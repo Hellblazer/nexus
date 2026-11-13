@@ -14,6 +14,19 @@
 #   qwentescence, restored to checkpoint clean-baseline-2026-10-06. Windows
 #   PowerShell 5.1 only; the script installs nothing.
 #
+# A RESUMED RUN IS A DIFFERENT CLAIM (nexus-y3y8d)
+#   tests/e2e/windows-guest/run-gate.sh --signed-in NAME (--standard-user only) does
+#   NOT restore clean-baseline-2026-10-06. It resumes NAME, the one running
+#   checkpoint (a child of clean-baseline-2026-10-06) that
+#   run-gate.sh --build-signed-in took after the standard user's first sign-in.
+#   Such a run does not exercise the standard user's first sign-in (the account,
+#   its profile and its first-logon work are already in the checkpoint) and does
+#   not exercise the boot after a restore (the guest resumes from saved memory:
+#   no offline boot, no fresh network start). Everything from the install step on
+#   is the same. A gate record that cites clean-baseline-2026-10-06 as its
+#   starting state must not cite a --signed-in run; it cites the checkpoint's
+#   name and this limit. run-gate.sh prints both at the start and in its summary.
+#
 # OPERATOR PROCEDURE
 #   0. Host: restore clean-baseline, start the VM, sign in as the guest user.
 #   1. Guest, a normal (non-elevated) PowerShell in the console session. Open a

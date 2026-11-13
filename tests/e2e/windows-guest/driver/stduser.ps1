@@ -49,22 +49,29 @@
 # checkpoint of the state this step leaves, with the default standard-user
 # configuration only: the account signed in at the console, the quiet-guest
 # policy, Git installed for all users, and the gate script staged in the
-# profile (later runs overwrite it). No account secret is in it: the Winlogon
-# key holds none once the account is signed in, and a resumed guest needs none.
+# profile (later runs overwrite it). No script stores the account secret: the
+# Winlogon value is removed once the account is signed in, and this step fails
+# (exit 19) unless it printed "winlogon secret removed=True", which the wrapper
+# also requires before the checkpoint. The checkpoint's MEMORY IMAGE holds the
+# signed-in session, and a resumed guest needs no secret.
 # -Existing yes (run-gate.sh --signed-in, nexus-y3y8d) is the step for a guest
 # resumed from that checkpoint, where the account exists and is signed in
 # already. It creates no account, sets no policy, installs no Git, stores no
 # secret and does not restart. It verifies and prints: the account exists, is a
 # member of Users and of no other group, has an interactive session at the
-# console, the quiet-guest policy reads back as the build left it (the line the
-# build prints), Git is installed for all users, and the Winlogon key holds no
-# secret; then it stages the gate script (and a wheel, when given) in the
-# account's nx-gate folder as the build does. A failed check is
-# "NXG-RESULT: FAIL" with its own exit code: 12 no such account, 13 its groups
-# are not Users only, 14 no interactive session at the console, 15 the policy
-# does not read back, 16 no Git for all users, 17 a secret in Winlogon. It is
-# refused with -AdminGit no or any AppLocker or WDAC mode: the checkpoint holds
-# the default state only.
+# console (query user: a line for the account that says Active and console)
+# and its explorer.exe is running, the quiet-guest policy reads back as the
+# build left it (the line the build prints), Git is installed for all users,
+# and the Winlogon key holds no secret; then it stages the gate script (and a
+# wheel, when given) in the account's nx-gate folder as the build does. The
+# checks are one table ($checks below: exit code, must or mustnot, the pattern
+# the guest's output is matched against, the message), tested against canned
+# output. A failed check is "NXG-RESULT: FAIL" with its own exit code: 12 no
+# such account, 13 its groups are not Users only, 14 no interactive session at
+# the console, 18 its explorer.exe is not running, 15 the policy does not read
+# back, 16 no Git for all users, 17 a secret in Winlogon. The build's own extra
+# check is 19 (the secret was not removed). It is refused with -AdminGit no or
+# any AppLocker or WDAC mode: the checkpoint holds the default state only.
 param(
     [Parameter(Mandatory = $true)][string]$VMName,
     [Parameter(Mandatory = $true)][string]$GuestUser,
@@ -149,7 +156,7 @@ if ($Existing -eq 'yes') {
         $info = Invoke-Command -Session $s -ArgumentList $StdUser, $Wheel {
             param($u, $Wheel)
             $acct = Get-LocalUser -Name $u -ErrorAction SilentlyContinue
-            "account $u exists=" + [bool]$acct
+            "account exists=" + [bool]$acct + " user=$u"
             if ($acct) {
                 $gsids = @(Get-LocalGroup | Where-Object { @(Get-LocalGroupMember -Group $_ -ErrorAction SilentlyContinue | ForEach-Object Name) -like "*\$u" } | ForEach-Object { $_.SID.Value })
                 "member of (sids): " + ($gsids -join ', ')
@@ -160,6 +167,8 @@ if ($Existing -eq 'yes') {
             $q
             $mine = @($q -split "`r?`n" | Where-Object { $_ -match "^\s*>?$([regex]::Escape($u))\s" -and $_ -match '\bActive\b' -and $_ -match '\bconsole\b' })
             "interactive session at the console=" + ($mine.Count -gt 0)
+            $expl = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Where-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwner).User -eq $u }).Count
+            "explorer running for account=" + ($expl -gt 0)
             $pol = @(
                 (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' -ErrorAction SilentlyContinue).DisableFileSyncNGSC,
                 (Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' -ErrorAction SilentlyContinue).AllowNewsAndInterests,
@@ -193,12 +202,22 @@ if ($Existing -eq 'yes') {
         }
         $info
         $text = ($info | Out-String)
-        if ($text -notmatch "account $([regex]::Escape($StdUser)) exists=True") { "NXG-RESULT: FAIL the account $StdUser does not exist in this guest"; $rcx = 12 }
-        elseif ($text -notmatch 'member of Users only=True') { "NXG-RESULT: FAIL $StdUser is not a member of Users only"; $rcx = 13 }
-        elseif ($text -notmatch 'interactive session at the console=True') { "NXG-RESULT: FAIL $StdUser has no interactive session at the console"; $rcx = 14 }
-        elseif ($text -notmatch 'EdgeBackground=1,0,1,0 \(want' -or $text -match 'OneDriveSetup Run entry: STILL PRESENT') { 'NXG-RESULT: FAIL the quiet-guest policy does not read back as the build left it'; $rcx = 15 }
-        elseif ($text -notmatch 'gitexe=True') { 'NXG-RESULT: FAIL Git is not installed for all users'; $rcx = 16 }
-        elseif ($text -notmatch 'winlogon secret present=False') { 'NXG-RESULT: FAIL the Winlogon key holds a secret'; $rcx = 17 }
+        # One row per check, one line each (tests/test_windows_gate_driver.py evaluates these rows against canned
+        # output): exit code, must (the pattern has to match the guest's output) or mustnot, the pattern, the message.
+        $checks = @(
+            @(12, 'must', 'account exists=True', 'the account does not exist in this guest'),
+            @(13, 'must', 'member of Users only=True', 'the account is not a member of Users only'),
+            @(14, 'must', 'interactive session at the console=True', 'the account has no interactive session at the console'),
+            @(18, 'must', 'explorer running for account=True', 'the account has no explorer.exe running'),
+            @(15, 'must', 'EdgeBackground=1,0,1,0 \(want', 'the quiet-guest policy does not read back as the build left it'),
+            @(15, 'mustnot', 'OneDriveSetup Run entry: STILL PRESENT', 'the default-user OneDriveSetup Run entry is still present'),
+            @(16, 'must', 'gitexe=True', 'Git is not installed for all users'),
+            @(17, 'must', 'winlogon secret present=False', 'the Winlogon key holds a secret')
+        )
+        foreach ($c in $checks) {
+            $hit = $text -match $c[2]
+            if (($c[1] -eq 'must') -ne $hit) { "NXG-RESULT: FAIL ${StdUser}: $($c[3])"; $rcx = $c[0]; break }
+        }
     } finally { Remove-PSSession $s }
     if ($rcx -ne 0) { exit $rcx }
     'NXG-RESULT: ok'
@@ -458,6 +477,7 @@ try {
     $text = ($info | Out-String)
     if ($text -notmatch 'profile=True desktop shell processes=[1-9]') { "NXG-RESULT: FAIL $StdUser has no profile or no desktop"; $rc = 7 }
     elseif ($text -notmatch 'in Administrators=False') { "NXG-RESULT: FAIL $StdUser is an administrator"; $rc = 8 }
+    elseif ($text -notmatch 'winlogon secret removed=True') { "NXG-RESULT: FAIL the account secret was not removed from the Winlogon key"; $rc = 19 }
     elseif ($AdminGit -ne 'no' -and $text -notmatch 'gitexe=True') { 'NXG-RESULT: FAIL Git is not installed'; $rc = 9 }
     elseif ($AppLocker -ne 'no' -and ($text -notmatch 'applocker AppIDSvc=Running' -or $text -notmatch 'applocker control for the account: Denied' -or $text -notmatch 'applocker System32 for the account: Allowed' -or $text -notmatch ('applocker control start as the account: event ' + $(if ($AppLocker -eq 'audit') { '8003' } else { '8004' }) + ' recorded=True'))) { 'NXG-RESULT: FAIL AppLocker is not in effect for the account (service, control file or System32 reading above)'; $rc = 10 }
     elseif ($Wdac -ne 'no' -and ($text -notmatch 'wdac policy active: count=1 ' -or $text -notmatch 'wdac control built: True signed=NotSigned' -or $text -notmatch ('wdac control start as the account: event ' + $(if ($Wdac -eq 'audit') { '3076' } else { '3077' }) + ' recorded=True'))) { 'NXG-RESULT: FAIL WDAC is not in effect for the account (deploy, policy or control reading above)'; $rc = 11 }

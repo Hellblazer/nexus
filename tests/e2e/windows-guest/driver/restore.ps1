@@ -17,9 +17,14 @@
 # the account already signed in, so there is no offline boot (the guest resumes where it was) and no
 # secret: after Start-VM resumes it, the adapter is put on the Default Switch, the quiet block (idempotent)
 # runs, and the network wait runs as always; a resumed guest can hold a stale NAT lease, so a pypi HEAD that
-# has not answered by the third iteration is followed by one `ipconfig /renew` in the guest. A restore that
-# does not leave the guest Saved (the checkpoint is not a running one) stops with exit 6. Only the standard-user
-# path may name that checkpoint; every other path restores the baseline checkpoint, which is never replaced.
+# has not answered by the third iteration is followed by one `ipconfig /renew` in the guest (the once-only flag
+# is set only after the renew actually ran). Once the network answers, a resumed guest's clock is compared with
+# the host's (the difference is printed), `w32tm /resync` runs once in the guest, and the difference is printed
+# again; none of that gates the run. A restore that does not leave the guest Saved (the checkpoint is not a
+# running one; this is the real test, the checkpoint's SnapshotType being Standard for the baseline too) stops
+# with exit 6. Only the standard-user path may name a ^stduser-signed-in- checkpoint, and then only with
+# -Resume yes: the script throws for that name without -Resume yes and for -Resume yes with any other name,
+# so a wrapper-less call cannot restore the signed-in checkpoint as a baseline or resume the baseline.
 param(
     [Parameter(Mandatory = $true)][string]$VMName,
     [Parameter(Mandatory = $true)][string]$GuestUser,
@@ -31,6 +36,8 @@ param(
 )
 if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { throw 'RunDir is not a run directory under C:\build\guest' }
 if ($Wheel -and $Wheel -notmatch '^[A-Za-z0-9._+-]+\.whl$') { throw 'Wheel is not a wheel file name' }
+if (($Checkpoint -match '^stduser-signed-in-') -ne ($Resume -eq 'yes')) { throw '-Resume yes and a stduser-signed-in-<8 digits> checkpoint go together: only --signed-in resumes one, and no other path restores one' }
+if ($Resume -eq 'yes' -and $Checkpoint -notmatch '^stduser-signed-in-[0-9]{8}$') { throw '-Resume yes needs a checkpoint named stduser-signed-in-<8 digits>' }
 $pw = [Console]::In.ReadLine()
 if (-not $pw) { throw 'nothing on stdin' }
 # The characters go into the SecureString one by one: ConvertTo-SecureString -AsPlainText would put the
@@ -169,10 +176,10 @@ for ($i = 0; $i -lt 60; $i++) {
         if ($r -eq 200) { $ok = $true; break }
     } catch { $lastError = ("" + $_.Exception.Message).Split("`n")[0].Trim() }
     if ($resume -and -not $ok -and $i -ge 2 -and -not $renewed) {
-        $renewed = $true
         try {
             $renew = { ipconfig /renew 2>&1 | Out-String }
             $rn = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop $renew
+            $renewed = $true
             "the pypi HEAD had not answered by iteration $i of a resumed guest: ran ipconfig /renew in the guest once: " + (($rn -replace '\s+', ' ').Trim())
         } catch { "the pypi HEAD had not answered by iteration $i of a resumed guest: ipconfig /renew did not run: $($_.Exception.Message)" }
     }
@@ -183,6 +190,24 @@ for ($i = 0; $i -lt 60; $i++) {
 $v = Get-VM -Name $vm
 "after: state=$($v.State) parent=$($v.ParentCheckpointName) nics=$(Nics)"
 if (-not $ok) { 'NXG-RESULT: FAIL the guest has no network'; exit 4 }
+# A resumed guest's clock is where the checkpoint left it, minutes to days behind the host's. Print the difference,
+# resync once, print it again. Nothing here gates the run (the stale clock is the reading, not a verdict).
+if ($resume) {
+    function ClockDelta {
+        $hostNow = (Get-Date).ToUniversalTime()
+        $g = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop { (Get-Date).ToUniversalTime().ToString('o') }
+        $guestNow = [DateTime]::Parse($g, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        [int]($guestNow - $hostNow).TotalSeconds
+    }
+    try {
+        "resumed guest clock minus host clock before the resync: $(ClockDelta) s"
+        $resync = { w32tm /resync 2>&1 | Out-String }
+        $rs = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop $resync
+        "w32tm /resync in the guest, once: " + (($rs -replace '\s+', ' ').Trim())
+        Start-Sleep 3
+        "resumed guest clock minus host clock after the resync: $(ClockDelta) s"
+    } catch { $why = ("" + $_.Exception.Message).Split("`n")[0].Trim(); "the clock check did not finish: $why" }
+}
 $rc = 0
 $s = Open-GuestSession $vm
 try {
