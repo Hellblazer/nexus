@@ -224,6 +224,30 @@ def test_a_dropped_connection_costs_one_page_not_the_export(tmp_path: Path) -> N
     verify_file(tmp_path / "x.nxtenant")
 
 
+def test_a_page_cut_mid_transfer_is_asked_for_again_from_the_same_key_and_the_file_verifies(tmp_path: Path) -> None:
+    """The engine sent every header and half the body, then the connection closed (the edge's 60-second cut, a reset)."""
+    sleeps = Sleeps()
+    dest = tmp_path / "x.nxtenant"
+    with FakeEngine(standard_tables()) as engine:
+        def cut(req) -> Reply | None:  # the SECOND page of memory, which has a key to resume from
+            if req.kind == "rows" and req.nth == 1:
+                reply = engine._answer(req)
+                assert isinstance(reply.body, bytes) and len(reply.body) > 8
+                reply.cut_at = len(reply.body) // 2
+                return reply
+            return None
+        engine.script.append(cut)
+        run_export(_client(engine, sleeps=sleeps), dest)
+        rows = engine.requests("rows")
+    assert rows[1].query == {"table": "memory", "after": "memory:0"}, "the cut page is the one after the first page's key"
+    assert rows[2].query == rows[1].query, "asked again from the same key, not from the start of the table"
+    assert sleeps.seconds == [ce.BACKOFF_LADDER[0]]
+    report = verify_file(dest)
+    assert [(t.name, t.rows, t.pages) for t in report.tables] == [("memory", 6, 3), ("frecency", 2, 1), ("plans", 0, 1)], (
+        "no page twice, none lost"
+    )
+
+
 def test_a_page_whose_hash_is_wrong_is_asked_for_again(tmp_path: Path) -> None:
     with FakeEngine(standard_tables()) as engine:
         def corrupt(req) -> Reply | None:

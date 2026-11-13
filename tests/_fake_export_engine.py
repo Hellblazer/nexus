@@ -53,6 +53,8 @@ class Reply:
     body: bytes | dict = b""
     headers: dict[str, str] = field(default_factory=dict)
     drop: bool = False  # close the connection without answering
+    #: answer with every header and the FULL Content-Length, send only this many body bytes, then close: a page cut mid-transfer
+    cut_at: int | None = None
 
 
 @dataclass
@@ -137,6 +139,12 @@ class FakeEngine:
         for k, v in reply.headers.items():
             h.send_header(k, v)
         h.end_headers()
+        if reply.cut_at is not None:
+            h.wfile.write(body[: reply.cut_at])
+            h.wfile.flush()
+            h.close_connection = True
+            h.connection.close()
+            return
         h.wfile.write(body)
 
     def _handle(self, h: BaseHTTPRequestHandler) -> None:

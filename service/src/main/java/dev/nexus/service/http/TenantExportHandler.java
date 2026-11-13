@@ -91,8 +91,10 @@ import java.util.regex.Pattern;
  * exchange limit but past the 30 s bound, and an exhausted pool answers 503 (see below). The header read of a
  * POST gives each of its statements the full budget, not a shared one (they are catalog reads). A page is
  * buffered whole before its first byte is sent (its hash is a header), so the transfer is outside the
- * response-start bound and the database transaction is already closed while the client reads. The measured 16 MB
- * page time at 500,000 chunks is the export battery's (nexus-csayy.4).
+ * response-start bound and the database transaction is already closed while the client reads. Measured at 500,000
+ * chunks (nexus-csayy.4, RDR-248 Performance Expectations): a 16 MB chunks page starts its response in about 1 s at the median
+ * and 2.6 to 3.1 s at the worst, falling with depth because a keyset page after the first is planned as a sort over the rows
+ * left in the tenant, so a page's time grows with the tenant's size (about 30 s near 5 million chunks).
  *
  * <p><b>Other answers.</b> An exhausted pool answers 503 {@code {"error":"database connection pool exhausted,
  * retry"}} with no reason code and no {@code Retry-After}: the client backs off on its own ladder. The auth filter

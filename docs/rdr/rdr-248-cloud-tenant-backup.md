@@ -510,6 +510,49 @@ sessions. 60 minutes is the hold A5 observed as benign at that window's write ra
 would run longer fails, naming the limit. The import session's bounds are settled in the Phase 2 design
 (nexus-csayy.5).
 
+**Gate N1 scale run (nexus-csayy.4, 2026-11-12, local engine on chas, `tests/e2e/export_scale_run.py`).** One tenant
+of 500,000 bge-768 chunks (distinct vectors, about 1 KB of text each), 500,000 manifest rows over 50,000 documents,
+and 400,000 `memory` rows interleaved by id with nine other tenants (4,000,000 rows in the table), exported through
+the routes by the shipped client with a minted tenant token. Engine: the gate jar, `NX_POOL_SIZE` 10, every
+`NX_EXPORT_*` setting at its default (16 MiB pages, 2 sessions, 20 s page budget); PostgreSQL 17.5 with
+`max_connections` 100 and `shared_buffers` 2 GB on the substrate's tmpfs root, restarted before the export so shared
+buffers began empty (the OS cache stayed warm); `lab-m`. An earlier run of the same data with the cluster on disk gave
+the same shape with slower pages (171 s, chunks response start p50 1.01 s, p95 2.15 s, max 3.13 s).
+- File 2,352,237,445 bytes, 1,450,002 rows, 164 pages (138 cut at the byte target), 142.8 s end to end through
+  loopback, about 16.5 MB/s: the local engine and database are not the limit.
+- Chunks: 129 pages, 3,906 rows and about 16.65 MB a page. Response start (headers in; the page is buffered whole, so
+  this is the database and the hash): p50 0.86 s, p95 1.61 s, max 2.56 s (page 1). Page end (body in) is 0.04 s later.
+  Every page is far under the 30 s response-start bound and the 20 s page budget. The deepest page (128, 32 rows)
+  started in 0.11 s; the first page, which carries the table's `count(*)` (93 ms), in 0.26 s.
+- Time does not grow with depth, so a deep-page regression is not present: the first decile of chunks pages has a mean
+  response start of 1.59 s and the last decile 0.30 s, a slope of -10 ms a page.
+- Why it falls instead (a finding for the engine release, not a ship-blocker at this size): after the first page, a page
+  is planned as `Limit -> Sort -> Append -> Index Scan` on the tenant leaf's primary key, because the planner estimates
+  one row for the row-value keyset predicate on an ANALYZEd table. The sort cannot emit before it has read every
+  remaining row of the tenant, so each page costs time in proportion to the rows left, not the rows it returns (the
+  16 MB cut cancels the COPY only after the sort has finished). The first page, which has no `after`, is planned
+  `Merge Append` over the leaves' primary-key index scans and is not affected. The page time is therefore linear in
+  the tenant's chunk count: 2.6 to 3.1 s at 500,000, so about 20 s (the page budget) between 3.2 and 3.9 million
+  chunks and about 30 s (the response-start bound) between 5 and 6 million.
+  `TenantExportSessionsTest.aDeepChunksPageIsAPerLeafIndexScanUnderMergeAppendWithNoSort` proves the planner CAN
+  choose the sort-free plan, because it turns `enable_sort`, `enable_seqscan` and `enable_bitmapscan` off; the engine
+  does not. EXPLAIN (ANALYZE) of a mid-table page, 100,000 rows uncancelled: the default plan sorts them, spilling a
+  303 MB external sort, in 918 ms; with `enable_sort` off it is `Merge Append` in 233 ms (and the real COPY, cut at
+  about 3,900 rows, would stop the merge early). Whether to pin the plan in the page transaction is the engine
+  release's decision; it was not tried against the real COPY.
+- `memory` (primary key `id` alone, the tenant owns a tenth of the table): `Index Scan using memory_pk`, `Index Cond:
+  (id > X)`, `Filter: tenant_id = ...`, `Rows Removed by Filter: 900,000` for 100,000 rows returned (490 ms), and 6
+  pages with response start p50 0.42 s, max 0.43 s. The tenant is a filter here, not an index condition: a page
+  costs its rows divided by the tenant's share of the table, so a small tenant in a large shared table is the expensive
+  case. The first-page count uses `idx_memory_tenant_timestamp` (index-only, 26 ms). Chunks, which are partitioned by
+  tenant, are not exposed to this.
+- Connections: the pool holds 10; PostgreSQL saw at most 13 `nexus_svc` backends (an evicted connection closing while its
+  replacement opens), of 100 `max_connections`. A cut page discards its connection (`TenantExportReads.release`), so the
+  engine opened one new connection per cut page: 139 sessions by the engine for 138 cut pages (282 sessions in the
+  window, 143 of them the script's own once-a-second sampler).
+Not measured here: the cloud's edge rate, its pool size and `max_connections`, and a cold volume. The cloud round
+trip (Activation Step 2) records those; its 500,000-chunk page times should be read against 3.1 s above, not 0.1 s.
+
 ## Finalization Gate
 
 ### Contradiction Check
@@ -578,3 +621,4 @@ tenants. Nothing to trim.
 - 2026-11-11: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); critique `nexus_rdr/248-gate-critique-2026-11-11-r2`, fix check `nexus_rdr/248-fix-check-6c291f8ba` (gated commit in T2 `nexus_rdr/248-gate-latest`).
 - 2026-11-11: Accepted by Sam, with export first and restore next, and the restore load's block on tenant create bounded (folded into the Implementation Plan and Risks).
 - 2026-11-11: Export session total bound set to 60 minutes (Sam, by dialog via halcyon: "60 minutes"; a larger export fails loudly and names the limit); amended under standing grant 3.
+- 2026-11-12: Performance Expectations amended with the gate N1 scale run (nexus-csayy.4).
