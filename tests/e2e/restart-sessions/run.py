@@ -4,7 +4,8 @@
 
 Drives real Claude Code sessions through the coordinated restart and checks every outcome,
 with nothing written to the operator's ~/.claude. Five scenarios, each in its own sandbox
-(``--scenario``, default all, in this order):
+(``--scenario``, default all, in this order; ``--scenario slash`` adds the opt-in measure of
+Claude Code's own ``/restart`` in slash_restart.py, never part of a recorded pass):
 
 - ``roll``: the full continuation roll. Six sessions; three restart, each told a code word:
   ``rs_alpha`` (the conexus channel, left at its prompt with whatever suggested prompt Claude
@@ -207,6 +208,9 @@ PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" 
 OPERATOR_HOME = Path.home()
 SANDBOX_PY = Path(__file__).resolve()
 SCENARIOS = ("roll", "variant", "abort", "gate", "pane")
+#: Opt-in scenarios, run only when named and never part of the recorded pass: ``slash`` measures Claude
+#: Code's own /restart (slash_restart.py), not the script.
+EXTRA_SCENARIOS = ("slash",)
 #: A fresh session is settled at its prompt when idle, or in ``shell``: a session launched without the
 #: channel is told by its SessionStart guidance to wait for mail with ``nx tuple wait`` in the
 #: background, and one that does so sits at its prompt in ``shell`` (the 2026-11-02 measuring roll:
@@ -274,6 +278,8 @@ SPECS = {
                     busy=("rs_late",), release_after=("rs_alpha", "rs_image")),
     "abort": Spec("abort", {}, (), frozenset({"rs_alpha"}), plain=("rs_alpha", "rs_nochan"), install_fails=True),
     "gate": Spec("gate", {}, ("rs_alpha",), frozenset({"rs_alpha"}), engine=("502",)),
+    "slash": Spec("slash", {"rs_alpha": "HELIOTROPE", "rs_clear": "MARZIPAN"}, (), frozenset({"rs_alpha"}),
+                  resume=True, wait=240),
     "pane": Spec("pane", {"rs_alpha": "HELIOTROPE", "rs_direct": "MARZIPAN"}, (), frozenset({"rs_alpha"}),
                  direct=("rs_direct",), resume=True, wait=240),
 }
@@ -1720,6 +1726,19 @@ RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario
            "pane": scenario_pane}
 
 
+def _load_slash():
+    """slash_restart.py beside this file, by path: run.py runs under ``python -I``, which leaves its own
+    directory off sys.path."""
+    loc = importlib.util.spec_from_file_location("restart_sandbox_slash", SANDBOX_PY.with_name("slash_restart.py"))
+    mod = importlib.util.module_from_spec(loc)
+    loc.loader.exec_module(mod)
+    return mod
+
+
+RUNNERS["slash"] = lambda sb, crs, a, failures, notes: _load_slash().scenario_slash(
+    sb, crs, a, failures, notes, boot=boot)
+
+
 def check_withdrawals(log: str, before: dict[str, dict], failures: list[str]) -> int:
     """Every handoff ask the script mailed was taken back against the real engine (nexus-wjlbk): the
     log has a withdraw line for that session saying withdrawn or already taken or expired. The rows
@@ -2274,7 +2293,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         if sb.before:
             n = check_withdrawals(sb.read_log(), sb.before, failures)
             notes.append(f"withdrawals: {n} mailed handoff ask(s) checked against the log")
-            if n == 0 and name not in ("gate", "pane"):  # every --fresh roll mails at least one ask: none found is a broken check
+            if n == 0 and name not in ("gate", "pane", "slash"):  # every --fresh roll mails at least one ask: none found is a broken check
                 failures.append("withdrawals: no mailed handoff ask found in the log to check")
         ok = not failures
     except Exception as exc:  # noqa: BLE001 -- a harness fault is a failed run with its reason
@@ -2680,7 +2699,7 @@ def main() -> int:
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--keep", action="store_true", help="keep each scratch HOME and tmux server even on a pass")
     ap.add_argument("--timeout", type=int, default=1200, help="seconds for each roll to finish")
-    ap.add_argument("--scenario", action="append", choices=SCENARIOS,
+    ap.add_argument("--scenario", action="append", choices=SCENARIOS + EXTRA_SCENARIOS,
                     help="run only this scenario (repeatable; default: all, in order)")
     a = ap.parse_args()
 
@@ -2696,7 +2715,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     signal.signal(signal.SIGHUP, lambda *_: sys.exit(129))  # a closed terminal: same cleanup
     crs = load_script()
-    chosen = [s for s in SCENARIOS if s in (a.scenario or SCENARIOS)]
+    chosen = [s for s in SCENARIOS + EXTRA_SCENARIOS if s in (a.scenario or SCENARIOS)]
     results = {}
     t0 = time.time()
     # The pass covers what the scenarios ran: the script's bytes and Claude Code's version as they
