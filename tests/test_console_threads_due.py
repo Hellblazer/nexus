@@ -120,9 +120,9 @@ def test_a_due_line_inside_an_ask_block_ends_it_so_it_goes_above_the_first_ask()
 
 
 def test_due_and_worktree_are_not_read_as_asks_to_sam() -> None:
-    s = parse_session("m", "## T\nstate: x\ndue: after Sam answers\nworktree: /Users/sam/x\n")
+    s = parse_session("m", "## T\nstate: x\ndue: after Sam answers\nworktree: /srv/sam/x\n")
     (t,) = s.threads
-    assert t.needs_sam == "" and t.due == "after Sam answers" and t.worktree == "/Users/sam/x"
+    assert t.needs_sam == "" and t.due == "after Sam answers" and t.worktree == "/srv/sam/x"
 
 
 NO_TITLE = lambda _t: None  # noqa: E731 -- a seam stand-in: no entry by title
