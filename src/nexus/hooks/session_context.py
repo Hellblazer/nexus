@@ -49,8 +49,10 @@ than silently folded in:
 resolves everything from ``CLAUDE_PROJECT_DIR``/``os.getcwd()`` and local
 environment variables. Since nexus-ct74m ``run`` reads one payload field,
 ``session_id``, to find the session's threads board entry and print its due
-threads (``nexus.hooks.board_due``, deferred import like the T2 section's);
-a payload without one prints no such section.
+threads (``nexus.hooks.board_due``); a payload without one prints no such
+section. Like the T2 section's ``t2_prefix_scan``, that module is imported
+inside ``run`` and is not stdlib-only: the STDLIB ONLY rule below covers this
+module's own top-level imports, not the sections it defers to.
 
 **STDLIB ONLY, in this module.** No ``structlog``, no
 ``nexus.logging_setup``, no import from a sibling ``nexus.hooks`` module --

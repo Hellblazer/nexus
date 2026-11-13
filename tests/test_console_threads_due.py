@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from nexus.console.threads import build_board, due_at, due_threads, parse_session
-from nexus.hooks.board_due import due_lines
+from nexus.hooks.board_due import HEADING, due_lines, session_name
 
 PST = timezone(timedelta(hours=-8))
 SID = "f1b056f7-28cb-4c4e-8a76-cbcf9a50a212"
@@ -68,6 +68,11 @@ def test_a_due_line_ends_an_ask_block_like_any_thread_field() -> None:
         ("", None),
         ("next tuesday", None),
         ("2026-13-01", None),
+        # the pinned shapes only: what fromisoformat would also take is refused, so a regex reader agrees
+        ("2026-11-17 09:00", None),
+        ("20261117", None),
+        ("2026-11-17T09", None),
+        ("2026-11-17T09:00:30.5Z", datetime(2026, 11, 17, 9, 0, 30, 500000, tzinfo=timezone.utc)),
     ],
 )
 def test_due_at(value: str, expected: datetime | None) -> None:
@@ -94,6 +99,10 @@ def test_the_board_card_names_its_due_threads() -> None:
     board = build_board([{"title": "marlowe", "content": ENTRY, "timestamp": "2026-11-18T11:00:00Z"}], now)
     (card,) = board.cards
     assert set(card.due) == {"RDR-230 readings", "Mail recount"}
+    assert card.bad_due == ("Typo",)
+
+
+NO_TITLE = lambda _t: None  # noqa: E731 -- a seam stand-in: no entry by title
 
 
 def _search(rows):
@@ -108,36 +117,91 @@ def _search(rows):
 
 def test_session_start_prints_one_line_per_due_thread() -> None:
     search, calls = _search([{"title": "marlowe", "content": ENTRY}])
-    lines = due_lines(SID, datetime(2026, 11, 18, 9, 0, tzinfo=PST), search=search)
+    lines = due_lines(SID, datetime(2026, 11, 18, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
     assert calls == [SID]
-    assert lines[0] == "## Due on your threads board (marlowe)"
-    assert lines[1:3] == [
+    assert lines == [
+        HEADING.format(entry="marlowe"),
         "- RDR-230 readings: due 2026-11-14 (ref nexus-4lnn1.1.8; worktree /Users/x/git/nexus-wt/marlowe-a6)",
         "- Mail recount: due 2026-11-17T09:00 (ref nexus-1d6pz)",
+        "- Typo: `due: next tuesday` is not an ISO date or datetime, so it never comes due",
+        "",
     ]
-    assert len(lines) == 4 and lines[3] == ""
+    assert "move or delete each due: line" in lines[0]
 
 
 def test_session_start_prints_nothing_when_nothing_is_due() -> None:
     search, _ = _search([{"title": "marlowe", "content": ENTRY}])
-    assert due_lines(SID, datetime(2026, 11, 13, 9, 0, tzinfo=PST), search=search) == []
+    clean = ENTRY.replace("due: next tuesday", "due: none")
+    search, _ = _search([{"title": "marlowe", "content": clean}])
+    assert due_lines(SID, datetime(2026, 11, 13, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="") == []
 
 
 def test_only_the_entry_whose_session_line_matches_counts() -> None:
     # Another session's entry that merely mentions this id (in a note) must not be read as ours.
     other = f"session: 0000aaaa-0000-0000-0000-000000000000\n## Theirs\nstate: mentions {SID}\ndue: 2026-01-01\n"
     search, _ = _search([{"title": "bob", "content": other}])
-    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search) == []
+    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="") == []
 
 
 def test_a_failing_search_or_no_session_id_prints_nothing() -> None:
     def boom(_q: str):
         raise OSError("engine down")
 
-    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=boom) == []
+    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=boom, by_title=NO_TITLE, name="") == []
     search, calls = _search([])
-    assert due_lines("", datetime(2026, 11, 18, tzinfo=PST), search=search) == []
+    assert due_lines("", datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="") == []
     assert calls == []
+
+
+def test_after_a_restart_the_entry_is_found_by_the_session_name() -> None:
+    # A restart, /clear, resume or fork gives a new session id; the entry's session: line still names the old one.
+    new_sid = "11111111-2222-3333-4444-555555555555"
+    rows = [{"title": "marlowe", "content": ENTRY}]
+    search, calls = _search(rows)
+    titles: list[str] = []
+
+    def by_title(t: str):
+        titles.append(t)
+        return {"title": "marlowe", "content": ENTRY} if t == "marlowe" else None
+
+    now = datetime(2026, 11, 14, 9, 0, tzinfo=PST)
+    lines = due_lines(new_sid, now, search=search, by_title=by_title, name="marlowe")
+    assert calls == [new_sid] and titles == ["marlowe"]
+    assert lines[1].startswith("- RDR-230 readings: due 2026-11-14")
+    # no name: nothing to fall back to
+    assert due_lines(new_sid, now, search=search, by_title=by_title, name="") == []
+    # a prefix match from the store is not the session's entry
+    assert due_lines(new_sid, now, search=search, by_title=lambda t: {"title": "marlowe2", "content": ENTRY},
+                     name="marlowe") == []
+
+
+def test_the_session_line_match_wins_and_the_title_is_not_read() -> None:
+    search, _ = _search([{"title": "marlowe", "content": ENTRY}])
+    titles: list[str] = []
+    due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search,
+              by_title=lambda t: titles.append(t), name="marlowe")
+    assert titles == []
+
+
+def test_every_entry_carrying_the_session_line_is_read() -> None:
+    second = f"session: {SID}\n## Other\ndue: 2026-11-01\n"
+    search, _ = _search([{"title": "marlowe", "content": f"session: {SID}\n## Q\nstate: x\n"},
+                         {"title": "marlowe_old", "content": second}])
+    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
+    assert lines[0] == HEADING.format(entry="marlowe_old") and lines[1] == "- Other: due 2026-11-01"
+
+
+def test_session_name_reads_the_claude_sessions_file(tmp_path) -> None:
+    import json  # noqa: PLC0415
+
+    d = tmp_path / "sessions"
+    d.mkdir()
+    (d / "123.json").write_text(json.dumps({"sessionId": SID, "name": "marlowe"}), encoding="utf-8")
+    (d / "456.json").write_text(json.dumps({"sessionId": "other", "name": "bob"}), encoding="utf-8")
+    (d / "bad.json").write_text("{not json", encoding="utf-8")
+    assert session_name(SID, tmp_path) == "marlowe"
+    assert session_name("nobody", tmp_path) == ""
+    assert session_name(SID, tmp_path / "missing") == ""
 
 
 def test_the_console_card_shows_due_and_worktree_and_marks_what_has_come() -> None:
@@ -158,6 +222,8 @@ def test_the_console_card_shows_due_and_worktree_and_marks_what_has_come() -> No
     assert '<strong class="due-now">&middot; due 2026-01-01</strong>' in html
     assert f'<span class="ts">&middot; due {soon}</span>' in html
     assert "worktree /w/marlowe-past" in html
+    rows[0]["content"] += "## Typo\ndue: soon\n"
+    assert "(not an ISO date or datetime: never comes due)" in client.get("/threads").text
 
 
 def test_session_context_puts_the_due_section_after_the_t1_lines(monkeypatch: pytest.MonkeyPatch) -> None:

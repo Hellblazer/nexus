@@ -61,6 +61,9 @@ _THREAD_FIELDS = {
 
 #: ``due:`` holding a bare date: due from local midnight of that day.
 _DUE_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+#: ``due:`` holding a datetime: ``T``-separated, minutes required, optional seconds and fraction, optional ``Z`` or
+#: ``+hh:mm`` offset. The whole accepted set, so a reader with its own regex (the PreCompact checkpoint) can match it.
+_DUE_DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?")
 
 #: Ask-level keys. Only inside an ``ask:`` block are they ask fields.
 ASK_KEYS = frozenset({
@@ -175,6 +178,8 @@ class SessionCard:
     stale: bool
     #: Titles of this session's threads whose ``due:`` has come (``due_threads`` at the board's clock).
     due: tuple[str, ...] = ()
+    #: Titles of threads whose ``due:`` holds a value ``due_at`` cannot read, so they never come due.
+    bad_due: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -577,7 +582,8 @@ def due_at(value: str, tz: tzinfo) -> datetime | None:
     """The instant a ``due:`` value comes due, or None when it holds no ISO date or datetime.
 
     A bare date is due from midnight of that day in *tz*; a datetime with no offset is read in *tz*; one with an
-    offset (or ``Z``) is exact. "none" and the other no-values read as None.
+    offset (or ``Z``) is exact. Only ``_DUE_DATE`` and ``_DUE_DATETIME`` shapes are read (not a space separator,
+    ``20261117`` or an hour alone, which ``fromisoformat`` would take); "none" and the other no-values read as None.
     """
     v = value.strip()
     if not has_value(v):
@@ -586,6 +592,8 @@ def due_at(value: str, tz: tzinfo) -> datetime | None:
         if _DUE_DATE.fullmatch(v):
             d = date.fromisoformat(v)
             return datetime(d.year, d.month, d.day, tzinfo=tz)
+        if not _DUE_DATETIME.fullmatch(v):
+            return None
         parsed = datetime.fromisoformat(v)
     except ValueError:
         return None
@@ -643,12 +651,14 @@ def build_board(entries: Iterable[Mapping[str, Any]], now: datetime) -> Board:
         except Exception:  # noqa: BLE001 -- one bad entry must not take the page down
             unreadable.append(_safe_title(e))
             continue
-        due = tuple(t.title for t, _ in due_threads(session, now.astimezone()))
+        local = now.astimezone()
+        due = tuple(t.title for t, _ in due_threads(session, local))
+        bad = tuple(t.title for t in session.threads if has_value(t.due) and due_at(t.due, local.tzinfo) is None)
         if newest is None:
-            built.append(SessionCard(session, None, "unknown", True, due))
+            built.append(SessionCard(session, None, "unknown", True, due, bad))
         else:
             delta = now - newest
-            built.append(SessionCard(session, newest, format_age(delta), delta > STALE_AFTER, due))
+            built.append(SessionCard(session, newest, format_age(delta), delta > STALE_AFTER, due, bad))
     floor = datetime.min.replace(tzinfo=timezone.utc)
     built.sort(key=lambda c: c.effective_updated or floor, reverse=True)
     needs = tuple(
