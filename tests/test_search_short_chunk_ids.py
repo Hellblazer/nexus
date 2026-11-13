@@ -198,3 +198,23 @@ def test_only_text_search_asks_for_the_superseded_mark(search) -> None:
     search([_sr("c1", _A, 0.1)])
     search([_sr("c1", _A, 0.1)], structured=True)
     assert [c.get("mark_superseded") for c in search.calls] == [True, False]
+
+
+def test_a_routed_id_that_is_still_missing_gets_no_looping_advice(get_many) -> None:
+    _shown_chunks.record([("d" * 64, "docs__1-1__m__v1")])
+    out = core.store_get_many(ids="dddddddd")  # routed to docs__1-1, and the fake does not know the chunk
+    assert colls[-1] == ["docs__1-1__m__v1"] and "Missing:" in out and "pass collections" not in out
+
+
+def test_text_and_structured_searches_never_share_a_cached_page(search, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(core._sensitivity, "read_sensitivity", lambda *a, **k: "include")  # "exclude" skips the cache
+    search([_sr("c1", _A, 0.1)])  # sets the rows and the stubs; invalidates the cache around itself
+    search.calls.clear()
+    core._page_cache_invalidate()
+    try:
+        core.search(query="q", corpus="knowledge", threshold=float("inf"))
+        # The cache holds one page; a structured call keyed like the text one would be served the marked page.
+        core.search(query="q", corpus="knowledge", threshold=float("inf"), structured=True)
+    finally:
+        core._page_cache_invalidate()
+    assert [c.get("mark_superseded") for c in search.calls] == [True, False]

@@ -179,10 +179,11 @@ def test_every_shared_catalog_handle_shares_one_cache_slot(monkeypatch: pytest.M
     from nexus.catalog import factory  # noqa: PLC0415
 
     cat = _Catalog(LINKS, TITLES)
+    slot = object()
 
     class _Handle(factory._SharedServiceCatalogHandle):  # get_catalog() builds a new one per call
         def __init__(self) -> None:
-            pass
+            self._slot = slot  # one shared slot, as get_catalog()'s handles have
 
         def link_query(self, **kw):
             return cat.link_query(**kw)
@@ -222,3 +223,39 @@ def test_the_mark_stays_out_of_json_output() -> None:
     from nexus.formatters import _INTERNAL_METADATA_KEYS  # noqa: PLC0415
 
     assert SUPERSEDED_KEY in _INTERNAL_METADATA_KEYS
+
+
+
+class _EngineT3:
+    _voyage_client = None
+
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
+        return [{"id": "e" * 64, "content": "old text", "distance": 0.2, "chunk_text_hash": "e" * 64}]
+
+
+class _EngineCatalog(_Catalog):
+    """Enough of the catalog for search_cross_corpus: one owner, 1.1.10, which 1.1.30 supersedes."""
+
+    def chash_positions(self, chashes):
+        return [{"chash": "e" * 64, "doc_id": "1.1.10", "position": 0, "chunk_count": 1}]
+
+    def resolve_many(self, doc_ids):
+        self.resolves.append(list(doc_ids))
+        from types import SimpleNamespace  # noqa: PLC0415
+
+        return {d: SimpleNamespace(file_path=f"/{d}.md", title=TITLES.get(d, f"Doc {d}"), sensitive=False,
+                                   physical_collection="knowledge__x__m__v1") for d in doc_ids}
+
+    def links_from_batch(self, doc_ids):
+        return {}
+
+
+@pytest.mark.parametrize("asked", [False, True])
+def test_search_cross_corpus_marks_only_when_asked(asked: bool) -> None:
+    from nexus.search_engine import search_cross_corpus  # noqa: PLC0415
+
+    (hit,) = search_cross_corpus("q", ["knowledge__x__m__v1"], n_results=1, t3=_EngineT3(),
+                                 catalog=_EngineCatalog(LINKS, TITLES), mark_superseded=asked,
+                                 sensitivity="include")
+    assert (SUPERSEDED_KEY in hit.metadata) is asked
+    assert hit.topic_boost == (-DISTANCE_PENALTY if asked else 0.0)

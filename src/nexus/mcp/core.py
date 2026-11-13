@@ -3997,7 +3997,8 @@ def search(
       the same scope the store read tools give `collection="knowledge"`.
     - `cluster_by` defaults to "" (no clustering).
     - The text and `structured=True` can disagree on ranking order within a
-      page: text applies a per-file diversity cap, the dict does not.
+      page: text applies a per-file diversity cap, the dict does not, and
+      text ranks a hit whose documents are all superseded lower and says so.
     - Identical chunk text in several collections is returned once, with the
       other collections named: `also in:` in the text; `also_in` and
       `also_in_ids` (collections, their documents; aligned with `ids`) in the
@@ -7218,8 +7219,8 @@ def store_get_many(
         description=(
             "Document ids to fetch: a comma-separated string, a flat list[str] "
             "(single-stream), or a list[list[str]] (parallel-stream, pairs with "
-            "a list[int] limit_per_source). A short id a text search printed (id=...) works, and with "
-            "collections left at its default it is looked up where that search found it."
+            "a list[int] limit_per_source). A short id a text search printed (id=...) works; in a flat "
+            "list with collections at its default and no limit_per_source it is looked up where that search found it."
         ),
     )],
     collections: Annotated[str | list, Field(
@@ -7288,6 +7289,7 @@ def store_get_many(
         ids, unresolved, homes = _shown_chunks.expand(ids)
         if collections == "knowledge" and limit_per_source is None:
             ids, collections = _shown_chunks.route(ids, homes, "knowledge")
+            homes = {}  # routed: a missing id was looked up where it was shown, so there is nowhere else to point
         out = _store_get_many_impl(
             ids=ids, collections=collections, max_chars_per_doc=max_chars_per_doc, structured=structured,
             limit_per_source=limit_per_source,

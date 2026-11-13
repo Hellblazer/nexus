@@ -105,7 +105,8 @@ def route(ids: str | list, homes: dict[str, str], default: str) -> tuple[str | l
 def notes_for(unresolved: dict[str, str], missing: Iterable[str], homes: dict[str, str] | None = None) -> list[str]:
     """The notes for ids that came back missing: a short id left as given (a 32- to 63-character id that resolved
     on its own needs none), and an expanded id that was not found where the caller looked (it names the collection
-    the id was shown from)."""
+    the id was shown from). Pass *homes* only when the lookup was not already routed there: advice to look where the
+    tool just looked would loop."""
     gone = set(missing)
     notes = [why for token, why in unresolved.items() if token in gone]
     notes += [

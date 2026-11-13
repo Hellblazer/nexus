@@ -75,7 +75,9 @@ def _catalog_key(catalog: Any) -> Any:
     any other catalog (a direct client, a test double) is its own."""
     from nexus.catalog.factory import _SharedServiceCatalogHandle  # noqa: PLC0415 — deferred, like the catalog itself
 
-    return _SharedServiceCatalogHandle if isinstance(catalog, _SharedServiceCatalogHandle) else id(catalog)
+    if isinstance(catalog, _SharedServiceCatalogHandle):
+        return (_SharedServiceCatalogHandle, id(getattr(catalog, "_slot", None)))
+    return id(catalog)
 
 
 def _superseded_map(catalog: Any, now: float) -> dict[str, list[tuple[str, str]]] | None:
