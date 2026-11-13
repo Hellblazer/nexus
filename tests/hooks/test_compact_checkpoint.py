@@ -1422,7 +1422,7 @@ class TestScript:
         facts = ast.parse((SCRIPT.parent / "_session_facts.py").read_text(encoding="utf-8"))
         theirs = {a.name.split(".")[0] for n in ast.walk(facts) if isinstance(n, ast.Import) for a in n.names}
         theirs |= {n.module.split(".")[0] for n in ast.walk(facts) if isinstance(n, ast.ImportFrom) and n.module}
-        assert theirs and all(r in sys.stdlib_module_names or r == "__future__" for r in theirs), theirs
+        assert theirs and all(r in sys.stdlib_module_names or r in ("__future__", "_exec_path") for r in theirs), theirs
 
     def test_the_sibling_imports_sit_inside_main_so_an_import_error_exits_zero(self, tmp_path: Path) -> None:
         tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))

@@ -821,7 +821,7 @@ def _board_facts(board: str, cwd: str | None, deadline: float) -> tuple[list[str
     """``(lines, unchecked)``: the board's ref, waiting_on, due and worktree lines checked against the facts."""
     sf = _session_facts
     wanted = sf.board_wants(board)
-    git, bd, gh = (_cli_lookup.resolve(t) for t in ("git", "bd", "gh"))
+    git, bd, gh = _cli_lookup.resolve("git"), _cli_lookup.resolve("bd"), _cli_lookup.resolve("gh")
     runs = sorted(wanted.runs)
     prs = sorted(wanted.prs)
     unchecked: list[str] = []

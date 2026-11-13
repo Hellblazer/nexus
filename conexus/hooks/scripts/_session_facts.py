@@ -25,6 +25,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:  # loaded by path from the restart script
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _exec_path  # noqa: E402 -- the plugin's own resolver; it must follow the path insert
+
 #: A Claude Code Bash-tool shell: ``/bin/zsh -c source <config>/shell-snapshots/snapshot-...``.
 SNAPSHOT_MARK = "/shell-snapshots/snapshot-"
 #: The most process or task lines one listing prints; the rest are counted.
@@ -65,10 +69,14 @@ class Proc:
 
 
 def process_table(runner: Runner | None = None) -> list[Proc]:
-    """Every process, from ``ps -A -o pid=,ppid=,lstart=,command=`` (macOS and Linux). ``[]`` on Windows or failure."""
+    """Every process, from ``ps -ww -A -o pid=,ppid=,lstart=,command=`` (macOS and Linux; ``-ww`` so Linux does
+    not cut the command at COLUMNS). ``[]`` on Windows or failure."""
     if sys.platform == "win32":
         return []
-    code, out = (runner or (lambda a, t: run(a, t)))(["ps", "-A", "-o", "pid=,ppid=,lstart=,command="], 3.0)
+    ps = _exec_path.which_off_cwd("ps")
+    if runner is None and ps is None:
+        return []
+    code, out = (runner or (lambda a, t: run(a, t)))([str(ps), "-ww", "-A", "-o", "pid=,ppid=,lstart=,command="], 3.0)
     if code != 0:
         return []
     rows = []
@@ -164,7 +172,12 @@ def process_cwds(runner: Runner | None = None) -> dict[int, str] | None:
         return out
     if sys.platform != "darwin":
         return None
-    code, text = (runner or (lambda a, t: run(a, t)))(["lsof", "-a", "-d", "cwd", "-u", str(os.getuid()), "-Fpn"], 3.0)
+    lsof = _exec_path.which_off_cwd("lsof")
+    if runner is None and lsof is None:
+        return None
+    # Every process's cwd, not only this user's: a process the user cannot read is skipped by lsof itself, and
+    # only cwds inside the session's own worktrees are kept by the caller.
+    code, text = (runner or (lambda a, t: run(a, t)))([str(lsof), "-a", "-d", "cwd", "-Fpn"], 3.0)
     if code not in (0, 1) or not text:  # lsof exits 1 when some process could not be read
         return None
     out, pid = {}, 0
