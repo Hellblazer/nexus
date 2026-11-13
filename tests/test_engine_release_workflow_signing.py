@@ -165,22 +165,17 @@ def test_the_shared_sign_script_enforces_the_signing_invariants() -> None:
 
 
 def test_rehearsal_workflow_shape() -> None:
-    """Push to develop limited to the signing inputs, plus dispatch; never pull_request (public
-    repo, self-hosted runner). Owner-only on hellmini, environment-scoped secrets, the shared
-    script, loud failure on missing secrets, notarization on push runs, an always() cleanup."""
+    """Dispatch only until the signing secrets exist (Sam 2026-11-13); never push or pull_request
+    (public repo, self-hosted runner). Owner-only on hellmini, environment-scoped secrets, the shared
+    script, loud failure on missing secrets, notarization by its input, an always() cleanup."""
     text = REHEARSAL.read_text()
     spec = yaml.safe_load(text)
     triggers = spec.get("on", spec.get(True))
-    assert set(triggers) == {"push", "workflow_dispatch"}
-    assert triggers["push"]["branches"] == ["develop"]
-    paths = triggers["push"]["paths"]
-    assert "service/deploy/mac-sign.sh" in paths
-    assert all(
-        p.startswith("service/deploy/") or p == ".github/workflows/mac-signing-rehearsal.yml" for p in paths
-    ), "the push trigger must stay limited to the signing inputs"
+    assert set(triggers) == {"workflow_dispatch"}, "dispatch only until the APPLE_DEV_ID_* secrets exist"
+    assert triggers["workflow_dispatch"]["inputs"]["notarize"]["default"] is True
     for name in ("Notarize", "Gatekeeper verdict (quarantined copy)"):
         step = next(s for s in spec["jobs"]["rehearse"]["steps"] if s.get("name") == name)
-        assert "github.event_name == 'push'" in step["if"], f"{name} must run on push, where inputs.notarize is empty"
+        assert step["if"] == "inputs.notarize", f"{name} runs when the dispatch asks for notarization"
     job = spec["jobs"]["rehearse"]
     # Both mac runners that sign: hellmini's persistent one and the pool's single-use one.
     assert job["runs-on"] == "${{ matrix.runner }}"
