@@ -137,6 +137,7 @@ from nexus.tuple_directory import (
 # instance-mailbox takeover it owns. Imported as a module, not individual
 # names, so the tools below read as `_subscriptions.<fn>` next to their
 # `_t2_ctx`/`_get_t1` sibling helpers.
+from nexus.mcp import _shown_chunks  # nexus-2k66t.6: short chunk ids on search hits
 from nexus.mcp import setup_tools as _setup_tools
 from nexus.mcp import subscriptions as _subscriptions
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.10), rewritten under RDR-213:
@@ -3867,7 +3868,14 @@ def _search_render(
             if r.metadata.get("also_in"):  # GH #1524: the same chunk, in the other collections
                 note_line += f"\n  also in: {', '.join(r.metadata['also_in'])}"
             badge = f" {_SENSITIVE_BADGE}" if posture.flagged(_idx) else ""
-            lines.append(f"[{dist}]{badge} {label}{flag}{note_line}\n  {snippet}")
+            # nexus-2k66t.6 (1a): a short chunk id store_get_many resolves, so the hit is fetchable without a
+            # structured re-run.
+            _chash = str(r.metadata.get("chunk_text_hash") or r.id or "")
+            _short = _shown_chunks.short_id(_chash)
+            if _short:
+                _shown_chunks.record([_chash])
+            id_part = f" id {_short}" if _short else ""
+            lines.append(f"[{dist}]{badge}{id_part} {label}{flag}{note_line}\n  {snippet}")
 
         if _withheld_line := posture.note_line():
             lines.append(f"\n{_withheld_line}")
@@ -3970,7 +3978,8 @@ def search(
     `search_graph_hop` when the search should be scoped by catalog metadata,
     an extracted aspect field, or graph neighbours, respectively.
 
-    Returns a ranked, human-readable list of chunks by default. With
+    Returns a ranked, human-readable list of chunks by default; each hit's
+    `id` is a short chunk id `store_get_many` accepts. With
     `structured=True` it returns the `{ids, tumblers, distances,
     hybrid_scores, collections, chunk_collections, chunk_text_hash}` dict
     instead. `distances` is the raw vector distance (absolute, lower is
@@ -7206,7 +7215,7 @@ def store_get_many(
         description=(
             "Document ids to fetch: a comma-separated string, a flat list[str] "
             "(single-stream), or a list[list[str]] (parallel-stream, pairs with "
-            "a list[int] limit_per_source)."
+            "a list[int] limit_per_source). A short id a text search printed works."
         ),
     )],
     collections: Annotated[str | list, Field(
@@ -7270,12 +7279,25 @@ def store_get_many(
     from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     try:
-        return _store_get_many_impl(
+        # nexus-2k66t.6 (1a): a short id a text search printed becomes its full chash.
+        ids, unresolved = _shown_chunks.expand(ids)
+        out = _store_get_many_impl(
             ids=ids, collections=collections, max_chars_per_doc=max_chars_per_doc, structured=structured,
             limit_per_source=limit_per_source,
             sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
             mcp_posture=True,  # RDR-243 Phase 3: this tool prints to the session model
         )
+        if unresolved:
+            if isinstance(out, dict):
+                if notes := _shown_chunks.notes_for(unresolved, out.get("missing") or ()):
+                    out["id_notes"] = notes  # additive: present only when a short id came back missing
+            elif "Missing:" in out:
+                # The text names missing ids on its last "Missing:" line (the first ten); a short id that
+                # resolved on its own is not on it and gets no note.
+                missing_line = out.rsplit("Missing:", 1)[1].split("\n", 1)[0]
+                named = {t.strip().split(" ")[0] for t in missing_line.split(",")}
+                out = "\n".join([out, *_shown_chunks.notes_for(unresolved, named)])
+        return out
     except SensitivityExcludeUnavailable as e:
         # RDR-243 review r1 F2: the impl lets a refused read propagate to its in-process callers; this MCP
         # boundary is where it becomes a tool error, and it says what was refused.
