@@ -1,5 +1,11 @@
 # Changelog
 
+## [8.2.1] - 2026-11-13
+
+Plugin version aligned with conexus 8.2.1. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/skills/upgrade/SKILL.md`: legacy chunk ids: nothing converges them; boot changesets delete them from engine 0.1.91 on; back up an older install before upgrading; report rows the VALIDATE job or doctor finds (nexus-f3yqd).
+
 ## [8.2.0] - 2026-11-12
 
 Plugin version aligned with conexus 8.2.0. No plugin-surface changes were pending at this pin.

@@ -43,13 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.2.0)
+## Awaiting the next release (pinned: v8.2.1)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/skills/upgrade/SKILL.md`
-  legacy chunk ids: nothing converges them; boot changesets delete them from
-  engine 0.1.91 on; back up an older install before upgrading; report rows the
-  VALIDATE job or doctor finds (nexus-f3yqd)
 
 ## Deferred to the next client release
