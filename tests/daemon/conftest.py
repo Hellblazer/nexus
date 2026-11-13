@@ -48,9 +48,9 @@ def _no_walk_of_the_test_process_ancestry(monkeypatch: pytest.MonkeyPatch) -> No
     (196, 214, ...), and in a container the test process's real ancestors
     can carry those same numbers, which would drop a row a test expects.
     The walk is left real for any pid other than this process."""
-    import os
+    import os  # noqa: PLC0415 — deferred: the fixture patches the module it names
 
-    from nexus.daemon import service_registry
+    from nexus.daemon import service_registry  # noqa: PLC0415 — deferred: the fixture patches the module it names
 
     real = service_registry.ancestor_pids
     monkeypatch.setattr(
@@ -66,3 +66,17 @@ def _no_reembed_hint_read(monkeypatch: pytest.MonkeyPatch) -> None:
     storage from a thread no test provisions a tenant for; it is off by default. The hint's own tests
     (``test_service_start_reembed_hint.py``) override this fixture by name."""
     monkeypatch.setattr("nexus.reembed_job.off_profile_hint", lambda reader_factory=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_chash_guard_finds_no_cluster_to_ask(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-f3yqd: the supervisor's step 1.75 asks the bundled Postgres whether the engine's boot would delete legacy
+    chash rows, and a start that cannot ask now waits instead of going on. The supervisor tests here fake Postgres and
+    the engine, so the question would reach a port nobody listens on; it is answered "no changelog" (nothing to
+    delete). The guard's own tests (``test_legacy_chash_guard*.py``) are left alone: they set their own."""
+    if request.module.__name__.rsplit(".", 1)[-1].startswith("test_legacy_chash_guard"):
+        return
+    def no_changelog(sql: str) -> str:  # the role may see every row; some cluster; no databasechangelog
+        return "t" if "rolsuper" in sql else "1" if "system_identifier" in sql else "f"
+
+    monkeypatch.setattr("nexus.daemon.legacy_chash_guard.bundled_run_sql", lambda *_a, **_k: no_changelog)

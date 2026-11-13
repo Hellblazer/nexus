@@ -524,14 +524,7 @@ public final class SchemaMigrator {
             // form for a SET statement at all") is retired with it: set_config(...)
             // is an ordinary PostgreSQL function, not the bare SET statement, so this
             // was never actually a no-typed-form case either.
-            try {
-                DSL.using(conn, SQLDialect.POSTGRES)
-                    .select(DSL.function("set_config", SQLDataType.VARCHAR,
-                        DSL.val("TimeZone"), DSL.val("UTC"), DSL.val(false)))
-                    .fetchOne();
-            } catch (DataAccessException e) {
-                throw new SQLException("SET TIME ZONE 'UTC' (via set_config) failed", e);
-            }
+            pinSessionTimeZoneToUtc(conn);
             logWalkStartSession(conn);
             pinSearchPathToPublic(conn);
             refuseSplitHistory(conn);
@@ -542,37 +535,7 @@ public final class SchemaMigrator {
             // nexus-vxmcl: the same for the shared lock table, which the walk's one transaction fills with leaf locks.
             WalkLockPreflight.check(conn);
 
-            Database database = DatabaseFactory.getInstance()
-                .findCorrectDatabaseImplementation(new JdbcConnection(conn));
-
-            // nexus-q81g7: pin Liquibase's bookkeeping to public. Without this,
-            // Liquibase puts DATABASECHANGELOG (and its lock table) in whatever
-            // schema current_schema() reports, and PostgreSQL's default
-            // search_path ("$user", public) makes that the schema named after
-            // the migrating role once such a schema exists. A role called
-            // nexus, t1 or staging (the three schemas this changelog creates)
-            // therefore boots once with the history in public, creates its own
-            // schema mid-walk, and on boot 2 reads an EMPTY history there,
-            // re-plans every changeset and dies re-creating nexus.memory
-            // ("relation already exists"). Every engine query on the history
-            // table already hardcodes public.databasechangelog (VersionHandler,
-            // and the count helpers below), and so does grants-nexus-svc.xml's
-            // GRANT, so public is the one place it can live.
-            //
-            // Both names are set: liquibaseSchemaName places the history and
-            // lock tables; defaultSchemaName is what Liquibase resolves
-            // unqualified objects and its own existence checks against, and it
-            // follows the same current_schema(). The session search_path is
-            // pinned too (pinSearchPathToPublic above): Liquibase's
-            // DatabaseUtils.initializeDatabase leaves a search_path that already
-            // starts with the default schema alone, and otherwise PREPENDS it to
-            // the existing one (public, $user, public), which keeps the
-            // role's own schema in the path. For a role with no like-named
-            // schema (the production nexus_admin) current_schema() is already
-            // public, so all three are no-ops there and existing installs are
-            // unchanged.
-            database.setLiquibaseSchemaName("public");
-            database.setDefaultSchemaName("public");
+            Database database = openLiquibaseDatabase(conn);
 
             // nexus-8sph2: the migration lock is declared AFTER Liquibase so it closes FIRST. Liquibase's
             // close() closes the connection, which on a pool returns it with the session, and so the
@@ -603,6 +566,7 @@ public final class SchemaMigrator {
                     logPciBuildersKept(conn, retrying);
                 } else {
                     terminatePciBuilders(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
+                    terminateChashValidators(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
                 }
 
                 // nexus-jl08t: identify THIS walk's own rows via a pre-walk
@@ -791,6 +755,7 @@ public final class SchemaMigrator {
                 // nexus-f3yqd: the repair alters a leaf (ENABLE ROW LEVEL SECURITY, ACCESS EXCLUSIVE), which queues
                 // behind a build's ShareUpdateExclusiveLock while the build waits for this statement's snapshot.
                 terminatePciBuilders(conn, "reason=partition_access_drift");
+                terminateChashValidators(conn, "reason=partition_access_drift");
             }
             for (String parent : PARTITION_PARENTS) {
                 try {
@@ -823,6 +788,59 @@ public final class SchemaMigrator {
 
     // ── nexus-q81g7: session pin, walk-start diagnostics, split-history refusal ──
 
+    /** Pins the session's {@code TimeZone} to UTC (nexus-rph82; see {@link #migrate}), shared with a test tool. */
+    static void pinSessionTimeZoneToUtc(Connection conn) throws SQLException {
+        try {
+            DSL.using(conn, SQLDialect.POSTGRES)
+                .select(DSL.function("set_config", SQLDataType.VARCHAR,
+                    DSL.val("TimeZone"), DSL.val("UTC"), DSL.val(false)))
+                .fetchOne();
+        } catch (DataAccessException e) {
+            throw new SQLException("SET TIME ZONE 'UTC' (via set_config) failed", e);
+        }
+    }
+
+    /**
+     * The Liquibase {@link Database} a walk runs on, with its bookkeeping pinned to {@code public}. Extracted
+     * verbatim from {@link #migrate} so a caller outside {@code migrate} (a test tool) builds it identically.
+     * Callers pin the session first ({@link #pinSessionTimeZoneToUtc}, {@link #pinSearchPathToPublic}):
+     * Liquibase leaves a search_path that already starts with the default schema alone.
+     */
+    static Database openLiquibaseDatabase(Connection conn) throws LiquibaseException {
+        Database database = DatabaseFactory.getInstance()
+            .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+
+        // nexus-q81g7: pin Liquibase's bookkeeping to public. Without this,
+        // Liquibase puts DATABASECHANGELOG (and its lock table) in whatever
+        // schema current_schema() reports, and PostgreSQL's default
+        // search_path ("$user", public) makes that the schema named after
+        // the migrating role once such a schema exists. A role called
+        // nexus, t1 or staging (the three schemas this changelog creates)
+        // therefore boots once with the history in public, creates its own
+        // schema mid-walk, and on boot 2 reads an EMPTY history there,
+        // re-plans every changeset and dies re-creating nexus.memory
+        // ("relation already exists"). Every engine query on the history
+        // table already hardcodes public.databasechangelog (VersionHandler,
+        // and the count helpers below), and so does grants-nexus-svc.xml's
+        // GRANT, so public is the one place it can live.
+        //
+        // Both names are set: liquibaseSchemaName places the history and
+        // lock tables; defaultSchemaName is what Liquibase resolves
+        // unqualified objects and its own existence checks against, and it
+        // follows the same current_schema(). The session search_path is
+        // pinned too (pinSearchPathToPublic, which the caller runs first): Liquibase's
+        // DatabaseUtils.initializeDatabase leaves a search_path that already
+        // starts with the default schema alone, and otherwise PREPENDS it to
+        // the existing one (public, $user, public), which keeps the
+        // role's own schema in the path. For a role with no like-named
+        // schema (the production nexus_admin) current_schema() is already
+        // public, so all three are no-ops there and existing installs are
+        // unchanged.
+        database.setLiquibaseSchemaName("public");
+        database.setDefaultSchemaName("public");
+        return database;
+    }
+
     /**
      * Pins this migration connection's session {@code search_path} to
      * {@code public}. Same shape as the time-zone pin above ({@code set_config(...,
@@ -835,7 +853,7 @@ public final class SchemaMigrator {
      * changeset to {@code public} on boot 1 and to a role-named schema from
      * boot 2 on, the same root cause as the history-table split, one level over.
      */
-    private static void pinSearchPathToPublic(Connection conn) throws SQLException {
+    static void pinSearchPathToPublic(Connection conn) throws SQLException {
         try {
             DSL.using(conn, SQLDialect.POSTGRES)
                 .select(DSL.function("set_config", SQLDataType.VARCHAR,
@@ -896,6 +914,36 @@ public final class SchemaMigrator {
             log.info("event=pci_builders_terminated count={} {}", terminated, why);
         } catch (DataAccessException e) {
             log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
+        }
+    }
+
+    /**
+     * nexus-f3yqd: end every backend of the user-started chash VALIDATE job ({@link ChashConstraintValidator#APPLICATION_NAME_PREFIX})
+     * in this database, at the two points where the walk ends the index builders: a walk with schema work queues its ACCESS
+     * EXCLUSIVE behind a VALIDATE's SHARE UPDATE EXCLUSIVE (up to 30 minutes, and an orphaned VALIDATE outlives the engine
+     * that started it), and every statement behind that waits too. Terminating is safe: a VALIDATE is atomic, so the
+     * constraint is exactly as it was, and the next job resumes at the step that was cut. Failure to signal is logged, never
+     * fatal, as for the builders.
+     */
+    private static void terminateChashValidators(Connection conn, String why) {
+        var pid = DSL.field(DSL.name("pid"), Integer.class);
+        try {
+            int terminated = 0;
+            for (Boolean ended : DSL.using(conn, SQLDialect.POSTGRES)
+                    .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
+                    .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                    .where(DSL.field(DSL.name("application_name"), String.class)
+                        .startsWith(ChashConstraintValidator.APPLICATION_NAME_PREFIX))
+                    .and(pid.ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
+                    .and(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", SQLDataType.VARCHAR)))
+                    .fetch(0, Boolean.class)) {
+                if (Boolean.TRUE.equals(ended)) {
+                    terminated++;
+                }
+            }
+            log.info("event=chash_validators_terminated count={} {}", terminated, why);
+        } catch (DataAccessException e) {
+            log.error("event=chash_validators_terminate_failed cause=\"{}\"", e.toString());
         }
     }
 
@@ -977,7 +1025,7 @@ public final class SchemaMigrator {
      * refuse. A history table the migration role cannot read is logged and skipped:
      * it is not ours to judge.
      */
-    private static void refuseSplitHistory(Connection conn) throws SQLException {
+    static void refuseSplitHistory(Connection conn) throws SQLException {
         try {
             DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
             Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);

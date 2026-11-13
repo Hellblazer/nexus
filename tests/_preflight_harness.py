@@ -38,7 +38,7 @@ CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 DRIFT = REPO_ROOT / ".github" / "workflows" / "plugin-drift-ledger.yml"
 BASH = shutil.which("bash")
 ZSH = shutil.which("zsh")
-MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin'"
+MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin and not pg_bundle_artifact'"
 #: R37: the two lint tests that resolve the bead ids cited under docs/ (Addendum
 #: 2026-09-18). The manifest is not required to hold every live bead, only the cited
 #: ones (tests/test_docs_reference_rot.py, test_bead_id_manifest_is_fresh_where_bd_is),

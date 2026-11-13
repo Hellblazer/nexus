@@ -597,9 +597,11 @@ def test_collected_family_meets_floor_and_is_visible_to_the_selector() -> None:
 # -- nexus-jh1f2 cut 4 review r1: the carve-out counts on a release PR's shard 1 --------------
 
 
-def _run_carveout(tmp: pathlib.Path, lived: int, keyed: int, pins: int) -> subprocess.CompletedProcess[str]:
+def _run_carveout(tmp: pathlib.Path, lived: int, keyed: int, pins: int,
+                  bundle: int = 19) -> subprocess.CompletedProcess[str]:
     (tmp / "tests" / "e2e" / "lib").mkdir(parents=True, exist_ok=True)
-    (tmp / "tests" / "e2e" / "local-service-gate.sh").write_text("LIVED_IN_EXPECTED=98  # note\nKEYED_VOYAGE_EXPECTED=3\n")
+    (tmp / "tests" / "e2e" / "local-service-gate.sh").write_text(
+        "LIVED_IN_EXPECTED=98  # note\nKEYED_VOYAGE_EXPECTED=3\nPG_BUNDLE_ARTIFACT_EXPECTED=19\n")
     (tmp / "tests" / "e2e" / "lib" / "mandatory_pins.sh").write_text(
         'MANDATORY_PIN_MARK_EXPR="integration and mandatory_regression_pin"\nMANDATORY_PIN_EXPECTED=4\n')
     bindir = tmp / "bin"
@@ -607,7 +609,8 @@ def _run_carveout(tmp: pathlib.Path, lived: int, keyed: int, pins: int) -> subpr
     stub = bindir / "uv"
     stub.write_text(
         "#!/usr/bin/env bash\n"
-        f'case "$*" in *lived_in*) n={lived} ;; *keyed_voyage*) n={keyed} ;; *mandatory*) n={pins} ;; *) n=0 ;; esac\n'
+        f'case "$*" in *lived_in*) n={lived} ;; *keyed_voyage*) n={keyed} ;; *pg_bundle_artifact*) n={bundle} ;; '
+        f'*mandatory*) n={pins} ;; *) n=0 ;; esac\n'
         'for i in $(seq 1 "$n"); do echo "tests/test_x.py::t$i"; done\necho "$n tests collected"\n')
     stub.chmod(0o755)
     script = _GH_EXPR.sub(lambda m: {"strategy.job-total": "3", "matrix.shard": "1"}[m.group(1).strip()],
@@ -621,9 +624,11 @@ def test_carveout_counts_pass_when_they_match(tmp_path: pathlib.Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-@pytest.mark.parametrize(("lived", "keyed", "pins", "named"),
-                         [(99, 3, 4, "lived_in"), (98, 2, 4, "keyed_voyage"), (98, 3, 5, "mandatory_regression_pin")])
-def test_carveout_counts_fail_on_any_drift(tmp_path: pathlib.Path, lived: int, keyed: int, pins: int, named: str) -> None:
-    proc = _run_carveout(tmp_path, lived, keyed, pins)
+@pytest.mark.parametrize(("lived", "keyed", "pins", "bundle", "named"),
+                         [(99, 3, 4, 19, "lived_in"), (98, 2, 4, 19, "keyed_voyage"),
+                          (98, 3, 5, 19, "mandatory_regression_pin"), (98, 3, 4, 18, "pg_bundle_artifact")])
+def test_carveout_counts_fail_on_any_drift(tmp_path: pathlib.Path, lived: int, keyed: int, pins: int, bundle: int,
+                                           named: str) -> None:
+    proc = _run_carveout(tmp_path, lived, keyed, pins, bundle)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert f"::error::{named}" in proc.stdout

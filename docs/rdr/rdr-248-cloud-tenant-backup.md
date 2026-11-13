@@ -169,14 +169,21 @@ against the live catalog (`relrowsecurity AND NOT relispartition`), never a hand
   (the spike's first staged load failed on `nx_answer_runs.plan_id`, which refers to `plans` with no
   foreign key); there are no cycles today, and only one foreign key is deferrable, so deferring
   constraints does not replace ordering;
-- its **reassigned id**, if its primary key is a global serial (18 tables), and the **columns that refer
-  to it**, both foreign keys (`nx_answer_steps.run_id`, `topic_assignments.topic_id`,
-  `topic_links.from_topic_id` and `to_topic_id`, `topics.parent_id`) and references with no foreign key
-  (`nx_answer_runs.plan_id` to `plans.id`, `taxonomy_centroids.topic_id` to `topics.id`);
-- the **columns a trigger maintains** (`topics.updated_at` and its doc count, restamped when assignments
-  load), which verification skips.
+- its **reassigned id**, if its primary key holds a serial (20 tables: 18 key on the serial alone, and
+  `catalog_links` and `pdf_pipeline` key it with the tenant), and the **columns that refer to it**, both
+  foreign keys (`nx_answer_steps.run_id`, `topic_assignments.topic_id`, `topic_links.from_topic_id` and
+  `to_topic_id`, `topics.parent_id`) and references with no foreign key (`nx_answer_runs.plan_id` to
+  `plans.id`, `taxonomy_centroids.topic_id` to `topics.id`, the array `memory_summaries.source_ids` to
+  `memory.id`, and `plans.id` inside the jsonb `nx_answer_runs.run_summary` at `run.plan_id`);
+- each **trigger and when it fires**, and the **columns a trigger maintains** (`topics.updated_at` and its
+  doc count, restamped when assignments load; `catalog_collections.owner_id`, recomputed from the
+  collection's documents as they load), which verification skips; a table whose trigger reads another
+  table during the load loads after it (`catalog_documents` after `catalog_owners` and
+  `catalog_collections`).
 A parity test fails when a live RLS table has no entry, when a foreign key or serial primary key is not
-reflected in the entry, or when an entry names a column that no longer exists.
+reflected in the entry, when an entry names a column that no longer exists, when a trigger is added or
+changes when it fires, or when a bigint, bigint[] or jsonb column of an exported table is not classified
+as a reference or as not one (bead nexus-csayy.1).
 
 The classes, from the spike (one reason each in the spike record):
 - `data`: catalog_owners, catalog_collections, catalog_documents, catalog_document_chunks, catalog_links,

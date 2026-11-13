@@ -1,0 +1,243 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+#
+# Record a Claude Code session's turn state on its tmux pane, for the status
+# line and the jump key (claude-tmux-next). Called from Claude Code hooks:
+#   working  UserPromptSubmit  the agent has the turn
+#   waiting  Stop              the turn ended; the session waits on Sam,
+#                              or "held" if the turn started background work
+#   notify   Notification      permission/question -> needs; idle -> waiting
+#   bg       PostToolUse (all) any tool ran, so the agent has the turn: set
+#                              working (a turn begun by a peer message or a
+#                              task notification fires no UserPromptSubmit,
+#                              and an answered permission prompt left needs).
+#                              Agent/Bash run_in_background, ScheduleWakeup,
+#                              Monitor also mark the turn as having started
+#                              background work, so its Stop shows "held"
+#   agentdone SubagentStop     drop a finished background agent from @cc_jobs;
+#                              an idle held pane with nothing left turns waiting
+#   hold     by hand           the session waits on something other than Sam
+#   need     by hand           a blocking ask waits on Sam: Stop shows needs (red)
+#   clear    SessionEnd        forget the state
+# Pane options: @cc_state, @cc_since (epoch seconds), @cc_bg (turn flag),
+# @cc_cmd (the pane's foreground command while Claude ran, for the dead-session
+# check in ~/.tmux.conf and claude-tmux-next), @cc_seen (1 once Sam has
+# focused a waiting pane; set by the pane-focus-in hook in ~/.tmux.conf),
+# @cc_jobs (outstanding background work across turns, space-separated:
+# b:<epoch>:<output file> for a background Bash, a:<epoch>:<agent id> for a
+# background agent). Stop shows held while @cc_jobs is non-empty; a Bash job
+# is done when its output file ends "[exited with code N]" or "[killed]", an
+# agent when SubagentStop names it. Entries older than 12 h are dropped.
+# Under herdr-core (HC_TERMINAL_ID set) the state is also reported in-band as
+# OSC 7501 to Claude's terminal, so hc and any OSC 7501 viewer see it too:
+# working/held -> working, waiting -> done (unseen) or idle (seen),
+# needs -> blocked (kind=permission for a permission prompt), clear -> clear.
+# Always exits 0 quickly: a hook that fails or stalls must never get in a
+# session's way.
+
+# OSC 7501 report (herdr-core integrations/claude-code/hc-status.sh). Hooks
+# run with no controlling terminal, so it goes to the terminal of the nearest
+# ancestor that has one: Claude's. Prints nothing on stdout.
+osc() {
+    [ -n "${HC_TERMINAL_ID:-}" ] || return 0
+    o_state=$1 o_kind=${2:-}
+    pid=$PPID depth=0 tty=
+    while [ -z "$tty" ] && [ "$depth" -lt 16 ] && [ "${pid:-0}" -gt 1 ]; do
+        # shellcheck disable=SC2046  # split ps output into tty and ppid on purpose
+        set -- $(ps -o tty= -o ppid= -p "$pid" 2>/dev/null)
+        case ${1:-?} in
+            '?' | '??' | '-') pid=${2:-0} ;;
+            *) tty=/dev/$1 ;;
+        esac
+        depth=$((depth + 1))
+    done
+    [ -n "$tty" ] && [ -w "$tty" ] || return 0
+    printf '\033]7501;state=%s:app=claude-code%s\033\\' "$o_state" "${o_kind:+:kind=$o_kind}" >"$tty" 2>/dev/null
+}
+# The kind of a needs state, from a Notification payload.
+osc_kind() {
+    case "$1" in permission_prompt) echo permission ;; *) echo ;; esac
+}
+
+if [ -z "${TMUX_PANE:-}" ] || ! command -v tmux >/dev/null 2>&1; then
+    # No tmux: only the OSC 7501 report, from the hook alone.
+    # hold and need are run by hand, not by a hook: never read their stdin,
+    # which a caller (a Claude Bash call) can hold open forever (2026-11-12:
+    # two sessions sat 21 h and 30 h in `need`). Hooks get a closed stdin.
+    case "$1" in hold|need) ;; *) [ -n "${HC_TERMINAL_ID:-}" ] || { [ -t 0 ] || cat >/dev/null 2>&1; exit 0; } ;; esac
+    [ -n "${HC_TERMINAL_ID:-}" ] || exit 0
+    payload=
+    case "$1" in hold|need) ;; *) [ -t 0 ] || payload=$(cat 2>/dev/null) ;; esac
+    case "$1" in
+        working|bg|hold) osc working ;;
+        waiting) osc "done" ;;
+        need) osc blocked question ;;
+        clear) osc clear ;;
+        notify)
+            kind=$(printf '%s' "$payload" | jq -r '.notification_type // .type // ""' 2>/dev/null)
+            msg=$(printf '%s' "$payload" | jq -r '.message // ""' 2>/dev/null)
+            case "$kind:$msg" in
+                idle_prompt:*|*:*"waiting for your input"*) ;;
+                *) osc blocked "$(osc_kind "$kind")" ;;
+            esac
+            ;;
+    esac
+    exit 0
+fi
+
+p="$TMUX_PANE"
+get() { tmux show -p -t "$p" -qv "$1" 2>/dev/null; }
+# Keep the jobs still running: a Bash job until its output file ends with the
+# harness's exit or kill line (or the file is gone), an agent until
+# SubagentStop removes it; anything older than 12 h is dropped.
+prune() {
+    cutoff=$(( $(date +%s) - 43200 ))
+    out=
+    for j in $1; do
+        t=${j#?:}; t=${t%%:*}
+        case "$t" in ''|*[!0-9]*) continue ;; esac
+        [ "$t" -lt "$cutoff" ] && continue
+        case "$j" in
+            b:*)
+                f=${j#b:*:}
+                [ -f "$f" ] || continue
+                tail -c 64 "$f" 2>/dev/null | grep -q -E '\[(exited with code -?[0-9]+|killed)\]' && continue
+                ;;
+        esac
+        out="${out:+$out }$j"
+    done
+    printf '%s' "$out"
+}
+
+state="$1"
+case "$state" in
+    notify)
+        payload=$(cat)
+        dir="${XDG_CACHE_HOME:-$HOME/.cache}/claude-tmux-state"
+        mkdir -p "$dir" 2>/dev/null && printf '%s\n' "$payload" > "$dir/last-notification.json" 2>/dev/null
+        kind=$(printf '%s' "$payload" | jq -r '.notification_type // .type // ""' 2>/dev/null)
+        msg=$(printf '%s' "$payload" | jq -r '.message // ""' 2>/dev/null)
+        printf '%s %s %s %s\n' "$(date -u +%FT%TZ)" "$p" "$kind" "$msg" >> "$dir/notifications.log" 2>/dev/null
+        case "$kind:$msg" in
+            idle_prompt:*|*:*"waiting for your input"*) state=waiting ;;
+            *) state=needs ;;
+        esac
+        # An idle reminder must not downgrade a permission prompt or a hold.
+        if [ "$state" = waiting ]; then
+            case "$(get @cc_state)" in needs|held) exit 0 ;; esac
+        fi
+        ;;
+    bg)
+        payload=$(cat)
+        if [ "$(get @cc_state)" != working ]; then
+            tmux set -p -t "$p" @cc_state working 2>/dev/null
+            tmux set -p -t "$p" @cc_since "$(date +%s)" 2>/dev/null
+            tmux set -p -t "$p" -u @cc_seen 2>/dev/null
+            tmux set -p -t "$p" @cc_cmd "$(tmux display -p -t "$p" '#{pane_current_command}' 2>/dev/null)" 2>/dev/null
+            tmux refresh-client -S 2>/dev/null
+            osc working
+        fi
+        now=$(date +%s)
+        job=$(printf '%s' "$payload" | jq -r --arg now "$now" '
+            if (.tool_name == "Bash" and (.tool_response.backgroundTaskId // "") != "") then
+                ((.scratchpad_dir // "") | rtrimstr("/") | rtrimstr("scratchpad")) as $d
+                | "b:" + $now + ":" + $d + "tasks/" + .tool_response.backgroundTaskId + ".output"
+            elif ((.tool_name == "Agent" or .tool_name == "Task")
+                  and (.tool_response.status? == "async_launched")) then
+                "a:" + $now + ":" + .tool_response.agentId
+            else "" end' 2>/dev/null)
+        case "$job" in
+            b:*:/*|a:*:?*) tmux set -p -t "$p" @cc_jobs "$(get @cc_jobs) $job" 2>/dev/null ;;
+        esac
+        # Monitor and ScheduleWakeup have no completion signal: they hold only
+        # the turn that started them, as before.
+        hit=$(printf '%s' "$payload" | jq -r '
+            if (.tool_name == "ScheduleWakeup" or .tool_name == "Monitor") then "y" else "" end' 2>/dev/null)
+        # Background work never downgrades a turn flagged need.
+        [ "$hit" = y ] && [ "$(get @cc_bg)" != need ] && tmux set -p -t "$p" @cc_bg 1 2>/dev/null
+        exit 0
+        ;;
+    agentdone)
+        id=$(jq -r '.agent_id // ""' 2>/dev/null)
+        [ -n "$id" ] || exit 0
+        jobs=$(get @cc_jobs)
+        case " $jobs " in *":$id "*) ;; *) exit 0 ;; esac
+        kept=$(prune "$(printf '%s\n' $jobs | grep -v ":$id\$" | tr '\n' ' ')")
+        tmux set -p -t "$p" @cc_jobs "$kept" 2>/dev/null
+        if [ -z "$kept" ] && [ "$(get @cc_state)" = held ]; then
+            tmux set -p -t "$p" @cc_state waiting 2>/dev/null
+            tmux set -p -t "$p" @cc_since "$(date +%s)" 2>/dev/null
+            tmux set -p -t "$p" -u @cc_seen 2>/dev/null
+            tmux refresh-client -S 2>/dev/null
+            osc "done"
+        fi
+        exit 0
+        ;;
+    waiting)
+        cat >/dev/null 2>&1
+        jobs=$(prune "$(get @cc_jobs)")
+        tmux set -p -t "$p" @cc_jobs "$jobs" 2>/dev/null
+        [ -n "$jobs" ] && state=held
+        case "$(get @cc_bg)" in
+            need) state=needs ;;
+            1) state=held ;;
+        esac
+        tmux set -p -t "$p" -u @cc_bg 2>/dev/null
+        ;;
+    working)
+        cat >/dev/null 2>&1
+        tmux set -p -t "$p" -u @cc_bg 2>/dev/null
+        ;;
+    hold|need)
+        # By hand: never read stdin (see the no-tmux branch above).
+        # Run by a session mid-turn (state working): flag the turn, so its
+        # Stop shows held (hold) or needs (need, a blocking ask is waiting
+        # on Sam) rather than being overwritten with waiting.
+        flag=1; [ "$state" = need ] && flag=need
+        if [ "$(get @cc_state)" = working ]; then
+            tmux set -p -t "$p" @cc_bg "$flag" 2>/dev/null
+            exit 0
+        fi
+        if [ "$state" = need ]; then state=needs; else state=held; fi
+        ;;
+    clear)
+        [ -t 0 ] || cat >/dev/null 2>&1
+        ;;
+esac
+
+case "$state" in
+    working|waiting|needs|held)
+        cur=$(get @cc_state)
+        tmux set -p -t "$p" @cc_state "$state" 2>/dev/null
+        tmux set -p -t "$p" @cc_cmd "$(tmux display -p -t "$p" '#{pane_current_command}' 2>/dev/null)" 2>/dev/null
+        # Keep the original time while the state holds, so "oldest" is honest.
+        if [ "$cur" != "$state" ]; then
+            tmux set -p -t "$p" @cc_since "$(date +%s)" 2>/dev/null
+            tmux set -p -t "$p" -u @cc_seen 2>/dev/null
+            # A turn that ends in the pane Sam is looking at is already seen:
+            # the active pane of the active window, with a focused client.
+            if [ "$state" = waiting ] &&
+                [ "$(tmux display -p -t "$p" '#{&&:#{pane_active},#{window_active}}' 2>/dev/null)" = 1 ] &&
+                tmux list-clients -t "$p" -F '#{client_flags}' 2>/dev/null | grep -q focused; then
+                tmux set -p -t "$p" @cc_seen 1 2>/dev/null
+            fi
+        fi
+        case "$state" in
+            working|held) osc working ;;
+            needs) osc blocked "$(osc_kind "${kind:-}")" ;;
+            waiting) if [ "$(get @cc_seen)" = 1 ]; then osc idle; else osc "done"; fi ;;
+        esac
+        ;;
+    clear)
+        tmux set -p -t "$p" -u @cc_state 2>/dev/null
+        tmux set -p -t "$p" -u @cc_since 2>/dev/null
+        tmux set -p -t "$p" -u @cc_bg 2>/dev/null
+        tmux set -p -t "$p" -u @cc_jobs 2>/dev/null
+        tmux set -p -t "$p" -u @cc_cmd 2>/dev/null
+        tmux set -p -t "$p" -u @cc_seen 2>/dev/null
+        osc clear
+        ;;
+esac
+tmux refresh-client -S 2>/dev/null
+exit 0

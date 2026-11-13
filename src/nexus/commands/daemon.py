@@ -666,7 +666,29 @@ def still_migrating_message(waited_s: float, config_dir: Path) -> str:
     )
 
 
-def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
+def _legacy_chash_refusal(config_dir: Path):
+    """A pending legacy-chash refusal as a start error (exit 75), or None (nexus-f3yqd)."""
+    from nexus.daemon.legacy_chash_cli import legacy_chash_refusal  # noqa: PLC0415 — deferred import
+
+    return legacy_chash_refusal(config_dir)
+
+
+def _clear_legacy_chash_refusal(config_dir: Path, legacy_backup: Path | None) -> None:
+    """The user's next start clears a pending legacy-chash refusal with a verified backup of this cluster, or is
+    refused again with exit 75 (nexus-f3yqd; wren: explicit, never a file merely appearing)."""
+    from nexus.daemon.legacy_chash_cli import clear_legacy_chash_refusal  # noqa: PLC0415 — deferred import
+
+    clear_legacy_chash_refusal(config_dir, legacy_backup)
+
+
+def _legacy_chash_waiting_note(config_dir: Path) -> str:
+    """Why the supervisor is waiting (it could not ask Postgres), as text to add to a timeout error, or ''."""
+    from nexus.daemon.legacy_chash_cli import waiting_note  # noqa: PLC0415 — deferred import
+
+    return waiting_note(config_dir)
+
+
+def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None, legacy_backup: Path | None = None):
     """Ensure a persistent (heartbeated) storage-service supervisor owns the lease.
 
     Returns the live :class:`LeaseRecord`. If a FRESH lease already exists this
@@ -739,6 +761,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     # from here would linger, and this caller would wait out the lease timeout
     # instead of saying why.
     _refuse_cluster_below_floor_before_start(config_dir)
+    _clear_legacy_chash_refusal(config_dir, legacy_backup)
     # A start is the user's "run again": it ends any earlier stop request, whether
     # or not a supervisor turns out to be running already (RDR-224, nexus-f9bgu.33).
     clear_stop_marker(config_dir, "storage_service", scope)
@@ -851,6 +874,8 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
         existing = _service_endpoint.discover_storage_service_lease(registry, scope)
         if existing is not None:
             return existing
+        if (refused := _legacy_chash_refusal(config_dir)) is not None:
+            raise refused  # the supervisor stays up with Postgres running, for nx backup
         announcer.poll()
         # nexus-qk6p6: a supervisor that has exited will never publish. An
         # engine that refuses to start takes it down within a second, and
@@ -888,7 +913,7 @@ def ensure_storage_supervisor(config_dir: Path, *, platform: str | None = None):
     if local_entries(config_dir):
         raise StorageServiceStartError(still_migrating_message(60.0, config_dir), still_starting=True)
     raise StorageServiceStartError(
-        "Storage service supervisor did not become ready within 60s. "
+        f"Storage service supervisor did not become ready within 60s.{_legacy_chash_waiting_note(config_dir)} "
         f"Check {supervisor_log} (supervisor) and "
         f"{', '.join(str(path) for path in engine_logs)} (engine), "
         "or run 'nx daemon service start --foreground' to see the error.",
@@ -1020,6 +1045,8 @@ def _start_via_autostart_unit(
         lease = _service_endpoint.discover_storage_service_lease(registry, scope)
         if lease is not None:
             return lease
+        if (refused := _legacy_chash_refusal(config_dir)) is not None:
+            raise refused
         if time.monotonic() >= deadline:
             break
         announcer.poll()
@@ -1029,7 +1056,7 @@ def _start_via_autostart_unit(
     last_error = _ssd.last_supervisor_error_line(error_log, error_mark)
     detail = (
         f"The supervisor reported: {last_error}\n" + _migration_halt_cause(last_error, engine_marks)
-        if last_error else ""
+        if last_error else (_legacy_chash_waiting_note(config_dir).lstrip() + "\n").lstrip()
     )
     raise _ssd.StorageServiceStartError(
         f"The autostart unit {unit_name} was started but the storage service "
@@ -1067,10 +1094,22 @@ def _start_via_autostart_unit(
     default=False,
     help="Emit the discovery JSON on stdout at startup.",
 )
+@click.option(
+    "--legacy-backup",
+    "legacy_backup",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "A dump written by `nx backup --to PATH` after a legacy-chash refusal, when it is not in ~/nexus-backups/. "
+        "It must be newer than the refusal, hold the marker schema the refusal created and the chunk and manifest "
+        "data, and read back to its end."
+    ),
+)
 def service_start_cmd(
     config_dir_str: str | None,
     foreground: bool,
     announce_stdout: bool,
+    legacy_backup: Path | None = None,
 ) -> None:
     """Start the native storage-service + Postgres supervisor (RDR-152 P5.1).
 
@@ -1109,20 +1148,22 @@ def service_start_cmd(
         config_dir = config_dir.absolute()  # a relative path must not be re-read from the new cwd
         enter_stable_daemon_cwd()
         try:
+            if legacy_backup is not None:  # nexus-f3yqd: --legacy-backup counts here too, not only on a detached start
+                _clear_legacy_chash_refusal(config_dir, legacy_backup)
             code = run_storage_supervisor(config_dir=config_dir)
         except StorageServiceStartError as exc:
             click.echo(f"Error: {exc}", err=True)
-            sys.exit(2)
+            sys.exit(getattr(exc, "exit_code", 2))
         sys.exit(code)
 
     # Non-foreground: ensure a persistent (heartbeated) supervisor owns the lease.
     # ensure_storage_supervisor starts an installed, enabled autostart unit
     # through the OS manager and spawns the detached supervisor only otherwise.
     try:
-        existing = ensure_storage_supervisor(config_dir)
+        existing = ensure_storage_supervisor(config_dir, legacy_backup=legacy_backup)
     except StorageServiceStartError as exc:
         click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
+        sys.exit(getattr(exc, "exit_code", 2))
 
     ep = existing.endpoint
     if announce_stdout:
@@ -1237,9 +1278,10 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     is_flag=True,
     default=False,
     help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
-    "ONLY after healing per the runbook linked at the end of this help (re-index the "
-    "affected collections, then re-run doctor and confirm the warning "
-    "clears). The rows stay unhealed debt if you force past them; a "
+    "ONLY after the operator or maintainer has decided how the rows are handled "
+    "(the runbook linked at the end of this help covers a service that will not "
+    "start, not these rows). No command repairs them. The rows stay as they "
+    "are if you force past them; a "
     "pre-v0.1.48 char-era engine can still crash-loop on boot.",
 )
 def service_install_binary_cmd(
@@ -1273,11 +1315,12 @@ def service_install_binary_cmd(
 
     # nexus-pnwu0 / GH #1414 upgrade gate: refuse to install a new engine onto a
     # store whose pgvector target holds width-non-conformant chash rows. The
-    # rows are unhealed debt the operator should converge FIRST (re-index the
-    # affected collections, then doctor clears); swapping engine binaries
-    # mid-debt just churns the boot path while the heal is pending. The
-    # chash-rekey upgrade rung this used to steer operators toward is deleted
-    # (nexus-lgdel) — re-indexing is the remedy now. Note the original
+    # rows are not expected after the engine's boot migrations (they delete
+    # them; the NOT VALID CHECK refuses new ones), so they mean the CHECK was
+    # bypassed; no command repairs them, and the operator or maintainer
+    # decides first (the VALIDATE job and the doctor detail say which rows and
+    # whose). The chash-rekey upgrade rung this used to steer operators toward
+    # is deleted (nexus-lgdel). Note the original
     # crash-loop premise was
     # narrowed by nexus-joima (2026-07-21): v0.1.48+ engines tolerate the rows
     # at boot (octet checks NOT VALID until the rekey rung); only a pre-v0.1.48

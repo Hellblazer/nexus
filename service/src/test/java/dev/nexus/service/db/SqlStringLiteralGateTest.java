@@ -110,6 +110,9 @@ class SqlStringLiteralGateTest {
         // deliberately invalid SQL (two ON CONFLICT clauses) pinning the server's 42601; jOOQ cannot build it and
         // its parser rejects it before the server would
         Map.entry("dev/nexus/service/ArbiterCompletenessTest.java", 2),
+        // the DO wrapper that keeps the validator's own VALIDATE statement running on the server (EXECUTE it, then
+        // pg_sleep), so a cancel lands on a statement in flight; the hook receives and returns that statement as text
+        Map.entry("dev/nexus/service/db/ChashValidateCancelTest.java", 1),
         // the DO wrapper around the probe resource's own text (ddl/nx-ddl-probe.sql, shared with the container
         // entrypoint), so the install is neither logged by log_statement=ddl nor seen by the trigger it creates
         Map.entry("dev/nexus/service/DdlCounts.java", 1),
@@ -118,7 +121,7 @@ class SqlStringLiteralGateTest {
         // neither statement can run inside a function or transaction)
         Map.entry("dev/nexus/service/SharedCluster.java", 3));
 
-    private static final int EXEMPT_TOTAL = 6;
+    private static final int EXEMPT_TOTAL = 7;
 
     /** SQL the tests never send to a database, per file, frozen. Each entry says what the text is for. */
     private static final Map<String, Integer> TEXT = Map.ofEntries(
@@ -148,6 +151,8 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/db/RawSqlGateTest.java", 3),
         // input to the reapable-consumers scanner under test
         Map.entry("dev/nexus/service/db/ReapableConsumersScanTest.java", 6),
+        // pg_get_triggerdef texts, input to the trigger-firing parser under test
+        Map.entry("dev/nexus/service/db/TenantExportRegistryParityTest.java", 3),
         // a pattern matched against changelog text
         Map.entry("dev/nexus/service/db/TenantScopeVacuumMaintainGrantParityTest.java", 1),
         // expected substrings of the trigger function bodies
@@ -155,7 +160,7 @@ class SqlStringLiteralGateTest {
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 71;
+    private static final int TEXT_TOTAL = 74;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(

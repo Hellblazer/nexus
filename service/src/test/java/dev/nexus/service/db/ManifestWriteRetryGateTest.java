@@ -96,7 +96,15 @@ class ManifestWriteRetryGateTest {
     private static final Map<String, String> READ_ONLY_REFERENCES = new TreeMap<>(Map.ofEntries(
         Map.entry("PgVectorRepository", "ownership, manifest and source_uri lookups (SELECT ... FROM catalog_document_chunks) and prose;"
             + " it writes chunks, never manifest rows"),
+        Map.entry("LegacyChunkSurvey", "nexus-f3yqd: reads manifest rows to find a chunk's owners and to classify a manifest row by its chunk;"
+            + " writes nothing"),
         Map.entry("SchemaMigrator", "names the table in the chash-length constraint map: DDL bookkeeping, no DML"),
+        Map.entry("ValidateConstraintsJobs", "nexus-f3yqd: names nexus.catalog_document_chunks as a table its refusal reports on; no DML"),
+        Map.entry("TenantExport", "nexus-csayy.1: the tenant export's table registry names the table and its columns;"
+            + " it holds no DML"),
+        Map.entry("ChashConstraintValidator", "nexus-f3yqd: VALIDATE CONSTRAINT of the chash width CHECK on the table (DDL, "
+            + "and a SELECT count of its non-conformant rows); it changes no row"),
+        Map.entry("ValidateConstraintsHandler", "javadoc naming the table whose CHECK the job validates; no DML"),
         Map.entry("TaxonomyRepository", "a comment naming the idiom; no code reference"),
         Map.entry("TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML"),
         Map.entry("DeadlockRetry", "class javadoc naming the manifest writers it guards; the belt itself touches no table"),

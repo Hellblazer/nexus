@@ -372,7 +372,8 @@ def _restart(effects: QuiesceOps, state: QuiesceState) -> None:
     except Exception as exc:
         err = RestartAfterReplaceError(
             f"{step} could not be started again after the replacement: {exc}. "
-            "Run 'nx daemon service start'."
+            + ("Run `nx backup`, then 'nx daemon service start'."  # the legacy-chash guard refused (exit 75)
+               if getattr(exc, "exit_code", None) == 75 else "Run 'nx daemon service start'.")
         )
         # nexus-86aaz r2: the raiser decides (StorageServiceStartError.still_starting), never the
         # message text, so a unit that is crash-looping or reported an error stays a failure.

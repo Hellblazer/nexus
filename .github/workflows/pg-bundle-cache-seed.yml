@@ -193,7 +193,7 @@ jobs:
           # actions/cache post-save runs with post-if: success() (verified
           # upstream), so an exit 1 here genuinely prevents the seed.
           sharedir="$(bundle/bin/pg_config --sharedir)"
-          for ctl in vector pg_trgm; do
+          for ctl in vector pg_trgm pg_background; do
             if [ ! -f "$sharedir/extension/$ctl.control" ]; then
               echo "::error::$ctl.control missing — refusing to seed an incomplete contrib set"
               exit 1

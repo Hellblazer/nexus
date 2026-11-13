@@ -37,6 +37,7 @@ from tests._llm_fake_server import (
     anthropic_stream,
     openai_error,
     openai_stream,
+    time_the_mid_stream_phase_only,
 )
 from tests._module_seam import patch_in
 
@@ -279,7 +280,8 @@ class TestContract:
         assert ei.value.partial_text == ""
         assert ei.value.event_count == 0
 
-    def test_a_stall_mid_stream_is_a_timeout_that_keeps_the_partial_output(self, backend) -> None:
+    def test_a_stall_mid_stream_is_a_timeout_that_keeps_the_partial_output(self, backend, monkeypatch) -> None:
+        time_the_mid_stream_phase_only(monkeypatch)  # phase 1 ends on the first event; the 0.6 s times the stall
         with DRIVERS[backend].scenario("stall_mid_stream") as run:
             with pytest.raises(OperatorTimeoutError) as ei:
                 run.dispatch(timeout=0.6)

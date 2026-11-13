@@ -98,6 +98,8 @@ def test_doctor_fix_wires_the_vacuum_and_fails_on_a_failed_one(monkeypatch) -> N
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: object())
     monkeypatch.setattr("nexus.garbage.catalog_garbage", lambda _r: SimpleNamespace(
         error=None, orphaned_links=0, trash_documents=0, stranded_chunks=0))
+    # doctor --fix also runs the chash CHECK validate job (nexus-f3yqd); it has its own tests.
+    monkeypatch.setattr("nexus.commands.t3_cmds.chash_checks.doctor_chash_fix", lambda **_k: None)
     monkeypatch.setattr(h, "vacuum_tuple_tables", lambda *, dry_run: calls.append(dry_run) or (
         ["--fix would VACUUM ANALYZE nexus.tuples (dead-tuple ratio 90.00%)."] if dry_run
         else ["VACUUM of nexus.tuples failed (psql exit 1): ERROR: x"]))

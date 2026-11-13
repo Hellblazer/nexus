@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Build a COMPLETE, RELOCATABLE PostgreSQL + pgvector + pg_trgm bundle from
-# source (RDR-157 P3.1, bead nexus-vwvv5.10 — Strategy B).
+# Build a COMPLETE, RELOCATABLE PostgreSQL + pgvector + pg_trgm + pg_background
+# bundle from source (RDR-157 P3.1, bead nexus-vwvv5.10 — Strategy B).
 #
 # Single source of truth for the bundle build, extracted from the proven CA-3
 # CI jobs (.github/workflows/ci.yml). CA-3 falsified Strategy A (zonky reduced
@@ -17,7 +17,12 @@
 #   --without-openssl  loopback-only; EXPLICIT so an image that later ships
 #                      openssl-devel cannot silently link libssl.
 #
-# Build-only files are removed once pgvector is built (prune_build_only): the C
+# pg_background (vibhorkum/pg_background, nexus-f3yqd.2) is built against the
+# bundle's own pg_config, like pgvector, so dml_utils can run each chunk of a
+# large-table rewrite in a background worker. It needs no shared_preload_libraries
+# (workers are registered dynamically), so no postgresql.conf change ships with it.
+#
+# Build-only files are removed once pgvector and pg_background are built (prune_build_only): the C
 # headers (include/), the static archives (lib/*.a), PGXS (the extension-build
 # makefiles) and the pkg-config files. Nothing at runtime reads them: initdb reads
 # share/ (postgres.bki and the rest), CREATE EXTENSION reads share/extension and
@@ -38,6 +43,11 @@
 # Optional env:
 #   PG_VERSION              default 17.5   (PG major aligned on 17; nexus-41bso)
 #   PGVECTOR_VERSION        default v0.8.2 (>=0.8 is the RDR-155 iterative_scan floor)
+#   PG_BACKGROUND_VERSION   default v2.0.4 (nexus-f3yqd.2). Must be a version listed in
+#                           pg_background_pinned_commit below: the clone is refused unless
+#                           its HEAD is the pinned commit (a tag can be moved, a commit
+#                           cannot). The pin lives here only, so the cache key's script
+#                           hash is what changes when it moves.
 #   WORK_DIR                scratch dir for sources; default `mktemp -d`
 #   MACOSX_DEPLOYMENT_TARGET (darwin only) default 13.0 — Mach-O minos floor
 #   SKIP_PREREQS            LINUX ONLY: when "1", do not attempt to install
@@ -55,6 +65,7 @@ set -euo pipefail
 : "${BUNDLE_PREFIX:?BUNDLE_PREFIX (absolute install prefix) is required}"
 PG_VERSION="${PG_VERSION:-17.5}"
 PGVECTOR_VERSION="${PGVECTOR_VERSION:-v0.8.2}"
+PG_BACKGROUND_VERSION="${PG_BACKGROUND_VERSION:-v2.0.4}"
 # Default to a private scratch dir we own (and clean up). If the caller supplies
 # WORK_DIR we leave it untouched on exit — it's theirs.
 if [ -z "${WORK_DIR:-}" ]; then
@@ -158,9 +169,81 @@ build_pgvector() {
     make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" OPTFLAGS="" install
 }
 
+# The commit a pg_background tag must resolve to. A version not listed is refused:
+# moving the pin is one reviewed line, never an environment variable alone.
+# v2.0.4: `ls-remote https://github.com/vibhorkum/pg_background refs/tags/v2.0.4`
+# on 2026-11-10 (release published 2026-09-28).
+pg_background_pinned_commit() {
+    case "$1" in
+        v2.0.4) echo "c1db2540408ce4626ea21bc97572ff43b1a19ff3" ;;
+        *) return 1 ;;
+    esac
+}
+
+build_pg_background() {
+    log "build pg_background ${PG_BACKGROUND_VERSION} against ${BUNDLE_PREFIX}/bin/pg_config"
+    local want head
+    want="$(pg_background_pinned_commit "${PG_BACKGROUND_VERSION}")" || {
+        echo "FATAL: no pinned commit for pg_background ${PG_BACKGROUND_VERSION}: add it to pg_background_pinned_commit (a tag can be moved; a commit cannot)" >&2
+        exit 1
+    }
+    cd "$WORK_DIR"
+    git clone -q --depth 1 --branch "${PG_BACKGROUND_VERSION}" https://github.com/vibhorkum/pg_background.git
+    cd pg_background
+    head="$(git rev-parse HEAD)"
+    if [ "$head" != "$want" ]; then
+        echo "FATAL: pg_background ${PG_BACKGROUND_VERSION} resolved to commit ${head}, the pin is ${want}: the tag moved, or the clone is not what was reviewed" >&2
+        exit 1
+    fi
+    # Installs pg_background.{so,dylib} into pkglibdir and the control + SQL scripts
+    # into share/extension, inside the bundle, so relocation keeps working. Must run
+    # before prune_build_only: the Makefile includes PGXS.
+    make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config"
+    make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" install
+}
+
+copy_license() {
+    # A component whose licence file is missing fails the build: the PostgreSQL License
+    # requires its notice in every copy, so a bundle never ships without it.
+    [ -f "$1" ] || { echo "FATAL: licence file $1 is missing; cannot ship $2 without its notice" >&2; exit 1; }
+    cp "$1" "${BUNDLE_PREFIX}/licenses/$2"
+}
+
+install_licenses() {
+    # licenses/ + THIRD-PARTY-NOTICES.txt, the layout the Windows bundle ships
+    # (build_pg_bundle_windows.py). All three components are under the PostgreSQL
+    # License; verify_and_mark requires every file.
+    log "install licences (PostgreSQL, pgvector, pg_background)"
+    mkdir -p "${BUNDLE_PREFIX}/licenses"
+    copy_license "${WORK_DIR}/postgresql-${PG_VERSION}/COPYRIGHT" postgresql-COPYRIGHT.txt
+    copy_license "${WORK_DIR}/pgvector/LICENSE" pgvector-LICENSE.txt
+    copy_license "${WORK_DIR}/pg_background/LICENSE" pg_background-LICENSE.txt
+    cat > "${BUNDLE_PREFIX}/THIRD-PARTY-NOTICES.txt" <<NOTICE
+THIRD-PARTY NOTICES for the nexus PostgreSQL bundle
+
+1. PostgreSQL ${PG_VERSION}: PostgreSQL License, see licenses/postgresql-COPYRIGHT.txt.
+2. pgvector ${PGVECTOR_VERSION}: PostgreSQL License, see licenses/pgvector-LICENSE.txt.
+3. pg_background ${PG_BACKGROUND_VERSION}: PostgreSQL License, see licenses/pg_background-LICENSE.txt.
+NOTICE
+}
+
+# The default_version a control file names ('' when it names none): CREATE EXTENSION reads
+# <name>--<default_version>.sql, so the checks below derive the script name from the control
+# file itself instead of hardcoding a version.
+control_default_version() {
+    awk -F"'" '/^[[:space:]]*default_version[[:space:]]*=/ { print $2; exit }' "$1"
+}
+
+# True when CREATE EXTENSION can reach <ctl>'s default_version from a script in <dir>: a full
+# <ctl>--<ver>.sql, or an upgrade script <ctl>--<from>--<ver>.sql ending at it (PostgreSQL's own
+# pg_trgm ships a base script plus upgrade scripts and no <ctl>--<default_version>.sql).
+has_default_script() {
+    compgen -G "$1/$2--$3.sql" >/dev/null || compgen -G "$1/$2--*--$3.sql" >/dev/null
+}
+
 prune_build_only() {
-    # Files used only to BUILD against this PostgreSQL (pgvector is already built
-    # above), never at runtime: headers, static archives, PGXS, pkg-config. Paths
+    # Files used only to BUILD against this PostgreSQL (pgvector and pg_background
+    # are already built above), never at runtime: headers, static archives, PGXS, pkg-config. Paths
     # come from pg_config (build prefix, before any relocation) and must sit
     # inside BUNDLE_PREFIX before anything is removed.
     local pgc="${BUNDLE_PREFIX}/bin/pg_config" libdir pkglibdir d
@@ -311,16 +394,33 @@ fixup_linux_relocatability() {
 
 verify_and_mark() {
     log "verify complete tool set + injected extension"
-    local b vector_lib pkglib sharedir
+    local b vector_lib pgbg_lib pkglib sharedir ctl lic
     for b in initdb pg_ctl postgres psql createdb pg_config; do
         test -x "${BUNDLE_PREFIX}/bin/${b}" || { echo "missing ${BUNDLE_PREFIX}/bin/${b}"; exit 1; }
     done
-    if [ "$uname_s" = "Darwin" ]; then vector_lib="vector.dylib"; else vector_lib="vector.so"; fi
+    if [ "$uname_s" = "Darwin" ]; then
+        vector_lib="vector.dylib"; pgbg_lib="pg_background.dylib"
+    else
+        vector_lib="vector.so"; pgbg_lib="pg_background.so"
+    fi
     pkglib="$("${BUNDLE_PREFIX}/bin/pg_config" --pkglibdir)"
     sharedir="$("${BUNDLE_PREFIX}/bin/pg_config" --sharedir)"
     test -f "${pkglib}/${vector_lib}" || { ls -la "${pkglib}"; exit 1; }
-    test -f "${sharedir}/extension/vector.control" || { ls -la "${sharedir}/extension"; exit 1; }
-    test -f "${sharedir}/extension/pg_trgm.control" || { ls -la "${sharedir}/extension"; exit 1; }
+    test -f "${pkglib}/${pgbg_lib}" || { echo "missing ${pkglib}/${pgbg_lib}"; ls -la "${pkglib}"; exit 1; }
+    # Contrib completeness: a bundle without any of these controls, or without the default_version
+    # script a control names, is refused (the workflows mirror this list;
+    # tests/test_pg_bundle_contrib_set.py pins them together).
+    local ver
+    for ctl in vector pg_trgm pg_background; do
+        test -f "${sharedir}/extension/${ctl}.control" || { echo "missing ${sharedir}/extension/${ctl}.control"; ls -la "${sharedir}/extension"; exit 1; }
+        ver="$(control_default_version "${sharedir}/extension/${ctl}.control")"
+        test -n "$ver" || { echo "${ctl}.control names no default_version"; exit 1; }
+        has_default_script "${sharedir}/extension" "$ctl" "$ver" || { echo "missing a ${ctl}--${ver}.sql (or ${ctl}--*--${ver}.sql) script in ${sharedir}/extension"; ls -la "${sharedir}/extension"; exit 1; }
+    done
+    # Licence notices (install_licenses): the PostgreSQL License needs one in every copy.
+    for lic in licenses/postgresql-COPYRIGHT.txt licenses/pgvector-LICENSE.txt licenses/pg_background-LICENSE.txt THIRD-PARTY-NOTICES.txt; do
+        test -f "${BUNDLE_PREFIX}/${lic}" || { echo "missing ${BUNDLE_PREFIX}/${lic}"; exit 1; }
+    done
     # prune_build_only took effect (a later edit that reorders it after a step
     # that re-installs headers must fail here, not ship 10 MB back).
     local libdir stray
@@ -337,7 +437,7 @@ verify_and_mark() {
         > "${BUNDLE_PREFIX}/.build_prefix"
 
     echo "Built: $("${BUNDLE_PREFIX}/bin/initdb" --version)"
-    echo "  ${vector_lib} at ${pkglib}"
+    echo "  ${vector_lib} and ${pgbg_lib} at ${pkglib}"
     echo "  build prefix recorded at ${BUNDLE_PREFIX}/.build_prefix"
 }
 
@@ -345,6 +445,8 @@ mkdir -p "$BUNDLE_PREFIX"
 install_prereqs
 build_pg
 build_pgvector
+build_pg_background
+install_licenses
 prune_build_only
 fixup_macos_relocatability
 fixup_linux_relocatability

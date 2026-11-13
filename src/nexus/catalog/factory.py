@@ -495,6 +495,16 @@ def make_catalog_writer_for_endpoint(
     return HttpCatalogClient(base_url=base_url, tenant=tenant, _token=token, client=client)
 
 
+def make_catalog_admin_client() -> Any:
+    """A catalog client of the caller's own, for an admin job it posts to and polls itself (nexus-f3yqd: the chash
+    CHECK validate job). The shared handle forwards public methods only, and the job client calls the store mixin's
+    ``_post``/``_get`` on the client it holds. Resolves the endpoint like the shared slot's client does. Returns a live
+    ``HttpCatalogClient`` the caller must ``close()``."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    return HttpCatalogClient()
+
+
 def make_catalog_client_for_migration(
     *,
     base_url: Optional[str] = None,

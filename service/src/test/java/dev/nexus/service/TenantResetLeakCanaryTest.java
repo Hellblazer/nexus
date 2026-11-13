@@ -196,6 +196,11 @@ class TenantResetLeakCanaryTest {
             + "/v1/catalog/manifest/fill), which needs manifest rows with chunk labels or spans to fill, and this "
             + "canary's workload writes none. ManifestFillConcurrencyTest and TenantResetRouteTest cover its jobs "
             + "and its evictor",
+        "ValidateConstraintsJobs", "its state is what a refused table's step of the root-only chash VALIDATE job says "
+            + "of a tenant (bad-row counts by tenant, and up to three example chashes that may be any tenant's when the admin "
+            + "pre-check found them, so every reset clears them), filled by a job a root credential starts over a store with "
+            + "a bad chash row, which this canary's workload never has. ValidateConstraintsJobsTest and ChashValidateJobRouteTest "
+            + "cover its evictor, the latter through a real job and the service's own evictor list",
         "ChunkReaper", "its timeout streaks and resume cursors are filled by a reaper pass over a T3 collection, "
             + "which needs a vector backend this engine does not have; TenantKeyedEvictorsTest covers its evictor",
         "OwnerlessLogLimiter", "this evictor drops the log windows of two holders, the vector repository's "

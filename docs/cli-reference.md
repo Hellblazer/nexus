@@ -2286,6 +2286,16 @@ Reading the audit afterwards: the verb prints, per call, the ids of the intent a
 
 ---
 
+### nx t3 validate-chash-checks
+
+```
+nx t3 validate-chash-checks [--dry-run] [--no-wait] [--json]
+nx t3 validate-chash-checks --job ID [--json]
+nx t3 validate-chash-checks --job ID --cancel [--no-wait] [--json]
+```
+
+Validates the chash width CHECKs on `nexus.chunks` and `nexus.catalog_document_chunks` by starting the engine's job (`POST /v1/admin/validate-constraints`, engine 0.1.190) and polling it to the end. The engine never runs this at boot; this command and `nx doctor --fix` start it. The job is safe to stop: a CHECK it validated stays valid, and the next run skips it. It needs the engine's operator credentials, so on a managed install the operator runs it. A finished job is read by its verdict, not its state, and each refused or deferred CHECK is printed with its own next step: rows that break a CHECK (the operator, with the unkeyable chunks the engine lists), a CHECK whose definition differs (the operator), a busy table (run again), or a VALIDATE past the engine's time limit (the operator raises `nexus.validate.statement_timeout_ms`). Stopping the command leaves the job running; `--job ID` follows it again, and `--job ID --cancel` cancels it (`DELETE /v1/admin/validate-constraints/{job_id}`) and waits for it to end: a CHECK it validated stays valid, the table it was on stays not validated, and the next run resumes there. Cancelling a job that has already ended changes nothing and prints its verdict. While a cancelled job is ending, a new start is refused until it ends. `--dry-run` reports what each CHECK would do and changes nothing; on a table whose rows the job cannot count it says a real run decides. Exit 0 when every CHECK is validated or `--cancel` saw the job end cancelled, 1 when one is refused or deferred, the job failed, was cancelled (when following it without `--cancel`) or was lost, or the engine could not be reached, 3 when the engine is too old or the credentials cannot run it.
+
 ### nx t3 quarantine restore
 
 ```
@@ -3860,7 +3870,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 
 **Garbage sweep (7.32.0; Sam, 2026-09-05).** Two rows on every run. `Local garbage` reaps, in place, the litter nothing else touches: `t1_mint_<session>.lock` files older than a day whose session holds no lease (706 had accumulated since July), rotated logs (`*.log.N`) older than 14 days, and `operator-timeout-*` / `operator-budget-*` dispatch dumps older than 7. `Catalog garbage` counts orphaned links (an endpoint that resolves to no live document) and tombstoned documents plus stranded chunks past **one** day; a non-zero count is a ⚠ that offers `nx doctor --fix --dry-run` (counts what would go, deletes nothing) before `nx doctor --fix` (deletes them permanently), and an unreachable engine is a ⚠ too, never a clean row. Each litter class this repo produces is a row in `nexus.garbage`; a new class is a new row there, not a new command.
 
-The `--fix` flag permanently deletes the catalog garbage the sweep counted (there is no undo; `--fix --dry-run` shows the counts and deletes nothing): it deletes every orphaned link, then runs the one-day `purge-trash` (it fails loud on an engine error), then, on a local install, runs `VACUUM ANALYZE` on each tuple-space table the `tuples.dead_tuple_ratio` row would fail, through the install's own admin credentials (`pg_credentials`), so no database password or SQL is needed (GH #1609; `--fix --dry-run` lists it, a managed service is left to its operator, and a failed VACUUM fails the command), then runs the HNSW `search_ef` step, which does nothing on the service-backed store (pgvector tunes HNSW on the server, through the engine's `NX_HNSW_EF_SEARCH`); in cloud mode it prints that tuning is server-side.
+The `--fix` flag permanently deletes the catalog garbage the sweep counted (there is no undo; `--fix --dry-run` shows the counts and deletes nothing): it deletes every orphaned link, then runs the one-day `purge-trash` (it fails loud on an engine error), then, on a local install, runs `VACUUM ANALYZE` on each tuple-space table the `tuples.dead_tuple_ratio` row would fail, through the install's own admin credentials (`pg_credentials`), so no database password or SQL is needed (GH #1609; `--fix --dry-run` lists it, a managed service is left to its operator, and a failed VACUUM fails the command), then, when the engine reports a chash width CHECK not validated, starts the engine's validate job and waits for it (the job `nx t3 validate-chash-checks` runs; it deletes nothing, `--fix --dry-run` starts a dry-run job, a refused or deferred CHECK prints its next step without failing the command, and on a managed install it says to ask the operator), then runs the HNSW `search_ef` step, which does nothing on the service-backed store (pgvector tunes HNSW on the server, through the engine's `NX_HNSW_EF_SEARCH`); in cloud mode it prints that tuning is server-side.
 
 **`Beads PRIME.md (user-level)`** (nexus-cnzei.8). Reports `[]` (no row at
 all) when neither `bd` nor the beads Claude Code plugin is detected on this
@@ -4580,6 +4590,7 @@ the engine and PostgreSQL itself (nexus-f9bgu.51).
 | `--json` | (`status`) Raw JSON output. |
 | `--with-pg` | (`stop`) Full-stack stop: also stop the nx-managed Postgres cluster and the MinerU server nexus started. |
 | `--announce-stdout` | (`start`) Emit the discovery JSON on stdout at startup. |
+| `--legacy-backup PATH` | (`start`, `--foreground` too) After a legacy-chash refusal (exit 75: the store holds legacy-width chash rows the engine's first boot deletes), a dump written by `nx backup --to PATH` outside `~/nexus-backups/`. It must be newer than the refusal; `pg_restore -l` must list the empty marker schema the refusal created (`nx_legacy_guard_<token>`, which proves the dump is of this store) and the chunk and manifest table data, and `pg_restore -a` must read all of it; the start then goes on. A refusal about another database, or one whose rows are gone, is retired at the next start. A dump in `~/nexus-backups/` is found without it. Managed and bring-your-own Postgres are exempt from the guard (their operator owns backups). |
 
 **Memory-constrained hosts.** Set `NX_SERVICE_MAX_HEAP` (e.g. `NX_SERVICE_MAX_HEAP=1g`)
 to cap the native service's JVM heap. On low-RAM laptops and containers the

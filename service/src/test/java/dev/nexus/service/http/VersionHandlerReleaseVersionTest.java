@@ -272,6 +272,13 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheChashConstraintsValidateJobAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendChashConstraintsValidateJobCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"chash_constraints_validate_job_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheManifestFillJobAsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogManifestFillJobCapabilityField(body);

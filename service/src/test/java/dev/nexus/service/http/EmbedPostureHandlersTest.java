@@ -395,6 +395,7 @@ class EmbedPostureHandlersTest {
         // nexus-f3yqd: the two census routes, each flag its own
         assertThat(body.get("catalog_index_run_census_supported").asBoolean()).isTrue();
         assertThat(body.get("catalog_next_seq_drift_read_supported").asBoolean()).isTrue();
+        assertThat(body.get("chash_constraints_validate_job_supported").asBoolean()).isTrue();
     }
 
     @Test

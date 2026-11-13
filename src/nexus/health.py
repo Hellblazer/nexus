@@ -7218,28 +7218,23 @@ def _check_migration_state(
             detail=(
                 f"{nonconforming} chunk row(s) have a {POISON_DETAIL_TOKEN} "
                 "(octet_length <> 32 — legacy pre-RDR-108 ids, or chash "
-                "CHECK constraints were dropped out-of-band). The engine "
+                "CHECK constraints were dropped out-of-band). Such rows are "
+                "not expected after the engine's boot migrations (they "
+                "delete them, and the NOT VALID width CHECK refuses new "
+                "ones), so their presence means the CHECK was bypassed, or "
+                "dropped and re-added after rows were written. The engine "
                 "serves fine with these rows (the octet-width CHECKs stay "
-                "NOT VALID for these rows), but "
-                "they are unhealed upgrade-ladder debt (GH #1414 / "
-                "nexus-pnwu0). Re-indexing affected content HEALS these "
-                "rows in place and lowers this count (new conformant rows "
-                "are written before stale rows are pruned — nexus-2hklz "
-                "verified heal-by-replacement); deleting affected content "
-                "also lowers it, so read a falling count as healing only "
-                "where your content is intact."
+                "NOT VALID for these rows), but they are unrepaired "
+                "(GH #1414 / nexus-pnwu0). No command repairs them. "
+                "Report this to the operator or maintainer."
             ),
             fix_suggestions=[
-                "Step 1 — find each affected collection's repo: "
-                "`nx catalog owners`",
-                "Step 2 — re-index the file-backed legacy collections: "
-                "`nx index repo <path>` (additive, per-collection). This "
-                "is the ONLY remedy: re-indexing writes conformant rows "
-                "before pruning stale ones. Content with no file behind "
-                "it (store_put-only notes) cannot be healed this way — "
-                "re-put it if the count matters.",
-                "Step 3 — re-run `nx doctor`; upgrade the engine once "
-                "this warning clears.",
+                "No command repairs these rows. Report it to the operator "
+                "or maintainer with this count. "
+                "The root-token job `POST /v1/admin/validate-constraints` "
+                "reports which rows are bad, by reason, with their owning "
+                "documents; `GET /v1/schema/chash-conformance?"
+                "detail=legacy_chunks` reports the same for one tenant.",
                 "Do NOT drop the chash length constraints to 'unblock' "
                 "anything — that is what caused GH #1390.",
                 "The will-not-boot class ONLY (service crash-looping at "
@@ -10937,6 +10932,35 @@ _CHASH_CONFORMANCE_REPORT_LABEL = "Chunk chash conformance (tenant-scoped, engin
 _CHASH_CONFORMANCE_REPORT_DIMS: tuple[int, ...] = (384, 768, 1024)
 
 
+def _chash_validate_suggestions() -> list[str]:
+    from nexus.config import is_local_mode  # noqa: PLC0415 — config only
+
+    if not is_local_mode():
+        return ["ask your nexus service's operator to run `nx t3 validate-chash-checks` (it needs the engine's "
+                "operator credentials)"]
+    return ["nx t3 validate-chash-checks  # the job alone",
+            "nx doctor --fix  # also runs it, after deleting catalog garbage (preview with --fix --dry-run)"]
+
+
+def _check_chash_validate_offer() -> list[HealthResult]:
+    """nexus-f3yqd: whenever the engine says a chash width CHECK is not validated, offer its validate job. The engine
+    never validates at boot; a user starts the job (`nx doctor --fix` or `nx t3 validate-chash-checks`). No row when
+    the engine cannot say (older engine, error) or when every CHECK is validated.
+
+    The row is informational (ok, no ⚠): every fresh schema starts not validated, so a warning here would greet every
+    new install. A job that refuses or defers a CHECK says so where it runs (`nx doctor --fix`, the verb)."""
+    if _chash_constraints_validated_by_engine() is not False:
+        return []
+    return [HealthResult(
+        label="chash CHECK validation", ok=True,
+        detail=("not validated yet, which is normal on a new or upgraded store: the chash width CHECKs already refuse "
+                "a new bad row, and validating proves no old row breaks them (on a local install doctor then skips its "
+                "conformance scan). The engine runs that only as a job a user starts; it deletes nothing and resumes "
+                "where it left off"),
+        fix_suggestions=_chash_validate_suggestions(),
+    )]
+
+
 def _check_chash_conformance_report() -> list[HealthResult]:
     """Managed/cloud-mode chash width-conformance check (RDR-180, bead
     nexus-du2dw) — the engine-route counterpart to the LOCAL-ONLY
@@ -13487,6 +13511,7 @@ def run_health_checks(
     # fed into the install-binary/convergence gates — see the check's own
     # docstring for the scoping rationale).
     results.extend(_step("_check_chash_conformance_report", lambda: _check_chash_conformance_report()))
+    results.extend(_step("_check_chash_validate_offer", lambda: _check_chash_validate_offer()))
     # nexus-sybbh: independent local evidence a purge-trash ran recently,
     # cross-referenced against the engine's gc_audit table — degrades to a
     # named skip when there is no local evidence, never a false clean pass.

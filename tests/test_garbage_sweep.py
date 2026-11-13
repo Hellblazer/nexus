@@ -325,6 +325,8 @@ class TestDoctorFixDryRun:
 
         monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: catalog)
         monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", no_writer)
+        # doctor --fix also runs the chash CHECK validate job (nexus-f3yqd); it has its own tests.
+        monkeypatch.setattr("nexus.commands.t3_cmds.chash_checks.doctor_chash_fix", lambda **_k: None)
         return CliRunner().invoke(main, ["doctor", "--fix", "--dry-run"]), opened
 
     def test_it_counts_what_fix_would_delete_and_deletes_nothing(self, monkeypatch) -> None:

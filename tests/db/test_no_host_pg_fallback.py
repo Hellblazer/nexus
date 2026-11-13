@@ -11,7 +11,7 @@ of fixed candidate directories (``/opt/homebrew/opt/postgresql@{17,16,15}/bin``,
 ``/usr/lib/postgresql/{17,16,15}/bin``) and ``shutil.which("initdb")``.
 
 WHY THEY WERE A CORRECTNESS BUG, not merely off-policy. The shipped bundle
-carries exactly ``pg_trgm``, ``plpgsql`` and ``vector``; a host PostgreSQL
+carries exactly ``pg_trgm``, ``plpgsql``, ``vector`` and (nexus-f3yqd.2) ``pg_background``; a host PostgreSQL
 carries the full distro contrib set and often no pgvector at all. Falling
 through to it substitutes a DIFFERENT database for the one nexus builds, so a
 missing bundle surfaces late as ``CREATE EXTENSION vector`` failing at boot, or

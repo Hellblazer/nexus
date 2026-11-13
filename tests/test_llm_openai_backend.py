@@ -20,7 +20,7 @@ from nexus.operators.llm_types import (
     OperatorOutputError,
     OperatorTimeoutError,
 )
-from tests._llm_fake_server import FakeLLMServer, Step, openai_error, openai_stream
+from tests._llm_fake_server import FakeLLMServer, Step, openai_error, openai_stream, time_the_mid_stream_phase_only
 
 KEY = "or-v1-ZZTOPSECRETOPENROUTERKEY0123456789"
 SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
@@ -230,6 +230,7 @@ class TestTransport:
     def test_stall_mid_stream_keeps_partial(self, server, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         events = openai_stream(tool_arg_chunks=['{"answer": ', '"par', 'tial'])
+        time_the_mid_stream_phase_only(monkeypatch)
         server.add(Step(events=events, stall_after=5))
         with pytest.raises(OperatorTimeoutError) as ei:
             Harness(server).run(timeout=0.6)
@@ -343,6 +344,7 @@ class TestTheKeyIsScrubbedFromEveryThirdPartyString:
     ) -> None:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         events = openai_stream(tool_arg_chunks=['{"answer": "my key is ', PLAIN_KEY, ' and more'])
+        time_the_mid_stream_phase_only(monkeypatch)
         server.add(Step(events=events, stall_after=5))
         with structlog.testing.capture_logs() as logs, pytest.raises(OperatorTimeoutError) as ei:
             Harness(server, api_key=PLAIN_KEY).run(timeout=0.6)

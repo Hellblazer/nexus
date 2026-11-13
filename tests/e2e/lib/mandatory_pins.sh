@@ -17,7 +17,7 @@
 # zero budget. Do not pass a token into the fence and do not raise the budget for the gate.
 
 # The gate's pytest marker expression. `not mandatory_regression_pin` is the point of this file.
-LSG_PYTEST_MARK_EXPR="integration and not lived_in and not keyed_voyage and not mandatory_regression_pin"
+LSG_PYTEST_MARK_EXPR="integration and not lived_in and not keyed_voyage and not mandatory_regression_pin and not pg_bundle_artifact"
 
 # What the pins' own run selects.
 MANDATORY_PIN_MARK_EXPR="integration and mandatory_regression_pin"

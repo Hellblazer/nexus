@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd: replaces the manifest table's chash width CHECK with a WEAKER constraint of the same name, left NOT VALID,
+    for the VALIDATE job's "a same-named weaker constraint is refused, never validated" test (no SQL strings in Java, tests
+    included; the jOOQ constraint DSL has no NOT VALID). Run through ChashValidateJobRouteTest. A later
+    PgContainerHelper#readdChashOctetChecksNotValid needs the constraint gone, which the test drops with the jOOQ DDL.
+
+    runAlways: every call runs again; bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="chash-weaker-not-valid-manifest" author="nexus-f3yqd" runAlways="true">
+        <sql>ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS catalog_document_chunks_chash_octet_check</sql>
+        <sql>ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT catalog_document_chunks_chash_octet_check CHECK (octet_length(chash) &gt;= 1) NOT VALID</sql>
+    </changeSet>
+</databaseChangeLog>

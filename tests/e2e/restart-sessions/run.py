@@ -42,7 +42,8 @@ with nothing written to the operator's ~/.claude. Five scenarios, each in its ow
   login shell is respawned there, remain-on-exit is released), rs_alpha last, no failure word in the log.
   Each is told a code word first (that gives it the transcript ``claude --resume`` needs) and must still
   answer its own word after the resume. Checked before the roll: claude really is rs_direct's pane process,
-  and rs_alpha's is a shell.
+  and rs_alpha's is a shell. After the roll each must have been woken exactly once (one ``woken by`` log line:
+  mail for rs_alpha, which has the channel; a typed pointer for rs_direct), with the wake text in its transcript.
 
 Shared by every scenario:
 
@@ -193,6 +194,8 @@ REPO = Path(__file__).resolve().parents[3]
 #: how its positive controls run.
 SCRIPT = Path(os.environ.get("NX_RESTART_SANDBOX_SCRIPT") or REPO / "scripts" / "claude-restart-sessions")
 CHANNEL_FLAGS = "--channels plugin:conexus@nexus-plugins"
+#: The opening of the wake prompt claude-restart-sessions gives a resumed session (wake_text).
+WAKE_MARK = "You were restarted onto conexus"
 MARKET = "nexus-plugins"
 #: The branch the sandbox marketplace publishes on (its bare repo's HEAD).
 MARKET_BRANCH = "plugins"
@@ -1525,12 +1528,44 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     if sb.tmux("show-options", "-p", "-t", pane, "remain-on-exit").stdout.strip():
         failures.append(f"pane: remain-on-exit is still set on {pane}")
     for name, word in spec.words.items():
-        now = sb.wait_status(name, {"idle"}, 120)
+        now = sb.wait_status(name, {"idle"}, 240)  # the wake's own turn ends first
         was = before[name]
         if now.get("sessionId") != was.get("sessionId") or now.get("pid") == was.get("pid"):
             failures.append(f"{name}: not resumed as the same session on a new process (was {was.get('pid')}, "
                             f"now {now.get('pid')}, session {was.get('sessionId')} -> {now.get('sessionId')})")
             continue
+        # The wake (Sam, 2026-11-11): a resumed session gets one prompt instead of sitting idle. rs_alpha has the
+        # channel and must take the mailed wake (the typed fallback would mean the mail path failed); rs_direct
+        # has none and gets the typed pointer. The log says which, once, and the wake text is in the transcript.
+        how = re.findall(rf"^\S+ {re.escape(name)}: woken by (mail|a typed prompt)$", log, re.MULTILINE)
+        want = "mail" if name in spec.channel else "a typed prompt"
+        if how != [want]:
+            failures.append(f"{name}: expected one 'woken by {want}' log line after the resume, found {how}")
+        else:
+            notes.append(f"{name} woken by {want}")
+        # mail arrives through the UserPromptSubmit hook as an `attachment` entry; a typed pointer as a `user`
+        # entry and the file's text in the Read result
+        if not any(e.get("type") in ("user", "attachment") and WAKE_MARK in json.dumps(e)
+                   for e in sb.events(str(was.get("sessionId")))):
+            failures.append(f"{name}: no wake prompt ({WAKE_MARK!r}) in its resumed transcript")
+        elif name in spec.channel:
+            # The mail is unattested, so the session checks the script's marker first (origin_note) and acts only
+            # on `present`. A marker removed too early reads as forged mail: the session declines while the log
+            # says "woken by mail" (the 22:17 run, before the wake's marker was kept out of the footprint).
+            events = sb.events(str(was.get("sessionId")))
+            checks = {c.get("id") for e in events if e.get("type") == "assistant"
+                      for c in (e.get("message") or {}).get("content") or []
+                      if c.get("type") == "tool_use" and "test -f" in json.dumps(c.get("input"))
+                      and "restart-asks" in json.dumps(c.get("input"))}
+            printed = [json.dumps(c.get("content")) for e in events if e.get("type") == "user"
+                       for c in ((e.get("message") or {}).get("content") or [])
+                       if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("tool_use_id") in checks]
+            if not checks:
+                failures.append(f"{name}: never ran the marker check on the mailed wake")
+            elif not any("present" in out for out in printed):
+                failures.append(f"{name}: the marker check on the mailed wake did not print present ({printed[:2]})")
+            else:
+                notes.append(f"{name}: the marker check on the mailed wake printed present")
         # A resume brings the transcript back: the session still knows the word it was told before the roll.
         reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
         others = [w for n, w in spec.words.items() if n != name]

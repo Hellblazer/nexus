@@ -28,7 +28,7 @@ which is exactly the class of thing a lint should own rather than a reviewer.
 
 CONTAINERS ARE NOT AN ALTERNATIVE HERE, deliberately. The Java suite boots
 ``pgvector/pgvector:pg17``, which carries the FULL contrib set; the shipped
-bundle carries exactly ``pg_trgm``, ``plpgsql`` and ``vector``. A changeset doing
+bundle carries exactly ``pg_trgm``, ``plpgsql``, ``vector`` and (nexus-f3yqd.2) ``pg_background``. A changeset doing
 ``CREATE EXTENSION unaccent`` passed the entire mvn suite and then failed every
 test of the pytest engine arm, because only that arm boots the real bundle
 (nexus-22r1f). Substituting a container for the self-provisioned bundle trades

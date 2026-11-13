@@ -319,6 +319,11 @@ public final class NexusService {
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
     /** nexus-6pfgb.44: the admin-connection DDL behind {@code /v1/admin/catalog-ttl-check/*}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.db.CatalogTtlCheckAdmin catalogTtlCheckAdmin;
+    /** nexus-f3yqd: the admin-connection VALIDATE behind {@code /v1/admin/validate-constraints}; null until {@code Main} binds it. */
+    private volatile dev.nexus.service.db.ChashConstraintValidator chashConstraintValidator;
+    /** nexus-f3yqd: the engine-wide validate job, one at a time and never tenant-scoped, so no tenant reset reaches it. */
+    private final dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ValidateConstraintsJobs.Progress> validateConstraintsJobs =
+        dev.nexus.service.http.ValidateConstraintsJobs.registry(System::currentTimeMillis);
     /**
      * nexus-hbnml: the result of the engine-start drain of the retired aspect queue table, served by
      * {@code GET /v1/status} as {@code aspect_queue_table_present} / {@code aspect_queue_rows_retained}. Null until
@@ -770,7 +775,7 @@ public final class NexusService {
         // reveal how many tenants share the engine.
         var chashConformanceCtx = server.createContext(dev.nexus.service.http.ChashConformanceHandler.PATH,
                 new dev.nexus.service.http.ChashConformanceHandler(
-                        new dev.nexus.service.db.ChashConformanceConstraints(tenantScope)));
+                        new dev.nexus.service.db.ChashConformanceConstraints(tenantScope), tenantScope));
         chashConformanceCtx.getFilters().addAll(authFilter);
 
         // /v1/requests/<id> — RDR-222 Phase 1 request status (bead nexus-yye8l.4). The one
@@ -902,6 +907,12 @@ public final class NexusService {
                 new dev.nexus.service.http.CatalogTtlCheckHandler(
                         () -> catalogTtlCheckAdmin, tokenStore::listKnownTenants, tenantScope));
         catalogTtlCtx.getFilters().addAll(authFilter);
+
+        // /v1/admin/validate-constraints — the user-started VALIDATE CONSTRAINT job of the chash width CHECKs (nexus-f3yqd),
+        // root token only; never started by the engine. The admin connection it runs on is bound late, from Main.
+        var validateConstraintsCtx = server.createContext(dev.nexus.service.http.ValidateConstraintsHandler.PATH,
+                new dev.nexus.service.http.ValidateConstraintsHandler(() -> chashConstraintValidator, validateConstraintsJobs));
+        validateConstraintsCtx.getFilters().addAll(authFilter);
 
         // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
         // only when a boot-checked TemplateRegistry was supplied (see the constructor
@@ -1115,7 +1126,9 @@ public final class NexusService {
                 t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
             dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
-            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant));
+            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs",
+                t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
     }
 
     /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
@@ -1293,6 +1306,24 @@ public final class NexusService {
     }
 
     /**
+     * Bind the admin-connection VALIDATE behind {@code POST /v1/admin/validate-constraints} (nexus-f3yqd). {@code Main} calls
+     * it once, with the same {@code NX_DB_ADMIN_*} values; until then the route answers 503. Binding runs nothing: the job
+     * starts only when a user sends the POST.
+     */
+    public void chashConstraintValidator(dev.nexus.service.db.ChashConstraintValidator validator) {
+        this.chashConstraintValidator = validator;
+    }
+
+    /**
+     * As {@link #chashConstraintValidator(dev.nexus.service.db.ChashConstraintValidator)} over {@code admin}, with this
+     * service's tenant scope and known-tenant list, so a refused table's bad rows can be counted by tenant.
+     */
+    public void chashConstraintValidator(dev.nexus.service.db.AdminConnection admin) {
+        this.chashConstraintValidator = new dev.nexus.service.db.ChashConstraintValidator(admin, tenantScope,
+            tokenStore::listKnownTenants);
+    }
+
+    /**
      * Bind the engine-start drain of the retired {@code aspect_extraction_queue} table (nexus-hbnml) and schedule it
      * once, {@value #ASPECT_QUEUE_DRAIN_DELAY_SECONDS} seconds after the call, on the sweep thread. {@code Main}
      * calls it once with the same {@code NX_DB_ADMIN_*} values the migrator uses (the table's owner, which can count
@@ -1362,6 +1393,11 @@ public final class NexusService {
     /** Test seam (nexus-f3yqd): the registry the manifest fill jobs live in, to stop one at a batch boundary. */
     dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ManifestFillJobs.Progress> manifestFillJobsForTests() {
         return manifestFillJobs;
+    }
+
+    /** Test seam (nexus-f3yqd): the registry the chash VALIDATE job lives in. */
+    dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ValidateConstraintsJobs.Progress> validateConstraintsJobsForTests() {
+        return validateConstraintsJobs;
     }
 
     /** The sink bound now (see {@link #chunkKeysAudit(dev.nexus.service.http.ChunkKeysAdminHandler.Audit)}). */
@@ -2191,6 +2227,10 @@ public final class NexusService {
         chunkKeysJobs.shutdown();
         reconcileJobs.shutdown();
         manifestFillJobs.shutdown();
+        validateConstraintsJobs.shutdown();
+        if (chashConstraintValidator != null) {
+            chashConstraintValidator.cancelRunning();   // a VALIDATE must not outlive the engine that asked for it
+        }
         // The runner's executor too; an in-flight batch is interrupted, and a job left running resumes from its
         // cursor on the next boot.
         if (reembedExecutor != null) {

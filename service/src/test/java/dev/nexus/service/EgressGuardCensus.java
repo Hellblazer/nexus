@@ -181,9 +181,11 @@ final class EgressGuardCensus {
             "Voyage rerank call to api.voyageai.com." + VOYAGE_REASON_TAIL));
         m.put("dev/nexus/service/vectors/PciBuilderSession.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the index builder's dedicated session."));
-        m.put("dev/nexus/service/db/AdminDdlSession.java", Allow.pinned(JDBC_SITE,
+        m.put("dev/nexus/service/db/AdminDdlSession.java", Allow.pinned(Map.of("DriverManager.getConnection", 2),
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the admin session of the operator constraint routes"
-                + " (nexus-6pfgb.43 chunk CHECKs, nexus-6pfgb.44 catalog TTL CHECK), which adds and validates them."));
+                + " (nexus-6pfgb.43 chunk CHECKs, nexus-6pfgb.44 catalog TTL CHECK, nexus-f3yqd chash VALIDATE job), which"
+                + " adds and validates them, and a short-lived second connection that pg_cancel_backend's that session's"
+                + " own backend (pid and backend_start both matched) when a cancel's deadline passes."));
         m.put("dev/nexus/service/db/AspectQueueDrain.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the owner-side census of the retired aspect queue table"
                 + " (nexus-hbnml), which counts every tenant's rows with FORCE ROW LEVEL SECURITY lifted in a"

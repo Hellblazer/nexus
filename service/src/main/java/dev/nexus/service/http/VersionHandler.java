@@ -53,6 +53,7 @@ import java.util.function.Supplier;
  *  "catalog_manifest_foreign_collection_supported":true,
  *  "catalog_index_run_census_supported":true,
  *  "catalog_next_seq_drift_read_supported":true,
+ *  "chash_constraints_validate_job_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -658,6 +659,21 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-f3yqd capability advertisement (engine 0.1.190): does {@code POST /v1/admin/validate-constraints} start the
+     * user-run {@code VALIDATE CONSTRAINT} job of the chash width CHECKs, and {@code GET /v1/admin/validate-constraints/{id}}
+     * report it?
+     *
+     * <p>Root token only, and never started by the engine itself (Sam, 2026-11-11), so the flag says the route exists, not
+     * that anything is being validated. An engine before the change answers 404; a client reads the flag first and falls back
+     * to its own admin-connection VALIDATE ({@code nexus.db.admin_sql}) when it is absent. Always present, always
+     * {@code true} on an engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it
+     * (the {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendChashConstraintsValidateJobCapabilityField(StringBuilder body) {
+        body.append(",\"chash_constraints_validate_job_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -873,6 +889,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-f3yqd: GET /v1/catalog/index-run/census and GET /v1/catalog/owners/next_seq_drift (the doctor's bounded reads).
         appendCatalogIndexRunCensusCapabilityField(body);
         appendCatalogNextSeqDriftReadCapabilityField(body);
+        // nexus-f3yqd (0.1.190): POST /v1/admin/validate-constraints, the user-started VALIDATE CONSTRAINT job.
+        appendChashConstraintsValidateJobCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

@@ -24,4 +24,4 @@ PROJECTION_TUNING_EPILOG = link_epilog(
 VOYAGE_LOCAL_MODE_EPILOG = link_epilog(
     'Steps for "Local mode with Voyage" (local.embed_model, voyage_api_key, restart)', "cli-reference.md"
 )
-MIGRATION_RUNBOOK_EPILOG = link_epilog("Healing a chash-poisoned install, before --force", "migration-runbook.md")
+MIGRATION_RUNBOOK_EPILOG = link_epilog("The migration runbook (service will not start), before --force", "migration-runbook.md")

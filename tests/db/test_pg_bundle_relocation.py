@@ -38,8 +38,9 @@ so this module can assert root != build-prefix without guessing.
 
 Locally (e.g. a darwin dev box) the bundle is absent, so every test skips with a
 reason naming the providing job. The CI job additionally asserts the core
-``CREATE EXTENSION`` test actually ran (``scripts/assert_ca3_ran.py``), so a
-silent all-skip can never masquerade as a pass.
+``CREATE EXTENSION`` test actually ran (``scripts/assert_ca3_ran.py``), and so
+did the pg_background worker test (nexus-f3yqd.2), so a silent all-skip can
+never masquerade as a pass.
 """
 from __future__ import annotations
 
@@ -70,6 +71,7 @@ _IS_LINUX = sys.platform.startswith("linux")
 # The Windows bundle ships vector.dll (and pg_trgm.dll) in lib\postgresql. Since
 # nexus-ja4pq this module's skip gate finds initdb.exe, so it runs on Windows.
 _VECTOR_LIB = "vector.dylib" if _IS_DARWIN else ("vector.dll" if sys.platform == "win32" else "vector.so")
+_PGBG_LIB = _VECTOR_LIB.replace("vector", "pg_background")
 
 # Pinned floors for the PACKAGED artifact (must match the CA-3 gate's floors in
 # tests/db/test_pg_provision_ca3_bundle.py). The relocation smoke re-checks them
@@ -109,6 +111,9 @@ pytestmark = [
     pytest.mark.integration,
     # Drives PostgreSQL directly via psql; never launches the JVM service jar.
     pytest.mark.no_service_jar,
+    # Only the CA-3 bundle jobs build a bundle, and they run this file by path; the local-service gate and
+    # the release-PR integration shards deselect it, so its skips never count against their budgets.
+    pytest.mark.pg_bundle_artifact,
     pytest.mark.skipif(_ROOT is None, reason=_SKIP_REASON),
 ]
 
@@ -295,6 +300,22 @@ class TestRelocatedBundleComplete:
             "contrib extension lost in packaging/extraction"
         )
 
+    def test_pg_background_present_under_root(self, bins):
+        """pg_background (nexus-f3yqd.2, run by dml_utils) survives packaging and extraction:
+        library, control file and the default_version script all sit under the relocated root."""
+        pkglibdir = _reanchored(bins, "--pkglibdir")
+        extdir = _reanchored(bins, "--sharedir") / "extension"
+        for f in (pkglibdir / _PGBG_LIB, extdir / "pg_background.control", extdir / "pg_background--2.0.sql"):
+            assert f.is_file(), f"{f.name} not found under relocated root at {f.parent} — lost in packaging/extraction"
+
+    def test_licence_notices_survive_extraction(self):
+        """The PostgreSQL License needs its notice in every copy: licenses/ and the notices file
+        ship in the bundle root on every platform and survive packaging."""
+        assert _ROOT is not None
+        for rel in ("licenses/postgresql-COPYRIGHT.txt", "licenses/pgvector-LICENSE.txt",
+                    "licenses/pg_background-LICENSE.txt", "THIRD-PARTY-NOTICES.txt"):
+            assert (_ROOT / rel).is_file(), f"{rel} missing from the relocated bundle"
+
     def test_preflight_passes_after_relocation(self, bins):
         """check_pgvector_available must re-anchor and find vector.control under
         the relocated root despite pg_config's stale sharedir."""
@@ -325,6 +346,15 @@ class TestPackagedGlibcFloor:
             f"GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]} (RF-157-9)"
         )
 
+    def test_pg_background_so_within_floor(self, bins):
+        so = _reanchored(bins, "--pkglibdir") / "pg_background.so"
+        required = _max_glibc_requirement(so)
+        assert required > (0, 0), f"no GLIBC_x.y symbols in {so} — objdump vacuous"
+        assert required <= GLIBC_FLOOR, (
+            f"pg_background.so requires GLIBC_{required[0]}.{required[1]} > floor "
+            f"GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]} (RF-157-9)"
+        )
+
     def test_postgres_binary_within_floor(self, bins):
         required = _max_glibc_requirement(bins.bin_dir / "postgres")
         assert required > (0, 0), (
@@ -349,6 +379,15 @@ class TestPackagedMacosFloor:
         )
         assert minos <= MACOS_MIN_FLOOR, (
             f"vector.dylib requires macOS {minos[0]}.{minos[1]} > floor "
+            f"{MACOS_MIN_FLOOR[0]}.{MACOS_MIN_FLOOR[1]} (nexus-0ixqc)"
+        )
+
+    def test_pg_background_dylib_within_floor(self, bins):
+        dylib = _reanchored(bins, "--pkglibdir") / "pg_background.dylib"
+        minos = _macos_minos(dylib)
+        assert minos > (0, 0), f"no LC_BUILD_VERSION minos in {dylib} — otool vacuous"
+        assert minos <= MACOS_MIN_FLOOR, (
+            f"pg_background.dylib requires macOS {minos[0]}.{minos[1]} > floor "
             f"{MACOS_MIN_FLOOR[0]}.{MACOS_MIN_FLOOR[1]} (nexus-0ixqc)"
         )
 
@@ -401,4 +440,38 @@ class TestCreateExtensionFromRelocated:
         )
         assert proc.returncode == 0 and proc.stdout.strip(), (
             f"vector distance op failed after load from relocated tree:\n{proc.stderr}"
+        )
+
+
+class TestPgBackgroundFromRelocated:
+    """nexus-f3yqd.2: the pg_background extension LOADS from the relocated tree and a background
+    worker really runs. CREATE EXTENSION dlopens the library; the launch starts a dynamic bgworker
+    (the library is not in shared_preload_libraries), runs ``SELECT 1`` in it, and the launcher reads
+    the row back. scripts/assert_ca3_ran.py requires this test to have passed, not skipped."""
+
+    _QUERY = (
+        "SELECT r.x FROM pg_background_launch('SELECT 1') AS h "
+        "CROSS JOIN LATERAL pg_background_result(h.pid, h.cookie) AS r(x int)"
+    )
+
+    def _psql(self, bins, port, sql) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(bins.psql), "-w", "-h", "127.0.0.1", "-p", str(port), "-U", bootstrap_superuser(),
+             "-d", NEXUS_DB_NAME, "-X", "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", sql],
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def test_create_extension_pg_background_runs_a_worker(self, provisioned, bins):
+        result, _ = provisioned
+        created = self._psql(bins, result.port, "CREATE EXTENSION IF NOT EXISTS pg_background")
+        assert created.returncode == 0, (
+            f"CREATE EXTENSION pg_background failed — the module did not load from the RELOCATED bundle:\n{created.stderr}"
+        )
+        preload = self._psql(bins, result.port, "SHOW shared_preload_libraries")
+        assert preload.returncode == 0 and "pg_background" not in preload.stdout, (
+            f"non-vacuity: the worker must run WITHOUT preloading the library (got {preload.stdout.strip()!r})"
+        )
+        ran = self._psql(bins, result.port, self._QUERY)
+        assert ran.returncode == 0 and ran.stdout.strip() == "1", (
+            f"a pg_background worker did not return SELECT 1 (rc={ran.returncode}, out={ran.stdout!r}):\n{ran.stderr}"
         )

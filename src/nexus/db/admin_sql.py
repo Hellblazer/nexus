@@ -97,8 +97,9 @@ class AdminSqlResult:
     against a relation that has been dropped out from under the rung must
     be SKIPPED, never raised. What was missing is that "every statement was
     skipped" and "every statement genuinely validated" both collapsed into
-    the same ``ok=True`` — a caller (``chash_rekey.py``'s ``_validate``)
-    could not tell "the octet CHECKs are validated" from "there was nothing
+    the same ``ok=True`` — a caller (the chash re-key rung's ``_validate``,
+    since removed: the engine's user-started VALIDATE job,
+    ``POST /v1/admin/validate-constraints``, replaced it) could not tell "the octet CHECKs are validated" from "there was nothing
     left to validate against, silently, forever" (RDR-191's schema unify is
     exactly the kind of retarget that can produce that gap if a table name
     is missed). ``ok`` preserves the legacy ``bool | None`` contract
@@ -139,8 +140,8 @@ def run_admin_sql_detailed(
     (the ``chash_index`` shape, RDR-187) is SKIPPED, never attempted: pre-fix,
     every such statement raised ``RuntimeError`` unconditionally, so once a
     tracked relation is gone ``nx upgrade`` exits non-zero FOREVER
-    (``chash_rekey.py``'s own ``OCTET_CHECKS`` comment documents this exact
-    shape happening once already). The probe failing to even RUN (permission
+    (the removed chash re-key rung's own ``OCTET_CHECKS`` comment documented
+    this exact shape happening once already). The probe failing to even RUN (permission
     denied, connection refused) is a DIFFERENT case — it is not evidence the
     relation is absent, so it still raises loud rather than silently
     skipping a VALIDATE that might genuinely be needed.

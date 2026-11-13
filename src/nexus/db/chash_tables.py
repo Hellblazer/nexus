@@ -21,13 +21,21 @@ only one. ``nexus.chash_index`` was already retired ahead of this (RDR-187
 / nexus-piwya.5) and is independent of the unify.
 
 Two severity classes (nexus-z5j0t), decided by ONE structural criterion —
-whether the table carries a width CHECK constraint that a Liquibase
-``VALIDATE CONSTRAINT`` will run on the next engine upgrade:
+whether the table carries a width CHECK constraint that the user-started
+engine VALIDATE job (``POST /v1/admin/validate-constraints``, engine
+0.1.190+; never run at boot or by an upgrade) validates:
 
 - **poison** (``chunks``, ``catalog_document_chunks``): these carry
   ``*_chash_len_check`` / ``*_chash_octet_check`` width constraints
-  (catalog-002/catalog-013), so a non-conformant row crash-loops the next
-  upgrade (GH #1390 / nexus-pnwu0). Counts here GATE ``install-binary``.
+  (catalog-002/catalog-013), so a non-conformant row makes that VALIDATE
+  refuse the table, and an unvalidated width CHECK is what an upgrade that
+  ran it at boot would have crash-looped on (GH #1390 / nexus-pnwu0). Counts
+  here GATE ``install-binary``. The VALIDATE refusal of a manifest or chunks
+  table reports its bad rows per reason, and a chunks table's refusal lists
+  them with their owning documents. A refusal is NOT expected after boot
+  migration (hygiene-001-5 deletes every non-32-byte chunk row and -8 the
+  orphan manifest rows; the NOT VALID CHECK refuses new ones): it means the
+  CHECK was bypassed, or dropped and re-added after rows were written.
 - **legacy debt** (``topic_assignments.doc_id``, ``frecency.chunk_id``,
   ``relevance_log.chunk_id``): chash-bearing soft references with NO check
   (FK-less by design — nexus-sa14p; telemetry-001). A non-conformant value

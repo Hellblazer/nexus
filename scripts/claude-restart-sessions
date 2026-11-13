@@ -6,7 +6,15 @@ status), optionally updates the plugin marketplaces and plugins first, then, one
 session as soon as it is idle (a busy one holds up no other; the caller's own
 session goes last): exits it (Ctrl-C twice, then SIGTERM if
 needed), and types `claude <its original flags> --resume <current session id>`
-back into the same pane, in the same directory.
+back into the same pane, in the same directory. A repeat of an earlier --channels (or
+development-channel) flag with the same values is dropped from that line, so the flags do
+not pile up one per restart. Once every restart is done, each resumed session gets one
+wake prompt, saying what it was restarted onto and to re-read its board entry: as conexus
+mail with the same origin note and marker as every ask from here when it has the channel
+(typed instead only when no turn starts within a minute and the mail is confirmed
+withdrawn), else typed as a short pointer to /tmp/rw-<id>.txt (removed once that turn
+ends), and typed only into an empty prompt.
+--no-wake leaves it idle as before.
 
 It always runs detached inside the tmux server (tmux run-shell -b), so it can
 restart the session that started it. Progress goes to ~/.claude/restart-sessions.log.
@@ -576,6 +584,38 @@ def _dev_channel_swap(args: list[str], cwd: str = "") -> list[str] | None:
     return out
 
 
+def _dedupe_channel_flags(args: list[str]) -> list[str]:
+    """`args` with every `--channels` (or development-channel) flag dropped whose values equal those of the
+    previous occurrence of the same flag.
+
+    A session relaunched with the line it was started with carries that line's flags forward, so a copy of
+    `--channels plugin:conexus@nexus-plugins` added at some launch (the operator's `claude()` shell function
+    prepends one to every launch it makes) stays on every later relaunch: labrun_79e carried three on
+    2026-11-11. Only a repeat of the previous occurrence goes, so the effective value is the same whether a
+    later `--channels` adds to an earlier one or replaces it: `a b a` keeps all three, `a a a` becomes `a`.
+    """
+    out: list[str] = []
+    last: dict[str, tuple[str, ...]] = {}
+    i = 0
+    while i < len(args):
+        flag, _, inline = args[i].partition("=")
+        if flag not in ("--channels", DEV_CHANNEL_FLAG):
+            out.append(args[i])
+            i += 1
+            continue
+        start = i
+        values = [inline] if inline else []
+        i += 1
+        while not inline and i < len(args) and not args[i].startswith("-"):
+            values.append(args[i])
+            i += 1
+        if last.get(flag) == tuple(values):
+            continue
+        last[flag] = tuple(values)
+        out += args[start:i]
+    return out
+
+
 def _launch_args(s: dict) -> list[str]:
     """The session's own flags up to a bare `--` (after it: the previous restart's first prompt)."""
     args = shlex.split(s["argv"])[1:] if s.get("argv") else []
@@ -585,7 +625,7 @@ def _launch_args(s: dict) -> list[str]:
 def dev_channel_swapped(s: dict) -> bool:
     """True when relaunch_command will launch `s` on --channels plugin:conexus instead of its dev form."""
     try:
-        return _dev_channel_swap(_launch_args(s), s.get("cwd") or "") is not None
+        return _dev_channel_swap(_dedupe_channel_flags(_launch_args(s)), s.get("cwd") or "") is not None
     except ValueError:
         return False
 
@@ -608,7 +648,7 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
     """
     # Everything after a bare `--` is the previous restart's first prompt (`-- cat <handoff>`):
     # carried over, it would push -n and --resume past the `--`, where claude reads them as prompt.
-    args = _launch_args(s)
+    args = _dedupe_channel_flags(_launch_args(s))
     args = _dev_channel_swap(args, s.get("cwd") or "") or args
     out, skip = [], False
     for i, a in enumerate(args):
@@ -1028,6 +1068,7 @@ def restart(s: dict, handoff: str = "") -> bool:
                 if not handoff:
                     log(f"OK {name}: resumed as pid {d['pid']}")
                     RESULTS[s["sessionId"]] = "resumed"
+                    TO_WAKE.append(_resumed(d, path, pane))
                     return True
                 return started_on(name, {**s, "pane": pane}, d, handoff, dev_dialog=uses_dev_channel(cmd))
         time.sleep(1)
@@ -1483,6 +1524,169 @@ def went_busy(s: dict, n0: int, seconds: int = 60) -> bool:
     return False
 
 
+#: --no-wake: leave a resumed session idle at an empty prompt, as before (Sam, 2026-11-11: a resumed session
+#: got no prompt and sat idle until he typed to it).
+NO_WAKE = False
+#: Seconds a resumed session gets to register as idle before its wake, and a mailed wake to start a turn.
+WAKE_IDLE_WAIT = 30
+WAKE_BUSY_WAIT = 60
+WAKE_TTL = 1800
+#: Sessions resumed in this run, woken by wake_resumed() once every restart is done, so a slow wake holds up
+#: no other session's restart (each restart is checked against its ready reply's age).
+TO_WAKE: list[dict] = []
+
+
+def wake_text() -> str:
+    """The one prompt a resumed session gets: where it was restarted onto, when, by what, and what to do."""
+    try:
+        version = plugin_versions().get(f"conexus@{MARKETPLACE}", "") or "?"
+    except Exception:  # noqa: BLE001 - a version that cannot be read must not cost the wake
+        version = "?"
+    return (f"You were restarted onto conexus {version} at {time.strftime('%Y-%m-%d %H:%M %Z')} by "
+            "claude-restart-sessions. Re-read your board entry and resume your open threads. No reply is needed.")
+
+
+def _status_after(sess_file: Path, want: str, seconds: int) -> str:
+    """The session's status once it reads *want* or busy, or when *seconds* run out ("" when unreadable)."""
+    deadline = time.time() + seconds
+    while True:
+        status_ = str((read(sess_file) or {}).get("status", ""))
+        if status_ in (want, "busy") or time.time() >= deadline:
+            return status_
+        time.sleep(1)
+
+
+def _mail_wake(s: dict, text: str) -> tuple[str, str, Path | None]:
+    """Mail the wake through mail_ask, with the same origin note and marker as every other ask this script
+    mails, so the session can check it came from here. Returns (outcome, tuple id, marker): outcome "sent",
+    "failed" (nothing was sent) or "maybe" (the send may have landed: timed out, or sent with no tuple id).
+    The session's own handoff bookkeeping (SENT_ASKS, SENT_MARKERS) is left as it was."""
+    sid = s["sessionId"]
+    path = f"restart-wake-{time.strftime('%Y%m%d-%H%M%S')}"
+    prior_ask, prior_marker = SENT_ASKS.pop(sid, None), SENT_MARKERS.pop(sid, None)
+    try:
+        sent = mail_ask(s, path, ASK_CLAIMANT, WAKE_TTL, kind="restart-wake", body=origin_note(s, path) + text,
+                        note=f"mailing wake to {label(s)}")
+        tid, marker = SENT_ASKS.pop(sid, ""), SENT_MARKERS.pop(sid, None)
+        if marker is not None:
+            # The session checks the marker a model turn after the mail arrives, and the footprint report at
+            # the end of the run removes every marker in MADE_MARKERS: a 22:17 sandbox run's session found
+            # it gone and rightly declined the wake. Left out of MADE_MARKERS, it expires by its own stamp
+            # (mail_ask sets its mtime to the ask's expiry; sweep_stale_markers removes it after that).
+            MADE_MARKERS.discard(marker)
+    finally:
+        if prior_ask is not None:
+            SENT_ASKS[sid] = prior_ask
+        if prior_marker is not None:
+            SENT_MARKERS[sid] = prior_marker
+    if sent:
+        return ("sent", tid, marker) if tid else ("maybe", "", marker)
+    return ("maybe", "", marker) if marker is not None else ("failed", "", None)
+
+
+#: Typed wakes whose pointer file waits for the session's turn to end before it is removed: (file, sessions
+#: json). In /tmp like ask_line's file: a read under ~/.claude is denied in default mode until approved
+#: (nexus-acp8p), which would leave the woken session stopped at a permission prompt.
+WAKE_FILES: list[tuple[Path, Path]] = []
+#: Seconds wake_resumed waits, for all typed wakes together, for their turns to end before removing the files.
+WAKE_FILE_WAIT = 180
+
+
+def _type_wake(s: dict, text: str) -> str:
+    """Type a short pointer to the wake text (long send-keys text arrives truncated: see ask_line)."""
+    note = TMP / f"rw-{s['sessionId'][:8]}.txt"
+    note.write_text(text + "\n", encoding="utf-8")
+    WAKE_FILES.append((note, Path(s["file"])))
+    if submit(s["pane"], f"Read {note}", Path(s["file"])):
+        log(f"{label(s)}: woken by a typed prompt")
+        return "typed"
+    log(f"WARN {label(s)}: the typed wake did not start a turn; check pane {s['pane']}")
+    return "typed, no turn"
+
+
+def wake(s: dict) -> str:
+    """Give a resumed session one prompt, so it does not sit idle until someone types to it.
+
+    *s* is the RESUMED session: sessionId, pane, file (its sessions/<pid>.json) and argv (its own launch line).
+    With the conexus channel the wake is mailed (origin note and marker, as every ask from here), and the
+    channel starts a turn without touching the prompt. When no turn starts within WAKE_BUSY_WAIT the mail is
+    withdrawn, and only a confirmed withdrawal lets the wake be typed instead: a mail that was taken late, that
+    could not be withdrawn, or whose send may have landed is never typed over, so no session is woken twice.
+    Without the channel the wake is typed. It is typed only into an empty prompt. Returns what happened.
+    """
+    name = label(s)
+    if NO_WAKE:
+        return "not woken (--no-wake)"
+    sess_file = Path(s["file"])
+    deadline = time.time() + WAKE_IDLE_WAIT
+    while (now := str((read(sess_file) or {}).get("status", ""))) != "idle" and time.time() < deadline:
+        time.sleep(1)  # a startup hook can show busy for a moment: wait for idle rather than skip at once
+    if now != "idle":
+        why = f"not idle after {WAKE_IDLE_WAIT}s ({now or 'no status'})"
+        log(f"{name}: not woken: {why}")
+        return f"not woken: {why}"
+    if "prompts_at_resume" in s and prompt_count(s["sessionId"]) > s["prompts_at_resume"]:
+        log(f"{name}: not woken: it has had a prompt since it resumed")
+        return "not woken: it had a prompt of its own"
+    text = wake_text()
+    if has_channel(s):
+        outcome, tid, marker = _mail_wake(s, text)
+        if outcome != "failed" and _status_after(sess_file, "busy", WAKE_BUSY_WAIT) == "busy":
+            log(f"{name}: woken by mail")
+            return "mailed"
+        if outcome == "maybe":
+            log(f"{name}: not woken: the mailed wake may have landed and cannot be withdrawn, so nothing is typed")
+            return "not woken: mail may have landed"
+        if outcome == "sent":
+            gone = withdraw_ask(s["sessionId"], tid, "wake")
+            if gone != "withdrawn":  # withdraw_ask names an unconfirmed one in UNWITHDRAWN itself
+                log(f"{name}: not woken by typing: the mailed wake is {gone or 'not withdrawn'}")
+                return f"mailed, {gone or 'not withdrawn'}"
+            if marker is not None:
+                drop_marker(marker)  # a copy of the mail that outlives it now reads as forged
+            if (read(sess_file) or {}).get("status") == "busy":
+                log(f"{name}: woken (busy as the wake mail was withdrawn)")
+                return "mailed"
+            log(f"{name}: the mailed wake started no turn and was withdrawn; typing it")
+        else:
+            log(f"{name}: the wake could not be mailed; typing it")
+    if pane_has_draft(s["pane"]):
+        log(f"{name}: not woken: unsent text in its prompt")
+        return "not woken: unsent text in its prompt"
+    return _type_wake(s, text)
+
+
+def wake_resumed() -> None:
+    """Wake every session resumed in this run, once all restarts are done. A failed wake is logged and never
+    stops the run: the session is already back."""
+    while TO_WAKE:
+        r = TO_WAKE.pop(0)
+        try:
+            wake(r)
+        except Exception as e:  # noqa: BLE001 - a courtesy prompt must not end the roll
+            log(f"WARN {label(r)}: wake failed ({type(e).__name__}: {e})")
+    deadline = time.time() + WAKE_FILE_WAIT
+    while WAKE_FILES:
+        note, sess_file = WAKE_FILES.pop(0)
+        while (read(sess_file) or {}).get("status") != "idle" and time.time() < deadline:
+            time.sleep(1)  # the turn the pointer started reads the file first; it is idle again once done
+        if (read(sess_file) or {}).get("status") == "idle" or not sess_file.exists():
+            note.unlink(missing_ok=True)
+        else:
+            log(f"WARN typed wake file {note} kept: its session is still mid-turn after {WAKE_FILE_WAIT}s")
+
+
+def _ps_args(pid: int) -> str:
+    return subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+
+
+def _resumed(d: dict, path: Path, pane: str) -> dict:
+    """The resumed session as wake() reads it: its registry entry, file, pane and live launch line."""
+    sid = str(d.get("sessionId", ""))
+    return {**d, "file": path, "pane": pane, "argv": _ps_args(int(d.get("pid", 0) or 0)),
+            "prompts_at_resume": prompt_count(sid) if sid else 0}
+
+
 def typed_ask(s: dict, path: str) -> bool:
     """Type the handoff ask into the session's prompt; False (and nothing typed) if it holds a draft.
 
@@ -1769,7 +1973,7 @@ def revive(a: argparse.Namespace) -> int:
     if not a.dry_run:
         log(f"=== revive: sessions written in the {a.since} min before boot "
             f"({time.strftime('%m-%d %H:%M', time.localtime(before))})")
-        if subprocess.run(["tmux", "has-session", "-t", a.tmux_session], capture_output=True).returncode != 0:
+        if tmux_run("has-session", "-t", a.tmux_session).returncode != 0:  # a missing tmux reads as no session
             tmux("new-session", "-d", "-s", a.tmux_session)
     launched: dict[str, str] = {}
     for s in found:
@@ -1794,14 +1998,18 @@ def revive(a: argparse.Namespace) -> int:
         return 0
     # A launch counts only once a live process has registered that session id.
     pending, deadline = dict(launched), time.time() + a.verify_timeout
+    woken: list[dict] = []
     while pending and time.time() < deadline:
         for p in SESSIONS.glob("*.json"):
             d = read(p) or {}
             sid = d.get("sessionId")
             if sid in pending and alive(int(d.get("pid", 0) or 0)):
                 log(f"OK {pending.pop(sid)}: resumed as pid {d['pid']} in {d.get('tmux')}")
+                woken.append(_resumed(d, p, str(d.get("tmux", "")).rsplit(".", 1)[-1]))
         if pending:
             time.sleep(1)
+    TO_WAKE.extend(woken)  # after the verify loop, so one slow wake does not eat another session's verify time
+    wake_resumed()
     for sid, label_ in pending.items():
         log(f"FAIL {label_}: no live session {sid[:8]} after {a.verify_timeout}s; check its {a.tmux_session} window")
     ok = len(launched) - len(pending)
@@ -2260,6 +2468,8 @@ def main() -> int:
                          "restart sessions in status 'shell'")
     ap.add_argument("--skip-sandbox-check", metavar="REASON", default=None,
                     help="restart although no sandbox pass covers this script (see above); REASON is logged")
+    ap.add_argument("--no-wake", action="store_true",
+                    help="do not give a resumed session its one wake prompt (it then sits idle until typed to)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
@@ -2272,9 +2482,10 @@ def main() -> int:
                    if a.skip_sandbox_check is not None else "")
     if a.skip_sandbox_check is not None and not skip_reason:
         ap.error("--skip-sandbox-check takes a reason, logged with the restart")
-    global FALLBACK_RESUME, KEEP_DEV_CHANNEL
+    global FALLBACK_RESUME, KEEP_DEV_CHANNEL, NO_WAKE
     FALLBACK_RESUME = a.fallback_resume
     KEEP_DEV_CHANNEL = a.keep_dev_channel
+    NO_WAKE = a.no_wake
     if a.revive:
         return revive(a)
 
@@ -2471,7 +2682,9 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
         log(f"=== STOP: {e}; not yet restarted: {', '.join(left) or 'none'}; "
             f"{len(RESULTS)} of {len(found)} restarted before it; nothing further was exited.")
         stop_report(a, found, e)
+        wake_resumed()  # the sessions already back still get their wake, after the stop notice
         return EXIT_STALLED
+    wake_resumed()
     kinds = list(RESULTS.values())
     log(f"=== done: {ok} of {len(found)} restarted ({kinds.count('fresh')} fresh, {kinds.count('resumed')} resumed)")
     return 0 if ok == len(found) else 1
@@ -2486,7 +2699,7 @@ def rerun_command(a: argparse.Namespace, skips: list[str]) -> str:
     if a.fresh:
         parts += ["--handoff-timeout", str(a.handoff_timeout)]
     for flag, on in (("--fallback-resume", a.fallback_resume), ("--keep-dev-channel", a.keep_dev_channel),
-                     ("--force", a.force), ("--no-ready-check", a.no_ready_check)):
+                     ("--force", a.force), ("--no-ready-check", a.no_ready_check), ("--no-wake", getattr(a, "no_wake", False))):
         if on:
             parts.append(flag)
     if a.skip_sandbox_check:
