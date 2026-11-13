@@ -1622,6 +1622,8 @@ def _pane_roll(sb: Sandbox, a, pane: str, was_all: dict[str, dict], failures: li
             continue
         if str(now.get("tmux", "")).rsplit(".", 1)[-1] != str(was.get("tmux", "")).rsplit(".", 1)[-1]:
             failures.append(f"{tag}: {name} resumed in {now.get('tmux')}, not in its pane {was.get('tmux')}")
+        if slash and (lost := _load_slash().lost_flags(sb, name, now)):
+            failures.append(f"{tag}: {name} lost across /restart: {lost}")
         # The wake (Sam, 2026-11-11): a resumed session gets one prompt instead of sitting idle. rs_alpha has the
         # channel and must take the mailed wake (the typed fallback would mean the mail path failed); rs_direct
         # has none and gets the typed pointer. The log says which, once, and the wake text is in the transcript.

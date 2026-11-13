@@ -56,7 +56,8 @@ def _transcript(tmp_path, text: str) -> None:
     f = tmp_path / ".claude" / "projects" / "p" / "sid-1.jsonl"
     f.parent.mkdir(parents=True, exist_ok=True)
     with f.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"type": "system", "content": text}) + "\n")
+        # the shape real transcripts record it in (an "Unknown command: /continuation" on this box, 2026-11-13)
+        fh.write(json.dumps({"type": "system", "subtype": "informational", "content": text}) + "\n")
 
 
 def _log(crs) -> str:
@@ -114,21 +115,88 @@ def test_a_session_that_never_comes_back_falls_through_after_the_wait(crs, monke
     monkeypatch.setattr(crs, "SLASH_WAIT", 3)
     monkeypatch.setattr(crs, "tmux", lambda *a: None)
     monkeypatch.setattr(crs, "alive", lambda pid: True)
-    assert crs.slash_restart(s) == (False, "it did not come back within 3s of /restart")
+    assert crs.slash_restart(s) == (False, "it did not start anew within 3s of /restart")
 
 
-def test_a_busy_restart_is_not_counted_until_the_session_is_idle(crs, monkeypatch, tmp_path) -> None:
+def test_a_restart_on_a_new_pid_is_counted(crs, monkeypatch, tmp_path) -> None:
+    s = _session(crs, tmp_path)
+
+    def fake_tmux(*a) -> None:
+        if a[-1] == "Enter":
+            (tmp_path / "sessions" / "12.json").write_text(json.dumps(
+                {"sessionId": "sid-1", "pid": 12, "tmux": "rs:@1.%3", "status": "idle", "startedAt": 2000}),
+                encoding="utf-8")
+
+    monkeypatch.setattr(crs, "tmux", fake_tmux)
+    monkeypatch.setattr(crs, "alive", lambda pid: pid == 12)
+    assert crs.slash_restart(s) == (True, "")
+    assert "OK w: restarted in place by /restart, pid 12 (was 10)" in _log(crs)
+
+
+@pytest.mark.parametrize("other", [{"sessionId": "sid-2", "tmux": "rs:@1.%3"}, {"sessionId": "sid-1", "tmux": "rs:@2.%4"}],
+                         ids=["another-session", "another-pane"])
+def test_a_new_start_of_another_session_or_pane_is_not_this_restart(crs, monkeypatch, tmp_path, other) -> None:
     s = _session(crs, tmp_path)
     monkeypatch.setattr(crs, "SLASH_WAIT", 3)
 
     def fake_tmux(*a) -> None:
         if a[-1] == "Enter":
-            s["file"].write_text(json.dumps({**json.loads(s["file"].read_text()), "startedAt": 2000,
-                                             "status": "busy"}), encoding="utf-8")
+            (tmp_path / "sessions" / "12.json").write_text(json.dumps(
+                {"pid": 12, "status": "idle", "startedAt": 2000, **other}), encoding="utf-8")
 
     monkeypatch.setattr(crs, "tmux", fake_tmux)
     monkeypatch.setattr(crs, "alive", lambda pid: True)
-    assert crs.slash_restart(s)[0] is False
+    assert crs.slash_restart(s)[0] is False and crs.RESULTS == {}
+
+
+@pytest.mark.parametrize("status", ["busy", "shell"])
+def test_a_restart_that_has_started_anew_is_never_exited_as_well(crs, monkeypatch, tmp_path, status) -> None:
+    """Two reviewers, 2026-11-13: a restart still busy (mail started a turn) when the old idle check timed out was
+    taken for "not taken", and the exit path restarted the session a second time. A new start now counts."""
+    s = _session(crs, tmp_path)
+    monkeypatch.setattr(crs, "SLASH_WAIT", 3)
+    monkeypatch.setattr(crs, "SLASH_SETTLE", 3)
+    typed: list[tuple] = []
+
+    def fake_tmux(*a) -> None:
+        typed.append(a)
+        if a[-1] == "Enter":
+            s["file"].write_text(json.dumps({**json.loads(s["file"].read_text()), "startedAt": 2000,
+                                             "status": status}), encoding="utf-8")
+
+    monkeypatch.setattr(crs, "tmux", fake_tmux)
+    monkeypatch.setattr(crs, "alive", lambda pid: True)
+    assert crs.restart(s) is True
+    assert not any("C-c" in a for a in typed) and not any("--resume" in " ".join(a) for a in typed)
+    log = _log(crs)
+    assert "OK w: restarted in place by /restart, pid 10 (same)" in log and "not taken" not in log
+    assert ("still busy after 3s" in log) is (status == "busy")
+    assert crs.RESULTS == {"sid-1": "resumed"}
+
+
+def test_an_unknown_line_already_in_the_transcript_is_not_this_answer(crs, monkeypatch, tmp_path) -> None:
+    """Only what the transcript gains after /restart is typed counts."""
+    s = _session(crs, tmp_path)
+    _transcript(tmp_path, "Unknown command: /restart")
+    monkeypatch.setattr(crs, "SLASH_WAIT", 3)
+    monkeypatch.setattr(crs, "tmux", lambda *a: None)
+    monkeypatch.setattr(crs, "alive", lambda pid: True)
+    assert crs.slash_restart(s) == (False, "it did not start anew within 3s of /restart")
+
+
+@pytest.mark.parametrize(("argv", "drop", "why"), [
+    (f"/x/claude --channels {P} -n w -- 'cat /tmp/h.md'", None, "first prompt after --"),
+    (f"/x/claude --channels {P} -n w", "startedAt", "no startedAt"),
+], ids=["positional-prompt", "no-startedAt"])
+def test_a_session_slash_restart_cannot_judge_is_left_to_the_exit_path(crs, monkeypatch, tmp_path, argv, drop,
+                                                                        why) -> None:
+    s = _session(crs, tmp_path, argv=argv)
+    if drop:
+        s.pop(drop)
+    typed: list[tuple] = []
+    monkeypatch.setattr(crs, "tmux", lambda *a: typed.append(a))
+    ok, reason = crs.slash_restart(s)
+    assert ok is False and why in reason and typed == []
 
 
 def test_a_dev_channel_session_is_left_to_the_exit_path(crs, monkeypatch, tmp_path) -> None:
@@ -149,34 +217,38 @@ def test_no_slash_restart_never_types_it(crs, monkeypatch, tmp_path) -> None:
     assert typed == []
 
 
-def test_a_draft_is_cleared_with_one_ctrl_c_before_slash_restart(crs, monkeypatch, tmp_path) -> None:
+def test_a_draft_is_saved_and_the_session_left_to_the_exit_path(crs, monkeypatch, tmp_path) -> None:
+    """restart() saves the draft before anything reaches the pane, and /restart is never typed over a draft:
+    the exit path takes the session (its Ctrl-C would be the first key the pane gets)."""
     s = _session(crs, tmp_path)
-    drafts = iter([True, False])
-    monkeypatch.setattr(crs, "pane_has_draft", lambda _p: next(drafts))
-    typed: list[tuple] = []
+    order: list[str] = []
+    monkeypatch.setattr(crs, "pane_has_draft", lambda _p: True)
+    monkeypatch.setattr(crs, "save_draft", lambda *_a: (order.append("saved"), ("/tmp/d.md", ""))[1])
+    state = {"exited": False}
 
     def fake_tmux(*a) -> None:
-        typed.append(a)
-        if a[-1] == "Enter":
-            s["file"].write_text(json.dumps({**json.loads(s["file"].read_text()), "startedAt": 2000}),
-                                 encoding="utf-8")
+        order.append(" ".join(a))
+        if a[-1] == "C-c":
+            state["exited"] = True
+        elif "-l" in a and "--resume" in a[-1]:
+            (tmp_path / "sessions" / "11.json").write_text(json.dumps(
+                {"sessionId": "sid-1", "pid": 11, "tmux": "rs:@1.%3", "status": "idle"}), encoding="utf-8")
 
     monkeypatch.setattr(crs, "tmux", fake_tmux)
-    monkeypatch.setattr(crs, "alive", lambda pid: True)
-    assert crs.slash_restart(s) == (True, "")
-    assert typed[0] == ("send-keys", "-t", "%3", "C-c")
-    assert [a for a in typed if "C-c" in a] == [typed[0]], "one Ctrl-C, not the two that exit"
-    assert ("send-keys", "-t", "%3", "-l", "/restart") in typed
+    monkeypatch.setattr(crs, "alive", lambda pid: pid == 11 or (pid == 10 and not state["exited"]))
+    assert crs.restart(s) is True
+    assert order[0] == "saved", order
+    assert not any("/restart" in o and "-l" in o for o in order)
+    assert "w: /restart not taken (it holds an unsent draft); exiting and resuming instead" in _log(crs)
 
 
-def test_a_draft_one_ctrl_c_does_not_clear_is_not_restarted_over(crs, monkeypatch, tmp_path) -> None:
+def test_a_draft_save_refused_types_nothing(crs, monkeypatch, tmp_path) -> None:
     s = _session(crs, tmp_path)
-    monkeypatch.setattr(crs, "pane_has_draft", lambda _p: True)
     typed: list[tuple] = []
+    monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", "its draft could not be read"))
     monkeypatch.setattr(crs, "tmux", lambda *a: typed.append(a))
-    monkeypatch.setattr(crs, "alive", lambda pid: True)
-    assert crs.slash_restart(s) == (False, "one Ctrl-C did not clear its draft")
-    assert not any("/restart" in a for a in typed)
+    assert crs.restart(s) is False and typed == []
+    assert "SKIP w: its draft could not be read; left running, not restarted" in _log(crs)
 
 
 def test_a_fresh_restart_never_tries_slash_restart(crs, monkeypatch, tmp_path) -> None:

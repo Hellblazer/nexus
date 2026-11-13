@@ -83,6 +83,23 @@ def _snapshot(sb, name: str) -> dict:
     return d
 
 
+def lost_flags(sb, name: str, new: dict) -> list[str]:
+    """What a session restarted by /restart no longer has: model, bypass permissions, name, channel. /restart
+    rewrites the launch line (2.1.323): --dangerously-skip-permissions comes back as
+    --allow-dangerously-skip-permissions --permission-mode bypassPermissions, and -n is dropped while the session
+    keeps its name. So this checks what each flag does, not its spelling. Also run by run.py's pane scenario,
+    which gates the pass where this opt-in scenario does not."""
+    argv = new.get("_argv") or _argv(int(new.get("pid", 0) or 0))
+    lost = [] if f"--model {sb.model}" in argv else ["model"]
+    if not ("--dangerously-skip-permissions" in argv or "--permission-mode bypassPermissions" in argv):
+        lost.append("bypass permissions")
+    if new.get("name") != name:
+        lost.append(f"session name (now {new.get('name')!r})")
+    if name in sb.spec.channel and "--channels plugin:conexus@nexus-plugins" not in argv:
+        lost.append("channel")
+    return lost
+
+
 def _restarted(was: dict, now: dict | None) -> bool:
     if not now or now.get("status") != "idle":
         return False
@@ -161,16 +178,9 @@ def scenario_slash(sb, crs, a, failures: list[str], notes: list[str], *, boot) -
         # /restart rewrites the launch line (2026-11-13, 2.1.323): --dangerously-skip-permissions comes back as
         # --allow-dangerously-skip-permissions --permission-mode bypassPermissions, and -n is dropped while the
         # session keeps its name. So check what each flag does, not its spelling.
-        argv = new["_argv"]
-        lost = [] if f"--model {sb.model}" in argv else ["model"]
-        if not ("--dangerously-skip-permissions" in argv or "--permission-mode bypassPermissions" in argv):
-            lost.append("bypass permissions")
-        if new.get("name") != name:
-            lost.append(f"session name (now {new.get('name')!r})")
-        if name in spec.channel and "--channels plugin:conexus@nexus-plugins" not in argv:
-            lost.append("channel")
+        lost = lost_flags(sb, name, new)
         if lost:
-            failures.append(f"{name}: lost across /restart: {lost} (argv {argv[:300]})")
+            failures.append(f"{name}: lost across /restart: {lost} (argv {new['_argv'][:300]})")
         if new["_argv"] != old["_argv"]:
             notes.append(f"{name}: argv changed: {old['_argv']} -> {new['_argv']}")
         # An argv without the flag does not settle it: the mode and name may come back from the session.

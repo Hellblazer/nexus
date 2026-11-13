@@ -2880,6 +2880,19 @@ def _three(crs, monkeypatch, tmp_path, first: _Pane, nx: str = "", caller_pane: 
     return fake, panes, found, code
 
 
+@pytest.mark.parametrize("first", ["late", "stuck"])
+def test_the_done_line_names_a_late_resume_and_a_claude_that_never_exited(crs, monkeypatch, tmp_path, first) -> None:
+    pane = _Pane("%1", 111, direct=False, ignores_ctrl_c=True, ignores_sigterm=True,
+                 exits_late_after=40 if first == "late" else None)
+    _fake, _panes, _found, code = _three(crs, monkeypatch, tmp_path, pane)
+    done = next(ln for ln in _log_text(tmp_path).splitlines() if "=== done:" in ln)
+    if first == "late":
+        assert code == 0 and done.endswith("3 of 3 restarted (0 fresh, 3 resumed); resumed late: wren"), done
+    else:
+        assert code == 1 and done.endswith(
+            "2 of 3 restarted (0 fresh, 2 resumed); never exited, not relaunched: wren (pid 111, pane %1)"), done
+
+
 @pytest.mark.parametrize("why", ["no-pane-to-relaunch-into", "claude-never-registers"])
 def test_a_relaunch_that_produces_no_session_stops_the_run(crs, monkeypatch, tmp_path, why) -> None:
     """The 7.96.0 run WARNed and moved on, so six sessions were exited one after another. Now it stops:

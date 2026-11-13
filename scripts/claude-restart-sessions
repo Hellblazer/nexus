@@ -971,21 +971,38 @@ FALLBACK_RESUME = False
 NO_SLASH = False
 #: Seconds a session gets to come back from /restart before the script exits and resumes it instead.
 SLASH_WAIT = 30
+#: Seconds a session /restart has started anew gets to settle (idle, or shell for one waiting on `nx tuple wait`).
+#: It counts as restarted either way: once a new start is seen the exit path never runs on it.
+SLASH_SETTLE = 120
 SLASH_UNKNOWN = "Unknown command: /restart"
 #: Seconds the exit path keeps watching a claude still running after its SIGTERM window. bob on the 8.2.2 round
 #: (2026-11-13) exited a little after the window and was left at a shell prompt, not relaunched.
 LATE_EXIT_WAIT = 180
 
 
-def _transcript_count(session_id: str, text: str) -> int:
-    """How many times `text` occurs in the session's transcript files."""
-    n = 0
+def _transcript_sizes(session_id: str) -> dict[Path, int]:
+    """The session's transcript files and their sizes now: the baseline _transcript_has reads past."""
+    out: dict[Path, int] = {}
     for f in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
         try:
-            n += f.read_text(encoding="utf-8", errors="replace").count(text)
+            out[f] = f.stat().st_size
         except OSError:
             continue
-    return n
+    return out
+
+
+def _transcript_has(session_id: str, text: str, since: dict[Path, int]) -> bool:
+    """Whether `text` was written to the session's transcripts after the sizes in `since`. Only the appended
+    bytes are read: a transcript can run to hundreds of MB, and this is polled every second."""
+    for f in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
+        try:
+            with f.open("rb") as fh:
+                fh.seek(since.get(f, 0))
+                if text.encode() in fh.read():
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 def slash_restart(s: dict) -> tuple[bool, str]:
@@ -994,47 +1011,77 @@ def slash_restart(s: dict) -> tuple[bool, str]:
 
     Measured in the sandbox's opt-in ``slash`` scenario (2.1.323, 2026-11-13): the process restarts on the same
     pid, as its CURRENT session id (after a /clear too), in the same pane, idle, with bypass permissions, model,
-    name and channel kept and its MCP servers replaced, in 4-7 s. Claude Code offers the command only to a native
-    install, on macOS or Linux, behind a server-side flag; elsewhere it answers "Unknown command: /restart". The
-    prompt must be empty (typed after a draft, /restart would be sent with it): one Ctrl-C clears a draft and
-    leaves the session running, and the draft does not come back, so restart() has saved it already. A session
-    on the development channel is left to the exit path: /restart keeps its flags, and that channel's dialog
-    would hold the session (the exit path relaunches it on the plugin channel where that registers).
+    name and channel kept and its MCP servers replaced, in 4-7 s. It keeps the old process's environment, where
+    the exit path relaunches from the pane shell's. Claude Code offers the command only to a native install, on
+    macOS or Linux, behind a server-side flag; elsewhere it answers "Unknown command: /restart".
+
+    Left to the exit path: a session holding a draft (typed after it, /restart would be sent with it, and the exit
+    path saves the draft first; a pane that cannot be read counts as holding one), a session on the development
+    channel (/restart keeps its flags, and that channel's dialog would hold it), a session launched with a
+    positional first prompt (`-- cat <handoff>` after a fresh start: /restart could replay it), and one whose
+    session file has no startedAt to tell a new start from the old one.
+
+    A new start (same session id and pane, a live pid, and a new pid or a later startedAt) means /restart took,
+    whatever the session's status: from then on this returns True, and the session is never exited as well
+    (two reviewers, 2026-11-13: a restart still busy at the old 30 s idle check was exited a second time).
     """
     if NO_SLASH:
         return False, "--no-slash-restart"
-    if uses_dev_channel(s.get("argv", "")):
+    argv = s.get("argv", "")
+    if uses_dev_channel(argv):
         return False, f"it was launched with {DEV_CHANNEL_FLAG}, which /restart would keep"
+    try:
+        positional = "--" in shlex.split(argv)
+    except ValueError:
+        positional = True
+    if positional:
+        return False, "it was launched with a first prompt after --, which /restart could replay"
+    started = s.get("startedAt")
+    if not started:
+        return False, "its session file has no startedAt to tell a new start by"
     pane, pid, sid = s["pane"], s["pid"], s["sessionId"]
     if pane_has_draft(pane):
-        tmux("send-keys", "-t", pane, "C-c")
-        time.sleep(2)
-        if not alive(pid):
-            return False, "it exited on the Ctrl-C that cleared its draft"
-        if pane_has_draft(pane):
-            return False, "one Ctrl-C did not clear its draft"
-    started = (read(s["file"]) or {}).get("startedAt") or 0
-    unknown = _transcript_count(sid, SLASH_UNKNOWN)
+        return False, "it holds an unsent draft"
+    since = _transcript_sizes(sid)
     tmux("send-keys", "-t", pane, "-l", "/restart")
     time.sleep(1)
     tmux("send-keys", "-t", pane, "Enter")
-    for _ in range(SLASH_WAIT):
-        time.sleep(1)
+
+    def new_start() -> tuple[dict, Path] | None:
         for path in SESSIONS.glob("*.json"):
             d = read(path)
             if not (d and d.get("sessionId") == sid and str(d.get("tmux", "")).rsplit(".", 1)[-1] == pane):
                 continue
             new_pid = int(d.get("pid", 0) or 0)
-            if (alive(new_pid) and d.get("status") == "idle"
-                    and (new_pid != pid or (d.get("startedAt") or 0) > started)):
-                log(f"OK {label(s)}: restarted in place by /restart, pid {new_pid}"
-                    + (" (same)" if new_pid == pid else f" (was {pid})"))
-                RESULTS[sid] = "resumed"
-                TO_WAKE.append(_resumed(d, path, pane))
-                return True, ""
-        if _transcript_count(sid, SLASH_UNKNOWN) > unknown:
+            if alive(new_pid) and (new_pid != pid or (d.get("startedAt") or 0) > started):
+                return d, path
+        return None
+
+    seen = None
+    for _ in range(SLASH_WAIT):
+        time.sleep(1)
+        seen = new_start()
+        if seen or _transcript_has(sid, SLASH_UNKNOWN, since):
+            break
+    if not seen:
+        seen = new_start()  # one more look: a start that landed with the Unknown line or on the last second
+    if not seen:
+        if _transcript_has(sid, SLASH_UNKNOWN, since):
             return False, f'Claude Code answered "{SLASH_UNKNOWN}"'
-    return False, f"it did not come back within {SLASH_WAIT}s of /restart"
+        return False, f"it did not start anew within {SLASH_WAIT}s of /restart"
+    d, path = seen
+    for _ in range(SLASH_SETTLE):
+        if d.get("status") in ("idle", "shell"):
+            break
+        time.sleep(1)
+        d, path = new_start() or (d, path)
+    new_pid = int(d.get("pid", 0) or 0)
+    log(f"OK {label(s)}: restarted in place by /restart, pid {new_pid}"
+        + (" (same)" if new_pid == pid else f" (was {pid})")
+        + ("" if d.get("status") in ("idle", "shell") else f"; still {d.get('status')} after {SLASH_SETTLE}s"))
+    RESULTS[sid] = "resumed"
+    TO_WAKE.append(_resumed(d, path, pane))
+    return True, ""
 
 
 def restart(s: dict, handoff: str = "") -> bool:
