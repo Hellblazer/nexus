@@ -24,8 +24,8 @@
 # baseline (8) and the baseline is still there (10). The type it prints is a reading only: the baseline is also
 # Standard, so it cannot tell a running checkpoint from the baseline; run-gate.sh --signed-in's resume (the guest
 # is Saved after the restore) is the test of that.
-# No script stores the account secret (the stduser step removed it from the guest's logon settings, and the
-# build is stopped unless it said so), and this one reads and stores none. The checkpoint's memory image holds the signed-in session.
+# The stduser step wrote the account secret to the guest's logon settings for its one restart and removed it before this step (the
+# build is stopped unless it said so); this script reads and stores none. The checkpoint's memory image holds the signed-in session.
 # Once a minute during the settle it prints the host's Default Switch byte counters, for the record only.
 # Exit 3, 4, 5, 6, 8, 10, 11, 12 as above; 7 the checkpoint could not be taken or the type is not back.
 param(
@@ -84,7 +84,7 @@ $now = "$((Get-VM -Name $vm).CheckpointType)"
 "CheckpointType now: $now (was $was)"
 if ($now -ne $was) { $typeNotBack = $true }
 if ($typeNotBack -or $err) {
-    $why = @(); if ($err) { $why += "the checkpoint was not taken: $err" }; if ($typeNotBack) { $why += "CheckpointType is $now, not back to ${was} (end.ps1 puts it back from $typeFile): $restoreErr" }
+    $why = @(); if ($err) { $why += "taking the checkpoint failed: $err (a partial checkpoint named $Name may still exist; check Get-VMSnapshot, and only Sam deletes one)" }; if ($typeNotBack) { $why += "CheckpointType is $now, not back to ${was} (end.ps1 puts it back from $typeFile): $restoreErr" }
     "NXG-RESULT: FAIL " + ($why -join '; ')
     exit 7
 }

@@ -26,7 +26,7 @@
 # --standard-user runs the install, the setup phase, the Claude Code session and
 # the verify phase as a local account that is a member of Users only
 # (NX_GUEST_STD_USER, default nxstd), which the stduser step creates after the
-# restore and the next restore erases. The administrator account ($GUSER) then
+# restore and the next restore of the baseline erases (a --signed-in run resumes it). The administrator account ($GUSER) then
 # only orchestrates, and installs Git for all users first, because winget's Git
 # package needs elevation: the run is a standard user on a machine that already
 # has Git. driver/stduser.ps1 lists everything the administrator does.
@@ -110,9 +110,9 @@
 # ^stduser-signed-in- is refused in every mode, and only --signed-in names such a
 # checkpoint. No script removes, renames or replaces a checkpoint: the baseline is
 # never removed, renamed or replaced.
-# The checkpoint holds no account secret that a script stored: no script stores
-# the account secret, the stduser step removes the Winlogon value, and the build
-# fails unless that step printed "winlogon secret removed=True". The checkpoint's
+# Account secret: the stduser step writes the account secret to Winlogon for its one restart and removes it before the checkpoint,
+# and the build fails unless that step printed "winlogon secret removed=True"; no
+# script keeps it after that. The checkpoint's
 # MEMORY IMAGE (the .vmrs) does hold the signed-in session, with whatever the
 # session keeps in memory, and the build's CheckpointType change is undone on every
 # exit path: checkpoint.ps1 writes the type it found to a file in the run directory
@@ -557,7 +557,7 @@ if [[ -n "$signed_in" ]]; then
     say "$signed_in_limit"
 fi
 if [[ -n "$signed_in_build" ]]; then
-    say "building the one running checkpoint $signed_in_build as a child of $CHECKPOINT on $VM: its memory image holds $STD_USER's signed-in session; no script stores the account secret; no gate is run"
+    say "building the one running checkpoint $signed_in_build as a child of $CHECKPOINT on $VM: its memory image holds $STD_USER's signed-in session; the account secret is removed from Winlogon before the checkpoint; no gate is run"
 fi
 say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 
@@ -633,7 +633,7 @@ if [[ -n "$signed_in_build" ]]; then
     run_step 01k checkpoint "$T_CHECKPOINT" 1 host_ps checkpoint.ps1 -VMName "$VM" -Baseline "$CHECKPOINT" -Name "$signed_in_build" -RunDir "$HOST_WIN_DIR" -SettleSeconds "$SETTLE_S"
     finish
     [[ -z "$end_warning" ]] || die 1 "the checkpoint $signed_in_build was taken, but the end step did not finish clean (the guest's CheckpointType may not be back as it was): $end_warning"
-    echo "run-gate.sh: SIGNED-IN CHECKPOINT BUILT (no gate was run; this is not a gate verdict): the running checkpoint $signed_in_build is a child of the baseline checkpoint $CHECKPOINT on $VM (settled $SETTLE_S s); its memory image holds $STD_USER's signed-in session and no script stored the account secret; the guest is shut down; logs in $out"
+    echo "run-gate.sh: SIGNED-IN CHECKPOINT BUILT (no gate was run; this is not a gate verdict): the running checkpoint $signed_in_build is a child of the baseline checkpoint $CHECKPOINT on $VM (settled $SETTLE_S s); its memory image holds $STD_USER's signed-in session and the account secret was removed from Winlogon before the checkpoint; the guest is shut down; logs in $out"
     exit 0
 fi
 as_user="${run_as:+-AsUser yes}"

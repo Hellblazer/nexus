@@ -42,15 +42,16 @@
 #     Windows signature wherever the file is.
 # The account's secret is 24 random bytes made in the guest. It is written to
 # the Winlogon key for the one restart and removed as soon as the account is
-# signed in; it is never printed, and the next restore erases the account.
+# signed in; it is never printed, and the next restore of the baseline erases the account (a run resumed
+# from the signed-in checkpoint keeps it).
 # This step takes no checkpoint, and nothing it does outlives the next restore
 # of the baseline checkpoint. Only run-gate.sh --build-signed-in takes one,
 # in its own step (checkpoint.ps1) after this one: a single running (Standard)
 # checkpoint of the state this step leaves, with the default standard-user
 # configuration only: the account signed in at the console, the quiet-guest
 # policy, Git installed for all users, and the gate script staged in the
-# profile (later runs overwrite it). No script stores the account secret: the
-# Winlogon value is removed once the account is signed in, and this step fails
+# profile (later runs overwrite it). The account secret is in Winlogon only for
+# the one restart: it is removed once the account is signed in, and this step fails
 # (exit 19) unless it printed "winlogon secret removed=True", which the wrapper
 # also requires before the checkpoint. The checkpoint's MEMORY IMAGE holds the
 # signed-in session, and a resumed guest needs no secret.

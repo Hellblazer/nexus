@@ -2330,7 +2330,8 @@ def test_the_build_names_the_memory_image_and_not_a_stored_secret(harness: Harne
     res = harness.run(*_BASE, "--standard-user", "--build-signed-in", SIGNED_IN, "--out", str(harness.out))
     assert res.returncode == 0, res.stderr + res.stdout
     said = [ln for ln in res.stdout.splitlines() if "memory image" in ln]
-    assert len(said) == 2 and all("no script stores the account secret" in ln or "no script stored the account secret" in ln for ln in said), res.stdout
+    assert len(said) == 2 and all("removed from Winlogon before the checkpoint" in ln for ln in said), res.stdout
+    assert "no script stor" not in res.stdout  # the secret IS written, for the restart; the claim is that it is removed
 
 
 def test_a_build_whose_end_step_did_not_finish_clean_is_not_a_success(harness: Harness) -> None:
@@ -2348,7 +2349,7 @@ def test_the_headers_state_the_exception_and_what_a_resumed_run_no_longer_proves
         "nx-clean-win11", "clean-baseline-2026-10-06", "^stduser-signed-in-", "needs Sam to delete the old one by hand",
         "A --signed-in RUN IS A DIFFERENT CLAIM", "does not exercise the standard user's first sign-in",
         "does not exercise the boot after a", "must not cite a --signed-in run",
-        "MEMORY IMAGE", "no script stores the account secret", "SIGNED-IN CHECKPOINT BUILT",
+        "MEMORY IMAGE", "removes it before the checkpoint", "SIGNED-IN CHECKPOINT BUILT",
     ):
         assert needle in flat, needle
     # the "exits 0 only on PASSED" claim names its one exception
@@ -2363,3 +2364,17 @@ def test_the_headers_state_the_exception_and_what_a_resumed_run_no_longer_proves
     section = gate[gate.index("A RESUMED RUN IS A DIFFERENT CLAIM"):gate.index("OPERATOR PROCEDURE")]
     for needle in ("clean-baseline-2026-10-06", "first sign-in", "boot after a restore", "must not cite a --signed-in run"):
         assert needle in re.sub(r"\n#\s*", " ", section), needle
+
+
+
+def test_the_existing_check_evaluator_and_the_type_exit_are_pinned_literally() -> None:
+    # Review r2 (b): the Python evaluator in the -Existing tests stands in for these lines; they must not drift.
+    std = (DRIVER / "stduser.ps1").read_text(encoding="utf-8")
+    for line in ("$hit = $text -match $c[2]",
+                 "if (($c[1] -eq 'must') -ne $hit) { \"NXG-RESULT: FAIL ${StdUser}: $($c[3])\"; $rcx = $c[0]; break }"):
+        assert line in std, line
+    cp = (DRIVER / "checkpoint.ps1").read_text(encoding="utf-8")
+    block = cp[cp.index("if ($typeNotBack -or $err) {"):]
+    branch = block[: block.index("\n}\n") + 3]
+    assert branch.rstrip().endswith("exit 7\n}"), branch  # the failure branch exits 7 before anything says ok
+    assert "a partial checkpoint named $Name may still exist" in cp
