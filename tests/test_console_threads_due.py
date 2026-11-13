@@ -98,8 +98,31 @@ def test_the_board_card_names_its_due_threads() -> None:
     now = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
     board = build_board([{"title": "marlowe", "content": ENTRY, "timestamp": "2026-11-18T11:00:00Z"}], now)
     (card,) = board.cards
-    assert set(card.due) == {"RDR-230 readings", "Mail recount"}
-    assert card.bad_due == ("Typo",)
+    titles = [t.title for t in card.session.threads]
+    assert [titles[i] for i in card.due] == ["RDR-230 readings", "Mail recount"]
+    assert [titles[i] for i in card.bad_due] == ["Typo"]
+
+
+def test_two_threads_with_one_title_are_marked_apart() -> None:
+    now = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+    content = "## A\ndue: 2026-01-01\n## A\ndue: 2099-01-01\n"
+    (card,) = build_board([{"title": "m", "content": content, "timestamp": "2026-11-18T11:00:00Z"}], now).cards
+    assert card.due == (0,)
+
+
+def test_a_due_line_inside_an_ask_block_ends_it_so_it_goes_above_the_first_ask() -> None:
+    # Documented in docs/agents/threads-board.md: like state:, a due: line ends an open ask block.
+    s = parse_session("m", "## T\nask: pick-port\nquestion: which port?\ndue: 2026-11-20\noption: 1\noption: 2\n")
+    (t,) = s.threads
+    assert t.due == "2026-11-20"
+    (ask,) = t.asks
+    assert ask.options == ()  # the options after the due: line are outside the block
+
+
+def test_due_and_worktree_are_not_read_as_asks_to_sam() -> None:
+    s = parse_session("m", "## T\nstate: x\ndue: after Sam answers\nworktree: /Users/sam/x\n")
+    (t,) = s.threads
+    assert t.needs_sam == "" and t.due == "after Sam answers" and t.worktree == "/Users/sam/x"
 
 
 NO_TITLE = lambda _t: None  # noqa: E731 -- a seam stand-in: no entry by title
@@ -222,8 +245,11 @@ def test_the_console_card_shows_due_and_worktree_and_marks_what_has_come() -> No
     assert '<strong class="due-now">&middot; due 2026-01-01</strong>' in html
     assert f'<span class="ts">&middot; due {soon}</span>' in html
     assert "worktree /w/marlowe-past" in html
-    rows[0]["content"] += "## Typo\ndue: soon\n"
-    assert "(not an ISO date or datetime: never comes due)" in client.get("/threads").text
+    rows[0]["content"] += "## Typo\ndue: soon\n## Hostile\ndue: <script>x</script>\nworktree: <b>w</b>\n"
+    html = client.get("/threads").text
+    assert "(not an ISO date or datetime: never comes due)" in html
+    assert "<script>x</script>" not in html and "&lt;script&gt;x&lt;/script&gt;" in html
+    assert "<b>w</b>" not in html and "&lt;b&gt;w&lt;/b&gt;" in html
 
 
 def test_session_context_puts_the_due_section_after_the_t1_lines(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,3 +271,74 @@ def test_session_context_puts_the_due_section_after_the_t1_lines(monkeypatch: py
     session_context.run({})
     session_context.run(None)
     assert seen == []
+
+
+
+def test_the_lookup_returns_within_its_budget_whatever_the_engine_does() -> None:
+    import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    release = threading.Event()
+
+    def hang(_q: str):
+        release.wait(30)
+        return []
+
+    t0 = time.monotonic()
+    try:
+        assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=hang, by_title=NO_TITLE, name="",
+                         budget_s=0.5) == []
+        assert time.monotonic() - t0 < 2.0
+    finally:
+        release.set()
+
+
+class _FakeStore:
+    """Stands in for HttpMemoryStore with the keyword shape board_due calls; the signature test below keeps the two
+    from drifting apart."""
+
+    made: list[dict] = []
+
+    def __init__(self, *, timeout: float) -> None:
+        _FakeStore.made.append({"timeout": timeout})
+
+    def search(self, query, project=None, access="track", *, timeout=None, retry_read_timeout=True):
+        _FakeStore.made.append({"search": (query, project, access, timeout, retry_read_timeout)})
+        return [{"title": "marlowe", "content": ENTRY}]
+
+    def get(self, project=None, title=None, id=None, *, timeout=None, retry_read_timeout=True):
+        return None
+
+
+def test_the_real_wiring_builds_the_store_and_searches_threads_silently(monkeypatch: pytest.MonkeyPatch,
+                                                                         capsys) -> None:
+    import nexus.db.t2.http_memory_store as hms  # noqa: PLC0415
+    from nexus._hook_runtime import _io  # noqa: PLC0415
+
+    monkeypatch.setattr(hms, "HttpMemoryStore", _FakeStore)
+    monkeypatch.setattr(_io, "configure_hook_logging", lambda: None)
+    monkeypatch.setenv("NX_BOARD_DUE_TIMEOUT_S", "1.5")
+    _FakeStore.made = []
+    lines = due_lines(SID, datetime(2026, 11, 18, 9, 0, tzinfo=PST), name="")
+    assert lines and lines[0] == HEADING.format(entry="marlowe")
+    assert _FakeStore.made == [{"timeout": 1.5}, {"search": (SID, "threads", "silent", 1.5, False)}]
+    assert capsys.readouterr().out == ""  # the hook's stdout carries only what run() returns
+
+
+def test_board_due_calls_match_the_real_store_signatures() -> None:
+    import inspect  # noqa: PLC0415
+
+    from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415
+
+    inspect.signature(HttpMemoryStore.__init__).bind(None, timeout=2.0)
+    inspect.signature(HttpMemoryStore.search).bind(None, SID, project="threads", access="silent", timeout=2.0,
+                                                   retry_read_timeout=False)
+    inspect.signature(HttpMemoryStore.get).bind(None, project="threads", title="marlowe", timeout=2.0,
+                                                retry_read_timeout=False)
+
+
+def test_a_long_line_is_cut() -> None:
+    content = f"session: {SID}\n## {'x' * 1000}\ndue: 2026-01-01\n"
+    search, _ = _search([{"title": "m", "content": content}])
+    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
+    assert len(lines[1]) == 300 and lines[1].endswith("…")

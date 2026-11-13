@@ -176,10 +176,11 @@ class SessionCard:
     effective_updated: datetime | None
     age: str
     stale: bool
-    #: Titles of this session's threads whose ``due:`` has come (``due_threads`` at the board's clock).
-    due: tuple[str, ...] = ()
-    #: Titles of threads whose ``due:`` holds a value ``due_at`` cannot read, so they never come due.
-    bad_due: tuple[str, ...] = ()
+    #: Positions in ``session.threads`` of the threads whose ``due:`` has come (``due_threads`` at the board's
+    #: clock); positions, not titles, so two threads sharing a title are told apart.
+    due: tuple[int, ...] = ()
+    #: Positions of threads whose ``due:`` holds a value ``due_at`` cannot read, so they never come due.
+    bad_due: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -648,12 +649,15 @@ def build_board(entries: Iterable[Mapping[str, Any]], now: datetime) -> Board:
         try:
             session = parse_session(str(e.get("title", "")), str(e.get("content", "")))
             newest = parse_timestamp(str(e.get("timestamp", "") or ""))
+            local = now.astimezone()
+            come = {id(t) for t, _ in due_threads(session, local)}
+            due = tuple(i for i, t in enumerate(session.threads) if id(t) in come)
+            bad = tuple(
+                i for i, t in enumerate(session.threads) if has_value(t.due) and due_at(t.due, local.tzinfo) is None
+            )
         except Exception:  # noqa: BLE001 -- one bad entry must not take the page down
             unreadable.append(_safe_title(e))
             continue
-        local = now.astimezone()
-        due = tuple(t.title for t, _ in due_threads(session, local))
-        bad = tuple(t.title for t in session.threads if has_value(t.due) and due_at(t.due, local.tzinfo) is None)
         if newest is None:
             built.append(SessionCard(session, None, "unknown", True, due, bad))
         else:

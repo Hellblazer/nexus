@@ -254,9 +254,12 @@ def run(payload: dict | None) -> HookResult:
     # The one use of the payload: its session id finds the session's own board entry.
     session_id = str((payload or {}).get("session_id") or "")
     if session_id:
-        from nexus.hooks.board_due import due_lines  # noqa: PLC0415 — deferred: only a payload with a session id pays
+        try:
+            from nexus.hooks.board_due import due_lines  # noqa: PLC0415 — deferred: only a payload with a session id pays
 
-        output_lines.extend(due_lines(session_id))
+            output_lines.extend(due_lines(session_id))
+        except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
+            debug("threads board due section skipped")
 
     # --- T2 memory context ---
     if which('nx'):
