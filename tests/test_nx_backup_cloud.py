@@ -144,7 +144,7 @@ def test_cloud_backup_with_a_failing_engine_says_run_again_and_leaves_nothing(
         result = CliRunner().invoke(main, ["backup", "--to", str(dest)])
         assert engine.deleted == engine.opened
     assert result.exit_code == 1
-    assert "run nx backup again" in _flat(result.output)
+    assert "run the backup again" in _flat(result.output)
     assert list(dest.parent.iterdir()) == []
 
 

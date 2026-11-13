@@ -172,9 +172,12 @@ def test_the_open_carries_the_file_header_its_sha256_and_the_row_bytes(backup_fi
     with FakeImportEngine() as engine:
         _restore(engine, backup_file)
         body = json.loads(engine.requests("open")[0].body)
+        parts = engine.requests("part")
     header_payload = _file_header_payload(backup_file)
     assert body["header_sha256"] == hashlib.sha256(header_payload).hexdigest()
-    assert body["row_bytes"] == sum(len(b) for pages in _file_pages(backup_file).values() for b in pages)
+    # row_bytes is what the engine will stage: the page bodies re-cut into parts, each with its COPY header and trailer.
+    # With the engine's real part size, the bytes put on the wire add up to it exactly.
+    assert body["row_bytes"] == sum(len(r.body) for r in parts)
     expected = json.loads(header_payload)
     assert {k: v for k, v in body.items() if k not in ("header_sha256", "row_bytes")} == expected
 
@@ -335,14 +338,62 @@ def test_a_stale_session_that_will_not_clear_is_refused_after_one_delete(backup_
         assert len(engine.requests("delete")) == 1, "deleted once, not in a loop"
 
 
-def test_a_stale_import_that_is_loading_is_left_alone_because_deleting_it_would_cancel_the_load(backup_file: Path) -> None:
+@pytest.mark.parametrize("state", ["loading", "verifying"])
+def test_a_stale_import_that_is_loading_is_left_alone_because_deleting_it_would_cancel_the_load(backup_file: Path, state: str) -> None:
     from tests._fake_import_engine import _Session  # noqa: PLC0415
 
     with FakeImportEngine() as engine:
-        engine.sessions["busy"] = _Session("busy", {}, [], state="loading", status="loading")
-        with pytest.raises(RestoreRefused, match="loading on the engine"):
+        engine.sessions["busy"] = _Session("busy", {}, [], state=state, status=state)
+        with pytest.raises(RestoreRefused, match="could not confirm that it is not loading"):
             _restore(engine, backup_file)
         assert engine.requests("delete") == []
+
+
+@pytest.mark.parametrize("answer", [
+    "connection dropped", "engine 500", "token rejected", "200 with no state", "404 that is not no_such_session",
+])
+def test_a_stale_import_whose_state_cannot_be_read_is_left_alone_not_deleted(backup_file: Path, answer: str) -> None:
+    """The load may be running: a DELETE would cancel it. Only a state that was READ as safe, or a plain
+    no_such_session, allows the delete."""
+    from tests._fake_import_engine import _Session  # noqa: PLC0415
+
+    replies = {
+        "connection dropped": Reply(drop=True),
+        "engine 500": Reply(500, {"error": "boom", "reason": "internal"}),
+        "token rejected": Reply(401, {"error": "unauthorized"}),
+        "200 with no state": Reply(200, {"session_id": "busy"}),
+        "404 that is not no_such_session": Reply(404, {"error": "no route", "reason": "not_found"}),
+    }
+    with FakeImportEngine() as engine:
+        engine.sessions["busy"] = _Session("busy", {}, [], state="loading", status="loading")
+        engine.script.append(lambda req: replies[answer] if req.kind == "status" and req.path.endswith("/busy") else None)
+        with pytest.raises(RestoreRefused, match="could not confirm that it is not loading"):
+            _restore(engine, backup_file)
+        assert engine.requests("delete") == [] and "busy" in engine.sessions, "the load is untouched"
+
+
+@pytest.mark.parametrize("state", ["staging", "committed", "failed"])
+def test_a_stale_import_read_as_staged_or_ended_is_deleted_and_the_open_repeated(backup_file: Path, state: str) -> None:
+    from tests._fake_import_engine import _Session  # noqa: PLC0415
+
+    with FakeImportEngine() as engine:
+        engine.sessions["old"] = _Session("old", {}, [], state=state, status=state)
+        _restore(engine, backup_file)
+        assert engine.deleted == ["old"] and len(engine.requests("open")) == 2
+
+
+def test_a_stale_import_the_engine_says_is_gone_is_deleted_and_the_open_repeated(backup_file: Path) -> None:
+    """The open said session_exists, the status says no_such_session: the slot has since cleared; the delete is a no-op."""
+    from tests._fake_import_engine import _Session  # noqa: PLC0415
+
+    with FakeImportEngine() as engine:
+        engine.sessions["old"] = _Session("old", {}, [])
+        engine.script.append(
+            lambda req: Reply(404, {"error": "no such import session", "reason": "no_such_session"})
+            if req.kind == "status" and req.path.endswith("/old") else None
+        )
+        _restore(engine, backup_file)
+        assert len(engine.requests("delete")) == 1 and engine.requests("delete")[0].path.endswith("/old")
 
 
 # -- open refusals --------------------------------------------------------------------------------------------------
@@ -641,3 +692,246 @@ def test_the_engine_is_asked_for_nothing_but_the_documented_routes(backup_file: 
         _restore(engine, backup_file)
         seen = {(r.method, r.kind) for r in engine.log}
     assert seen == {("GET", "version"), ("POST", "open"), ("PUT", "part"), ("POST", "close"), ("POST", "commit"), ("GET", "status")}
+
+
+# -- round 1 review (a8efcfcef): local mode, derived tables in both lists, the file changing, outcomes ----------------
+
+
+def test_a_local_install_is_told_to_issue_a_tenant_token_and_export_it_not_to_set_service_token(backup_file: Path) -> None:
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: Reply(403, {"error": "no", "reason": "import_scope_forbidden"}) if req.kind == "open" else None)
+        clock = Clock()
+        local = ImportClient(engine.base_url, Creds(), sleep=clock.sleep, monotonic=clock.monotonic, remote=False)
+        with pytest.raises(RestoreRefused) as err:
+            run_restore(local, backup_file)
+        text = str(err.value)
+        assert "nx service token issue --tenant" in text and "NX_SERVICE_TOKEN" in text
+        assert "applies only when a service_url is set" in text
+        managed = ImportClient(engine.base_url, Creds(), sleep=clock.sleep, monotonic=clock.monotonic, remote=True)
+        with pytest.raises(RestoreRefused) as err2:
+            run_restore(managed, backup_file)
+    assert "nx config set service_token" in str(err2.value) and "nx service token issue" not in str(err2.value)
+
+
+def test_a_local_install_whose_token_is_rejected_gets_the_same_remedy(backup_file: Path) -> None:
+    with FakeImportEngine(accepted={"other"}) as engine:
+        clock = Clock()
+        local = ImportClient(engine.base_url, Creds("tok"), sleep=clock.sleep, monotonic=clock.monotonic, remote=False)
+        with pytest.raises(RestoreRefused, match="nx service token issue --tenant"):
+            run_restore(local, backup_file)
+
+
+def test_connect_knows_a_local_install_by_its_missing_service_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", "9")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+    assert ci.connect()._remote is False
+    monkeypatch.setenv("NX_SERVICE_URL", "https://api.example.invalid")
+    assert ci.connect()._remote is True
+
+
+def test_credential_refusals_on_the_restore_path_say_restore_and_the_export_ones_still_say_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.backup.cloud_export import ExportRefused, ManagedCredentials  # noqa: PLC0415
+
+    monkeypatch.setattr("nexus.db.service_endpoint.resolve_service_endpoint", lambda *a, **k: ("http://x", ""))
+    with pytest.raises(ExportRefused) as restore_err:
+        ManagedCredentials("http://x", restore=True).bearer()
+    assert "a restore needs" in str(restore_err.value) and "run the restore again" in str(restore_err.value)
+    assert "export" not in str(restore_err.value).replace("export NX_SERVICE_TOKEN", "")
+    with pytest.raises(ExportRefused) as export_err:
+        ManagedCredentials("http://x").bearer()
+    assert "an export needs" in str(export_err.value) and "run the backup again" in str(export_err.value)
+
+
+def test_a_derived_table_in_both_tables_and_skipped_tables_is_uploaded_and_closed_because_the_engine_demands_it(backup_file: Path) -> None:
+    """The engine lists a derived table the target already has rows for in ``skipped_tables`` AND leaves it in
+    ``tables``, and refuses the commit (409 tables_open) until it is closed. A client that skipped it on the strength
+    of ``skipped_tables`` fails here."""
+    with FakeImportEngine(part_bytes=2048, loaded_but_skipped={"frecency": "the target already holds rows for it"}) as engine:
+        result, _, _ = _restore(engine, backup_file)
+        sent = {r.query["table"] for r in engine.requests("part")}
+        closed = [r.query["table"] for r in engine.requests("close")]
+    assert "frecency" in sent and "frecency" in closed and result.outcome.source == "status"
+    assert result.skipped_at_open == {"frecency": "the target already holds rows for it"}
+
+
+def test_a_file_that_changes_between_verification_and_upload_stops_the_run_and_deletes_the_session(
+    backup_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_page = index_file(backup_file).tables["memory"].pages[0]
+    real_verify = ci.verify_file
+
+    def verify_then_damage(path: Path):  # noqa: ANN202
+        report = real_verify(path)
+        _tamper(path, first_page.offset + 40)   # a byte inside the first page of the first table, after the check passed
+        return report
+
+    monkeypatch.setattr(ci, "verify_file", verify_then_damage)
+    with FakeImportEngine(part_bytes=2048) as engine:
+        with pytest.raises(RestoreFailed, match="no longer matches its hash"):
+            _restore(engine, backup_file)
+        assert engine.requests("part") == [] and engine.requests("close") == [], "not one more byte after the mismatch"
+        assert len(engine.deleted) == 1 and engine.requests("commit") == []
+
+
+def test_header_sha256_differs_between_two_exports_of_one_tenant_so_the_marker_names_one_file(tmp_path: Path) -> None:
+    """The restore marker identifies a file by its header SHA-256, which is a file identity only because the header
+    keeps ``created_at``. Two exports of the same tenant must not share one."""
+    import time as _time  # noqa: PLC0415
+
+    with FakeEngine(_tables()) as export_engine:
+        one, two = tmp_path / "one.nxtenant", tmp_path / "two.nxtenant"
+        run_export(ExportClient(export_engine.base_url, Creds(), sleep=lambda _s: None), one)
+        _time.sleep(0.01)
+        run_export(ExportClient(export_engine.base_url, Creds(), sleep=lambda _s: None), two)
+    assert index_file(one).header["tenant_id"] == index_file(two).header["tenant_id"]
+    assert index_file(one).header_sha256 != index_file(two).header_sha256
+
+
+# -- after a failed answer, the marker decides ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("marker_names_file", [True, False], ids=["marker names the file", "marker does not"])
+def test_any_failed_answer_after_a_commit_is_settled_by_the_marker_whatever_its_text(backup_file: Path, marker_names_file: bool) -> None:
+    failed = Reply(200, {"session_id": "x", "state": "failed", "status": "failed: aborted", "notes": []})
+    sha = index_file(backup_file).header_sha256
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: failed if req.kind == "status" else None)
+        engine.marker = {"header_sha256": sha if marker_names_file else "e" * 64, "session_id": "s", "committed_at": "T"}
+        if marker_names_file:
+            assert _restore(engine, backup_file)[0].outcome.source == "marker"
+        else:
+            with pytest.raises(RestoreFailed, match="rolled the restore back"):
+                _restore(engine, backup_file)
+
+
+def test_a_failed_answer_whose_marker_cannot_be_read_is_an_unknown_outcome_not_a_rollback(backup_file: Path) -> None:
+    failed = Reply(200, {"session_id": "x", "state": "failed", "status": "failed: aborted", "notes": []})
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: failed if req.kind == "status" else Reply(drop=True) if req.kind == "marker" else None)
+        with pytest.raises(RestoreOutcomeUnknown, match="marker could not be read"):
+            _restore(engine, backup_file)
+
+
+def test_a_state_of_committed_with_failed_text_is_not_a_commit(backup_file: Path) -> None:
+    odd = Reply(200, {"session_id": "x", "state": "committed", "status": "failed: the commit was not confirmed", "notes": []})
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: odd if req.kind == "status" else None)
+        with pytest.raises(RestoreFailed, match="rolled the restore back"):
+            _restore(engine, backup_file)
+
+
+def test_a_404_on_the_status_poll_that_is_not_no_such_session_is_an_unknown_outcome(backup_file: Path) -> None:
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: Reply(404, {"error": "no route", "reason": "not_found"}) if req.kind == "status" else None)
+        with pytest.raises(RestoreOutcomeUnknown, match="not the engine saying it forgot the session"):
+            _restore(engine, backup_file)
+        assert engine.requests("marker") == [], "only no_such_session sends the client to the marker"
+
+
+@pytest.mark.parametrize("marker_names_file", [True, False])
+def test_a_commit_answered_no_such_session_is_decided_by_the_marker(backup_file: Path, marker_names_file: bool) -> None:
+    gone = Reply(404, {"error": "no such import session", "reason": "no_such_session"})
+    sha = index_file(backup_file).header_sha256
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: gone if req.kind == "commit" else None)
+        engine.marker = {"header_sha256": sha, "session_id": "s", "committed_at": "T"} if marker_names_file else None
+        if marker_names_file:
+            assert _restore(engine, backup_file)[0].outcome.source == "marker"
+        else:
+            with pytest.raises(RestoreFailed, match="did not commit"):
+                _restore(engine, backup_file)
+        assert len(engine.requests("marker")) == 1
+
+
+def test_a_commit_answered_with_a_5xx_does_not_say_nothing_was_loaded(backup_file: Path) -> None:
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: Reply(404, {"error": "x", "reason": "not_found"}) if req.kind == "commit" else None)
+        with pytest.raises(RestoreOutcomeUnknown, match="does not say whether the load started") as err:
+            _restore(engine, backup_file)
+    assert "Nothing was loaded" not in str(err.value)
+
+
+def test_a_token_refused_during_the_poll_says_the_outcome_is_unknown_not_that_nothing_was_loaded(backup_file: Path) -> None:
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: Reply(401, {"error": "unauthorized"}) if req.kind == "status" else None)
+        with pytest.raises(RestoreOutcomeUnknown, match="may be running or may have committed") as err:
+            _restore(engine, backup_file)
+    assert "Nothing was loaded" not in str(err.value)
+
+
+def test_a_token_refused_before_the_commit_is_still_a_plain_refusal(backup_file: Path) -> None:
+    with FakeImportEngine() as engine:
+        engine.script.append(lambda req: Reply(401, {"error": "unauthorized"}) if req.kind == "part" else None)
+        with pytest.raises(RestoreRefused, match="rejected the token"):
+            _restore(engine, backup_file)
+        assert len(engine.deleted) == 1
+
+
+# -- the load bound, the engine's cap, progress, mid-upload refusals -------------------------------------------------
+
+
+def test_a_poll_that_runs_to_the_deadline_while_the_engine_still_says_loading_says_so(backup_file: Path) -> None:
+    with FakeImportEngine(load_polls=10**9, load_max_seconds=60) as engine:
+        with pytest.raises(RestoreOutcomeUnknown, match="still reports the load as running") as err:
+            _restore(engine, backup_file)
+        assert engine.deleted == []
+    assert "could not be read" not in str(err.value)
+
+
+def test_a_part_that_would_pass_the_engines_staged_cap_ends_the_run_naming_the_cap(backup_file: Path) -> None:
+    with FakeImportEngine(part_bytes=2048, max_bytes=3000) as engine:
+        with pytest.raises(RestoreFailed, match="engine's cap of 3000"):
+            _restore(engine, backup_file)
+        assert len(engine.deleted) == 1 and engine.requests("commit") == []
+        assert sum(len(r.body) for r in engine.requests("part")) <= 3000
+
+
+def test_progress_never_passes_its_total_and_ends_at_it(backup_file: Path) -> None:
+    seen: list[tuple[int, int]] = []
+    with FakeImportEngine() as engine:
+        run_restore(_client(engine, Clock()), backup_file, on_progress=lambda done, total, *_: seen.append((done, total)), poll_interval_s=2.0)
+    assert seen and all(done <= total for done, total in seen)
+    assert seen[-1][0] == seen[-1][1], "the engine's own part size is the one the total was computed with"
+
+
+def test_a_table_the_engine_will_not_close_at_the_trailers_count_ends_the_run_and_deletes_the_session(backup_file: Path) -> None:
+    wrong = Reply(409, {"error": "count", "reason": "row_count_mismatch", "staged": 7, "expected": 18})
+    with FakeImportEngine(part_bytes=2048) as engine:
+        engine.script.append(lambda req: wrong if req.kind == "close" and req.query["table"] == "memory" else None)
+        with pytest.raises(RestoreFailed, match="staged 7 rows and the file's trailer says 18"):
+            _restore(engine, backup_file)
+        assert len(engine.deleted) == 1 and engine.requests("commit") == []
+
+
+def test_a_part_the_engine_fails_ends_the_run_and_sends_no_delete_for_the_session_it_closed(backup_file: Path) -> None:
+    failed = Reply(422, {"error": "COPY failed: bad stream", "reason": "part_failed"})
+    with FakeImportEngine(part_bytes=2048) as engine:
+        engine.script.append(lambda req: failed if req.kind == "part" and req.nth == 2 else None)
+        with pytest.raises(RestoreFailed, match="closed the session"):
+            _restore(engine, backup_file)
+        assert engine.deleted == [] and engine.requests("commit") == []
+
+
+def test_the_loading_note_is_repeated_at_most_every_30_seconds_while_the_status_text_stays_the_same(backup_file: Path) -> None:
+    with FakeImportEngine(load_polls=40) as engine:
+        result, clock, notes = _restore(engine, backup_file)   # 40 polls two seconds apart: 80 seconds of "loading"
+    loading = [n for n in notes if n.startswith("Loading:")]
+    assert 1 <= len(loading) <= 4, loading
+    assert result.outcome.source == "status"
+
+
+def test_the_verb_reports_an_unknown_outcome_with_exit_1_and_no_commit_claim(
+    cloud_mode: None, monkeypatch: pytest.MonkeyPatch, backup_file: Path,
+) -> None:
+    with FakeImportEngine(load_polls=10**9, load_max_seconds=1) as engine:
+        _point_at(monkeypatch, engine)
+        monkeypatch.setattr(ci, "POLL_INTERVAL_S", 0.01)
+        monkeypatch.setattr(ci, "POLL_SLACK_S", 0.0)
+        result = CliRunner().invoke(main, ["backup", "restore", str(backup_file)])
+        assert engine.deleted == []
+    assert result.exit_code == 1
+    out = _flat(result.output)
+    assert "still reports the load as running" in out and "may have committed" in out
+    assert "Restore committed" not in out

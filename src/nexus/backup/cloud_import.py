@@ -42,7 +42,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 import structlog
@@ -94,6 +94,11 @@ _AGAIN = "Nothing was loaded into your tenant; run nx backup restore again."
 #: Answers that carry a decision the caller makes, so a 5xx among them is not retried as a failed request.
 _PASS_THROUGH_REASONS = frozenset({"restore_busy", "import_capacity_full", "singleton_lock_not_held", "shutting_down"})
 
+#: The states of a stale import session a DELETE cannot hurt: its upload is staged or it has ended.
+_DELETABLE_STATES = frozenset({"staging", "committed", "failed", "gone"})
+#: A "Loading:" note is repeated at most this often while the status text stays the same, in seconds.
+NOTE_EVERY_S = 30.0
+
 IMPORT = "/v1/tenant/import"
 EXPORT = "/v1/tenant/export"
 
@@ -110,6 +115,10 @@ class RestoreOutcomeUnknown(BackupFailed):
     """The client lost the engine while a load may have been running and could not learn how it ended."""
 
 
+class _Gone(Exception):
+    """The engine answered 404 ``no_such_session`` for the client's own session."""
+
+
 class _RequestFailed(RestoreFailed):
     """One logical request failed after its tries. ``transport`` is true when the engine never answered."""
 
@@ -120,13 +129,15 @@ class _RequestFailed(RestoreFailed):
 
 def connect() -> ImportClient:
     """A client for the configured service, cloud or local. Raises :class:`RestoreRefused` when none resolves."""
+    from nexus import config as _config  # noqa: PLC0415 - read through the module, so a test's patch is seen
     from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 - deferred, heavy
 
     try:
         base_url, _ = resolve_service_endpoint()
+        remote = bool(_config.get_service_url())
     except RuntimeError as exc:
         raise RestoreRefused(str(exc)) from None
-    return ImportClient(base_url, ManagedCredentials(base_url))
+    return ImportClient(base_url, ManagedCredentials(base_url, restore=True), remote=remote)
 
 
 @dataclass
@@ -161,7 +172,10 @@ class ImportClient:
         monotonic: Callable[[], float] = time.monotonic,
         open_wait_budget_s: float = OPEN_WAIT_BUDGET_S,
         busy_wait_budget_s: float = BUSY_WAIT_BUDGET_S,
+        remote: bool = True,
     ) -> None:
+        #: A service_url is set (the managed service). Without one the engine is the local one, whose own token is root.
+        self._remote = remote
         self._base = base_url.rstrip("/")
         self._shown = log_endpoint(self._base)
         self._creds = credentials
@@ -200,14 +214,13 @@ class ImportClient:
         waited = 0.0
         while True:
             sent = self._bearer()
-            _check_bearer(sent)
             all_headers = {"Authorization": f"Bearer {sent}", **client_identity_headers(), **(headers or {})}
             transport = False
             try:
                 before_request()
                 resp = self._http.request(method, self._base + path, params=params, content=content, headers=all_headers)
             except httpx.InvalidURL:
-                raise RestoreRefused(f"the service URL ({self._shown}) is not a valid URL; check NX_SERVICE_URL.") from None
+                self._refuse(f"the service URL ({self._shown}) is not a valid URL; check NX_SERVICE_URL.")
             except httpx.HTTPError as exc:  # transport errors, but also a body that will not decode, too many redirects
                 problem, delay, transport = f"{type(exc).__name__}: {scrub_transport_error(exc, self._base)}", None, True
             else:
@@ -219,15 +232,12 @@ class ImportClient:
                     if reauths < 2 and self._creds.rejected(sent):
                         reauths += 1
                         continue
-                    raise RestoreRefused(
-                        f"the service at {self._shown} rejected the token (401) and no fresh one is available. "
-                        "Set a current tenant or data token with `nx config set service_token <token>`, then run nx backup restore again."
-                    )
+                    self._refuse(self._token_text(f"the service at {self._shown} rejected the token (401) and no fresh one is available."))
                 if status == 403 and reason == "import_scope_forbidden":
-                    raise RestoreRefused(
-                        "a restore is made with the tenant's own tenant or data token, and this install's token is an operator "
-                        "(root) token, which the import refuses. Use a tenant or data token (`nx config set service_token <token>`)."
-                    )
+                    self._refuse(self._token_text(
+                        "a restore is made with the tenant's own tenant or data token, and the token this install sends is an "
+                        "operator (root) token, which the import refuses."
+                    ))
                 if status == 409 and reason in busy_reasons:
                     if waited >= self._busy_budget:
                         raise _RequestFailed(f"{what}: the engine kept answering {reason} for {int(self._busy_budget)} seconds", transport=False)
@@ -246,12 +256,38 @@ class ImportClient:
             self._sleep(delay if delay is not None else BACKOFF_LADDER[failures - 1])
 
     def _bearer(self) -> str:
-        return self._creds.bearer()
+        """The token to send, checked. A refusal after the first commit attempt says the outcome is unknown."""
+        try:
+            token = self._creds.bearer()
+            _check_bearer(token)
+        except BackupRefused as exc:
+            self._refuse(str(exc))
+        return token
+
+    def _refuse(self, text: str) -> NoReturn:
+        """Refuse with *text*: before the first commit attempt nothing was loaded; after it a load may be running or
+        may have committed, which the message must say."""
+        if self._loading:
+            raise RestoreOutcomeUnknown(
+                f"{text} The load had already been committed to the engine when this happened, so it may be running or "
+                f"may have committed. {self._maybe_loaded()}"
+            )
+        raise RestoreRefused(text)
+
+    def _token_text(self, why: str) -> str:
+        if self._remote:
+            return f"{why} Set a current tenant or data token with `nx config set service_token <token>`, then run the restore again."
+        return (
+            f"{why} This install talks to a local engine, and the token it holds is the supervisor's operator token, which a "
+            "restore refuses. Issue a token for a tenant you created with `nx service token issue --tenant <tenant>` and "
+            "export it as NX_SERVICE_TOKEN (a local install reads the token from that variable; `nx config set service_token` "
+            "applies only when a service_url is set), then run the restore again."
+        )
 
     # -- the engine gate ---------------------------------------------------------------------------------
 
     def check_token(self) -> None:
-        _check_bearer(self._bearer())
+        self._bearer()
 
     def check_engine(self) -> None:
         """Refuse an engine that has no import routes, naming the release that has them."""
@@ -261,7 +297,7 @@ class ImportClient:
             try:
                 resp = self._http.get(f"{self._base}/version", timeout=_PROBE_TIMEOUT_S, headers=client_identity_headers())
             except httpx.InvalidURL:
-                raise RestoreRefused(f"the service URL ({self._shown}) is not a valid URL; check NX_SERVICE_URL.") from None
+                self._refuse(f"the service URL ({self._shown}) is not a valid URL; check NX_SERVICE_URL.")
             except httpx.HTTPError as exc:
                 raise RestoreRefused(
                     f"the nexus service at {self._shown} is unreachable ({type(exc).__name__}: "
@@ -359,22 +395,34 @@ class ImportClient:
                        {str(k): str(v) for k, v in skipped.items()}, notes, load_max, max_bytes)
 
     def _clear_stale(self, session_id: str, kind: str) -> None:
-        if kind == "import":
-            state = self._stale_import_state(session_id)
-            if state in ("loading", "verifying"):
-                raise RestoreRefused(
-                    "a restore of this tenant is loading on the engine now (an earlier run started it). Deleting it would cancel it, so "
-                    "this run leaves it. Wait for it to end, then check the tenant; if the load committed, this file's marker is on it."
-                )
+        """Delete the tenant's leftover session. An import is deleted only when its state was READ and is one a DELETE
+        cannot hurt (staging, or already ended), or the engine says it is not there: a read that failed, or one that
+        says loading, verifying or nothing at all, leaves it alone, because a DELETE during the load cancels it."""
+        if kind == "import" and self._stale_import_state(session_id) not in _DELETABLE_STATES:
+            raise RestoreRefused(
+                "an import session of this tenant is on the engine and this run could not confirm that it is not loading "
+                "(an earlier run may have started the load, and deleting a loading session cancels it), so it leaves it. "
+                "Wait for it to end (the engine closes an idle one after 10 minutes), then check the tenant: if the load "
+                "committed, this file's marker is on it, and running the restore again says so."
+            )
         _log.info("restore_stale_session_deleted", session_id=session_id, kind=kind)
         self._delete_quietly(session_id, EXPORT if kind == "export" else IMPORT)
 
-    def _stale_import_state(self, session_id: str) -> str:
-        with contextlib.suppress(Exception):
+    def _stale_import_state(self, session_id: str) -> str | None:
+        """The stale import's state when it was read as one of :data:`_DELETABLE_STATES` (or ``gone`` for an answered
+        ``no_such_session``); None for anything else: a transport failure, a 5xx, a 401, a 200 with no state."""
+        try:
             resp = self._exchange("GET", f"{IMPORT}/{session_id}", what="reading a stale import session")
-            if resp.status_code == 200:
-                return str(_json_body(resp).get("state") or "")
-        return ""
+        except BackupFailed:
+            return None
+        except BackupRefused:
+            return None
+        if resp.status_code == 200:
+            state = str(_json_body(resp).get("state") or "")
+            return state if state in _DELETABLE_STATES else None
+        if resp.status_code == 404 and _reason(resp)[0] == "no_such_session":
+            return "gone"
+        return None
 
     def _not_empty_text(self, engine_message: str, index: FileIndex) -> str:
         text = f"the tenant is not empty, so nothing was staged ({engine_message}). A restore loads into a fresh, empty tenant only."
@@ -449,33 +497,45 @@ class ImportClient:
             return marker
         return None
 
-    def commit_and_wait(self, session: Session, index: FileIndex, *, poll_interval_s: float = POLL_INTERVAL_S) -> Outcome:
+    def commit_and_wait(self, session: Session, index: FileIndex, *, poll_interval_s: float | None = None) -> Outcome:
         """Commit, retry ``restore_busy``, and read the status until the load ends. Returns the outcome only when
-        the engine says ``committed`` (or, after the session is gone, the marker names this file)."""
+        the engine says ``committed`` (or the marker names this file); a ``failed`` answer is settled by the marker."""
+        interval = POLL_INTERVAL_S if poll_interval_s is None else poll_interval_s
         first_attempt = self._monotonic()
         poll_deadline: float | None = None
         need_commit = True
+        last_text, last_note_at = "", -NOTE_EVERY_S
+        last_seen = ""
         while True:
             if need_commit:
-                body = self._commit_once(session, first_attempt)
+                try:
+                    body = self._commit_once(session, first_attempt)
+                except _Gone:
+                    return self._after_gone(session, index)
                 need_commit = False
-                if body is None:  # the answer was lost: the next move is the status route
-                    poll_deadline = poll_deadline or self._monotonic() + session.load_max_seconds + POLL_SLACK_S
-                    continue
                 if poll_deadline is None:
                     poll_deadline = self._monotonic() + session.load_max_seconds + POLL_SLACK_S
+                if body is None:  # the answer was lost: the next move is the status route
+                    continue
             else:
                 try:
                     resp = self._exchange("GET", f"{IMPORT}/{session.id}", what="reading the restore status")
                 except _RequestFailed as exc:
                     if poll_deadline is not None and self._monotonic() >= poll_deadline:
-                        raise RestoreOutcomeUnknown(self._unknown_text(exc)) from None
-                    self._sleep(poll_interval_s)
+                        raise RestoreOutcomeUnknown(self._unknown_text(exc, last_seen)) from None
+                    self._sleep(interval)
                     continue
                 if resp.status_code == 404:
-                    return self._after_gone(session, index)
+                    if _reason(resp)[0] == "no_such_session":
+                        return self._after_gone(session, index)
+                    raise RestoreOutcomeUnknown(
+                        f"reading the restore status: the engine answered 404 {_reason(resp)[0] or 'not found'}, which is not "
+                        f"the engine saying it forgot the session. {self._maybe_loaded()}"
+                    )
                 if resp.status_code != 200:
-                    raise RestoreFailed(f"reading the restore status: the engine answered {resp.status_code}. {self._maybe_loaded()}")
+                    raise RestoreOutcomeUnknown(
+                        f"reading the restore status: the engine answered {resp.status_code} {_reason(resp)[0]}. {self._maybe_loaded()}"
+                    )
                 body = _json_body(resp)
             verdict = self._judge(session, index, body)
             if verdict is not None:
@@ -484,13 +544,18 @@ class ImportClient:
             if state == "staging":
                 need_commit = True  # the commit never landed (a lost request): send it again, which is idempotent
                 continue
+            last_seen = str(body.get("status") or state)
             if poll_deadline is not None and self._monotonic() >= poll_deadline:
-                raise RestoreOutcomeUnknown(self._unknown_text(None))
-            self.note(f"Loading: {body.get('status') or state}")
-            self._sleep(poll_interval_s)
+                raise RestoreOutcomeUnknown(self._unknown_text(None, last_seen))
+            now = self._monotonic()
+            if last_seen != last_text or now - last_note_at >= NOTE_EVERY_S:
+                self.note(f"Loading: {last_seen}")
+                last_text, last_note_at = last_seen, now
+            self._sleep(interval)
 
     def _commit_once(self, session: Session, first_attempt: float) -> dict[str, Any] | None:
-        """One commit, with ``restore_busy`` retried. Returns the status body (None when the answer was lost)."""
+        """One commit, with ``restore_busy`` retried. Returns the status body (None when the answer was lost);
+        raises :class:`_Gone` when the engine says it has no such session."""
         while True:
             self._loading.add(session.id)  # from the moment it is sent, the load may have started
             try:
@@ -513,15 +578,19 @@ class ImportClient:
                 self.note(f"Another restore is loading; the upload stays staged. Trying again in {wait:g} s.")
                 self._sleep(wait)
                 continue
-            self._loading.discard(session.id)
-            if status == 404:
-                self._live.pop(session.id, None)
-                raise RestoreFailed(f"committing: the engine no longer has the import session{self._why_gone(session)}. {_AGAIN}")
-            raise RestoreFailed(f"committing: the engine answered {status} {reason or message}. {_AGAIN}")
+            if status == 404 and reason == "no_such_session":
+                raise _Gone
+            if status in (400, 409):  # a refusal the engine made before starting anything
+                self._loading.discard(session.id)
+                raise RestoreFailed(f"committing: the engine answered {status} {reason or message}. {_AGAIN}")
+            raise RestoreOutcomeUnknown(
+                f"committing: the engine answered {status} {reason or message}, which does not say whether the load started. {self._maybe_loaded()}"
+            )
 
     def _judge(self, session: Session, index: FileIndex, body: dict[str, Any]) -> Outcome | None:
         """The outcome a status body states, or None while the load is still going. A body is committed only when its
-        state says so and its status text does not say it failed; a ``failed`` one is read as a failure even on a 200."""
+        state says so and its status text does not say it failed. A ``failed`` one is read as a failure even on a 200,
+        and is settled by the marker: committed only when it names this file (the engine's own words are a hint)."""
         state = str(body.get("state") or "")
         text = str(body.get("status") or "")
         notes = [str(n) for n in body.get("notes") or []]
@@ -531,11 +600,10 @@ class ImportClient:
             return Outcome("status", report, notes, None)
         if state == "failed" or text.startswith("failed"):
             self._live.pop(session.id, None)
-            if "import-marker" in text:  # the engine could not confirm its own COMMIT: the marker is the record
-                marker = self._marker_or_unknown(text)
-                if marker is not None and marker.get("header_sha256") == index.header_sha256:
-                    return Outcome("marker", {}, notes, marker)
-            raise RestoreFailed(f"the engine rolled the restore back ({text or 'failed'}). The tenant is as it was. Run nx backup restore again.")
+            marker = self._marker_or_unknown(f"the engine reports the load failed ({text or 'failed'})")
+            if marker is not None and marker.get("header_sha256") == index.header_sha256:
+                return Outcome("marker", {}, notes, marker)
+            raise RestoreFailed(f"the engine rolled the restore back ({text or 'failed'}). The tenant is as it was. Run the restore again.")
         return None
 
     def _after_gone(self, session: Session, index: FileIndex) -> Outcome:
@@ -546,7 +614,7 @@ class ImportClient:
             return Outcome("marker", {}, [], marker)
         raise RestoreFailed(
             "the engine no longer has the import session and the tenant's restore marker does not name this file, so the load "
-            "did not commit (it ends in one transaction, rolled back with the session). The tenant is as it was. Run nx backup restore again."
+            "did not commit (it ends in one transaction, rolled back with the session). The tenant is as it was. Run the restore again."
         )
 
     def _marker_or_unknown(self, why: str) -> dict[str, Any] | None:
@@ -565,9 +633,14 @@ class ImportClient:
             "(running nx backup restore on the same file says so if it did commit)."
         )
 
-    def _unknown_text(self, exc: _RequestFailed | None) -> str:
-        last = f" (last: {exc})" if exc is not None else ""
-        return f"the restore status could not be read to the end of the engine's load bound{last}. {self._maybe_loaded()}"
+    def _unknown_text(self, exc: _RequestFailed | None, last_seen: str) -> str:
+        if exc is None:
+            return (
+                f"the engine still reports the load as running ({last_seen or 'loading'}) past its own load bound and this client's "
+                f"wait for it. {self._maybe_loaded()}"
+            )
+        seen = f" The last status read said: {last_seen}." if last_seen else ""
+        return f"the restore status could not be read to the end of the engine's load bound (last: {exc}).{seen} {self._maybe_loaded()}"
 
     # -- cleanup ---------------------------------------------------------------------------------------------------
 
@@ -626,7 +699,7 @@ def run_restore(
     *,
     on_progress: Progress | None = None,
     on_note: Callable[[str], None] | None = None,
-    poll_interval_s: float = POLL_INTERVAL_S,
+    poll_interval_s: float | None = None,
 ) -> RestoreResult:
     """Restore *path* into the caller's own tenant.
 
@@ -641,7 +714,7 @@ def run_restore(
     note("Verifying the file.")
     try:
         verify_file(path)
-        index = index_file(path)
+        index = index_file(path, part_bytes=MAX_PART_BYTES)
     except TenantFileError as exc:
         raise RestoreRefused(f"{path} does not verify: {exc}. Nothing was sent to the engine; fix or re-take the backup.") from None
     try:
@@ -694,10 +767,15 @@ def _upload(client: ImportClient, session: Session, index: FileIndex, path: Path
                 except ValueError as exc:
                     raise RestoreFailed(f"table {name}: cannot cut a page into parts: {exc}. {_AGAIN}") from None
                 for data, _rows in parts:
+                    if session.max_bytes and sent + len(data) > session.max_bytes:
+                        raise RestoreFailed(
+                            f"table {name}: the next part would take the staged bytes past the engine's cap of {session.max_bytes} "
+                            f"(NX_IMPORT_MAX_BYTES). {_AGAIN}"
+                        )
                     client.put_part(session, name, part, data)
                     part += 1
                     sent += len(data)
                     if on_progress is not None:
-                        on_progress(sent, total, name, n, len(session.tables))
+                        on_progress(min(sent, total), total, name, n, len(session.tables))
             client.close_table(session, name, table.rows)
     return sent

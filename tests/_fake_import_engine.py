@@ -62,11 +62,17 @@ class FakeImportEngine:
         self, *, accepted: set[str] | None = None, release: str = "0.1.192", supported: bool = True,
         part_bytes: int = 8 * 1024 * 1024, load_max_seconds: int = 3600, skipped: dict[str, str] | None = None,
         load_polls: int = 1, busy_commits: int = 0, report: dict | None = None, notes: list[str] | None = None,
+        loaded_but_skipped: dict[str, str] | None = None, max_bytes: int = 8 << 30,
     ) -> None:
         self.accepted = accepted if accepted is not None else {"tok"}
         self.release, self.supported = release, supported
         self.part_bytes, self.load_max_seconds = part_bytes, load_max_seconds
+        #: tables the load skips and the open answer leaves out of ``tables`` (their parts answer ``skipped``)
         self.skipped = skipped or {}
+        #: tables named in BOTH ``tables`` and ``skipped_tables`` (a derived table the target already has rows for):
+        #: the engine still stages them, and the commit is refused ``tables_open`` until each is closed
+        self.loaded_but_skipped = loaded_but_skipped or {}
+        self.max_bytes = max_bytes
         #: status reads that answer ``loading`` before the load reads ``committed``
         self.load_polls = load_polls
         #: commits answered 503 restore_busy before one is accepted
@@ -227,8 +233,8 @@ class FakeImportEngine:
         self.sessions[sid] = _Session(sid, body, names)
         return Reply(body={
             "session_id": sid, "part_bytes": self.part_bytes, "idle_timeout_seconds": 600, "total_timeout_seconds": 3600,
-            "load_max_seconds": self.load_max_seconds, "max_bytes": 8 << 30, "tables": names,
-            "skipped_tables": self.skipped, "notes": self.notes,
+            "load_max_seconds": self.load_max_seconds, "max_bytes": self.max_bytes, "tables": names,
+            "skipped_tables": {**self.skipped, **self.loaded_but_skipped}, "notes": self.notes,
         })
 
     def _part(self, s: _Session, req: IReq) -> Reply:

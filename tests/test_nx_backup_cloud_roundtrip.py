@@ -27,7 +27,7 @@ from click.testing import CliRunner
 
 from nexus.backup import cloud_export as ce
 from nexus.backup.pg_backup import BackupRefused
-from nexus.backup.tenant_file import iter_copy_tuples, verify_file
+from nexus.backup.tenant_file import index_file, iter_copy_tuples, verify_file
 from nexus.cli import main
 from tests._engine_substrate import ensure_engine, minted_test_tenant
 
@@ -149,6 +149,8 @@ def _case_the_session_was_closed_so_a_second_export_succeeds(runner: CliRunner, 
     again = runner.invoke(main, ["backup", "--to", str(second)])
     assert again.exit_code == 0, again.output
     assert [t.rows for t in verify_file(second).tables] == [t.rows for t in verify_file(dest).tables]
+    # the restore marker names a file by its header SHA-256: two exports of one tenant must not share it
+    assert index_file(second).header_sha256 != index_file(dest).header_sha256
     assert {p.name for p in dest.parent.iterdir()} == {"tenant.nxtenant", "second.nxtenant"}
 
 

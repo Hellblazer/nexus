@@ -515,8 +515,9 @@ class TableIndex:
 @dataclass(frozen=True)
 class FileIndex:
     """What a restore needs from a file without holding it in memory: the header, the SHA-256 of the header
-    frame's payload (the marker the engine writes names it), the sum of the page bodies' bytes, and every
-    table's page positions."""
+    frame's payload (the marker the engine writes names it), ``row_bytes`` (the bytes the engine will stage: the
+    page bodies re-cut into parts, each with its own COPY header and trailer; the plain body total when
+    :func:`index_file` was not given a part size), and every table's page positions."""
 
     header: dict[str, Any]
     header_sha256: str
@@ -524,9 +525,10 @@ class FileIndex:
     tables: dict[str, TableIndex]
 
 
-def index_file(path: Path) -> FileIndex:
+def index_file(path: Path, part_bytes: int | None = None) -> FileIndex:
     """Walk *path*'s frames and record each page's position. It does not verify (call :func:`verify_file`
-    first): it reads only frame heads and page metadata, so it costs a few seeks per page, not the file.
+    first). Without *part_bytes* it reads only frame heads and page metadata, a few seeks per page; with it, each
+    page body is read once more to total the bytes the engine will stage (:func:`staged_bytes`).
 
     Raises :class:`TenantFileError` on a structure it cannot walk."""
     try:
@@ -577,7 +579,14 @@ def index_file(path: Path) -> FileIndex:
                     raise TenantFileError(f"table {current}: a page's metadata runs past its frame", current)
                 pages.append(PageRef(body_start + 4 + mlen, size, rows, sha))
                 table_rows += rows
-                row_bytes += size
+                if part_bytes is None:
+                    row_bytes += size
+                else:
+                    fh.seek(body_start + 4 + mlen)
+                    try:
+                        row_bytes += staged_bytes(fh.read(size), part_bytes)
+                    except ValueError as exc:
+                        raise TenantFileError(f"table {current}: a page cannot be cut into parts: {exc}", current) from None
                 fh.seek(body_start + length)
                 continue
             payload = fh.read(length)
@@ -661,3 +670,8 @@ def split_copy_body(body: bytes, max_part_bytes: int) -> list[tuple[bytes, int]]
     if chunk_rows:
         parts.append((head + bytes(view[chunk_start:pos]) + trailer, chunk_rows))
     return parts
+
+
+def staged_bytes(body: bytes, max_part_bytes: int) -> int:
+    """The bytes the engine stages for one page: the sum of its parts (:func:`split_copy_body`)."""
+    return sum(len(part) for part, _rows in split_copy_body(body, max_part_bytes))

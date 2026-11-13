@@ -5,7 +5,7 @@ A verb the user runs, nothing else: no other command, hook or daemon calls it. L
 database (:mod:`nexus.backup.pg_backup`); managed (cloud) mode pulls the caller's own tenant through the engine's
 export session into one ``.nxtenant`` file (:mod:`nexus.backup.cloud_export`, RDR-248); ``--check FILE`` verifies such
 a file offline (:mod:`nexus.backup.tenant_file`); ``restore FILE`` loads such a file into the caller's own, empty
-tenant through the engine's import session (:mod:`nexus.backup.cloud_import`), in cloud and local mode alike.
+tenant through the engine's import session (:mod:`nexus.backup.cloud_import`) with a tenant or data token.
 ``tests/test_nx_backup_pin.py`` fails on a Python import or a command line that runs any of it from anywhere but
 here (see that module's docstring for what the scan can and cannot see).
 """
@@ -292,10 +292,14 @@ def restore(file: Path) -> None:
     refer to each other and not to the old tenant's ids. Do not use the tenant until the verb reports the outcome:
     a write during the upload makes the engine refuse the load.
 
-    Works against the managed service and a local engine alike (the tenant or data token in `service_token` decides
-    which tenant it is). An engine older than the import routes is refused, naming the release that has them. If the
-    connection drops while the load runs, the verb reads the engine's status, and after an engine restart its
-    restore marker, and says whether the load committed.
+    Needs a tenant or data token for the empty tenant. On the managed service that is the `service_token` the operator
+    issued. A local engine is the same routes, but this install's own token there is the supervisor's operator token,
+    which the import refuses; restore into a tenant you created with `nx service token issue --tenant <tenant>` and
+    export that token as NX_SERVICE_TOKEN (a local install reads the token from that variable). Restoring into the
+    local default tenant is not possible today. An engine older than the import routes is refused, naming the release
+    that has them. If the connection drops while the load runs, the verb reads the engine's status, and after an
+    engine restart its restore marker, and says whether the load committed; if it cannot learn that it says so and
+    leaves the load alone.
     """
     try:
         client = cloud_import.connect()
