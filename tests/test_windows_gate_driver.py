@@ -2048,15 +2048,15 @@ def test_the_restore_resumes_a_saved_guest_without_the_offline_boot() -> None:
     saved = after.index("if ($st -ne 'Saved')")
     start = after.index("Start-VM -Name $vm")
     assert saved < start and "exit 6" in after[saved:start]
-    resume_branch = after[after.index("if ($resume) {\n    $st"):after.index("} elseif ($offline) {")]
+    resume_branch = after[after.index("if ($resuming) {\n    $st"):after.index("} elseif ($offline) {")]
     assert "Disconnect-VMNetworkAdapter" not in resume_branch and "Add-VMNetworkAdapter" not in resume_branch
     # once Start-VM has resumed it, the adapter is on the Default Switch before the quiet block and the probe
     after_start = after[start:]
     assert after_start.index("Connect-VMNetworkAdapter -SwitchName 'Default Switch'") < after_start.index("$quietBlock; $quieted = $true")
-    assert "if ($resume) { $offline = $false }" in after[:start]
+    assert "if ($resuming) { $offline = $false }" in after[:start]
     # a stale NAT lease: once, and only for a resumed guest whose probe has failed three times
     loop = after[after.index("for ($i = 0; $i -lt 60; $i++)"):]
-    assert "if ($resume -and -not $ok -and $i -ge 2 -and -not $renewed) {" in loop
+    assert "if ($resuming -and -not $ok -and $i -ge 2 -and -not $renewed) {" in loop
     assert loop.count("$renew = { ipconfig /renew 2>&1 | Out-String }") == 1 and "$renewed = $true" in loop
     assert loop.index("Invoke-WebRequest https://pypi.org/simple/") < loop.index("$renew = {")
     # the quiet block still runs for a resumed guest, and the gate script is copied in as always
@@ -2066,7 +2066,7 @@ def test_the_restore_resumes_a_saved_guest_without_the_offline_boot() -> None:
     assert renew.index("$rn = Invoke-Command") < renew.index("$renewed = $true") < renew.index("} catch {")
     assert loop.count("$renewed = $true") == 1
     # the resumed guest's clock: printed against the host's, one w32tm /resync, printed again, nothing gating
-    clock = code[code.index("if ($resume) {\n    function ClockDelta"):code.index("$rc = 0")]
+    clock = code[code.index("if ($resuming) {\n    function ClockDelta"):code.index("$rc = 0")]
     assert clock.index("before the resync") < clock.index("w32tm /resync") < clock.index("after the resync")
     assert clock.count("$resync = { w32tm /resync") == 1 and "exit" not in clock
     assert code.index("if (-not $ok) { 'NXG-RESULT: FAIL the guest has no network'; exit 4 }") < code.index("function ClockDelta")
@@ -2378,3 +2378,23 @@ def test_the_existing_check_evaluator_and_the_type_exit_are_pinned_literally() -
     branch = block[: block.index("\n}\n") + 3]
     assert branch.rstrip().endswith("exit 7\n}"), branch  # the failure branch exits 7 before anything says ok
     assert "a partial checkpoint named $Name may still exist" in cp
+
+
+
+def test_no_driver_script_assigns_to_one_of_its_own_parameters_in_any_case() -> None:
+    # 2026-11-13 build start: restore.ps1 had `$resume = $Resume -eq 'yes'`. PowerShell variable names are
+    # case-blind, so that assigned the -Resume parameter, its ValidateSet refused the bool, $resume kept the string
+    # 'no' (true), and a baseline restore took the resume branch. Text pins and the parser cannot see it.
+    found = []
+    for f in sorted(DRIVER.glob("*.ps1")):
+        src = f.read_text(encoding="utf-8")
+        m = re.search(r"param\((.*?)\n\)", src, re.S)
+        if not m:
+            continue
+        params = {p.lower() for p in re.findall(r"\]\s*\$(\w+)", m.group(1))}
+        body = src[m.end():]
+        for ln in body.splitlines():
+            a = re.match(r"\s*\$(\w+)\s*=(?!=)", ln)
+            if a and a.group(1).lower() in params:
+                found.append(f"{f.name}: {ln.strip()}")
+    assert not found, found

@@ -103,9 +103,9 @@ for ($i = 0; $i -lt 5; $i++) { "nic count ${i}x3s after the restore = $(Nics)"; 
 # which needs no network, and the adapter connects to the Default Switch only after it applied: in the
 # 2026-11-07 attribution 213 MiB (Edge's self-update alone 78 MiB) left in the 40 s before the block ran.
 $offline = $Cache -eq 'yes'
-$resume = $Resume -eq 'yes'
-if ($resume) { $offline = $false }
-if ($resume) {
+$resuming = $Resume -eq 'yes'  # not $resume: PowerShell names are case-blind, and that would assign the -Resume parameter, whose ValidateSet refuses a bool
+if ($resuming) { $offline = $false }
+if ($resuming) {
     $st = (Get-VM -Name $vm).State
     "resume: state after the restore = $st"
     if ($st -ne 'Saved') { "NXG-RESULT: FAIL -Resume yes, but the guest is $st after the restore, not Saved: $cp is not a running (Standard) checkpoint"; exit 6 }
@@ -117,7 +117,7 @@ if ($resume) {
 Start-VM -Name $vm -ErrorAction Stop
 "started at $((Get-Date).ToUniversalTime().ToString('o'))"
 Start-Sleep 5
-if ($resume) {
+if ($resuming) {
     EnsureNic 'after the resume'
     Get-VMNetworkAdapter -VMName $vm | Connect-VMNetworkAdapter -SwitchName 'Default Switch' -ErrorAction Stop
     "nic count after the resume = $(Nics), connected to the Default Switch"
@@ -158,7 +158,7 @@ $quietBlock = {
 $quieted = $Cache -ne 'yes'
 if ($quieted) { "quiet-updates: not with -Cache $Cache" }
 $ok = $false; $connected = $false; $lastError = $null; $renewed = $false
-if ($resume) { $connected = $true }
+if ($resuming) { $connected = $true }
 for ($i = 0; $i -lt 60; $i++) {
     if ($i -gt 0 -and ($i % 6) -eq 0 -and (Nics) -eq 0) {
         if ($offline -and -not $connected) { Add-VMNetworkAdapter -VMName $vm -ErrorAction SilentlyContinue; "re-added a disconnected NIC in the network wait, iteration $i" }
@@ -175,7 +175,7 @@ for ($i = 0; $i -lt 60; $i++) {
         $r = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop { try { (Invoke-WebRequest https://pypi.org/simple/ -Method Head -UseBasicParsing -TimeoutSec 10).StatusCode } catch { 0 } }
         if ($r -eq 200) { $ok = $true; break }
     } catch { $lastError = ("" + $_.Exception.Message).Split("`n")[0].Trim() }
-    if ($resume -and -not $ok -and $i -ge 2 -and -not $renewed) {
+    if ($resuming -and -not $ok -and $i -ge 2 -and -not $renewed) {
         try {
             $renew = { ipconfig /renew 2>&1 | Out-String }
             $rn = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop $renew
@@ -192,7 +192,7 @@ $v = Get-VM -Name $vm
 if (-not $ok) { 'NXG-RESULT: FAIL the guest has no network'; exit 4 }
 # A resumed guest's clock is where the checkpoint left it, minutes to days behind the host's. Print the difference,
 # resync once, print it again. Nothing here gates the run (the stale clock is the reading, not a verdict).
-if ($resume) {
+if ($resuming) {
     function ClockDelta {
         $hostNow = (Get-Date).ToUniversalTime()
         $g = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop { (Get-Date).ToUniversalTime().ToString('o') }
