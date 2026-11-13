@@ -105,7 +105,12 @@ _SORT_NODE = re.compile(r"^\s*(->\s*)?(Incremental )?Sort\s+\(cost=", re.M)
 
 
 def plan_has_sort(plan: str) -> bool:
-    """True when an EXPLAIN text has a Sort or Incremental Sort NODE (a ``Sort Key:`` line alone is not one)."""
+    """True when an EXPLAIN text has a Sort or Incremental Sort NODE (a ``Sort Key:`` line alone is not one).
+
+    A text that is not a finished EXPLAIN ANALYZE (an error, an empty capture) raises, so the check cannot pass on it.
+    """
+    if "Execution Time" not in plan:
+        raise ValueError(f"not an EXPLAIN ANALYZE plan: {plan[:200]!r}")
     return _SORT_NODE.search(plan) is not None
 
 

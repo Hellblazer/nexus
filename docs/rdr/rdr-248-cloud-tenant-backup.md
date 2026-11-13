@@ -591,7 +591,7 @@ the limit.
   `(tenant_id, timestamp DESC)` and `(tenant_id, ttl, timestamp)`), so for an id-keyed table a page costs the cheaper
   of two plans, the key-order scan (rows returned over the tenant's share, so growing with the whole table) and a sort of
   the tenant's remaining rows (growing with the tenant). The planner takes the cheaper per page, and the key-order scan
-  reads page rows divided by the share, so it does not grow with the table.
+  reads page rows divided by the share, so at a fixed share it does not grow with the table.
 - `memory`, middle shares of the same 4,000,000-row table (0.5%, 1%, 2%, 5%: 20,000 to 199,000 rows): worst page
   response start 0.55 s (5%, page 0 with its count), whole exports 0.37 to 2.24 s; the plan flips between the sort
   (0.5%, 1%, the 2% first page) and the filtered key-order scan (the 2% deep page, 5%). Extrapolated, not measured, to
