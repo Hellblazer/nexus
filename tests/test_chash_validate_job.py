@@ -563,7 +563,9 @@ class TestDoctorWiring:
             assert len(health._check_chash_validate_offer()) == rows
         monkeypatch.setattr(health, "_chash_constraints_validated_by_engine", lambda: False)
         row = health._check_chash_validate_offer()[0]
-        assert row.warn is True and row.fix_suggestions[0].startswith("nx t3 validate-chash-checks")
+        # informational: a fresh schema starts not validated, so a ⚠ would greet every new install (8.2.1 battery)
+        assert row.ok is True and row.warn is False
+        assert row.fix_suggestions[0].startswith("nx t3 validate-chash-checks")
 
     def test_on_a_managed_install_the_row_says_ask_the_operator(self, monkeypatch) -> None:
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
