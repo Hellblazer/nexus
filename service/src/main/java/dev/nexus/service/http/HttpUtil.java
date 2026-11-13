@@ -416,7 +416,7 @@ public final class HttpUtil {
      *       malformed_after} (400), {@code export_session_exists} and {@code page_in_flight} (409, the
      *       latter with {@code Retry-After}), {@code
      *       session_closed} (410), {@code export_capacity_full} (503, with {@code retry_after_seconds}) and
-     *       {@code export_page_busy} (503, with {@code Retry-After}: a lock bound or the page's time budget). The client's copy of these values lands with the client half of
+     *       {@code export_page_busy} (503, with {@code Retry-After}: a lock bound) and {@code export_page_over_budget} (503, no {@code Retry-After}: the page's time budget). The client's copy of these values lands with the client half of
      *       RDR-248 (nexus-csayy.3).</li>
      * </ul>
      * The typed 409 bodies predate the rule and discriminate on {@code status}

@@ -305,6 +305,31 @@ def test_a_503_with_retry_after_waits_as_told_and_one_without_uses_the_ladder(tm
     assert sleeps.seconds == [7.0, ce.BACKOFF_LADDER[0]]
 
 
+def test_a_page_cancelled_at_the_engines_budget_is_a_failed_page_and_ends_naming_the_budget(tmp_path: Path) -> None:
+    """503 export_page_over_budget takes the five tries and the backoff ladder, never the busy budget, and the message
+    names the engine's page budget and says to report it."""
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(503, {"error": "over", "reason": "export_page_over_budget", "page_budget_ms": 20000}) if r.kind == "rows" else None)
+        with pytest.raises(BackupFailed, match="20 s page budget") as err:
+            run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+        failing = engine.requests("rows")
+    text = str(err.value)
+    assert "report" in text and "export_page_over_budget" in text and "will not help" in text
+    assert len(failing) == ce.PAGE_ATTEMPTS and len({tuple(r.query.items()) for r in failing}) == 1, "the same page, tried the attempts"
+    assert sleeps.seconds == list(ce.BACKOFF_LADDER), "the ladder, not a Retry-After wait and not the busy budget"
+    assert sum(sleeps.seconds) < ce.BUSY_WAIT_BUDGET_S
+    assert _entries(tmp_path) == set()
+
+
+def test_a_page_over_the_budget_once_is_retried_and_the_export_completes(tmp_path: Path) -> None:
+    sleeps = Sleeps()
+    with FakeEngine(standard_tables()) as engine:
+        engine.script.append(lambda r: Reply(503, {"error": "over", "reason": "export_page_over_budget"}) if r.kind == "rows" and r.nth == 0 else None)
+        run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
+    assert sleeps.seconds == [ce.BACKOFF_LADDER[0]]
+
+
 def test_a_page_in_flight_409_waits_its_retry_after(tmp_path: Path) -> None:
     sleeps = Sleeps()
     with FakeEngine(standard_tables()) as engine:

@@ -244,8 +244,12 @@ routes" in its Step 5. This export is that route in the only shape the cloud edg
 exchange, 20 MB a body). What RDR-241 forbids is a client walking live tables whose size and state it does
 not control: each page then costs more as the tenant grows, and the walk reads a table that is changing
 under it. Here the engine holds one snapshot and the client pages that, through routes that exist only for
-the export. A page is cut by bytes, so its cost does not depend on the tenant's size; every page reads the
-same state; the table whitelist is the registry's; and the engine, not the client, bounds the session (idle
+the export. A page is cut by bytes. On a table whose key leads with the tenant (chunks, manifests, topic
+assignments) the page reads in key order, so its cost does not depend on the tenant's size (gate N1 found the
+planner sorting instead, and the page transaction now forbids the sort). On a table keyed by `id` alone (memory,
+plans, aspects) a page costs the cheaper of a key-order scan of the shared table and a sort of the tenant's
+remaining rows, so it can grow with the table and the tenant's share, and the 20 s page budget, not the tenant,
+bounds it (see Risks). Every page reads the same state; the table whitelist is the registry's; and the engine, not the client, bounds the session (idle
 10 minutes, 60 minutes in all). RDR-241's ratchet of walk shapes lists no call of these routes, and
 RDR-241 Step 5 should read "streamed" as "a session of short requests over an engine-held snapshot" when
 it lands.
@@ -388,6 +392,15 @@ exporter; every new table needs a new exporter.
   tenant create is pending; a tenant create during a load waits a short window, then gets a retry-after;
   the Step 6 scale run records how long the window is.
 
+- **Risk**: a page of a table keyed by `id` alone costs the cheaper of a key-order scan over the shared
+  table and a sort of the tenant's remaining rows (no `(tenant_id, id)` index exists), so a tenant holding a
+  middling share of a very large shared table can pass the 20 s page budget and never back up.
+  **Mitigation**: the engine answers such a page `export_page_over_budget` and logs the tenant, table and
+  time, and the client fails it as a page failure (not a busy wait), naming the budget. Measured shares are in
+  Performance Expectations. **Owner and trigger**: a `(tenant_id, id)` Liquibase index on the id-keyed tables is
+  Sam's decision, taken when any id-keyed page starts its response in more than 5 s (Activation Step 2 or any
+  later export) or the over-budget log line fires.
+
 ### Failure Modes
 
 - A page request fails: the client asks again from the same key; after a bounded number of tries it
@@ -443,6 +456,10 @@ operator task from the file.
 #### Activation Step 1: Engine release carrying the export routes (Phase 1), then the cloud deploy (Sam's go); the restore routes ride a later release
 
 #### Activation Step 2: A cloud export of a test tenant in an announced window (bob), time and size recorded; after Phase 2, a cloud round trip
+
+The export records, beside time and size: the per-page response start for every page (chunks and the
+id-keyed tables, against the 5 s trigger in Risks), NX_POOL_SIZE and PG max_connections against the export
+cap, and any over-budget or busy answers. A tenant near nexus's size (about 540,000 chunks) is the target.
 
 ### Day 2 Operations
 
@@ -573,9 +590,14 @@ the limit.
   `memory` index delivers `(tenant_id, id)` order (the tenant indexes are `(tenant_id, project)`, `(tenant_id, agent)`,
   `(tenant_id, timestamp DESC)` and `(tenant_id, ttl, timestamp)`), so for an id-keyed table a page costs the cheaper
   of two plans, the key-order scan (rows returned over the tenant's share, so growing with the whole table) and a sort of
-  the tenant's remaining rows (growing with the tenant). The worst tenant is the one between the two, which this run did
-  not seed (the 10% tenant above and the 1,000-row tenant are on either side of it). Only a `(tenant_id, id)` index on
-  these tables would make their pages cost the rows returned; adding one to the large cloud tables is a separate decision.
+  the tenant's remaining rows (growing with the tenant). The planner takes the cheaper per page, and the key-order scan
+  reads page rows divided by the share, so it does not grow with the table.
+- `memory`, middle shares of the same 4,000,000-row table (0.5%, 1%, 2%, 5%: 20,000 to 199,000 rows): worst page
+  response start 0.55 s (5%, page 0 with its count), whole exports 0.37 to 2.24 s; the plan flips between the sort
+  (0.5%, 1%, the 2% first page) and the filtered key-order scan (the 2% deep page, 5%). Extrapolated, not measured, to
+  40,000,000 rows: the worst share moves to about 0.5 to 1% at about 1.4 to 1.9 s a page with parallel workers, about
+  6 s without. A cold or cloud volume ten times slower would put that near the 20 s budget, which is why Risks names
+  an owner and a trigger for a `(tenant_id, id)` index.
 - Connections: the pool holds 10; PostgreSQL saw at most 13 `nexus_svc` backends (an evicted connection closing while its
   replacement opens), of 100 `max_connections`. A cut page discards its connection (`TenantExportReads.release`), so the
   engine opened one new connection per cut page: 139 sessions by the engine for 138 cut pages.
@@ -651,3 +673,4 @@ tenants. Nothing to trim.
 - 2026-11-11: Accepted by Sam, with export first and restore next, and the restore load's block on tenant create bounded (folded into the Implementation Plan and Risks).
 - 2026-11-11: Export session total bound set to 60 minutes (Sam, by dialog via halcyon: "60 minutes"; a larger export fails loudly and names the limit); amended under standing grant 3.
 - 2026-11-12: Performance Expectations amended with the gate N1 scale run (nexus-csayy.4), and again with the page-plan fix and its before/after numbers.
+- 2026-11-12: Phase 1 review gate (nexus-csayy.4): the not-a-client-walk paragraph corrected for id-keyed tables; Risks gains the id-keyed page cost with its owner and trigger; Activation Step 2 names what it records. Amended under standing grant 3.

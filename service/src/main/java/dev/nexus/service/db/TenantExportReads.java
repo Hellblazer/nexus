@@ -68,15 +68,30 @@ public final class TenantExportReads {
     }
 
     /**
-     * A read could not take a table lock inside its lock bound, or ran past its time budget (statement timeout);
-     * retryable.
+     * A read could not take a table lock inside its lock bound; retryable (the lock clears when its holder ends).
      */
     public static final class PageBusyException extends RuntimeException {
         public PageBusyException(Throwable cause) {
-            super("export read waited too long for a table lock or ran past its time budget", cause);
+            super("export read waited too long for a table lock", cause);
         }
 
         PageBusyException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * A read was cancelled at its time budget (SQLSTATE 57014 from the budget's {@code statement_timeout}, or the budget
+     * spent before the next statement). Not the same as {@link PageBusyException}: a lock wait clears when the other
+     * transaction ends, and a statement that ran out of its budget is likely to run out again, so a client repeats it
+     * a few times and then reports it, instead of waiting it out.
+     */
+    public static final class PageOverBudgetException extends RuntimeException {
+        public PageOverBudgetException(Throwable cause) {
+            super("export read cancelled at its page time budget", cause);
+        }
+
+        PageOverBudgetException(String message) {
             super(message);
         }
     }
@@ -186,7 +201,8 @@ public final class TenantExportReads {
                 finished = true;
                 txn.discard = true;   // the cancel leaves the driver behind the server: see release()
             } catch (IOException | SQLException e) {
-                throw retryable(e) ? new PageBusyException(e) : new IllegalStateException(
+                RuntimeException limited = timeLimited(e);
+                throw limited != null ? limited : new IllegalStateException(
                     "export page copy failed for " + table.name(), e);
             } finally {
                 // any other way out (a failed copy, a sink that threw, a cancelled statement) leaves the connection
@@ -316,25 +332,28 @@ public final class TenantExportReads {
         conn.unwrap(PGConnection.class).getCopyAPI().copyOut(copy, sink);
     }
 
-    /** A lock wait that ran out of its bound, or a statement cancelled at the time budget: both are retried. */
-    private static boolean retryable(Throwable e) {
+    /**
+     * What a failed statement means to the caller: {@link PageBusyException} for a lock wait that ran out of its bound,
+     * {@link PageOverBudgetException} for a statement cancelled at the time budget, null for any other failure.
+     */
+    private static RuntimeException timeLimited(Throwable e) {
         for (Throwable c = e; c != null; c = c.getCause()) {
-            if (c instanceof SQLException s
-                    && (LOCK_NOT_AVAILABLE.equals(s.getSQLState()) || QUERY_CANCELED.equals(s.getSQLState()))) {
-                return true;
+            if (c instanceof SQLException s) {
+                if (QUERY_CANCELED.equals(s.getSQLState())) return new PageOverBudgetException(e);
+                if (LOCK_NOT_AVAILABLE.equals(s.getSQLState())) return new PageBusyException(e);
             }
         }
-        return false;
+        return null;
     }
 
     /**
      * Restarts the statement bound at what is left of the read's budget, so the statements of one read share one
-     * budget instead of each having its own. Spent: the read is refused as busy, before it starts another statement.
+     * budget instead of each having its own. Spent: the read is refused as over budget, before it starts another statement.
      */
     private static void rebound(Txn txn) {
         long left = (txn.deadlineNanos - System.nanoTime()) / 1_000_000L;
         if (left < 1) {
-            throw new PageBusyException("the export read used its whole time budget before its next statement");
+            throw new PageOverBudgetException("the export read used its whole time budget before its next statement");
         }
         PgSession.setLocal(txn.ctx, "statement_timeout", Long.toString(left));
     }
@@ -425,11 +444,14 @@ public final class TenantExportReads {
             txn = new Txn(conn, ctx, deadline);
             return work.apply(txn);
         } catch (org.jooq.exception.DataAccessException e) {
-            // a statement inside the read (jOOQ wraps the driver's exception): a lock wait that ran out is retryable
-            if (retryable(e)) throw new PageBusyException(e);
+            // a statement inside the read (jOOQ wraps the driver's exception): a lock wait that ran out, or a statement
+            // cancelled at the time budget
+            RuntimeException limited = timeLimited(e);
+            if (limited != null) throw limited;
             throw e;
         } catch (SQLException e) {
-            throw retryable(e) ? new PageBusyException(e) : new IllegalStateException("export read failed", e);
+            RuntimeException limited = timeLimited(e);
+            throw limited != null ? limited : new IllegalStateException("export read failed", e);
         } finally {
             release(conn, txn != null && txn.discard);
         }

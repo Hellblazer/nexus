@@ -24,6 +24,10 @@ What the driver does on each answer (the csayy.2 review gate's client rules):
   ``export_page_busy`` or 409 ``page_in_flight`` is not a failure: it waits the ``Retry-After`` the engine gives, on
   its own budget (:data:`BUSY_WAIT_BUDGET_S` per request, which one last wait can overshoot), not the tries. When
   the tries or the budget run out the session is closed, the partial file removed, and the message says to run again.
+* A 503 ``export_page_over_budget`` is the engine cancelling the page at its page time budget (20 s by default). It
+  is a FAILED page, never a busy one: it takes the tries and the backoff ladder like any failure, and never the busy
+  budget, because a statement that ran out of its budget is likely to run out again. When the tries run out the run
+  fails naming the budget and saying to report it.
 * A 404 or 410 on the client's OWN session id means the engine forgot it (it restarted, the session expired, the
   request reached another instance): start over with a new session, at most :data:`MAX_RESTARTS` times, and past
   the session's ``expires_at`` fail naming the engine's limit instead.
@@ -262,6 +266,17 @@ def _reason(resp: httpx.Response) -> tuple[str, str]:
     return "", ""
 
 
+def _page_budget_s(resp: httpx.Response) -> float:
+    """The engine's page time budget in seconds, from the ``page_budget_ms`` of an ``export_page_over_budget`` body (20 s, the
+    engine's default, when the body does not carry it)."""
+    try:
+        body = resp.json()
+        ms = float(body["page_budget_ms"]) if isinstance(body, dict) else 0.0
+    except (ValueError, KeyError, TypeError):
+        ms = 0.0
+    return ms / 1000.0 if ms > 0 else 20.0
+
+
 def _retry_after(resp: httpx.Response) -> float | None:
     raw = resp.headers.get("Retry-After")
     try:
@@ -323,6 +338,7 @@ class ExportClient:
         reauths = 0
         waited = 0.0
         while True:
+            over_budget_s: float | None = None   # set when this try was cancelled at the engine's page budget
             sent = self._creds.bearer()
             _check_bearer(sent)
             headers = {"Authorization": f"Bearer {sent}", **client_identity_headers()}
@@ -383,9 +399,17 @@ class ExportClient:
                         continue
                     if status in (400, 404, 405, 409):
                         raise BackupFailed(f"{what}: the engine answered {status} {reason or message}. {_AGAIN}")
+                    if status == 503 and reason == "export_page_over_budget":
+                        over_budget_s = _page_budget_s(resp)
                     problem = f"HTTP {status} {reason or message}".strip()
                     delay = retry_after if status == 503 else None
             failures += 1
+            if failures >= PAGE_ATTEMPTS and over_budget_s is not None:
+                raise BackupFailed(
+                    f"{what}: the engine cancelled this page {failures} times in a row at its {over_budget_s:g} s page budget "
+                    "(503 export_page_over_budget), so the page is too slow for it to read. Retrying will not help: report this "
+                    "to the Nexus operator, naming the table. The backup was not kept."
+                )
             if failures >= PAGE_ATTEMPTS:
                 raise BackupFailed(f"{what} failed {failures} times in a row (last: {problem}). {_AGAIN}")
             self._sleep(delay if delay is not None else BACKOFF_LADDER[failures - 1])
@@ -641,8 +665,8 @@ def run_export(
                     ) from None
                 if restart == max_restarts:
                     raise BackupFailed(
-                        f"the engine forgot the export session {max_restarts + 1} times (it restarted, or the request "
-                        f"reached another instance). {_AGAIN}"
+                        f"the engine forgot the export session {max_restarts + 1} times (it restarted, the request "
+                        f"reached another instance, or another nx backup of this tenant replaced it). {_AGAIN}"
                     ) from None
                 note("The engine ended the export session; starting over with a new one.")
                 continue

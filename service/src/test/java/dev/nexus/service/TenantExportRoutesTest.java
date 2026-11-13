@@ -643,7 +643,7 @@ class TenantExportRoutesTest {
     }
 
     @Test
-    void aPageThatWaitsOutItsLockOrItsTimeBudgetIs503ExportPageBusyWithRetryAfter() throws Exception {
+    void aPageThatWaitsOutItsLockIs503ExportPageBusyWithRetryAfter() throws Exception {
         service.exportSessions(new TenantExportSessions(ds,
             TenantExportSessions.Config.defaults().withLockTimeoutMs(300).withSweepInterval(Duration.ofHours(1)),
             java.time.Clock.systemUTC()));
@@ -656,21 +656,27 @@ class TenantExportRoutesTest {
             holder.rollback();
         }
         assertThat(rowsBytes(A_TOKEN, id, rowsQuery("memory", null)).statusCode()).as("retried, it reads").isEqualTo(200);
+    }
 
-        // the time budget, with a lock bound far above it: the statement timeout ends the wait
+    @Test
+    void aPageCancelledAtItsTimeBudgetIs503ExportPageOverBudgetWithNoRetryAfterAndTheBudgetInItsBody() throws Exception {
+        // the time budget forced low, with a lock bound far above it: the statement timeout (SQLSTATE 57014) ends the wait
         service.exportSessions(new TenantExportSessions(ds,
             TenantExportSessions.Config.defaults().withLockTimeoutMs(60_000).withPageBudgetMs(400)
                 .withSweepInterval(Duration.ofHours(1)), java.time.Clock.systemUTC()));
-        var id2 = open(A_TOKEN).get("session_id").asText();
+        var id = open(A_TOKEN).get("session_id").asText();
         try (Connection holder = lockedBy(MEMORY)) {
             long t0 = System.nanoTime();
-            var budget = rowsBytes(A_TOKEN, id2, rowsQuery("memory", null));
+            var budget = rowsBytes(A_TOKEN, id, rowsQuery("memory", null));
             assertThat(budget.statusCode()).as("time budget").isEqualTo(503);
-            assertThat(new String(budget.body(), StandardCharsets.UTF_8)).contains("export_page_busy");
-            assertThat(budget.headers().firstValue("Retry-After")).contains("1");
+            var body = MAPPER.readTree(budget.body());
+            assertThat(body.get("reason").asText()).isEqualTo("export_page_over_budget");
+            assertThat(body.get("page_budget_ms").asInt()).isEqualTo(400);
+            assertThat(budget.headers().firstValue("Retry-After")).as("a repeat meets the same limit: no wait is asked").isEmpty();
             assertThat(Duration.ofNanos(System.nanoTime() - t0)).isLessThan(Duration.ofSeconds(15));
             holder.rollback();
         }
+        assertThat(rowsBytes(A_TOKEN, id, rowsQuery("memory", null)).statusCode()).as("and it is not sticky").isEqualTo(200);
     }
 
     @Test

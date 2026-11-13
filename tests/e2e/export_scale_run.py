@@ -34,9 +34,11 @@ What it does, in order:
    COPY statements the engine actually sent, read back out of the server log), and the engine's export log lines.
 
 "Does time grow with depth" is computed, not eyeballed: the mean of the last decile of chunk pages against the first
-decile, and the least-squares slope of response-start over page index. A deep-page regression is a ship-blocker
-(nexus-csayy.4), so the script exits 3 when the last decile's mean response-start is more than twice the first's AND
-more than 0.5 s over it.
+decile, and the least-squares slope of response-start over page index. A page time that depends on depth is a
+ship-blocker in EITHER direction (nexus-csayy.4): rising with depth is a page whose cost grows with what was already
+sent, and FALLING with depth is a page whose cost grows with the rows left (the sorted keyset plan the engine used to
+run, whose pages got faster as the table drained, 1.59 s to 0.30 s). So the script exits 3 when the first and last
+deciles' mean response-starts differ by more than 2x (either way round) AND by more than 0.5 s.
 """
 
 from __future__ import annotations
@@ -89,9 +91,22 @@ _COLLECTION = "knowledge__scalerun__bge-base-en-v15-768__v1"
 _MEMORY_ROWS = 2_000_000
 _NOISE_TENANTS = 9
 _SMALL_TENANT_ROWS = 1_000
+# middle-share tenants of the id-keyed table: percent -> (modulus, residue) of the id; the residue classes are disjoint from each
+# other, from the main tenant (g % 10 = 0) and from the small tenant, and spread evenly over the id range
+_SHARES: dict[str, tuple[int, int]] = {"5": (20, 1), "2": (50, 2), "1": (100, 3), "0.5": (200, 4)}
 _ENGINE_PIN = "SET LOCAL enable_sort = off; "   # what TenantExportReads.pinOrderedScan sets, for a table whose key leads with tenant_id
 _BATCH = 50_000
 _EXIT_DEEP_PAGE_REGRESSION = 3
+_EXIT_PINNED_PLAN_SORTS = 4
+#: Tables measured here whose primary key leads with ``tenant_id``: the engine's page transaction pins their planner to an
+#: ordered index scan (``TenantExportReads.pinOrderedScan``), so a Sort in their deep-page plan is the bug coming back.
+_PINNED_TABLES = ("chunks",)
+_SORT_NODE = re.compile(r"^\s*(->\s*)?(Incremental )?Sort\s+\(cost=", re.M)
+
+
+def plan_has_sort(plan: str) -> bool:
+    """True when an EXPLAIN text has a Sort or Incremental Sort NODE (a ``Sort Key:`` line alone is not one)."""
+    return _SORT_NODE.search(plan) is not None
 
 
 class _StaticCredentials:
@@ -224,7 +239,12 @@ class Engine:
 # -- seeding ------------------------------------------------------------------------------------------------
 
 
-def _seed(cluster: Cluster, chunks: int, memory_rows: int, small_rows: int, say: Callable[[str], None]) -> None:
+def _share_name(percent: str) -> str:
+    return "scale-share-" + percent.replace(".", "p")
+
+
+def _seed(cluster: Cluster, chunks: int, memory_rows: int, small_rows: int, say: Callable[[str], None],
+          shares: list[str] | None = None) -> None:
     """Chunks, their manifest and documents, and an id-keyed table, by SQL as the superuser."""
     t, coll, model = _TENANT, _COLLECTION, _MODEL
     say("seed: collection and documents")
@@ -259,9 +279,11 @@ FROM generate_series({lo}, {hi}) g;
     say("seed: memory rows")
     # the small tenant's rows are spread evenly over the id range: one row in every small_every, as a small tenant's are in a shared table
     small_every = memory_rows // small_rows if small_rows > 0 else 0
+    share_cases = " ".join(f"WHEN g % {_SHARES[p][0]} = {_SHARES[p][1]} THEN '{_share_name(p)}'" for p in shares or [])
     cluster.psql_script(f"""
 INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp)
 SELECT CASE WHEN {small_every} > 0 AND g % {small_every} = 1 THEN '{_SMALL_TENANT}'
+            {share_cases}
             WHEN g % {_NOISE_TENANTS + 1} = 0 THEN '{t}' ELSE 'scale-noise-' || (g % {_NOISE_TENANTS + 1}) END,
        'p' || (g % 50), 'title ' || g, repeat('memory body ', 12), now() FROM generate_series(1, {memory_rows}) g;
 """, timeout=3600)
@@ -338,6 +360,12 @@ def _slope(ys: list[float]) -> float:
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / den if den else 0.0
 
 
+def depth_trend_fails(first: float, last: float) -> bool:
+    """True when the first- and last-decile mean response starts differ by more than 2x AND by more than 0.5 s, in either direction."""
+    hi, lo = max(first, last), min(first, last)
+    return hi > 2 * lo and (hi - lo) > 0.5
+
+
 def _table_summary(recs: list[dict[str, Any]]) -> dict[str, Any]:
     start = [r["start_s"] for r in recs]
     total = [r["total_s"] for r in recs]
@@ -348,6 +376,8 @@ def _table_summary(recs: list[dict[str, Any]]) -> dict[str, Any]:
         "rows": sum(r["rows"] for r in recs),
         "bytes": sum(r["bytes"] for r in recs),
         "start_s": {"p50": _pct(start, 0.5), "p95": _pct(start, 0.95), "max": max(start)},
+        "pages_start_s": start,
+        "pages_rows": [r["rows"] for r in recs],
         "total_s": {"p50": _pct(total, 0.5), "p95": _pct(total, 0.95), "max": max(total)},
         "deepest_page": {"page": recs[-1]["page"], "rows": recs[-1]["rows"], "bytes": recs[-1]["bytes"],
                          "start_s": recs[-1]["start_s"], "total_s": recs[-1]["total_s"]},
@@ -389,10 +419,13 @@ def _decode_key(cursor: str) -> list[str]:
               help="Rows of the id-keyed table in all; the tenant owns a tenth, nine other tenants the rest.")
 @click.option("--small-tenant-rows", default=_SMALL_TENANT_ROWS, show_default=True,
               help="Rows a small tenant owns in the id-keyed table, spread evenly over it (0: none). Exported and timed after the big tenant.")
+@click.option("--share-tenants", default="", show_default=True,
+              help=f"Comma-separated percents of the id-keyed table to give a tenant each, from {', '.join(_SHARES)}; each is exported and its memory pages timed.")
 @click.option("--pool-size", default=10, show_default=True, help="NX_POOL_SIZE (the engine's default is 10).")
 @click.option("--out-dir", type=click.Path(path_type=Path), required=True, help="Where the results go.")
 @click.option("--keep-file/--no-keep-file", default=False, help="Keep the exported .nxtenant file (about 2 GB at 500,000 chunks).")
-def main(chunks: int, memory_rows: int, small_tenant_rows: int, pool_size: int, out_dir: Path, keep_file: bool) -> None:
+def main(chunks: int, memory_rows: int, small_tenant_rows: int, share_tenants: str, pool_size: int, out_dir: Path,
+         keep_file: bool) -> None:
     """Seed a synthetic tenant, export it through the routes, and write the timing."""
     if reason := jar_freshness_skip_reason():
         raise click.ClickException(f"{reason}; run scripts/build-gate-jar.sh first")
@@ -416,8 +449,13 @@ def main(chunks: int, memory_rows: int, small_tenant_rows: int, pool_size: int, 
         engine.start()
         token = create_tenant_token(engine.url, _ROOT_TOKEN, _TENANT)
         small_token = create_tenant_token(engine.url, _ROOT_TOKEN, _SMALL_TENANT) if small_tenant_rows > 0 else None
+        shares = [x.strip() for x in share_tenants.split(",") if x.strip()]
+        for pct in shares:
+            if pct not in _SHARES:
+                raise click.ClickException(f"--share-tenants: {pct} is not one of {', '.join(_SHARES)}")
+        share_tokens = {pct: create_tenant_token(engine.url, _ROOT_TOKEN, _share_name(pct)) for pct in shares}
         say("tenant: created, tenant token minted")
-        _seed(cluster, chunks, memory_rows, small_tenant_rows, say)
+        _seed(cluster, chunks, memory_rows, small_tenant_rows, say, shares)
         counts = {
             "chunks": int(cluster.psql(f"SELECT count(*) FROM nexus.chunks WHERE tenant_id = '{_TENANT}'")),
             "memory_of_tenant": int(cluster.psql(f"SELECT count(*) FROM nexus.memory WHERE tenant_id = '{_TENANT}'")),
@@ -460,6 +498,11 @@ def main(chunks: int, memory_rows: int, small_tenant_rows: int, pool_size: int, 
             say(f"export: small tenant ({small_tenant_rows} memory rows in a table of {memory_rows})")
             small_result, small_timer = _export(engine, small_token, work / "small.nxtenant", say)
             say(f"export: small tenant done in {small_result.seconds:.1f}s")
+        share_runs: dict[str, tuple[ce.ExportResult, _Timer]] = {}
+        for pct, tok in share_tokens.items():
+            say(f"export: {pct}% tenant ({int(cluster.psql(f'SELECT count(*) FROM nexus.memory WHERE tenant_id = {chr(39)}{_share_name(pct)}{chr(39)}'))} memory rows)")
+            share_runs[pct] = _export(engine, tok, work / f"share-{pct}.nxtenant", say)
+            say(f"export: {pct}% tenant done in {share_runs[pct][0].seconds:.2f}s")
 
         with open(out_dir / "pages.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["table", "page", "rows", "bytes", "start_s", "total_s", "done", "last_key"])
@@ -498,18 +541,36 @@ def main(chunks: int, memory_rows: int, small_tenant_rows: int, pool_size: int, 
                 explains["memory-small-tenant-first-page-pin-flipped"] = _explain(cluster, inner(stmt), _SMALL_TENANT, _ENGINE_PIN)
             explains["memory-small-tenant-count"] = _explain(
                 cluster, f"SELECT count(*) FROM \"nexus\".\"memory\" WHERE tenant_id = '{_SMALL_TENANT}'", _SMALL_TENANT)
+        share_summary: dict[str, Any] = {}
+        for pct, (res, tmr) in share_runs.items():
+            name = _share_name(pct)
+            mem = [r for r in tmr.records if r["table"] == "memory"]
+            share_summary[pct] = {"tenant": name,
+                                  "rows": int(cluster.psql(f"SELECT count(*) FROM nexus.memory WHERE tenant_id = '{name}'")),
+                                  "export_seconds": res.seconds, "memory_pages": _table_summary(mem) if mem else None}
+            stmts = _copy_statements(cluster.log, "memory", name)
+            if stmts:
+                explains[f"memory-share-{pct}-first-page"] = _explain(cluster, inner(stmts[0]), name)
+                explains[f"memory-share-{pct}-deep-page"] = _explain(cluster, inner(stmts[-1]), name)
         for name, text in explains.items():
             (out_dir / f"explain-{name}.txt").write_text(text)
 
+        # the pin is the engine's: the replay above sets it by hand, so a Sort here means the replay and the engine disagree or
+        # the planner stopped honouring it; an absent plan is a failure of the check, not a pass
+        deep_plans = {t: explains.get(f"{t}-deep-page") for t in _PINNED_TABLES}
+        missing = [t for t, plan in deep_plans.items() if plan is None]
+        if missing:
+            raise click.ClickException(f"no deep-page EXPLAIN for {', '.join(missing)}: the Sort check examined nothing")
+        sorted_plans = [t for t, plan in deep_plans.items() if plan_has_sort(plan or "")]
         chunks_summary = tables.get("chunks")
         growth = None
         regression = False
         if chunks_summary and chunks_summary["pages"] >= 10:
             first, last = chunks_summary["first_decile_mean_start_s"], chunks_summary["last_decile_mean_start_s"]
-            regression = last > 2 * first and (last - first) > 0.5
+            regression = depth_trend_fails(first, last)
             growth = {"first_decile_mean_start_s": first, "last_decile_mean_start_s": last,
                       "ratio": last / first if first else None, "slope_start_s_per_page": chunks_summary["slope_start_s_per_page"],
-                      "slope_total_s_per_page": chunks_summary["slope_total_s_per_page"], "time_grows_with_depth": regression}
+                      "slope_total_s_per_page": chunks_summary["slope_total_s_per_page"], "time_depends_on_depth": regression}
 
         engine_lines: list[str] = []
         if engine.log is not None and engine.log.exists():
@@ -527,6 +588,7 @@ def main(chunks: int, memory_rows: int, small_tenant_rows: int, pool_size: int, 
             "tables": tables,
             "growth_with_depth": growth,
             "small_tenant": small_summary,
+            "share_tenants": share_summary,
             "connections": {"peak_nexus_svc_backends": peak["backends"], "sessions_established_during_export_all": sessions_after - sessions_before,
                             "sampler_sessions": peak["samples"] + 1,
                             "sessions_established_by_engine": sessions_after - sessions_before - peak["samples"] - 1,
@@ -540,6 +602,9 @@ def main(chunks: int, memory_rows: int, small_tenant_rows: int, pool_size: int, 
             shutil.move(str(dest), out_dir / dest.name)
         say("summary.json written")
         click.echo(json.dumps({k: summary[k] for k in ("file_bytes", "total_seconds", "pages_total", "cut_pages", "growth_with_depth")}, indent=2, default=str))
+        if sorted_plans:
+            click.echo(f"FAIL: the deep-page plan of {', '.join(sorted_plans)} has a Sort node: the engine's pin is not in effect", err=True)
+            raise SystemExit(_EXIT_PINNED_PLAN_SORTS)
         if regression:
             raise SystemExit(_EXIT_DEEP_PAGE_REGRESSION)
     finally:

@@ -72,8 +72,10 @@ import java.util.regex.Pattern;
  * Postgres no longer has the snapshot (the held transaction ended outside the engine's own bounds); 409
  * {@code page_in_flight} with {@code Retry-After: 1} for a second concurrent page of one session; 503
  * {@code export_page_busy} with {@code Retry-After: 1} when a read (a page, or the header of a POST) waited out
- * its lock bound behind a tenant create or ran past its time budget (retry it; a POST that answers it opened
- * nothing).
+ * its lock bound behind a tenant create (retry it; a POST that answers it opened nothing); 503 {@code
+ * export_page_over_budget}, with no {@code Retry-After} and a {@code page_budget_ms} field, when a read was cancelled
+ * at its time budget (below): another try may meet the same limit, so a client repeats it a few times and then reports
+ * it. The engine logs {@code event=export_page_over_budget} with the tenant, the table and the elapsed time.
  *
  * <p><b>The page cut and its time budget, against the edge limits.</b> The cloud edge ends an exchange at 60
  * seconds (RDR-248 A1) and the bead's gate N1 wants a page to START its response inside 30 seconds. A page is
@@ -82,7 +84,7 @@ import java.util.regex.Pattern;
  * {@link TenantExportSessions.Config#pageBudgetMs()} (default 20 s, {@code NX_EXPORT_PAGE_BUDGET_SECONDS}), all
  * its statements together (the first page's row count, then the COPY): each runs under {@code statement_timeout}
  * set to what is left of the budget, and a statement cancelled at the bound answers 503 {@code
- * export_page_busy}. The database serves about 4,000 chunk rows in 0.1 s (T2 {@code
+ * export_page_over_budget}. The database serves about 4,000 chunk rows in 0.1 s (T2 {@code
  * nexus/rdr248-local-spike-r2-2026-11-11}), so the budget bounds a pathological page and is not the expected
  * time. The budget does NOT include the pool borrow: that is bounded by the pool's own connection timeout
  * (HikariCP's 30 s default; {@code Main} does not change it for the engine's pool) and runs before the budget
@@ -210,6 +212,7 @@ public final class TenantExportHandler implements HttpHandler {
     private void open(HttpExchange exchange, String tenant) throws IOException {
         TenantExportSessions s = sessions.get();
         TenantExportSessions.Opened opened;
+        long opened0 = System.nanoTime();
         try {
             opened = s.open(tenant);
         } catch (TenantExportSessions.SessionExistsException e) {
@@ -224,9 +227,12 @@ public final class TenantExportHandler implements HttpHandler {
             HttpUtil.send(exchange, 503, MAPPER.writeValueAsString(body));
             return;
         } catch (TenantExportReads.PageBusyException e) {
-            // the header read waited out a table lock or its time budget: nothing was opened (the held transaction ended)
+            // the header read waited out a table lock: nothing was opened (the held transaction ended)
             exchange.getResponseHeaders().set("Retry-After", "1");
             error(exchange, 503, "export_page_busy", e.getMessage());
+            return;
+        } catch (TenantExportReads.PageOverBudgetException e) {
+            overBudget(exchange, tenant, "(header)", opened0, s.config().pageBudgetMs(), e);
             return;
         }
         TenantExportSessions.Session session = opened.session();
@@ -304,6 +310,7 @@ public final class TenantExportHandler implements HttpHandler {
         }
         final List<Object> bounds = after;
         TenantExportReads.Page page;
+        long read0 = System.nanoTime();
         try {
             page = s.withPage(session, held -> s.reads().page(held.snapshotId(), held.owner(), table, bounds,
                 s.config().pageBytes(), s.config().pageMaxRows()));
@@ -318,6 +325,9 @@ public final class TenantExportHandler implements HttpHandler {
         } catch (TenantExportReads.PageBusyException e) {
             exchange.getResponseHeaders().set("Retry-After", "1");
             error(exchange, 503, "export_page_busy", e.getMessage());
+            return;
+        } catch (TenantExportReads.PageOverBudgetException e) {
+            overBudget(exchange, tenant, table.name(), read0, s.config().pageBudgetMs(), e);
             return;
         }
         sendPage(exchange, table, page);
@@ -369,6 +379,21 @@ public final class TenantExportHandler implements HttpHandler {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 is a required JDK algorithm", e);
         }
+    }
+
+    /**
+     * A read cancelled at its time budget: 503 {@code export_page_over_budget}, no {@code Retry-After} (a repeat is
+     * likely to meet the same limit, so the client does not wait it out as it does a lock), the budget in the body, and
+     * a warn line that names the tenant, the table and the time the read ran, so an operator can see which page it was.
+     */
+    private static void overBudget(HttpExchange exchange, String tenant, String table, long startNanos, int budgetMs,
+                                   TenantExportReads.PageOverBudgetException e) throws IOException {
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
+        log.warn("event=export_page_over_budget tenant={} table={} elapsed_ms={} budget_ms={}", tenant, table, elapsedMs, budgetMs);
+        ObjectNode body = errorBody("export_page_over_budget", "the export page for " + table
+            + " was cancelled at its " + budgetMs + " ms time budget");
+        body.put("page_budget_ms", budgetMs);
+        HttpUtil.send(exchange, 503, MAPPER.writeValueAsString(body));
     }
 
     private static ObjectNode errorBody(String reason, String message) {

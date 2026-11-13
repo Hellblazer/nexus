@@ -83,6 +83,9 @@ class TenantExportBatteryTest {
     private static final String B_TOKEN = "tok-b-battery-0123456789abcdefghijkl";
     private static final String A = "t-battery-a";
     private static final String B = "t-battery-b";
+    /** The tenant the mid-export-writes test mutates: its own, so no test depends on the order the tests run in. */
+    private static final String C = "t-battery-c";
+    private static final String C_TOKEN = "tok-c-battery-0123456789abcdefghijkl";
     private static final String BGE = "bge-base-en-v15-768";
     private static final String MINILM = "minilm-l6-v2-384";
     private static final String VOYAGE = "voyage-context-3";
@@ -108,13 +111,17 @@ class TenantExportBatteryTest {
                 dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL, dev.nexus.service.db.TokenStore.SCOPE_ROOT, null, null);
             PgContainerHelper.seedServiceToken(dsl, A_TOKEN, A, "tenant-a");
             PgContainerHelper.seedServiceToken(dsl, B_TOKEN, B, "tenant-b");
+            PgContainerHelper.seedServiceToken(dsl, C_TOKEN, C, "tenant-c");
             PgContainerHelper.ensureTenantPartitions(dsl, A);
             PgContainerHelper.ensureTenantPartitions(dsl, B);
+            PgContainerHelper.ensureTenantPartitions(dsl, C);
             List<String> failures = new ArrayList<>();
             Seed.tenant(dsl, A, 3, failures);
             Seed.tenant(dsl, B, 1, failures);
+            Seed.tenant(dsl, C, 3, failures);
             Seed.fillNulls(dsl, A, failures);
             Seed.fillNulls(dsl, B, failures);
+            Seed.fillNulls(dsl, C, failures);
             createProbe(su);
             assertThat(failures).as("the battery's seed").isEmpty();
         }
@@ -127,7 +134,7 @@ class TenantExportBatteryTest {
         ds = new HikariDataSource(cfg);
         service = new NexusService(0, ROOT, ds);
         service.start();
-        for (String token : List.of(A_TOKEN, B_TOKEN)) {   // the filter's first-request ghost sweep, before any test holds a lock
+        for (String token : List.of(A_TOKEN, B_TOKEN, C_TOKEN)) {   // the filter's first-request ghost sweep, before any test holds a lock
             assertThat(call("GET", "/v1/_whoami", token).statusCode()).isEqualTo(200);
         }
     }
@@ -211,7 +218,7 @@ class TenantExportBatteryTest {
             Map<String, Walk> walks = walk(A_TOKEN, id, header, null);
             for (JsonNode th : header.get("tables")) {
                 ExportTable t = TenantExport.exportable(th.get("name").asText()).orElseThrow();
-                compare(su, t, th, walks.get(t.name()), refLive(su, t, th), problems);
+                compare(su, t, th, walks.get(t.name()), refLive(su, t, th), A, problems);
             }
             assertThat(problems).as("export of every table of " + A).isEmpty();
             call("DELETE", PATH + "/" + id, A_TOKEN);
@@ -228,34 +235,34 @@ class TenantExportBatteryTest {
             su.setAutoCommit(true);
             List<String> problems = new ArrayList<>();
             List<ExportTable> exported = TenantExport.TABLES.stream().filter(ExportTable::exported).toList();
-            // the reference: tenant A's rows as they are BEFORE the session opens
+            // the reference: tenant C's rows as they are BEFORE the session opens
             for (ExportTable t : exported) {
                 String cols = String.join(", ", liveColumns(su, t).stream().map(c -> q(c.name)).toList());
                 exec(su, "CREATE TEMP TABLE " + q("ref_" + t.name()) + " AS SELECT " + cols + " FROM " + qn(t)
-                    + " WHERE tenant_id = '" + A + "'");
+                    + " WHERE tenant_id = '" + C + "'");
             }
-            JsonNode header = open(A_TOKEN);
+            JsonNode header = open(C_TOKEN);
             String id = header.get("session_id").asText();
 
-            long chunkRowsBefore = scalar(su, "SELECT count(*) FROM nexus.chunks WHERE tenant_id = '" + A + "'");
-            Map<String, Walk> walks = walk(A_TOKEN, id, header, () -> mutateA(su));
+            long chunkRowsBefore = scalar(su, "SELECT count(*) FROM nexus.chunks WHERE tenant_id = '" + C + "'");
+            Map<String, Walk> walks = walk(C_TOKEN, id, header, () -> mutateC(su));
             // the mutation really happened: the live tables differ from the reference now, in both directions
             for (String table : List.of("memory", "chunks", "catalog_meta", "search_telemetry")) {
                 ExportTable t = TenantExport.exportable(table).orElseThrow();
                 String cols = String.join(", ", liveColumns(su, t).stream().map(c -> q(c.name)).toList());
-                assertThat(scalar(su, "SELECT count(*) FROM (SELECT " + cols + " FROM " + qn(t) + " WHERE tenant_id = '" + A + "' EXCEPT ALL SELECT " + cols + " FROM " + q("ref_" + table) + ") d"))
+                assertThat(scalar(su, "SELECT count(*) FROM (SELECT " + cols + " FROM " + qn(t) + " WHERE tenant_id = '" + C + "' EXCEPT ALL SELECT " + cols + " FROM " + q("ref_" + table) + ") d"))
                     .as(table + " rows written since the reference").isGreaterThan(0);
             }
             for (String table : List.of("memory", "chunks", "catalog_meta", "frecency")) {
                 ExportTable t = TenantExport.exportable(table).orElseThrow();
                 String cols = String.join(", ", liveColumns(su, t).stream().map(c -> q(c.name)).toList());
-                assertThat(scalar(su, "SELECT count(*) FROM (SELECT " + cols + " FROM " + q("ref_" + table) + " EXCEPT ALL SELECT " + cols + " FROM " + qn(t) + " WHERE tenant_id = '" + A + "') d"))
+                assertThat(scalar(su, "SELECT count(*) FROM (SELECT " + cols + " FROM " + q("ref_" + table) + " EXCEPT ALL SELECT " + cols + " FROM " + qn(t) + " WHERE tenant_id = '" + C + "') d"))
                     .as(table + " reference rows deleted or rewritten since").isGreaterThan(0);
             }
 
             for (JsonNode th : header.get("tables")) {
                 ExportTable t = TenantExport.exportable(th.get("name").asText()).orElseThrow();
-                compare(su, t, th, walks.get(t.name()), cols -> "SELECT " + cols + " FROM " + q("ref_" + t.name()), problems);
+                compare(su, t, th, walks.get(t.name()), cols -> "SELECT " + cols + " FROM " + q("ref_" + t.name()), C, problems);
             }
             assertThat(problems).as("the export holds the state at the session's open, not what was written after")
                 .isEmpty();
@@ -265,31 +272,31 @@ class TenantExportBatteryTest {
             // a page asked for again from the same key, after the writes, is the same bytes: a cut page costs one page
             List<byte[]> chunkPages = walks.get("chunks").pages();
             String cursor = walks.get("chunks").lastKeys().get(0);
-            var again = rowsBytes(A_TOKEN, id, rowsQuery("chunks", cursor));
+            var again = rowsBytes(C_TOKEN, id, rowsQuery("chunks", cursor));
             assertThat(again.statusCode()).isEqualTo(200);
             assertThat(again.body()).as("the second page of chunks, asked for again").isEqualTo(chunkPages.get(1));
-            call("DELETE", PATH + "/" + id, A_TOKEN);
+            call("DELETE", PATH + "/" + id, C_TOKEN);
         }
     }
 
     /** Inserts, updates and deletes in tables the walk has yet to read and in chunks past the first page. */
-    private static void mutateA(Connection su) {
+    private static void mutateC(Connection su) {
         try {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.execute("DELETE FROM nexus.memory WHERE tenant_id = ? AND title = (SELECT min(title) FROM nexus.memory WHERE tenant_id = ?)", A, A);
-            ctx.execute("INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp) VALUES (?, 'p', 'written-after-open', 'x', now())", A);
-            ctx.execute("UPDATE nexus.memory SET content = 'rewritten after open' WHERE tenant_id = ? AND title = (SELECT max(title) FROM nexus.memory WHERE tenant_id = ? AND title <> 'written-after-open')", A, A);
-            ctx.execute("DELETE FROM nexus.catalog_meta WHERE tenant_id = ? AND key = (SELECT max(key) FROM nexus.catalog_meta WHERE tenant_id = ?)", A, A);
-            ctx.execute("INSERT INTO nexus.catalog_meta (tenant_id, key, value) VALUES (?, 'written-after-open', 'v')", A);
-            ctx.execute("DELETE FROM nexus.frecency WHERE tenant_id = ?", A);
-            ctx.execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) VALUES (?, now(), 'after-open', 'c', 1, 1)", A);
+            ctx.execute("DELETE FROM nexus.memory WHERE tenant_id = ? AND title = (SELECT min(title) FROM nexus.memory WHERE tenant_id = ?)", C, C);
+            ctx.execute("INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp) VALUES (?, 'p', 'written-after-open', 'x', now())", C);
+            ctx.execute("UPDATE nexus.memory SET content = 'rewritten after open' WHERE tenant_id = ? AND title = (SELECT max(title) FROM nexus.memory WHERE tenant_id = ? AND title <> 'written-after-open')", C, C);
+            ctx.execute("DELETE FROM nexus.catalog_meta WHERE tenant_id = ? AND key = (SELECT max(key) FROM nexus.catalog_meta WHERE tenant_id = ?)", C, C);
+            ctx.execute("INSERT INTO nexus.catalog_meta (tenant_id, key, value) VALUES (?, 'written-after-open', 'v')", C);
+            ctx.execute("DELETE FROM nexus.frecency WHERE tenant_id = ?", C);
+            ctx.execute("INSERT INTO nexus.search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count) VALUES (?, now(), 'after-open', 'c', 1, 1)", C);
             // chunks: delete every chunk no manifest or topic row holds, and write new ones on both sides of the key space
-            ctx.execute("DELETE FROM nexus.chunks c WHERE c.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m WHERE m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash AND m.embedding_model = c.embedding_model) AND NOT EXISTS (SELECT 1 FROM nexus.topic_assignments a WHERE a.tenant_id = c.tenant_id AND a.source_collection = c.collection AND a.doc_id = c.chash AND a.embedding_model = c.embedding_model) AND NOT EXISTS (SELECT 1 FROM nexus.chunk_orphaned_at o WHERE o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash AND o.embedding_model = c.embedding_model)", A);
+            ctx.execute("DELETE FROM nexus.chunks c WHERE c.tenant_id = ? AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m WHERE m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash AND m.embedding_model = c.embedding_model) AND NOT EXISTS (SELECT 1 FROM nexus.topic_assignments a WHERE a.tenant_id = c.tenant_id AND a.source_collection = c.collection AND a.doc_id = c.chash AND a.embedding_model = c.embedding_model) AND NOT EXISTS (SELECT 1 FROM nexus.chunk_orphaned_at o WHERE o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash AND o.embedding_model = c.embedding_model)", C);
             for (String h : List.of("00", "ff")) {
                 byte[] chash = new byte[32];
                 java.util.Arrays.fill(chash, (byte) Integer.parseInt(h, 16));
                 ctx.execute("INSERT INTO nexus.chunks (tenant_id, collection, chash, embedding_model, chunk_text, embedding_768) VALUES (?, ?, ?, ?, 'written after open', ?::nexus.vector)",
-                    A, Seed.collection(A, 768), chash, BGE, Seed.vectorText(768, 5));
+                    C, Seed.collection(C, 768), chash, BGE, Seed.vectorText(768, 5));
             }
         } catch (RuntimeException e) {
             throw new IllegalStateException("the battery's mid-export writes failed", e);
@@ -423,14 +430,14 @@ class TenantExportBatteryTest {
     }
 
     /** Loads the walk's pages into a temp table of the header's columns and compares them with the reference. */
-    private void compare(Connection su, ExportTable t, JsonNode th, Walk w, Function<String, String> ref, List<String> problems)
-            throws Exception {
+    private void compare(Connection su, ExportTable t, JsonNode th, Walk w, Function<String, String> ref, String tenant,
+                         List<String> problems) throws Exception {
         List<LiveColumn> cols = new ArrayList<>();
         th.get("columns").forEach(c -> cols.add(new LiveColumn(c.get("name").asText(), c.get("type").asText(), false)));
         long refRows = scalar(su, "SELECT count(*) FROM (" + ref.apply("*") + ") r");
         if (w.tableRows() != refRows) problems.add(t.name() + " first page says " + w.tableRows() + " rows, the reference has " + refRows);
         if (w.rowsHeaderSum() != w.tableRows()) problems.add(t.name() + " pages' row headers sum to " + w.rowsHeaderSum() + ", not " + w.tableRows());
-        stageAndCompare(su, t.name().replace('.', '_'), cols, w.pages(), refRows, ref, A, problems);
+        stageAndCompare(su, t.name().replace('.', '_'), cols, w.pages(), refRows, ref, tenant, problems);
     }
 
     private static void stageAndCompare(Connection su, String label, List<LiveColumn> cols, List<byte[]> pages, long expectedRows,

@@ -597,7 +597,7 @@ class TenantExportSessionsTest {
             }
         };
         assertThatThrownBy(() -> s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100))
-            .isInstanceOf(TenantExportReads.PageBusyException.class).hasMessageContaining("whole time budget");
+            .isInstanceOf(TenantExportReads.PageOverBudgetException.class).hasMessageContaining("whole time budget");
         s.reads().beforeCopyForTests = null;
         assertThat(s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100).rows()).isEqualTo(5);
     }
@@ -672,7 +672,7 @@ class TenantExportSessionsTest {
     // ── time budget, lock bound, progress and the cut ────────────────────────────────────────────
 
     @Test
-    void aPageRunningPastItsTimeBudgetIsCancelledAsBusyNotHung() throws Exception {
+    void aPageRunningPastItsTimeBudgetIsCancelledAsOverBudgetNotBusyAndNotHung() throws Exception {
         // a lock wait far longer than the budget: it is the statement timeout that ends the wait
         var s = sessions(config(2).withLockTimeoutMs(60_000).withPageBudgetMs(400), clock());
         var session = s.open(A).session();
@@ -681,7 +681,7 @@ class TenantExportSessionsTest {
             PgContainerHelper.lockTable(holder, MEMORY, PgContainerHelper.LockMode.ACCESS_EXCLUSIVE);
             long t0 = System.nanoTime();
             assertThatThrownBy(() -> s.reads().page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100))
-                .isInstanceOf(TenantExportReads.PageBusyException.class);
+                .isInstanceOf(TenantExportReads.PageOverBudgetException.class);
             assertThat(Duration.ofNanos(System.nanoTime() - t0)).as("cut at the 400 ms budget, not the 60 s lock bound")
                 .isLessThan(Duration.ofSeconds(10));
             holder.rollback();
@@ -916,5 +916,60 @@ class TenantExportSessionsTest {
                 .select(DSL.function("current_setting", String.class, DSL.inline("enable_sort")))
                 .fetchOne(0, String.class)).as("the setting did not leak to the pool").isEqualTo("on");
         }
+    }
+
+    /**
+     * Every table the pin covers (an exported table whose primary key leads with {@code tenant_id}), ANALYZEd, no planner
+     * setting of the test's own, a deep keyset page read through the page's own transaction: no Sort anywhere in the plan.
+     * The tables the fixture leaves empty are covered too (the key is made up from the key's types), because the plan of a
+     * page does not depend on the rows it will find.
+     */
+    @Test
+    void aDeepPageOfEveryTableThePinCoversRunsNoSortOnAnalyzedTables() throws Exception {
+        List<ExportTable> pinned = TenantExport.TABLES.stream().filter(ExportTable::exported)
+            .filter(t -> "tenant_id".equals(t.primaryKey().get(0).name())).toList();
+        List<ExportTable> unpinned = TenantExport.TABLES.stream().filter(ExportTable::exported)
+            .filter(t -> !"tenant_id".equals(t.primaryKey().get(0).name())).toList();
+        // not vacuous: the registry's tenant-led tables are many, and the id-keyed ones are the minority left to the planner
+        assertThat(pinned.size()).as("tenant-led exported tables").isGreaterThanOrEqualTo(15);
+        assertThat(unpinned.stream().map(ExportTable::name)).contains("memory");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            for (ExportTable t : pinned) {
+                PgContainerHelper.analyzeTable(su, DSL.table(DSL.name(t.schema(), t.table())));
+            }
+        }
+        var s = sessions(config(2), clock());
+        var session = s.open(A).session();
+        var reads = new TenantExportReads(explainDs, 300, 20_000);
+        List<String> withSort = new ArrayList<>();
+        int explained = 0;
+        for (ExportTable t : pinned) {
+            List<String> parts = new ArrayList<>();
+            for (Column k : t.primaryKey()) {
+                parts.add(switch (k.name().equals("tenant_id") ? "tenant" : k.type()) {
+                    case "tenant" -> A;
+                    case "text" -> "m";
+                    case "bigint", "integer" -> "1";
+                    case "bytea" -> "00";
+                    case "uuid" -> "00000000-0000-0000-0000-000000000001";
+                    case "timestamp with time zone" -> "2026-01-01T00:00:00Z";
+                    default -> throw new IllegalStateException(t.name() + " key type " + k.type());
+                });
+            }
+            List<Object> deep = TenantExportKeys.binds(t.primaryKey(), parts);
+            String[] plan = new String[1];
+            reads.beforeCopyForTests = ctx -> plan[0] = PgContainerHelper.explainPlanWith(ctx,
+                TenantExportReads.pageSelect(ctx, t, TenantExportReads.liveColumns(ctx, t), A, deep, 5),
+                new PgContainerHelper.ExplainOptions(false, false, false, false));
+            reads.page(session.snapshotId(), A, t, deep, 1 << 20, 5);
+            explained++;
+            List<String> nodes = plan[0].lines().map(l -> l.replaceFirst("^\\s*(->\\s*)?", "").trim()).toList();
+            if (nodes.stream().anyMatch(n -> n.equals("Sort") || n.startsWith("Incremental Sort"))) {
+                withSort.add(t.name() + ":\n" + plan[0]);
+            }
+        }
+        assertThat(explained).as("every pinned table was explained").isEqualTo(pinned.size());
+        assertThat(withSort).as("tables whose deep page plan sorts").isEmpty();
     }
 }
