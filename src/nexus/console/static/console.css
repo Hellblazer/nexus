@@ -211,6 +211,11 @@ details .grid input {
   box-shadow: inset 3px 0 0 var(--console-warn);
 }
 
+/* nexus-ct74m: a thread whose due: has come */
+.thread-list .due-now {
+  color: var(--console-warn);
+}
+
 .quiet-sessions {
   margin-top: 0.5rem;
 }

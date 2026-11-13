@@ -68,8 +68,10 @@
       <li {% if has_value(t.needs_sam) %}class="needs-sam"{% endif %}>
         {{ t.title }}{% if t.state %}: {{ t.state }}{% endif %}
         {% if has_value(t.waiting_on) %}<span class="ts">&middot; waiting on {{ t.waiting_on }}</span>{% endif %}
+        {% if has_value(t.due) %}{% if t.title in card.due %}<strong class="due-now">&middot; due {{ t.due }}</strong>{% else %}<span class="ts">&middot; due {{ t.due }}</span>{% endif %}{% endif %}
         {% if has_value(t.needs_sam) %}<span class="ts">&middot; needs you: {{ t.needs_sam }}</span>{% endif %}
         {% if t.refs %}<small class="ts">&nbsp;{{ t.refs | join(", ") }}</small>{% endif %}
+        {% if has_value(t.worktree) %}<br><small class="ts">worktree {{ t.worktree }}</small>{% endif %}
         {% for n in t.notes %}<br><small class="ts">{{ n }}</small>{% endfor %}
       </li>
       {% endfor %}

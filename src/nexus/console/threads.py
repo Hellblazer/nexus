@@ -38,7 +38,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 
 #: A session whose newest update is older than this is greyed out.
@@ -54,7 +54,13 @@ _THREAD_FIELDS = {
     "state": "state",
     "waiting_on": "waiting_on",
     "needs_sam": "needs_sam",
+    # nexus-ct74m: when the thread wants attention, and the stable place its work lives
+    "due": "due",
+    "worktree": "worktree",
 }
+
+#: ``due:`` holding a bare date: due from local midnight of that day.
+_DUE_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 #: Ask-level keys. Only inside an ``ask:`` block are they ask fields.
 ASK_KEYS = frozenset({
@@ -148,6 +154,8 @@ class Thread:
     needs_sam: str = ""
     notes: tuple[str, ...] = ()
     asks: tuple[Ask, ...] = ()
+    due: str = ""  #: ``due:`` as written: an ISO date or datetime (``due_at`` reads it)
+    worktree: str = ""  #: ``worktree:`` as written: an absolute path, an artifact slug or a file path
     unopened: tuple[UnopenedAsk, ...] = ()
 
 
@@ -165,6 +173,8 @@ class SessionCard:
     effective_updated: datetime | None
     age: str
     stale: bool
+    #: Titles of this session's threads whose ``due:`` has come (``due_threads`` at the board's clock).
+    due: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -356,7 +366,8 @@ def _build_ask(
 
 
 def _new_thread(title: str) -> dict[str, Any]:
-    return {"title": title, "refs": [], "state": "", "waiting_on": "", "needs_sam": "", "notes": [],
+    return {"title": title, "refs": [], "state": "", "waiting_on": "", "needs_sam": "", "due": "", "worktree": "",
+            "notes": [],
             "ask_next": False, "ops": [], "block": None, "blocks": [], "unopened": []}
 
 
@@ -554,10 +565,47 @@ def _finish_thread(t: dict[str, Any], entry: str, session_id: str) -> Thread:
         needs_sam=needs_sam,
         notes=tuple(t["notes"]),
         asks=asks,
+        due=t["due"],
+        worktree=t["worktree"],
         unopened=tuple(
             UnopenedAsk(i, q, entry, t["title"], session_id, bad, late) for i, q, bad, late in t["unopened"]
         ),
     )
+
+
+def due_at(value: str, tz: tzinfo) -> datetime | None:
+    """The instant a ``due:`` value comes due, or None when it holds no ISO date or datetime.
+
+    A bare date is due from midnight of that day in *tz*; a datetime with no offset is read in *tz*; one with an
+    offset (or ``Z``) is exact. "none" and the other no-values read as None.
+    """
+    v = value.strip()
+    if not has_value(v):
+        return None
+    try:
+        if _DUE_DATE.fullmatch(v):
+            d = date.fromisoformat(v)
+            return datetime(d.year, d.month, d.day, tzinfo=tz)
+        parsed = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=tz)
+
+
+def due_threads(session: Session, now: datetime) -> tuple[tuple[Thread, datetime], ...]:
+    """``(thread, due instant)`` for each of *session*'s threads whose ``due:`` is at or before *now*, in file order.
+
+    *now* must be timezone-aware; its zone is the one a bare date or an offset-less datetime is read in, so pass
+    local time (``datetime.now().astimezone()``) for "midnight" to mean the operator's midnight.
+    """
+    if now.tzinfo is None:
+        raise ValueError("due_threads needs an aware clock")
+    out: list[tuple[Thread, datetime]] = []
+    for t in session.threads:
+        when = due_at(t.due, now.tzinfo)
+        if when is not None and when <= now:
+            out.append((t, when))
+    return tuple(out)
 
 
 def format_age(delta: timedelta) -> str:
@@ -595,11 +643,12 @@ def build_board(entries: Iterable[Mapping[str, Any]], now: datetime) -> Board:
         except Exception:  # noqa: BLE001 -- one bad entry must not take the page down
             unreadable.append(_safe_title(e))
             continue
+        due = tuple(t.title for t, _ in due_threads(session, now.astimezone()))
         if newest is None:
-            built.append(SessionCard(session, None, "unknown", True))
+            built.append(SessionCard(session, None, "unknown", True, due))
         else:
             delta = now - newest
-            built.append(SessionCard(session, newest, format_age(delta), delta > STALE_AFTER))
+            built.append(SessionCard(session, newest, format_age(delta), delta > STALE_AFTER, due))
     floor = datetime.min.replace(tzinfo=timezone.utc)
     built.sort(key=lambda c: c.effective_updated or floor, reverse=True)
     needs = tuple(
