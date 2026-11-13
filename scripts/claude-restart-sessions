@@ -16,6 +16,12 @@ withdrawn), else typed as a short pointer to /tmp/rw-<id>.txt (removed once that
 ends), and typed only into an empty prompt.
 --no-wake leaves it idle as before.
 
+A resume goes through Claude Code's own /restart first (2.1.288+): the prompt is cleared (an unsent draft is
+saved first, as below) and /restart is typed; the session comes back in place, as its current session id, with
+its flags and a fresh set of MCP servers. Where /restart is not taken within 30 s (Claude Code offers it only to
+a native install on macOS or Linux, and answers "Unknown command: /restart" elsewhere), and for a session on the
+development channel, the session is exited and relaunched as described next. --no-slash-restart always does that.
+
 It always runs detached inside the tmux server (tmux run-shell -b), so it can
 restart the session that started it. Progress goes to ~/.claude/restart-sessions.log.
 
@@ -961,6 +967,73 @@ def skipped(name: str | None, sid: str, skip: list[str]) -> bool:
 FALLBACK_RESUME = False
 
 
+#: --no-slash-restart: resume every session by exiting it and typing `claude ... --resume <id>`, never /restart.
+NO_SLASH = False
+#: Seconds a session gets to come back from /restart before the script exits and resumes it instead.
+SLASH_WAIT = 30
+SLASH_UNKNOWN = "Unknown command: /restart"
+
+
+def _transcript_count(session_id: str, text: str) -> int:
+    """How many times `text` occurs in the session's transcript files."""
+    n = 0
+    for f in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
+        try:
+            n += f.read_text(encoding="utf-8", errors="replace").count(text)
+        except OSError:
+            continue
+    return n
+
+
+def slash_restart(s: dict) -> tuple[bool, str]:
+    """Resume a session in place with Claude Code's own /restart (2.1.288+); (True, "") when it came back,
+    (False, why) when it did not take, and the caller exits and resumes it as before.
+
+    Measured in the sandbox's opt-in ``slash`` scenario (2.1.323, 2026-11-13): the process restarts on the same
+    pid, as its CURRENT session id (after a /clear too), in the same pane, idle, with bypass permissions, model,
+    name and channel kept and its MCP servers replaced, in 4-7 s. Claude Code offers the command only to a native
+    install, on macOS or Linux, behind a server-side flag; elsewhere it answers "Unknown command: /restart". The
+    prompt must be empty (typed after a draft, /restart would be sent with it): one Ctrl-C clears a draft and
+    leaves the session running, and the draft does not come back, so restart() has saved it already. A session
+    on the development channel is left to the exit path: /restart keeps its flags, and that channel's dialog
+    would hold the session (the exit path relaunches it on the plugin channel where that registers).
+    """
+    if NO_SLASH:
+        return False, "--no-slash-restart"
+    if uses_dev_channel(s.get("argv", "")):
+        return False, f"it was launched with {DEV_CHANNEL_FLAG}, which /restart would keep"
+    pane, pid, sid = s["pane"], s["pid"], s["sessionId"]
+    if pane_has_draft(pane):
+        tmux("send-keys", "-t", pane, "C-c")
+        time.sleep(2)
+        if not alive(pid):
+            return False, "it exited on the Ctrl-C that cleared its draft"
+        if pane_has_draft(pane):
+            return False, "one Ctrl-C did not clear its draft"
+    started = (read(s["file"]) or {}).get("startedAt") or 0
+    unknown = _transcript_count(sid, SLASH_UNKNOWN)
+    tmux("send-keys", "-t", pane, "-l", "/restart")
+    time.sleep(1)
+    tmux("send-keys", "-t", pane, "Enter")
+    for _ in range(SLASH_WAIT):
+        time.sleep(1)
+        for path in SESSIONS.glob("*.json"):
+            d = read(path)
+            if not (d and d.get("sessionId") == sid and str(d.get("tmux", "")).rsplit(".", 1)[-1] == pane):
+                continue
+            new_pid = int(d.get("pid", 0) or 0)
+            if (alive(new_pid) and d.get("status") == "idle"
+                    and (new_pid != pid or (d.get("startedAt") or 0) > started)):
+                log(f"OK {label(s)}: restarted in place by /restart, pid {new_pid}"
+                    + (" (same)" if new_pid == pid else f" (was {pid})"))
+                RESULTS[sid] = "resumed"
+                TO_WAKE.append(_resumed(d, path, pane))
+                return True, ""
+        if _transcript_count(sid, SLASH_UNKNOWN) > unknown:
+            return False, f'Claude Code answered "{SLASH_UNKNOWN}"'
+    return False, f"it did not come back within {SLASH_WAIT}s of /restart"
+
+
 def restart(s: dict, handoff: str = "") -> bool:
     """Exit an idle session and resume it in its pane (or, with a handoff path, start it fresh on that handoff)."""
     name = label(s)
@@ -989,6 +1062,11 @@ def restart(s: dict, handoff: str = "") -> bool:
     if refused:
         log(f"SKIP {name}: {refused}; left running, not restarted")
         return False
+    if not handoff:
+        done, why = slash_restart(s)
+        if done:
+            return True
+        log(f"{name}: /restart not taken ({why}); exiting and resuming instead")
     first = ""
     if handoff:
         first = f"cat {handoff}" + (f" {draft}" if draft else "")
@@ -2468,6 +2546,9 @@ def main() -> int:
                          "restart sessions in status 'shell'")
     ap.add_argument("--skip-sandbox-check", metavar="REASON", default=None,
                     help="restart although no sandbox pass covers this script (see above); REASON is logged")
+    ap.add_argument("--no-slash-restart", action="store_true",
+                    help="resume each session by exiting it and relaunching `claude ... --resume <id>`, "
+                         "never through Claude Code's own /restart")
     ap.add_argument("--no-wake", action="store_true",
                     help="do not give a resumed session its one wake prompt (it then sits idle until typed to)")
     ap.add_argument("--dry-run", action="store_true")
@@ -2482,8 +2563,9 @@ def main() -> int:
                    if a.skip_sandbox_check is not None else "")
     if a.skip_sandbox_check is not None and not skip_reason:
         ap.error("--skip-sandbox-check takes a reason, logged with the restart")
-    global FALLBACK_RESUME, KEEP_DEV_CHANNEL, NO_WAKE
+    global FALLBACK_RESUME, KEEP_DEV_CHANNEL, NO_WAKE, NO_SLASH
     FALLBACK_RESUME = a.fallback_resume
+    NO_SLASH = a.no_slash_restart
     KEEP_DEV_CHANNEL = a.keep_dev_channel
     NO_WAKE = a.no_wake
     if a.revive:
@@ -2699,7 +2781,8 @@ def rerun_command(a: argparse.Namespace, skips: list[str]) -> str:
     if a.fresh:
         parts += ["--handoff-timeout", str(a.handoff_timeout)]
     for flag, on in (("--fallback-resume", a.fallback_resume), ("--keep-dev-channel", a.keep_dev_channel),
-                     ("--force", a.force), ("--no-ready-check", a.no_ready_check), ("--no-wake", getattr(a, "no_wake", False))):
+                     ("--force", a.force), ("--no-ready-check", a.no_ready_check), ("--no-wake", getattr(a, "no_wake", False)),
+                     ("--no-slash-restart", getattr(a, "no_slash_restart", False))):
         if on:
             parts.append(flag)
     if a.skip_sandbox_check:
