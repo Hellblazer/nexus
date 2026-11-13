@@ -43,7 +43,18 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.2.2)
+## Awaiting the next release (pinned: v8.2.3)
+
+ONE PATH PER BULLET, on the bullet's FIRST line.
+
+## Deferred to the next client release` below and do not cherry-pick its
+commits, so the whole bead ships together at the next normal release. A
+deferred entry is exempt from the release-window "ledger must be empty" rule
+above -- still declared there is correct, not stale -- and stays exactly where
+it is until moved back deliberately.
+
+---
+## Awaiting the next release (pinned: v8.2.3)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 

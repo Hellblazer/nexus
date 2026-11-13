@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.2.3] - 2026-11-13
+
+Plugin version aligned with conexus 8.2.3. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/hooks/scripts/compact_checkpoint.py`: nexus-ct74m: the PreCompact checkpoint checks the board against the facts: board lines resolved against bd, git and gh; worktrees holding work no thread names; the session's background tasks, worktree processes and crons; the worktree chosen by a board worktree: line, then the newest commit; kept sections stamped with the time they were read.
+- `conexus/hooks/scripts/_session_facts.py`: nexus-ct74m: new, the facts module the checkpoint and claude-restart-sessions share.
+
 ## [8.2.2] - 2026-11-13
 
 Plugin version aligned with conexus 8.2.2. No plugin-surface changes were pending at this pin; the #1656 fix is in the nx SubagentStart hook.
