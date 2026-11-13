@@ -153,7 +153,7 @@ class TestCheckpointShowsEachSlip:
         world["board"] = "## Live\nref: nexus-11ve0\nwaiting_on: sam\n"
         world["beads"] = {"nexus-11ve0": ("in_progress", "task", 0)}
         text = _section(world["write"](), "Board checked against the facts")
-        assert "- checked 1 ref/waiting_on line(s) naming a bead, tag, CI run or PR; 1 line(s) name nothing" in text
+        assert "- checked 1 ref/waiting_on line(s) against a bead, tag, CI run or PR; 1 line(s) name none" in text
         assert "stale" not in text
 
     def test_a_due_thread(self, world) -> None:
@@ -171,7 +171,7 @@ class TestCheckpointShowsEachSlip:
         world["board"] = f"## Main\nref: nexus-ct74m\nstate: in nexus-wt/{NAME}\n"
         text = world["write"](cwd=str(primary))
         assert re.search(rf"- no board thread names \S*{NAME}-forgotten \[feature/x-{NAME}-forgotten\]: "
-                         r"1 commit\(s\) not on origin/develop", text)
+                         r"1 commit\(s\) not on origin/develop \(as of its last fetch\)", text)
 
     def test_the_worktree_is_the_one_with_the_newest_commit_not_the_cwd(self, world, mod, env, monkeypatch, tmp_path) -> None:
         _repo(tmp_path, {NAME: True, f"{NAME}-live": False})
@@ -271,7 +271,7 @@ class TestCheckpointShowsEachSlip:
         started = time.monotonic()
         text = world["write"]()
         assert time.monotonic() - started < 3.0
-        assert "beads not checked: the lookup ran out of time" in text
+        assert "beads not checked: the lookup failed or ran out of time" in text
 
 
 # ── what review round 1 found printed falsely (448ad2e1c) ───────────────────
@@ -300,6 +300,34 @@ class TestNoFalseClaim:
         world["beads"] = {"nexus-nz8kl": ("closed", "task", 0), "nexus-y3y8d": ("in_progress", "task", 0)}
         text = world["write"]()
         assert "ref: nexus-nz8kl is closed" in text and "stale" not in _section(text, "Board checked against the facts")
+
+    @pytest.mark.parametrize(("line", "facts", "says", "never"), [
+        # halcyon: a tag that exists is half of a two-step wait
+        ("waiting_on: 0.1.188 then 8.1.3", {"tags": {"engine-service-v0.1.188"}},
+         "waiting_on engine-service-v0.1.188: the tag exists on origin\n", "may be over"),
+        # baton: a closed bead beside a sha and a window on the same line
+        ("ref: nexus-qo7ie.31; develop 68bc53766 (window 24)", {"beads": {"nexus-qo7ie.31": ("closed", "task", 0)}},
+         "ref: nexus-qo7ie.31 is closed", "stale"),
+        ("waiting_on: CI run 43278647831 then the merge", {"runs": {"43278647831": ("completed", "success")}},
+         "CI run 43278647831: completed, success\n", "over"),
+    ], ids=["tag-then-another", "bead-beside-a-sha", "run-then-a-step"])
+    def test_a_fact_on_a_line_with_another_wait_draws_no_conclusion(self, world, line, facts, says, never) -> None:
+        world["board"] = f"## T\n{line}\n"
+        for k, v in facts.items():
+            world[k] = v
+        section = _section(world["write"](), "Board checked against the facts")
+        assert says in section and never not in section
+
+    def test_a_line_whose_lookup_failed_is_not_a_line_that_names_nothing(self, world) -> None:
+        world["board"] = "## T\nref: nexus-ct74m\nwaiting_on: sam\n"  # world["beads"] is empty: bd answered nothing
+        section = _section(world["write"](), "Board checked against the facts")
+        assert "- checked 0 ref/waiting_on line(s) against a bead, tag, CI run or PR; 1 line(s) name one that no " \
+               "lookup answered; 1 line(s) name none" in section
+
+    def test_a_deferred_epic_is_not_told_to_close(self, world) -> None:
+        world["board"] = "## Held\nref: nexus-1d6pz\n"
+        world["beads"] = {"nexus-1d6pz": ("deferred", "epic", 0)}
+        assert "close it" not in world["write"]()
 
     def test_a_bare_pr_number_is_not_looked_up(self, world) -> None:
         # nexus #12 is merged; "PR #12" on a board can be any repository's.
@@ -393,6 +421,16 @@ class TestParsing:
         assert sf.verify("## T\ndue: 2026-01-01\ndue: 2999-01-01\n", sf.Facts(), now).lines == []
         assert sf.verify("## T\ndue: 2999-01-01\ndue: 2026-01-01\n", sf.Facts(), now).lines == ["- T", "  - due 2026-01-01: due now"]
 
+    @pytest.mark.parametrize(("body", "is_standing"), [
+        ("nx tuple wait mailbox/tamsin", True),
+        ("nx tuple wait mailbox/tamsin --timeout 600 > /tmp/w.log 2>&1", True),
+        ("nx tuple wait mailbox/x; rm -rf build", False),
+        ("bd comments add x \"nx tuple wait\"", False),
+        ("nx tuple wait x && make", False),
+    ])
+    def test_only_the_bare_wake_is_a_standing_wait(self, sf, body, is_standing) -> None:
+        assert sf.standing(SNAP.format(body)) is is_standing
+
     @pytest.mark.parametrize(("line", "want"), [
         ("zsh -c source /h/.claude/shell-snapshots/snapshot-zsh-1.sh && eval 'echo '\\''hi'\\'' > /x' < /dev/null", "echo 'hi' > /x"),
         # macOS ps: '"'"' for a quote, \012 for a newline (live, review of 448ad2e1c)
@@ -451,6 +489,8 @@ class TestParsing:
         assert sf.unboarded([w], "## T\nstate: in nexus-wt/tamsin-x\n") == ([], [])
         assert sf.unboarded([w], "## T\nref: nexus-zzzzz\n")[0][0].startswith("- no board thread names /w/tamsin-x")
         assert sf.unboarded([w], "## T\nstate: in /w/tamsin-x\n") == ([], [])
+        # A longer sibling's path does not name this one (/w/tamsin-x-old is not /w/tamsin-x).
+        assert sf.unboarded([w], "## T\nstate: in /w/tamsin-x-old\n")[0]
         # A session's name elsewhere on its board (mailbox/tamsin-x) is not the worktree.
         assert sf.unboarded([w], "## T\n(mailbox/tamsin-x)\nref: nexus-zzzzz\n")[0]
         assert sf.unboarded([sf.WorktreeWork("/w/a", "b", 0, 0)], "") == ([], [])

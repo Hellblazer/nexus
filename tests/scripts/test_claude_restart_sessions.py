@@ -1075,7 +1075,7 @@ def test_the_ready_ask_carries_the_task_list(crs, rd, monkeypatch) -> None:
            "pid 5000 since t: nx ci wait abc. Stop each one you do not need, or answer not ready." in text
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     assert "sees no background task running under your session" in crs.ready_prompt(s, "/tmp/r.json")
-    assert "A session-only cron or reminder you set is lost in a restart" in crs.ready_prompt(s, "/tmp/r.json")
+    assert "A session-only cron or reminder you set may be lost in a restart" in crs.ready_prompt(s, "/tmp/r.json")
     monkeypatch.setattr(crs, "session_tasks", lambda _s: None)
     assert "could not list your background tasks" in crs.ready_prompt(s, "/tmp/r.json")
 

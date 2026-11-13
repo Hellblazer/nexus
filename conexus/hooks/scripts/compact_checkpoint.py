@@ -785,7 +785,7 @@ def _summarized(text: str) -> bool:
 
 
 #: Wall clock for one fact lookup (bd, git ls-remote, gh); they run beside continuation.
-_FACT_TIMEOUT_S = 6.0
+_FACT_TIMEOUT_S = 8.0
 #: The fact checks' own budget, from their start: whatever is not done by then is cut off and said so, so
 #: the checkpoint is written inside the hook's 45 s (hooks.json) whatever the box's load.
 _FACTS_BUDGET_S = 14.0
@@ -845,16 +845,17 @@ def _board_facts(board: str, cwd: str | None, deadline: float) -> tuple[list[str
             if why:
                 unchecked.append(why)
         else:
-            unchecked.append(f"{why_key} not checked: the lookup ran out of time")
+            unchecked.append(f"{why_key} not checked: the lookup failed or ran out of time")
     facts.runs = {k[1]: v for k, v in got.items() if isinstance(k, tuple) and k[0] == "run" and v is not None}
     facts.prs = {k[1]: v for k, v in got.items() if isinstance(k, tuple) and k[0] == "pr" and v is not None}
     if len(facts.runs) < len(runs) or len(facts.prs) < len(prs):
         unchecked.append("some CI runs or PRs not checked: gh missing, failed, timed out or the repository is not ours")
     verdict = sf.verify(board, facts, _now())
     lines = list(verdict.lines)
-    lines.append(f"- checked {verdict.checked} ref/waiting_on line(s) naming a bead, tag, CI run or PR"
-                 + (f"; {verdict.opaque} line(s) name nothing this check can resolve (a person, a branch, a "
-                    "deploy): read those yourself" if verdict.opaque else ""))
+    lines.append(f"- checked {verdict.checked} ref/waiting_on line(s) against a bead, tag, CI run or PR"
+                 + (f"; {verdict.unresolved} line(s) name one that no lookup answered" if verdict.unresolved else "")
+                 + (f"; {verdict.opaque} line(s) name none (a person, a branch, a deploy): read those yourself"
+                    if verdict.opaque else ""))
     if cut:
         unchecked.append(f"{cut} lookup(s) cut off by the checks' time budget")
     return lines, unchecked
@@ -867,8 +868,9 @@ def _worktree_lines(board: str, worktree: str | None, others: list[tuple[str, st
     git = _cli_lookup.resolve("git")
     if not git:
         return [], ["worktrees not checked: git not found"]
-    trees = ([(worktree, "")] if worktree else []) + [(p, b) for p, b, _a in others]
-    trees.sort(key=lambda t: sf.last_work_time(t[0]), reverse=True)
+    # The chosen worktree first, whatever the cap; then the others, newest first.
+    rest = sorted(((p, b) for p, b, _a in others), key=lambda t: sf.last_work_time(t[0]), reverse=True)
+    trees = ([(worktree, "")] if worktree else []) + rest
     unchecked = []
     if len(trees) > sf.MAX_WORKTREES:
         unchecked.append(f"only the newest {sf.MAX_WORKTREES} of {len(trees)} worktrees were checked for work")

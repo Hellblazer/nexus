@@ -202,11 +202,13 @@ def worktree_processes(table: list[Proc], cwds: dict[int, str], worktrees: Itera
 
 #: A background task that is the session's standing mail wake (the mailbox skill keeps one armed when the
 #: session has no channel): it is meant to run, and a restart re-arms it.
-_STANDING_RE = re.compile(r"\bnx tuple wait\b")
+_STANDING_RE = re.compile(r"nx tuple wait(\s+[^;&|]*)?")
 
 
 def standing(command: str) -> bool:
-    return _STANDING_RE.search(task_command(command)) is not None
+    """The task is the bare wake (``nx tuple wait <space> [flags] [> log 2>&1]``), nothing chained to it."""
+    body = re.sub(r"\d?>&\d", "", task_command(command)).strip()
+    return _STANDING_RE.fullmatch(body) is not None
 
 
 def task_lines(tasks: list[Proc] | None, procs: list[tuple[Proc, str]] | None, crons: list[str], *,
@@ -370,7 +372,8 @@ def unboarded(work: Iterable[WorktreeWork], board: str) -> tuple[list[str], list
         # By path: the whole path, or ``<something>-wt/<dir>`` as boards write it. A bare directory name is not
         # enough: ``mailbox/tamsin`` on tamsin's board named the ``tamsin`` worktree and hid its work.
         name = Path(w.path).name
-        named = (w.path in board or re.search(rf"wt[/\\]{re.escape(name)}(?![\w-])", board) is not None
+        named = (re.search(rf"{re.escape(w.path)}(?![\w.-])", board) is not None
+                 or re.search(rf"wt[/\\]{re.escape(name)}(?![\w-])", board) is not None
                  or bool(w.branch and w.branch in board)
                  or any(bead_named(b, board) for b in _BRANCH_BEAD_RE.findall(w.branch)))
         if named:
@@ -380,7 +383,7 @@ def unboarded(work: Iterable[WorktreeWork], board: str) -> tuple[list[str], list
             continue
         what = []
         if w.unlanded > 0:
-            what.append(f"{w.unlanded} commit(s) not on origin/develop")
+            what.append(f"{w.unlanded} commit(s) not on origin/develop (as of its last fetch)")
         if w.dirty > 0:
             what.append(f"{w.dirty} changed file(s)")
         if what:
@@ -503,27 +506,48 @@ def parse_date(value: str) -> datetime | None:
 @dataclass
 class Verdict:
     lines: list[str]
-    checked: int  # ref and waiting_on lines naming something resolvable
-    opaque: int  # ref and waiting_on lines naming nothing this check can resolve (a person, a branch, a deploy)
+    checked: int  # ref and waiting_on lines where at least one named fact was found
+    opaque: int  # ref and waiting_on lines naming no bead, tag, run or PR at all (a person, a branch, a deploy)
+    unresolved: int = 0  # lines naming one, where no lookup answered (it failed, timed out, or bd knows no such id)
+
+
+#: Words a ref or waiting_on line uses around the facts it names, which name no other wait themselves.
+_FILLER = frozenset({"and", "the", "a", "an", "on", "for", "of", "to", "in", "ci", "run", "runs", "pr", "tag", "cut",
+                     "engine", "engine-service", "conexus", "release", "develop", "github", "com", "https", "http",
+                     "actions", "pull", "nexus"})
+
+
+def _nothing_else(value: str, wanted: Wanted) -> bool:
+    """The line names nothing but *wanted*: with its facts and filler words removed, no word is left. Only
+    then is a conclusion about the whole line drawn; a person, a sha or a second step keeps it unsaid
+    (halcyon's "0.1.188 then 8.1.3", baton's "nexus-qo7ie.31; develop 68bc53766", review r2)."""
+    rest = _PR_RE.sub(" ", re.sub(r"https?://github\.com/[\w.-]+/[\w.-]+/actions/runs/\d+", " ", value))
+    for token in sorted({*wanted.beads, *wanted.engine_tags, *wanted.client_tags,
+                         *(r for _repo, r in wanted.runs), *(f"{repo}#{n}" for repo, n in wanted.prs),
+                         *(n for _repo, n in wanted.prs), *(t.removeprefix("engine-service-v") for t in wanted.engine_tags),
+                         *(t.removeprefix("v") for t in wanted.client_tags)}, key=len, reverse=True):
+        rest = rest.replace(token, " ")
+    words = re.findall(r"[a-z0-9][a-z0-9.'-]*", rest.lower())
+    return all(w.strip(".'-") in _FILLER for w in words)
 
 
 def _line_notes(key: str, value: str, facts: Facts) -> list[str]:
-    """What the facts say about one ref or waiting_on line. On a line naming one thing the conclusion is
-    drawn ("this line is stale", "this wait is over"); on a line naming several, each part is reported
-    and the reader draws it, since one closed bead or one finished run says nothing about the others."""
+    """What the facts say about one ref or waiting_on line. The fact is always reported; the conclusion
+    ("this line is stale", "this wait is over") only when the line names nothing else, since one closed bead
+    or one finished run says nothing about the other waits on the line."""
     wanted = facts_named(value)
-    single = wanted.count() == 1
+    single = wanted.count() == 1 and _nothing_else(value, wanted)
     notes: list[str] = []
     beads = sorted(wanted.beads)
     known = [b for b in beads if b in facts.beads]
     closed = [b for b in known if facts.beads[b][0] == "closed"]
-    if closed and len(closed) == len(beads) == len(known) and wanted.count() == len(beads):
+    if closed and len(closed) == len(beads) == len(known) and wanted.count() == len(beads) and _nothing_else(value, wanted):
         notes.append(f"{key} {', '.join(closed)}: closed, so this line is stale")
     else:
         notes.extend(f"{key}: {b} is closed" for b in closed)
     for b in known:
         status, kind, open_children = facts.beads[b]
-        if status != "closed" and kind == "epic" and open_children == 0 and key == "ref":
+        if status == "open" and kind == "epic" and open_children == 0 and key == "ref":
             notes.append(f"ref {b}: open epic with no open child; close it or name what is left")
         elif status != "closed" and key == "waiting_on" and single:
             notes.append(f"waiting_on {b}: still {status}")
@@ -547,15 +571,21 @@ def verify(board: str, facts: Facts, now: datetime) -> Verdict:
     """Per thread, the lines whose claim the facts settle, as markdown, with how many lines could be
     checked at all. Lines that still hold are not listed."""
     out: list[str] = []
-    checked = opaque = 0
+    checked = opaque = unresolved = 0
     for t in threads(board):
         notes: list[str] = []
         dues = [i for i, (k, _v) in enumerate(t.fields) if k == "due"]
         for i, (key, value) in enumerate(t.fields):
             if key in ("ref", "waiting_on"):
-                if facts_named(value).count():
+                w = facts_named(value)
+                resolved = (any(b in facts.beads for b in w.beads)
+                            or any(t in facts.tags for t in w.engine_tags | w.client_tags)
+                            or any(r in facts.runs for _repo, r in w.runs) or any(p in facts.prs for p in w.prs))
+                if resolved:
                     checked += 1
                     notes.extend(_line_notes(key, value, facts))
+                elif w.count():
+                    unresolved += 1
                 elif value.lower() not in _UNSET:
                     opaque += 1
             elif key == "due" and i == dues[-1]:  # given twice, the last due: line counts
@@ -569,7 +599,7 @@ def verify(board: str, facts: Facts, now: datetime) -> Verdict:
         if notes:
             out.append(f"- {t.title}")
             out.extend(f"  - {n}" for n in dict.fromkeys(notes))
-    return Verdict(out, checked, opaque)
+    return Verdict(out, checked, opaque, unresolved)
 
 
 def board_worktree(board: str) -> list[str]:

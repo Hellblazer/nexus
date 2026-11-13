@@ -2226,7 +2226,7 @@ def session_tasks(s: dict) -> list[str] | None:
 
 
 def tasks_note(tasks: list[str] | None) -> str:
-    crons = "A session-only cron or reminder you set is lost in a restart; count it as work in flight. "
+    crons = "A session-only cron or reminder you set may be lost in a restart; count it as work in flight. "
     if tasks is None:
         return "This script could not list your background tasks; check your own before answering. " + crons
     if not tasks:
