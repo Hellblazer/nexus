@@ -31,6 +31,7 @@ class _Link:
 @dataclass
 class _Entry:
     title: str
+    sensitive: bool = False
 
 
 class _Catalog:
@@ -52,7 +53,8 @@ class _Catalog:
         self.resolves.append(list(doc_ids))
         if self.fail == "titles":
             raise RuntimeError("catalog down")
-        return {d: _Entry(self.titles[d]) for d in doc_ids if d in self.titles}
+        return {d: (self.titles[d] if isinstance(self.titles[d], _Entry) else _Entry(self.titles[d]))
+                for d in doc_ids if d in self.titles}
 
 
 def _hit(rid: str, owners: list[str], dist: float = 0.3) -> SearchResult:
@@ -106,7 +108,7 @@ def test_the_annotation_line_leads_with_the_successor() -> None:
     cat = _Catalog(LINKS, TITLES)
     old = _hit("a", ["1.1.11"])
     mark_superseded([old], cat, owners_of=_owners, clock=lambda: 0.0)
-    assert hit_annotation_line(old.metadata) == "superseded by RDR-040 (2026-08-01)"
+    assert hit_annotation_line(old.metadata) == "superseded by RDR-040 (linked 2026-08-01)"
     assert hit_annotation_line({}) == ""
 
 
@@ -163,3 +165,60 @@ def test_no_catalog_or_no_owners_is_a_no_op() -> None:
     cat = _Catalog(LINKS, TITLES)
     mark_superseded([r], cat, owners_of=_owners, clock=lambda: 0.0)
     assert SUPERSEDED_KEY not in r.metadata
+
+
+def test_a_sensitive_successor_is_never_named() -> None:
+    cat = _Catalog(LINKS, {"1.1.40": _Entry("RDR-040 Secret Plan", sensitive=True)})
+    old = _hit("a", ["1.1.11"])
+    mark_superseded([old], cat, owners_of=_owners, clock=lambda: 0.0)
+    assert old.metadata[SUPERSEDED_KEY][0] == supersession.WITHHELD_TITLE
+    assert "Secret" not in hit_annotation_line(old.metadata)
+
+
+def test_every_shared_catalog_handle_shares_one_cache_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.catalog import factory  # noqa: PLC0415
+
+    cat = _Catalog(LINKS, TITLES)
+
+    class _Handle(factory._SharedServiceCatalogHandle):  # get_catalog() builds a new one per call
+        def __init__(self) -> None:
+            pass
+
+        def link_query(self, **kw):
+            return cat.link_query(**kw)
+
+        def resolve_many(self, ids):
+            return cat.resolve_many(ids)
+
+    for _ in range(3):
+        mark_superseded([_hit("a", ["1.1.10"])], _Handle(), owners_of=_owners, clock=lambda: 0.0)
+    assert cat.queries == 1
+
+
+def test_a_failed_read_is_remembered_briefly() -> None:
+    cat = _Catalog(LINKS, TITLES, fail="links")
+    t = [0.0]
+    for _ in range(3):
+        mark_superseded([_hit("a", ["1.1.10"])], cat, owners_of=_owners, clock=lambda: t[0])
+    assert cat.queries == 1
+    t[0] = supersession.FAILED_TTL_S + 1
+    mark_superseded([_hit("a", ["1.1.10"])], cat, owners_of=_owners, clock=lambda: t[0])
+    assert cat.queries == 2
+
+
+def test_a_hit_with_unknown_or_too_many_owners_is_left_alone() -> None:
+    from nexus.context_annotations import OWNER_RESOLVE_CAP  # noqa: PLC0415
+
+    cat = _Catalog(LINKS, TITLES)
+    failed = _hit("a", ["1.1.10"])
+    failed.metadata["_owner_lookup_failed"] = True
+    many = _hit("b", ["1.1.10"])
+    many.metadata["_owner_doc_ids"] = [f"1.9.{i}" for i in range(OWNER_RESOLVE_CAP + 1)]
+    mark_superseded([failed, many], cat, owners_of=_owners, clock=lambda: 0.0)
+    assert SUPERSEDED_KEY not in failed.metadata and SUPERSEDED_KEY not in many.metadata
+
+
+def test_the_mark_stays_out_of_json_output() -> None:
+    from nexus.formatters import _INTERNAL_METADATA_KEYS  # noqa: PLC0415
+
+    assert SUPERSEDED_KEY in _INTERNAL_METADATA_KEYS

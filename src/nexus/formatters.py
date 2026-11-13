@@ -31,6 +31,7 @@ _INTERNAL_METADATA_KEYS: frozenset[str] = frozenset(
     {
         "_owner_doc_ids", DISPLAY_SOURCE_PATH_KEY, DOC_ID_INFERRED_KEY, OWNER_AGENTS_KEY, OWNER_BIB_KEY, OWNER_CHUNK_COUNT_KEY,
         OWNER_FACTS_KEY, OWNER_FRECENCY_KEY, OWNER_QUALITY_KEY,
+        "_superseded_by",  # nexus-2k66t.6: supersession.SUPERSEDED_KEY, a working key
     },
 )
 

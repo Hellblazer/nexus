@@ -3501,6 +3501,7 @@ def _search_render(
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
             topic or "", threshold, lexical, boost_window, allow_key, sensitivity,
+            bool(structured),  # nexus-2k66t.6: only text output marks superseded hits, so the two never share a page
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -3553,7 +3554,8 @@ def _search_render(
                     query, target, n_results=fetch_n, t3=t3, where=where_dict,
                     cluster_by=cluster_by or None,
                     catalog=_get_catalog(),
-                    link_boost=False,
+                    # nexus-2k66t.6: text output prints the superseded mark, so it is the one that demotes
+                    link_boost=False, mark_superseded=not structured,
                     taxonomy=_search_taxonomy(),
                     topic=topic or None,
                     threshold_override=threshold,
@@ -3870,11 +3872,12 @@ def _search_render(
             badge = f" {_SENSITIVE_BADGE}" if posture.flagged(_idx) else ""
             # nexus-2k66t.6 (1a): a short chunk id store_get_many resolves, so the hit is fetchable without a
             # structured re-run.
-            _chash = str(r.metadata.get("chunk_text_hash") or r.id or "")
+            # The row id is what store_get_many looks up; the metadata chash only when the id is not a full chash.
+            _chash = str(r.id) if _CHASH_SHAPE.fullmatch(str(r.id)) else str(r.metadata.get("chunk_text_hash") or "")
             _short = _shown_chunks.short_id(_chash)
             if _short:
-                _shown_chunks.record([_chash])
-            id_part = f" id {_short}" if _short else ""
+                _shown_chunks.record([(_chash, r.collection)])
+            id_part = f" id={_short}" if _short else ""
             lines.append(f"[{dist}]{badge}{id_part} {label}{flag}{note_line}\n  {snippet}")
 
         if _withheld_line := posture.note_line():
@@ -3979,7 +3982,7 @@ def search(
     an extracted aspect field, or graph neighbours, respectively.
 
     Returns a ranked, human-readable list of chunks by default; each hit's
-    `id` is a short chunk id `store_get_many` accepts. With
+    `id=` is a short chunk id `store_get_many` accepts. With
     `structured=True` it returns the `{ids, tumblers, distances,
     hybrid_scores, collections, chunk_collections, chunk_text_hash}` dict
     instead. `distances` is the raw vector distance (absolute, lower is
@@ -7215,7 +7218,8 @@ def store_get_many(
         description=(
             "Document ids to fetch: a comma-separated string, a flat list[str] "
             "(single-stream), or a list[list[str]] (parallel-stream, pairs with "
-            "a list[int] limit_per_source). A short id a text search printed works."
+            "a list[int] limit_per_source). A short id a text search printed (id=...) works, and with "
+            "collections left at its default it is looked up where that search found it."
         ),
     )],
     collections: Annotated[str | list, Field(
@@ -7279,24 +7283,27 @@ def store_get_many(
     from nexus.db.http_vector_client import SensitivityExcludeUnavailable  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
     try:
-        # nexus-2k66t.6 (1a): a short id a text search printed becomes its full chash.
-        ids, unresolved = _shown_chunks.expand(ids)
+        # nexus-2k66t.6 (1a): a short id a text search printed becomes its full chash, looked up in the collection
+        # it was shown from when the caller left collections at the default.
+        ids, unresolved, homes = _shown_chunks.expand(ids)
+        if collections == "knowledge" and limit_per_source is None:
+            ids, collections = _shown_chunks.route(ids, homes, "knowledge")
         out = _store_get_many_impl(
             ids=ids, collections=collections, max_chars_per_doc=max_chars_per_doc, structured=structured,
             limit_per_source=limit_per_source,
             sensitivity=_sensitivity.read_sensitivity(),  # RDR-243 Phase 2 (nexus-rfvyy.7.8): once, on the tool's own thread
             mcp_posture=True,  # RDR-243 Phase 3: this tool prints to the session model
         )
-        if unresolved:
+        if unresolved or homes:
             if isinstance(out, dict):
-                if notes := _shown_chunks.notes_for(unresolved, out.get("missing") or ()):
+                if notes := _shown_chunks.notes_for(unresolved, out.get("missing") or (), homes):
                     out["id_notes"] = notes  # additive: present only when a short id came back missing
             elif "Missing:" in out:
                 # The text names missing ids on its last "Missing:" line (the first ten); a short id that
                 # resolved on its own is not on it and gets no note.
                 missing_line = out.rsplit("Missing:", 1)[1].split("\n", 1)[0]
                 named = {t.strip().split(" ")[0] for t in missing_line.split(",")}
-                out = "\n".join([out, *_shown_chunks.notes_for(unresolved, named)])
+                out = "\n".join([out, *_shown_chunks.notes_for(unresolved, named, homes)])
         return out
     except SensitivityExcludeUnavailable as e:
         # RDR-243 review r1 F2: the impl lets a refused read propagate to its in-process callers; this MCP

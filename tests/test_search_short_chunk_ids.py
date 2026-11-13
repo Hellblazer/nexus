@@ -41,7 +41,12 @@ def search(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(core, "_get_t3", lambda: _T3())
     monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, t3, **kw: ["knowledge__1-1"])
-    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", lambda q, target, **kw: list(rows))
+    def fake_scc(q, target, **kw):
+        calls.append(kw)
+        return list(rows)
+
+    calls: list[dict] = []
+    monkeypatch.setattr("nexus.search_engine.search_cross_corpus", fake_scc)
     monkeypatch.setattr("nexus.search_engine.apply_ranking_boosts", lambda results, **kw: results)
     monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
     monkeypatch.setattr(core, "_get_catalog", lambda: None)
@@ -52,6 +57,7 @@ def search(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(core, "_get_t1", _no_t1)
 
     def _run(results: list[SearchResult], **kw: Any):
+        _run.calls = calls  # type: ignore[attr-defined]
         rows[:] = results
         core._page_cache_invalidate()
         try:
@@ -64,8 +70,8 @@ def search(monkeypatch: pytest.MonkeyPatch):
 
 def test_each_text_hit_prints_its_short_id_and_records_the_full_chash(search) -> None:
     out = search([_sr("c1", _A, 0.1), _sr("c3", _C, 0.2)])
-    assert "] id ab12cd34 doc c1" in out
-    assert "] id c0ffee00 doc c3" in out
+    assert "] id=ab12cd34 doc c1" in out
+    assert "] id=c0ffee00 doc c3" in out
     assert _shown_chunks.expand("ab12cd34,c0ffee00")[0] == f"{_A},{_C}"
 
 
@@ -89,7 +95,7 @@ def test_a_withheld_row_prints_its_stub_and_no_id(search, monkeypatch: pytest.Mo
     clean.metadata["sensitive"] = False
     out = search([secret, clean])
     assert "ab12cd34" not in out, out
-    assert "] id c0ffee00 doc c3" in out
+    assert "] id=c0ffee00 doc c3" in out
     assert _shown_chunks.expand("ab12cd34")[1], "a withheld row's chash is not recorded either"
 
 
@@ -100,8 +106,9 @@ def test_a_withheld_row_prints_its_stub_and_no_id(search, monkeypatch: pytest.Mo
 def get_many(monkeypatch: pytest.MonkeyPatch):
     seen: list[Any] = []
 
-    def impl(*, ids, structured, **kw):
+    def impl(*, ids, structured, collections="knowledge", **kw):
         seen.append(ids)
+        colls.append(collections)
         if isinstance(ids, list):
             flat = [x for s in ids for x in s] if ids and isinstance(ids[0], list) else list(ids)
         else:
@@ -116,24 +123,27 @@ def get_many(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(core, "_store_get_many_impl", impl)
     return seen
 
+colls: list = []
+
 
 def test_store_get_many_expands_a_recorded_short_id(get_many) -> None:
-    _shown_chunks.record([_A, _C])
+    _shown_chunks.record([(_A, "knowledge__1-1__m__v1"), (_C, "knowledge__1-1__m__v1")])
+    colls.clear()
     out = core.store_get_many(ids="c0ffee00")
-    assert get_many == [_C]
+    assert get_many == [[_C]] and colls == [["knowledge__1-1__m__v1"]]
     assert "Missing" not in out
 
 
 def test_list_and_parallel_shapes_are_expanded_in_place(get_many) -> None:
-    _shown_chunks.record([_C])
-    core.store_get_many(ids=["c0ffee00", _A])
+    _shown_chunks.record([(_C, "knowledge__1-1__m__v1")])
+    core.store_get_many(ids=["c0ffee00", _A], collections="knowledge__1-1__m__v1")
     core.store_get_many(ids=[["c0ffee00"], [_A]], collections=["knowledge", "knowledge"],
                         limit_per_source=[1, 1])
     assert get_many == [[_C, _A], [[_C], [_A]]]
 
 
 def test_an_ambiguous_short_id_is_named_not_guessed(get_many) -> None:
-    _shown_chunks.record([_A, _B])
+    _shown_chunks.record([(_A, "knowledge__1-1__m__v1"), (_B, "knowledge__1-1__m__v1")])
     out = core.store_get_many(ids="ab12cd34")
     assert get_many == ["ab12cd34"]
     assert "id ab12cd34 matches 2 chunks" in out
@@ -141,7 +151,7 @@ def test_an_ambiguous_short_id_is_named_not_guessed(get_many) -> None:
     assert s["missing"] == ["ab12cd34"] and "matches 2 chunks" in s["id_notes"][0]
     # more characters settle it
     core.store_get_many(ids="ab12cd340")
-    assert get_many[-1] == _A
+    assert get_many[-1] == [_A]
 
 
 def test_a_short_id_never_shown_says_how_to_get_the_full_one(get_many) -> None:
@@ -157,6 +167,34 @@ def test_full_ids_and_non_hex_ids_pass_through_untouched(get_many) -> None:
 
 
 def test_the_record_is_bounded() -> None:
-    _shown_chunks.record(f"{i:064x}" for i in range(_shown_chunks.CAPACITY + 10))
-    assert _shown_chunks.expand(f"{0:064x}"[:12])[1], "the oldest fell out"
-    assert not _shown_chunks.expand(f"{_shown_chunks.CAPACITY + 9:064x}"[-64:][:64])[1]
+    def chash(i: int) -> str:
+        return f"{i:08x}" + "e" * 56  # a distinct 8-character id each
+
+    _shown_chunks.record((chash(i), "k") for i in range(_shown_chunks.CAPACITY + 10))
+    _ids, unresolved, _h = _shown_chunks.expand(chash(0)[:8])
+    assert "not the start of a chunk id" in unresolved[chash(0)[:8]], "the oldest fell out"
+    newest = chash(_shown_chunks.CAPACITY + 9)
+    assert _shown_chunks.expand(newest[:8])[0] == newest
+
+
+def test_a_docs_hit_is_fetched_from_its_own_collection(search, get_many) -> None:
+    docs = SearchResult(id=_C, content="d", distance=0.1, collection="docs__1-1__m__v1",
+                        metadata={"chunk_text_hash": _C, "_display_title": "a doc"})
+    out = search([docs])
+    assert "] id=c0ffee00 a doc" in out
+    colls.clear()
+    core.store_get_many(ids="c0ffee00")
+    assert get_many[-1] == [_C] and colls == [["docs__1-1__m__v1"]]
+
+
+def test_an_explicit_scope_that_misses_names_where_the_id_was_shown(get_many) -> None:
+    _shown_chunks.record([("d" * 64, "docs__1-1__m__v1")])
+    out = core.store_get_many(ids="dddddddd", collections="code")
+    assert 'id dddddddd was shown from docs__1-1__m__v1; pass collections="docs__1-1__m__v1"' in out
+
+
+def test_only_text_search_asks_for_the_superseded_mark(search) -> None:
+    # nexus-2k66t.6 (2A): text output prints the mark, so only it demotes; structured output keeps its ranking.
+    search([_sr("c1", _A, 0.1)])
+    search([_sr("c1", _A, 0.1)], structured=True)
+    assert [c.get("mark_superseded") for c in search.calls] == [True, False]
