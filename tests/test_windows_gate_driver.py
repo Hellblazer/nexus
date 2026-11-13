@@ -36,7 +36,7 @@ RUN_GATE: Path = GUEST_DIR / "run-gate.sh"
 GATE: Path = REPO / "tests" / "e2e" / "windows-phase5-gate.ps1"
 
 PW_SCRIPTS = ("restore.ps1", "guest-run.ps1", "stduser.ps1", "cache.ps1")
-NO_PW_SCRIPTS = ("hostcheck.ps1", "end.ps1")
+NO_PW_SCRIPTS = ("hostcheck.ps1", "end.ps1", "checkpoint.ps1")
 INNER_SCRIPTS = ("inst.ps1", "setup-run.ps1", "gaterun.ps1", "waitv.ps1", "as-user.ps1")
 ALL_PS = PW_SCRIPTS + NO_PW_SCRIPTS + INNER_SCRIPTS
 
@@ -168,13 +168,18 @@ def test_the_retry_is_bounded_and_stops_for_a_guest_that_is_not_running() -> Non
 
 
 def test_no_script_takes_deletes_or_renames_a_checkpoint() -> None:
-    forbidden = re.compile(
-        r"Checkpoint-VM|Remove-VMSnapshot|Remove-VMCheckpoint|Rename-VMSnapshot|Rename-VMCheckpoint|"
-        r"Set-VMSnapshot|Export-VMSnapshot|Convert-VHD|Remove-VM\b|Set-VM\b",
+    """The driver never removes, renames or replaces a checkpoint, the baseline least of all. The one exception
+    to "takes none" is checkpoint.ps1 (nexus-y3y8d, run-gate.sh --build-signed-in), pinned in its own tests."""
+    never = re.compile(
+        r"Remove-VMSnapshot|Remove-VMCheckpoint|Rename-VMSnapshot|Rename-VMCheckpoint|"
+        r"Set-VMSnapshot|Export-VMSnapshot|Convert-VHD|Remove-VM\b",
         re.I,
     )
+    taking = re.compile(r"Checkpoint-VM|Set-VM\b", re.I)
     for text in [_sh(), *(_read(n) for n in ALL_PS)]:
-        assert not forbidden.search(text)
+        assert not never.search(text)
+    for text in [_sh(), *(_read(n) for n in ALL_PS if n != "checkpoint.ps1")]:
+        assert not taking.search(text)
     restores = [(n, ln.strip()) for n in ALL_PS for ln in _code_lines(_read(n)) if "Restore-VM" in ln]
     assert restores == [
         ("restore.ps1", "Restore-VMSnapshot -VMName $vm -Name $cp -Confirm:$false -ErrorAction Stop")
@@ -522,6 +527,10 @@ case "$cmd" in
         m="${cmd#* -Mode }"; m="${m%% *}"
         echo "$m :: $cmd" >> "$FAKE_ROOT/cache.log"
         if [[ "${FAKE_FAIL_STEP:-}" == "$m" ]]; then echo "NXG-RESULT: FAIL cache $m broke"; exit 1; fi
+        echo "NXG-RESULT: ok" ;;
+      checkpoint.ps1)
+        echo "$cmd" >> "$FAKE_ROOT/checkpoint.log"
+        if [[ "${FAKE_FAIL_STEP:-}" == checkpoint ]]; then echo "NXG-RESULT: FAIL the checkpoint was not taken: broke"; exit 7; fi
         echo "NXG-RESULT: ok" ;;
       end.ps1)
         echo "$cmd" >> "$FAKE_ROOT/end.log"
@@ -1758,3 +1767,281 @@ def test_step_keeps_the_miss_lines_by_not_streaming_its_output() -> None:
     # nothing; with -Stream every cache-miss line past the twelfth would vanish from the log.
     step = next(ln for ln in _code_lines(_read("inst.ps1")) if "Out-String" in ln)
     assert "-Stream" not in step, step
+
+
+# ---- the signed-in checkpoint (nexus-y3y8d) ----------------------------------
+
+SIGNED_IN = "stduser-signed-in-20261113"
+BASELINE = "clean-baseline-2026-10-06"
+
+
+def _scripts(h: Harness) -> list[tuple[str, str]]:
+    """(script name, ssh log line) for every host script the run started, in order."""
+    found = []
+    for ln in h.ssh_lines():
+        m = re.search(r"-File \S*\\([a-z-]+\.ps1)", ln)
+        if m:
+            found.append((m.group(1), ln))
+    return found
+
+
+def _line(h: Harness, name: str) -> str:
+    return next(ln for n, ln in _scripts(h) if n == name)
+
+
+@pytest.mark.parametrize("flag", ["--build-signed-in", "--signed-in"])
+@pytest.mark.parametrize(
+    ("extra", "why"),
+    [
+        ((), "need --standard-user"),
+        (("--standard-user", "--applocker"), "no --applocker* or --wdac* mode"),
+        (("--standard-user", "--applocker-allow-dll"), "no --applocker* or --wdac* mode"),
+        (("--standard-user", "--no-admin-git", "--wdac-audit"), "no --applocker* or --wdac* mode"),
+        (("--standard-user", "--no-admin-git"), "no --no-admin-git"),
+        (("--standard-user", "--wheel", "@WHEEL@"), "take no --wheel"),
+    ],
+)
+def test_the_signed_in_flags_hold_the_default_standard_user_state_only(
+    harness: Harness, tmp_path: Path, flag: str, extra: tuple[str, ...], why: str
+) -> None:
+    wheel = tmp_path / "conexus-9.8.7-py3-none-any.whl"
+    wheel.write_bytes(b"x")
+    args = [str(wheel) if a == "@WHEEL@" else a for a in extra]
+    res = harness.run(*_BASE, *args, flag, SIGNED_IN)
+    assert res.returncode == 2, res.stderr
+    assert why in res.stderr, res.stderr
+    assert not (harness.root / "ssh.log").exists() and not (harness.root / "scp.log").exists()
+
+
+@pytest.mark.parametrize("flag", ["--build-signed-in", "--signed-in"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "stduser-signed-in",
+        "stduser-signed-in-2026",
+        "stduser-signed-in-2026111x",
+        "stduser-signed-in-202611133",
+        "x-stduser-signed-in-20261113",
+        "stduser-signed-in-20261113-b",
+        "clean-baseline-2026-10-06",
+        "a b",
+    ],
+)
+def test_the_signed_in_checkpoint_name_must_match_the_pattern(harness: Harness, flag: str, name: str) -> None:
+    res = harness.run(*_BASE, "--standard-user", flag, name)
+    assert res.returncode == 2
+    assert "stduser-signed-in-<8 digits>" in res.stderr, res.stderr
+    assert not (harness.root / "ssh.log").exists()
+
+
+def test_the_signed_in_name_may_not_be_the_baseline_and_the_two_flags_are_separate_runs(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--signed-in", SIGNED_IN, env={"NX_GUEST_CHECKPOINT": SIGNED_IN})
+    assert res.returncode == 2 and "must not be the baseline checkpoint" in res.stderr
+    res = harness.run(*_BASE, "--standard-user", "--signed-in", SIGNED_IN, "--build-signed-in", SIGNED_IN)
+    assert res.returncode == 2 and "separate runs" in res.stderr
+    res = harness.run(*_BASE, "--standard-user", "--build-signed-in", SIGNED_IN, env={"NX_GUEST_SETTLE_S": "soon"})
+    assert res.returncode == 2 and "NX_GUEST_SETTLE_S" in res.stderr
+    assert not (harness.root / "ssh.log").exists()
+
+
+@pytest.mark.parametrize("extra", [(), ("--standard-user",)], ids=["plain", "standard-user"])
+def test_a_run_without_the_flags_is_unchanged_baseline_restore_and_offline_boot(harness: Harness, extra: tuple[str, ...]) -> None:
+    res = harness.run(*_BASE, *extra, "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    hc, restore = _line(harness, "hostcheck.ps1"), _line(harness, "restore.ps1")
+    assert f"-Checkpoint {BASELINE} " in hc and "-SignedIn" not in hc and "-NewCheckpoint" not in hc
+    assert f"-Checkpoint {BASELINE} " in restore and "-Resume" not in restore and "-Cache yes" in restore
+    assert "checkpoint.ps1" not in "".join(n for n, _ in _scripts(harness))
+    if extra:
+        assert "-Existing" not in _line(harness, "stduser.ps1")
+    assert "stduser-signed-in" not in "\n".join(harness.ssh_lines())
+    # the offline boot is still restore.ps1's default path, and -Resume defaults to no
+    restore_ps = _read("restore.ps1")
+    assert "[ValidateSet('yes', 'no')][string]$Resume = 'no'" in restore_ps
+    assert "$offline = $Cache -eq 'yes'" in restore_ps
+    assert "Disconnect-VMNetworkAdapter -VMName $vm -ErrorAction Stop" in restore_ps
+
+
+def test_build_signed_in_restores_the_baseline_signs_in_settles_checkpoints_and_ends(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--build-signed-in", SIGNED_IN, "--out", str(harness.out), env={"NX_GUEST_SETTLE_S": "7"})
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert [n for n, _ in _scripts(harness)] == ["hostcheck.ps1", "restore.ps1", "stduser.ps1", "checkpoint.ps1", "end.ps1"]
+    hc, restore, std, ck = (_line(harness, n) for n in ("hostcheck.ps1", "restore.ps1", "stduser.ps1", "checkpoint.ps1"))
+    # the guest is restored to the baseline, as in every run; nothing resumes
+    assert f"-Checkpoint {BASELINE} " in restore and "-Resume" not in restore and SIGNED_IN not in restore
+    assert f"-Checkpoint {BASELINE} " in hc and f"-NewCheckpoint {SIGNED_IN}" in hc and "-SignedIn" not in hc
+    assert "-Existing" not in std
+    assert f"-Baseline {BASELINE} -Name {SIGNED_IN} -SettleSeconds 7" in ck and ck.startswith("bytes_on_stdin=0 ::")
+    # no install, setup, gate, launch, verdict, cache or collection; the normal end step ran once, shutting the guest down
+    assert not (harness.root / "inner.log").exists() and not (harness.root / "launch.log").exists()
+    assert not (harness.root / "cache.log").exists()
+    assert not any("guest-run.ps1" in ln for ln in harness.ssh_lines())
+    assert "-KeepGuest" not in harness.end_calls()[0]
+    _assert_cleaned_up_once(harness)
+    assert f"built the running checkpoint {SIGNED_IN}" in res.stdout
+    assert not any(ln.startswith("WINDOWS PHASE 5 GATE") for ln in res.stdout.splitlines())
+
+
+def test_build_signed_in_settles_for_ten_minutes_by_default(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--build-signed-in", SIGNED_IN, "--out", str(harness.out))
+    assert res.returncode == 0, res.stderr + res.stdout
+    assert "-SettleSeconds 600" in _line(harness, "checkpoint.ps1")
+
+
+def test_a_failed_checkpoint_fails_the_run_and_still_ends_the_guest(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--build-signed-in", SIGNED_IN, "--out", str(harness.out), fail_step="checkpoint")
+    assert res.returncode == 1
+    assert not (harness.root / "inner.log").exists()
+    _assert_cleaned_up_once(harness)
+
+
+def test_a_failed_account_step_in_the_build_takes_no_checkpoint(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--build-signed-in", SIGNED_IN, "--out", str(harness.out), fail_step="stduser")
+    assert res.returncode == 1
+    assert "checkpoint.ps1" not in "".join(n for n, _ in _scripts(harness))
+
+
+def test_signed_in_resumes_the_checkpoint_and_checks_the_existing_account(harness: Harness) -> None:
+    res = harness.run(*_BASE, "--standard-user", "--signed-in", SIGNED_IN, "--out", str(harness.out), verdict=_verdict(PASSED))
+    assert res.returncode == 0, res.stderr + res.stdout
+    order = [n for n, _ in _scripts(harness)]
+    assert order[:4] == ["hostcheck.ps1", "restore.ps1", "stduser.ps1", "cache.ps1"] and "checkpoint.ps1" not in order
+    hc, restore, std = (_line(harness, n) for n in ("hostcheck.ps1", "restore.ps1", "stduser.ps1"))
+    # hostcheck names both: the baseline the checkpoint must be a child of, and the checkpoint it checks
+    assert f"-Checkpoint {BASELINE} " in hc and f"-SignedIn {SIGNED_IN}" in hc
+    assert f"-Checkpoint {SIGNED_IN} " in restore and "-Resume yes" in restore and BASELINE not in restore
+    assert "-Existing yes" in std and "-AppLocker no -Wdac no" in std and "-AdminGit yes" in std
+    # every later step is the plain standard-user run's
+    later = [ln for n, ln in _scripts(harness) if n == "guest-run.ps1"]
+    assert len(later) == 4 and all("-RunAs nxstd" in ln for ln in later)
+    assert "run as standard user nxstd" in res.stdout
+    _assert_cleaned_up_once(harness)
+
+
+def test_hostcheck_refuses_a_signed_in_checkpoint_that_is_missing_wrongly_parented_or_not_standard() -> None:
+    code = "\n".join(_code_lines(_read("hostcheck.ps1")))
+    block = code[code.index("if ($SignedIn) {"):code.index("if ($NewCheckpoint) {")]
+    assert "$_.Name -eq $SignedIn" in block and "exit 7" in block
+    assert "$sn[0].ParentSnapshotName -ne $Checkpoint" in block and "exit 8" in block
+    assert "\"$($sn[0].SnapshotType)\" -ne 'Standard'" in block and "exit 9" in block
+    assert code.index("if ($SignedIn) {") < code.index("'NXG-RESULT: ok'")
+    new = code[code.index("if ($NewCheckpoint) {"):code.index("if ($parseErrors -gt 0)")]
+    assert "$NewCheckpoint -eq $Checkpoint" in new and "$snaps -contains $NewCheckpoint" in new and "exit 10" in new
+    # both names are held to the pattern before the guest is read
+    pattern = "'^stduser-signed-in-[0-9]{8}$'"
+    assert pattern in code and code.index(pattern) < code.index("Get-VM -Name")
+
+
+def test_checkpoint_ps1_is_the_one_place_a_checkpoint_is_taken_and_only_under_its_rules() -> None:
+    ck = _read("checkpoint.ps1")
+    code = "\n".join(_code_lines(ck))
+    takers = [n for n in ALL_PS if re.search(r"Checkpoint-VM|Set-VM\b", "\n".join(_code_lines(_read(n))))]
+    assert takers == ["checkpoint.ps1"]
+    assert code.count("Checkpoint-VM") == 1 and "Checkpoint-VM -Name $vm -SnapshotName $Name -ErrorAction Stop" in code
+    # the name: the pattern, and neither the baseline's nor an existing one's, refused before anything is changed
+    assert "$Name -notmatch '^stduser-signed-in-[0-9]{8}$'" in code
+    refuse = code.index("if ($Name -eq $Baseline -or $snaps -contains $Name)")
+    assert refuse < code.index("Set-VM") and refuse < code.index("Checkpoint-VM")
+    assert "exit 3" in code[refuse:code.index("if ($snaps -notcontains $Baseline)")]
+    # the baseline must exist and be the guest's current checkpoint, so the new one is its child
+    assert "$v.ParentCheckpointName -ne $Baseline" in code and "$v.State -ne 'Running'" in code
+    # the settle precedes the checkpoint; the default is ten minutes
+    assert "[int]$SettleSeconds = 600" in code
+    assert code.index("$SettleSeconds) { Start-Sleep 10 }") < code.index("Set-VM -VMName $vm -CheckpointType Standard")
+    # CheckpointType: recorded, set to Standard, taken, and put back in a finally whatever happened
+    rec = code.index("$was = $v.CheckpointType")
+    setstd = code.index("Set-VM -VMName $vm -CheckpointType Standard -ErrorAction Stop")
+    take = code.index("Checkpoint-VM")
+    fin = code.index("} finally {", take)
+    back = code.index("Set-VM -VMName $vm -CheckpointType $was -ErrorAction Stop", fin)
+    assert rec < setstd < take < fin < back
+    assert code.count("Set-VM") == 2 and all("-CheckpointType" in ln for ln in code.splitlines() if "Set-VM" in ln)
+    # what it reports and what it fails on
+    assert "parent=$($new.ParentSnapshotName) type=$($new.SnapshotType)" in code
+    assert "$new.ParentSnapshotName -ne $Baseline" in code and "\"$($new.SnapshotType)\" -ne 'Standard'" in code
+    assert "$after -notcontains $Baseline" in code
+    assert code.rstrip().endswith("'NXG-RESULT: ok'")
+    # no secret: the script has no way to read or store one
+    assert not re.search(r"DefaultPassword|Winlogon|Open-GuestSession|New-PSSession", ck)
+
+
+def test_the_restore_resumes_a_saved_guest_without_the_offline_boot() -> None:
+    code = "\n".join(_code_lines(_read("restore.ps1")))
+    after = code[code.index("Restore-VMSnapshot"):]
+    saved = after.index("if ($st -ne 'Saved')")
+    start = after.index("Start-VM -Name $vm")
+    assert saved < start and "exit 6" in after[saved:start]
+    resume_branch = after[after.index("if ($resume) {\n    $st"):after.index("} elseif ($offline) {")]
+    assert "Disconnect-VMNetworkAdapter" not in resume_branch and "Add-VMNetworkAdapter" not in resume_branch
+    # once Start-VM has resumed it, the adapter is on the Default Switch before the quiet block and the probe
+    after_start = after[start:]
+    assert after_start.index("Connect-VMNetworkAdapter -SwitchName 'Default Switch'") < after_start.index("$quietBlock; $quieted = $true")
+    assert "if ($resume) { $offline = $false }" in after[:start]
+    # a stale NAT lease: once, and only for a resumed guest whose probe has failed three times
+    loop = after[after.index("for ($i = 0; $i -lt 60; $i++)"):]
+    assert "if ($resume -and -not $ok -and $i -ge 2 -and -not $renewed) {" in loop
+    assert loop.count("$renew = { ipconfig /renew 2>&1 | Out-String }") == 1 and "$renewed = $true" in loop
+    assert loop.index("Invoke-WebRequest https://pypi.org/simple/") < loop.index("$renew = {")
+    # the quiet block still runs for a resumed guest, and the gate script is copied in as always
+    assert "$quieted = $Cache -ne 'yes'" in code and "windows-phase5-gate.ps1" in code
+
+
+def test_existing_mode_checks_the_account_and_builds_nothing() -> None:
+    std = _read("stduser.ps1")
+    start = std.index("if ($Existing -eq 'yes') {")
+    end = std.index("# -Existing ends here")
+    branch = "\n".join(_code_lines(std[start:end]))
+    # no account, no policy, no Git install, no secret, no restart
+    for forbidden in (
+        "Add-LocalGroupMember", "ADSI", "SetPassword", "Create(", "winget", "shutdown.exe", "Set-ItemProperty",
+        "New-Item -Force", "Set-AppLockerPolicy", "CiTool", "RNGCryptoServiceProvider", "AutoAdminLogon",
+    ):
+        assert forbidden not in branch, forbidden
+    assert not re.search(r"Winlogon[^\n]*(Set-|-Value)|DefaultPassword\s+-Value", branch)
+    # the account exists, is in Users and no other group (by SID), is signed in at the console; policy, Git and secret are read back
+    assert "Get-LocalUser -Name $u" in branch and "Get-LocalGroupMember" in branch
+    assert "$gsids.Count -eq 1 -and $gsids[0] -eq 'S-1-5-32-545'" in branch
+    assert "query user" in branch and "interactive session at the console=" in branch
+    assert (
+        "quiet-guest policy read back: OneDrive,Widgets,ConsumerFeatures,EdgeBackground=$pol (want 1,0,1,0); "
+        "default-user OneDriveSetup Run entry: $odRun"
+    ) in branch
+    assert "'C:\\Program Files\\Git\\cmd\\git.exe'" in branch
+    assert "winlogon secret present=" in branch
+    # the per-run staging the normal path does after sign-in, with the hashes run-gate.sh greps
+    assert 'Copy-Item -LiteralPath "$from\\windows-phase5-gate.ps1" -Destination "$b\\windows-phase5-gate.ps1" -Force' in branch
+    assert '"std gate sha256="' in branch and '"std wheel sha256="' in branch
+    # every failed check is a FAIL with its own exit code, and ok only after all of them
+    codes = [int(c) for c in re.findall(r"\$rcx = (1\d)", branch)]
+    assert codes == [12, 13, 14, 15, 16, 17]
+    assert branch.rstrip().endswith("exit 0\n}") and branch.index("if ($rcx -ne 0) { exit $rcx }") < branch.index("'NXG-RESULT: ok'")
+    # the mode holds the default state only, sits before anything of the build, and the header says who takes a checkpoint
+    assert "if ($Existing -eq 'yes' -and ($AdminGit -eq 'no' -or $AppLocker -ne 'no' -or $Wdac -ne 'no')) { throw" in std[:start]
+    assert start < std.index("Add-LocalGroupMember")
+    assert "no checkpoint is taken." not in std
+    assert "Only run-gate.sh --build-signed-in takes one" in std
+
+
+def test_only_the_standard_user_signed_in_path_may_name_the_new_checkpoint() -> None:
+    sh = "\n".join(_code_lines(_sh()))
+    # restore names the signed-in checkpoint in one place, inside the --signed-in branch; the default is the baseline's
+    assert sh.count('restore_checkpoint="$signed_in"') == 1 and 'restore_checkpoint="$CHECKPOINT"' in sh
+    branch = sh[sh.index('if [[ -n "$signed_in" ]]; then\n    hostcheck_extra'):]
+    assert branch.index('restore_checkpoint="$signed_in"') < branch.index("fi")
+    # the flags need --standard-user and refuse the other modes, before any remote call
+    guard = sh[sh.index("signed_in_name="):sh.index('install_doc="')]
+    for needle in (
+        "$standard_user -eq 1", '"$applocker" == no && "$wdac" == no', '"$admin_git" == yes', '-z "$wheel"',
+        "stduser-signed-in-[0-9]{8}", '!= "$CHECKPOINT"',
+    ):
+        assert needle in guard, needle
+    # the build ends at the end step: nothing after the checkpoint runs, and no collection is attempted
+    build = sh[sh.index('if [[ -n "$signed_in_build" ]]; then\n    run_step 01k'):]
+    build = build[: build.index("\nfi\n")]
+    assert "collected=1" in build and "finish" in build and "exit 0" in build
+    for later in ("run_step 02", "run_step 03", "run_step 04", "run_step 05", "run_step 06", "harvest", "launch_guest"):
+        assert later not in build, later
+    # the header documents both flags and the step
+    head = _sh()[: _sh().index("set -uo pipefail")]
+    for needle in ("--build-signed-in NAME", "--signed-in NAME", "01k checkpoint", "NX_GUEST_SETTLE_S", "stduser-signed-in-<8 digits>"):
+        assert needle in head, needle

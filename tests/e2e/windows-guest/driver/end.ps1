@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Host, no guest credential. The last step of run-gate.sh: shut the guest down
-# (no checkpoint is taken, deleted or renamed) unless -KeepGuest, then remove
+# (this script takes, deletes and renames no checkpoint) unless -KeepGuest, then remove
 # every host file this run created by its exact name, then the run's
 # directories if they are empty. Removes this script last. "NXG-RESULT: ok"
 # only when the run directory is gone.
@@ -24,7 +24,7 @@ $v = Get-VM -Name $vm
 # Exact names only: the run's own scripts, its staged files, the files collected
 # from the guest (named as collected, one by one), and the two files launch.sh
 # staged under nxgate\stage. launch.sh's helper scripts in nxgate stay.
-$mine = @('hostcheck.ps1', 'restore.ps1', 'guest-run.ps1', 'inst.ps1', 'setup-run.ps1', 'gaterun.ps1', 'waitv.ps1', 'stduser.ps1', 'as-user.ps1', 'cache.ps1', 'end.ps1') | ForEach-Object { Join-Path $RunDir $_ }
+$mine = @('hostcheck.ps1', 'restore.ps1', 'guest-run.ps1', 'inst.ps1', 'setup-run.ps1', 'gaterun.ps1', 'waitv.ps1', 'stduser.ps1', 'as-user.ps1', 'cache.ps1', 'checkpoint.ps1', 'end.ps1') | ForEach-Object { Join-Path $RunDir $_ }
 $mine += Join-Path $RunDir 'portable-git.ps1'
 $mine += Join-Path $RunDir 'stage\windows-phase5-gate.ps1'
 if ($Wheel) { $mine += Join-Path $RunDir "stage\$Wheel" }

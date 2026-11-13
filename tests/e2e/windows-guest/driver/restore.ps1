@@ -5,19 +5,29 @@
 # other, and take none), make sure it has a network adapter, start it, wait for
 # the network, copy the gate script (and a candidate wheel) in, and parse the
 # gate script under PowerShell 5.1 on the guest. Exit 3 guest not Off, 4 no
-# network, 5 the gate script does not parse on the guest; over ssh these reach
+# network, 5 the gate script does not parse on the guest, 6 -Resume yes and the
+# guest is not Saved after the restore; over ssh these reach
 # the Mac only as non-zero, so the NXG-RESULT line says which.
 # "NXG-RESTORED: ok" is printed the moment the restore has succeeded and
 # not before: run-gate.sh powers the guest off at the end only when it sees it,
 # so a refusal above it never leaves this run owning a guest it did not restore.
 # With -Cache yes the guest boots with its adapter disconnected; it connects once the quiet block below has applied (nexus-y3y8d).
+# -Resume yes (run-gate.sh --signed-in, nexus-y3y8d) is for the one running (Standard) checkpoint that
+# --build-signed-in takes after the standard user's first sign-in. Restoring it leaves the guest Saved, with
+# the account already signed in, so there is no offline boot (the guest resumes where it was) and no
+# secret: after Start-VM resumes it, the adapter is put on the Default Switch, the quiet block (idempotent)
+# runs, and the network wait runs as always; a resumed guest can hold a stale NAT lease, so a pypi HEAD that
+# has not answered by the third iteration is followed by one `ipconfig /renew` in the guest. A restore that
+# does not leave the guest Saved (the checkpoint is not a running one) stops with exit 6. Only the standard-user
+# path may name that checkpoint; every other path restores the baseline checkpoint, which is never replaced.
 param(
     [Parameter(Mandatory = $true)][string]$VMName,
     [Parameter(Mandatory = $true)][string]$GuestUser,
     [Parameter(Mandatory = $true)][string]$Checkpoint,
     [Parameter(Mandatory = $true)][string]$RunDir,
     [string]$Wheel = '',
-    [ValidateSet('yes', 'no')][string]$Cache = 'yes'
+    [ValidateSet('yes', 'no')][string]$Cache = 'yes',
+    [ValidateSet('yes', 'no')][string]$Resume = 'no'
 )
 if ($RunDir -notmatch '^C:\\build\\guest\\nxg-[0-9]{8}T[0-9]{6}Z-[0-9]+$') { throw 'RunDir is not a run directory under C:\build\guest' }
 if ($Wheel -and $Wheel -notmatch '^[A-Za-z0-9._+-]+\.whl$') { throw 'Wheel is not a wheel file name' }
@@ -86,7 +96,13 @@ for ($i = 0; $i -lt 5; $i++) { "nic count ${i}x3s after the restore = $(Nics)"; 
 # which needs no network, and the adapter connects to the Default Switch only after it applied: in the
 # 2026-11-07 attribution 213 MiB (Edge's self-update alone 78 MiB) left in the 40 s before the block ran.
 $offline = $Cache -eq 'yes'
-if ($offline) {
+$resume = $Resume -eq 'yes'
+if ($resume) { $offline = $false }
+if ($resume) {
+    $st = (Get-VM -Name $vm).State
+    "resume: state after the restore = $st"
+    if ($st -ne 'Saved') { "NXG-RESULT: FAIL -Resume yes, but the guest is $st after the restore, not Saved: $cp is not a running (Standard) checkpoint"; exit 6 }
+} elseif ($offline) {
     if ((Nics) -eq 0) { Add-VMNetworkAdapter -VMName $vm -ErrorAction Stop }
     Disconnect-VMNetworkAdapter -VMName $vm -ErrorAction Stop
     "nic count $(Nics), disconnected until the quiet block applies"
@@ -94,7 +110,11 @@ if ($offline) {
 Start-VM -Name $vm -ErrorAction Stop
 "started at $((Get-Date).ToUniversalTime().ToString('o'))"
 Start-Sleep 5
-if ($offline) { Disconnect-VMNetworkAdapter -VMName $vm -ErrorAction Stop; "nic count after Start-VM = $(Nics), still disconnected" } else { EnsureNic 'after Start-VM' }
+if ($resume) {
+    EnsureNic 'after the resume'
+    Get-VMNetworkAdapter -VMName $vm | Connect-VMNetworkAdapter -SwitchName 'Default Switch' -ErrorAction Stop
+    "nic count after the resume = $(Nics), connected to the Default Switch"
+} elseif ($offline) { Disconnect-VMNetworkAdapter -VMName $vm -ErrorAction Stop; "nic count after Start-VM = $(Nics), still disconnected" } else { EnsureNic 'after Start-VM' }
 # nexus-bpzt7 (Sam, 2026-10-15): every restore is a fresh Windows that starts its own update downloads, on a
 # host shared with other work. Unless -Cache no, the first time the guest answers over PowerShell Direct:
 # stop and disable Windows Update, its orchestrator and Delivery Optimization, set the policies that keep
@@ -130,7 +150,8 @@ $quietBlock = {
 }
 $quieted = $Cache -ne 'yes'
 if ($quieted) { "quiet-updates: not with -Cache $Cache" }
-$ok = $false; $connected = $false; $lastError = $null
+$ok = $false; $connected = $false; $lastError = $null; $renewed = $false
+if ($resume) { $connected = $true }
 for ($i = 0; $i -lt 60; $i++) {
     if ($i -gt 0 -and ($i % 6) -eq 0 -and (Nics) -eq 0) {
         if ($offline -and -not $connected) { Add-VMNetworkAdapter -VMName $vm -ErrorAction SilentlyContinue; "re-added a disconnected NIC in the network wait, iteration $i" }
@@ -147,6 +168,14 @@ for ($i = 0; $i -lt 60; $i++) {
         $r = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop { try { (Invoke-WebRequest https://pypi.org/simple/ -Method Head -UseBasicParsing -TimeoutSec 10).StatusCode } catch { 0 } }
         if ($r -eq 200) { $ok = $true; break }
     } catch { $lastError = ("" + $_.Exception.Message).Split("`n")[0].Trim() }
+    if ($resume -and -not $ok -and $i -ge 2 -and -not $renewed) {
+        $renewed = $true
+        try {
+            $renew = { ipconfig /renew 2>&1 | Out-String }
+            $rn = Invoke-Command -VMName $vm -Credential $cred -ErrorAction Stop $renew
+            "the pypi HEAD had not answered by iteration $i of a resumed guest: ran ipconfig /renew in the guest once: " + (($rn -replace '\s+', ' ').Trim())
+        } catch { "the pypi HEAD had not answered by iteration $i of a resumed guest: ipconfig /renew did not run: $($_.Exception.Message)" }
+    }
     Start-Sleep 5
 }
 "quieted=$quieted connected=$connected; last error in the network wait: $(if ($lastError) { $lastError } else { 'none' })"
