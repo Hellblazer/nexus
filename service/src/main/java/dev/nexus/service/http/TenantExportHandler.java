@@ -92,9 +92,12 @@ import java.util.regex.Pattern;
  * POST gives each of its statements the full budget, not a shared one (they are catalog reads). A page is
  * buffered whole before its first byte is sent (its hash is a header), so the transfer is outside the
  * response-start bound and the database transaction is already closed while the client reads. Measured at 500,000
- * chunks (nexus-csayy.4, RDR-248 Performance Expectations): a 16 MB chunks page starts its response in about 1 s at the median
- * and 2.6 to 3.1 s at the worst, falling with depth because a keyset page after the first is planned as a sort over the rows
- * left in the tenant, so a page's time grows with the tenant's size (about 30 s near 5 million chunks).
+ * chunks (nexus-csayy.4, RDR-248 Performance Expectations): a 16 MB chunks page starts its response in about 0.2 s at the
+ * median and 0.28 s at the worst, flat from the first page to the last, because the page's transaction keeps the
+ * keyset read an ordered index scan ({@code TenantExportReads#pinOrderedScan}). Before that, a keyset page after the
+ * first was planned as a sort over every row left in the tenant and cost 0.9 s at the median and 2.6 to 3.1 s at the
+ * worst, in proportion to the tenant's size (about 30 s near 5 million chunks). A table keyed by {@code id} alone costs
+ * its rows divided by the tenant's share of the table: see the Performance Expectations.
  *
  * <p><b>Other answers.</b> An exhausted pool answers 503 {@code {"error":"database connection pool exhausted,
  * retry"}} with no reason code and no {@code Retry-After}: the client backs off on its own ladder. The auth filter

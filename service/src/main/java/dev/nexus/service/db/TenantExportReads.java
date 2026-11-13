@@ -164,6 +164,7 @@ public final class TenantExportReads {
         return inSnapshot(snapshotId, tenant, txn -> {
             DSLContext ctx = txn.ctx;
             List<LiveColumn> columns = liveColumns(ctx, table);
+            pinOrderedScan(ctx, table);
             Long tableRows = null;
             if (after == null) {
                 rebound(txn);
@@ -205,6 +206,32 @@ public final class TenantExportReads {
             }
             return new Page(result.buffer(), result.length(), result.rows(), lastKey, result.exhausted(), tableRows);
         });
+    }
+
+    /**
+     * Keeps the page's ordered read an ordered index scan, for a table whose primary key LEADS with {@code tenant_id}.
+     * On analyzed tables the planner costs the keyset's row-value comparison at about one row, and for one row a sort over
+     * the leaves' scans is the cheapest plan: Limit -> Sort -> Append -> Index Scan, which reads every remaining row of
+     * the tenant before the first goes out, so a page cost time in proportion to the tenant's size, not the page's (gate
+     * N1 scale run, nexus-csayy.4: a mid-table page of 100,000 rows, 918 ms with the sort and 233 ms as Merge Append).
+     * With the sort off the planner takes the per-leaf index scans under Merge Append, which emit in key order and stop at
+     * the LIMIT or when the COPY is cancelled at the byte target. Such a scan reads only the tenant's rows, so no sort can
+     * beat it.
+     *
+     * <p>A table keyed by {@code id} alone ({@code memory}, {@code plans}, ...) is left to the planner: its key order
+     * scan filters on the tenant and reads the whole table's rows between two of the tenant's, so for a small tenant in a
+     * large table the planner's other plan (the tenant's index, then a sort of that tenant's few rows) can be far cheaper,
+     * and the pin would remove it.
+     *
+     * <p>{@code enable_sort = off} only adds a cost penalty to sort paths; it forbids nothing, so a table with no index in
+     * key order would still sort. It is set transaction-locally ({@code set_config(.., true)}, legal in this read-only
+     * transaction as {@code statement_timeout} already is) and the transaction is rolled back before the connection
+     * returns to the pool, so nothing leaks to another borrower. Package-private so the plan test pins nothing of its own.
+     */
+    static void pinOrderedScan(DSLContext ctx, ExportTable table) {
+        if (!table.primaryKey().isEmpty() && "tenant_id".equals(table.primaryKey().get(0).name())) {
+            PgSession.setLocal(ctx, "enable_sort", "off");
+        }
     }
 
     private static Table<?> sourceOf(ExportTable table) {

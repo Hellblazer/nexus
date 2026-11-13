@@ -859,4 +859,62 @@ class TenantExportSessionsTest {
         assertThat(nodes).anyMatch(n -> n.equals("Limit"));
         assertThat(plan).as("the keyset is a row-value comparison on the key, not an OR chain").contains("> ROW(");
     }
+
+    /**
+     * The plan the shipped page code runs, on analyzed tables, with the test setting NO planner GUC. Gate N1 scale run
+     * (RDR-248, nexus-csayy.4): on analyzed tables the planner costs the keyset's row-value comparison at one row, so it
+     * chose Limit -> Sort -> Append -> Index Scan and the sort read every remaining row of the tenant before the first
+     * went out: a page cost time linear in the tenant's size. The sibling test above pins the planner itself and so only
+     * proves the sort-free plan is possible; this one reads the plan from inside the page's own transaction, through the
+     * page's own seam, so whatever the page sets for itself is what is explained.
+     */
+    @Test
+    void aDeepChunksPageOnAnalyzedTablesRunsNoSortUnderThePlannerSettingsThePageSetsItself() throws Exception {
+        ExportTable chunks = table("chunks");
+        List<List<String>> keys = chunkKeysInOrder(A);
+        List<Object> deep = TenantExportKeys.binds(chunks.primaryKey(), keys.get(keys.size() / 2));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.analyzeTable(su, CHUNKS);
+        }
+        var s = sessions(config(2), clock());
+        var session = s.open(A).session();
+        // a reads object on the role that may call the test schema's explain function; the snapshot is the engine pool's
+        var reads = new TenantExportReads(explainDs, 300, 20_000);
+        String[] plan = new String[1];
+        String[] enableSort = new String[1];
+        reads.beforeCopyForTests = ctx -> {
+            enableSort[0] = ctx.select(DSL.function("current_setting", String.class, DSL.inline("enable_sort")))
+                .fetchOne(0, String.class);
+            var columns = TenantExportReads.liveColumns(ctx, chunks);
+            plan[0] = PgContainerHelper.explainPlanWith(ctx,
+                TenantExportReads.pageSelect(ctx, chunks, columns, A, deep, 5),
+                new PgContainerHelper.ExplainOptions(false, false, false, false));
+        };
+        var page = reads.page(session.snapshotId(), A, chunks, deep, 1 << 20, 5);
+        assertThat(page.rows()).as("the page still reads its rows").isEqualTo(5);
+
+        List<String> nodes = plan[0].lines().map(l -> l.replaceFirst("^\\s*(->\\s*)?", "").trim()).toList();
+        assertThat(nodes).as("no sort of the page (the planner settings were the page's own):%n%s", plan[0])
+            .noneMatch(n -> n.equals("Sort") || n.startsWith("Incremental Sort") || n.startsWith("Seq Scan"));
+        assertThat(nodes).as("the leaves merge in key order:%n%s", plan[0]).contains("Merge Append");
+        assertThat(nodes.stream().filter(n -> n.startsWith("Index Scan using") || n.startsWith("Index Only Scan using")))
+            .as("an index scan per leaf, in key order:%n%s", plan[0]).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(plan[0]).as("the key is an index condition, not a filter:%n%s", plan[0]).contains("Index Cond");
+        assertThat(enableSort[0]).as("the page's own setting, seen from inside its transaction").isEqualTo("off");
+
+        // a table keyed by id alone is left to the planner: its small-tenant plan can be a sort of the tenant's few rows
+        String[] memoryEnableSort = new String[1];
+        reads.beforeCopyForTests = ctx -> memoryEnableSort[0] = ctx.select(
+            DSL.function("current_setting", String.class, DSL.inline("enable_sort"))).fetchOne(0, String.class);
+        reads.page(session.snapshotId(), A, table("memory"), null, 1 << 20, 100);
+        assertThat(memoryEnableSort[0]).as("memory's key is id alone: not pinned").isEqualTo("on");
+
+        // transaction-local: the pooled connection the page used is back to the server default
+        try (Connection c = explainDs.getConnection()) {
+            assertThat(DSL.using(c, SQLDialect.POSTGRES)
+                .select(DSL.function("current_setting", String.class, DSL.inline("enable_sort")))
+                .fetchOne(0, String.class)).as("the setting did not leak to the pool").isEqualTo("on");
+        }
+    }
 }

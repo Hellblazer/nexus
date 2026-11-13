@@ -516,42 +516,71 @@ and 400,000 `memory` rows interleaved by id with nine other tenants (4,000,000 r
 the routes by the shipped client with a minted tenant token. Engine: the gate jar, `NX_POOL_SIZE` 10, every
 `NX_EXPORT_*` setting at its default (16 MiB pages, 2 sessions, 20 s page budget); PostgreSQL 17.5 with
 `max_connections` 100 and `shared_buffers` 2 GB on the substrate's tmpfs root, restarted before the export so shared
-buffers began empty (the OS cache stayed warm); `lab-m`. An earlier run of the same data with the cluster on disk gave
-the same shape with slower pages (171 s, chunks response start p50 1.01 s, p95 2.15 s, max 3.13 s).
-- File 2,352,237,445 bytes, 1,450,002 rows, 164 pages (138 cut at the byte target), 142.8 s end to end through
-  loopback, about 16.5 MB/s: the local engine and database are not the limit.
+buffers began empty (the OS cache stayed warm); `lab-m`. The run was made twice with the same data: before and after a
+fix to the page plan, described next.
+
+**Before the fix: the keyset page was planned as a sort.** After the first page, a chunks page was planned
+`Limit -> Sort -> Append -> Index Scan` on the tenant leaf's primary key, because the planner estimates one row for the
+row-value keyset predicate on an ANALYZEd table. The sort cannot emit before it has read every remaining row of the
+tenant, so each page cost time in proportion to the rows left, not the rows it returned (the 16 MB cut cancels the COPY
+only after the sort has finished). The first page, which has no `after`, was planned `Merge Append` and was not
+affected. Measured (before): file 2,352,237,445 bytes, 1,450,002 rows, 164 pages (138 cut), 142.8 s end to end; chunks,
+129 pages of 3,906 rows, response start p50 0.86 s, p95 1.61 s, max 2.56 s (page 1), first decile mean 1.59 s, last
+decile 0.30 s: time FELL with depth because the rows left fell. The page time was linear in the tenant's chunk count,
+so the 20 s page budget would have broken between 3.2 and 3.9 million chunks and the 30 s response-start bound between
+5 and 6 million. (An earlier run with the cluster on disk: 171.0 s, chunks p50 1.01 s, p95 2.15 s, max 3.13 s.)
+EXPLAIN (ANALYZE) of a mid-table page, 100,000 rows uncancelled: Sort (external merge, 303 MB on disk) 918 ms; with
+`enable_sort` off, `Merge Append` 233 ms. The existing plan test
+(`aDeepChunksPageIsAPerLeafIndexScanUnderMergeAppendWithNoSort`) missed this because it turns `enable_sort`,
+`enable_seqscan` and `enable_bitmapscan` off itself.
+
+**The fix.** `TenantExportReads.pinOrderedScan` sets `enable_sort = off` for the page's transaction
+(`set_config(.., true)`: legal in the read-only snapshot transaction, rolled back before the connection returns to the
+pool, so it cannot leak) when the table's primary key leads with `tenant_id`. For such a table an ordered index scan
+reads only the tenant's rows and no sort can beat it. It is a cost penalty, not a ban: a table with no index in key
+order would still sort. Tables keyed by `id` alone (`memory`, `plans`, `topics`, ...) are NOT pinned: for a small tenant
+in a large table the planner's other plan, the tenant's index and a sort of the tenant's few rows, is far cheaper than
+the key-order scan, and the pin would remove it (measured below). It is the same transaction as the COPY, so it governs
+the real cut path. Test:
+`TenantExportSessionsTest.aDeepChunksPageOnAnalyzedTablesRunsNoSortUnderThePlannerSettingsThePageSetsItself` analyzes the
+tables, sets no planner setting itself, reads the plan from inside the page's own transaction (the page's seam), and
+asserts `Merge Append` over per-leaf `Index Scan` with an `Index Cond` on the key and no `Sort`, that `memory` is not
+pinned, and that the setting does not outlive the transaction. It failed on the code before the fix (`Limit -> Sort ->
+Append -> Seq Scan`).
+
+**After the fix** (same data, same host and class, `export_scale_run.py`): file 2,352,237,445 bytes, 1,450,002 rows, 164
+pages (138 cut), 52.3 s end to end through loopback (about 45 MB/s; was 142.8 s): the local engine and database are not
+the limit.
 - Chunks: 129 pages, 3,906 rows and about 16.65 MB a page. Response start (headers in; the page is buffered whole, so
-  this is the database and the hash): p50 0.86 s, p95 1.61 s, max 2.56 s (page 1). Page end (body in) is 0.04 s later.
-  Every page is far under the 30 s response-start bound and the 20 s page budget. The deepest page (128, 32 rows)
-  started in 0.11 s; the first page, which carries the table's `count(*)` (93 ms), in 0.26 s.
-- Time does not grow with depth, so a deep-page regression is not present: the first decile of chunks pages has a mean
-  response start of 1.59 s and the last decile 0.30 s, a slope of -10 ms a page.
-- Why it falls instead (a finding for the engine release, not a ship-blocker at this size): after the first page, a page
-  is planned as `Limit -> Sort -> Append -> Index Scan` on the tenant leaf's primary key, because the planner estimates
-  one row for the row-value keyset predicate on an ANALYZEd table. The sort cannot emit before it has read every
-  remaining row of the tenant, so each page costs time in proportion to the rows left, not the rows it returns (the
-  16 MB cut cancels the COPY only after the sort has finished). The first page, which has no `after`, is planned
-  `Merge Append` over the leaves' primary-key index scans and is not affected. The page time is therefore linear in
-  the tenant's chunk count: 2.6 to 3.1 s at 500,000, so about 20 s (the page budget) between 3.2 and 3.9 million
-  chunks and about 30 s (the response-start bound) between 5 and 6 million.
-  `TenantExportSessionsTest.aDeepChunksPageIsAPerLeafIndexScanUnderMergeAppendWithNoSort` proves the planner CAN
-  choose the sort-free plan, because it turns `enable_sort`, `enable_seqscan` and `enable_bitmapscan` off; the engine
-  does not. EXPLAIN (ANALYZE) of a mid-table page, 100,000 rows uncancelled: the default plan sorts them, spilling a
-  303 MB external sort, in 918 ms; with `enable_sort` off it is `Merge Append` in 233 ms (and the real COPY, cut at
-  about 3,900 rows, would stop the merge early). Whether to pin the plan in the page transaction is the engine
-  release's decision; it was not tried against the real COPY.
-- `memory` (primary key `id` alone, the tenant owns a tenth of the table): `Index Scan using memory_pk`, `Index Cond:
-  (id > X)`, `Filter: tenant_id = ...`, `Rows Removed by Filter: 900,000` for 100,000 rows returned (490 ms), and 6
-  pages with response start p50 0.42 s, max 0.43 s. The tenant is a filter here, not an index condition: a page
-  costs its rows divided by the tenant's share of the table, so a small tenant in a large shared table is the expensive
-  case. The first-page count uses `idx_memory_tenant_timestamp` (index-only, 26 ms). Chunks, which are partitioned by
-  tenant, are not exposed to this.
+  this is the database and the hash): p50 0.21 s, p95 0.26 s, max 0.28 s (page 0, which carries the table's `count(*)`);
+  was p50 0.86 s, p95 1.61 s, max 2.56 s. The deepest page (128, 32 rows) 0.14 s. First decile mean 0.19 s, last decile
+  0.24 s, a slope of +0.6 ms a page: flat, and independent of the rows left in the tenant, so a page no longer costs time
+  in proportion to the tenant's size. Every page is far under the 30 s response-start bound and the 20 s page budget.
+- The plan of a mid-table and the deepest page, replayed from the statements the engine sent (`explain-chunks-mid-page.txt`):
+  `Limit -> Merge Append -> Index Scan using chunks_..._pkey`, `Index Cond` on the key, no Sort; 100,000 rows in 390 ms
+  (was 918 to 1,020 ms); the deepest page 112 ms. The same statement without the pin (`...-pin-flipped`) is the old
+  `Limit -> Sort -> Append`, 1,020 ms.
+- Other tenant-keyed tables: `catalog_document_chunks` 6 pages, response start p50 0.16 s, max 0.17 s.
+- `memory` (primary key `id` alone, the tenant owns a tenth of the table), unchanged by the fix: `Index Scan using
+  memory_pk`, `Index Cond: (id > X)`, `Filter: tenant_id = ...`, `Rows Removed by Filter: 900,000` for 100,000 rows returned
+  (490 ms), and 6 pages with response start p50 0.36 s, max 0.87 s (page 0, with the `count(*)`). Page cost is the rows
+  returned divided by the tenant's share of the table. The first-page count uses `idx_memory_tenant_timestamp`
+  (index-only, 26 ms). Chunks, which are partitioned by tenant, are not exposed to this.
+- `memory`, a small tenant: 1,000 rows spread evenly over the same 4,000,000-row table. Its page started its response in
+  0.010 s (whole export 0.13 s). The planner uses `Bitmap Index Scan on idx_memory_tenant_ttl_timestamp`, `Bitmap Heap
+  Scan`, then sorts the tenant's 1,000 rows in memory: 8 ms. Forcing the key-order scan (what a pin on `memory` would
+  do) is `Parallel Index Scan using memory_pk` with `Rows Removed by Filter: 1,333,000` a worker, 917 ms. No existing
+  `memory` index delivers `(tenant_id, id)` order (the tenant indexes are `(tenant_id, project)`, `(tenant_id, agent)`,
+  `(tenant_id, timestamp DESC)` and `(tenant_id, ttl, timestamp)`), so for an id-keyed table a page costs the cheaper
+  of two plans, the key-order scan (rows returned over the tenant's share, so growing with the whole table) and a sort of
+  the tenant's remaining rows (growing with the tenant). The worst tenant is the one between the two, which this run did
+  not seed (the 10% tenant above and the 1,000-row tenant are on either side of it). Only a `(tenant_id, id)` index on
+  these tables would make their pages cost the rows returned; adding one to the large cloud tables is a separate decision.
 - Connections: the pool holds 10; PostgreSQL saw at most 13 `nexus_svc` backends (an evicted connection closing while its
   replacement opens), of 100 `max_connections`. A cut page discards its connection (`TenantExportReads.release`), so the
-  engine opened one new connection per cut page: 139 sessions by the engine for 138 cut pages (282 sessions in the
-  window, 143 of them the script's own once-a-second sampler).
+  engine opened one new connection per cut page: 139 sessions by the engine for 138 cut pages.
 Not measured here: the cloud's edge rate, its pool size and `max_connections`, and a cold volume. The cloud round
-trip (Activation Step 2) records those; its 500,000-chunk page times should be read against 3.1 s above, not 0.1 s.
+trip (Activation Step 2) records those; its 500,000-chunk page times should be read against 0.28 s above, not 0.1 s.
 
 ## Finalization Gate
 
@@ -621,4 +650,4 @@ tenants. Nothing to trim.
 - 2026-11-11: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); critique `nexus_rdr/248-gate-critique-2026-11-11-r2`, fix check `nexus_rdr/248-fix-check-6c291f8ba` (gated commit in T2 `nexus_rdr/248-gate-latest`).
 - 2026-11-11: Accepted by Sam, with export first and restore next, and the restore load's block on tenant create bounded (folded into the Implementation Plan and Risks).
 - 2026-11-11: Export session total bound set to 60 minutes (Sam, by dialog via halcyon: "60 minutes"; a larger export fails loudly and names the limit); amended under standing grant 3.
-- 2026-11-12: Performance Expectations amended with the gate N1 scale run (nexus-csayy.4).
+- 2026-11-12: Performance Expectations amended with the gate N1 scale run (nexus-csayy.4), and again with the page-plan fix and its before/after numbers.

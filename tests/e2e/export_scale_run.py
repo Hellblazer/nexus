@@ -18,14 +18,16 @@ What it does, in order:
 2. Create a tenant through ``POST /v1/tenants/create`` with the bootstrap root token, which returns a tenant-scoped
    token: the routes refuse the root token.
 3. Seed that tenant by SQL as the superuser: N bge-768 chunks (distinct vectors, ~1 KB of text, jsonb metadata), a
-   manifest row for each, the documents they belong to, and an id-keyed ``memory`` table of two million rows of which
+   manifest row for each, the documents they belong to, and an id-keyed ``memory`` table (``--memory-rows``) of which
    the tenant owns a tenth (nine other tenants interleave by id, as they do in a shared database: a keyset scan over a
-   primary key of ``id`` alone must skip their rows, which a one-tenant table would hide). Then
+   primary key of ``id`` alone must skip their rows, which a one-tenant table would hide) and a small tenant owns
+   ``--small-tenant-rows`` rows spread evenly over the id range (the expensive case for that scan). Then
    ``ANALYZE``, a checkpoint, and a PostgreSQL restart so shared buffers start empty (the OS page cache stays warm:
    this is the database's cost with the data on a local disk, not a cold cloud volume).
 4. Export through the shipped client (``nexus.backup.cloud_export``) with an HTTP client that stamps each page
    request's response start (headers in) and end (body in). The client writes and verifies the real ``.nxtenant``
-   file, so the file size and total time are the product's own.
+   file, so the file size and total time are the product's own. Then the small tenant is exported the same way and its
+   ``memory`` page timed.
 5. Write ``pages.csv`` (every page of every table: depth, rows, bytes, response-start, total), ``summary.json``
    (chunk count, file size, total time, p50/p95/max, deepest page, depth trend), ``explain-*.txt`` (EXPLAIN
    (ANALYZE, BUFFERS) of the first-page count and of a deep keyset page for chunks and for ``memory``, taken from the
@@ -81,10 +83,13 @@ _JAR = _REPO / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 _ROOT_TOKEN = "scale-run-root-token-0123456789"
 _DB = "nexus_scale"
 _TENANT = "scale-tenant"
+_SMALL_TENANT = "scale-small"
 _MODEL = "bge-base-en-v15-768"
 _COLLECTION = "knowledge__scalerun__bge-base-en-v15-768__v1"
 _MEMORY_ROWS = 2_000_000
 _NOISE_TENANTS = 9
+_SMALL_TENANT_ROWS = 1_000
+_ENGINE_PIN = "SET LOCAL enable_sort = off; "   # what TenantExportReads.pinOrderedScan sets, for a table whose key leads with tenant_id
 _BATCH = 50_000
 _EXIT_DEEP_PAGE_REGRESSION = 3
 
@@ -219,7 +224,7 @@ class Engine:
 # -- seeding ------------------------------------------------------------------------------------------------
 
 
-def _seed(cluster: Cluster, chunks: int, memory_rows: int, say: Callable[[str], None]) -> None:
+def _seed(cluster: Cluster, chunks: int, memory_rows: int, small_rows: int, say: Callable[[str], None]) -> None:
     """Chunks, their manifest and documents, and an id-keyed table, by SQL as the superuser."""
     t, coll, model = _TENANT, _COLLECTION, _MODEL
     say("seed: collection and documents")
@@ -252,9 +257,12 @@ FROM generate_series({lo}, {hi}) g;
         say(f"seed: chunks {hi}/{chunks} (batch {n}/{len(batches)})")
     cluster.psql("DROP TABLE public.scale_vp1, public.scale_vp2")
     say("seed: memory rows")
+    # the small tenant's rows are spread evenly over the id range: one row in every small_every, as a small tenant's are in a shared table
+    small_every = memory_rows // small_rows if small_rows > 0 else 0
     cluster.psql_script(f"""
 INSERT INTO nexus.memory (tenant_id, project, title, content, timestamp)
-SELECT CASE WHEN g % {_NOISE_TENANTS + 1} = 0 THEN '{t}' ELSE 'scale-noise-' || (g % {_NOISE_TENANTS + 1}) END,
+SELECT CASE WHEN {small_every} > 0 AND g % {small_every} = 1 THEN '{_SMALL_TENANT}'
+            WHEN g % {_NOISE_TENANTS + 1} = 0 THEN '{t}' ELSE 'scale-noise-' || (g % {_NOISE_TENANTS + 1}) END,
        'p' || (g % 50), 'title ' || g, repeat('memory body ', 12), now() FROM generate_series(1, {memory_rows}) g;
 """, timeout=3600)
     say("seed: analyze, checkpoint")
@@ -351,9 +359,12 @@ def _table_summary(recs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _copy_statements(log: Path, table: str) -> list[str]:
+def _copy_statements(log: Path, table: str, tenant: str = _TENANT) -> list[str]:
+    """The COPY statements the engine sent for ``table`` and ``tenant`` (the tenant's name reaches the statement as hex)."""
     text = log.read_text(errors="replace")
-    return re.findall(r"statement: (COPY \(select [^\n]*? from \"nexus\"\.\"" + table + r"\"[^\n]*\) TO STDOUT \(FORMAT binary\))", text, re.I)
+    found = re.findall(r"statement: (COPY \(select [^\n]*? from \"nexus\"\.\"" + table + r"\"[^\n]*\) TO STDOUT \(FORMAT binary\))", text, re.I)
+    hexed = tenant.encode().hex()
+    return [s for s in found if hexed in s]
 
 
 def _explain(cluster: Cluster, select: str, tenant: str, settings: str = "") -> str:
@@ -376,10 +387,12 @@ def _decode_key(cursor: str) -> list[str]:
 @click.option("--chunks", default=500_000, show_default=True, help="Chunks to seed (the gate wants at least 500,000).")
 @click.option("--memory-rows", default=_MEMORY_ROWS, show_default=True,
               help="Rows of the id-keyed table in all; the tenant owns a tenth, nine other tenants the rest.")
+@click.option("--small-tenant-rows", default=_SMALL_TENANT_ROWS, show_default=True,
+              help="Rows a small tenant owns in the id-keyed table, spread evenly over it (0: none). Exported and timed after the big tenant.")
 @click.option("--pool-size", default=10, show_default=True, help="NX_POOL_SIZE (the engine's default is 10).")
 @click.option("--out-dir", type=click.Path(path_type=Path), required=True, help="Where the results go.")
 @click.option("--keep-file/--no-keep-file", default=False, help="Keep the exported .nxtenant file (about 2 GB at 500,000 chunks).")
-def main(chunks: int, memory_rows: int, pool_size: int, out_dir: Path, keep_file: bool) -> None:
+def main(chunks: int, memory_rows: int, small_tenant_rows: int, pool_size: int, out_dir: Path, keep_file: bool) -> None:
     """Seed a synthetic tenant, export it through the routes, and write the timing."""
     if reason := jar_freshness_skip_reason():
         raise click.ClickException(f"{reason}; run scripts/build-gate-jar.sh first")
@@ -402,12 +415,14 @@ def main(chunks: int, memory_rows: int, pool_size: int, out_dir: Path, keep_file
         say("engine: boot (migrates the schema)")
         engine.start()
         token = create_tenant_token(engine.url, _ROOT_TOKEN, _TENANT)
+        small_token = create_tenant_token(engine.url, _ROOT_TOKEN, _SMALL_TENANT) if small_tenant_rows > 0 else None
         say("tenant: created, tenant token minted")
-        _seed(cluster, chunks, memory_rows, say)
+        _seed(cluster, chunks, memory_rows, small_tenant_rows, say)
         counts = {
             "chunks": int(cluster.psql(f"SELECT count(*) FROM nexus.chunks WHERE tenant_id = '{_TENANT}'")),
             "memory_of_tenant": int(cluster.psql(f"SELECT count(*) FROM nexus.memory WHERE tenant_id = '{_TENANT}'")),
             "memory_all_tenants": int(cluster.psql("SELECT count(*) FROM nexus.memory")),
+            "memory_of_small_tenant": int(cluster.psql(f"SELECT count(*) FROM nexus.memory WHERE tenant_id = '{_SMALL_TENANT}'")),
             "catalog_document_chunks": int(cluster.psql(f"SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id = '{_TENANT}'")),
         }
         if counts["chunks"] < chunks:
@@ -440,6 +455,11 @@ def main(chunks: int, memory_rows: int, pool_size: int, out_dir: Path, keep_file
         sampler_stop.set()
         say(f"export: done, {result.size} bytes in {result.seconds:.1f}s")
         sessions_after = int(cluster.psql(f"SELECT sessions FROM pg_stat_database WHERE datname = '{_DB}'"))
+        small_timer = small_result = None
+        if small_token is not None:
+            say(f"export: small tenant ({small_tenant_rows} memory rows in a table of {memory_rows})")
+            small_result, small_timer = _export(engine, small_token, work / "small.nxtenant", say)
+            say(f"export: small tenant done in {small_result.seconds:.1f}s")
 
         with open(out_dir / "pages.csv", "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["table", "page", "rows", "bytes", "start_s", "total_s", "done", "last_key"])
@@ -451,20 +471,33 @@ def main(chunks: int, memory_rows: int, pool_size: int, out_dir: Path, keep_file
         tables = {name: _table_summary(recs) for name, recs in by_table.items() if recs}
         cut_pages = sum(1 for r in timer.records if not r["done"] and r["rows"] > 0)
 
-        # EXPLAIN (ANALYZE) of the statements the engine really sent, replayed as the engine's role under the tenant stamp
+        # EXPLAIN (ANALYZE) of the statements the engine really sent, replayed as the engine's role under the tenant stamp and, for
+        # a table whose key leads with tenant_id, under the planner setting the engine's page transaction sets for itself
+        # (TenantExportReads.pinOrderedScan; a psql replay does not inherit it). The "-pin-flipped" variant is the other choice.
         explains: dict[str, str] = {}
+        inner = lambda s: re.sub(r"^COPY \((.*)\) TO STDOUT \(FORMAT binary\)$", r"\1", s, flags=re.S)  # noqa: E731
         for table in ("chunks", "memory"):
+            pinned = table == "chunks"
             stmts = _copy_statements(cluster.log, table)
             if not stmts:
                 continue
-            inner = lambda s: re.sub(r"^COPY \((.*)\) TO STDOUT \(FORMAT binary\)$", r"\1", s, flags=re.S)  # noqa: E731
             picks = {"first-page": stmts[0], "mid-page": stmts[len(stmts) // 2], "deep-page": stmts[-1]}
+            engine_settings = _ENGINE_PIN if pinned else ""
             for label, stmt in picks.items():
-                explains[f"{table}-{label}"] = _explain(cluster, inner(stmt), _TENANT)
-            # what the planner does when it may not sort: the engine does not set this; it is the question a deep page raises
-            explains[f"{table}-mid-page-enable_sort-off"] = _explain(cluster, inner(picks["mid-page"]), _TENANT, "SET LOCAL enable_sort = off; ")
+                explains[f"{table}-{label}"] = _explain(cluster, inner(stmt), _TENANT, engine_settings)
+            explains[f"{table}-mid-page-pin-flipped"] = _explain(cluster, inner(picks["mid-page"]), _TENANT, "" if pinned else _ENGINE_PIN)
             explains[f"{table}-first-page-count"] = _explain(
                 cluster, f"SELECT count(*) FROM \"nexus\".\"{table}\" WHERE tenant_id = '{_TENANT}'", _TENANT)
+        small_summary = None
+        if small_timer is not None:
+            small_memory = [r for r in small_timer.records if r["table"] == "memory"]
+            small_summary = {"memory_pages": _table_summary(small_memory) if small_memory else None,
+                             "export_seconds": small_result.seconds if small_result else None}
+            for stmt in _copy_statements(cluster.log, "memory", _SMALL_TENANT)[:1]:
+                explains["memory-small-tenant-first-page"] = _explain(cluster, inner(stmt), _SMALL_TENANT)
+                explains["memory-small-tenant-first-page-pin-flipped"] = _explain(cluster, inner(stmt), _SMALL_TENANT, _ENGINE_PIN)
+            explains["memory-small-tenant-count"] = _explain(
+                cluster, f"SELECT count(*) FROM \"nexus\".\"memory\" WHERE tenant_id = '{_SMALL_TENANT}'", _SMALL_TENANT)
         for name, text in explains.items():
             (out_dir / f"explain-{name}.txt").write_text(text)
 
@@ -493,10 +526,13 @@ def main(chunks: int, memory_rows: int, pool_size: int, out_dir: Path, keep_file
             "cut_pages": cut_pages,
             "tables": tables,
             "growth_with_depth": growth,
+            "small_tenant": small_summary,
             "connections": {"peak_nexus_svc_backends": peak["backends"], "sessions_established_during_export_all": sessions_after - sessions_before,
                             "sampler_sessions": peak["samples"] + 1,
                             "sessions_established_by_engine": sessions_after - sessions_before - peak["samples"] - 1,
                             "note": "a cut page evicts its connection, so sessions established ~ cut pages (+ the session and header connections)"},
+            # the engine's own page transactions, read from the statement log: the pin is set by the engine, not by this script
+            "page_pin_statements_in_pg_log": cluster.log.read_text(errors="replace").count("enable_sort"),
             "engine_export_log_lines": engine_lines,
         }
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))

@@ -62,7 +62,9 @@ public final class PgSession {
         // merge join and no sequential scan, so its co-owner anti-joins probe
         // idx_catalog_chunks_chash per window row instead of hashing the whole tenant's
         // manifest; ManifestFill#pinWindow: no sort, so its window stays an ordered index
-        // scan that stops at its LIMIT). No other production path sets them.
+        // scan that stops at its LIMIT), and enable_sort by the tenant export's page read alone
+        // (TenantExportReads#pinOrderedScan, nexus-csayy.4: the keyset page stays an ordered index scan).
+        // No other production path sets them.
         "enable_hashjoin",
         "enable_mergejoin",
         "enable_incremental_sort",
