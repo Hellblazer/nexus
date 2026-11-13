@@ -224,14 +224,14 @@ class TenantImportRoutesTest {
     @Test
     void anEngineThatDoesNotHoldTheSingletonLockRefusesToOpenNamingTheLock() throws Exception {
         String token = env.newTenant("t-imp-nolock");
-        env.service.declareSingletonLockHeld(false);
+        env.service.importWiring().declareSingletonLockHeld(false);
         try {
             HttpResponse<String> r = env.open(token, file);
             assertThat(r.statusCode()).isEqualTo(503);
             assertThat(json(r).get("reason").asText()).isEqualTo("singleton_lock_not_held");
             assertThat(json(r).get("error").asText()).contains("singleton lock");
         } finally {
-            env.service.declareSingletonLockHeld(true);
+            env.service.importWiring().declareSingletonLockHeld(true);
         }
         openOk(token, file);   // nothing was opened or held back
     }

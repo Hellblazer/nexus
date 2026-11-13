@@ -40,7 +40,7 @@ final class TenantExportKeyedStateTable {
             notKeyed.put(f, result);   // one export header or page, built for that request and dropped with its response
         }
         // the import session (nexus-csayy.6): a held connection and its staged rows, one per tenant; a reset ends it
-        keyed.put("NexusService.importSessions", IMPORT_SESSIONS);
+        keyed.put("TenantImportWiring.sessions", IMPORT_SESSIONS);
         keyed.put("TenantImportSessions.byTenant", IMPORT_SESSIONS);
         keyed.put("TenantImportSessions.outcomes", IMPORT_SESSIONS);   // the 24-hour record of a finished session; a reset drops it
         keyed.put("TenantExportSessions.importSlots", IMPORT_SESSIONS);   // the cap's and the one-per-tenant rule's view of the same sessions

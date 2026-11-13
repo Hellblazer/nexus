@@ -76,7 +76,7 @@ final class ImportTestEnv implements AutoCloseable {
         cfg.setAutoCommit(true);
         HikariDataSource ds = new HikariDataSource(cfg);
         NexusService service = new NexusService(0, ROOT, ds);
-        service.declareSingletonLockHeld(true);
+        service.importWiring().declareSingletonLockHeld(true);
         service.start();
         return new ImportTestEnv(pg, ds, service);
     }
@@ -346,8 +346,8 @@ final class ImportTestEnv implements AutoCloseable {
     dev.nexus.service.db.TenantImportSessions importSessions(dev.nexus.service.db.TenantImportSessions.Config config,
                                                              List<dev.nexus.service.db.TenantExport.Retired> retired) {
         var sessions = new dev.nexus.service.db.TenantImportSessions(service::exportSessions, ds, config,
-            dev.nexus.service.db.CollectionRegistry::evictTenant, service::singletonLockHeld, () -> null, retired);
-        service.importSessions(sessions);
+            dev.nexus.service.db.CollectionRegistry::evictTenant, service.importWiring()::singletonLockHeld, () -> null, retired);
+        service.importWiring().sessions(sessions);
         return sessions;
     }
 

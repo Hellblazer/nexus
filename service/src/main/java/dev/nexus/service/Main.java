@@ -575,7 +575,7 @@ public final class Main {
         service.embedPosture(dev.nexus.service.http.EmbedPosture.of(plan, reranker));
         // nexus-csayy.6 (RDR-248): the import routes open a session only on an engine that holds the singleton lock
         // (null: NX_ENGINE_SINGLETON_LOCK=off, or a pooler, where the lock is skipped).
-        service.declareSingletonLockHeld(singletonLock != null);
+        service.importWiring().declareSingletonLockHeld(singletonLock != null);
         service.start();
         // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
         // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
