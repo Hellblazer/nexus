@@ -10945,14 +10945,18 @@ def _chash_validate_suggestions() -> list[str]:
 def _check_chash_validate_offer() -> list[HealthResult]:
     """nexus-f3yqd: whenever the engine says a chash width CHECK is not validated, offer its validate job. The engine
     never validates at boot; a user starts the job (`nx doctor --fix` or `nx t3 validate-chash-checks`). No row when
-    the engine cannot say (older engine, error) or when every CHECK is validated."""
+    the engine cannot say (older engine, error) or when every CHECK is validated.
+
+    The row is informational (ok, no ⚠): every fresh schema starts not validated, so a warning here would greet every
+    new install. A job that refuses or defers a CHECK says so where it runs (`nx doctor --fix`, the verb)."""
     if _chash_constraints_validated_by_engine() is not False:
         return []
     return [HealthResult(
-        label="chash CHECK validation", ok=False, warn=True,
-        detail=("the chash width CHECKs are not validated: they already refuse a new bad row, and validating proves "
-                "no old row breaks them (on a local install doctor then skips its conformance scan). The engine runs "
-                "that only as a job a user starts; it deletes nothing and resumes where it left off"),
+        label="chash CHECK validation", ok=True,
+        detail=("not validated yet, which is normal on a new or upgraded store: the chash width CHECKs already refuse "
+                "a new bad row, and validating proves no old row breaks them (on a local install doctor then skips its "
+                "conformance scan). The engine runs that only as a job a user starts; it deletes nothing and resumes "
+                "where it left off"),
         fix_suggestions=_chash_validate_suggestions(),
     )]
 
