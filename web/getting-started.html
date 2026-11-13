@@ -364,7 +364,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <tr><th>Case</th><th>How you notice it</th><th>Then</th></tr>
 <tr><td>You are about to stop working</td><td>End of the day, a meeting, lunch, any time the terminal will wait for more than an hour.</td><td>Run it, then close the terminal or leave the session open. Both are fine.</td></tr>
 <tr><td>You finished a task, or are about to change subject</td><td>The task is committed, or the next task is unrelated to the current one: a different branch, a different part of the system.</td><td>Run it, then type <code>/clear</code> and start the next task in the empty session. Paste the handoff later, when you return to the old subject.</td></tr>
-<tr><td>The context window is filling</td><td><code>/context</code> shows that most of the window is used, or Claude Code shows its warning, or Claude asks about things you told it an hour ago. <a href="#context-window">The appendix</a> explains the window.</td><td>Run it, then type <code>/clear</code> and paste the handoff. You lose nothing, and the session is fast again.</td></tr>
+<tr><td>The context window is filling</td><td><code>/context</code> shows that most of the window is used, or Claude Code shows its warning, or Claude asks about things you told it an hour ago. <a href="#context-window">The appendix</a> explains the window.</td><td>Run it, then type <code>/clear</code> and paste the handoff. You lose nothing, and the session is fast again. You can also let Claude Code compact the session: the plugin writes a checkpoint before the compaction and puts it back after, so Claude keeps its place without a handoff.</td></tr>
 </table></div>
 <p>If you forget to run it, memory still has everything that was written to it. Start the new session and ask <em>"What do you know about this project, and what was I working on?"</em>, and Claude answers from memory. The last continuation file is still in <code>/tmp</code> until the computer restarts, and Claude can find it if you ask.</p>
 <p class="note">You can give a topic, <code>/conexus:continuation <span class="ph">&lt;TOPIC&gt;</span></code>, and the file is then named after it, which helps when you work on several things at once. The files live in <code>/tmp</code> and disappear when the computer restarts.</p>
@@ -378,12 +378,17 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <!-- ============ 7 ============ -->
 <section class="lesson" id="l7">
 <div class="lhead"><span class="lnum">7</span><h2>Keep Nexus healthy</h2></div>
-<p class="why">Three things keep Nexus working: a health check, the correct way to update, and a current index.</p>
+<p class="why">Four things keep Nexus working: a health check, a backup before you update, the correct way to update, and a current index.</p>
 
 <h3>Health check</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
 <p>No line may show ✗. Read every ⚠ line. Right after <code>nx self install</code>, "Orphan uv install" is normal, and it goes away once the old uv copy is removed. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
+
+<h3>Back up before you update</h3>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Back up the Nexus database.</pre><button class="copy" type="button">Copy</button></div>
+<p>Claude runs <code>nx backup</code>, which writes the local database to one file in <code>~/nexus-backups/</code> while the engine keeps running. The file is about as large as the database. Nothing runs a backup for you, not <code>nx upgrade</code> and not a hook, so ask for one before an update.</p>
 
 <h3>Update</h3>
 <div class="see">You might say</div>
