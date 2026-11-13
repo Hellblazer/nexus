@@ -165,10 +165,10 @@ checks for this draft, 2026-11-12, in the worktree at origin/develop.
   (a `python -I` process), on the order of a few hundred milliseconds, which
   is acceptable for posts that arrive minutes apart. To verify in Phase 2 by
   measuring a fire on the CI consumer.
-- **Assumed:** one session per repo is enough to carry a given aura's
-  display. Several sessions subscribed to the same topic each run the aura
-  and each write their own threads block; that duplication is accepted for
-  version 1 (see Open Questions).
+- **Decided (Sam, 2026-11-13):** each enabled session shows its own block.
+  Several sessions subscribed to the same topic each run the aura and each
+  write their own threads block; there is no lock tuple limiting an aura to
+  one session per repo.
 
 ## Proposed Solution
 
@@ -237,8 +237,10 @@ in the engine, and the procedure can still only read.
 
 3. **Enabling.** No aura runs unless enabled. An aura is enabled by name in
    the repo's `.nexus.yml` (`auras: [ci_develop_red]`) or in the user config,
-   read when the MCP server starts. A repo-root aura follows whatever Sam
-   decides for repo-root procedures (RDR-242 residual S5). Enabling
+   read when the MCP server starts. The nexus repo's `.nexus.yml` enables
+   `ci_develop_red`; every other aura is off everywhere until a repo or user
+   config names it (Sam, 2026-11-13). A repo-root aura follows RDR-242
+   residual S5 for repo-root procedures (confirmed by Sam, 2026-11-13). Enabling
    subscribes the trigger subspace, within `MAX_BOARD_TOPICS`; an aura past
    the limit is refused at load with its name.
 
@@ -322,7 +324,8 @@ was scrapped, and RDR-212 excludes it. Would need Sam to override RDR-212.
 - An aura fires only while a session that enabled it is open. A red at
   night is shown to the first session opened after it only if the post is
   still within its retention and that session's waiter receives it.
-- Several sessions enabling one aura each write their own threads block.
+- Several sessions enabling one aura each write their own threads block, by
+  decision: there is no lock tuple.
 
 ### Risks and Mitigations
 
@@ -382,8 +385,9 @@ handled-id record prevents a second fire.
 
 ### Phase 3: The first consumer
 
-`ci_red_notice.lua` and `ci_develop_red.aura.toml` in the package root;
-measure one fire's cost (the Critical Assumption).
+`ci_red_notice.lua` and `ci_develop_red.aura.toml` in the package root, and
+`auras: [ci_develop_red]` in the nexus repo's `.nexus.yml`; measure one
+fire's cost (the Critical Assumption).
 
 ### New Dependencies
 
@@ -396,13 +400,16 @@ tests against a self-provisioned engine for subscription, announce-once
 evaluation, the drain fallback and the threads block. A gate test that fails
 if no aura was evaluated (non-vacuity).
 
-## Open Questions for Sam
+## Resolved Questions
 
-1. Duplicate displays: accept one threads block per enabled session, or
-   limit a given aura to one session per repo (a lock tuple)?
-2. Default enablement of shipped auras: off everywhere (this draft), or
-   `ci_develop_red` on in the nexus repo's `.nexus.yml`?
-3. Repo-root auras follow RDR-242 residual S5; confirm.
+Sam answered the draft's three open questions on 2026-11-13, choosing from
+a picker in halcyon's session:
+
+1. Duplicate displays: "One block per session". Each enabled session shows
+   its own block; no lock tuple.
+2. Default enablement: "ci_develop_red on in nexus". `ci_develop_red` is on
+   in the nexus repo's `.nexus.yml`; every other aura is off everywhere.
+3. Repo-root auras: "Confirm S5". They follow RDR-242 residual S5.
 
 ## References
 
@@ -415,3 +422,5 @@ if no aura was evaluated (non-vacuity).
 ## Revision History
 
 - 2026-11-12: drafted (marginalia) from Sam's choices "c" and "1".
+- 2026-11-13: Sam's answers to the three open questions folded in (one
+  block per session; `ci_develop_red` on in nexus; S5 confirmed).
