@@ -298,8 +298,8 @@ check holds a lock through the upload. Refusals, each naming what failed, and no
   file lacks is NOT NULL with no default.
 - **Missing model.** An `embedding_models` row the header names does not exist.
 - **Too large.** The declared row bytes exceed `NX_IMPORT_MAX_BYTES` (default 8 GiB, about twice tenant `nexus`).
-- **Busy.** The tenant already has an import or export session, or the engine is at its session cap
-  (503 with a retry-after).
+- **Busy.** The tenant already has an import or export session (409, naming the open session's id, so a client
+  that lost its earlier session can `DELETE` it), or the engine is at its session cap (503 with a retry-after).
 A newer file (its `schema_changeset_count` above the engine's) is not refused on the count alone: the column
 comparison decides, and the count difference is logged and shown in the status. The count reads the database's
 changelog journal, which can only read high, so the count was always the weaker test (N2).
@@ -315,14 +315,15 @@ passes is copied with `COPY ... FROM STDIN (FORMAT binary)` into the table's sta
 columns, from the header; never `CREATE TABLE ... AS` from the target, which would lock every `chunks` partition
 until commit), with no savepoint: a savepoint per part would hold one subtransaction id per part until the
 transaction ends, and past 64 of them every other backend's snapshot on the shared database reads `pg_subtrans`
-(a nexus-size file is about 480 parts). A COPY of a part whose hash passed fails only on a malformed stream, so it
+(a nexus-size file is about 480 parts). A COPY of a part whose hash passed fails on a malformed stream, a full disk or a timeout, and any of these
 fails the session (`failed: part T/k: <error>`) and the client starts over. One part is in flight per session: a
 request that arrives while another runs (a retry after the edge cut the first at 60 s) gets 409 `part_in_flight`
 and the client asks again. Parts of a table arrive in order: a repeat of the last staged part with the same
 SHA-256 answers 200 and stages nothing; a different SHA-256 for a staged part, or a gap, is refused. The engine
 counts staged bytes and refuses the part that would pass `NX_IMPORT_MAX_BYTES`, so the cap holds whatever the
-open declared. Tables arrive in load order, and a table is closed by the client sending its row count from the
-trailer; the engine refuses the close unless the staged count equals it. That staged-count check against the
+open declared. Tables arrive in load order, and a table is closed by `POST /v1/tenant/import/{id}/close?table=T&rows=N`,
+N being the table's row count from the trailer; the engine answers 409 `row_count_mismatch` (with both counts)
+unless the staged count equals N, and a part for a closed table is refused. That staged-count check against the
 trailer, plus each part's own SHA-256, is the integrity check of the transfer (S3): the page hashes were already
 checked by the client against the file, and the engine never sees the original pages. The held transaction is
 READ COMMITTED, so the load's re-check below sees writes committed during the upload.
@@ -336,8 +337,11 @@ for the idle bound, and the upload's total bound stops at the first commit attem
 `NX_IMPORT_LOAD_MAX` from that first attempt then applies, past which the engine closes the session, so a user who
 meets `restore_busy` after a long upload keeps it staged while another load runs, and no longer. The verb retries
 the commit every 60 s until that bound. Tenant create
-checks the same key: a new changeset redefines `create_tenant_partitions` (today only in `vectors-030`:349-403) so
-its slow path, the one that runs DDL (the fast path at :378-386 takes no lock and is unaffected), first calls
+checks the same key: a new changeset redefines `create_tenant_partitions` (today only in `vectors-030`:349-403) with
+a parameter `p_check_restore boolean DEFAULT true`, which the token-insert trigger leaves at its default and the
+RDR-225 walk (`vectors-030`:724-725) passes as false. With it true, the slow path, the one that runs DDL (the fast
+path at :378-386, every leaf present, takes no lock, so minting or rotating a token for an existing tenant is never
+delayed), first calls
 `pg_try_advisory_xact_lock_shared` on the restore key (a different key from its per-tenant lock at :387-389) and
 raises `lock_not_available` when a load holds it. TokenStore retries that as it retries a lock timeout
 (`TokenStore.java:83-84`, 3 attempts with 200-400 ms backoff), so the answer comes within about 1 s: 503
@@ -371,12 +375,20 @@ would otherwise outlive it. The load, in that one transaction, in load order:
 `GET /v1/tenant/import/{id}` reports `staging`, `loading <table>`, `verifying`, `committed` or `failed:
 <reason>`; the engine keeps the outcome in memory for 24 hours. A dropped client neither stops nor rolls back a
 load. After an engine restart the in-memory outcome is gone, so the verb does not infer it from a refused reopen
-(a refusal also follows any other write): it reads `GET /v1/tenant/import/last`, which returns that tenant's
+(a refusal also follows any other write): it reads `GET /v1/tenant/import-marker`, which returns that tenant's
 `rdr248_restore` row. The load committed exactly when that row names this file's header SHA-256; otherwise it
 rolled back.
 
+*Routes.* Open `POST /v1/tenant/import`; part `PUT /v1/tenant/import/{id}/rows?table=T&part=k`; close `POST
+/v1/tenant/import/{id}/close?table=T&rows=N`; commit `POST /v1/tenant/import/{id}/commit` (a repeat while the
+load runs or after it ended answers 200 with the current status and never starts a second load, so a client that
+lost the 202 just commits again); status `GET /v1/tenant/import/{id}`; abort `DELETE /v1/tenant/import/{id}`; the
+restore marker `GET /v1/tenant/import-marker` (its own path, so no session id can shadow it). Session ids are UUIDs.
+
 *Bounds* (S6 and the fix check). Before commit: idle 10 minutes without a part, 60 minutes in all, as for
-export; a status poll is not activity. After commit the load has a total bound, `NX_IMPORT_LOAD_MAX` (default 60
+export; a status poll is not activity. After a commit refused `restore_busy`, the restore-wait bound above
+(`NX_IMPORT_LOAD_MAX` from the first attempt). In all a session can hold its slot and its transaction for up to
+three hours. After commit the load has a total bound, `NX_IMPORT_LOAD_MAX` (default 60
 minutes, set from the Step 6 scale run with a margin of at least 2x), enforced by the engine cancelling the load's
 backend; each statement also runs under a statement timeout of the same value. `DELETE /v1/tenant/import/{id}`
 aborts: before commit it rolls back the staged transaction; during the load it cancels the backend, and the
@@ -400,9 +412,10 @@ The array holds the `memory.id` values a rollup summarised, as provenance (`memo
 (`MemoryRepository.java:722`), so a summary whose sources were all reaped is the normal state, and the export does
 not filter quarantined rows, so unreaped sources are in the file and remap. Remapping, not restoring old ids, is the
 choice because an old positive id in a new tenant names some other memory or none. The parity census
-(`everyIdShapedColumnOfAnExportedTableIsClassified`) covers bigint, bigint[] and jsonb today and is widened to
-integer and integer[]. Text and uuid columns stay outside it: every reassigned key is a BIGSERIAL, and an id
-written into text or uuid would be a schema choice a reviewer sees.
+(`everyIdShapedColumnOfAnExportedTableIsClassified`) covers bigint, bigint[] and jsonb, the only types that can
+hold a BIGSERIAL value, and every reassigned key is one; it is not widened. An id kept in text or uuid is not
+caught by any test; that is a stated limit, not a check. A `source_ids` value of 0 never comes from a BIGSERIAL; it
+passes through like a negative one, and verify fails only on a positive value outside the map.
 
 *Derived tables and cross-release (N2).* A `derived` table is rebuildable, so it never refuses a restore: when
 the target already holds rows for it (a first search writes `search_telemetry`), or a file column of it does not
@@ -423,13 +436,13 @@ HNSW maintenance, on the database every tenant shares. What bounds that is Sam's
 
 **Restore verb.** `nx backup restore FILE` (cloud and local) starts an import session, uploads the
 pages, commits and polls the status until it ends. A cloud file restores into a local engine under the
-same rule, when the local engine's schema is the file's or newer. The local `pg_restore` runbook stays
+same column-compatibility rule; which cloud-to-local cases are supported is the ask `rdr248-cloud-to-local`. The local `pg_restore` runbook stays
 for whole-cluster restores. An empty tenant comes from tenant create: the operator on the cloud
 (conexus), `nx init` on a fresh local install. The runbook's order is: the operator runs the current
 engine, creates the empty tenant and issues its token; the user restores, and does not use the tenant until
 the verb reports the outcome (a write during the upload refuses the load at its re-check). Nobody pins an engine
 version. The verb first verifies the whole file, then opens, uploads, commits, and polls; after a lost
-connection it polls the status, and after "no such session" it reads `/v1/tenant/import/last`. It prints row
+connection it polls the status, and after "no such session" it reads `/v1/tenant/import-marker`. It prints row
 counts by class, the derived tables and retired columns skipped, the soft-reference values negated, and the
 centroid rows dropped.
 
@@ -544,8 +557,12 @@ exporter; every new table needs a new exporter.
   tenant is as it was; the status reports the table and reason.
 - The client drops during a load: the load continues; the outcome is read later from the status route.
 - The engine restarts during or after a load: the in-memory outcome is lost; the verb reads
-  `/v1/tenant/import/last`, which names the file's header SHA-256 only when the load committed.
+  `/v1/tenant/import-marker`, which names the file's header SHA-256 only when the load committed.
 - A tenant create arrives during a load: `tenant_creation_busy` with a 30 s retry-after.
+- A session passes its idle, total or restore-wait bound: the engine rolls it back and closes it; the next request
+  gets "no such session", and the verb says which bound and to run again.
+- A commit meets `restore_busy` until the restore-wait bound: as above, the session closes with that reason.
+- An open while the engine's singleton lock is not held: refused naming the lock; no session is opened.
 - The database runs out of disk or WAL space during the load: the transaction fails and rolls back, and the status
   reports the database error; what prevents it is ask `rdr248-import-capacity`.
 - Registry out of date: the parity test fails in CI before release.
@@ -588,8 +605,8 @@ operator task from the file.
 
 The design is settled in the Import session section (nexus-csayy.5). Its two open asks to Sam,
 `rdr248-cloud-to-local` and `rdr248-import-capacity`, do not block the routes; they decide one refusal and one
-pre-check, each added when answered. The tenant-create check goes in the partition trigger's path, not in the
-body of `create_tenant_partitions`, which the RDR-225 walk also calls (`vectors-030`:724-725); the busy answer
+pre-check, each added when answered. The tenant-create check is the `p_check_restore` parameter of
+`create_tenant_partitions`, on its slow path only, which the RDR-225 walk turns off; the busy answer
 carries the restore-held fact on `TenantCreationBusyException`, sets the header and the body's
 `retry_after_seconds` alike, and the `TokenStore.java:151-154` javadoc is corrected.
 
@@ -626,7 +643,7 @@ None.
   the column; a newer file whose columns all match loads, and the count difference is shown.
 - **Scenario**: the client drops during a commit — **Verify**: the load continues, and a later status call
   reports its outcome.
-- **Scenario**: the engine restarts after a commit — **Verify**: `/v1/tenant/import/last` names the file's
+- **Scenario**: the engine restarts after a commit — **Verify**: `/v1/tenant/import-marker` names the file's
   header SHA-256 and the verb reports the restore done; after a restart during the load it does not, and the
   verb reports it rolled back.
 - **Scenario**: a part sent twice, a part with a wrong SHA-256 (a transfer cut short), a gap, and a malformed
@@ -639,13 +656,18 @@ None.
   a later commit succeeds, and a session still waiting past the restore-wait bound is closed.
 - **Scenario**: a request with an expired token mid-session, then a new token of the same tenant — **Verify**:
   401, then the session continues.
+- **Scenario**: an open on an engine whose singleton lock is not held (an in-process service that does not
+  declare it) — **Verify**: refused naming the lock.
+- **Scenario**: a repeated commit after a lost 202, and an open while the tenant's earlier session is still
+  open — **Verify**: the repeat answers the current status and starts no second load; the open answers 409 with
+  the earlier session's id, which `DELETE` then closes.
 - **Scenario**: a fresh tenant after one authenticated request and one search — **Verify**: every `data` row it
   holds is covered by `seededKeys` (a new lazily written row fails this test), and a restore into it succeeds.
 - **Scenario**: a write to the tenant during the upload — **Verify**: the load's re-check refuses it and
   nothing is written.
 - **Scenario**: a summary whose sources were partly and one whose sources were all reaped before the export, a run
   whose plan was deleted, a run with plan_id 0, and a centroid whose topic is gone — **Verify**: the load commits;
-  remapped ids are new ids, reaped ones negated, the deleted plan NULL, the 0 kept, the centroid dropped, and each
+  remapped ids are new ids, reaped ones negated, the deleted plan negated (still counted a hit), the 0 kept, the centroid dropped, and each
   count reported.
 - **Scenario**: restore into the local default tenant, whose `embedding_profile` rows the boot wrote — **Verify**:
   equal rows load; a file whose row differs in one column is refused naming it.
@@ -852,3 +874,4 @@ tenants. Nothing to trim.
 - 2026-11-13: Phase 2 design (nexus-csayy.5): the Import session, Restore verb, Risks, Failure Modes, Test Plan and import bounds revised to settle gate S1-S3, S5, S6, N2 and the fix-check items (seeded rows, part protocol, in-load re-check, restore marker, load bound and abort, advisory-lock admission against tenant create, source_ids remap, derived and retired skips). Evidence in T2 `nexus/rdr248-phase2-evidence-2026-11-13`. Two decisions left with Sam as asks: supported cloud-to-local cases and import capacity.
 - 2026-11-13: Phase 2 design check (substantive-critic, T2 `nexus_rdr/248-phase2-design-check`): B1 settled with a per-column soft-reference rule (sentinels, dangling values, `source_ids` negated); D1-D11 folded in (no per-part savepoints, transaction-scoped admission lock, a 1 s tenant-create answer, the verify count identity, a refused commit keeps its upload, staged-byte cap, one part in flight, derived dependents skipped together, the embedding_profile comparison, stale lines, token expiry); O1-O7 stated as risks or notes.
 - 2026-11-13: Phase 2 design check round 2 (T2 `nexus_rdr/248-phase2-design-check-r2`): negative soft-reference values pass through, so negation survives a second backup and restore; a deleted plan's id is negated, keeping the run a plan hit; a restore-wait bound on a commit refused `restore_busy`; the session hold restated as up to three hours; stale savepoint, 3.8 s and two-reference lines swept; Step 5 names the asks and the trigger-path placement.
+- 2026-11-13: Phase 2 design check round 3 (T2 `nexus_rdr/248-phase2-design-check-r3`, 0 BLOCKS-PLANNING): the route list (table close, idempotent commit, `import-marker`, busy names the open session), the tenant-create check as a `create_tenant_partitions` parameter on its slow path only, the cloud-to-local line pointed at its ask, the census left at the types a BIGSERIAL fits, and the remaining Test Plan and Failure Modes lines.
