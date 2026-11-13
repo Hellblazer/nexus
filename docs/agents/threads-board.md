@@ -25,9 +25,9 @@ When the thread wants attention again: a measurement window, a recount date, a d
 
 Once the time has come, the thread is due until its `due:` line is changed or removed:
 
-- Every SessionStart (startup, resume, clear, compact, fork) prints `## Due on your threads board (<entry>): move or delete each due: line once you have acted on it`, with one line per due thread, its refs and worktree. The `session-context` hook finds the entry the way the PreCompact checkpoint does: every entry whose `session:` line names the session's current id, or, when none does, the entry titled exactly the session's name (from Claude Code's `~/.claude/sessions/<pid>.json`). The name is what carries a reminder across a restart, `/clear`, resume or fork, all of which give the session a new id. A session with no name whose `session:` line is out of date gets no reminder. The lookup has a hard budget (`NX_BOARD_DUE_BUDGET_S`, default 3 s); over budget, or on any failure, it prints nothing and logs a warning to the hook log.
+- Every SessionStart (startup, resume, clear, compact, fork) prints `## Due on your threads board (<entry>): move or delete each due: line once you have acted on it`, with one line per due thread, its refs and worktree. The `session-context` hook finds the entry the way the PreCompact checkpoint does: every entry whose `session:` line names the session's current id, or, when none does, the entry titled exactly the session's name (from Claude Code's `~/.claude/sessions/<pid>.json`). When the session's id changes and its entry still names the old one (a fresh start under the same name; `/clear` and fork give a new id, while `claude --resume` was seen to keep it), the name is what finds the entry. Not covered: a session with no name, a renamed session whose entry still has the old title, and a Claude Desktop session whose entry is filed under a handle; `/clear` and fork are untested, since they rely on Claude Code writing the new id to the sessions file before the hook runs. The lookup has a hard budget (`NX_BOARD_DUE_BUDGET_S`, default 3 s); over budget, or on any failure, it prints nothing and logs a warning to the hook log.
 - `nx console`, Threads tab, shows `due <value>` on the thread, highlighted once it has come.
-- The PreCompact checkpoint's half of nexus-ct74m reads the same line to mark a past `due:` as overdue.
+- Planned, not yet shipped: the PreCompact checkpoint (the other half of nexus-ct74m) is to read the same line and mark a past `due:` as overdue.
 
 Move the date forward, or delete the line, when you act on it.
 
@@ -35,4 +35,4 @@ Move the date forward, or delete the line, when you act on it.
 
 Where the thread's work lives, so a session coming back from a compaction or a restart does not have to guess from its cwd. Use the worktree's absolute path (`worktree: /Users/…/git/nexus-wt/marlowe-ct74m`). For work that has no worktree, an artifact slug or a file path serves the same purpose.
 
-The console shows it under the thread. The PreCompact checkpoint's half of nexus-ct74m takes it as its first choice for the session's worktree.
+The console shows it under the thread. Planned, not yet shipped: the PreCompact checkpoint (the other half of nexus-ct74m) is to take it as its first choice for the session's worktree.

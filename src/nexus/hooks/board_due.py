@@ -8,9 +8,10 @@ The session's board entry is found as the PreCompact checkpoint finds it (``comp
 2. when none does, the entry titled exactly the session's name, read from Claude Code's
    ``<config dir>/sessions/<pid>.json`` (``sessionId`` and ``name``).
 
-Step 2 is what makes a ``due:`` survive a restart, ``/clear``, resume or fork: each gives the session a new id, and
-the entry's ``session:`` line still names the old one until the session rewrites it. A session with no name and a
-stale ``session:`` line gets no reminder.
+Step 2 is what finds the entry when the session's id has changed and the entry's ``session:`` line still names the
+old one (a fresh start under the same name; ``/clear`` and fork, untested here, depend on Claude Code writing the new
+id to the sessions file before the hook runs). A session with no name, a renamed one whose entry keeps the old
+title, and a Desktop session filed under a handle get no reminder then.
 
 The whole lookup has one hard budget (``NX_BOARD_DUE_BUDGET_S``, default 3 s): it runs in a daemon thread that
 the hook stops waiting for when the budget is spent, so the store's own waits (an endpoint re-resolve, gateway
