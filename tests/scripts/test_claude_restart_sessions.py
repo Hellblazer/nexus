@@ -2631,10 +2631,12 @@ class _Pane:
     after claude exits, then dies with the pane (it is not at a prompt until then)."""
 
     def __init__(self, pane: str, claude_pid: int, *, direct: bool, name: str = "wren", registers: bool = True,
-                 ignores_ctrl_c: bool = False, ignores_sigterm: bool = False,
+                 ignores_ctrl_c: bool = False, ignores_sigterm: bool = False, exits_late_after: int | None = None,
                  wrapper_dies_after: int | None = None, wrapper_args: str = "sh -c 'claude; sleep 3'") -> None:
         self.id, self.claude_pid, self.direct, self.name, self.registers = pane, claude_pid, direct, name, registers
         self.ignores_ctrl_c, self.ignores_sigterm = ignores_ctrl_c, ignores_sigterm
+        # with ignores_sigterm: claude exits on its own this many liveness looks after the SIGTERM (bob, 8.2.2 round)
+        self.exits_late_after, self.late_looks = exits_late_after, None
         self.pid = claude_pid if direct else claude_pid - 1  # a shell's pid, when there is one
         self.wrapper_polls, self.wrapper_args = wrapper_dies_after, wrapper_args
         self.wrapper_alive = False
@@ -2665,6 +2667,11 @@ class FakeTmux:
         self.next_new = 9
 
     def alive(self, pid: int) -> bool:
+        for pane in self.panes.values():
+            if pane.claude_pid == pid and pane.late_looks is not None and pid in self.alive_pids:
+                pane.late_looks -= 1
+                if pane.late_looks <= 0:
+                    self._claude_exits(pane)
         return pid in self.alive_pids
 
     def kill(self, pid: int, sig: int) -> None:
@@ -2673,6 +2680,8 @@ class FakeTmux:
         for pane in self.panes.values():
             if pane.claude_pid == pid and not pane.ignores_sigterm:
                 self._claude_exits(pane)
+            elif pane.claude_pid == pid and pane.exits_late_after is not None:
+                pane.late_looks = pane.exits_late_after
 
     def verbs(self, verb: str) -> list[list[str]]:
         return [c for c in self.calls if c[1] == verb]
@@ -2791,6 +2800,8 @@ def _fake_tmux(crs, monkeypatch, tmp_path: Path, panes: list[_Pane], **kw) -> Fa
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
     monkeypatch.setattr(crs, "alive", fake.alive)
     monkeypatch.setattr(crs, "RESULTS", {})
+    monkeypatch.setattr(crs, "LATE", [])
+    monkeypatch.setattr(crs, "STUCK", [])
     setattr_in(monkeypatch, crs, "subprocess.run", fake)
     setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
     setattr_in(monkeypatch, crs, "os.kill", fake.kill)
@@ -2948,6 +2959,32 @@ def test_remain_on_exit_is_released_when_the_pid_will_not_exit(crs, monkeypatch,
     assert "FAIL wren: pid 111 did not exit" in _log_text(tmp_path)
     assert fake.kills == [(111, signal.SIGTERM)] and pane.typed == []
     assert pane.opts == {"-p": "", "-w": ""} and pane.state == "live"
+
+
+def test_a_claude_that_never_exits_is_named_with_its_pid_and_pane(crs, monkeypatch, tmp_path) -> None:
+    """After the SIGTERM window the script watches LATE_EXIT_WAIT more seconds, then fails naming pid and pane."""
+    pane = _Pane("%18", 111, direct=False, ignores_ctrl_c=True, ignores_sigterm=True)
+    _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is False
+    log = _log_text(tmp_path)
+    assert f"watching it up to {crs.LATE_EXIT_WAIT}s more" in log
+    assert f"FAIL wren: pid 111 did not exit within {crs.LATE_EXIT_WAIT}s" in log and "(pane %18)" in log
+    assert crs.STUCK == ["wren (pid 111, pane %18)"] and pane.typed == []
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["shell-pane", "claude-is-the-pane"])
+def test_a_claude_that_exits_after_the_sigterm_window_is_resumed_late(crs, monkeypatch, tmp_path, direct) -> None:
+    """bob on the 8.2.2 round (2026-11-13): claude exited a little after the SIGTERM window and was left at a
+    shell prompt, not relaunched. Now the late watch sees the exit, relaunches it, and logs it as resumed late."""
+    pane = _Pane("%18", 111, direct=direct, name="bob", ignores_ctrl_c=True, ignores_sigterm=True,
+                 exits_late_after=40)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is True
+    log = _log_text(tmp_path)
+    assert "bob: pid 111 still running 15s after SIGTERM" in log and "exited" in log and "into the late watch" in log
+    assert "OK bob: resumed late as pid" in log and "FAIL" not in log
+    assert crs.LATE == ["bob"] and crs.STUCK == [] and len(pane.typed) == 1 and pane.lost == []
+    assert fake.kills == [(111, signal.SIGTERM)]
 
 
 def test_remain_on_exit_is_released_when_no_pane_is_left_to_relaunch_in(crs, monkeypatch, tmp_path) -> None:

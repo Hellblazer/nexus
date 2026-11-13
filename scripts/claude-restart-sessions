@@ -972,6 +972,9 @@ NO_SLASH = False
 #: Seconds a session gets to come back from /restart before the script exits and resumes it instead.
 SLASH_WAIT = 30
 SLASH_UNKNOWN = "Unknown command: /restart"
+#: Seconds the exit path keeps watching a claude still running after its SIGTERM window. bob on the 8.2.2 round
+#: (2026-11-13) exited a little after the window and was left at a shell prompt, not relaunched.
+LATE_EXIT_WAIT = 180
 
 
 def _transcript_count(session_id: str, text: str) -> int:
@@ -1095,6 +1098,7 @@ def restart(s: dict, handoff: str = "") -> bool:
             return False
         log(f"{name}: relaunching in new window pane {pane}; pane {s['pane']} closes with claude")
     log(f"exit {name} (pid {s['pid']}, pane {s['pane']})")
+    late = False
     try:
         tmux("send-keys", "-t", s["pane"], "C-c")
         time.sleep(0.4)
@@ -1114,7 +1118,17 @@ def restart(s: dict, handoff: str = "") -> bool:
                     break
                 time.sleep(1)
         if alive(s["pid"]):
-            log(f"FAIL {name}: pid {s['pid']} did not exit; not relaunched")
+            log(f"{name}: pid {s['pid']} still running 15s after SIGTERM; watching it up to {LATE_EXIT_WAIT}s more")
+            for waited in range(1, LATE_EXIT_WAIT + 1):
+                time.sleep(1)
+                if not alive(s["pid"]):
+                    log(f"{name}: pid {s['pid']} exited {waited}s into the late watch; relaunching")
+                    late = True
+                    break
+        if alive(s["pid"]):
+            log(f"FAIL {name}: pid {s['pid']} did not exit within {LATE_EXIT_WAIT}s of the SIGTERM window; "
+                f"not relaunched (pane {s['pane']})")
+            STUCK.append(f"{name} (pid {s['pid']}, pane {s['pane']})")
             return False
         time.sleep(1)
         if kept:
@@ -1144,8 +1158,10 @@ def restart(s: dict, handoff: str = "") -> bool:
             if (match and int(d.get("pid", 0)) != s["pid"]
                     and str(d.get("tmux", "")).rsplit(".", 1)[-1] == pane and alive(int(d["pid"]))):
                 if not handoff:
-                    log(f"OK {name}: resumed as pid {d['pid']}")
+                    log(f"OK {name}: resumed {'late ' if late else ''}as pid {d['pid']}")
                     RESULTS[s["sessionId"]] = "resumed"
+                    if late:
+                        LATE.append(name)
                     TO_WAKE.append(_resumed(d, path, pane))
                     return True
                 return started_on(name, {**s, "pane": pane}, d, handoff, dev_dialog=uses_dev_channel(cmd))
@@ -1976,6 +1992,9 @@ def transcript_has(session_id: str, text: str) -> bool:
 
 #: sessionId -> "fresh" or "resumed", for the closing tally.
 RESULTS: dict[str, str] = {}
+#: Sessions resumed after a late exit, and sessions whose claude never exited (name, pid, pane), for the done line.
+LATE: list[str] = []
+STUCK: list[str] = []
 
 
 def started_on(name: str, s: dict, d: dict, handoff: str, dev_dialog: bool = False) -> bool:
@@ -2768,7 +2787,9 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
         return EXIT_STALLED
     wake_resumed()
     kinds = list(RESULTS.values())
-    log(f"=== done: {ok} of {len(found)} restarted ({kinds.count('fresh')} fresh, {kinds.count('resumed')} resumed)")
+    log(f"=== done: {ok} of {len(found)} restarted ({kinds.count('fresh')} fresh, {kinds.count('resumed')} resumed)"
+        + (f"; resumed late: {', '.join(LATE)}" if LATE else "")
+        + (f"; never exited, not relaunched: {', '.join(STUCK)}" if STUCK else ""))
     return 0 if ok == len(found) else 1
 
 
