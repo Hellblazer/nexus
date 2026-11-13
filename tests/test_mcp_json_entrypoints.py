@@ -230,9 +230,13 @@ def test_the_placeholder_check_would_have_caught_the_original() -> None:
 #: nexus (nexus-fbtyl) carries NO server-level key: eight of its tools are
 #: flagged per tool in their ``_meta`` instead (tests/test_mcp_always_load.py),
 #: and a server-level ``false`` would override those flags and defer all 44.
+#:
+#: GitHub #1656 (2026-11-13): the sequential-thinking server is off. With it
+#: loaded, subagents were stopped by the API's safety classifier; with it
+#: removed, the same runs passed. Its script stays in conexus/mcp/, and turning
+#: it back on is restoring the entry (alwaysLoad true).
 _EXPECTED_ALWAYS_LOAD = {
     "nexus": None,
-    "sequential-thinking": True,
     "nexus-catalog": False,
 }
 
@@ -242,6 +246,6 @@ def test_always_load_values_are_pinned() -> None:
     actual = {name: cfg.get("alwaysLoad") for name, cfg in mcp_json.items()}
     assert actual == _EXPECTED_ALWAYS_LOAD, (
         "conexus/.mcp.json alwaysLoad drifted: deferred schemas are not "
-        "invoked, so sequential-thinking must stay true, nexus-catalog false "
+        "invoked, so nexus-catalog must stay false, "
         f"and nexus unset (per-tool flags); got {actual!r}"
     )

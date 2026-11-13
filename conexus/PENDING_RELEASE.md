@@ -47,4 +47,6 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/.mcp.json`: the sequential-thinking MCP server is off (GitHub #1656: subagents blocked by the API safety classifier while it loaded; its script is kept).
+
 ## Deferred to the next client release

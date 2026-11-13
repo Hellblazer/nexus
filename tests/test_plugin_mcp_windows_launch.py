@@ -125,10 +125,10 @@ def test_the_nexus_servers_start_through_the_launcher(server: str, program: str,
     assert (REPO_ROOT / "conexus" / "launch" / "nx_launch.py").is_file()
 
 
-def test_sequential_thinking_launch_argv() -> None:
-    cfg = json.loads(MCP_JSONS["conexus"].read_text())["sequential-thinking"]
-    assert cfg["command"] == "uv"
-    assert cfg["args"] == SEQ_ARGS
+def test_sequential_thinking_is_off_and_its_script_kept() -> None:
+    """GitHub #1656 (2026-11-13): the server is off because subagents were blocked by the safety classifier while
+    it loaded. The script stays, so turning it back on is restoring the entry with SEQ_ARGS."""
+    assert "sequential-thinking" not in json.loads(MCP_JSONS["conexus"].read_text())
     assert SEQ_SCRIPT.is_file()
 
 
