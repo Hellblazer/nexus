@@ -263,6 +263,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Accepted | 2026-11-03 |
 | [RDR-245](rdr-245-structured-asks-on-the-threads-board.md) | Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox | Feature | Accepted | 2026-11-05 |
 | [RDR-248](rdr-248-cloud-tenant-backup.md) | Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant | Feature | Accepted | 2026-11-11 |
+| [RDR-249](rdr-249-declarative-auras.md) | Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure | Feature | Draft | 2026-11-12 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 
