@@ -270,6 +270,22 @@ class TenantImportRoutesTest {
     }
 
     @Test
+    void aTenantResetEndsTheImportSessionAndFreesItsPlace() throws Exception {
+        String tenant = "t-imp-reset";
+        String token = env.newTenant(tenant);
+        String id = openOk(token, file).get("session_id").asText();
+        var evictor = env.service.tenantKeyedState().stream().filter(s -> s.name().equals("TenantImportSessions")).findFirst();
+        assertThat(evictor).isPresent();
+
+        assertThat(evictor.get().evictTenant("t-imp-someone-else")).isZero();
+        assertThat(evictor.get().evictTenant(tenant)).isEqualTo(1);
+
+        assertThat(evictor.get().evictTenant(tenant)).as("and again: nothing left").isZero();
+        assertThat(env.call("GET", IMPORT + "/" + id, token).statusCode()).as("the reset also drops the recorded outcome").isEqualTo(404);
+        assertThat(env.open(token, file).statusCode()).as("the tenant's place is free").isEqualTo(200);
+    }
+
+    @Test
     void anotherTenantsTokenOnEveryRouteOfASessionGetsNoSuchSession() throws Exception {
         String owner = env.newTenant("t-imp-owner");
         String stranger = env.newTenant("t-imp-stranger");
