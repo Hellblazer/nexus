@@ -317,8 +317,9 @@ public final class NexusService {
     private volatile java.util.function.Supplier<dev.nexus.service.vectors.PciMaintenanceStatus> chunksLeavesCanary;
     /** nexus-6pfgb.43: the admin-connection DDL behind {@code /v1/admin/chunk-keys/add-constraints} and {@code validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
-    /** nexus-6pfgb.44: the admin-connection DDL behind {@code /v1/admin/catalog-ttl-check/*}; null until {@code Main} binds it. */
+    /** nexus-6pfgb.44 / .42: the admin-connection DDL behind {@code /v1/admin/catalog-ttl-check/*} and {@code /v1/admin/manifest-chunk-index-check/*}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.db.CatalogTtlCheckAdmin catalogTtlCheckAdmin;
+    private volatile dev.nexus.service.db.ManifestChunkIndexCheckAdmin manifestChunkIndexCheckAdmin;
     /** nexus-f3yqd: the admin-connection VALIDATE behind {@code /v1/admin/validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.db.ChashConstraintValidator chashConstraintValidator;
     /** nexus-csayy.2 (RDR-248): the tenant export sessions behind {@code /v1/tenant/export}; swapped whole by a test. */
@@ -903,13 +904,13 @@ public final class NexusService {
                                 : tokenCache.resolve(hash).isPresent()));
         chunkKeysCtx.getFilters().addAll(authFilter);
 
-        // /v1/admin/catalog-ttl-check/* — RDR-236 (nexus-6pfgb.44): the census, add-NOT-VALID and VALIDATE of the
-        // catalog TTL CHECK, a step of its own (not the chunk routes above). Nothing in the engine calls them; the
-        // admin connection they run on is bound late, from Main (catalogTtlCheckAdmin).
-        var catalogTtlCtx = server.createContext(dev.nexus.service.http.CatalogTtlCheckHandler.PATH,
+        // /v1/admin/catalog-ttl-check/* (nexus-6pfgb.44), /v1/admin/manifest-chunk-index-check/* (nexus-6pfgb.42), RDR-236: operator steps; nothing calls them, Main binds their admin connections late.
+        server.createContext(dev.nexus.service.http.CatalogTtlCheckHandler.PATH,
                 new dev.nexus.service.http.CatalogTtlCheckHandler(
-                        () -> catalogTtlCheckAdmin, tokenStore::listKnownTenants, tenantScope));
-        catalogTtlCtx.getFilters().addAll(authFilter);
+                        () -> catalogTtlCheckAdmin, tokenStore::listKnownTenants, tenantScope)).getFilters().addAll(authFilter);
+        server.createContext(dev.nexus.service.http.ManifestChunkIndexCheckHandler.PATH,
+                new dev.nexus.service.http.ManifestChunkIndexCheckHandler(
+                        () -> manifestChunkIndexCheckAdmin, tokenStore::listKnownTenants, tenantScope)).getFilters().addAll(authFilter);
 
         // /v1/admin/validate-constraints — the user-started VALIDATE CONSTRAINT job of the chash width CHECKs (nexus-f3yqd),
         // root token only; never started by the engine. The admin connection it runs on is bound late, from Main.
@@ -1316,12 +1317,14 @@ public final class NexusService {
         this.chunkConstraintAdmin = admin;
     }
 
-    /**
-     * Bind the admin-connection DDL behind the catalog TTL CHECK routes (nexus-6pfgb.44). {@code Main} calls it once,
-     * with the same {@code NX_DB_ADMIN_*} values; until then the routes answer 503.
-     */
+    /** Bind the admin-connection DDL behind the catalog TTL CHECK routes (nexus-6pfgb.44); {@code Main} calls it once, until then they answer 503. */
     public void catalogTtlCheckAdmin(dev.nexus.service.db.CatalogTtlCheckAdmin admin) {
         this.catalogTtlCheckAdmin = admin;
+    }
+
+    /** Bind the admin-connection DDL behind the manifest chunk-index CHECK routes (nexus-6pfgb.42); {@code Main} calls it once, until then they answer 503. */
+    public void manifestChunkIndexCheckAdmin(dev.nexus.service.db.ManifestChunkIndexCheckAdmin admin) {
+        this.manifestChunkIndexCheckAdmin = admin;
     }
 
     /**

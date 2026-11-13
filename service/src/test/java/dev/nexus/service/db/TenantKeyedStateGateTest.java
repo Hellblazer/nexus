@@ -663,17 +663,18 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, "a field of the audit trail of ONE sweep request (built per request, dropped with "
                     + "its response); the handler holds no reference to it afterwards");
             }
-            // nexus-6pfgb.44: the catalog TTL CHECK routes hold nothing between requests.
-            notKeyed.put("CatalogTtlCheckAdmin.TenantCensus.tenant", "a component of one table-wide census row (the "
-                + "tenant name beside its counts), built for that request and dropped with its response");
-            notKeyed.put("CatalogTtlCheckHandler.tenants", "a supplier of the known tenant names (TokenStore#"
-                + "listKnownTenants), read on each request; it caches nothing");
-            notKeyed.put("CatalogTtlCheckHandler.Survey.checked", "a component of one request's survey (the tenants "
-                + "that request covered), built for that request and dropped with its response");
-            notKeyed.put("CatalogTtlCheckHandler.Survey.census", "a component of one request's survey (the census rows "
-                + "it read), built for that request and dropped with its response");
-            notKeyed.put("NexusService.catalogTtlCheckAdmin", "the admin-connection DDL object bound once at boot; "
-                + "table-wide, it opens a connection per call and holds no per-tenant state");
+            // nexus-6pfgb.44 and .42: the catalog TTL and manifest chunk-index CHECK routes hold nothing between requests.
+            for (String f : List.of("CatalogTtlCheckAdmin.TenantCensus.tenant", "CatalogTtlCheckHandler.tenants",
+                    "CatalogTtlCheckHandler.Survey.checked", "CatalogTtlCheckHandler.Survey.census",
+                    "ManifestChunkIndexCheckAdmin.TenantCensus.tenant", "ManifestChunkIndexCheckHandler.tenants",
+                    "ManifestChunkIndexCheckHandler.Survey.checked", "ManifestChunkIndexCheckHandler.Survey.census")) {
+                notKeyed.put(f, "a component of one request's census or survey, or the supplier of known tenant names "
+                    + "(TokenStore#listKnownTenants) read on each request; built for that request, dropped with its response");
+            }
+            for (String f : List.of("NexusService.catalogTtlCheckAdmin", "NexusService.manifestChunkIndexCheckAdmin")) {
+                notKeyed.put(f, "the admin-connection DDL object bound once at boot; table-wide, it opens a connection "
+                    + "per call and holds no per-tenant state");
+            }
             notKeyed.put("NexusService.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("AuthFilter.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("TokenAdminHandler.cache", TOKEN_CACHE_REF);
