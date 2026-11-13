@@ -134,7 +134,10 @@ $$;
 -- changelog also runs against schemas migrated before vectors-030 existed.
 DO $$
 BEGIN
-    IF to_regprocedure('nexus.create_tenant_partitions(regclass, text, boolean)') IS NOT NULL THEN
+    IF to_regprocedure('nexus.create_tenant_partitions(regclass, text, boolean, boolean)') IS NOT NULL THEN
+        -- vectors-059 (RDR-248) added p_check_restore and dropped the three-argument function
+        EXECUTE 'GRANT EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean, boolean) TO ${svcRole}';
+    ELSIF to_regprocedure('nexus.create_tenant_partitions(regclass, text, boolean)') IS NOT NULL THEN
         EXECUTE 'GRANT EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) TO ${svcRole}';
     END IF;
 END

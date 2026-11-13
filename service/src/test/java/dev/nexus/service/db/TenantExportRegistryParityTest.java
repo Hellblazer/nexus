@@ -733,4 +733,100 @@ class TenantExportRegistryParityTest {
             t.triggerMaintained(), t.notReferences()));
         assertThat(softReferenceProblems(live, planted)).containsExactly("taxonomy_centroids: topics.topic_pk");
     }
+
+    // ── the import's rows of the registry (RDR-248 Step 5, bead nexus-csayy.6) ───────────────────────
+
+    /** A soft reference with no S1 rule: the load would not know what a value with no map entry becomes. */
+    static List<String> softReferencesWithoutARule(List<ExportTable> tables) {
+        List<String> wrong = new ArrayList<>();
+        tables.forEach(e -> e.references().forEach(r -> {
+            if (!r.foreignKey() && r.softRule() == null) wrong.add(e.name() + "." + r.columns().get(0));
+        }));
+        return wrong;
+    }
+
+    /** A seeded key on a table that is not data, or with a value count that is not the key's columns after tenant_id, or on a non-text key. */
+    static List<String> seededKeyProblems(Map<String, LiveTable> live, List<ExportTable> tables) {
+        List<String> wrong = new ArrayList<>();
+        tables.forEach(e -> {
+            if (e.seededKeys().isEmpty()) return;
+            if (e.exportClass() != TenantExport.ExportClass.DATA) {
+                wrong.add(e.name() + ": seeded keys on a table that is not data");
+                return;
+            }
+            List<String> keyColumns = e.primaryKey().stream().map(TenantExport.Column::name).filter(n -> !n.equals("tenant_id")).toList();
+            LiveTable t = live.get(e.name());
+            e.seededKeys().forEach(k -> {
+                if (k.values().size() != keyColumns.size()) {
+                    wrong.add(e.name() + ": a seeded key has " + k.values().size() + " values, the key has " + keyColumns);
+                }
+            });
+            if (t != null) {
+                keyColumns.forEach(c -> {
+                    LiveColumn col = t.columns().get(c);
+                    if (col == null || !"text".equals(col.type())) wrong.add(e.name() + "." + c + ": a seeded key column that is not text");
+                });
+            }
+        });
+        return wrong;
+    }
+
+    /** A retired entry that names a table or column the live schema still has: it is not retired. */
+    static List<String> retiredButStillLive(Map<String, LiveTable> live, List<TenantExport.Retired> retired) {
+        List<String> wrong = new ArrayList<>();
+        retired.forEach(r -> {
+            LiveTable t = live.get(r.table());
+            if (t == null) return;
+            if (r.column() == null) {
+                wrong.add(r.table() + ": retired by " + r.changeset() + " and still a live RLS table");
+            } else if (t.columns().containsKey(r.column())) {
+                wrong.add(r.table() + "." + r.column() + ": retired by " + r.changeset() + " and still a live column");
+            }
+        });
+        return wrong;
+    }
+
+    @Test
+    void everySoftReferenceHasARuleForAValueWithNoMapEntry() {
+        assertThat(softReferencesWithoutARule(TenantExport.TABLES)).isEmpty();
+        assertThat(TenantExport.TABLES.stream().flatMap(t -> t.references().stream()).filter(r -> !r.foreignKey()).count())
+            .as("non-vacuity: the four soft references of RDR-248 S1").isEqualTo(4);
+    }
+
+    @Test
+    void aSoftReferenceWithNoRuleFails() {
+        List<ExportTable> planted = replacing("nx_answer_runs", t -> copy(t, t.primaryKey(), t.reassignedId(),
+            List.of(Reference.soft("plan_id", "plans", "id")), t.triggers(), t.triggerMaintained(), t.notReferences()));
+        assertThat(softReferencesWithoutARule(planted)).containsExactly("nx_answer_runs.plan_id");
+    }
+
+    @Test
+    void everySeededKeyFitsItsTable() {
+        assertThat(seededKeyProblems(live, TenantExport.TABLES)).isEmpty();
+        assertThat(TenantExport.TABLES.stream().filter(t -> !t.seededKeys().isEmpty()).map(ExportTable::name))
+            .as("non-vacuity: the two kinds of row the engine writes for a tenant").containsExactlyInAnyOrder("catalog_meta", "embedding_profile");
+    }
+
+    @Test
+    void aSeededKeyWithTheWrongNumberOfValuesFails() {
+        List<ExportTable> planted = replacing("catalog_meta", t -> new ExportTable(t.schema(), t.table(), t.exportClass(), t.reason(),
+            t.primaryKey(), t.reassignedId(), t.references(), t.triggers(), t.loadsAfter(), t.triggerMaintained(), t.notReferences(),
+            List.of(new TenantExport.SeededKey(List.of("a", "b"), false, false))));
+        assertThat(seededKeyProblems(live, planted)).singleElement().asString().contains("catalog_meta").contains("2 values");
+    }
+
+    @Test
+    void theRetiredListNamesNothingTheLiveSchemaStillHas() {
+        assertThat(retiredButStillLive(live, TenantExport.RETIRED)).isEmpty();
+    }
+
+    @Test
+    void aRetiredEntryForALiveColumnOrTableFails() {
+        assertThat(retiredButStillLive(live, List.of(new TenantExport.Retired("memory", "title", "memory-099"))))
+            .containsExactly("memory.title: retired by memory-099 and still a live column");
+        assertThat(retiredButStillLive(live, List.of(new TenantExport.Retired("chunks", null, "chunks-099"))))
+            .containsExactly("chunks: retired by chunks-099 and still a live RLS table");
+        assertThat(retiredButStillLive(live, List.of(new TenantExport.Retired("long_gone", null, "gone-1"),
+            new TenantExport.Retired("memory", "long_gone_column", "memory-098")))).isEmpty();
+    }
 }

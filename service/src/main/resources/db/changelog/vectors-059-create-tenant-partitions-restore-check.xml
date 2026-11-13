@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-csayy.6 (RDR-248 Step 5, "Import session", Commit): nexus.create_tenant_partitions gains a fourth
+    parameter, p_check_restore boolean DEFAULT true, so a tenant create cannot take AccessExclusiveLocks on the
+    model partitions of nexus.chunks and nexus.taxonomy_centroids while a tenant restore load is writing into them.
+
+    THE PROBLEM. A restore load is ONE transaction that inserts a whole tenant, and it can run for an hour. Its
+    inserts into nexus.chunks hold row locks and relation locks on the model partitions of the tables the load
+    touches. The first token row of a tenant fires the service_tokens trigger, which calls create_tenant_partitions
+    and needs ACCESS EXCLUSIVE on a model partition; behind the load it waits out its lock_timeout and the caller's
+    statement_timeout, and the stuck creation queues every writer behind it, across tenants (RDR-225 Locks and
+    bounds). So a load would stall tenant create for the hour.
+
+    THE FIX. The load takes the advisory lock hashtextextended('nexus.restore_load', 0) with pg_try_advisory_xact_lock
+    as its first statement (RestoreLoadLock). create_tenant_partitions, on its SLOW path only (the path that runs
+    DDL, after the fast path found a leaf missing), first calls pg_try_advisory_xact_lock_shared on the same key and
+    raises lock_not_available (55P03) at once when a load holds it. TokenStore retries that like a lock timeout (3
+    attempts, 200 to 400 ms pauses), so the answer comes within about a second as 503 tenant_creation_busy with a 30
+    s Retry-After. The FAST path (every leaf present: a second token, a rotation, a mint for an existing tenant)
+    takes no lock and is not delayed by a load. A load that finds a tenant create holding the key shared retries
+    its try-lock for a few seconds and then answers restore_busy.
+
+    p_check_restore = false skips the check. The RDR-225 migration walk (vectors-030) passes p_force = false for the
+    *_new parents; it runs inside a Liquibase migration, before the engine serves, where no load can exist, and it
+    is an applied changeset that is not edited (a checksum change refuses boot), so it keeps resolving to this
+    function with the default. Nothing in the engine passes false.
+
+    THE SIGNATURE CHANGE. Postgres cannot add a parameter with CREATE OR REPLACE, and keeping the three-argument
+    function beside the new one makes every two-argument call (the service_tokens trigger) ambiguous. So the
+    three-argument function is dropped and the four-argument one created; the trigger function and the walk call it
+    by name from plpgsql bodies that resolve at run time, and the two-argument and three-argument calls resolve to
+    the new function through its defaults. Owner, SECURITY DEFINER, search_path, lock_timeout and the privilege
+    posture (EXECUTE revoked from PUBLIC, granted to nexus_svc) are vectors-030-1's.
+
+    No DATA EFFECT: a function definition only. After vectors-058 (the tail), before the grants runAlways blocks.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-059-1" author="nexus-csayy.6">
+        <comment>nexus-csayy.6 (RDR-248): create_tenant_partitions(parent, tenant, force) becomes create_tenant_partitions(parent, tenant, force, check_restore); on its slow path it refuses with lock_not_available while a tenant restore load holds the restore-load advisory key. Everything else in the body is vectors-030-1's. No data effect: a function definition only; the rollback restores the vectors-030-1 function.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION nexus.create_tenant_partitions(regclass, text, boolean);
+
+CREATE FUNCTION nexus.create_tenant_partitions(
+    p_parent        regclass,
+    p_tenant        text,
+    p_force         boolean DEFAULT true,
+    p_check_restore boolean DEFAULT true
+) RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '2s'
+AS $fn$
+DECLARE
+    v_created integer := 0;
+    r         record;
+BEGIN
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'nexus.create_tenant_partitions: a tenant is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    PERFORM nexus.partition_parent_check(p_parent);
+    -- p_force = false exists for the walk, which fills the *_new parents with FORCE ROW LEVEL SECURITY off.
+    -- This function is SECURITY DEFINER and nexus_svc may call it, so on a live parent it would make leaves
+    -- without FORCE: refused there.
+    IF NOT p_force AND (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = p_parent) !~ '_new$' THEN
+        RAISE EXCEPTION 'nexus.create_tenant_partitions: p_force = false is accepted only for a *_new parent, not %', p_parent
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The common case, a second token for a tenant that already has every leaf: ONE catalog query, no lock taken.
+    -- A concurrent first creation is invisible here until it commits, so the caller falls through to the advisory
+    -- lock below and waits for it (bounded by lock_timeout) instead of racing it.
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_inherits i
+         WHERE i.inhparent = p_parent
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits j
+                            WHERE j.inhparent = i.inhrelid
+                              AND nexus.partition_bound_value(j.inhrelid) = p_tenant)
+    ) THEN
+        RETURN 0;
+    END IF;
+    -- The slow path runs DDL. A tenant restore load (RDR-248) holds the restore-load key exclusively for the whole
+    -- load and writes into the partitions this path locks ACCESS EXCLUSIVE: refuse at once instead of queueing
+    -- behind it. The shared lock is held to the end of this transaction, so a load that starts meanwhile finds
+    -- the key taken and retries its own try-lock. Read-only here: the key text is RestoreLoadLock.KEY_NAME.
+    IF p_check_restore AND NOT pg_catalog.pg_try_advisory_xact_lock_shared(
+            pg_catalog.hashtextextended('nexus.restore_load', 0)) THEN
+        RAISE EXCEPTION 'nexus.create_tenant_partitions: a tenant restore load is running, retry when it ends'
+            USING ERRCODE = 'lock_not_available';
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('nexus.create_tenant_partitions:' || p_tenant, 0));
+    FOR r IN
+        SELECT i.inhrelid::pg_catalog.regclass AS mp
+          FROM pg_catalog.pg_inherits i
+          JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = p_parent
+         ORDER BY c.relname
+    LOOP
+        IF nexus.partition_ensure_leaf(p_parent, r.mp, p_tenant, p_force) THEN
+            v_created := v_created + 1;
+        END IF;
+    END LOOP;
+    RETURN v_created;
+END
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean, boolean) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION nexus.create_tenant_partitions(regclass, text, boolean, boolean);
+
+CREATE FUNCTION nexus.create_tenant_partitions(
+    p_parent regclass,
+    p_tenant        text,
+    p_force         boolean DEFAULT true
+) RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '2s'
+AS $fn$
+DECLARE
+    v_created integer := 0;
+    r         record;
+BEGIN
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'nexus.create_tenant_partitions: a tenant is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    PERFORM nexus.partition_parent_check(p_parent);
+    IF NOT p_force AND (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = p_parent) !~ '_new$' THEN
+        RAISE EXCEPTION 'nexus.create_tenant_partitions: p_force = false is accepted only for a *_new parent, not %', p_parent
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_inherits i
+         WHERE i.inhparent = p_parent
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits j
+                            WHERE j.inhparent = i.inhrelid
+                              AND nexus.partition_bound_value(j.inhrelid) = p_tenant)
+    ) THEN
+        RETURN 0;
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('nexus.create_tenant_partitions:' || p_tenant, 0));
+    FOR r IN
+        SELECT i.inhrelid::pg_catalog.regclass AS mp
+          FROM pg_catalog.pg_inherits i
+          JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = p_parent
+         ORDER BY c.relname
+    LOOP
+        IF nexus.partition_ensure_leaf(p_parent, r.mp, p_tenant, p_force) THEN
+            v_created := v_created + 1;
+        END IF;
+    END LOOP;
+    RETURN v_created;
+END
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.create_tenant_partitions(regclass, text, boolean) TO nexus_svc;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

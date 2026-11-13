@@ -124,7 +124,21 @@ public final class TokenStore {
                 }
             }
         }
-        throw new TenantCreationBusyException(tenant, tenantCreationBound.attempts(), last);
+        throw new TenantCreationBusyException(tenant, tenantCreationBound.attempts(), last, restoreLoadHeld());
+    }
+
+    /**
+     * True when a tenant restore load holds the restore key right now (RDR-248, nexus-csayy.6): the creation that just
+     * gave up was refused by {@code create_tenant_partitions} for that reason, or a stuck lock merely coincided with a
+     * load; either way the load lasts minutes, so the caller is told to wait longer. A failed read counts as not held.
+     */
+    private boolean restoreLoadHeld() {
+        try {
+            return RestoreLoadLock.heldByLoad(dsl());
+        } catch (RuntimeException e) {
+            log.warn("event=restore_lock_probe_failed error={}", e.getMessage());
+            return false;
+        }
     }
 
     private void pauseBeforeRetry() {
@@ -149,10 +163,12 @@ public final class TokenStore {
      * of them and needs that partition closes a cycle, and PostgreSQL may end it on the token
      * transaction. Nothing was issued, so it is retried like the other two.
      *
-     * <p>At {@link TenantCreationBound#DEFAULT} a 55P03 does not occur: the 1 s statement_timeout fires before
-     * {@code create_tenant_partitions}' own 2 s lock_timeout, so a stuck creation ends as 57014. A bound above
-     * 2 s makes 55P03 the first to fire; {@code TenantTokenPartitionsIntegrationTest} drives that case
-     * (nexus-3wh8d.34).
+     * <p>At {@link TenantCreationBound#DEFAULT} a lock WAIT ends as 57014, not 55P03: the 1 s statement_timeout
+     * fires before {@code create_tenant_partitions}' own 2 s lock_timeout. A bound above 2 s makes 55P03 the first
+     * to fire; {@code TenantTokenPartitionsIntegrationTest} drives that case (nexus-3wh8d.34). A 55P03 does occur
+     * at the default bound, with no wait: {@code create_tenant_partitions} raises {@code lock_not_available} on its
+     * slow path at once when a tenant restore load holds the restore key ({@link RestoreLoadLock}, RDR-248,
+     * nexus-csayy.6), so three such attempts take the retry pauses, about a second, not three statement bounds.
      */
     static String lockWaitState(Throwable t) {
         Throwable c = t;

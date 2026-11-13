@@ -140,7 +140,7 @@ class PciReconcilerBootWorkIntegrationTest {
         try (Connection owner = adminDs.getConnection()) {
             owner.setAutoCommit(true);
             dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(
-                DSL.using(owner, SQLDialect.POSTGRES).configuration(), "nexus.chunks", tenant, true);
+                DSL.using(owner, SQLDialect.POSTGRES).configuration(), "nexus.chunks", tenant, true, true);
         }
         return tenant;
     }

@@ -631,11 +631,15 @@ public final class HttpUtil {
         if (tenantCreationBusy != null) {
             log.warn("event={}_tenant_creation_busy {} tenant={} attempts={}",
                 event, context, tenantCreationBusy.tenant(), tenantCreationBusy.attempts());
-            exchange.getResponseHeaders().set("Retry-After", Long.toString(TENANT_CREATION_RETRY_AFTER_SECONDS));
+            // the header and the body's retry_after_seconds are one value (RDR-248, nexus-csayy.6): 30 s while a
+            // tenant restore load holds the restore key, the creation's own 2 s otherwise
+            long retryAfter = tenantCreationBusy.restoreHeld()
+                ? TENANT_CREATION_RESTORE_RETRY_AFTER_SECONDS : TENANT_CREATION_RETRY_AFTER_SECONDS;
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(retryAfter));
             send(exchange, 503,
                 "{\"error\":" + jsonString(tenantCreationBusy.getMessage())
                 + ",\"reason\":\"" + TENANT_CREATION_BUSY_REASON + "\""
-                + ",\"retry_after_seconds\":" + TENANT_CREATION_RETRY_AFTER_SECONDS + "}");
+                + ",\"retry_after_seconds\":" + retryAfter + "}");
             return true;
         }
         String noPartition = noPartitionMessage(e);
@@ -841,6 +845,9 @@ public final class HttpUtil {
 
     /** {@code Retry-After} on {@link #TENANT_CREATION_BUSY_REASON}: one {@code lock_timeout} of the creation. */
     static final long TENANT_CREATION_RETRY_AFTER_SECONDS = 2;
+
+    /** {@code Retry-After} on the same answer while a tenant restore load holds the restore key (RDR-248): a load lasts minutes. */
+    static final long TENANT_CREATION_RESTORE_RETRY_AFTER_SECONDS = 30;
 
     /** The {@link dev.nexus.service.db.CollectionModelMismatchException} in {@code t}'s cause chain, or null. */
     static dev.nexus.service.db.CollectionModelMismatchException collectionModelMismatch(Throwable t) {

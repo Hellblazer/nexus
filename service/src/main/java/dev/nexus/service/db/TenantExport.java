@@ -43,6 +43,56 @@ public final class TenantExport {
     }
 
     /**
+     * What a restore does with a soft reference value that has no entry in the parent's id map, because its parent
+     * was gone before the export (RDR-248 "S1, soft references"). A value that is NULL, 0 or negative is a sentinel
+     * and passes through whatever the rule; only a positive value with no map entry reaches the rule.
+     */
+    public enum SoftRule {
+        /**
+         * The value becomes {@code -old_id}: it names no row, as a reaped parent already is, the array keeps its
+         * length (a CHECK on {@code memory_summaries.source_ids} needs it non-empty), and because negatives pass
+         * through, a second backup and restore leaves it negative.
+         */
+        NEGATE_DANGLING,
+        /** The whole row is dropped and counted ({@code taxonomy_centroids}: derived, the key holds the id). */
+        DROP_ROW
+    }
+
+    /**
+     * A row the engine itself writes for a tenant before any user write (RDR-248 "Not empty"), so the emptiness
+     * test does not count it and the load inserts the file's copy of it with {@code ON CONFLICT DO NOTHING}.
+     * {@code values} are the primary-key columns after {@code tenant_id}, as text, in key order.
+     * {@code defaultTenantOnly}: the engine writes it for the local default tenant only (the boot's
+     * {@code embedding_profile} rows). {@code mustMatch}: the file's row must equal the seeded one on every
+     * non-tenant column, or the load fails naming the key and the column.
+     */
+    public record SeededKey(List<String> values, boolean defaultTenantOnly, boolean mustMatch) {
+        public SeededKey {
+            values = List.copyOf(values);
+        }
+    }
+
+    /**
+     * A table or column that a later migration removed (RDR-248 "Derived tables and cross-release"). A file's data
+     * in it is skipped and reported, not refused. {@code column} is null when the whole table is retired;
+     * {@code changeset} names the changeset that removed it.
+     */
+    public record Retired(String table, String column, String changeset) {
+        public Retired {
+            if (table == null || table.isBlank() || changeset == null || changeset.isBlank()) {
+                throw new IllegalArgumentException("a retired entry names its table and the changeset that removed it");
+            }
+        }
+    }
+
+    /**
+     * Tables and columns removed since the export format shipped. Empty today: nothing exported has been removed.
+     * A migration that drops an exported table or column adds its entry here in the same change, with the
+     * changeset id; {@code TenantExportRegistryParityTest} fails an entry that names something still live.
+     */
+    public static final List<Retired> RETIRED = List.of();
+
+    /**
      * Columns of this table that hold a key of {@code parentSchema.parentTable}. {@code foreignKey} is true
      * when a foreign key constraint enforces it and false for a reference the schema does not enforce
      * (RDR-248: {@code nx_answer_runs.plan_id}, {@code taxonomy_centroids.topic_id}). {@code array} is true
@@ -53,10 +103,17 @@ public final class TenantExport {
      * provenance is the Phase 2 design's decision (bead nexus-csayy.5).
      */
     public record Reference(List<String> columns, String parentSchema, String parentTable,
-                            List<String> parentColumns, boolean foreignKey, boolean array, String jsonPath) {
+                            List<String> parentColumns, boolean foreignKey, boolean array, String jsonPath,
+                            SoftRule softRule) {
         public Reference {
             columns = List.copyOf(columns);
             parentColumns = List.copyOf(parentColumns);
+        }
+
+        /** A reference with no soft rule: a foreign key, or a soft reference whose rule is not yet decided. */
+        public Reference(List<String> columns, String parentSchema, String parentTable,
+                         List<String> parentColumns, boolean foreignKey, boolean array, String jsonPath) {
+            this(columns, parentSchema, parentTable, parentColumns, foreignKey, array, jsonPath, null);
         }
 
         public String parentName() {
@@ -68,18 +125,31 @@ public final class TenantExport {
         }
 
         static Reference soft(String column, String parentTable, String parentColumn) {
+            return soft(column, parentTable, parentColumn, null);
+        }
+
+        static Reference soft(String column, String parentTable, String parentColumn, SoftRule rule) {
             return new Reference(List.of(column), "nexus", parentTable, List.of(parentColumn), false, false,
-                null);
+                null, rule);
         }
 
         static Reference softArray(String column, String parentTable, String parentColumn) {
+            return softArray(column, parentTable, parentColumn, null);
+        }
+
+        static Reference softArray(String column, String parentTable, String parentColumn, SoftRule rule) {
             return new Reference(List.of(column), "nexus", parentTable, List.of(parentColumn), false, true,
-                null);
+                null, rule);
         }
 
         static Reference softJson(String column, String jsonPath, String parentTable, String parentColumn) {
+            return softJson(column, jsonPath, parentTable, parentColumn, null);
+        }
+
+        static Reference softJson(String column, String jsonPath, String parentTable, String parentColumn,
+                                  SoftRule rule) {
             return new Reference(List.of(column), "nexus", parentTable, List.of(parentColumn), false, false,
-                jsonPath);
+                jsonPath, rule);
         }
     }
 
@@ -102,11 +172,13 @@ public final class TenantExport {
      *                          bigint) that hold no other row's key; with {@code reassignedId} and
      *                          {@code references} this classifies every such column (RDR-248 gate S1,
      *                          census half)
+     * @param seededKeys        rows the engine writes for a tenant before any user write (see {@link SeededKey})
      */
     public record ExportTable(String schema, String table, ExportClass exportClass, String reason,
                               List<Column> primaryKey, String reassignedId, List<Reference> references,
                               Map<String, String> triggers, Set<String> loadsAfter,
-                              Set<String> triggerMaintained, Set<String> notReferences) {
+                              Set<String> triggerMaintained, Set<String> notReferences,
+                              List<SeededKey> seededKeys) {
         public ExportTable {
             primaryKey = List.copyOf(primaryKey);
             references = List.copyOf(references);
@@ -114,10 +186,20 @@ public final class TenantExport {
             loadsAfter = Set.copyOf(loadsAfter);
             triggerMaintained = Set.copyOf(triggerMaintained);
             notReferences = Set.copyOf(notReferences);
+            seededKeys = List.copyOf(seededKeys);
             if ((exportClass == ExportClass.EXCLUDED) == (reason == null || reason.isBlank())) {
                 throw new IllegalArgumentException(qualify(schema, table)
                     + ": an excluded table needs a reason, and only an excluded table has one");
             }
+        }
+
+        /** An entry with no seeded rows. */
+        public ExportTable(String schema, String table, ExportClass exportClass, String reason,
+                           List<Column> primaryKey, String reassignedId, List<Reference> references,
+                           Map<String, String> triggers, Set<String> loadsAfter,
+                           Set<String> triggerMaintained, Set<String> notReferences) {
+            this(schema, table, exportClass, reason, primaryKey, reassignedId, references, triggers, loadsAfter,
+                triggerMaintained, notReferences, List.of());
         }
 
         public String name() {
@@ -170,6 +252,7 @@ public final class TenantExport {
         private final Set<String> loadsAfter = new LinkedHashSet<>();
         private final Set<String> maintained = new LinkedHashSet<>();
         private final Set<String> notRefs = new LinkedHashSet<>();
+        private final List<SeededKey> seeded = new ArrayList<>();
 
         private Entry(String schema, String table, ExportClass exportClass, String reason) {
             this.schema = schema;
@@ -220,9 +303,14 @@ public final class TenantExport {
             return this;
         }
 
+        Entry seeded(boolean defaultTenantOnly, boolean mustMatch, String... keyValues) {
+            seeded.add(new SeededKey(List.of(keyValues), defaultTenantOnly, mustMatch));
+            return this;
+        }
+
         ExportTable build() {
             return new ExportTable(schema, table, exportClass, reason, pk, reassigned, refs, triggers,
-                loadsAfter, maintained, notRefs);
+                loadsAfter, maintained, notRefs, seeded);
         }
     }
 
@@ -273,7 +361,14 @@ public final class TenantExport {
             .build(),
         data("embedding_profile").pk("tenant_id text", "content_type text")
             .ref(new Reference(List.of("embedding_model"), "nexus", "embedding_models",
-                List.of("embedding_model"), true, false, null)).build(),
+                List.of("embedding_model"), true, false, null))
+            // A local engine's boot writes one row per content type for the default tenant (Main, EmbedderRouter
+            // #seedEmbeddingProfile). A restored row must equal it: a different profile means the restored
+            // vectors do not match the engine's embedder. Any other tenant's row is a user write (collection
+            // register), so it counts.
+            .seeded(true, true, "knowledge").seeded(true, true, "docs").seeded(true, true, "rdr")
+            .seeded(true, true, "code").seeded(true, true, "unknown")
+            .build(),
         data("catalog_documents").pk("tenant_id text", "tumbler text")
             // catalog-044's owner trigger reads catalog_owners and rewrites catalog_collections.owner_id.
             .trigger("catalog_documents_owner_to_collection",
@@ -282,6 +377,8 @@ public final class TenantExport {
             .notRefs("metadata")
             .build(),
         data("catalog_meta").pk("tenant_id text", "key text")
+            // AuthFilter writes it on a tenant's first authenticated request (CatalogRepository#ensureGhostSweepRanOnce).
+            .seeded(false, false, "rdr204_ghost_sweep_v1")
             .build(),
         data("catalog_sensitivity_changes").pk("id bigint").reassigned("id")
             .build(),
@@ -322,13 +419,13 @@ public final class TenantExport {
         data("memory").pk("id bigint").reassigned("id")
             .build(),
         data("memory_summaries").pk("id bigint").reassigned("id")
-            .ref(Reference.softArray("source_ids", "memory", "id")).build(),
+            .ref(Reference.softArray("source_ids", "memory", "id", SoftRule.NEGATE_DANGLING)).build(),
         data("plans").pk("id bigint").reassigned("id")
             .notRefs("plan_json", "default_bindings")
             .build(),
         derived("nx_answer_runs").pk("id bigint").reassigned("id")
-            .ref(Reference.soft("plan_id", "plans", "id"))
-            .ref(Reference.softJson("run_summary", "run.plan_id", "plans", "id"))
+            .ref(Reference.soft("plan_id", "plans", "id", SoftRule.NEGATE_DANGLING))
+            .ref(Reference.softJson("run_summary", "run.plan_id", "plans", "id", SoftRule.NEGATE_DANGLING))
             .notRefs("duration_ms")
             .build(),
         derived("nx_answer_steps").pk("run_id bigint", "step_index integer")
@@ -361,7 +458,7 @@ public final class TenantExport {
             .build(),
         derived("taxonomy_centroids")
             .pk("tenant_id text", "collection text", "topic_id bigint", "embedding_model text")
-            .ref(Reference.soft("topic_id", "topics", "id")).build(),
+            .ref(Reference.soft("topic_id", "topics", "id", SoftRule.DROP_ROW)).build(),
         // ── telemetry and consent ──
         derived("frecency").pk("tenant_id text", "chunk_id text")
             .build(),

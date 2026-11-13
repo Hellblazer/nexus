@@ -323,6 +323,10 @@ public final class NexusService {
     private volatile dev.nexus.service.db.ChashConstraintValidator chashConstraintValidator;
     /** nexus-csayy.2 (RDR-248): the tenant export sessions behind {@code /v1/tenant/export}; swapped whole by a test. */
     private volatile dev.nexus.service.db.TenantExportSessions exportSessions;
+    /** nexus-csayy.6 (RDR-248): the tenant import sessions behind {@code /v1/tenant/import}; they share the export sessions' cap. */
+    private volatile dev.nexus.service.db.TenantImportSessions importSessions;
+    /** Whether this engine holds the one-engine-per-database lock; Main declares it, an in-process test service declares it itself. */
+    private volatile boolean engineSingletonLockHeld;
     /** nexus-f3yqd: the engine-wide validate job, one at a time and never tenant-scoped, so no tenant reset reaches it. */
     private final dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ValidateConstraintsJobs.Progress> validateConstraintsJobs =
         dev.nexus.service.http.ValidateConstraintsJobs.registry(System::currentTimeMillis);
@@ -1091,6 +1095,16 @@ public final class NexusService {
                 new dev.nexus.service.http.TenantExportHandler(() -> exportSessions, versionHandler::engineVersion,
                         versionHandler::schemaChangesetCount)).getFilters().addAll(authFilter);
 
+        // RDR-248 (nexus-csayy.6): the tenant import session routes. They refuse to open a session unless the engine
+        // singleton lock is held (sessions live in this engine's memory, sound only with one engine per database).
+        this.importSessions = new dev.nexus.service.db.TenantImportSessions(() -> exportSessions, dataSource,
+                dev.nexus.service.db.TenantImportSessions.Config.fromEnv(System::getenv),
+                dev.nexus.service.db.CollectionRegistry::evictTenant, () -> engineSingletonLockHeld,
+                versionHandler::schemaChangesetCount);
+        server.createContext(dev.nexus.service.http.TenantImportHandler.PATH,
+                new dev.nexus.service.http.TenantImportHandler(() -> importSessions, () -> exportSessions))
+                .getFilters().addAll(authFilter);
+
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
         this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository));
@@ -1135,10 +1149,38 @@ public final class NexusService {
                 t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
             dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("TenantExportSessions", t -> exportSessions.evictTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("TenantImportSessions", t -> importSessions.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs",
                 t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
+    }
+
+    /** Declares that this engine holds the one-engine-per-database lock ({@code Main} after it took it; a test service for its own reasons). */
+    public void declareSingletonLockHeld(boolean held) {
+        this.engineSingletonLockHeld = held;
+    }
+
+    /** What {@link #declareSingletonLockHeld} last declared. */
+    public boolean singletonLockHeld() {
+        return engineSingletonLockHeld;
+    }
+
+    /** Test seam (nexus-csayy.6): replace the import sessions (a test's own bounds); the old ones close. */
+    public void importSessions(dev.nexus.service.db.TenantImportSessions replacement) {
+        var old = this.importSessions;
+        this.importSessions = replacement;
+        old.close();
+    }
+
+    /** Test seam (nexus-csayy.6): the import sessions the routes use now, so a test can build a replacement from them. */
+    public dev.nexus.service.db.TenantImportSessions importSessions() {
+        return importSessions;
+    }
+
+    /** The export sessions the routes use now (an import test builds its own import sessions over them). */
+    public dev.nexus.service.db.TenantExportSessions exportSessions() {
+        return exportSessions;
     }
 
     /** Test seam (nexus-csayy.2): replace the export sessions (a test's own bounds and clock); the old ones close. */
@@ -2245,6 +2287,7 @@ public final class NexusService {
         reconcileJobs.shutdown();
         manifestFillJobs.shutdown();
         validateConstraintsJobs.shutdown();
+        importSessions.close();   // a held import transaction must not outlive the engine's pool, nor roll back after it
         exportSessions.close();   // a held export snapshot must not outlive the engine's pool
         if (chashConstraintValidator != null) {
             chashConstraintValidator.cancelRunning();   // a VALIDATE must not outlive the engine that asked for it

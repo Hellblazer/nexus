@@ -76,7 +76,7 @@ class PciBuildMemoryIntegrationTest {
         try (Connection owner = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
             owner.setAutoCommit(true);
             dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(
-                DSL.using(owner, SQLDialect.POSTGRES).configuration(), "nexus.chunks", tenant, true);
+                DSL.using(owner, SQLDialect.POSTGRES).configuration(), "nexus.chunks", tenant, true, true);
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

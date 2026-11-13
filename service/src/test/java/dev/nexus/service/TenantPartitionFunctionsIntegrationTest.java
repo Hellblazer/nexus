@@ -442,7 +442,7 @@ class TenantPartitionFunctionsIntegrationTest {
     void createTenantPartitions_isDefinerWithFixedSearchPath_executableByNexusSvcOnly() throws Exception {
         try (Connection a = admin()) {
             var ctx = dsl(a);
-            String sig = "nexus.create_tenant_partitions(regclass, text, boolean)";
+            String sig = "nexus.create_tenant_partitions(regclass, text, boolean, boolean)";   // vectors-059 added p_check_restore
             assertThat(PgCatalogProbes.routineSecurityDefiner(ctx, "nexus", "create_tenant_partitions")).isTrue();
             assertThat(PartitionScratch.procConfig(ctx, "create_tenant_partitions"))
                 .contains("search_path=pg_catalog, pg_temp").contains("lock_timeout=2s");

@@ -120,8 +120,15 @@ final class PartitionScratch {
 
     @SuppressWarnings("deprecation")
     static int createTenantPartitions(DSLContext ctx, String parentRel, String tenant, boolean force) {
+        return createTenantPartitions(ctx, parentRel, tenant, force, true);
+    }
+
+    /** The four-parameter function (vectors-059, RDR-248): {@code checkRestore} false skips the restore-load check. */
+    @SuppressWarnings("deprecation")
+    static int createTenantPartitions(DSLContext ctx, String parentRel, String tenant, boolean force,
+                                      boolean checkRestore) {
         return dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(
-            ctx.configuration(), "nexus." + parentRel, tenant, force);
+            ctx.configuration(), "nexus." + parentRel, tenant, force, checkRestore);
     }
 
     @SuppressWarnings("deprecation")

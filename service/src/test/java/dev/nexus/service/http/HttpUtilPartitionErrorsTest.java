@@ -162,6 +162,24 @@ class HttpUtilPartitionErrorsTest {
     }
 
     @Test
+    void aLockWaitOnTokenIssuanceBehindARestoreLoad_asksFor30Seconds_inTheHeaderAndTheBodyAlike() throws Exception {
+        // RDR-248 (nexus-csayy.6): the same answer, but a load lasts minutes, so the header and the body say 30, not 2
+        var held = send(new RuntimeException("insert failed", new TenantCreationBusyException("acme", 3,
+            new SQLException("a tenant restore load is running", "55P03"), true)));
+        assertThat(held.status).isEqualTo(503);
+        assertThat(held.responseHeaders.getFirst("Retry-After")).isEqualTo("30");
+        JsonNode heldBody = MAPPER.readTree(held.body());
+        assertThat(heldBody.get("reason").asText()).isEqualTo("tenant_creation_busy");
+        assertThat(heldBody.get("retry_after_seconds").asInt()).isEqualTo(30);
+        assertThat(heldBody.get("error").asText()).contains("restore");
+
+        var plain = send(new RuntimeException("insert failed", new TenantCreationBusyException("acme", 3,
+            new SQLException("canceling statement due to statement timeout", "57014"), false)));
+        assertThat(plain.responseHeaders.getFirst("Retry-After")).as("a lock wait with no load keeps its 2 s").isEqualTo("2");
+        assertThat(MAPPER.readTree(plain.body()).get("retry_after_seconds").asInt()).isEqualTo(2);
+    }
+
+    @Test
     void aRegisteredModelWithNoPartition_is500_andAnUnregisteredOne_is422_bothNamingTheModel() throws Exception {
         // The exception's constructor is package-private to db; reach it through the public refusal path.
         var registered = refusal(true);

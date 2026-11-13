@@ -56,6 +56,7 @@ import java.util.function.Supplier;
  *  "chash_constraints_validate_job_supported":true,
  *  "tenant_export_supported":true,
  *  "tenant_export_format_version":1,
+ *  "tenant_import_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -687,6 +688,16 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-csayy.6 (RDR-248): the tenant import routes ({@code POST /v1/tenant/import} and the routes under it,
+     * {@code GET /v1/tenant/import-marker}). A boolean on its own, because the public edge relays capability fields as
+     * booleans: a client that restores refuses an engine without it, naming the engine release that carries the routes.
+     * It reads the file format from the export header's {@code format_version} (the import reads the same version).
+     */
+    static void appendTenantImportCapabilityField(StringBuilder body) {
+        body.append(",\"tenant_import_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -921,6 +932,7 @@ public final class VersionHandler implements HttpHandler {
         appendChashConstraintsValidateJobCapabilityField(body);
         // nexus-csayy.2 (RDR-248): the tenant export session routes and their format version.
         appendTenantExportCapabilityField(body);
+        appendTenantImportCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

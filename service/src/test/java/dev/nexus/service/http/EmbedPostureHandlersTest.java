@@ -399,6 +399,7 @@ class EmbedPostureHandlersTest {
         // nexus-csayy.2 (RDR-248): the tenant export routes and their format version
         assertThat(body.get("tenant_export_supported").asBoolean()).isTrue();
         assertThat(body.get("tenant_export_format_version").asInt()).isEqualTo(1);
+        assertThat(body.get("tenant_import_supported").asBoolean()).isTrue();   // nexus-csayy.6
     }
 
     @Test

@@ -254,7 +254,7 @@ public final class TenantExportSessions implements AutoCloseable {
         private final String sessionId;
 
         SessionExistsException(String sessionId) {
-            super("this tenant already has an export session");
+            super("this tenant already has an export or import session");
             this.sessionId = sessionId;
         }
 
@@ -268,7 +268,7 @@ public final class TenantExportSessions implements AutoCloseable {
         private final int retryAfterSeconds;
 
         CapacityFullException(int retryAfterSeconds) {
-            super("this engine already holds its maximum number of export sessions");
+            super("this engine already holds its maximum number of export and import sessions");
             this.retryAfterSeconds = retryAfterSeconds;
         }
 
@@ -334,6 +334,8 @@ public final class TenantExportSessions implements AutoCloseable {
     private final Object lock = new Object();
     private final Map<String, Session> byOwner = new HashMap<>();
     private final Set<String> opening = new HashSet<>();
+    /** Slots held by tenant import sessions (RDR-248 Step 5): they share the per-engine cap and the per-tenant rule. */
+    private final Map<String, Slot> importSlots = new HashMap<>();
     private ScheduledExecutorService sweeper;
     private boolean closed;
 
@@ -346,6 +348,16 @@ public final class TenantExportSessions implements AutoCloseable {
 
     public Config config() {
         return config;
+    }
+
+    /** The clock the session bounds read; the import sessions that share this cap read the same one. */
+    public Clock clock() {
+        return clock;
+    }
+
+    /** The pool the sessions hold their connections from. */
+    DataSource dataSource() {
+        return dataSource;
     }
 
     public TenantExportReads reads() {
@@ -373,8 +385,10 @@ public final class TenantExportSessions implements AutoCloseable {
         synchronized (lock) {
             Session existing = byOwner.get(tenant);
             if (existing != null) throw new SessionExistsException(existing.id);
+            Slot importing = importSlots.get(tenant);
+            if (importing != null) throw new SessionExistsException(importing.id());
             if (opening.contains(tenant)) throw new SessionExistsException(null);
-            if (byOwner.size() + opening.size() >= config.maxSessions()) {
+            if (byOwner.size() + opening.size() + importSlots.size() >= config.maxSessions()) {
                 throw new CapacityFullException(config.retryAfterSeconds());
             }
             opening.add(tenant);
@@ -404,6 +418,47 @@ public final class TenantExportSessions implements AutoCloseable {
                 }
                 endHeld(held, "open_failed", tenant);
             }
+        }
+    }
+
+    /** A tenant's place among the engine's sessions held by something other than an export (an import session). */
+    public record Slot(String tenant, String id) {
+    }
+
+    /**
+     * Reserves {@code tenant}'s one session place and one of the engine's session places for an import session
+     * ({@link TenantImportSessions}): the same cap and the same one-per-tenant rule as an export, because both hold a
+     * pooled connection for the length of the session. {@code id} is the id the import session will answer to.
+     *
+     * @throws SessionExistsException if the tenant already has an export or import session (or one is opening)
+     * @throws CapacityFullException  if the engine holds its maximum
+     */
+    public Slot reserveSlot(String tenant, String id) {
+        List<Session> expired;
+        synchronized (lock) {
+            if (closed) throw new IllegalStateException("export sessions are closed");
+            expired = expireLocked(clock.instant());
+        }
+        handOff(expired);
+        synchronized (lock) {
+            Session existing = byOwner.get(tenant);
+            if (existing != null) throw new SessionExistsException(existing.id);
+            Slot held = importSlots.get(tenant);
+            if (held != null) throw new SessionExistsException(held.id());
+            if (opening.contains(tenant)) throw new SessionExistsException(null);
+            if (byOwner.size() + opening.size() + importSlots.size() >= config.maxSessions()) {
+                throw new CapacityFullException(config.retryAfterSeconds());
+            }
+            Slot slot = new Slot(tenant, id);
+            importSlots.put(tenant, slot);
+            return slot;
+        }
+    }
+
+    /** Frees a place taken by {@link #reserveSlot}; a place already freed is left alone. */
+    public void releaseSlot(Slot slot) {
+        synchronized (lock) {
+            importSlots.remove(slot.tenant(), slot);
         }
     }
 
