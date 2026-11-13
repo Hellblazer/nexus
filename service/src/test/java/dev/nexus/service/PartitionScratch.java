@@ -127,8 +127,18 @@ final class PartitionScratch {
     @SuppressWarnings("deprecation")
     static int createTenantPartitions(DSLContext ctx, String parentRel, String tenant, boolean force,
                                       boolean checkRestore) {
-        return dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(
-            ctx.configuration(), "nexus." + parentRel, tenant, force, checkRestore);
+        // a schema migrated only up to before vectors-059 (a test that migrates part of the way) still has the three-argument function
+        boolean fourParameters = ctx.fetchExists(DSL.selectOne().from(DSL.table(DSL.name("pg_catalog", "pg_proc")))
+            .where(DSL.field(DSL.name("proname"), String.class).eq("create_tenant_partitions"),
+                DSL.field(DSL.name("pronargs"), Short.class).eq((short) 4)));
+        if (fourParameters) {
+            return dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(
+                ctx.configuration(), "nexus." + parentRel, tenant, force, checkRestore);
+        }
+        var regclass = new org.jooq.impl.DefaultDataType<>(org.jooq.SQLDialect.POSTGRES, Object.class, "regclass");
+        return ctx.select(DSL.function(DSL.name("nexus", "create_tenant_partitions"), org.jooq.impl.SQLDataType.INTEGER,
+                DSL.val("nexus." + parentRel).cast(regclass), DSL.val(tenant), DSL.val(force)))
+            .fetchOne(0, Integer.class);
     }
 
     @SuppressWarnings("deprecation")

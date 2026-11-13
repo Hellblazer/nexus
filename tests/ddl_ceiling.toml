@@ -208,7 +208,9 @@ migration_wal_bytes_per_worker = 12143000
 # Counted from the changeset's statements (3) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-seo4k tree, gate jar rebuilt, ddl: migration=2399.
 # 2400 -> 2413 (2026-11-09, nexus-bbtc2): vectors-058-1 redefines nexus.text_gate_probe_384, _768 and _1024 (the substring branch) and vectors-058-2 redefines the ten LANGUAGE sql row gates (text_gated_search_hnsw_first, text_gated_search_allowed, manifest_search at 384/768/1024, manifest_qualifying_hits): 13 CREATE OR REPLACE FUNCTION, no grant (CREATE OR REPLACE keeps the ACL), no table.
 # Counted from the changesets' statements (13) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-bbtc2 tree, gate jar rebuilt, ddl: migration=2413.
-migration_ddl_per_worker = 2413
+# 2413 -> 2417 (2026-11-13, nexus-csayy.6, RDR-248 Step 5): vectors-059-1 drops nexus.create_tenant_partitions(regclass, text, boolean) and creates the four-parameter function (p_check_restore), then REVOKEs EXECUTE from PUBLIC and GRANTs it to nexus_svc: 1 DROP FUNCTION, 1 CREATE FUNCTION, 1 REVOKE, 1 GRANT, no table.
+# Counted from the changeset's statements (4) and measured: local laptop (macOS), 2026-11-13, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-csayy.6 tree (gate jar rebuilt), ddl: migration=2417.
+migration_ddl_per_worker = 2417
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

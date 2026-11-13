@@ -121,8 +121,8 @@ DROP FUNCTION nexus.create_tenant_partitions(regclass, text, boolean, boolean);
 
 CREATE FUNCTION nexus.create_tenant_partitions(
     p_parent regclass,
-    p_tenant        text,
-    p_force         boolean DEFAULT true
+    p_tenant text,
+    p_force  boolean DEFAULT true
 ) RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -138,10 +138,16 @@ BEGIN
             USING ERRCODE = 'null_value_not_allowed';
     END IF;
     PERFORM nexus.partition_parent_check(p_parent);
+    -- p_force = false exists for the walk, which fills the *_new parents with FORCE ROW LEVEL SECURITY off.
+    -- This function is SECURITY DEFINER and nexus_svc may call it, so on a live parent it would make leaves
+    -- without FORCE: refused there.
     IF NOT p_force AND (SELECT c.relname FROM pg_catalog.pg_class c WHERE c.oid = p_parent) !~ '_new$' THEN
         RAISE EXCEPTION 'nexus.create_tenant_partitions: p_force = false is accepted only for a *_new parent, not %', p_parent
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
+    -- The common case, a second token for a tenant that already has every leaf: ONE catalog query, no lock taken.
+    -- A concurrent first creation is invisible here until it commits, so the caller falls through to the advisory
+    -- lock below and waits for it (bounded by lock_timeout) instead of racing it.
     IF NOT EXISTS (
         SELECT 1
           FROM pg_catalog.pg_inherits i
