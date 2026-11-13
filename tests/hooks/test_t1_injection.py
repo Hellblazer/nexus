@@ -77,6 +77,16 @@ def test_the_write_back_line_sends_interim_findings_to_t1(monkeypatch) -> None:
     assert "store_put (T3) or memory_put (T2) before returning" not in ctx
 
 
+def test_the_write_back_line_yields_to_the_brief(monkeypatch) -> None:
+    """GitHub #1656: subagents told "Do not use any tools" still wrote to T1 because the line said findings not
+    stored are lost. The line now applies only to work with findings and defers to the brief."""
+    ctx = _ctx("conexus:developer", monkeypatch)
+    [line] = [ln for ln in ctx.splitlines() if ln.startswith("WRITE-BACK")]
+    assert "findings not stored are lost" not in line
+    assert "when your work produced findings" in line
+    assert "Your brief comes first" in line and "not to use tools" in line
+
+
 def test_the_t1_index_shows_ids_and_tags_never_contents(monkeypatch) -> None:
     listing = "\n".join(
         f"[abcd{i:04d}] nexus-x,review-r1  flagged=False\n  secret finding number {i} from a sibling critic"
