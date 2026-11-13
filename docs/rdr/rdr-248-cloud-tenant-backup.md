@@ -338,8 +338,10 @@ for the idle bound, and the upload's total bound stops at the first commit attem
 meets `restore_busy` after a long upload keeps it staged while another load runs, and no longer. The verb retries
 the commit every 60 s until that bound. Tenant create
 checks the same key: a new changeset redefines `create_tenant_partitions` (today only in `vectors-030`:349-403) with
-a parameter `p_check_restore boolean DEFAULT true`, which the token-insert trigger leaves at its default and the
-RDR-225 walk (`vectors-030`:724-725) passes as false. With it true, the slow path, the one that runs DDL (the fast
+a parameter `p_check_restore boolean DEFAULT true`, which every caller leaves at its default. The RDR-225 walk
+(`vectors-030`:724-725) cannot pass it: on a fresh install that changeset runs before the new one exists. That is
+harmless, because migration finishes before the engine serves, so no load can hold the key during the walk. False
+is for an operator's or the doctor's hand repair (the doctor's printed recovery statement passes it). With it true, the slow path, the one that runs DDL (the fast
 path at :378-386, every leaf present, takes no lock, so minting or rotating a token for an existing tenant is never
 delayed), first calls
 `pg_try_advisory_xact_lock_shared` on the restore key (a different key from its per-tenant lock at :387-389) and
@@ -364,8 +366,10 @@ would otherwise outlive it. The load, in that one transaction, in load order:
    the seeded one, or the load fails naming the key and the column (a different profile means the restored vectors do not match
    the engine's embedder).
 4. **Verify** (S3): for each table, inserted rows plus seeded rows skipped by `ON CONFLICT` plus rows dropped by
-   the soft-reference rule equal the staged count (skipped `derived` tables are not loaded and not counted); every
-   foreign key holds by construction; for each soft reference, every positive value is a new id from the map
+   the soft-reference rule equal the staged count (skipped `derived` tables are not loaded and not counted); a
+   foreign-key value whose parent row is not in the file fails the load, naming the column (a LEFT JOIN would
+   otherwise write NULL into a nullable key such as `topics.parent_id`), and a file with a child table but without
+   its reassigned-id parent table is refused at open, so no row can point at another tenant's parent; for each soft reference, every positive value is a new id from the map
    (a positive value outside the map fails the load), and the counts of remapped, passed-through and negated
    values are reported. Column checksums are a round-trip test check only, because trigger-maintained
    columns and reassigned ids change by design.
@@ -384,13 +388,18 @@ rolled back.
 load runs or after it ended answers 200 with the current status and never starts a second load, so a client that
 lost the 202 just commits again); status `GET /v1/tenant/import/{id}`; abort `DELETE /v1/tenant/import/{id}`; the
 restore marker `GET /v1/tenant/import-marker` (its own path, so no session id can shadow it). Session ids are UUIDs.
+The bodies, status fields and reason codes are recorded in the wire-contract entry (`docs/wire-contract-pending.md`,
+nexus-csayy.6), which is their authority; a 409 for an open session names the session's kind (export or import), so
+the client deletes it through the right route; a 200 from commit or status can carry `failed: <reason>`, so the
+client reads the body. `GET /version` reports `tenant_import_supported`.
 
 *Bounds* (S6 and the fix check). Before commit: idle 10 minutes without a part, 60 minutes in all, as for
 export; a status poll is not activity. After a commit refused `restore_busy`, the restore-wait bound above
 (`NX_IMPORT_LOAD_MAX` from the first attempt). In all a session can hold its slot and its transaction for up to
 three hours. After commit the load has a total bound, `NX_IMPORT_LOAD_MAX` (default 60
 minutes, set from the Step 6 scale run with a margin of at least 2x), enforced by the engine cancelling the load's
-backend; each statement also runs under a statement timeout of the same value. `DELETE /v1/tenant/import/{id}`
+backend; each statement also runs under a statement timeout of the same value. Each part's staging COPY runs
+under a 120 s statement timeout. `DELETE /v1/tenant/import/{id}`
 aborts: before commit it rolls back the staged transaction; during the load it cancels the backend, and the
 status reads `failed: aborted`. The export keeps its 60-minute cap (Sam, 2026-11-11); A5 is stated as observed
 benign for 60 minutes at that window's write rate, not as a basis for a longer cap, and no xmin-age alarm is
@@ -559,8 +568,9 @@ exporter; every new table needs a new exporter.
 - The engine restarts during or after a load: the in-memory outcome is lost; the verb reads
   `/v1/tenant/import-marker`, which names the file's header SHA-256 only when the load committed.
 - A tenant create arrives during a load: `tenant_creation_busy` with a 30 s retry-after.
-- A session passes its idle, total or restore-wait bound: the engine rolls it back and closes it; the next request
-  gets "no such session", and the verb says which bound and to run again.
+- A session passes its idle, total or restore-wait bound: the engine rolls it back and closes it, and keeps its
+  outcome for 24 hours: status and commit answer `failed: <bound>`, while a part, close or abort gets "no such
+  session"; the verb says which bound and to run again.
 - A commit meets `restore_busy` until the restore-wait bound: as above, the session closes with that reason.
 - An open while the engine's singleton lock is not held: refused naming the lock; no session is opened.
 - The database runs out of disk or WAL space during the load: the transaction fails and rolls back, and the status
@@ -606,7 +616,7 @@ operator task from the file.
 The design is settled in the Import session section (nexus-csayy.5). Its two open asks to Sam,
 `rdr248-cloud-to-local` and `rdr248-import-capacity`, do not block the routes; they decide one refusal and one
 pre-check, each added when answered. The tenant-create check is the `p_check_restore` parameter of
-`create_tenant_partitions`, on its slow path only, which the RDR-225 walk turns off; the busy answer
+`create_tenant_partitions`, on its slow path only, at its default for every runtime caller; the busy answer
 carries the restore-held fact on `TenantCreationBusyException`, sets the header and the body's
 `retry_after_seconds` alike, and the `TokenStore.java:151-154` javadoc is corrected.
 
@@ -875,3 +885,4 @@ tenants. Nothing to trim.
 - 2026-11-13: Phase 2 design check (substantive-critic, T2 `nexus_rdr/248-phase2-design-check`): B1 settled with a per-column soft-reference rule (sentinels, dangling values, `source_ids` negated); D1-D11 folded in (no per-part savepoints, transaction-scoped admission lock, a 1 s tenant-create answer, the verify count identity, a refused commit keeps its upload, staged-byte cap, one part in flight, derived dependents skipped together, the embedding_profile comparison, stale lines, token expiry); O1-O7 stated as risks or notes.
 - 2026-11-13: Phase 2 design check round 2 (T2 `nexus_rdr/248-phase2-design-check-r2`): negative soft-reference values pass through, so negation survives a second backup and restore; a deleted plan's id is negated, keeping the run a plan hit; a restore-wait bound on a commit refused `restore_busy`; the session hold restated as up to three hours; stale savepoint, 3.8 s and two-reference lines swept; Step 5 names the asks and the trigger-path placement.
 - 2026-11-13: Phase 2 design check round 3 (T2 `nexus_rdr/248-phase2-design-check-r3`, 0 BLOCKS-PLANNING): the route list (table close, idempotent commit, `import-marker`, busy names the open session), the tenant-create check as a `create_tenant_partitions` parameter on its slow path only, the cloud-to-local line pointed at its ask, the census left at the types a BIGSERIAL fits, and the remaining Test Plan and Failure Modes lines.
+- 2026-11-13: Step 5 review round 1 (T2 `nexus/review-712a73dfb-nexus-csayy.6-2026-11-13`, `nexus/critique-712a73dfb-nexus-csayy.6-2026-11-13`): the RDR-225 walk cannot pass `p_check_restore` and does not need to (amended); ended sessions keep their outcome for 24 hours; verify fails a foreign-key value with no parent in the file and refuses a child table without its parent; staging statement timeout 120 s; Routes points at the wire-contract entry for bodies and reason codes, and a 409 names the session's kind. Amended under standing grant 3 to match reviewed code.
