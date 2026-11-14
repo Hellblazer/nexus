@@ -15,10 +15,10 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>The trigram and tsvector GIN indexes are per leaf (tenant x model), so a one-collection probe rebuilds the
  * leaf-wide bitmap for the pattern before it ANDs it down to its collection: about 65 ms an arm for an identifier,
- * 120 arms. One statement over all the request's collections pays that once. What each arm then does depends on how
- * many rows the gate admitted ({@link #SELECTIVE}, {@link #PER_COLLECTION} and {@link #FALLBACK} below); in every
- * case an arm ranks exactly the rows its own one-collection probe would have handed it, so the lexical leg's rows
- * and their order are what the per-arm path returns.
+ * 120 arms. One statement over all the request's collections pays that once: {@code
+ * text_gate_probe_by_collection_<dim>} (vectors-060) says, per collection, which chashes the gate admits or that the
+ * collection is dense ({@link Kind#PER_COLLECTION}), and an arm ranks exactly the rows its own one-collection probe
+ * would have handed it, so the lexical leg's rows and their order are what the per-arm path returns.
  *
  * <p>One instance is shared by the request's worker threads: the probe task completes it once, the lexical arms
  * {@link #await} it. It never blocks past the fan-out deadline and never fails an arm: anything but a clean answer
@@ -31,13 +31,8 @@ final class SharedLexicalProbe {
         /** Still running (before {@link #complete}); {@link #await} never returns it. */
         PENDING,
         /**
-         * The one statement over every collection returned at most {@code selectiveGateMax} chashes, so every
-         * collection's own count is too and every arm ranks from this set.
-         */
-        SELECTIVE,
-        /**
-         * That statement hit its cap; the per-collection statement answered: each collection either has its own
-         * chash set (at most {@code selectiveGateMax} rows) or is dense (more), and a dense one ranks HNSW-first.
+         * The per-collection statement answered: each collection either has its own chash set (at most {@code
+         * selectiveGateMax} rows), or is dense (more) and ranks HNSW-first, or has no gated row.
          */
         PER_COLLECTION,
         /** The shared probe failed, timed out or was never run: every arm runs its own probe. */
@@ -58,7 +53,6 @@ final class SharedLexicalProbe {
 
     private final CountDownLatch done = new CountDownLatch(1);
     private volatile Kind kind = Kind.PENDING;
-    private volatile byte[][] all = new byte[0][];
     private volatile Map<String, byte[][]> byCollection = Map.of();
     private volatile Set<String> dense = Set.of();
     private volatile long probeNanos;
@@ -86,12 +80,6 @@ final class SharedLexicalProbe {
         @Override public int hashCode() {
             return java.util.Arrays.hashCode(bytes);
         }
-    }
-
-    /** The one statement over every collection answered within the cap: every arm ranks from {@code chashes}. */
-    void completeSelective(byte[][] chashes, long nanos) {
-        this.all = chashes;
-        finish(Kind.SELECTIVE, nanos);
     }
 
     /**
@@ -146,7 +134,6 @@ final class SharedLexicalProbe {
     /** What the arm of {@code collection} does once {@link #await} returned {@code answered}. */
     ArmPlan planFor(Kind answered, String collection) {
         return switch (answered) {
-            case SELECTIVE -> new RankChashes(all);
             case PER_COLLECTION -> dense.contains(collection)
                 ? new RankDense()
                 : new RankChashes(byCollection.getOrDefault(collection, new byte[0][]));

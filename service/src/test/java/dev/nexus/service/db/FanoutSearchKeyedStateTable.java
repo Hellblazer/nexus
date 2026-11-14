@@ -27,8 +27,6 @@ final class FanoutSearchKeyedStateTable {
             + "fan-out search; dies with the request");
         notKeyed.put("SharedLexicalProbe.kind", "how one fan-out search's shared text-gate probe answered; "
             + "dies with the request");
-        notKeyed.put("SharedLexicalProbe.all", "the chashes one fan-out search's shared probe admitted; "
-            + "dies with the request");
         notKeyed.put("SharedLexicalProbe.byCollection", "per-collection chashes of one fan-out search's shared "
             + "probe; dies with the request");
         notKeyed.put("SharedLexicalProbe.dense", "the collections one fan-out search's shared probe found dense; "

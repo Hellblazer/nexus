@@ -190,11 +190,11 @@ class LexicalSharedProbeIdentityIntegrationTest {
         return r.lexical().stream().mapToInt(PgVectorRepository.LexicalStat::count).sum();
     }
 
-    // ── fix 1: one statement over every collection, under the cutoff ─────────
+    // ── under the cutoff: no collection is dense, every arm ranks its own chashes
 
     @Test
     void underTheCutoff_oneProbeServesEveryArm_andTheRowsAreThePerArmRows_oneToken() {
-        Run shared = identical(ONE_TOKEN, ALL, null, 5000, "selective");
+        Run shared = identical(ONE_TOKEN, ALL, null, 5000, "per_collection");
         // non-vacuity: the lexical leg returned rows from several collections, not an empty comparison
         assertThat(lexicalHits(shared.result())).isGreaterThan(20);
         assertThat(shared.result().lexical().stream().filter(s -> s.count() > 0).count()).isGreaterThanOrEqualTo(5);
@@ -202,14 +202,14 @@ class LexicalSharedProbeIdentityIntegrationTest {
 
     @Test
     void underTheCutoff_twoWordsTakeTheTrigramBranch_andAgree() {
-        Run shared = identical(TWO_WORDS, ALL, null, 5000, "selective");
+        Run shared = identical(TWO_WORDS, ALL, null, 5000, "per_collection");
         assertThat(lexicalHits(shared.result())).isGreaterThan(20);
     }
 
     @Test
     void oneChashInTwoCollectionsWithDifferentMetadata_isFilteredPerRowNotPerChash() {
         Map<String, Object> en = Map.of("lang", "en");
-        Run shared = identical(ONE_TOKEN, List.of(SH1, SH2, S1), en, 5000, "selective");
+        Run shared = identical(ONE_TOKEN, List.of(SH1, SH2, S1), en, 5000, "per_collection");
         // SH2 holds the shared text too, but its copy is lang=fr: the chash is in the shared set (SH1's copy passes the
         // gate and the where), and SH2's arm must still not return it.
         int sh2 = shared.result().perCollection().stream().map(s -> s.collection()).toList().indexOf(SH2);
@@ -220,18 +220,18 @@ class LexicalSharedProbeIdentityIntegrationTest {
 
     @Test
     void aCollectionWhoseGateAdmitsNothing_returnsNothing_asItDidBefore() {
-        Run shared = identical(ONE_TOKEN, List.of(Z, S1), null, 5000, "selective");
+        Run shared = identical(ONE_TOKEN, List.of(Z, S1), null, 5000, "per_collection");
         int z = shared.result().perCollection().stream().map(s -> s.collection()).toList().indexOf(Z);
         assertThat(shared.result().lexical().get(z).ids()).isEmpty();
         assertThat(shared.result().lexical().get(z).error()).isNull();
     }
 
-    // ── fix 2: past the cutoff, one statement that answers per collection ────
+    // ── past the cutoff: the dense collections rank HNSW-first ───────────────
 
     @Test
     void pastTheCutoff_theByCollectionProbeServesEveryArm_denseCollectionsRankHnswFirst() {
-        // 22 token rows over all seven, cutoff 8: one statement over every collection is capped (it returns 9), S1 (3 rows),
-        // S2 (5), S3 (2), SH1/SH2 (2 each) are selective and D1 (12 rows) is dense.
+        // 22 token rows over all seven, cutoff 8: S1 (3 rows), S2 (5), S3 (2), SH1/SH2 (2 each) are selective and D1
+        // (12 rows) is dense.
         Run shared = identical(ONE_TOKEN, ALL, null, 8, "per_collection");
         assertThat(lexicalHits(shared.result())).isGreaterThan(20);
     }

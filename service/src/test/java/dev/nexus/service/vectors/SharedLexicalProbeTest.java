@@ -26,26 +26,17 @@ class SharedLexicalProbeTest {
     }
 
     @Test
-    void aSelectiveAnswerGivesEveryCollectionTheSameSet() {
-        var share = new SharedLexicalProbe();
-        share.completeSelective(new byte[][] {b(1), b(2)}, 5_000_000L);
-        var kind = share.await(System.nanoTime() + FAR);
-        assertThat(kind).isEqualTo(SharedLexicalProbe.Kind.SELECTIVE);
-        for (String c : List.of("a", "b")) {
-            assertThat(share.planFor(kind, c)).isInstanceOfSatisfying(SharedLexicalProbe.RankChashes.class,
-                r -> assertThat(hex(r.chashes())).containsExactly("01", "02"));
-        }
-        assertThat(share.probeMillis()).isEqualTo(5L);
-    }
-
-    @Test
     void aPerCollectionAnswerSeparatesSelectiveDenseAndEmptyCollections() {
         var share = new SharedLexicalProbe();
-        share.completePerCollection(Map.of("a", new byte[][] {b(1)}), Set.of("dense"), 1L);
+        share.completePerCollection(Map.of("a", new byte[][] {b(1)}, "b", new byte[][] {b(2), b(3)}), Set.of("dense"),
+                                    5_000_000L);
         var kind = share.await(System.nanoTime() + FAR);
         assertThat(kind).isEqualTo(SharedLexicalProbe.Kind.PER_COLLECTION);
         assertThat(share.planFor(kind, "a")).isInstanceOfSatisfying(SharedLexicalProbe.RankChashes.class,
             r -> assertThat(hex(r.chashes())).containsExactly("01"));
+        assertThat(share.planFor(kind, "b")).isInstanceOfSatisfying(SharedLexicalProbe.RankChashes.class,
+            r -> assertThat(hex(r.chashes())).containsExactly("02", "03"));
+        assertThat(share.probeMillis()).isEqualTo(5L);
         assertThat(share.planFor(kind, "dense")).isInstanceOf(SharedLexicalProbe.RankDense.class);
         assertThat(share.planFor(kind, "never-gated")).isInstanceOfSatisfying(SharedLexicalProbe.RankChashes.class,
             r -> assertThat(r.chashes()).isEmpty());
@@ -70,9 +61,9 @@ class SharedLexicalProbeTest {
     @Test
     void theFirstAnswerWins_aLaterFallbackFromTheFinallyBlockChangesNothing() {
         var share = new SharedLexicalProbe();
-        share.completeSelective(new byte[][] {b(9)}, 3_000_000L);
+        share.completePerCollection(Map.of("a", new byte[][] {b(9)}), Set.of(), 3_000_000L);
         share.completeFallback(99_000_000L);
-        assertThat(share.kind()).isEqualTo(SharedLexicalProbe.Kind.SELECTIVE);
+        assertThat(share.kind()).isEqualTo(SharedLexicalProbe.Kind.PER_COLLECTION);
         assertThat(share.probeMillis()).isEqualTo(3L);
     }
 
@@ -82,9 +73,9 @@ class SharedLexicalProbeTest {
         var kinds = new SharedLexicalProbe.Kind[1];
         Thread waiter = Thread.ofVirtual().start(() -> kinds[0] = share.await(System.nanoTime() + FAR));
         Thread.sleep(30);
-        share.completeSelective(new byte[0][], 1L);
+        share.completePerCollection(Map.of(), Set.of(), 1L);
         waiter.join(5_000);
-        assertThat(kinds[0]).isEqualTo(SharedLexicalProbe.Kind.SELECTIVE);
+        assertThat(kinds[0]).isEqualTo(SharedLexicalProbe.Kind.PER_COLLECTION);
     }
 
     @Test

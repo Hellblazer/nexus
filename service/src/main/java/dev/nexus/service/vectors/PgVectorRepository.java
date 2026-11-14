@@ -3583,10 +3583,11 @@ public final class PgVectorRepository {
      * an arm slot like any arm, and bounded by what the budgets leave. It never throws and always completes
      * {@code share}: any failure means the arms run their own probes, which is what they did before.
      *
-     * <p>First statement: {@code text_gate_probe_<dim>} over every collection with the cap an arm's own probe uses
-     * ({@code selectiveGateMax + 1}). At or below {@code selectiveGateMax} rows every collection is selective and
-     * each arm ranks from the set. Above it, one {@code text_gate_probe_by_collection_<dim>} statement (vectors-060)
-     * says, per collection, which chashes it has or that it is dense.
+     * <p>One {@code text_gate_probe_by_collection_<dim>} statement (vectors-060) with the cap an arm's own probe uses
+     * ({@code selectiveGateMax + 1}) says, per collection, which chashes it has or that it is dense. There is no
+     * capped statement over every collection first: on a leaf where the trigram half admits many candidates (D,
+     * {@code advisory lock}, about 40,000 rechecked for 7,900 gated) that statement alone cost 5.1 s and never decides
+     * anything the per-collection statement does not (T2 nexus/bbtc2-dense-leaf-bound-2026-11-14).
      */
     private void runSharedProbe(SharedLexicalProbe share, String tenant, String model, int dim, String gateText,
                                 String[] colls, WherePlan wherePlan, int selectiveGateMax,
@@ -3605,18 +3606,6 @@ public final class PgVectorRepository {
                     PgSession.setSearchStatementTimeout(ctx, bound.getAsInt());
                     setGateGucs(ctx, trgmMode);
                     PgSession.setSearchPlanCacheMode(ctx);
-                    org.jooq.Table<?> probeFn = textGateProbeFn(dim, gateQueryText, colls, wherePlan, cap, model,
-                                                                tenant);
-                    Result<? extends Record> all = ctx.selectFrom(probeFn).fetch();
-                    if (all.size() <= selectiveGateMax) {
-                        List<byte[]> rows = new ArrayList<>(all.size());
-                        for (Record r : all) {
-                            rows.add(r.get(0, byte[].class));
-                        }
-                        byte[][] chashes = SharedLexicalProbe.distinct(rows);
-                        return () -> share.completeSelective(chashes, System.nanoTime() - startNanos);
-                    }
-                    PgSession.setSearchStatementTimeout(ctx, bound.getAsInt());
                     Result<? extends Record> per = ctx.selectFrom(
                         textGateProbeByCollectionFn(dim, gateQueryText, colls, wherePlan, cap, model, tenant)).fetch();
                     Map<String, List<byte[]>> rowsOf = new HashMap<>();
