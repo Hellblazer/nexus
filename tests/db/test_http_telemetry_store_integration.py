@@ -15,13 +15,12 @@ Run locally with:
     uv run pytest -m integration tests/db/test_http_telemetry_store_integration.py -v
 
 What is exercised (bead nexus-gmiaf.12 requirements):
-  a) Per-table round-trip: log/get and import/get for all 6 tables
+  a) Per-table round-trip: log/get and import/get for the five event-log tables
   b) TIMESTAMP PRESERVATION: import paths write source timestamps VERBATIM (not now())
   c) DO NOTHING idempotency: event log double-import produces no duplicate
-  d) GREATEST no-clobber: frecency re-import with stale values does not clobber live
-  e) LEAST embedded_at: re-import with newer embedded_at preserves original
-  f) Cross-tenant RLS negative: tenant A relevance_log invisible to tenant B
-  g) rename_collection: search_telemetry.collection updated
+  d) Cross-tenant RLS negative: tenant A relevance_log invisible to tenant B
+  e) rename_collection: search_telemetry.collection updated
+  (nexus.frecency, with its GREATEST/LEAST merge cases, was dropped: nexus-6pfgb.42)
 
 NX_STORAGE_BACKEND is NOT touched — default SQLite path is unchanged.
 
@@ -939,96 +938,6 @@ class TestDoNothingIdempotency:
         assert len(rows) == 1, (
             f"DO NOTHING: second import must not create a duplicate row; got {len(rows)}"
         )
-
-
-class TestFrecencyGreatestLeast:
-    """Frecency uses GREATEST for counters/timestamps, LEAST for embedded_at."""
-
-    def test_greatest_no_clobber(self, tel_store):
-        chunk_id = canonical_chunk_id("chunk-greatest-int")
-        tel_store.import_frecency_row(
-            chunk_id=chunk_id,
-            embedded_at="2024-01-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.95,
-            miss_count=20,
-            last_hit_at="2025-06-01T00:00:00Z",
-        )
-        # Re-import with stale (lower) values
-        tel_store.import_frecency_row(
-            chunk_id=chunk_id,
-            embedded_at="2023-01-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.50,
-            miss_count=5,
-            last_hit_at="2024-01-01T00:00:00Z",
-        )
-        import httpx
-        # Read back via /v1/telemetry/frecency/get
-        base_url = tel_store._base_url
-        # Post-mixin-adoption (nexus-f2qvx.1): headers are built fresh per
-        # request via RefreshableHttpStoreMixin._auth_headers(), not baked
-        # into a ``self._headers`` dict at construction time.
-        resp = httpx.get(
-            f"{base_url}/v1/telemetry/frecency/get",
-            params={"chunk_id": chunk_id},
-            headers=tel_store._auth_headers(),
-        )
-        assert resp.status_code == 200
-        row = resp.json()
-        score = float(row.get("frecency_score", 0.0))
-        miss  = int(row.get("miss_count", 0))
-        assert score == pytest.approx(0.95, abs=1e-9), (
-            f"GREATEST: re-import with stale score=0.50 must not clobber live score=0.95; got {score}")
-        assert miss == 20, (
-            f"GREATEST: re-import with stale miss_count=5 must not clobber live miss_count=20; got {miss}")
-
-    def test_least_embedded_at(self, tel_store):
-        """LEAST: re-import with newer embedded_at must NOT replace the older one."""
-        import httpx
-        base_url = tel_store._base_url
-        # Post-mixin-adoption (nexus-f2qvx.1): headers are built fresh per
-        # request via RefreshableHttpStoreMixin._auth_headers(), not baked
-        # into a ``self._headers`` dict at construction time.
-        headers = tel_store._auth_headers()
-        chunk_id = canonical_chunk_id("chunk-least-int")
-
-        # Seed with 2024-01-01
-        tel_store.import_frecency_row(
-            chunk_id=chunk_id,
-            embedded_at="2024-01-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.5,
-            miss_count=1,
-            last_hit_at=None,
-        )
-        # Re-import with newer embedded_at (2025-06-01) — LEAST means 2024 should win
-        tel_store.import_frecency_row(
-            chunk_id=chunk_id,
-            embedded_at="2025-06-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.3,
-            miss_count=0,
-            last_hit_at=None,
-        )
-
-        resp = httpx.get(
-            f"{base_url}/v1/telemetry/frecency/get",
-            params={"chunk_id": chunk_id},
-            headers=headers,
-        )
-        assert resp.status_code == 200
-        row = resp.json()
-        embedded_at = row.get("embedded_at", "")
-
-        # PG may return timestamps in local tz offset form (e.g. "2023-12-31T16:00-08:00")
-        # which is the same instant as "2024-01-01T00:00:00Z".  Parse and compare as UTC.
-        from datetime import datetime, timezone
-        expected_dt = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        stored_dt = datetime.fromisoformat(embedded_at).astimezone(timezone.utc)
-        assert abs((stored_dt - expected_dt).total_seconds()) < 1.0, (
-            f"LEAST: re-import with newer embedded_at must not replace older 2024-01-01 value; "
-            f"got {embedded_at!r} (parsed UTC: {stored_dt.isoformat()})")
 
 
 class TestCrossTenantRlsNegative:

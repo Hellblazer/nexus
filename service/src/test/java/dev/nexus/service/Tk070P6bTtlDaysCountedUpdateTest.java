@@ -5,6 +5,7 @@ package dev.nexus.service;
 import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -15,7 +16,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.util.List;
 
-import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -24,6 +24,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * NOTICE ({@code nexus.frecency}; the {@code staging.frecency} twin left with the
  * staging schema at nexus-z0o2p.27), and
  * the surviving-row shape after the CHECK lands on {@code nexus.frecency}.
+ *
+ * <p><strong>The table is gone at HEAD</strong> ({@code telemetry-019-1}, nexus-6pfgb.42), so the test first replays
+ * that changeset's own {@code <rollback>}, which recreates {@code nexus.frecency} empty in the shape
+ * {@code telemetry-006-1} left it (and so also exercises that rollback text), and then relaxes it as below. The
+ * generated jOOQ schema is HEAD's and has no such table: the probes name it.
  *
  * <p><strong>Technique.</strong> Same test-only-relaxation shape as
  * {@link Tk070P6aTtlDaysCountedDeleteTest} / {@link
@@ -58,8 +63,14 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
     private static final String NEXUS_CHANGELOG = "db/changelog/telemetry-006-frecency-ttl-null.xml";
     private static final String NEXUS_CHANGESET_ID = "telemetry-006-1";
+    private static final String RETIRE_CHANGELOG = "db/changelog/telemetry-019-drop-frecency.xml";
+    private static final String RETIRE_CHANGESET_ID = "telemetry-019-1";
     private static final String TENANT_A = "p6b-direct-a";
     private static final String TENANT_B = "p6b-direct-b";
+
+    /** {@code nexus.frecency}, recreated by the retire changeset's rollback; the generated schema no longer has it. */
+    private static final Table<?> FRECENCY = DSL.table(DSL.name("nexus", "frecency"));
+    private static final Field<String> TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
 
     /** Bare column references for the {@code nexus.frecency} probes below. */
     private static final Field<Integer> TTL_DAYS = DSL.field(DSL.name("ttl_days"), Integer.class);
@@ -92,11 +103,14 @@ class Tk070P6bTtlDaysCountedUpdateTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
 
+            // telemetry-019-1 dropped the table at HEAD: bring it back empty, as its rollback does.
+            PgContainerHelper.replayChangesetRollback(su, RETIRE_CHANGELOG, RETIRE_CHANGESET_ID);
+
             // Test-only relaxation: undo telemetry-006-1 back to a shape
             // that accepts ttl_days=0 again (the CHECK now forbids it).
             PgContainerHelper.dropConstraint(su, FRECENCY, "frecency_ttl_days_positive_chk");
             DSL.using(su, SQLDialect.POSTGRES)
-                .alterTable(FRECENCY).alterColumn(FRECENCY.TTL_DAYS).setDefault(0)
+                .alterTable(FRECENCY).alterColumn(TTL_DAYS).setDefault(0)
                 .execute();
 
             // Two ttl_days=0 rows, spanning two tenants (proves the RLS
@@ -150,7 +164,7 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
     private static void seedFrecencyRow(Connection c, String tenant, String chunkId, Integer ttlDays) {
         DSL.using(c, SQLDialect.POSTGRES)
-            .insertInto(FRECENCY, FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID, FRECENCY.TTL_DAYS)
+            .insertInto(FRECENCY, TENANT_ID, CHUNK_ID, TTL_DAYS)
             .values(tenant, chunkId, ttlDays)
             .execute();
     }

@@ -931,7 +931,7 @@ class TenantExportSessionsTest {
         List<ExportTable> unpinned = TenantExport.TABLES.stream().filter(ExportTable::exported)
             .filter(t -> !"tenant_id".equals(t.primaryKey().get(0).name())).toList();
         // not vacuous: the registry's tenant-led tables are many, and the id-keyed ones are the minority left to the planner
-        assertThat(pinned.size()).as("tenant-led exported tables").isGreaterThanOrEqualTo(15);
+        assertThat(pinned.size()).as("tenant-led exported tables").isGreaterThanOrEqualTo(14);
         assertThat(unpinned.stream().map(ExportTable::name)).contains("memory");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

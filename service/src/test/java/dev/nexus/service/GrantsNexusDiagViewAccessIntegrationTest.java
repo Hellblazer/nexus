@@ -62,7 +62,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Fix lives in {@code grants-nexus-diag-3} (the changeset that runs LAST
  * among the runAlways grants blocks every boot): it re-grants SELECT on the
- * view plus the five {@code CHASH_BEARING_TABLES}
+ * view plus the four {@code CHASH_BEARING_TABLES}
  * (src/nexus/db/chash_tables.py) every boot, making the grants the final
  * word regardless of what -1/-2/taxonomy-011-8 did earlier in the same
  * walk.
@@ -112,7 +112,6 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         "nexus.chunks",
         "nexus.catalog_document_chunks",
         "nexus.topic_assignments",
-        "nexus.frecency",
         "nexus.relevance_log");
 
     /** RDR-205's three tuple-space tables (tuples-001-baseline.xml, bead nexus-f1pbh). */

@@ -152,8 +152,7 @@ public final class CatalogRepository {
     private static final Set<String> COUNT_ONLY_RELATIONS = Set.of(
         "nexus.relevance_log",
         "nexus.search_telemetry",
-        "nexus.tier_writes",
-        "nexus.frecency"
+        "nexus.tier_writes"
     );
 
     static final ObjectMapper MAPPER = new ObjectMapper()

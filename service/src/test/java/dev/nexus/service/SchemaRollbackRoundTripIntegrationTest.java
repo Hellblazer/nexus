@@ -424,6 +424,9 @@ class SchemaRollbackRoundTripIntegrationTest {
      * {@code tuple_tenants} (RDR-205's tuple-space tables) — the same
      * missing-grant class as -3/-4, found by a live PITR fork walk. The
      * expected set below is now ten tables, not seven.
+     *
+     * <p><strong>REVISED (nexus-6pfgb.42).</strong> {@code nexus.frecency} was dropped (telemetry-019-1), so
+     * {@code grants-nexus-diag-3} no longer grants on it and the expected set below is nine tables.
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
@@ -456,7 +459,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("a FRESH cluster must land DIRECTLY in view era — "
                             + "grants-nexus-diag-1's legacy branch must NOT have fired "
                             + "(its bulk ALL-TABLES grant would produce a much wider set "
-                            + "than the ten below) — but grants-nexus-diag-3 must have "
+                            + "than the nine below) — but grants-nexus-diag-3 must have "
                             + "re-granted exactly the tables security_invoker=true "
                             + "requires, restoring what grants-nexus-diag-2's own "
                             + "REVOKE loop stripped earlier in this SAME boot "
@@ -468,7 +471,6 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .containsExactly(
                             "nexus.catalog_document_chunks",
                             "nexus.chunks",
-                            "nexus.frecency",
                             "nexus.gc_audit",
                             "nexus.relevance_log",
                             "nexus.search_telemetry",
@@ -489,14 +491,13 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("a reboot must re-stamp the runAlways rows in place")
                         .isEqualTo(viewEraRows);
                     assertThat(diagBaseTableGrants(c))
-                        .as("view era holds across a reboot too — the same ten tables, "
+                        .as("view era holds across a reboot too — the same nine tables, "
                             + "re-granted fresh by grants-nexus-diag-3, grants-nexus-diag-4 and "
                             + "grants-nexus-diag-5 every boot (nexus-lhuhe; gc_audit incident "
                             + "2026-08-19; nexus-f1pbh)")
                         .containsExactly(
                             "nexus.catalog_document_chunks",
                             "nexus.chunks",
-                            "nexus.frecency",
                             "nexus.gc_audit",
                             "nexus.relevance_log",
                             "nexus.search_telemetry",

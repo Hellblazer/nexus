@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-6pfgb.42: retire nexus.frecency.
+
+    The table has no live writer and no live reader. Its one client writer, HttpTelemetryStore.import_frecency_row, was
+    an ETL import whose last caller is gone; POST /v1/telemetry/frecency/upsert and GET /v1/telemetry/frecency/get were
+    called only by tests; the "frecency" kind of POST /v1/telemetry/import and /import_batch and of the ids probe had no
+    caller either. The score the search path reads is the frecency_score key on the chunk's own metadata (written through
+    /v1/vectors/update-metadata, RDR-152 nexus-enehl), which this change does not touch. The routes and the repository
+    methods leave the engine in the same release as this drop.
+
+    ONE CHANGESET, ONE TRANSACTION, THREE STEPS.
+
+    1. SET LOCAL lock_timeout = '5s', the hygiene-001 pattern. DROP TABLE takes ACCESS EXCLUSIVE, and a lock that cannot be
+       had in five seconds on a table nothing writes is a sign of something wrong that a failed changeset reports better
+       than a wait does.
+    2. A guard for a view that still reads the table. The nexus_diag counts view nexus.diag_chash_conformance had a leg
+       that read nexus.frecency, and this file never says CASCADE (that would drop the view silently and leave nexus_diag
+       with no counts). The view needs no work here: taxonomy-011-8 is runAlways and sits earlier in the master order, its
+       body is the four-leg text nexus.db.chash_tables.diag_conformance_view_ddl() now generates, so on every boot it
+       re-points the view before this changeset runs (an edit to a runAlways changeset is checksum-exempt). The one case it
+       cannot reach is a view the migrating role does not own, which taxonomy-011-8 leaves alone with a NOTICE. That view
+       would make the DROP fail with an unnamed dependency error, so the guard looks for any view that depends on the table
+       and fails with the remedy named, as taxonomy-011-1 does for the same view.
+    3. DROP TABLE IF EXISTS nexus.frecency. The table's primary key, its three indexes, its two CHECK constraints, its
+       tenant_isolation policy and the comment on chunk_id go with it. No other table references it (fk-005-1 recorded
+       that no foreign key could, by grain), and nothing else in the schema reads it: the runAlways grants loop grants on
+       whatever tables exist, and grants-nexus-diag-3 no longer names it.
+
+    EXPORT FILES. A tenant backup written before this change carries a frecency section. TenantExport.RETIRED names this
+    changeset for it, so a restore skips the section and says so in the import status notes instead of refusing the file
+    (RDR-248 "Derived tables and cross-release"; TenantImportFixtureTest loads the committed fixture, which holds one).
+
+    ROLLBACK recreates the table EMPTY, in the shape the older changesets left it (telemetry-001-11/-12, telemetry-006-1,
+    legacy-001-3 and the comment of fk-006-1), because the older changesets' own rollbacks run ALTER TABLE and COMMENT ON
+    COLUMN on it (telemetry-006-1, legacy-001-3, fk-005-1, fk-006-1) and fail on a missing table. The rows are not
+    recoverable: the table held a projection the engine no longer reads. The view is untouched by this changeset in either
+    direction: it stays at four legs, which is what taxonomy-011-8 re-creates on every forward pass.
+    Placed after vectors-059 and before the runAlways grants blocks (the D0.1 late-append convention).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-019-1" author="nexus-6pfgb.42">
+        <comment>Retire nexus.frecency (nexus-6pfgb.42): fail with the remedy named if a view the migrating role does not own still reads it (taxonomy-011-8, runAlways, has already re-pointed nexus.diag_chash_conformance at four legs), then DROP TABLE IF EXISTS nexus.frecency. The table had no live writer or reader; the score the search path uses is the frecency_score key on chunk metadata, which this change leaves alone. DATA EFFECT: DROPs nexus.frecency, discarding every row it holds (a projection nothing reads); irreversible for the rows, and the rollback recreates the table's empty schema shape (the shape telemetry-001-11/-12, telemetry-006-1, legacy-001-3 and fk-006-1 left), not the data.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+        </sql>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    v_views text;
+BEGIN
+    SELECT string_agg(DISTINCT format('%I.%I', n.nspname, c.relname), ', ' ORDER BY format('%I.%I', n.nspname, c.relname))
+      INTO v_views
+      FROM pg_depend d
+      JOIN pg_rewrite r ON r.oid = d.objid AND d.classid = 'pg_rewrite'::regclass
+      JOIN pg_class c ON c.oid = r.ev_class
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE d.refobjid = to_regclass('nexus.frecency')
+       AND c.oid &lt;&gt; d.refobjid;
+    IF v_views IS NOT NULL THEN
+        RAISE EXCEPTION 'nexus-6pfgb.42: nexus.frecency cannot be dropped while % reads it. Remedy: the view''s owning role must re-create it without the frecency leg (for nexus.diag_chash_conformance, the four-leg body of nexus.db.chash_tables.diag_conformance_view_ddl()) or drop it, then retry this migration.', v_views;
+    END IF;
+END
+$$;
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+DROP TABLE IF EXISTS nexus.frecency;
+        </sql>
+        <rollback>
+            <!-- Empty, in the end state of telemetry-001-11/-12, telemetry-006-1, legacy-001-3 and fk-006-1. The older
+                 rollbacks that run next need the table and, for fk-006-1, the comment. -->
+            <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.frecency (
+    tenant_id      TEXT             NOT NULL,
+    chunk_id       TEXT             NOT NULL,
+    embedded_at    TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    ttl_days       INTEGER,
+    frecency_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    miss_count     INTEGER          NOT NULL DEFAULT 0,
+    last_hit_at    TIMESTAMPTZ      NOT NULL DEFAULT now(),
+    CONSTRAINT frecency_pk PRIMARY KEY (tenant_id, chunk_id),
+    CONSTRAINT frecency_ttl_days_positive_chk CHECK (ttl_days IS NULL OR ttl_days &gt; 0),
+    CONSTRAINT frecency_chunk_id_canonical_check CHECK (chunk_id ~ '^[0-9a-f]{64}$')
+);
+
+CREATE INDEX idx_frecency_chunk    ON nexus.frecency (tenant_id, chunk_id);
+CREATE INDEX idx_frecency_last_hit ON nexus.frecency (tenant_id, last_hit_at DESC);
+CREATE INDEX idx_frecency_score    ON nexus.frecency (tenant_id, frecency_score DESC);
+
+ALTER TABLE nexus.frecency ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.frecency FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.frecency
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+COMMENT ON COLUMN nexus.frecency.chunk_id IS
+  'No FK, by GRAIN, not by deferral (RDR-194 D7). nexus.chunks is keyed (tenant_id, collection, chash); frecency has no collection column -- its PK is (tenant_id, chunk_id), one row per chash per tenant ACROSS collections by design. Adding a collection column to make an FK expressible would change the table''s identity grain, a behaviour change, not hygiene. The standing detection for this edge is the nexus_diag debt view nexus.diag_chash_conformance (observe-only for this table; src/nexus/db/chash_tables.py). The engine-side ChashCensus leg this comment used to name was deleted at nexus-z0o2p.27 together with its only caller; D0.10''s one-for-one FK retirement does not fire here.';
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

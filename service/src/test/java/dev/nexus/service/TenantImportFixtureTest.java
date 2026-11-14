@@ -130,7 +130,20 @@ class TenantImportFixtureTest {
 
         assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("committed");
         assertThat(end.get("report").get("skipped_tables").size()).as("a skipped table is a table the fixture no longer tests").isZero();
+        // A table a later migration dropped is in the file and not in the engine: the load skips it and says so in the status
+        // notes (RDR-248 "Derived tables and cross-release"), and nothing else about it is loaded or counted. Only a table the
+        // registry retired by name may be absent from the engine, so a drop that was not entered in TenantExport.RETIRED still fails here.
+        Set<String> retiredTables = new TreeSet<>();
+        TenantExport.RETIRED.stream().filter(r -> r.column() == null).forEach(r -> retiredTables.add(r.table()));
+        List<String> inFileAndRetired = file.tableNames().stream().filter(retiredTables::contains).toList();
+        assertThat(inFileAndRetired).as("the fixture still carries the tables that were retired after it was written (frecency: telemetry-019-1)")
+            .containsExactly("frecency");
+        for (String t : inFileAndRetired) {
+            assertThat(end.get("notes").toString()).as("the status names the retired table it skipped").contains("table " + t + " is retired");
+            assertThat(TenantExport.exportable(t)).as(t + " is no longer in the registry").isEmpty();
+        }
         for (String t : file.tableNames()) {
+            if (retiredTables.contains(t)) continue;
             long expected = file.rows(t);
             long actual = env.count(t, tenant);
             // catalog_meta: the file's rows (its own ghost-sweep row is the tenant's already) and the marker of this restore

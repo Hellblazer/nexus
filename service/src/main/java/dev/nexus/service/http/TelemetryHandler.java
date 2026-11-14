@@ -76,9 +76,7 @@ import java.util.Set;
  *                                              mechanism was write-only)
  *   POST /v1/telemetry/index_failures/unacknowledge  revoke an acknowledgment (nx index
  *                                              failures --unacknowledge; same fold-in)
- *   POST /v1/telemetry/frecency/upsert         upsert frecency record
- *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
- *   POST /v1/telemetry/import                  fidelity ETL for all 6 tables
+ *   POST /v1/telemetry/import                  fidelity ETL for the five event-log tables
  *   POST /v1/telemetry/import_batch             bulk fidelity ETL for one table
  *   POST /v1/telemetry/ids/probe                membership probe (verify-fill inner loop)
  *   POST /v1/telemetry/capability_census/record upsert one session's capability census
@@ -196,8 +194,6 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/index_failures/acknowledge"    -> handleIndexFailureAcknowledge(exchange, tenant, method);
                 case "/index_failures/acks"           -> handleIndexFailureAcksList(exchange, tenant, method);
                 case "/index_failures/unacknowledge"  -> handleIndexFailureUnacknowledge(exchange, tenant, method);
-                case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
-                case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
                 case "/import"                 -> handleImport(exchange, tenant, method);
                 case "/import_batch"           -> handleImportBatch(exchange, tenant, method);
                 case "/ids/probe"               -> handleIdsProbe(exchange, tenant, method);
@@ -1197,43 +1193,6 @@ public final class TelemetryHandler implements HttpHandler {
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted, "dry_run", dryRun)));
     }
 
-    // ── frecency ───────────────────────────────────────────────────────────────
-
-    private void handleFrecencyUpsert(HttpExchange ex, String tenant, String method) throws IOException {
-        requireMethod(ex, method, "POST");
-        var body = readBody(ex);
-        // nexus-lgdel.l1: see handleRelevanceLog's identical comment above.
-        String chunkId       = dev.nexus.service.db.Chash.requireCanonical(
-            requireString(body, "chunk_id"), "'chunk_id'");
-        String embeddedAt    = optStr(body, "embedded_at");
-        // nexus-tk070.p6b (RDR-194 D5): live single-row path — boundary-
-        // validated (400), matching MemoryHandler's /put treatment. Omitted
-        // means permanent (null); an explicit ttl_days<=0 is rejected loud.
-        Integer ttlDays       = requirePositiveOrNullTtlDays(optInt(body, "ttl_days"));
-        double frecencyScore = body.get("frecency_score") != null
-            ? ((Number) body.get("frecency_score")).doubleValue() : 0.0;
-        int missCount        = optInt(body, "miss_count", 0);
-        String lastHitAt     = optStr(body, "last_hit_at");
-        repo.upsertFrecency(tenant, chunkId, embeddedAt, ttlDays, frecencyScore, missCount, lastHitAt);
-        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
-    }
-
-    private void handleFrecencyGet(HttpExchange ex, String tenant, String method) throws IOException {
-        requireMethod(ex, method, "GET");
-        var params  = queryParams(ex);
-        String chunkId = params.getOrDefault("chunk_id", "");
-        if (chunkId.isBlank()) {
-            HttpUtil.send(ex, 400, json(Map.of("error", "chunk_id required")));
-            return;
-        }
-        var result = repo.getFrecency(tenant, chunkId);
-        if (result.isEmpty()) {
-            HttpUtil.send(ex, 404, json(Map.of("error", "not found")));
-        } else {
-            HttpUtil.send(ex, 200, json(result.get()));
-        }
-    }
-
     // ── import (ETL fidelity-preserving, all tables) ───────────────────────────
 
     /**
@@ -1243,7 +1202,7 @@ public final class TelemetryHandler implements HttpHandler {
      * <pre>
      * {
      *   "table": "relevance_log" | "search_telemetry" | "tier_writes" |
-     *            "nx_answer_runs" | "hook_failures" | "frecency",
+     *            "nx_answer_runs" | "hook_failures",
      *   ... table-specific fields ...
      * }
      * </pre>
@@ -1330,24 +1289,6 @@ public final class TelemetryHandler implements HttpHandler {
                     batchDocIds,
                     Boolean.TRUE.equals(body.get("is_batch")),
                     optStr(body, "chain"));
-            }
-            case "frecency" -> {
-                Double frecScore = optDoubleNull(body, "frecency_score");
-                repo.upsertFrecency(tenant,
-                    // nexus-lgdel.l1: see handleRelevanceLog's identical comment.
-                    dev.nexus.service.db.Chash.requireCanonical(
-                        requireString(body, "chunk_id"), "'chunk_id'"),
-                    optStr(body, "embedded_at"),
-                    // nexus-tk070.p6b (RDR-194 D5): ETL path — carries an
-                    // explicit ttl_days verbatim (including an explicit 0,
-                    // which then hits the CHECK), but an OMITTED field now
-                    // defaults to null (permanent), not 0 (retired). Not
-                    // boundary-validated — see requirePositiveOrNullTtlDays's
-                    // javadoc for the scope decision.
-                    optInt(body, "ttl_days"),
-                    frecScore != null ? frecScore : 0.0,
-                    optInt(body, "miss_count", 0),
-                    optStr(body, "last_hit_at"));
             }
             default -> throw new IllegalArgumentException("Unknown table: " + table);
         }
@@ -1614,33 +1555,6 @@ public final class TelemetryHandler implements HttpHandler {
         }
         throw new IllegalArgumentException(
             "Field '" + key + "' has unexpected type: " + v.getClass().getSimpleName());
-    }
-
-    /**
-     * Boundary rejection for {@code ttl_days} on the live single-row
-     * {@code POST /v1/telemetry/frecency/upsert} path (nexus-tk070.p6b,
-     * RDR-194 D5) — mirrors {@code MemoryHandler.requirePositiveOrNullTtl}
-     * exactly (same message shape, same {@code null}-or-positive contract),
-     * naming the field {@code ttl_days} rather than {@code ttl} since that
-     * is this table's actual wire field name. Deliberately NOT applied to
-     * the ETL import paths ({@code handleImportRow}'s {@code "frecency"}
-     * case, {@code TelemetryRepository.importFrecencyBatch}) — those carry
-     * source values verbatim (their default moved from {@code 0} to
-     * {@code null} instead, a default-value fix, not new rejection logic;
-     * see {@code TelemetryRepository.optInteger}'s javadoc), so an explicit
-     * {@code ttl_days=0} row from an ETL source still reaches the CHECK and
-     * surfaces as a 409 with a remedy (HttpUtil.ttlDaysCheckRemedy already
-     * wildcard-matches {@code frecency_ttl_days_positive_chk}) — same scope
-     * boundary p6a drew for {@code MemoryHandler.parseImportRow}.
-     */
-    private static Integer requirePositiveOrNullTtlDays(Integer ttlDays) {
-        if (ttlDays != null && ttlDays <= 0) {
-            throw new IllegalArgumentException(
-                "ttl_days=" + ttlDays + " is invalid: omit the field or pass null for a "
-                + "permanent entry — ttl_days must be a positive integer number of "
-                + "days (0 does NOT mean permanent; NULL does)");
-        }
-        return ttlDays;
     }
 
     /**

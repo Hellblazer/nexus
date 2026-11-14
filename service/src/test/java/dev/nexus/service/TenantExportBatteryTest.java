@@ -180,7 +180,7 @@ class TenantExportBatteryTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             List<String> problems = new ArrayList<>();
             List<ExportTable> exported = TenantExport.TABLES.stream().filter(ExportTable::exported).toList();
-            assertThat(exported).as("the registry's data and derived tables").hasSize(26);
+            assertThat(exported).as("the registry's data and derived tables").hasSize(25);
 
             // the seed is not vacuous: every exported column is non-NULL in some A row and NULL-or-default in the
             // others, and B has rows in every table
@@ -271,7 +271,7 @@ class TenantExportBatteryTest {
                         .exceptAll(DSL.select(cols).from(DSL.table(ref(table))))))
                     .as(table + " rows written since the reference").isGreaterThan(0);
             }
-            for (String table : List.of("memory", "chunks", "catalog_meta", "frecency")) {
+            for (String table : List.of("memory", "chunks", "catalog_meta", "relevance_log")) {
                 ExportTable t = TenantExport.exportable(table).orElseThrow();
                 List<Field<?>> cols = liveFields(ctx, t);
                 assertThat(ctx.fetchCount(DSL.select(cols).from(DSL.table(ref(table)))
@@ -314,7 +314,7 @@ class TenantExportBatteryTest {
                 .and(key.eq(DSL.field(DSL.select(DSL.max(key)).from(tbl("catalog_meta")).where(tenant(C))))).execute();
             ctx.insertInto(tbl("catalog_meta"), col("tenant_id"), col("key"), col("value"))
                 .values(C, "written-after-open", "v").execute();
-            ctx.deleteFrom(tbl("frecency")).where(tenant(C)).execute();
+            ctx.deleteFrom(tbl("relevance_log")).where(tenant(C)).execute();
             ctx.insertInto(tbl("search_telemetry"), col("tenant_id"), col("ts"), col("query_hash"), col("collection"),
                     col("raw_count"), col("kept_count"))
                 .values(C, DSL.currentOffsetDateTime(), "after-open", "c", 1, 1).execute();
@@ -816,8 +816,6 @@ class TenantExportBatteryTest {
                         model(dim), DSL.val(vector(dim, 3), VectorSeeds.centroidEmbedding(dim))});
                 }
             });
-            run(failures, "frecency", () -> insert(ctx, "frecency", List.of("tenant_id", "chunk_id"),
-                new Object[] {t, hex(t + "f1")}, new Object[] {t, hex(t + "f2")}));
             run(failures, "search_telemetry", () -> insert(ctx, "search_telemetry",
                 List.of("tenant_id", "ts", "query_hash", "collection", "raw_count", "kept_count"),
                 new Object[] {t, TS, "q1", "c", 1, 1}, new Object[] {t, TS, "q2", "c", 2, 1}));

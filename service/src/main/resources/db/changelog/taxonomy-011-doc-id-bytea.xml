@@ -1152,6 +1152,16 @@ $$;
             (harmless, idempotent, and correct in isolation) rather than
             removed, matching this changeset's own DEFENSE IN DEPTH
             ethos elsewhere in this file.
+
+            FOUR LEGS SINCE nexus-6pfgb.42: this changeset is runAlways, so
+            its body is the CURRENT generator output, not the five-leg text
+            it first shipped with. nexus.frecency was dropped
+            (telemetry-019-1, later in the master order), and a view that
+            still read it would have failed this changeset on every boot
+            after the drop. The frecency leg left here first, so on an
+            existing install this changeset re-points the view at four legs
+            before telemetry-019-1 drops the table (an edit to a runAlways
+            changeset is checksum-exempt).
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
@@ -1177,8 +1187,6 @@ BEGIN
         SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE octet_length(chash) &lt;&gt; 32
         UNION ALL
         SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = t.doc_id)
-        UNION ALL
-        SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'))
         UNION ALL
         SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'));
     EXCEPTION WHEN insufficient_privilege THEN

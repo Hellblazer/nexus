@@ -36,11 +36,12 @@ engine VALIDATE job (``POST /v1/admin/validate-constraints``, engine
   migration (hygiene-001-5 deletes every non-32-byte chunk row and -8 the
   orphan manifest rows; the NOT VALID CHECK refuses new ones): it means the
   CHECK was bypassed, or dropped and re-added after rows were written.
-- **legacy debt** (``topic_assignments.doc_id``, ``frecency.chunk_id``,
-  ``relevance_log.chunk_id``): chash-bearing soft references with NO check
-  (FK-less by design — nexus-sa14p; telemetry-001). A non-conformant value
-  cannot fail any VALIDATE; it silently degrades topic membership or
-  frecency ranking instead. Counts here are OBSERVED (diag view, forensics,
+- **legacy debt** (``topic_assignments.doc_id``, ``relevance_log.chunk_id``):
+  chash-bearing soft references with NO check (FK-less by design —
+  nexus-sa14p; telemetry-001). A non-conformant value cannot fail any
+  VALIDATE; it silently degrades topic membership or relevance reads
+  instead. (``frecency.chunk_id`` was a third until ``nexus.frecency`` was
+  dropped, telemetry-019-1, nexus-6pfgb.42.) Counts here are OBSERVED (diag view, forensics,
   a non-gating doctor warning) and converged by the remap cascade /
   RDR-180 Item6 ETL — never an upgrade gate (a legitimately debt-carrying
   install must not brick its install-binary path).
@@ -121,9 +122,9 @@ class ChashBearingTable(NamedTuple):
     converted chash/chunk-content columns first) and does not need this
     flag read — the octet_length predicate is already era-safe for those.
     It exists for the DEBT entries, which are NOT era-uniform: RDR-194 P3c
-    moved ``topic_assignments.doc_id`` to bytea while ``frecency.chunk_id``
-    and ``relevance_log.chunk_id`` stay TEXT (nexus-lgdel.l1's canonical-only
-    CHECK covers those two; they were never part of D1's scope). A bytea
+    moved ``topic_assignments.doc_id`` to bytea while ``relevance_log.chunk_id``
+    stays TEXT (nexus-lgdel.l1's canonical-only CHECK covers it; it was never
+    part of D1's scope). A bytea
     debt column's anti-join is direct equality against the chunk key (no
     regex/decode — the value already IS bytes); a TEXT debt column's
     anti-join still needs the hex-shape guard + decode(). See
@@ -158,7 +159,6 @@ CHASH_BEARING_TABLES: tuple[ChashBearingTable, ...] = (
     # moved from TEXT to bytea. See ChashBearingTable.bytea's own docstring
     # for why this is a per-entry flag, not a blanket era assumption.
     ChashBearingTable("nexus.topic_assignments", "doc_id", poison=False, bytea=True),
-    ChashBearingTable("nexus.frecency", "chunk_id", poison=False),
     ChashBearingTable("nexus.relevance_log", "chunk_id", poison=False),
 )
 
@@ -310,10 +310,10 @@ def diag_conformance_view_ddl() -> str:
 
     MIXED-ERA DEBT COLUMNS (RDR-194 P3c, nexus-tk070.p3c): the debt legs are
     no longer uniformly TEXT. ``topic_assignments.doc_id`` moved to
-    ``bytea`` (:attr:`ChashBearingTable.bytea`); ``frecency.chunk_id`` and
-    ``relevance_log.chunk_id`` stay TEXT (nexus-lgdel.l1's canonical-only
-    CHECK covers those two directly, so their debt leg here is genuinely
-    the SOFT reference this view exists to observe, not width conformance).
+    ``bytea`` (:attr:`ChashBearingTable.bytea`); ``relevance_log.chunk_id``
+    stays TEXT (nexus-lgdel.l1's canonical-only CHECK covers it directly, so
+    its debt leg here is genuinely the SOFT reference this view exists to
+    observe, not width conformance).
     A bytea debt column's anti-join is direct bytea equality against
     :data:`CHUNKS_TABLE`'s ``chash`` — no regex guard, no ``decode()``, the
     value already IS bytes. A TEXT debt column's anti-join keeps the
@@ -347,8 +347,8 @@ def diag_conformance_view_ddl() -> str:
             # no hex-shape guard, no decode(). Same NOT EXISTS anti-join
             # SHAPE as the engine-side ChashCensus.unresolvableBytesCount
             # idiom (class deleted at nexus-z0o2p.27; this view is now the
-            # standing detection for the FK-less frecency / relevance_log
-            # chunk_id edges), but deliberately WIDER in scope (critic finding,
+            # standing detection for the FK-less relevance_log
+            # chunk_id edge), but deliberately WIDER in scope (critic finding,
             # 2026-08-17): that idiom restricted to
             # octet_length(byteCol) IN (16, 32) before its anti-join -- a
             # narrow census-leg scope tuned to the two widths ITS OWN

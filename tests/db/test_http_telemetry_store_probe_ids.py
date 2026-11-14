@@ -74,7 +74,7 @@ def test_probe_ids_empty_keys_is_noop_no_http_call():
         return httpx.Response(200, json={"present": []})
 
     store = _store_with_transport(handler)
-    present = store.probe_ids("frecency", [])
+    present = store.probe_ids("relevance_log", [])
 
     assert present == []
     assert calls == []
@@ -96,7 +96,7 @@ def test_probe_ids_pages_transparently_at_quota_cap():
         return httpx.Response(200, json={"present": body["keys"]})
 
     store = _store_with_transport(handler)
-    present = store.probe_ids("frecency", keys)
+    present = store.probe_ids("relevance_log", keys)
 
     assert len(request_sizes) == 2, "650 candidates at cap=300 must page into 2 requests"
     assert all(size <= cap for size in request_sizes)

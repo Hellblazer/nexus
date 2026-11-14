@@ -86,11 +86,15 @@ public final class TenantExport {
     }
 
     /**
-     * Tables and columns removed since the export format shipped. Empty today: nothing exported has been removed.
-     * A migration that drops an exported table or column adds its entry here in the same change, with the
-     * changeset id; {@code TenantExportRegistryParityTest} fails an entry that names something still live.
+     * Tables and columns removed since the export format shipped. A migration that drops an exported table or
+     * column adds its entry here in the same change, with the changeset id; {@code TenantExportRegistryParityTest}
+     * fails an entry that names something still live.
+     *
+     * <p>{@code frecency}: {@code telemetry-019-1} (nexus-6pfgb.42) dropped {@code nexus.frecency}, which had no
+     * writer or reader left. An export file written by an engine that still had it carries a {@code frecency}
+     * section; the import skips that table and reports it, it does not refuse the file.
      */
-    public static final List<Retired> RETIRED = List.of();
+    public static final List<Retired> RETIRED = List.of(new Retired("frecency", null, "telemetry-019-1"));
 
     /**
      * Columns of this table that hold a key of {@code parentSchema.parentTable}. {@code foreignKey} is true
@@ -460,8 +464,6 @@ public final class TenantExport {
             .pk("tenant_id text", "collection text", "topic_id bigint", "embedding_model text")
             .ref(Reference.soft("topic_id", "topics", "id", SoftRule.DROP_ROW)).build(),
         // ── telemetry and consent ──
-        derived("frecency").pk("tenant_id text", "chunk_id text")
-            .build(),
         derived("search_telemetry")
             .pk("tenant_id text", "ts timestamp with time zone", "query_hash text", "collection text")
             .build(),

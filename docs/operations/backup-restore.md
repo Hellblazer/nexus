@@ -239,7 +239,7 @@ nx backup --check ~/nexus-backups/nexus-acme-20261112T190000Z.nxtenant
 
 ### What the file holds
 
-Every `data` and `derived` table of your tenant from one snapshot: the catalog (documents, links, chunk manifests, collections), T3 chunks with their embeddings, T2 notes, plans, document aspects and highlights, taxonomy, the rebuildable telemetry and frecency tables, and the `embedding_models` rows the chunks refer to. A sensitive document (RDR-243) is in the file like everything else, and the verb says how many the file holds; the file is created readable by you only (mode 0600; the directory it creates 0700), so keep it that way.
+Every `data` and `derived` table of your tenant from one snapshot: the catalog (documents, links, chunk manifests, collections), T3 chunks with their embeddings, T2 notes, plans, document aspects and highlights, taxonomy, the rebuildable telemetry tables, and the `embedding_models` rows the chunks refer to. A sensitive document (RDR-243) is in the file like everything else, and the verb says how many the file holds; the file is created readable by you only (mode 0600; the directory it creates 0700), so keep it that way.
 
 It leaves out operational state: tuples and their claims and deliveries (their ids hash the tenant, so they cannot move), in-flight PDF and re-embed jobs, session scratch (T1), and the request ledger, tier writes, routing events and the other logs. The verb prints this after every run; a CI test checks that the table names behind the list it prints are the engine's own excluded tables (it cannot check the wording of the phrases, so a reclassified table makes CI fail until someone updates the list). No credential is in the file: tokens live in global tables the export cannot read.
 

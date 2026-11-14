@@ -138,9 +138,8 @@ SELECT r.id, '{t}', k, CASE k WHEN 0 THEN 'extract' ELSE 'rank' END, 'llm', 5, k
 FROM nx_answer_runs r, generate_series(0, 1) k WHERE r.tenant_id = '{t}';
 DROP TABLE public.scale_mem, public.scale_plan;
 """, timeout=3600)
-    say("seed: frecency, search_telemetry, relevance_log")
+    say("seed: search_telemetry, relevance_log")
     cluster.psql_script(f"""
-INSERT INTO frecency (tenant_id, chunk_id) SELECT '{t}', md5(g::text) || md5('f' || g) FROM generate_series(1, {max(10, chunks // 5)}) g;
 INSERT INTO search_telemetry (tenant_id, ts, query_hash, collection, raw_count, kept_count)
 SELECT '{t}', now() - (g || ' seconds')::interval, md5(g::text), '{coll}', 10, 5 FROM generate_series(1, {max(10, chunks // 2)}) g;
 INSERT INTO relevance_log (tenant_id, query, chunk_id, action, timestamp)

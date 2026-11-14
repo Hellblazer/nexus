@@ -4393,7 +4393,11 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # nexus.embedding_profile: RDR-204 Phase 1 (nexus-ft04v.2, catalog-036-3),
     # the per-tenant write-model profile; ENABLE + FORCE + tenant_isolation.
     "nexus.embedding_profile",
-    "nexus.frecency",
+    # "nexus.frecency" REMOVED (nexus-6pfgb.42, telemetry-019-drop-frecency.xml):
+    # same chash_index/chash_alias precedent — the table is dropped, so it must
+    # not be a permanent false FATAL here. The completeness guard's dropped-
+    # tables exemption in tests/test_health_service_checks.py carries the
+    # matching entry.
     "nexus.gc_audit",
     "nexus.hook_failures",
     # nexus.index_failures: nexus-nukn3, durable per-file index-failure
@@ -7249,10 +7253,10 @@ def _check_migration_state(
         ))
 
     # nexus-z5j0t: legacy-debt observability over the CHECK-less chash
-    # bearers (topic_assignments.doc_id, frecency/relevance_log.chunk_id).
+    # bearers (topic_assignments.doc_id, relevance_log.chunk_id).
     # Non-gating BY DESIGN: no width CHECK exists on these tables, so a
     # non-32 value cannot crash-loop a VALIDATE — it silently degrades topic
-    # membership / frecency ranking instead (converged by the remap cascade /
+    # membership instead (converged by the remap cascade /
     # RDR-180 Item6 ETL). Only runs when the view path proved live; a stale
     # (pre-z5j0t 5-leg) view yields NULL sums (empty psql lines) → unknown,
     # logged at debug, never a WARN and never a false clean-or-poisoned.
@@ -7288,7 +7292,7 @@ def _check_migration_state(
                 ok=False,
                 detail=(
                     f"{debt} hex-shaped chash reference(s) across "
-                    "topic_assignments/frecency/relevance_log miss every "
+                    "topic_assignments/relevance_log miss every "
                     "chunk-table join (dangling content references). "
                     "NON-GATING (no CHECK constraint exists on these tables); "
                     "alias-mapped rows converge via the RDR-180 rekey "
@@ -10995,7 +10999,7 @@ def _check_chash_conformance_report() -> list[HealthResult]:
     ``chunks_<dim>`` and ``catalog_document_chunks`` (filtered to that dim's
     model-token collections, same IN-list routing caveat the now-retired
     ``manifest_orphans`` used, RDR-191 Phase 6 nexus-o8dil.33). The
-    LEGACY-DEBT tables (topic_assignments, frecency, relevance_log) are NOT
+    LEGACY-DEBT tables (topic_assignments, relevance_log) are NOT
     covered — they are not dim-routable by construction (mixed identity
     space); this is a stated scope reduction relative to the local probe's
     four-table coverage, not a silent one.

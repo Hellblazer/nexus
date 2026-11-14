@@ -6,7 +6,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
-import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
@@ -138,7 +137,6 @@ abstract class LegacyChashFixture {
             ctx.alterTable(CATALOG_DOCUMENT_CHUNKS).dropConstraintIfExists(MANIFEST_CHECK).execute();
             ctx.deleteFrom(TOPIC_ASSIGNMENTS).execute();
             ctx.deleteFrom(TOPICS).execute();
-            ctx.deleteFrom(FRECENCY).execute();
             ctx.deleteFrom(RELEVANCE_LOG).execute();
             ctx.deleteFrom(CHUNK_ORPHANED_AT).execute();
             ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).execute();

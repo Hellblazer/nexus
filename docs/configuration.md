@@ -414,8 +414,6 @@ run:
    UNION ALL
    SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = t.doc_id)
    UNION ALL
-   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'))
-   UNION ALL
    SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks c WHERE c.chash = decode(t.chunk_id, 'hex'));
    GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
    ```
@@ -428,10 +426,13 @@ run:
    view generation: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t
    added the three legacy-debt legs (`topic_assignments.doc_id`,
    `frecency.chunk_id`, `relevance_log.chunk_id`; observed-only, they do not
-   gate upgrades), and RDR-187 (nexus-piwya.5) retired the
+   gate upgrades), RDR-187 (nexus-piwya.5) retired the
    `nexus.chash_index` leg (the router table is being dropped; the gate
    filters by table_name, so an older view with the extra leg still
-   satisfies it). Until re-created, debt counts report as unknown, never as
+   satisfies it), and nexus-6pfgb.42 retired the `nexus.frecency` leg when
+   that table was dropped (the engine's `telemetry-019-1` re-points an
+   existing view; a view that still reads the table must be re-created
+   before the engine migrates, or the drop fails with its remedy named). Until re-created, debt counts report as unknown, never as
    clean.
 
 ## Tuning Parameters

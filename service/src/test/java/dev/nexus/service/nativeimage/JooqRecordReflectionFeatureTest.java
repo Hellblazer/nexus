@@ -306,7 +306,8 @@ class JooqRecordReflectionFeatureTest {
     // 131 -> 132: nexus-u5m5g.4 (RDR-193 Step 3), catalog-048-5 added nexus.catalog_links_upsert_many, a RETURNS TABLE
     // function (CatalogLinksUpsertManyRecord); catalog_link_endpoint returns text and catalog_link_same_content jsonb
     // (scalars, no Record type), +1.
-    private static final int EXPECTED_RECORD_TYPES = 132;
+    // 132 -> 131: nexus-6pfgb.42, telemetry-019-1 dropped nexus.frecency, so FrecencyRecord is no longer generated, -1.
+    private static final int EXPECTED_RECORD_TYPES = 131;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

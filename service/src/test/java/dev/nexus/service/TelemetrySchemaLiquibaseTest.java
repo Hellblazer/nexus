@@ -62,9 +62,6 @@ class TelemetrySchemaLiquibaseTest {
     private static final Set<String> HOOK_FAILURES_COLS = Set.of(
         "id", "tenant_id", "doc_id", "collection", "hook_name", "error", "occurred_at",
         "batch_doc_ids", "is_batch", "chain");
-    private static final Set<String> FRECENCY_COLS = Set.of(
-        "tenant_id", "chunk_id", "embedded_at", "ttl_days", "frecency_score",
-        "miss_count", "last_hit_at");
     // RDR-196 .p1c (nexus-nyry9.9): per-step cost/quality telemetry, child of nx_answer_runs.
     // telemetry-008 (nexus-ndoke): the two prompt-cache token columns.
     private static final Set<String> NX_ANSWER_STEPS_COLS = Set.of(
@@ -75,7 +72,7 @@ class TelemetrySchemaLiquibaseTest {
     // Tables that should NOT have a tsvector column (telemetry is never FTS-searched)
     private static final List<String> ALL_TEL_TABLES = List.of(
         "relevance_log", "search_telemetry", "tier_writes",
-        "nx_answer_runs", "hook_failures", "frecency", "nx_answer_steps", "agent_dispatches");
+        "nx_answer_runs", "hook_failures", "nx_answer_steps", "agent_dispatches");
 
     PostgreSQLContainer<?> pg;
 
@@ -148,8 +145,13 @@ class TelemetrySchemaLiquibaseTest {
     }
 
     @Test
-    void frecency_hasExactColumnSet() throws Exception {
-        assertColumns("frecency", FRECENCY_COLS);
+    void frecency_isGoneAfterTheFullWalk() throws Exception {
+        // telemetry-019-1 (nexus-6pfgb.42) dropped it; it is in no table list above.
+        try (Connection su = pg.createConnection("")) {
+            assertThat(PgCatalogProbes.tableExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "frecency"))
+                .as("nexus.frecency must not exist after the full changelog walk")
+                .isFalse();
+        }
     }
 
     @Test
@@ -307,8 +309,7 @@ class TelemetrySchemaLiquibaseTest {
             new String[]{ "search_telemetry", "ts" },
             new String[]{ "tier_writes",      "ts" },
             new String[]{ "nx_answer_runs",   "created_at" },
-            new String[]{ "hook_failures",    "occurred_at" },
-            new String[]{ "frecency",         "last_hit_at" }
+            new String[]{ "hook_failures",    "occurred_at" }
         );
 
         try (Connection su = pg.createConnection("")) {

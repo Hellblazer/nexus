@@ -41,16 +41,15 @@ def test_the_authoritative_set_is_column_aware_and_complete():
     table DROP, independently of the unify)."""
     by_table = {t.table: t for t in CHASH_BEARING_TABLES}
     assert by_table["nexus.topic_assignments"].column == "doc_id"
-    assert by_table["nexus.frecency"].column == "chunk_id"
+    # nexus.frecency was dropped (telemetry-019-1, nexus-6pfgb.42): its leg left the view.
+    assert "nexus.frecency" not in by_table
     assert by_table["nexus.relevance_log"].column == "chunk_id"
     assert not by_table["nexus.topic_assignments"].poison
-    assert not by_table["nexus.frecency"].poison
     assert not by_table["nexus.relevance_log"].poison
-    # RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea now; the other two debt
-    # columns stay TEXT (nexus-lgdel.l1's canonical-only CHECK covers them
+    # RDR-194 P3c (nexus-tk070.p3c): doc_id is bytea now; the other debt
+    # column stays TEXT (nexus-lgdel.l1's canonical-only CHECK covers it
     # directly).
     assert by_table["nexus.topic_assignments"].bytea
-    assert not by_table["nexus.frecency"].bytea
     assert not by_table["nexus.relevance_log"].bytea
     assert tuple(t.table for t in POISON_CHASH_TABLES) == (
         "nexus.chunks",
@@ -78,7 +77,7 @@ def test_view_ddl_covers_exactly_the_chash_tables():
     # against the unified nexus.chunks relation. RDR-194 P3c: debt columns
     # are no longer uniformly TEXT -- a bytea debt column (topic_assignments.
     # doc_id) skips the hex-shape guard entirely (direct bytea equality);
-    # only the still-TEXT debt columns (frecency/relevance_log) keep it.
+    # only the still-TEXT debt column (relevance_log) keeps it.
     for t in DEBT_CHASH_TABLES:
         assert f"'{t.table}' AS table_name" in ddl
         if t.bytea:
@@ -184,7 +183,13 @@ def test_liquibase_owned_view_matches_the_generator():
     :func:`test_docs_rendered_copy_matches_the_generator`, so a
     ``CHASH_BEARING_TABLES`` change regenerates BOTH the docs block and the
     changelog's embedded copy, not just one of them silently drifting from
-    the other."""
+    the other.
+
+    ``taxonomy-011-8`` is ``runAlways``, so it is checksum-exempt and its
+    body is the CURRENT generator output on every boot, not a historical
+    snapshot: when ``nexus.frecency`` was dropped (telemetry-019-1,
+    nexus-6pfgb.42) its frecency leg left here too, or the changeset would
+    have failed on every boot after the drop."""
     xml = (
         _REPO
         / "service/src/main/resources/db/changelog/taxonomy-011-doc-id-bytea.xml"

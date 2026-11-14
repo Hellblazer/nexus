@@ -284,7 +284,7 @@ $$;
             INVOKING role's OWN table privileges for the relations the
             view references — nexus_diag's BYPASSRLS exempts it from
             row-level policies, never from ordinary GRANT-based privilege
-            checks). The five tables below are exactly
+            checks). The four tables below are exactly
             CHASH_BEARING_TABLES (src/nexus/db/chash_tables.py) — the SAME
             set diag_conformance_view_ddl() reads to build the view text —
             named individually (never a schema-wide bulk grant) so this
@@ -297,7 +297,7 @@ $$;
             nexus_diag and SELECTs the view plus every underlying table
             against a live install.
 
-            No foreign-owner guard is needed for the five table grants
+            No foreign-owner guard is needed for the four table grants
             (unlike the view's own GRANT below): nexus_admin created every
             one of them via forward DDL and always owns them, the same
             assumption -1's own unguarded bulk grant already makes for
@@ -320,7 +320,7 @@ BEGIN
     -- comment element above for the full derivation. View existence
     -- implies every underlying table already exists too (the view's own
     -- CREATE would have failed otherwise), so no separate existence
-    -- guard is needed for the five GRANTs below.
+    -- guard is needed for the four GRANTs below.
     IF EXISTS (
         SELECT 1 FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -338,7 +338,6 @@ BEGIN
         GRANT SELECT ON nexus.chunks                  TO nexus_diag;
         GRANT SELECT ON nexus.catalog_document_chunks TO nexus_diag;
         GRANT SELECT ON nexus.topic_assignments        TO nexus_diag;
-        GRANT SELECT ON nexus.frecency                 TO nexus_diag;
         GRANT SELECT ON nexus.relevance_log            TO nexus_diag;
     END IF;
 END
@@ -357,7 +356,7 @@ $$;
             could not read the very audit table it exists to check. Same
             defect CLASS as the nexus-lhuhe v0.1.78 zero-grants bug
             (grants-nexus-diag-3 above), one generation later: -3's re-grant
-            list is scoped EXACTLY to CHASH_BEARING_TABLES (the five tables
+            list is scoped EXACTLY to CHASH_BEARING_TABLES (the four tables
             nexus.diag_chash_conformance reads internally), because that
             changeset was written to fix ONE bug (the view went dark) — it
             was never meant to be, and is not, the general view-era
@@ -442,7 +441,7 @@ BEGIN
     -- individually — see CatalogRepository.NEXUS_DIAG_READABLE_TABLES),
     -- so nexus_diag should see them whether or not the counts view
     -- exists. hook_failures is deliberately NOT granted here (see comment
-    -- above) -- do not add it for symmetry with -3's five-table list.
+    -- above) -- do not add it for symmetry with -3's four-table list.
     GRANT SELECT ON nexus.search_telemetry TO nexus_diag;
     GRANT SELECT ON nexus.gc_audit         TO nexus_diag;
 END

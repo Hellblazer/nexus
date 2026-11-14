@@ -15,9 +15,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
-import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.HOOK_FAILURES;
 import static dev.nexus.service.jooq.nexus.Tables.NX_ANSWER_RUNS;
 import static dev.nexus.service.jooq.nexus.Tables.NX_ANSWER_STEPS;
@@ -44,8 +42,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  *   <li>tier_writes: recordTierWrite round-trip; importTierWriteRow preserves ts (FIDELITY)</li>
  *   <li>nx_answer_runs: recordNxAnswerRun; importNxAnswerRunRow preserves created_at (FIDELITY)</li>
  *   <li>hook_failures: recordHookFailure; importHookFailureRow preserves occurred_at (FIDELITY)</li>
- *   <li>frecency: upsertFrecency GREATEST merge does not clobber live PG values</li>
- *   <li>frecency: getFrecency round-trip</li>
  *   <li>renameCollection: updates search_telemetry and hook_failures</li>
  *   <li>RLS WITH CHECK: raw INSERT with wrong tenant_id rejected</li>
  * </ol>
@@ -1196,117 +1192,6 @@ class TelemetryRepositoryTest {
         assertThat(unfiltered.get("total")).isEqualTo(2);
     }
 
-    // ── frecency ───────────────────────────────────────────────────────────────
-
-    @Test @Order(12)
-    void frecency_getFrecency_roundTrip() {
-        repo.upsertFrecency(TENANT_A, "56ac933d343160c61ded6e852ae5fd5d02576a722b2a76b11e27b661a856ed7d",
-            "2024-06-01T00:00:00Z", 90, 0.75, 3, "2024-09-01T00:00:00Z");
-
-        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, "56ac933d343160c61ded6e852ae5fd5d02576a722b2a76b11e27b661a856ed7d");
-        assertThat(result).as("getFrecency must return the upserted record").isPresent();
-        assertThat(result.get().get("chunk_id")).isEqualTo("56ac933d343160c61ded6e852ae5fd5d02576a722b2a76b11e27b661a856ed7d");
-        assertThat(((Number) result.get().get("ttl_days")).intValue()).isEqualTo(90);
-        assertThat(((Number) result.get().get("frecency_score")).doubleValue()).isEqualTo(0.75);
-        assertThat(((Number) result.get().get("miss_count")).intValue()).isEqualTo(3);
-    }
-
-    @Test @Order(13)
-    void frecency_greatestNoClober_reImportWithStaleSrcDoesNotRollBackLiveValues() {
-        // Step 1: insert an initial frecency record with low counters (simulating source SQLite)
-        repo.upsertFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588",
-            "2024-01-01T00:00:00Z", 30, 0.50, 5, "2024-06-01T00:00:00Z");
-
-        // Step 2: simulate live PG advancement (higher values = fresher data)
-        // by upserting with higher values first
-        repo.upsertFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588",
-            "2024-01-01T00:00:00Z", 30, 0.95, 20, "2026-01-01T00:00:00Z");
-
-        // Step 3: re-import with the STALE source values (lower counters)
-        // GREATEST logic must preserve the live PG values, not clobber with stale source
-        repo.upsertFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588",
-            "2024-01-01T00:00:00Z", 30, 0.50, 5, "2024-06-01T00:00:00Z");
-
-        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, "327a4a832e256cb155e4b6f03535960645648c1b15f2deb3760d29ba69583588");
-        assertThat(result).isPresent();
-        // GREATEST(0.50, 0.95) = 0.95  — stale source must NOT clobber live value
-        assertThat(((Number) result.get().get("frecency_score")).doubleValue())
-            .as("GREATEST: frecency_score must not be rolled back to stale 0.50")
-            .isEqualByComparingTo(0.95);
-        // GREATEST(5, 20) = 20
-        assertThat(((Number) result.get().get("miss_count")).intValue())
-            .as("GREATEST: miss_count must not be rolled back to stale 5")
-            .isEqualTo(20);
-    }
-
-    @Test @Order(14)
-    void frecency_embeddedAt_leastPreservesOldestEmbedTime() {
-        // embedded_at should use LEAST to keep the oldest (first-seen) embed time
-        repo.upsertFrecency(TENANT_A, "3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb",
-            "2023-01-01T00:00:00Z", 30, 0.1, 0, "2023-01-01T00:00:00Z");
-
-        // Re-import with a newer embedded_at (from a re-index) — should keep oldest
-        repo.upsertFrecency(TENANT_A, "3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb",
-            "2025-01-01T00:00:00Z", 30, 0.5, 1, "2025-01-01T00:00:00Z");
-
-        try (Connection conn = pg.createConnection("")) {
-            PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
-            var rows = DSL.using(conn, SQLDialect.POSTGRES)
-                .select(FRECENCY.EMBEDDED_AT)
-                .from(FRECENCY)
-                .where(FRECENCY.CHUNK_ID.eq("3115d480cb3cef4722d35d5608cf43e4ae6dae56c3eedafccbb1efa83dec6efb"))
-                .fetch();
-            assertThat(rows).hasSize(1);
-            var stored = rows.get(0).value1().toInstant();
-            // embedded_at must be the OLDEST value (2023-01-01)
-            long oldest = OffsetDateTime.parse("2023-01-01T00:00:00+00:00").toInstant().toEpochMilli();
-            assertThat(stored.toEpochMilli())
-                .as("LEAST: embedded_at must keep oldest embed time 2023-01-01")
-                .isEqualTo(oldest);
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    // ── nexus-tk070.p6b (RDR-194 D5): CHECK-layer proof, independent of the
-    //    TelemetryHandler boundary 400 ──────────────────────────────────────
-
-    @Test @Order(47)
-    void upsertFrecency_ttlDaysZero_violatesCheckConstraintDirectlyAtRepositoryLayer() {
-        // Calls TelemetryRepository directly -- bypassing TelemetryHandler's
-        // handler-level ttl_days<=0 rejection entirely -- to prove the DB
-        // CHECK itself rejects ttl_days=0, independent of the HTTP boundary
-        // validation. The two layers are tested SEPARATELY (see
-        // TelemetryHandlerFrecencyTtlBoundaryTest for the boundary proof,
-        // MemoryRepositoryTest's identical-shape test for the precedent):
-        // deleting TelemetryHandler's requirePositiveOrNullTtlDays would not
-        // make THIS test fail, and dropping frecency_ttl_days_positive_chk
-        // would not make the boundary test fail -- each test falsifies only
-        // its own layer.
-        assertThatThrownBy(() ->
-            repo.upsertFrecency(TENANT_A,
-                "0123456789abcdef".repeat(4),
-                "2024-01-01T00:00:00Z", 0, 0.0, 0, "2024-01-01T00:00:00Z"))
-            .as("ttl_days=0 must violate frecency_ttl_days_positive_chk at the "
-                + "DB layer even when no handler-level validation runs")
-            .hasMessageContaining("frecency_ttl_days_positive_chk");
-    }
-
-    @Test @Order(48)
-    void upsertFrecency_ttlDaysNull_isPermanentAndAccepted() {
-        // The positive companion to the CHECK-violation test above: NULL is
-        // the sole permanent sentinel post-migration and must be accepted
-        // without any exception.
-        String chunkId = "fedcba9876543210".repeat(4);
-        repo.upsertFrecency(TENANT_A, chunkId, "2024-01-01T00:00:00Z", null, 0.5, 0,
-            "2024-01-01T00:00:00Z");
-        Optional<Map<String, Object>> result = repo.getFrecency(TENANT_A, chunkId);
-        assertThat(result).as("a NULL-ttl_days row must be readable, not swallowed").isPresent();
-        assertThat(result.get().get("ttl_days"))
-            .as("ttl_days must round-trip as null (permanent), not silently coerced")
-            .isNull();
-    }
-
     // ── renameCollection ───────────────────────────────────────────────────────
 
     @Test @Order(15)
@@ -1542,19 +1427,6 @@ class TelemetryRepositoryTest {
         assertThat(present).hasSize(1).containsExactly(presentKey);
     }
 
-    @Test @Order(33)
-    void probeIds_frecency_returnsPresentSubset() {
-        repo.upsertFrecency(TENANT_A,
-            "f6a5377eb8124396725a7c2146f6b3cc96f3a4bbda0157b2c26d366383e6ad24", "2025-05-06T00:00:00Z", 30, 1.5, 2, "2025-05-06T00:00:00Z");
-
-        var presentKey = List.<Object>of("f6a5377eb8124396725a7c2146f6b3cc96f3a4bbda0157b2c26d366383e6ad24");
-        var missingKey = List.<Object>of("2a4bb2a4cf738d5be52f827a0f2bbe0a6afc9996cd7ca3004e5ce8bbfef05597");
-
-        var present = repo.probeIds(TENANT_A, "frecency", List.of(presentKey, missingKey));
-
-        assertThat(present).hasSize(1).containsExactly(presentKey);
-    }
-
     @Test @Order(34)
     void probeIds_tenantScoped_secondTenantSeesNothing() {
         repo.importRelevanceRow(TENANT_A,
@@ -1610,11 +1482,21 @@ class TelemetryRepositoryTest {
 
     @Test @Order(36)
     void probeIds_wrongArity_throwsIllegalArgument() {
-        // frecency's conflict key is 1-tuple [chunk_id]; feed it 2 elements.
+        // relevance_log's conflict key is a 5-tuple; feed it 2 elements.
         assertThatThrownBy(() ->
-            repo.probeIds(TENANT_A, "frecency", List.of(List.of("chunk-a", "extra"))))
+            repo.probeIds(TENANT_A, "relevance_log", List.of(List.of("chunk-a", "extra"))))
             .as("probeIds with a mis-sized key tuple must throw")
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test @Order(91)
+    void probeIds_retiredFrecencyKind_isAnUnknownTable() {
+        // nexus.frecency was retired (telemetry-019-1, nexus-6pfgb.42): its probe kind went with it.
+        assertThatThrownBy(() ->
+            repo.probeIds(TENANT_A, "frecency", List.of(List.of("0".repeat(64)))))
+            .as("the retired frecency kind is rejected like any other unknown table")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("Unknown table");
     }
 
     @Test @Order(37)
@@ -1666,35 +1548,12 @@ class TelemetryRepositoryTest {
         assertThat(repo.getRelevanceLog(TENANT_A, "batch-rl-q0", "1d39101ad2293ca5be9ad805a05eee36c73683aade61ee5046cbfe1e76930457", "", "", 5)).hasSize(1);
     }
 
-    @Test @Order(41)
-    void importBatch_frecency_multiRow_greatestMerge_intraBatchDedupeLastWins() {
-        // Two rows for the SAME chunk_id in ONE batch — must dedupe (last wins),
-        // since a single multi-row ON CONFLICT DO UPDATE cannot affect the same
-        // row twice.
-        int n = repo.importBatch(TENANT_A, "frecency", List.of(
-            Map.of("chunk_id", "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4", "embedded_at", "2024-01-01T00:00:00Z",
-                   "ttl_days", 30, "frecency_score", 0.3, "miss_count", 2,
-                   "last_hit_at", "2024-02-01T00:00:00Z"),
-            Map.of("chunk_id", "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4", "embedded_at", "2024-01-01T00:00:00Z",
-                   "ttl_days", 30, "frecency_score", 0.8, "miss_count", 9,
-                   "last_hit_at", "2024-03-01T00:00:00Z")));
-        assertThat(n).as("rows submitted (contract unchanged), not rows landed").isEqualTo(2);
-
-        var got = repo.getFrecency(TENANT_A, "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4");
-        assertThat(got).isPresent();
-        assertThat(((Number) got.get().get("frecency_score")).doubleValue()).isEqualTo(0.8);
-        assertThat(((Number) got.get().get("miss_count")).intValue()).isEqualTo(9);
-
-        // Re-import with STALE (lower) values — GREATEST must not roll back live values.
-        repo.importBatch(TENANT_A, "frecency", List.of(
-            Map.of("chunk_id", "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4", "embedded_at", "2024-01-01T00:00:00Z",
-                   "ttl_days", 30, "frecency_score", 0.1, "miss_count", 1,
-                   "last_hit_at", "2024-01-15T00:00:00Z")));
-        var afterStale = repo.getFrecency(TENANT_A, "9c4bcf15a73ec0b5a38f89c7fff6aba6c67e031f42ae51957a3399eb9e6e95e4");
-        assertThat(((Number) afterStale.get().get("frecency_score")).doubleValue())
-            .as("GREATEST: must not roll back to stale 0.1").isEqualTo(0.8);
-        assertThat(((Number) afterStale.get().get("miss_count")).intValue())
-            .as("GREATEST: must not roll back to stale 1").isEqualTo(9);
+    @Test @Order(92)
+    void importBatch_retiredFrecencyKind_isAnUnknownTable() {
+        // nexus.frecency was retired (telemetry-019-1, nexus-6pfgb.42): its import kind went with it.
+        assertThatThrownBy(() -> repo.importBatch(TENANT_A, "frecency", List.of(Map.of("chunk_id", "0".repeat(64)))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("Unknown table");
     }
 
     @Test @Order(42)
