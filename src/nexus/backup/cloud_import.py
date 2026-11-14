@@ -13,7 +13,7 @@ What the driver does, in order:
 * The whole file is verified before any byte leaves (:func:`~nexus.backup.tenant_file.verify_file`: every page's
   SHA-256, every table's count, the trailer). A file that fails is refused and the engine is never opened against.
 * Open with the file's header, ``header_sha256`` (the SHA-256 of the header frame's payload, which the engine's
-  restore marker names) and ``row_bytes`` (the page bodies' total). A 409 ``session_exists`` names the open
+  restore marker names) and ``row_bytes`` (the bytes the engine will stage: page bodies re-cut into parts with their COPY headers and trailers). A 409 ``session_exists`` names the open
   session's kind: it is deleted once through the matching route and the open repeated, unless it is an import
   that is already loading (deleting that would cancel the load).
 * Each exported page is re-cut at row boundaries into parts of at most the engine's part size, each a complete

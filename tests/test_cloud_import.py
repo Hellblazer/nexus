@@ -845,7 +845,7 @@ def test_a_commit_answered_no_such_session_is_decided_by_the_marker(backup_file:
         assert len(engine.requests("marker")) == 1
 
 
-def test_a_commit_answered_with_a_5xx_does_not_say_nothing_was_loaded(backup_file: Path) -> None:
+def test_a_commit_answered_with_a_bare_404_does_not_say_nothing_was_loaded(backup_file: Path) -> None:
     with FakeImportEngine() as engine:
         engine.script.append(lambda req: Reply(404, {"error": "x", "reason": "not_found"}) if req.kind == "commit" else None)
         with pytest.raises(RestoreOutcomeUnknown, match="does not say whether the load started") as err:

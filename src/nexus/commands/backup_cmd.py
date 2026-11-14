@@ -294,9 +294,9 @@ def restore(file: Path) -> None:
 
     Needs a tenant or data token for the empty tenant. On the managed service that is the `service_token` the operator
     issued. A local engine is the same routes, but this install's own token there is the supervisor's operator token,
-    which the import refuses; restore into a tenant you created with `nx service token issue --tenant <tenant>` and
-    export that token as NX_SERVICE_TOKEN (a local install reads the token from that variable). Restoring into the
-    local default tenant is not possible today. An engine older than the import routes is refused, naming the release
+    which the import refuses; issue a tenant token with `nx service token issue --tenant <tenant>` (`default` for
+    the install's own tenant, which must be empty) and export it as NX_SERVICE_TOKEN (a local install reads the
+    token from that variable). An engine older than the import routes is refused, naming the release
     that has them. If the connection drops while the load runs, the verb reads the engine's status, and after an
     engine restart its restore marker, and says whether the load committed; if it cannot learn that it says so and
     leaves the load alone.
