@@ -346,3 +346,35 @@ def test_a_model_the_engine_will_not_serve_is_refused_at_the_open_naming_it_and_
             run_restore(ImportClient(engine.base_url, _Tok(), sleep=lambda _s: None), backup_file)
         assert [r.kind for r in engine.log if r.kind != "version"] == ["open"], "the open is the only import request"
     assert error in str(err.value) and reason in str(err.value) and "Nothing was written" in str(err.value)
+
+
+def test_a_restart_mid_run_revokes_with_the_supervisor_token_the_lease_names_now() -> None:
+    """The engine restarted during the restore, so the supervisor's token changed: the revoke uses the new one first."""
+    issuer = Issuer()
+    lease = {"root": ROOT}
+    creds = LocalRestoreCredentials(
+        Static(ROOT), "http://x", root_token=lambda: lease["root"], issue=issuer, revoke=issuer.revoke, clock=WallClock(),
+    )
+    assert creds.bearer() == "minted-1"
+    lease["root"] = "supervisor-root-after-restart"
+    creds.release()
+    assert [r[1] for r in issuer.revoked] == ["supervisor-root-after-restart"]
+
+
+def test_when_the_new_supervisor_token_cannot_revoke_the_one_it_was_minted_from_is_tried() -> None:
+    issuer = Issuer()
+    lease = {"root": ROOT}
+    tried: list[str] = []
+
+    def revoke(base_url: str, root: str, token_hash: str) -> None:
+        tried.append(root)
+        if root != ROOT:
+            raise RuntimeError("401")
+
+    creds = LocalRestoreCredentials(
+        Static(ROOT), "http://x", root_token=lambda: lease["root"], issue=issuer, revoke=revoke, clock=WallClock(),
+    )
+    creds.bearer()
+    lease["root"] = "supervisor-root-after-restart"
+    creds.release()
+    assert tried == ["supervisor-root-after-restart", ROOT]

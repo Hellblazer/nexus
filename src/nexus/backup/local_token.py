@@ -175,12 +175,20 @@ class LocalRestoreCredentials:
         if not minted.token_hash:
             _log.warning("restore_local_token_not_revoked", reason="the engine did not name the token's hash")
             return
-        try:
-            self._revoke(self._base, minted.root, minted.token_hash)
-        except Exception as exc:  # noqa: BLE001 - best effort by design; the token expires on its own TTL
-            _log.warning("restore_local_token_revoke_failed", error=type(exc).__name__)
-        else:
+        # The supervisor's token can change mid-run (an engine restart): revoke with the one the lease names now, then
+        # with the one the token was minted from, so a restart does not leave the minted token alive to its TTL.
+        current = self._read_root()
+        bearers = [r for r in dict.fromkeys((current, minted.root)) if r]
+        failure: Exception | None = None
+        for root in bearers:
+            try:
+                self._revoke(self._base, root, minted.token_hash)
+            except Exception as exc:  # noqa: BLE001 - best effort by design; the token expires on its own TTL
+                failure = exc
+                continue
             _log.info("restore_local_token_revoked", tenant=LOCAL_TENANT)
+            return
+        _log.warning("restore_local_token_revoke_failed", error=type(failure).__name__ if failure else "no_root")
 
     def _mint(self, root: str) -> str:
         try:
