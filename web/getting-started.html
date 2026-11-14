@@ -161,7 +161,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <p class="lede">Everything on this page happens inside Claude Code. You describe what you want, and Claude chooses the Nexus tools and skills for you. Each lesson gives an instruction to type, says what Claude does with it, and says what you will see.</p>
 <p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start, install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in one of your projects and run <code>claude</code>.</p>
-<div class="callout rule"><p>You describe what you want in your own words, and you do not learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and uses the debugger agent. If you say "is what the docs say about caching true in the code", Claude plans a search across many documents. The <code>/conexus:…</code> commands in the lessons are shortcuts that start one skill or agent directly, and they are never required. The prompts here are examples of phrasing, and your own words work the same way.</p></div>
+<div class="callout rule"><p>You describe what you want in your own words, and you do not learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and uses the debugger agent. If you say "is what the docs say about caching true in the code", Claude plans a search across many documents. The <code>/conexus:…</code> commands in the lessons are shortcuts that start one skill or agent directly, and they are never required. The prompts here are examples of phrasing.</p></div>
 
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
@@ -172,7 +172,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Index this repository into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs the terminal command <code>nx index repo .</code>, and Claude Code shows a Bash tool call with that command. The command reads every file, cuts it into chunks, and stores the chunks, which takes longer on a large repository. At the end the output shows <code>Done.</code> and, after the first index, a line with the number of topics that Nexus found.</p>
+<p>Claude runs the terminal command <code>nx index repo .</code>, and Claude Code shows a Bash tool call with that command. The command takes longer on a large repository. At the end the output shows <code>Done.</code> and, after the first index, a line with the number of topics that Nexus found.</p>
 <p class="note">If you index the same repository again later, Nexus skips files that did not change and shows <code>skipped: index fresh</code> for them.</p>
 
 <h3>Find out what is in the index</h3>
@@ -288,7 +288,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="cmd"><pre>Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 1&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, takes the relevant facts from each, compares them, and returns one answer with sources. This takes much longer than a normal search, so start it and do something else.</p>
-<p class="note">Use it when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster. Claude plans the search, and you need no command.</p>
+<p class="note">Use it when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster.</p>
 
 <h3>Other commands to know</h3>
 <p>Each command below starts one skill or agent directly. A skill is a named procedure that Claude follows for one kind of situation. An agent is a helper that Claude starts for one job. You can describe the task in your own words instead, and Claude chooses the same one.</p>

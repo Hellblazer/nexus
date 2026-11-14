@@ -242,7 +242,7 @@ Send <span class="ph">&lt;PEER NAME&gt;</span> a note that <span class="ph">&lt;
   "claim_id": "784e820d-…"
 }
 tuple_ack  … → Acked</pre></details>
-<p class="note">The drain hook makes these two calls for you, and the sample shows them made by hand.</p>
+<p class="note">The drain hook makes these two calls for you.</p>
 
 <h3>Other machines</h3>
 <p>The peer can run on another machine. Machines that use one engine share one tuple space, as they do in cloud mode. So a session on a laptop can hand a long job to a session on a server. In local mode each machine has its own engine. Only sessions that use the same engine credential share a space.</p>
