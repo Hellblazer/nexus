@@ -26,7 +26,8 @@ What it does, in order:
 4. Create the empty target tenant, time a tenant create on the idle database, and restore the file with the shipped
    client (``nexus.backup.cloud_import.run_restore``). While it runs, a sampler records once a second:
    the import status (state, staged bytes), the database's oldest transaction age and oldest ``xmin`` age among
-   all backends, the longest transaction of the engine's role, and the bytes of every temp table (the staging).
+   all backends, the longest transaction of the engine's role, and the engine's own running statement and what it waits on. The staged
+   bytes are the engine's own count (``staged_bytes`` of the status route), not a count of temp-table files.
    While the engine reports ``loading`` or ``verifying``, a prober asks the engine to create a NEW tenant (the DDL
    path, which a load blocks) every 3 s and records the wait and the ``Retry-After``, and asks for a token of an
    EXISTING tenant (the fast path), which must not wait.
@@ -150,13 +151,12 @@ FROM generate_series(1, {max(10, chunks // 5)}) g;
 
 
 class _Sampler(threading.Thread):
-    """Once a second: the import status, the database's transaction ages and the staging's temp bytes."""
+    """Once a second: the import status, the database's transaction ages and the engine's running statement."""
 
     _SQL = (
         "SELECT coalesce(max(age(backend_xmin)), 0), coalesce(max(age(backend_xid)), 0), "
         "coalesce(max(extract(epoch FROM now() - xact_start)) FILTER (WHERE usename = 'nexus_svc'), 0)::float8, "
         "coalesce(max(extract(epoch FROM now() - xact_start)), 0)::float8, "
-        "(SELECT coalesce(sum(pg_relation_size(oid)), 0) FROM pg_class WHERE relpersistence = 't' AND relkind = 'r'), "
         # the engine's oldest running statement and what it waits on (a load that stalls shows here)
         "coalesce((SELECT coalesce(wait_event_type || ':' || wait_event, 'cpu') || ' ' || left(regexp_replace(query, '\\s+', ' ', 'g'), 70) "
         "FROM pg_stat_activity WHERE usename = 'nexus_svc' AND state = 'active' AND xact_start IS NOT NULL ORDER BY xact_start LIMIT 1), '') "
@@ -177,9 +177,9 @@ class _Sampler(threading.Thread):
         while not self.stop_event.is_set():
             row: dict[str, Any] = {"t": round(time.monotonic() - self.t0, 2)}
             try:
-                xmin_age, xid_age, svc_xact_s, any_xact_s, temp_bytes, engine_stmt = self.cluster.psql(self._SQL).split("|", 5)
+                xmin_age, xid_age, svc_xact_s, any_xact_s, engine_stmt = self.cluster.psql(self._SQL).split("|", 4)
                 row.update(xmin_age=int(xmin_age), xid_age=int(xid_age), engine_xact_s=float(svc_xact_s),
-                           any_xact_s=float(any_xact_s), temp_bytes=int(temp_bytes), engine_stmt=engine_stmt)
+                           any_xact_s=float(any_xact_s), engine_stmt=engine_stmt)
             except Exception as exc:  # noqa: BLE001 - a sample is advisory; a failed one is a gap, not a failure of the run
                 row["error"] = str(exc)[:80]
             if self.session_id:
@@ -300,7 +300,7 @@ def main(chunks: int, memory_rows: int, pool_size: int, load_max: int, probe: bo
         tgt_token = create_tenant_token(engine.url, esr._ROOT_TOKEN, _TARGET)
         idle_create = _Prober(_Sampler(cluster, engine.url, tgt_token), engine.url, esr._ROOT_TOKEN, esr._TENANT).probe("new-tenant-idle", "scale-idle")
         say(f"tenant create on an idle database: {idle_create['seconds']}s (status {idle_create['status']})")
-        baseline = cluster.psql(_Sampler._SQL).split("|", 5)[:5]
+        baseline = cluster.psql(_Sampler._SQL).split("|", 4)[:4]
 
         sampler = _Sampler(cluster, engine.url, tgt_token)
         prober = _Prober(sampler, engine.url, esr._ROOT_TOKEN, esr._TENANT)
@@ -389,10 +389,10 @@ def main(chunks: int, memory_rows: int, pool_size: int, load_max: int, probe: bo
                 "note": "the import session holds one transaction on one connection from the first part to the commit; "
                         "engine_xact_s is the longest transaction age of the engine's role, any_xact_s of any backend, "
                         "xmin_age/xid_age the largest age() of any backend's xmin/xid, in transactions",
-                "baseline_xmin_xid_engine_any_temp": baseline,
-                "peak_staging": {k: peak(staging, k) for k in ("xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "temp_bytes", "staged_bytes")},
-                "peak_loading": {k: peak(loading, k) for k in ("xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "temp_bytes", "staged_bytes")},
-                "peak_all": {k: peak(sampler.rows, k) for k in ("xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "temp_bytes", "staged_bytes")},
+                "baseline_xmin_xid_engine_any": baseline,
+                "peak_staging": {k: peak(staging, k) for k in ("xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "staged_bytes")},
+                "peak_loading": {k: peak(loading, k) for k in ("xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "staged_bytes")},
+                "peak_all": {k: peak(sampler.rows, k) for k in ("xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "staged_bytes")},
                 "samples": len(sampler.rows),
                 "loading_first_seen_at_s": loading_at, "committed_seen_at_s": committed_at,
             },
@@ -405,7 +405,7 @@ def main(chunks: int, memory_rows: int, pool_size: int, load_max: int, probe: bo
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
         (out_dir / "probes.json").write_text(json.dumps(probes, indent=2))
         with open(out_dir / "samples.csv", "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["t", "state", "staged_bytes", "temp_bytes", "xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "engine_stmt", "error"], extrasaction="ignore")
+            w = csv.DictWriter(f, fieldnames=["t", "state", "staged_bytes", "xmin_age", "xid_age", "engine_xact_s", "any_xact_s", "engine_stmt", "error"], extrasaction="ignore")
             w.writeheader()
             w.writerows(sampler.rows)
         if engine.log is not None and engine.log.exists():
