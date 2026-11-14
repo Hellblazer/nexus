@@ -382,9 +382,9 @@ class ImportClient:
         except (TypeError, ValueError):
             part_bytes = MAX_PART_BYTES
         try:
-            load_max = int(data.get("load_max_seconds") or 3600)
+            load_max = int(data.get("load_max_seconds") or 3960)
         except (TypeError, ValueError):
-            load_max = 3600
+            load_max = 3960
         try:
             max_bytes = int(data.get("max_bytes") or 0)
         except (TypeError, ValueError):

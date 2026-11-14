@@ -14,10 +14,11 @@ import java.util.Map;
 class TenantImportConfigTest {
 
     @Test
-    void theDefaultsAreTheDesignsEightGibibytesAndSixtyMinutes() {
+    void theDefaultsAreEightGibibytesAndALoadBoundOfTwiceTheMeasuredLoad() {
         var c = TenantImportSessions.Config.fromEnv(Map.<String, String>of()::get);
         assertThat(c.maxBytes()).isEqualTo(8L << 30);
-        assertThat(c.loadMax()).isEqualTo(Duration.ofMinutes(60));
+        // 2x the Step 6 load (1,973 s for 500,000 chunks), Sam 2026-11-14, ask rdr248-load-bound
+        assertThat(c.loadMax()).isEqualTo(Duration.ofSeconds(3960));
         assertThat(c.restoreRetryAfterSeconds()).isEqualTo(60);
         assertThat(c.restoreLockWait()).isEqualTo(Duration.ofSeconds(5));
         assertThat(c.outcomeRetention()).isEqualTo(Duration.ofHours(24));

@@ -92,7 +92,7 @@ public final class TenantImportSessions implements AutoCloseable {
         }
 
         public static Config defaults() {
-            return new Config(8L << 30, Duration.ofMinutes(60), 60, Duration.ofSeconds(5), Duration.ofHours(24),
+            return new Config(8L << 30, Duration.ofSeconds(3960), 60, Duration.ofSeconds(5), Duration.ofHours(24),
                 Duration.ofSeconds(5));
         }
 

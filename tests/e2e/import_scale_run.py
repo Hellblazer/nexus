@@ -246,7 +246,7 @@ def _count(cluster: esr.Cluster, table: str, tenant: str) -> int:
 @click.option("--memory-rows", default=esr._MEMORY_ROWS, show_default=True, help="Rows of the id-keyed table in all; the tenant owns a tenth.")
 @click.option("--pool-size", default=10, show_default=True, help="NX_POOL_SIZE (the engine's default is 10).")
 @click.option("--load-max", default=21_600, show_default=True,
-              help="NX_IMPORT_LOAD_MAX in seconds for THIS run (the default is 3600). A run that must learn how long the load takes "
+              help="NX_IMPORT_LOAD_MAX in seconds for THIS run (the default is 3960). A run that must learn how long the load takes "
                    "cannot be cut at the bound it is meant to set; the summary records the value used.")
 @click.option("--probe/--no-probe", default=True, show_default=True,
               help="Probe tenant create during the load. A probe is a real request that takes locks, so a run without it shows what the probes cost.")
@@ -372,7 +372,7 @@ def main(chunks: int, memory_rows: int, pool_size: int, load_max: int, probe: bo
             "database_bytes_after_seed": db_bytes,
             "postgres": settings,
             "engine": {"pool_size": pool_size, "export_settings": "defaults (NX_EXPORT_* unset)",
-                       "import_settings": f"NX_IMPORT_LOAD_MAX={load_max} (default 3600), the rest at their defaults"},
+                       "import_settings": f"NX_IMPORT_LOAD_MAX={load_max} (default 3960), the rest at their defaults"},
             "file_bytes": result.size,
             "export_seconds": result.seconds,
             "restore": {
@@ -400,7 +400,7 @@ def main(chunks: int, memory_rows: int, pool_size: int, load_max: int, probe: bo
             "counts": counts,
             "count_mismatches": mismatches,
             "proposed_NX_IMPORT_LOAD_MAX_seconds": proposed,
-            "default_NX_IMPORT_LOAD_MAX_seconds": 3600,
+            "default_NX_IMPORT_LOAD_MAX_seconds": 3960,
         }
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=str))
         (out_dir / "probes.json").write_text(json.dumps(probes, indent=2))
