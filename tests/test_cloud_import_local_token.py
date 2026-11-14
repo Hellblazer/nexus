@@ -333,7 +333,7 @@ def test_a_revoke_that_fails_changes_neither_the_outcome_nor_a_failure_the_resto
 @pytest.mark.parametrize(
     ("reason", "error"),
     [
-        ("embedding_model_not_served", "the file names the Voyage embedding model voyage-context-3, which this engine cannot serve: it has no Voyage key"),
+        ("embedding_model_not_served", "the file names the Voyage embedding model voyage-3-lite, which this engine cannot serve: it has no Voyage key"),
         ("missing_embedding_model", "the target has no embedding_models row for voyage-3"),
     ],
 )
