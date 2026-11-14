@@ -68,7 +68,9 @@ public final class TenantExportReads {
     }
 
     /**
-     * A read could not take a table lock inside its lock bound; retryable (the lock clears when its holder ends).
+     * A page cannot be read now; retryable. A read could not take a table lock inside its lock bound (the lock clears
+     * when its holder ends), or an earlier page read of the same session is still alive after its wall
+     * ({@code TenantExportSessions#withPage}, nexus-csayy.9).
      */
     public static final class PageBusyException extends RuntimeException {
         public PageBusyException(Throwable cause) {
@@ -82,7 +84,8 @@ public final class TenantExportReads {
 
     /**
      * A read was cancelled at its time budget (SQLSTATE 57014 from the budget's {@code statement_timeout}, or the budget
-     * spent before the next statement). Not the same as {@link PageBusyException}: a lock wait clears when the other
+     * spent before the next statement), or passed the page's wall ({@code TenantExportSessions#withPage}, nexus-csayy.9;
+     * {@link #wallMs()} then says so). Not the same as {@link PageBusyException}: a lock wait clears when the other
      * transaction ends, and a statement that ran out of its budget is likely to run out again, so a client repeats it
      * a few times and then reports it, instead of waiting it out.
      */
