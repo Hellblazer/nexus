@@ -229,6 +229,34 @@ def _case_the_engines_root_token_is_refused_saying_which_token_to_use(monkeypatc
     assert list(refused.iterdir()) == []
 
 
+class _Held:
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def bearer(self) -> str:
+        return self.token
+
+    def rejected(self, sent: str) -> bool:
+        return False
+
+
+def _case_a_local_root_token_is_swapped_for_a_default_tenant_token_the_import_routes_accept() -> None:
+    """RDR-248 ask ``rdr248-local-root``: against the real engine, the supervisor's root token is refused by an import
+    route, and the credentials a local restore uses mint a ``default``-tenant token through the real token route that the
+    same route accepts. (The default tenant is not empty in a shared substrate, so this case stops at the marker read.)"""
+    from nexus.backup.local_token import LOCAL_TENANT, LocalRestoreCredentials  # noqa: PLC0415
+
+    state = ensure_engine()
+    marker = f"{state['base_url']}/v1/tenant/import-marker"
+    root = httpx.get(marker, headers={"Authorization": f"Bearer {state['bearer']}"}, timeout=10)
+    assert root.status_code == 403 and root.json().get("reason") == "import_scope_forbidden", root.text
+    creds = LocalRestoreCredentials(_Held(state["bearer"]), state["base_url"], root_token=lambda: state["bearer"])
+    minted = creds.bearer()
+    assert minted and minted != state["bearer"] and creds.bearer() == minted, "one mint, reused"
+    ok = httpx.get(marker, headers={"Authorization": f"Bearer {minted}", "X-Nexus-Tenant": LOCAL_TENANT}, timeout=10)
+    assert ok.status_code == 200 and "present" in ok.json(), ok.text
+
+
 def _case_the_engine_advertises_the_routes_the_client_gates_on() -> None:
     state = ensure_engine()
     body = httpx.get(f"{state['base_url']}/version", timeout=10).json()
@@ -257,5 +285,6 @@ def test_cloud_backup_against_the_real_engine(t2_tenant: str, monkeypatch: pytes
     _case_the_session_was_closed_so_a_second_export_succeeds(runner, dest)
     _case_an_interrupted_export_frees_the_engines_session_slot(t2_tenant, tmp_path)
     _case_the_engine_advertises_the_routes_the_client_gates_on()
+    _case_a_local_root_token_is_swapped_for_a_default_tenant_token_the_import_routes_accept()
     _case_a_restore_into_a_second_tenant_round_trips_with_equal_counts(runner, dest, tmp_path, monkeypatch)
     _case_the_engines_root_token_is_refused_saying_which_token_to_use(monkeypatch, tmp_path)  # last: it swaps the token

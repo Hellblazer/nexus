@@ -60,6 +60,7 @@ from nexus.backup.cloud_export import (
     _reason,
     _retry_after,
 )
+from nexus.backup.local_token import LocalRestoreCredentials
 from nexus.backup.pg_backup import BackupFailed, BackupRefused
 from nexus.backup.tenant_file import (
     FileIndex,
@@ -137,7 +138,12 @@ def connect() -> ImportClient:
         remote = bool(_config.get_service_url())
     except RuntimeError as exc:
         raise RestoreRefused(str(exc)) from None
-    return ImportClient(base_url, ManagedCredentials(base_url, restore=True), remote=remote)
+    creds: Credentials = ManagedCredentials(base_url, restore=True)
+    if not remote:
+        # A local install holds the supervisor's root token, which the import refuses: the client mints a short-lived
+        # default-tenant token from it (rdr248-local-root). A token that is not the supervisor's passes through.
+        creds = LocalRestoreCredentials(creds, base_url)
+    return ImportClient(base_url, creds, remote=remote)
 
 
 @dataclass
@@ -278,8 +284,8 @@ class ImportClient:
         if self._remote:
             return f"{why} Set a current tenant or data token with `nx config set service_token <token>`, then run the restore again."
         return (
-            f"{why} This install talks to a local engine, and the token it holds is the supervisor's operator token, which a "
-            "restore refuses. Issue a token for a tenant you created with `nx service token issue --tenant <tenant>` and "
+            f"{why} This install talks to a local engine, and the token it sends is an operator token, which a restore "
+            "refuses. Issue a token for the tenant you are restoring into with `nx service token issue --tenant <tenant>` (`default` for the install's own) and "
             "export it as NX_SERVICE_TOKEN (a local install reads the token from that variable; `nx config set service_token` "
             "applies only when a service_url is set), then run the restore again."
         )

@@ -40,6 +40,7 @@ SCAN_ROOTS = (
 _SELF = {
     "src/nexus/commands/backup_cmd.py", "src/nexus/backup/pg_backup.py",
     "src/nexus/backup/cloud_export.py", "src/nexus/backup/cloud_import.py", "src/nexus/backup/tenant_file.py",
+    "src/nexus/backup/local_token.py",  # the restore arm's local-token credentials (rdr248-local-root)
 }
 _VERB_AND_ARM = "src/nexus/commands/backup_cmd.py"
 _MODULES = {
