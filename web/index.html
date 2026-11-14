@@ -190,13 +190,13 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <div class="tbl"><table>
 <tr><th>Choice</th><th>What happens</th><th>Download</th></tr>
 <tr><td>Local</td><td>Install the <code>nx</code> command and run a Nexus service on this machine</td><td>about 0.8 GB down (1.0 GB on Linux), 2.6 to 2.9 GB on disk</td></tr>
-<tr><td>Cloud</td><td>Install the <code>nx</code> command and connect it to a managed service you have an address and token for (and a tenant, for a mint credential)</td><td>about 0.5 GB down (0.6 GB on Linux), 1.9 to 2.2 GB on disk</td></tr>
+<tr><td>Cloud</td><td>Install the <code>nx</code> command and connect it to a managed service you already have an address and token for</td><td>about 0.5 GB down (0.6 GB on Linux), 1.9 to 2.2 GB on disk</td></tr>
 <tr><td>CLI only</td><td>Install the <code>nx</code> command and decide about a service later</td><td>about 0.5 GB down (0.6 GB on Linux), 1.9 to 2.2 GB on disk</td></tr>
 <tr><td>Not now</td><td>Nothing is installed</td><td>none</td></tr>
 </table></div>
-<p class="note">These sizes include PDF support. <code>--slim</code> leaves it out, and the first PDF you index then installs it. The sizes on disk are the install itself, and uv keeps a separate download cache that <code>uv cache clean</code> empties. They were measured on version 7.89.0 on macOS and Linux (2026-10-29), Windows was not measured, and none of them is a promise.</p>
+<p class="note">These sizes include PDF support. <code>--slim</code> leaves it out, and the first PDF you index then installs it. The sizes on disk are the install itself, and uv keeps a separate download cache that <code>uv cache clean</code> empties. They were measured on version 7.89.0 on macOS and Linux, Windows was not measured, and none of them is a promise.</p>
 <p>Pressing Enter at the question, or running the script without a terminal, picks CLI only. Local adds a second question, whether the service should start when you log in, and the answer is No unless you type <code>y</code>.</p>
-<p>Cloud needs the service address and token, and a tenant if your credential is a mint credential. The script asks for them in the terminal. Through the plugin a page opens in your browser instead, so Claude never sees the token.</p>
+<p>Cloud needs the service address and token. If your token is a mint credential, which is bound to one tenant, the script asks for that tenant too. The script asks for them in the terminal. Through the plugin a page opens in your browser instead, so Claude never sees the token.</p>
 
 <details id="flags"><summary>Skip the question with a flag</summary>
 <p data-os-block="mac linux">Add a flag after <code>sh -s --</code>: <code>--local</code>, <code>--cloud</code> or <code>--cli-only</code>. With <code>--local</code> you can add <code>--autostart</code> or <code>--no-autostart</code>. The <code>--slim</code> flag leaves out PDF support. This example installs the service and does not start it at login:</p>
@@ -226,7 +226,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <li><div class="step">
   <h3>Check the install</h3>
   <div class="cmd"><pre>nx doctor</pre><button class="copy" type="button">Copy</button></div>
-  <p class="note">No line may show <span style="font-weight:600">✗</span>. Read every <span style="font-weight:600">⚠</span> line. If you installed by hand, one ⚠ line, "Orphan uv install", is normal right after <code>nx self install</code>: the next <code>nx self install</code>, <code>nx self gc</code>, or Claude Code session with the plugin removes the old uv copy.</p>
+  <p class="note">No line may show <span style="font-weight:600">✗</span>. Read every <span style="font-weight:600">⚠</span> line. The ⚠ line "Orphan uv install" means a copy of conexus installed with uv is still on disk next to the one Nexus manages. Right after <code>nx self install</code> that is normal, and the next <code>nx self install</code>, <code>nx self gc</code>, or Claude Code session with the plugin removes the old copy.</p>
 </div></li>
 <li><div class="step">
   <h3>Index a repository and search it</h3>
@@ -255,7 +255,7 @@ nx upgrade        <span class="c"># update the service, the data, and the plugin
 <ol class="steps">
 <li><div class="step">
   <h3>Optional: keep a copy of your data</h3>
-  <p>On a local install, <code>nx backup</code> writes the whole database, memory included, to one file in <code>~/nexus-backups/</code>. On a managed service it writes your own tenant to a <code>.nxtenant</code> file in the same folder, and it needs a tenant or data token. Move that file somewhere you keep before you remove the data.</p>
+  <p>On a local install, <code>nx backup</code> writes the whole database, memory included, to one file in <code>~/nexus-backups/</code>. On a managed service it writes your own tenant to a <code>.nxtenant</code> file in the same folder, and it needs a tenant or data token and engine 0.1.191 or later. Move that file somewhere you keep before you remove the data.</p>
   <div class="cmd"><pre>nx backup</pre><button class="copy" type="button">Copy</button></div>
   <p>For a cloud file, <code>nx backup --check <span class="ph">&lt;FILE&gt;</span>.nxtenant</code> verifies it on your computer without contacting the service.</p>
   <p>To keep only the knowledge store, in a form a new install can import one collection at a time, export it:</p>
@@ -312,7 +312,7 @@ Test-Path "$HOME\.local\share\nexus"                                  <span clas
 <details data-os-block="mac linux"><summary>nx: command not found</summary><p>Add <code>~/.local/bin</code> to your PATH and open a new terminal. If PATH is already correct, run <code>nx self install</code>. If <code>nx</code> was never installed, run <code>uv tool install conexus --python 3.12</code>.</p></details>
 <details class="hidden" data-os-block="windows"><summary>nx: command not found</summary><p>Open a new PowerShell window. If <code>nx</code> is still not found, check that <code>%USERPROFILE%\.local\share\nexus\tools\current\bin</code> is on your user PATH.</p></details>
 <details class="hidden" data-os-block="linux"><summary>Linux: uv says "unexpected argument '--torch-backend'"</summary><p>Your uv is too old for the option the install uses to get the CPU build of torch on Linux. Run <code>uv self update</code>, or update uv with the package manager that installed it, and then run the install again.</p></details>
-<details><summary>The service will not start and says to run <code>nx backup</code></summary><p>Your store holds old-format rows that the next engine start would delete. Nexus refuses to start the engine (exit 75) until you have a backup. Run <code>nx backup</code>, then run <code>nx upgrade</code> or <code>nx daemon service start</code> again. This applies to the local service only, because a managed service keeps its own backups.</p></details>
+<details><summary>The service will not start and says to run <code>nx backup</code></summary><p>Your store holds old-format rows that the engine's first start would delete, so Nexus refuses to start the engine until a backup exists. Run <code>nx backup</code> now, because a backup taken before the refusal does not count. Then run <code>nx daemon service start</code>. Do not run <code>nx upgrade</code> again, because it can time out while it checks a large backup and the start command has no time limit. This applies only to the bundled local Postgres. The operator of a managed or self-hosted Postgres owns the backups.</p></details>
 <details><summary>nx search returns nothing</summary><p>Run <code>nx doctor</code>. If you chose CLI only, no service runs yet, so run <code>nx init</code> for a local service or <code>nx config init</code> for a managed one. If the index was interrupted, run <code>nx index repo .</code> again and it continues where it stopped.</p></details>
 <details data-for="code cli"><summary>Plugin installed but its tools never appear</summary><p>Usually the <code>nx</code> command is not installed, setup has not finished, or you chose Not now. Type <code>/conexus:setup</code>, which shows what is missing and asks before it installs anything. After setup is done, reconnect the <code>nexus</code> server with <code>/mcp</code>. <code>/conexus:nx-preflight</code> also lists what is missing.</p></details>
 <details class="hidden" data-for="desktop"><summary>Plugin added but Claude shows no Nexus tools</summary><p>Usually the <code>nx</code> command is not installed or setup has not finished. Say <em>Set up Nexus</em> in a conversation, and Claude shows what is missing and asks before it installs anything. After setup is done, quit Claude Desktop fully and open it again, because a new conversation keeps the old server.</p></details>
@@ -360,7 +360,7 @@ nx self install</pre><button class="copy" type="button">Copy</button></div>
 <p>Then <a href="#after">index a repository</a>.</p>
 </details>
 <details id="what"><summary>What you installed and what it sends</summary>
-<p>Nexus is one service on your computer. It holds a database (Postgres 17 with pgvector) and three stores: scratch for one session, memory for project facts, and knowledge for everything you index. The search model also runs on your computer, so your data does not leave it unless you add a Voyage key.</p>
+<p>Nexus is one service on your computer. It holds a database (Postgres 17 with pgvector) and three stores: scratch for one session, memory for project facts, and knowledge for everything you index. The search model also runs on your computer, so your data does not leave it unless you add a Voyage AI key. That key sends your text to an outside embedding service.</p>
 <p>While Claude uses Nexus, it sends one short message a day, with no hostname, paths, or content. The <a href="https://github.com/Hellblazer/nexus/blob/main/docs/privacy-policy.md">privacy policy</a> lists the fields, <code>nx telemetry off</code> stops it, and <code>nx telemetry status</code> shows the setting.</p>
 </details>
 

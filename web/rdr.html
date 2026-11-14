@@ -202,7 +202,7 @@ details.gloss>.pad{padding:0 14px 12px}
 <p class="note">Claude may also propose the RDR: "This has three possible designs. Do you want an RDR?" The plugin tells Claude to ask before it builds anything with no written design.</p>
 
 <h3>Choose the size now</h3>
-<p>Tell Claude how big the decision is, because that decides how much of the template Claude uses. The gate checks every RDR for the same sections, so size changes how much you write in each, not which sections exist. A bug with one clear cause keeps each section to a few lines. A design with real alternatives fills them in fully.</p>
+<p>Tell Claude how big the decision is, because that decides how much Claude writes in each section. The gate checks every RDR for the same sections, so size changes how much you write in each, not which sections exist. A bug with one clear cause keeps each section to a few lines. A design with real alternatives fills them in fully.</p>
 <div class="cmd"><pre>This is a bug with one cause. Keep every section short.</pre><button class="copy" type="button">Copy</button></div>
 <div class="cmd"><pre>This is an architecture change. Use the full template, and we will need real alternatives.</pre><button class="copy" type="button">Copy</button></div>
 <p>The usual problem is too much text, not too little. When Claude adds a section, ask which decision it serves, and remove it if the answer is none.</p>
@@ -349,7 +349,7 @@ details.gloss>.pad{padding:0 14px 12px}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Phase <span class="ph">&lt;N&gt;</span> looks done. Run the phase review.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/phase-review-gate/SKILL.md"><code>/conexus:phase-review-gate</code></a>. It lists every numbered item in the RDR's Approach. Each item needs a pointer: the closed task that delivered it, or <code>none</code> when the item is deliberately out of scope for this phase. An item with no pointer is missing, and the phase is not done until it has one. This is a checklist that Claude walks with you, not an enforced gate, because no command checks the list and nothing blocks the close. It exists to catch scope that shrinks quietly, one small omission at a time.</p>
+<p>Claude runs <a href="https://github.com/Hellblazer/nexus/blob/main/conexus/skills/phase-review-gate/SKILL.md"><code>/conexus:phase-review-gate</code></a>. It lists every numbered item in the RDR's Approach. Each item needs a pointer: the closed task that delivered it, or <code>none</code> when the item is deliberately out of scope for this phase. An item with no pointer is missing, and the phase is not done until it has one. This is a checklist that Claude walks with you, not an enforced gate, because nothing blocks the close. It exists to catch scope that shrinks quietly, one small omission at a time.</p>
 <p class="note">Code review and test validation cannot find this, because they check what was built. Only a comparison of the RDR with the tasks checks what was not built.</p>
 
 <h3>When the build proves the RDR wrong</h3>

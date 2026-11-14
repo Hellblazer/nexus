@@ -38,7 +38,7 @@ Match depth to the decision's complexity.
 | **Minimal** (bug, single option) | All sections, each a few lines | AST line-range bug: splitter returns empty metadata |
 | **Full** (architecture, multiple options) | All sections, each filled in | Four-store T3 architecture with quota enforcement |
 
-The gate checks every RDR for the same sections (Context, Research Findings, Proposed Solution, Alternatives Considered, Trade-offs, Implementation Plan, Success Criteria, and `#### Gap N:` headings under Problem), so a small RDR keeps each section short. Don't pad a section to look thorough.
+The gate checks every RDR for the same sections (Context, Research Findings, Proposed Solution, Alternatives Considered, Trade-offs, Implementation Plan, Success Criteria, and, in a new RDR, `#### Gap N:` headings under Problem), so a small RDR keeps each section short. Don't pad a section to look thorough.
 
 ## Evidence classification
 

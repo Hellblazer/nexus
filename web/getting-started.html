@@ -383,13 +383,13 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <h3>Health check</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
-<p>No line may show ✗. Read every ⚠ line. If you installed by hand, "Orphan uv install" is normal right after <code>nx self install</code>. It goes away once the old uv copy is removed. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
+<p>No line may show ✗. Read every ⚠ line. The line "Orphan uv install" means a copy of conexus installed with uv is still on disk. Right after <code>nx self install</code> that is normal, and Nexus removes the old copy at the next <code>nx self install</code>. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
 
 <h3>Back up before you update</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Back up the Nexus database.</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude runs <code>nx backup</code>, which writes the local database to one file in <code>~/nexus-backups/</code> while the engine keeps running. The file is about as large as the database. Nothing runs a backup for you, not <code>nx upgrade</code> and not a hook, so ask for one before an update. If your store still holds old-format rows, Nexus refuses to start the engine until a backup exists, and the message says so.</p>
-<p>On a managed service, <code>nx backup</code> writes your own tenant to a <code>.nxtenant</code> file in the same folder. To check that file without contacting the service, run <code>nx backup --check <span class="ph">&lt;FILE&gt;</span></code>.</p>
+<p>Claude runs <code>nx backup</code>, which writes the local database to one file in <code>~/nexus-backups/</code> while the engine keeps running. The file is about as large as the database. Nothing runs a backup for you, not <code>nx upgrade</code> and not a hook, so ask for one before an update. If your store still holds old-format rows, Nexus refuses to start the engine until a backup taken after that refusal exists. A backup you took earlier does not count, and the message names the commands to run.</p>
+<p>On a managed service, <code>nx backup</code> writes your own tenant to a <code>.nxtenant</code> file in the same folder, and it needs engine 0.1.191 or later. To check that file without contacting the service, run <code>nx backup --check <span class="ph">&lt;FILE&gt;</span></code>.</p>
 
 <h3>Update</h3>
 <div class="see">You might say</div>
