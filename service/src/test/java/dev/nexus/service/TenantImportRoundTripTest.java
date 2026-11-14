@@ -242,6 +242,142 @@ class TenantImportRoundTripTest {
         });
     }
 
+    // ── references resolve, and the checks above can fail ───────────────────────────────────────
+
+    /** What {@link #resolution} found for one reference column: rows it looked at, and positive values that name no row of the tenant. */
+    private record Resolution(String reference, long examined, long unresolved) {
+    }
+
+    /**
+     * Every reference of every exported table whose parent is exported, resolved inside {@code tenant}: a foreign key
+     * must find its parent row in the tenant, and a soft reference's positive values (a NULL, 0 or negative value names
+     * no row by design) must find theirs, as a restored tenant must hold no pointer into another tenant's ids.
+     */
+    private List<Resolution> resolution(String tenant) {
+        return env.su(ctx -> {
+            List<Resolution> out = new ArrayList<>();
+            for (ExportTable t : TenantExport.TABLES) {
+                if (!t.exported()) continue;
+                for (Reference r : t.references()) {
+                    var parent = TenantExport.entry(r.parentTable());
+                    if (parent.isEmpty() || !parent.get().exported()) continue;
+                    String child = "nexus." + t.table(), par = "nexus." + parent.get().table();
+                    String sql;
+                    if (r.array()) {
+                        sql = "SELECT count(*) FILTER (WHERE v > 0), count(*) FILTER (WHERE v > 0 AND NOT EXISTS (SELECT 1 FROM " + par
+                            + " p WHERE p.tenant_id = ? AND p." + r.parentColumns().get(0) + " = v)) FROM " + child
+                            + " c, unnest(c." + r.columns().get(0) + ") v WHERE c.tenant_id = ?";
+                    } else if (r.jsonPath() != null) {
+                        String v = "(c." + r.columns().get(0) + " #>> '{" + r.jsonPath().replace('.', ',') + "}')::bigint";
+                        sql = "SELECT count(*) FILTER (WHERE " + v + " > 0), count(*) FILTER (WHERE " + v + " > 0 AND NOT EXISTS (SELECT 1 FROM "
+                            + par + " p WHERE p.tenant_id = ? AND p." + r.parentColumns().get(0) + " = " + v + ")) FROM " + child
+                            + " c WHERE c.tenant_id = ?";
+                    } else {
+                        StringBuilder on = new StringBuilder("p.tenant_id = ?");
+                        StringBuilder present = new StringBuilder();
+                        for (int i = 0; i < r.columns().size(); i++) {
+                            String c = r.columns().get(i), pc = r.parentColumns().get(i);
+                            if (c.equals("tenant_id")) continue;
+                            on.append(" AND p.").append(pc).append(" = c.").append(c);
+                            present.append(" AND c.").append(c).append(r.foreignKey() ? " IS NOT NULL" : " > 0");
+                        }
+                        sql = "SELECT count(*) FILTER (WHERE true" + present + "), count(*) FILTER (WHERE true" + present
+                            + " AND NOT EXISTS (SELECT 1 FROM " + par + " p WHERE " + on + ")) FROM " + child + " c WHERE c.tenant_id = ?";
+                    }
+                    int params = (int) sql.chars().filter(ch -> ch == '?').count();
+                    Object[] binds = new Object[params];
+                    Arrays.fill(binds, tenant);
+                    Record row = ctx.fetchOne(sql, binds);
+                    out.add(new Resolution(t.name() + "." + String.join(",", r.columns()) + " -> " + parent.get().name(),
+                        row.get(0, Long.class), row.get(1, Long.class)));
+                }
+            }
+            return out;
+        });
+    }
+
+    @Test
+    void everyForeignKeyAndSoftReferenceOfTheRestoredTenantResolvesToItsOwnNewRows() throws Exception {
+        String tenant = "t-imp-rt-d";
+        assertThat(env.restore(env.newTenant(tenant), file).get("status").asText()).isEqualTo("committed");
+
+        List<Resolution> found = resolution(tenant);
+
+        assertThat(found).as("the check looked at the references of the registry").hasSizeGreaterThanOrEqualTo(20);
+        assertThat(found.stream().filter(r -> r.unresolved() > 0).toList()).as("references that name no row of the tenant").isEmpty();
+        // a check that examined nothing proves nothing: every reference must have held a value to resolve
+        assertThat(found.stream().filter(r -> r.examined() == 0).map(Resolution::reference).toList())
+            .as("references with no value to resolve (the seed must reach every one)").isEmpty();
+        // and the source tenant resolves the same way, so the check is not tuned to the restore
+        assertThat(resolution(SRC).stream().filter(r -> r.unresolved() > 0).toList()).isEmpty();
+    }
+
+    @Test
+    void theChecksFailWhenTheIdsAreNotReassignedOrAValueIsDamaged() throws Exception {
+        // A restore that kept the source's ids (the regression the reassignment exists to prevent) is simulated by
+        // pointing the restored tenant's soft references back at the SOURCE tenant's ids. Every comparison must see it.
+        String tenant = "t-imp-rt-e";
+        assertThat(env.restore(env.newTenant(tenant), file).get("status").asText()).isEqualTo("committed");
+        Map<Long, String> srcMemory = labels("memory", "title", SRC);
+        Map<Long, String> dstMemory = labels("memory", "title", tenant);
+        assertThat(summarySources(tenant, dstMemory)).as("sound before the damage").isEqualTo(summarySources(SRC, srcMemory));
+        assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0)).isEmpty();
+        long srcMemoryId = srcMemory.keySet().iterator().next();
+        long srcPlanId = labels("plans", "query", SRC).keySet().iterator().next();
+
+        env.su(ctx -> {
+            ctx.execute("UPDATE nexus.memory_summaries SET source_ids = ARRAY[?::bigint] WHERE tenant_id = ?", srcMemoryId, tenant);
+            ctx.execute("UPDATE nexus.nx_answer_runs SET plan_id = ? WHERE tenant_id = ?", srcPlanId, tenant);
+            return null;
+        });
+
+        assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0).map(Resolution::reference).toList())
+            .as("the resolution check sees ids that name another tenant's rows")
+            .anyMatch(s -> s.startsWith("memory_summaries.source_ids")).anyMatch(s -> s.startsWith("nx_answer_runs.plan_id"));
+        assertThat(summarySources(tenant, dstMemory)).as("the join comparison sees it too").isNotEqualTo(summarySources(SRC, srcMemory));
+        assertThat(runPlans(tenant)).isNotEqualTo(runPlans(SRC));
+
+        // and the contents comparison sees a value changed in a column no restore touches
+        ExportTable memory = TenantExport.entry("memory").orElseThrow();
+        env.su(ctx -> ctx.execute(
+            "UPDATE nexus.memory SET content = content || '!' WHERE tenant_id = ? AND id = (SELECT min(id) FROM nexus.memory WHERE tenant_id = ?)",
+            tenant, tenant));
+        assertThat(rowsOf("memory", tenant, changedByDesign(memory))).isNotEqualTo(rowsOf("memory", SRC, changedByDesign(memory)));
+    }
+
+    @Test
+    void aSecondGenerationRestoreIsEqualToTheSourceOnEveryTableAndEveryReference() throws Exception {
+        // restore A -> C, export C, restore that file -> E: every comparison of the first generation holds against the ORIGINAL source
+        String first = "t-imp-gen-1", second = "t-imp-gen-2";
+        String firstToken = env.newTenant(first);
+        assertThat(env.restore(firstToken, file).get("status").asText()).isEqualTo("committed");
+        ImportTestEnv.BackupFile again = env.export(firstToken);
+
+        JsonNode end = env.restore(env.newTenant(second), again);
+
+        assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("committed");
+        for (ExportTable t : TenantExport.TABLES) {
+            if (!t.exported()) continue;
+            if (t.name().equals("catalog_meta")) {
+                // the source's rows, the tenant's own ghost-sweep row, and the marker of THIS restore (the first marker came in the file and is replaced)
+                assertThat(env.count(t.table(), second)).as("catalog_meta").isEqualTo(env.count(t.table(), SRC) + 1);
+                continue;
+            }
+            assertThat(env.count(t.table(), second)).as("rows of " + t.name()).isEqualTo(env.count(t.table(), SRC));
+            assertThat(rowsOf(t.table(), second, changedByDesign(t))).as("contents of " + t.name())
+                .isEqualTo(rowsOf(t.table(), SRC, changedByDesign(t)));
+        }
+        Map<Long, String> srcMemory = labels("memory", "title", SRC);
+        Map<Long, String> dstMemory = labels("memory", "title", second);
+        assertThat(dstMemory.keySet()).as("a second generation has ids of its own").doesNotContainAnyElementsOf(srcMemory.keySet())
+            .doesNotContainAnyElementsOf(labels("memory", "title", first).keySet());
+        assertThat(parentLabels(second)).isEqualTo(parentLabels(SRC));
+        assertThat(summarySources(second, dstMemory)).isEqualTo(summarySources(SRC, srcMemory));
+        assertThat(runPlans(second)).isEqualTo(runPlans(SRC)).isNotEmpty();
+        assertThat(topicRefs(second)).isEqualTo(topicRefs(SRC)).isNotEmpty();
+        assertThat(resolution(second).stream().filter(r -> r.unresolved() > 0)).isEmpty();
+    }
+
     @Test
     void theNextEngineInsertAfterTheLoadSucceeds() throws Exception {
         String tenant = "t-imp-rt-c";
