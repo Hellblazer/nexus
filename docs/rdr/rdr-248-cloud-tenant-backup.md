@@ -129,7 +129,7 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
   - 21 tables key on a global serial or hashed id without the tenant, so a restore into a second tenant
     in the same database collides unless ids are reassigned; reassigning through per-table maps, with
     foreign-key children rewritten and tables loaded in foreign-key order, loaded A into an empty C with
-    counts and checksums equal (outside the reassigned columns and one trigger-maintained column);
+    counts and row contents equal (outside the reassigned columns and one trigger-maintained column);
   - tuple ids hash the tenant, so tuples cannot move to another tenant by copying;
   - the seeded tenant exported 312 KB in 0.04 s, 285 KB of it chunks: size follows chunk count, about
     5 KB per bge-768 chunk.
@@ -144,7 +144,7 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 | A1 | The cloud front end lets one authenticated response stream for tens of minutes and several GB | **Refuted** (bob, from conexus config, 2026-11-11): the edge proxy closes every exchange at an absolute 60 s, the load balancer idle timeout and CloudFront's origin read timeout are 60 s, and the sidecar caps a request body at 20 MB | Config reading; the design below works within those limits |
 | A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); the cloud has no pooler (the engine reaches PG directly through its own Hikari pool, bob 2026-11-11), so the local result carries | Local spike |
 | A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Steps 4 and 6 test's seed |
-| A4 | Import loads in one transaction | Verified at toy scale (57 chunks, 0.12 s) with id reassignment, foreign-key order and tuples excluded; at real scale the load cannot fit one 60-second exchange (248-research-11, inferred), so the commit is asynchronous; its time at scale is measured in Step 6 | Local spike |
+| A4 | Import loads in one transaction | Verified at toy scale (57 chunks, 0.12 s) with id reassignment, foreign-key order and tuples excluded; at real scale the load cannot fit one 60-second exchange (248-research-11, inferred), so the commit is asynchronous; its time at scale was measured in Step 6: 33 minutes for 500,000 chunks (Performance Expectations), one run | Local spike |
 | A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Verified (bob, read-only cloud window, Sam's go, 2026-11-11, T2 `nexus/rdr248-cloud-spike-2026-11-11`): tenant `nexus` is 2,272,023 rows and 3.82 GB in binary COPY over the 26 data and derived tables, read from one snapshot in about 83 s (`chunks` 542,778 rows, 3.39 GB, 78 s, about 43 MB/s; the rest about 5 s). A snapshot held 60 minutes (by accident) left the xmin age near 1000 and dead tuples barely grown (`topic_assignments` 45.7k to 46.8k); no autovacuum ran in the window | Cloud measurement |
 | A6 | A snapshot exported by one transaction serves many later page transactions, confined by RLS, consistent across writes | Verified locally (spike round 2, T2 `nexus/rdr248-local-spike-r2-2026-11-11`): 43 pages, writes and deletes committed between pages, concatenated pages equal the single-transaction export row for row on all 26 tables | Local spike |
 | A7 | The cloud engine role has no `idle_in_transaction_session_timeout` that would kill the held transaction between page requests | Verified (bob, same window): idle-in-transaction, idle-session, statement and transaction timeouts are 0 at server level, with no role or database override for `nexus_svc`; the engine sets `statement_timeout` locally only on its search and taxonomy paths, so the export's dedicated connection sets its own bounds | Cloud settings read; engine source |
@@ -397,7 +397,8 @@ client reads the body. `GET /version` reports `tenant_import_supported`.
 export; a status poll is not activity. After a commit refused `restore_busy`, the restore-wait bound above
 (`NX_IMPORT_LOAD_MAX` from the first attempt). In all a session can hold its slot and its transaction for up to
 three hours. After commit the load has a total bound, `NX_IMPORT_LOAD_MAX` (default 60
-minutes, set from the Step 6 scale run with a margin of at least 2x), enforced by the engine cancelling the load's
+minutes; the Step 6 run measured 33 minutes for 500,000 chunks, so the default is 1.8x that load and short of the 2x margin
+this was meant to carry: the bound is Sam's decision, ask `rdr248-load-bound`), enforced by the engine cancelling the load's
 backend; each statement also runs under a statement timeout of the same value. Each part's staging COPY runs
 under a 120 s statement timeout. `DELETE /v1/tenant/import/{id}`
 aborts: before commit it rolls back the staged transaction; during the load it cancels the backend, and the
@@ -536,9 +537,12 @@ exporter; every new table needs a new exporter.
 - **Risk**: a schema change between export and import makes a file unloadable.
   **Mitigation**: the compatibility rule loads a file from an older engine whose columns still exist in
   the target, filling new columns from their defaults. A committed fixture enforces it: Step 6 writes a
-  small backup file with the engine of this RDR's implementation and keeps it in the repository; a test
-  loads that fixture on every later engine, so a migration that drops or retypes an exported column goes
-  red there and must say what it does to old backups.
+  small backup file with the code of this RDR's implementation and keeps it in the repository; a test
+  loads that fixture on every later engine. It is a file from THIS code, and it becomes an older-engine
+  file the day a later migration lands, so a migration that drops or retypes an exported column goes
+  red there and must say what it does to old backups. The SHA-256 pin is the guard against replacing
+  the file; the header's `engine_version` names the generating commit (a test engine is unstamped), and
+  is pinned only as a second, redundant label.
 - **Risk**: a restore's load blocks tenant create on the shared database until it commits.
   **Mitigation** (Sam, 2026-11-11: bound it): one restore load at a time per database (an advisory lock);
   tenant create's DDL path checks the same lock and answers `tenant_creation_busy` with a 30 s retry-after
@@ -661,7 +665,7 @@ None.
 
 ## Test Plan
 
-- **Scenario**: export then import into an empty tenant — **Verify**: per-table counts and checksums equal.
+- **Scenario**: export then import into an empty tenant — **Verify**: per-table counts and row contents equal.
 - **Scenario**: two tenants — **Verify**: the export holds none of the other tenant's rows.
 - **Scenario**: import into a non-empty tenant — **Verify**: refused, nothing written.
 - **Scenario**: a file written by an older engine — **Verify**: it loads, and columns the file lacks take
@@ -746,7 +750,7 @@ total 60 minutes (Sam, 2026-11-11), refused-with-retry when an engine already ha
 sessions. 60 minutes is the hold A5 observed as benign at that window's write rate; an export that
 would run longer fails, naming the limit. Import bounds (Phase 2 design): upload idle 10 minutes and 60 minutes
 in all, so a nexus-size file (3.82 GB) needs about 1.1 MB/s sustained, and a slower link fails at the bound,
-naming it; the load `NX_IMPORT_LOAD_MAX`, default 60 minutes until the Step 6 scale run sets it with a 2x margin;
+naming it; the load `NX_IMPORT_LOAD_MAX`, default 60 minutes (the Step 6 run measured 33 minutes for 500,000 chunks, so a 2x margin would be 66 minutes; the default is Sam's decision);
 parts of at most 8 MiB. An import holds one of the engine's export/import session slots for up to three hours (upload, restore wait, load).
 
 **Gate N1 scale run (nexus-csayy.4, 2026-11-12, local engine on chas, `tests/e2e/export_scale_run.py`).** One tenant
@@ -827,17 +831,21 @@ Not measured here: the cloud's edge rate, its pool size and `max_connections`, a
 trip (Activation Step 2) records those; its 500,000-chunk page times should be read against 0.28 s above, not 0.1 s.
 
 **Step 6 commit at scale (nexus-csayy.7, 2026-11-14, local engine on chas `lab-l`, `tests/e2e/import_scale_run.py`; T2
-`nexus/rdr248-import-scale-run-2026-11-14`).** The 500,000-chunk tenant of the export run, with every other data and derived
-table seeded beside it (26 tables, 2,151,015 rows, soft references of every kind), exported (2,438,747,324 bytes, 56 s) and
-restored by the shipped client into an empty tenant of the same database; the database had fsync off, which a cloud database
-has not. Every table's count equals the source's (`catalog_meta` plus the marker). Upload 20 s over loopback (444 parts); staged
-bytes 2,438,681,881. **The load took 1,973 s (32.9 minutes)**: the chunks insert 1,361 s (69%, HNSW maintenance), the topic
-assignments 261 s, the verify phase 263 s, everything else under a minute. The held transaction lived 2,006 s; the oldest
-`xmin` age of any backend reached 2,191 transactions and the database was otherwise idle. Tenant create during the load: 545
-probes, every one 503 `tenant_creation_busy` with `Retry-After: 30` in 0.42 to 0.81 s (median 0.61 s); a token for an existing
-tenant 545 of 545 in under 20 ms; 0.04 s on an idle database and after the commit. The default `NX_IMPORT_LOAD_MAX` of 3,600 s is
-1.8 times this load, short of the 2x margin this section promised; a 2x margin is 3,960 s. The load is over 30 minutes, so the
-default is left as it is and the choice (a larger bound, or a cheaper chunk load) is Sam's.
+`nexus/rdr248-import-scale-run-2026-11-14`). One run (n=1).** The 500,000-chunk tenant of the export run, with every other data
+and derived table seeded beside it (26 tables, 2,151,015 rows, soft references of every kind), exported (2,438,747,324 bytes,
+56 s) and restored by the shipped client into an empty tenant of the same database. The database was a throwaway cluster with
+`fsync` off and `wal_level = minimal`, which a cloud database is not, and a tenant create probe ran every 3.6 s for the whole
+load (the probes take locks for under a second). Every table's row count equals the source's (`catalog_meta` plus the marker);
+counts were compared, not checksums. Upload 20 s over loopback (444 parts); staged bytes 2,438,681,881. **The load took 1,973 s
+(32.9 minutes)**: the chunks insert 1,361 s (69%, HNSW maintenance, about 2.7 ms a chunk), the topic assignments 261 s, the
+verify phase 263 s, everything else under a minute; about 4 ms of load per chunk in all. The held transaction lived about
+2,000 s (sampled maximum 1,993 s); the oldest `xmin` age of any backend reached 2,191 transactions, from an idle database, and
+is no bound for a busy one. Tenant create during the load: 545 probes, every one 503 `tenant_creation_busy` with
+`Retry-After: 30` in 0.42 to 0.81 s (median 0.61 s); a token for an existing tenant 545 of 545 in under 20 ms; 0.04 s on an idle
+database and after the commit. Tenant `nexus` is about 1.1x the chunks and 1.6x the bytes of this tenant, so its load would be
+longer. The default `NX_IMPORT_LOAD_MAX` of 3,600 s is 1.8 times this load, short of the 2x margin (3,960 s) this section
+promised; a durable, busy database would need more. The default is left as it is and the choice (a larger bound, or a cheaper
+chunk load) is Sam's, ask `rdr248-load-bound`.
 
 ## Finalization Gate
 
@@ -858,7 +866,7 @@ A2 to A7 are verified (research records 248-research-1 to -14): A2, A3 and A6 by
 scale by a local spike, A5 and A7 by a read-only cloud window, A1 refuted and designed around. Left for
 implementation, not assumed in the design: the column types the spike did not exercise (bigint[],
 smallint, uuid, the identity column), which the Step 4 and 6 tests seed; the commit's time at scale, measured
-in Step 6 and used to set the load's total bound `NX_IMPORT_LOAD_MAX`; and the cloud edge's transfer rate, which sets an
+in Step 6 (33 minutes for 500,000 chunks, one run), which informs the load's total bound `NX_IMPORT_LOAD_MAX`, whose default is Sam's decision; and the cloud edge's transfer rate, which sets an
 export's time but no design choice and is recorded at Activation Step 2.
 
 #### API Verification
@@ -873,9 +881,9 @@ export's time but no design choice and is recorded at Activation Step 2.
 ### Scope Verification
 
 The Minimum Viable Validation is Step 4's export tests at scale (Phase 1) and Step 6's round-trip test (Phase 2): export a seeded tenant through the shipped
-routes, import into an empty tenant in the same database, and assert equal counts, checksums and joins,
+routes, import into an empty tenant in the same database, and assert equal counts, row contents and joins,
 in-process with the test fixtures, plus one commit at scale (at least 500,000 synthetic chunks) whose time
-is recorded. Step 4 gates the export release (Activation Step 1); Step 6 gates the later restore
+is recorded and whose per-table counts are compared (not checksums). Step 4 gates the export release (Activation Step 1); Step 6 gates the later restore
 release (Activation Step 1); the cloud export is Activation Step 2.
 
 ### Cross-Cutting Concerns
@@ -917,3 +925,4 @@ tenants. Nothing to trim.
 - 2026-11-13: Phase 2 design check round 3 (T2 `nexus_rdr/248-phase2-design-check-r3`, 0 BLOCKS-PLANNING): the route list (table close, idempotent commit, `import-marker`, busy names the open session), the tenant-create check as a `create_tenant_partitions` parameter on its slow path only, the cloud-to-local line pointed at its ask, the census left at the types a BIGSERIAL fits, and the remaining Test Plan and Failure Modes lines.
 - 2026-11-13: Step 5 review round 1 (T2 `nexus/review-712a73dfb-nexus-csayy.6-2026-11-13`, `nexus/critique-712a73dfb-nexus-csayy.6-2026-11-13`): the RDR-225 walk cannot pass `p_check_restore` and does not need to (amended); ended sessions keep their outcome for 24 hours; verify fails a foreign-key value with no parent in the file and refuses a child table without its parent; staging statement timeout 120 s; Routes points at the wire-contract entry for bodies and reason codes, and a 409 names the session's kind. Amended under standing grant 3 to match reviewed code.
 - 2026-11-13: Step 5 client review (T2 `nexus/review-a8efcfcef-nexus-csayy.6-client-2026-11-13`, `nexus/critique-a8efcfcef-nexus-csayy.6-2026-11-13`): the Restore verb states its rules for a load it cannot see (fail-closed stale delete, nothing deleted after a commit attempt, marker settles any failed answer), its failsafe waits, `header_sha256` and `row_bytes`, the both-lists upload, no automatic restart after a part failure, and that a local restore uses a tenant token, the default tenant's included (ask `rdr248-local-root`). Amended under standing grant 3 to match reviewed code.
+- 2026-11-14: Step 6 (nexus-csayy.7): the round trip, the committed fixture, the runbook and the commit at scale (33 minutes for 500,000 chunks, one run); the load bound the RDR promised to set with a 2x margin is left as a decision for Sam (ask `rdr248-load-bound`) because the measured load is over 30 minutes; review round 1 (T2 `nexus/critique-a4e85add1-nexus-csayy.7-2026-11-14-r1`, `nexus/review-a4e85add1-nexus-csayy.7-2026-11-14-r1`) folded in.
