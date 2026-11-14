@@ -35,10 +35,10 @@ Match depth to the decision's complexity.
 
 | Scenario | Sections needed | Example |
 |---|---|---|
-| **Minimal** (bug, single option) | Problem + Root Cause + Fix | AST line-range bug: splitter returns empty metadata |
-| **Full** (architecture, multiple options) | All sections | Four-store T3 architecture with quota enforcement |
+| **Minimal** (bug, single option) | All sections, each a few lines | AST line-range bug: splitter returns empty metadata |
+| **Full** (architecture, multiple options) | All sections, each filled in | Four-store T3 architecture with quota enforcement |
 
-If you can state the problem, root cause, and fix in one paragraph, that IS the RDR. Don't add sections to look thorough.
+The gate checks every RDR for the same sections (Context, Research Findings, Proposed Solution, Alternatives Considered, Trade-offs, Implementation Plan, Success Criteria, and `#### Gap N:` headings under Problem), so a small RDR keeps each section short. Don't pad a section to look thorough.
 
 ## Evidence classification
 
