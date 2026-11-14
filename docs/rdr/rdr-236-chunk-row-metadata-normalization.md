@@ -976,9 +976,9 @@ the enforcement this RDR adds:
 | octet_length(chash) = 32 | the existing NOT VALID CHECK `chunks_chash_octet_check` (vectors-004, carried onto the partitioned table by vectors-030; RF-24), left NOT VALID since the chash-rekey rung retired; VALIDATE only, by the validate route, after reading `pg_constraint.convalidated` | negligible |
 | metadata embedding_model = the column | CHECK; not censused by RF-16, counted by the Step 3 dry run first (6pfgb.42) | negligible |
 | quarantined_by implies quarantined_at (RF-16: 158 rows in the quarantine collections, moved by the engine's `gc_quarantine_orphans` on the client's call, carry quarantined_at alone, 0 rows the other way, 0 half-present in live collections; a gc restore drops quarantined_at and leaves quarantined_by, so the restore drops all four before the CHECK is added: 6pfgb.40) | CHECK | negligible |
-| manifest collection = the document's physical_collection | composite foreign key or trigger; documents with no physical_collection (RDR-191) need a rule (6pfgb.42) | one index lookup a manifest row |
-| chunk_index = position | CHECK (6pfgb.42) | negligible |
-| labels_written false means the labels are NULL | CHECK on `catalog_document_chunks`; not censused by RF-16, counted by the Step 3 dry run first, added in 6pfgb.42's own step (not the chunk routes) | negligible |
+| manifest collection = the document's physical_collection | no constraint: census-only, through `GET /v1/catalog/manifest/foreign_collection` (Sam, 2026-11-14, 6pfgb.42). Since RDR-191 the manifest collection is the caller's value (documents with no physical_collection are stamped with it; foreign-collection manifests exist, GH #1611), and an FK or trigger would refuse collection rename, the RDR-210 move, the reconcile commit, imports, the chash rename route and some rehomes | none |
+| chunk_index = position | CHECK, added NOT VALID and VALIDATEd by the operator routes `/v1/admin/manifest-chunk-index-check/{census,add,validate}` (6pfgb.42); never a startup changeset | negligible |
+| labels_written false means the labels are NULL | CHECK on `catalog_document_chunks`; not censused by RF-16, counted by the Step 3 dry run first, added in 6pfgb.42's own operator census / add NOT VALID / validate step (not the chunk routes), whose add refuses while the census counts a violator | negligible |
 | ttl_days > 0 means put_at present | CHECK on `catalog_documents` meta, counted at the .10 dry run, added NOT VALID only after the Step 2c paired cut (a pre-6pfgb.15 client writes ttl_days without put_at and would be refused by a NOT VALID CHECK; after 2c such a client is already refused, so the ledger entry is the same not-additive one) and VALIDATEd in its own step (6pfgb.44) | negligible |
 | derived document keys (source_format; indexed files' tags and category) | none in the database (option A): stored meta keys stamped at register by one rule per key (`src/nexus/catalog/indexed_meta.py`) and filled for older documents by backfill-meta; a later change to content_type or file_path does not restamp tags and category (a re-index fills them only if empty and keeps the first non-empty stamp; correct by `nx catalog update --meta`), while source_format is re-stamped on every re-register | one regex per register for source_format |
 
@@ -1029,7 +1029,7 @@ equality the census covered already holds on live data (chunk_text_hash
 equals the chash, chash is 32 bytes everywhere, manifest collection
 equals the document's physical_collection, chunk_index equals position),
 so the CHECKs on those equalities (chunk_text_hash, chash width,
-chunk_index; the manifest collection rule is 6pfgb.42's) hold there
+chunk_index; the manifest collection equality stays census-only, 6pfgb.42) hold there
 without a data fix; two CHECKs the table lists were not censused (metadata
 embedding_model equal to the column; labels_written false with NULL
 labels) and are counted by the Step 3 dry run before they are added
@@ -1078,7 +1078,7 @@ part of K, determines it.
 | chunk_type (table_page) | none; dead | dropped by normalize before every write | none; writer removed | 6pfgb.27 |
 | quarantined_at, origin_collection, quarantined_by, reaper_quarantined_at | the physical row; written only by the engine | quarantined_by implies quarantined_at (CHECK); quarantined_at alone is a gc orphan move (158 rows in the quarantine collections, RF-16); gc restores today drop two | ROW; refused from a client write; the bypass prefixes (`quarantine-*`) stay exempt from the allow-list; the 158 rows with quarantined_at alone were stamped by the engine's `gc_quarantine_orphans`, which `chunk_quarantine.py` calls and which writes two of the four keys (RF-22); the restore fix for the four keys is 6pfgb.40, and the Step 3 sweep strips retired document keys from quarantined rows too so a restore passes the validated CHECK (RF-23) | stays; CHECK in Phase 4 |
 | last_written_at, retention, collection, embedding_model (columns) | the row | columns | ROW | stays |
-| `nexus.frecency` table (telemetry-001: frecency_score, ttl_days keyed by chunk) | a third home with no client writer found | engine-internal writers UNCONFIRMED | retire, or list its writer and reader | 6pfgb.42 settles |
+| `nexus.frecency` table (telemetry-001: frecency_score, ttl_days keyed by chunk) | a third home with no live writer or reader (the one client writer was an ETL import with no caller; the two routes were called only by tests) | retired | retired (Sam, 2026-11-14): a telemetry changeset drops the table, and its routes, repository methods and client method are removed | 6pfgb.42 |
 | doc_id, chunk_index, chunk_count | legacy (RDR-108 Phase 3) | on old rows; `indexer.py` ~3375 still sets doc_id | LEGACY; from engine 0.1.170 the search row itself names its owner (6pfgb.26, `/v1/vectors/search`); for a row that names none, the client resolves the chash through `chash_positions` (tenant-wide, each row carrying its `collection`) or the manifest fallback, and in both it prefers the smallest doc_id homed in the hit's collection, else the smallest doc_id in text order (text order equals the engine's `ORDER BY doc_id` only under C collation, which the local bundle's `initdb --no-locale` gives; the cloud collation is not verified in this repo). The pick is marked inferred (`DOC_ID_INFERRED_KEY`), `_owner_doc_ids` keeps every owner, and the score readers take the best live owner, so the pick is deterministic but not a fact about the row (6pfgb.52); read by the engine's manifest-less census forward join, the rdr192 rung and `manifest_backfill.py` to attribute a manifest-less chunk (RF-19) until the tenant's rdr192 completion record exists and 6pfgb.39 lands; then swept; kept on `quarantine-*` rows, which the restore reads before it moves the chunk, with nexus-l003p owning the move of the reattach plan's forward path off the restored row (RF-24); chunk_index lives on as the manifest column (CHECK equal to position) | 6pfgb.39, sweep |
 | source_path | legacy (RDR-102 D2) | absent | LEGACY; its dead client reads are removed in Phase 2; the engine's `/reapable` and reaper audit display read it until 6pfgb.39 (RF-19) | 6pfgb.39, sweep |
 | store_type, corpus, git_meta, git_project_name, git_branch, git_commit_hash, git_remote_url | legacy (RDR-101 Phase 5c) | the repo PDF dict still sets the flat git keys | LEGACY; writer removed in Phase 0 | sweep |
@@ -1086,8 +1086,9 @@ part of K, determines it.
 
 Manifest redundancies the analysis found, carried by 6pfgb.42 in the
 Phase 4 cut or after it (none is on the five Gaps' path): (tenant_id,
-doc_id) determines collection but nothing checks it against the
-document's physical_collection; chunk_index always equals position
+doc_id) determines collection, and its equality with the document's
+physical_collection is census-only (no constraint: the collection is
+caller-supplied since RDR-191); chunk_index always equals position
 (CHECK); labels_written false must mean NULL labels (CHECK).
 
 The site-level detail behind the table (every writer and reader by file
@@ -1811,7 +1812,7 @@ those four and the existing width CHECK `chunks_chash_octet_check`
 (reading `pg_constraint.convalidated` first; nothing has validated it since
 the chash-rekey rung retired, RF-23). The two routes carry `nexus.chunks`
 constraints only; the manifest-table CHECKs (labels_written false means
-NULL labels, chunk_index equals position, the collection rule: 6pfgb.42)
+NULL labels, chunk_index equals position: 6pfgb.42)
 and the catalog-table CHECK (ttl_days implies put_at: 6pfgb.44) are counted
 and added in their own beads' steps, after their own backfills. A tenant whose
 client never upgrades: its reads keep working and its writes are refused
@@ -2241,3 +2242,12 @@ log mode, the CHECK is what covers direct SQL; neither alone does both.
   `indexing` or `failed` chunk; no rival narrowing remains. The one accepted
   narrowing: a bytes-only restore (`--no-reattach`) of a chunk whose owner those
   keys named reports `owner_link_dropped` and cannot be reattached by a rerun.
+- 2026-11-14: amended at Sam's rulings on 6pfgb.42's two asks, in wren's
+  session. The manifest collection equality with the document's
+  physical_collection gets no constraint and stays census-only (the
+  `foreign_collection` route): since RDR-191 the collection is the caller's
+  value, and the writer audit found live writers an FK or trigger would
+  refuse. `nexus.frecency` is retired (no live writer or reader). The
+  chunk_index CHECK ships as the operator routes
+  `/v1/admin/manifest-chunk-index-check/*`, and the labels_written CHECK as
+  an operator step of the same shape whose add refuses on a counted violator.
