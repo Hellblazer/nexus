@@ -826,6 +826,19 @@ the limit.
 Not measured here: the cloud's edge rate, its pool size and `max_connections`, and a cold volume. The cloud round
 trip (Activation Step 2) records those; its 500,000-chunk page times should be read against 0.28 s above, not 0.1 s.
 
+**Step 6 commit at scale (nexus-csayy.7, 2026-11-14, local engine on chas `lab-l`, `tests/e2e/import_scale_run.py`; T2
+`nexus/rdr248-import-scale-run-2026-11-14`).** The 500,000-chunk tenant of the export run, with every other data and derived
+table seeded beside it (26 tables, 2,151,015 rows, soft references of every kind), exported (2,438,747,324 bytes, 56 s) and
+restored by the shipped client into an empty tenant of the same database; the database had fsync off, which a cloud database
+has not. Every table's count equals the source's (`catalog_meta` plus the marker). Upload 20 s over loopback (444 parts); staged
+bytes 2,438,681,881. **The load took 1,973 s (32.9 minutes)**: the chunks insert 1,361 s (69%, HNSW maintenance), the topic
+assignments 261 s, the verify phase 263 s, everything else under a minute. The held transaction lived 2,006 s; the oldest
+`xmin` age of any backend reached 2,191 transactions and the database was otherwise idle. Tenant create during the load: 545
+probes, every one 503 `tenant_creation_busy` with `Retry-After: 30` in 0.42 to 0.81 s (median 0.61 s); a token for an existing
+tenant 545 of 545 in under 20 ms; 0.04 s on an idle database and after the commit. The default `NX_IMPORT_LOAD_MAX` of 3,600 s is
+1.8 times this load, short of the 2x margin this section promised; a 2x margin is 3,960 s. The load is over 30 minutes, so the
+default is left as it is and the choice (a larger bound, or a cheaper chunk load) is Sam's.
+
 ## Finalization Gate
 
 ### Contradiction Check
