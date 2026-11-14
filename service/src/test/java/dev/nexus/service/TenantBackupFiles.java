@@ -39,13 +39,10 @@ final class TenantBackupFiles {
 
     /** The file's bytes for an export the test holds. The session fields are already gone; the open-only fields are dropped here. */
     static byte[] write(ImportTestEnv.BackupFile file) throws IOException {
-        ObjectNode header = file.header.deepCopy();
-        header.remove("header_sha256");
-        header.remove("row_bytes");
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         MessageDigest fileDigest = sha256();
         emit(out, fileDigest, concat(MAGIC, ByteBuffer.allocate(2).putShort((short) FILE_FORMAT_VERSION).array()));
-        emit(out, fileDigest, frame('H', json(header)));
+        emit(out, fileDigest, frame('H', headerPayload(file.header)));
         List<ObjectNode> tables = new ArrayList<>();
         long total = 0;
         for (String table : file.tableNames()) {
@@ -72,6 +69,14 @@ final class TenantBackupFiles {
         trailer.put("total_rows", total).put("file_sha256", hex(fileDigest.digest()));
         out.write(frame('E', json(trailer)));
         return out.toByteArray();
+    }
+
+    /** The header frame's payload: the header without the two fields only an open carries, as the file stores it. */
+    static byte[] headerPayload(ObjectNode header) throws IOException {
+        ObjectNode copy = header.deepCopy();
+        copy.remove("header_sha256");
+        copy.remove("row_bytes");
+        return json(copy);
     }
 
     // ── reading ─────────────────────────────────────────────────────────────────────────────────

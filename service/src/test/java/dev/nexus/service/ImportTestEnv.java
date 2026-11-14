@@ -229,16 +229,17 @@ final class ImportTestEnv implements AutoCloseable {
             return c;
         }
 
-        /** The header's hash and the file's row bytes, set as a client sets them before it opens. */
+        /**
+         * The header's hash and the file's row bytes, set as a client sets them before it opens. The hash is the SHA-256 of
+         * the header frame's payload exactly as {@link TenantBackupFiles} writes it into a file ({@code nx backup restore}
+         * hashes the same bytes), so a marker that names it names the file.
+         */
         BackupFile seal() {
             try {
-                ObjectNode core = MAPPER.createObjectNode();
-                core.set("tables", header.get("tables"));
-                core.set("embedding_models", header.get("embedding_models"));
-                header.put("header_sha256", sha256(MAPPER.writeValueAsBytes(core)));
+                header.put("header_sha256", sha256(TenantBackupFiles.headerPayload(header)));
                 header.put("row_bytes", pages.values().stream().flatMap(List::stream).mapToLong(p -> p.length).sum());
                 return this;
-            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            } catch (java.io.IOException e) {
                 throw new IllegalStateException(e);
             }
         }

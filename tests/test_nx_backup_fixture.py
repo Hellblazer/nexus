@@ -10,6 +10,7 @@ tenant: it reads the file.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from nexus.backup.tenant_file import index_file, verify_file
@@ -30,3 +31,19 @@ def test_the_committed_engine_fixture_passes_nx_backup_check_and_indexes_for_a_r
     index = index_file(_FIXTURE, part_bytes=8 * 1024 * 1024)
     assert set(index.tables) == {t.name for t in report.tables}
     assert index.header_sha256
+
+
+def test_the_header_hash_the_java_tests_pin_is_the_one_the_client_sends() -> None:
+    """``header_sha256`` is the SHA-256 of the header frame's payload: what the verb sends on open and the restore
+    marker records. ``TenantImportFixtureTest.PINNED_HEADER_SHA256`` is the Java side's value (its ``seal()`` hashes
+    the same frame bytes); this reads that constant and compares it with the client's own ``index_file``."""
+    java = (Path(__file__).resolve().parents[1] / "service/src/test/java/dev/nexus/service/TenantImportFixtureTest.java").read_text()
+    match = re.search(r'PINNED_HEADER_SHA256 = "([0-9a-f]{64})"', java)
+    assert match, "TenantImportFixtureTest.PINNED_HEADER_SHA256 is missing or is not a SHA-256"
+
+    index = index_file(_FIXTURE, part_bytes=8 * 1024 * 1024)
+
+    assert index.header_sha256 == match.group(1), (
+        "the Java tests' pinned header hash differs from the client's: regenerate through TenantImportFixtureTest#regenerate"
+        " or fix TenantBackupFiles.headerPayload"
+    )

@@ -50,6 +50,12 @@ class TenantImportFixtureTest {
     static final String PINNED_SHA256 = "551f2c92e77b7f5e03f8de4bfa7f85057730c1fc7b8fec9f2dab91da678a94c6";
     /** The {@code engine_version} of the committed file's header: the engine that wrote it. */
     static final String PINNED_ENGINE_VERSION = "unstamped+48654a703cf0";
+    /**
+     * SHA-256 of the file's header frame payload: what {@code nx backup restore} sends as {@code header_sha256} and the restore
+     * marker records. {@code tests/test_nx_backup_fixture.py} reads this constant and compares it with the Python client's own
+     * {@code index_file(...).header_sha256}, so the Java writer and the client cannot disagree on what "the header" is.
+     */
+    static final String PINNED_HEADER_SHA256 = "29e9c949a8822ecb53d7a6a567be259e1e44f8a2e012e6f2002121da6746dd83";
     /** The tables of the file: every exported table of the registry the day it was written. */
     static final int PINNED_TABLE_COUNT = 26;
 
@@ -85,7 +91,10 @@ class TenantImportFixtureTest {
 
         assertThat(sha256Hex(bytes)).as("the fixture was regenerated or edited: a reviewed change must update PINNED_SHA256 and say why"
             + " (see TenantImportFixtureTest.regenerate)").isEqualTo(PINNED_SHA256);
+        // Redundant with the SHA-256 above (any change to the header changes the file), and it stays as a label: a test engine is
+        // unstamped, so this names the commit that generated the file, which a reviewer reads without hashing anything.
         assertThat(file.header.get("engine_version").asText()).as("the engine that wrote the fixture").isEqualTo(PINNED_ENGINE_VERSION);
+        assertThat(file.headerSha()).as("the header frame's SHA-256, as the client and the restore marker compute it").isEqualTo(PINNED_HEADER_SHA256);
         assertThat(file.tableNames()).as("tables of the fixture").hasSize(PINNED_TABLE_COUNT);
     }
 
@@ -194,6 +203,7 @@ class TenantImportFixtureTest {
         Files.createDirectories(target.getParent());
         Files.write(target, bytes);
         System.out.println("FIXTURE REGENERATED (" + why + "): " + target + "\n  PINNED_SHA256 = \"" + sha256Hex(bytes)
+            + "\"\n  PINNED_HEADER_SHA256 = \"" + TenantBackupFiles.read(bytes).headerSha()
             + "\"\n  PINNED_ENGINE_VERSION = \"" + file.header.get("engine_version").asText() + "\"\n  PINNED_TABLE_COUNT = " + file.tableNames().size());
     }
 

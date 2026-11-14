@@ -313,27 +313,47 @@ class TenantImportRoundTripTest {
     }
 
     @Test
-    void theChecksFailWhenTheIdsAreNotReassignedOrAValueIsDamaged() throws Exception {
-        // A restore that kept the source's ids (the regression the reassignment exists to prevent) is simulated by
-        // pointing the restored tenant's soft references back at the SOURCE tenant's ids. Every comparison must see it.
-        String tenant = "t-imp-rt-e";
+    void theChecksFailWhenAnyKindOfReferenceKeepsTheSourcesIdOrAValueIsDamaged() throws Exception {
+        // A restore that kept the source's ids (the regression the reassignment exists to prevent) is simulated, one reference
+        // kind at a time on a tenant of its own, by pointing that reference back at the SOURCE tenant's id. The resolution check
+        // must name exactly that reference. Kinds: a bigint[] soft reference, a scalar soft reference, a soft reference inside a
+        // jsonb path, a soft reference of a derived table (the centroid's topic), and a foreign key with no tenant column
+        // (a step's run). The composite foreign keys cannot be pointed at another tenant: the database refuses it.
+        long srcMemoryId = labels("memory", "title", SRC).keySet().iterator().next();
+        long srcPlanId = labels("plans", "query", SRC).keySet().iterator().next();
+        long srcTopicId = labels("topics", "label", SRC).keySet().iterator().next();
+        long srcRunId = labels("nx_answer_runs", "question", SRC).keySet().iterator().next();
+        Map<String, String> damage = new LinkedHashMap<>();
+        damage.put("memory_summaries.source_ids", "UPDATE nexus.memory_summaries SET source_ids = ARRAY[" + srcMemoryId + "::bigint] WHERE tenant_id = ?");
+        damage.put("nx_answer_runs.plan_id", "UPDATE nexus.nx_answer_runs SET plan_id = " + srcPlanId + " WHERE tenant_id = ?");
+        damage.put("nx_answer_runs.run_summary", "UPDATE nexus.nx_answer_runs SET run_summary = jsonb_build_object('run', jsonb_build_object('plan_id', "
+            + srcPlanId + ")) WHERE tenant_id = ? AND run_summary IS NOT NULL");
+        damage.put("taxonomy_centroids.topic_id", "UPDATE nexus.taxonomy_centroids SET topic_id = " + srcTopicId + " WHERE tenant_id = ?");
+        damage.put("nx_answer_steps.run_id", "UPDATE nexus.nx_answer_steps SET run_id = " + srcRunId + " WHERE tenant_id = ?");
+        int n = 0;
+        for (var d : damage.entrySet()) {
+            String tenant = "t-imp-rt-e" + n++;
+            assertThat(env.restore(env.newTenant(tenant), file).get("status").asText()).isEqualTo("committed");
+            assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0)).as("sound before the damage to " + d.getKey()).isEmpty();
+
+            env.su(ctx -> ctx.execute(d.getValue(), tenant));
+
+            assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0).map(Resolution::reference).toList())
+                .as("the resolution check names " + d.getKey() + " once it holds the source's id")
+                .anyMatch(r -> r.startsWith(d.getKey()));
+        }
+
+        // the join comparisons see the same damage in the references they read
+        String tenant = "t-imp-rt-e-joins";
         assertThat(env.restore(env.newTenant(tenant), file).get("status").asText()).isEqualTo("committed");
         Map<Long, String> srcMemory = labels("memory", "title", SRC);
         Map<Long, String> dstMemory = labels("memory", "title", tenant);
         assertThat(summarySources(tenant, dstMemory)).as("sound before the damage").isEqualTo(summarySources(SRC, srcMemory));
-        assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0)).isEmpty();
-        long srcMemoryId = srcMemory.keySet().iterator().next();
-        long srcPlanId = labels("plans", "query", SRC).keySet().iterator().next();
-
         env.su(ctx -> {
-            ctx.execute("UPDATE nexus.memory_summaries SET source_ids = ARRAY[?::bigint] WHERE tenant_id = ?", srcMemoryId, tenant);
-            ctx.execute("UPDATE nexus.nx_answer_runs SET plan_id = ? WHERE tenant_id = ?", srcPlanId, tenant);
+            ctx.execute(damage.get("memory_summaries.source_ids"), tenant);
+            ctx.execute(damage.get("nx_answer_runs.plan_id"), tenant);
             return null;
         });
-
-        assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0).map(Resolution::reference).toList())
-            .as("the resolution check sees ids that name another tenant's rows")
-            .anyMatch(s -> s.startsWith("memory_summaries.source_ids")).anyMatch(s -> s.startsWith("nx_answer_runs.plan_id"));
         assertThat(summarySources(tenant, dstMemory)).as("the join comparison sees it too").isNotEqualTo(summarySources(SRC, srcMemory));
         assertThat(runPlans(tenant)).isNotEqualTo(runPlans(SRC));
 
@@ -346,8 +366,10 @@ class TenantImportRoundTripTest {
     }
 
     @Test
-    void aSecondGenerationRestoreIsEqualToTheSourceOnEveryTableAndEveryReference() throws Exception {
-        // restore A -> C, export C, restore that file -> E: every comparison of the first generation holds against the ORIGINAL source
+    void aSecondGenerationRestoreOfTheSeededRowsIsEqualToTheSourceOnEveryTableAndEveryReference() throws Exception {
+        // restore A -> C, export C, restore that file -> E: every comparison of the first generation holds against the ORIGINAL source.
+        // This seed holds no reaped or deleted parent, so it does not exercise the negation rule across generations: that row of the
+        // Test Plan is TenantImportSoftReferencesTest.aSecondBackupAndRestoreLeavesTheNegatedValuesNegativeAndRemapsTheRest.
         String first = "t-imp-gen-1", second = "t-imp-gen-2";
         String firstToken = env.newTenant(first);
         assertThat(env.restore(firstToken, file).get("status").asText()).isEqualTo("committed");
