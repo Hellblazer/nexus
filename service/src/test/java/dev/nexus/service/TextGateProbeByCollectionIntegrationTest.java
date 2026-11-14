@@ -57,14 +57,21 @@ class TextGateProbeByCollectionIntegrationTest {
     static final String EDGE = "knowledge__bbtc2-bc-edge__minilm-l6-v2-384__v1";
     static final String BIG = "knowledge__bbtc2-bc-big__minilm-l6-v2-384__v1";
     static final String NONE = "knowledge__bbtc2-bc-none__minilm-l6-v2-384__v1";
+    /** 3 live and 4 unowned token rows: 7 rows to the gate, 3 to a reader. */
+    static final String MIXED = "knowledge__bbtc2-bc-mixed__minilm-l6-v2-384__v1";
+    /** 4 token rows, none owned (no live owner): absent from every answer. */
+    static final String GHOST = "knowledge__bbtc2-bc-ghost__minilm-l6-v2-384__v1";
     static final String TOKEN = "quuxbycoltoken";
     static final int CAP = 5;
+    static final String TOKEN_WHERE_EN = "{\"lang\": \"en\"}";
 
     PostgreSQLContainer<?> pg;
     HikariDataSource ds;
     TenantScope scope;
     PgVectorRepositoryContractTest.FakeEmbedder embedder;
     PgVectorRepository repo;
+    /** The token rows of each collection that have a live owner, hex chashes in seed order. */
+    final Map<String, List<String>> liveIds = new TreeMap<>();
 
     @BeforeAll
     void startAll() throws Exception {
@@ -82,7 +89,7 @@ class TextGateProbeByCollectionIntegrationTest {
 
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, org.jooq.SQLDialect.POSTGRES);
-            for (String c : List.of(SMALL, EDGE, BIG, NONE)) {
+            for (String c : List.of(SMALL, EDGE, BIG, NONE, MIXED, GHOST)) {
                 PgContainerHelper.insertCollection(dsl, TENANT, c);
             }
             PgContainerHelper.insertCollection(dsl, OTHER_TENANT, SMALL);
@@ -92,6 +99,8 @@ class TextGateProbeByCollectionIntegrationTest {
         seed(TENANT, BIG, 9, Map.of("lang", "en"));
         seed(TENANT, NONE, 0, Map.of());
         seed(OTHER_TENANT, SMALL, 3, Map.of());
+        seedOwned(TENANT, MIXED, 7, 3, Map.of());
+        seedOwned(TENANT, GHOST, 4, 0, Map.of());
     }
 
     @AfterAll
@@ -100,8 +109,13 @@ class TextGateProbeByCollectionIntegrationTest {
         if (pg != null) pg.stop();
     }
 
-    /** {@code n} rows holding the token and {@code 3} filler rows, all in {@code collection}. */
+    /** {@code n} rows holding the token and {@code 3} filler rows, all in {@code collection}, all owned. */
     private void seed(String tenant, String collection, int n, Map<String, Object> tokenMeta) {
+        seedOwned(tenant, collection, n, n, tokenMeta);
+    }
+
+    /** As {@link #seed}, but only the first {@code owned} token rows (and the filler) get a live owner. */
+    private void seedOwned(String tenant, String collection, int n, int owned, Map<String, Object> tokenMeta) {
         List<String> ids = new ArrayList<>();
         List<String> texts = new ArrayList<>();
         List<Map<String, Object>> metas = new ArrayList<>();
@@ -114,16 +128,34 @@ class TextGateProbeByCollectionIntegrationTest {
             metas.add(i < n ? tokenMeta : Map.of());
         }
         repo.upsertChunks(tenant, collection, ids, texts, metas);
+        List<String> live = new ArrayList<>(ids.subList(0, owned));
+        live.addAll(ids.subList(n, ids.size()));
+        liveIds.put(collection, new ArrayList<>(ids.subList(0, owned)));
         scope.withTenant(tenant, ctx -> {
-            PgContainerHelper.ownChunks(ctx, tenant, collection, ids.toArray(new String[0]));
+            PgContainerHelper.ownChunks(ctx, tenant, collection, live.toArray(new String[0]));
             return null;
         });
     }
 
     private <T> T asTenant(String guc, Function<DSLContext, T> body) {
+        return asTenant(guc, false, body);
+    }
+
+    /**
+     * {@code forceParallel} sets {@code debug_parallel_query = on} for the transaction, so the function's step-1
+     * statement runs under a Gather whatever its cost: the tenant GUC the gate reads and the owner policy are then
+     * evaluated by the workers (a worker that lost either would return no row, and the comparisons below are not empty).
+     */
+    private <T> T asTenant(String guc, boolean forceParallel, Function<DSLContext, T> body) {
         return scope.withTenant(TENANT, ctx -> {
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
             if (guc != null) PgSession.setLocal(ctx, PgVectorRepository.LEXICAL_TRGM_GUC, guc);
+            if (forceParallel) {
+                ctx.select(DSL.function("set_config", org.jooq.impl.SQLDataType.VARCHAR,
+                    DSL.val("debug_parallel_query"), DSL.val("on"), DSL.inline(true))).fetch();
+                ctx.select(DSL.function("set_config", org.jooq.impl.SQLDataType.VARCHAR,
+                    DSL.val("max_parallel_workers_per_gather"), DSL.val("2"), DSL.inline(true))).fetch();
+            }
             return body.apply(ctx);
         });
     }
@@ -143,9 +175,14 @@ class TextGateProbeByCollectionIntegrationTest {
     /** The by-collection function's rows grouped by collection: hex chashes sorted, or null for the dense marker. */
     private Map<String, List<String>> byCollection(String text, String guc, int cap, String where,
                                                     String... collections) {
+        return byCollection(text, guc, false, cap, where, collections);
+    }
+
+    private Map<String, List<String>> byCollection(String text, String guc, boolean forceParallel, int cap,
+                                                    String where, String... collections) {
         Table<?> fn = TEXT_GATE_PROBE_BY_COLLECTION_384.call(text, collections,
             where == null ? null : org.jooq.JSONB.valueOf(where), null, cap, MODEL, TENANT);
-        Result<? extends Record> rows = asTenant(guc, ctx -> ctx.selectFrom(fn).fetch());
+        Result<? extends Record> rows = asTenant(guc, forceParallel, ctx -> ctx.selectFrom(fn).fetch());
         Map<String, List<String>> chashes = new TreeMap<>();
         java.util.Set<String> dense = new java.util.HashSet<>();
         for (Record r : rows) {
@@ -236,6 +273,79 @@ class TextGateProbeByCollectionIntegrationTest {
             Table<?> p1024 = TEXT_GATE_PROBE_1024.call("anything", new String[] {"x"}, null, null, CAP, "voyage-1024", TENANT);
             assertThat(count(p768, guc)).isZero();
             assertThat(count(p1024, guc)).isZero();
+        }
+    }
+
+    // ── liveness (nexus-bbtc2 fix round 1): the function applies the probes' own predicate ──────────────────
+
+    @Test
+    void aRowWithNoLiveOwnerIsNotReturned_andDoesNotCountTowardTheCap() {
+        // MIXED holds 7 gated rows, 3 live: under a cap of 5 it is NOT dense (3 live rows), and it returns exactly the
+        // live chashes. Without the liveness EXISTS the gate's 7 rows would reach the cap and the answer would be a dense
+        // marker. GHOST holds 4 gated rows and no live one: it is absent, where an unfiltered 4 rows would be returned.
+        for (String guc : new String[] {"substring", "on", null}) {
+            Map<String, List<String>> got = byCollection(TOKEN, guc, CAP, null, MIXED, GHOST, SMALL);
+            assertThat(got.keySet()).as("guc=%s: a collection with no live gated row is absent", guc)
+                .containsExactlyInAnyOrder(MIXED, SMALL);
+            assertThat(got.get(MIXED)).as("guc=%s: only the live rows, not dense", guc)
+                .containsExactlyElementsOf(new TreeSet<>(liveIds.get(MIXED))).hasSize(3);
+            assertThat(got.get(MIXED)).as("guc=%s: the per-arm probe says the same", guc)
+                .isEqualTo(perArm(MIXED, TOKEN, guc, 100, null));
+            assertThat(perArm(GHOST, TOKEN, guc, 100, null)).as("guc=%s: the per-arm probe agrees GHOST has none", guc)
+                .isEmpty();
+        }
+    }
+
+    // ── the parallel path (a Gather runs the step-1 statement in workers) ───────────────────────────────────
+
+    @Test
+    void underAForcedGather_everyModeReturnsTheRowsItReturnsSerially() {
+        for (String guc : new String[] {"off", "substring", "on", null}) {
+            Map<String, List<String>> serial = byCollection(TOKEN, guc, false, 100, null, SMALL, EDGE, BIG, MIXED, GHOST);
+            Map<String, List<String>> parallel = byCollection(TOKEN, guc, true, 100, null, SMALL, EDGE, BIG, MIXED, GHOST);
+            assertThat(serial.keySet()).as("non-vacuity, guc=%s: the leaf has gated rows to compare", guc)
+                .containsExactlyInAnyOrder(SMALL, EDGE, BIG, MIXED);
+            assertThat(parallel).as("guc=%s: the same collections and chashes under debug_parallel_query", guc)
+                .isEqualTo(serial);
+            // the dense markers too
+            assertThat(byCollection(TOKEN, guc, true, CAP, null, SMALL, EDGE, BIG, MIXED))
+                .as("guc=%s: the same dense/selective split", guc)
+                .isEqualTo(byCollection(TOKEN, guc, false, CAP, null, SMALL, EDGE, BIG, MIXED));
+        }
+        assertThat(byCollection(TOKEN, "substring", true, 100, TOKEN_WHERE_EN, BIG)).as("a where under a Gather")
+            .isEqualTo(byCollection(TOKEN, "substring", false, 100, TOKEN_WHERE_EN, BIG)).hasSize(1);
+    }
+
+    // ── the gather's ceiling (a custom setting lowers it for a test; the engine answers per-arm on it) ──────
+
+    @Test
+    void aGateThatAdmitsMoreRowsThanTheCeilingRaisesProgramLimitExceeded() {
+        Table<?> fn = TEXT_GATE_PROBE_BY_COLLECTION_384.call(TOKEN, new String[] {SMALL, EDGE, BIG}, null, null, 100, MODEL,
+                                                              TENANT);
+        // SMALL, EDGE and BIG hold 4 + 5 + 9 = 18 gated rows: a ceiling of 17 is passed, a ceiling of 18 is not.
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> scope.withTenant(TENANT, ctx -> {
+            PgSession.setLocal(ctx, PgVectorRepository.LEXICAL_TRGM_GUC, "substring");
+            ctx.select(DSL.function("set_config", org.jooq.impl.SQLDataType.VARCHAR,
+                DSL.val("nexus.gate_probe_max_rows"), DSL.val("17"), DSL.inline(true))).fetch();
+            return ctx.selectFrom(fn).fetch();
+        })).isInstanceOfSatisfying(org.jooq.exception.DataAccessException.class, e ->
+            assertThat(e.sqlState()).as("a distinct, class-54 error the engine reads as 'too dense to share'")
+                .isEqualTo("54000"));
+        Result<? extends Record> atTheCeiling = scope.withTenant(TENANT, ctx -> {
+            PgSession.setLocal(ctx, PgVectorRepository.LEXICAL_TRGM_GUC, "substring");
+            ctx.select(DSL.function("set_config", org.jooq.impl.SQLDataType.VARCHAR,
+                DSL.val("nexus.gate_probe_max_rows"), DSL.val("18"), DSL.inline(true))).fetch();
+            return ctx.selectFrom(fn).fetch();
+        });
+        assertThat(atTheCeiling).as("exactly the ceiling is not past it").hasSize(18);
+    }
+
+    // ── what the six functions are, in the catalog ───────────────────────────────────────────────────────────
+
+    @Test
+    void theCatalogShapeOfTheThreeFunctions_isTheIntendedOne() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            TextGateProbeByCollectionShape.assertShape(DSL.using(su, org.jooq.SQLDialect.POSTGRES), true);
         }
     }
 }

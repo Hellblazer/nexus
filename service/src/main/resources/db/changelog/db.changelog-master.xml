@@ -2157,8 +2157,9 @@
     <!--
         Bead nexus-bbtc2: nexus.text_gate_probe_by_collection_384/768/1024, one scan of the leaf that returns (collection, chash)
         for the rows the text gate admits, capped per collection (a collection at the cap returns one (collection, NULL) row).
-        The per-collection route's lexical leg runs it once over all its collections when a single probe over all of them hits
-        its cap, instead of one probe per collection; see the included file's own header. Posture read from the existing probes.
+        The per-collection route's lexical leg runs it once over all its collections instead of one probe per collection; a
+        leaf too dense to share (more than 2,000,000 gated rows) makes it raise and the arms run their own probes. See the
+        included file's own header. Posture read from the existing probes.
         No DATA EFFECT: function definitions only. After telemetry-019, before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/vectors-060-text-gate-probe-by-collection.xml"/>

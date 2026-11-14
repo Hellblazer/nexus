@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.TextGateProbeByCollectionShape;
 import dev.nexus.service.Vectors057RollbackIntegrationTest;
 import dev.nexus.service.Vectors058RollbackIntegrationTest;
 import dev.nexus.service.db.Chash;
@@ -263,6 +264,32 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     }
 
     /**
+     * nexus-bbtc2 (vectors-060), the invoker posture: migrated as nexus_svc the three by-collection functions are
+     * SECURITY INVOKER with the probes' owner and ACL and exactly the SET clauses a definer's carry less the search_path
+     * pin, and the INVOKER copy RUNS: the tenant-stamped service role gets its own tenant's rows grouped by collection
+     * (RLS and the live-owner test applied as the invoker), none of the other tenant's, in every trigram mode.
+     */
+    @Test
+    void migratedAsTheServiceRole_theByCollectionFunctionsAreInvoker_andRunUnderTheTenantPolicy() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            TextGateProbeByCollectionShape.assertShape(DSL.using(su, SQLDialect.POSTGRES), false);
+        }
+        for (String mode : new String[] {null, "off", "substring", "on"}) {
+            var fn = dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_BY_COLLECTION_384.call(
+                TOKEN, new String[] {COLL_A, COLL_B}, null, null, 100, MODEL, TENANT_A);
+            var rows = tenantScope.withTenant(TENANT_A, ctx -> {
+                PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
+                if (mode != null) PgSession.setLocal(ctx, "nexus.lexical_trgm", mode);
+                return ctx.selectFrom(fn).fetch();
+            });
+            assertThat(rows.getValues(0, String.class)).as("mode=%s: only A's collection", mode)
+                .containsOnly(COLL_A).hasSize(PER_TENANT);
+            assertThat(rows.getValues(1, byte[].class).stream().map(b -> HexFormat.of().formatHex(b)).toList())
+                .as("mode=%s: A's three chashes", mode).containsExactlyInAnyOrderElementsOf(idsA);
+        }
+    }
+
+    /**
      * nexus-seo4k (vectors-057), the invoker posture's ROLLBACK: migrated as nexus_svc itself vectors-031-2 left the
      * probes SECURITY INVOKER and LANGUAGE sql, and vectors-057 moved them to plpgsql. Rolling back vectors-057-1
      * alone must put the LANGUAGE sql invoker bodies back, with no SET clause, and leave every other function in
@@ -450,6 +477,8 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
         assertThat(PgCatalogProbes.policyExists(ctx, "nexus", "chunks", "chunks_gate_probe_owner_read"))
             .as("no owner policy: %s", why).isFalse();
         assertThat(definerProbes(ctx)).as("every probe stays SECURITY INVOKER: %s", why).isEmpty();
+        // nexus-bbtc2: vectors-060 reads the probes' posture, so the by-collection functions are invoker here too
+        TextGateProbeByCollectionShape.assertShape(ctx, false);
     }
 
     /** I2: the membership branch of the precondition. Fails when pg_has_role(r.oid, current_user) is removed. */
@@ -483,6 +512,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
                 .containsExactlyInAnyOrder("tenant_isolation roles={public} cmd=ALL",
                     "chunks_gate_probe_owner_read roles={" + ADMIN + "} cmd=SELECT");
             assertThat(definerProbes(ctx)).as("the three probes are SECURITY DEFINER").hasSize(3);
+            TextGateProbeByCollectionShape.assertShape(ctx, true);   // nexus-bbtc2: and so are the by-collection functions
             assertServiceSeesOnlyItsOwnTenant(c);
             try (HikariDataSource svc = pool(c, SVC, PgContainerHelper.SVC_PASSWORD, "guard-svc-check", 1)) {
                 assertThat(ChunksIsolationCheck.violations(svc)).as("boot check on the service pool").isEmpty();

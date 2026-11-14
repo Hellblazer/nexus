@@ -126,6 +126,19 @@ final class SharedLexicalProbe {
         return kind;
     }
 
+    /**
+     * The word the request's log line carries: the kind in lower case, except that a probe that never completed
+     * ({@link Kind#PENDING}: the worker loop stopped before the probe task ran) is {@code not_started}.
+     */
+    String label() {
+        return kind == Kind.PENDING ? "not_started" : kind.name().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** How many collections the per-collection answer found dense; 0 before it, or when it fell back. */
+    int denseCount() {
+        return dense.size();
+    }
+
     /** Milliseconds the shared probe's statements took, for the request's log line; 0 before it completes. */
     long probeMillis() {
         return probeNanos / 1_000_000L;

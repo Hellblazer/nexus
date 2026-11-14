@@ -62,24 +62,24 @@ class HnswServingGucParityTest {
      * Deliberate {@code setSearchStatementTimeout(} calls beyond one per iterative-scan site, per file, with
      * the reason. {@code PgVectorRepository#hybridRank}: a per-collection fan-out's lexical arm sets its bound
      * again between the gate probe and the rank, so the rank is bounded by the budget that remains
-     * (nexus-xd2rc); the site's first bound is the paired one. {@code PgVectorRepository#runSharedProbe}
+     * (nexus-xd2rc); the site's first bound is the paired one. {@code LexicalGateProbe#runShared}
      * (nexus-bbtc2): the fan-out's one shared text-gate probe bounds its per-collection probe statement. It scans no
      * HNSW index, so it belongs to no iterative-scan site; {@link #everyFetchingTenantBlockBoundsItsStatementsFirst}
-     * holds the block to its own ordering.
+     * holds the block to its own ordering (it fetches with {@code ctx.selectFrom(fn)}, an anchor of that test).
      */
     private static final java.util.Map<String, Integer> EXTRA_STATEMENT_BOUNDS =
-        java.util.Map.of("PgVectorRepository.java", 2);
+        java.util.Map.of("PgVectorRepository.java", 1, "LexicalGateProbe.java", 1);
 
     /**
      * Deliberate {@code setSearchPlanCacheMode(} calls beyond one per iterative-scan site, per file: the three
      * {@code withTenant} blocks of the where-taking get reads ({@code PgVectorRepository#getWhere}, both branches,
      * and {@code #getAllMetadata}, nexus-u9dc5). They scan no HNSW index, so they carry no other GUC of the group;
      * {@link #everyWhereGetReadPinsACustomPlanBeforeItsFetch} holds them to their own pairing. And the fan-out's
-     * shared text-gate probe block ({@code PgVectorRepository#runSharedProbe}, nexus-bbtc2), which scans no HNSW
+     * shared text-gate probe block ({@code LexicalGateProbe#runShared}, nexus-bbtc2), which scans no HNSW
      * index either; {@link #everyFetchingTenantBlockBoundsItsStatementsFirst} holds it to its pairing.
      */
     private static final java.util.Map<String, Integer> EXTRA_PLAN_MODE_PINS =
-        java.util.Map.of("PgVectorRepository.java", 4);
+        java.util.Map.of("PgVectorRepository.java", 3, "LexicalGateProbe.java", 1);
 
     /**
      * Where a window the sweeps read begins: every {@code tenantScope.withTenant(} block, and the body of
@@ -179,6 +179,7 @@ class HnswServingGucParityTest {
     void everyFetchingTenantBlockBoundsItsStatementsFirst() {
         Path root = Path.of("src", "main", "java");
         List<String> unbounded = new ArrayList<>();
+        java.util.Set<String> filesWithFetchingBlocks = new java.util.TreeSet<>();
         int fetchingBlocks = 0;
         try (Stream<Path> files = Files.walk(root)) {
             for (Path p : files.filter(f -> f.toString().endsWith(".java")).toList()) {
@@ -200,6 +201,7 @@ class HnswServingGucParityTest {
                         continue;
                     }
                     fetchingBlocks++;
+                    filesWithFetchingBlocks.add(p.getFileName().toString());
                     int bound = block.indexOf("setSearchStatementTimeout(");
                     int plan = block.indexOf("setSearchPlanCacheMode(");
                     if (bound < 0 || bound > fetch || plan < 0 || plan > fetch) {
@@ -221,6 +223,12 @@ class HnswServingGucParityTest {
         assertThat(fetchingBlocks)
             .as("fetching withTenant blocks visible to the sweep")
             .isGreaterThanOrEqualTo(4);
+        // nexus-bbtc2: the shared text-gate probe's block fetches with ctx.selectFrom(fn). It is named here so that a
+        // refactor that renames its fetch out of the anchors, or moves it to a file the sweep does not read, fails
+        // instead of leaving the block unscanned (the count above would still pass without it).
+        assertThat(filesWithFetchingBlocks)
+            .as("the files whose fetching withTenant blocks the sweep reads")
+            .contains("PgVectorRepository.java", "LexicalGateProbe.java");
     }
 
     /**
