@@ -72,9 +72,8 @@ import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_768;
-// nexus-zrcj7 (T2 [24219] critique finding B, single-gate-eval restored): text_gate_probe_
-// <dim> is a SETOF-bytea table-valued function (vectors-011), and
-// text_gated_search_by_chash_<dim> ranks ONLY over the probe's own chash set -- no second
+// nexus-zrcj7 (T2 [24219] critique finding B, single-gate-eval restored): text_gated_search_by_chash_<dim> ranks
+// ONLY over the text_gate_probe_<dim> chash set (the probe helpers live in LexicalGateProbe) -- no second
 // text-gate evaluation.
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_384;

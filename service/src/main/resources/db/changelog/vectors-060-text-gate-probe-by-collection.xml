@@ -43,11 +43,11 @@
     step 2's liveness EXISTS included, which is planned at 100 times the default operator price too (it has no join to
     reorder and measured 0.16 s on the 7,905 rows). jit is off, as in vectors-032: the inflated price can lift a dense
     leaf's plan cost past jit_above_cost, and compiling the gate for a statement of this kind costs more than it saves.
-    How many workers the statement may use is NOT set here. A function SET of max_parallel_workers_per_gather would
-    override an operator's lower setting (0 included) upward, and the workers come from the cluster-wide
-    max_parallel_workers pool that the engine's own arm permits do not count. The engine sets it for the statement's
-    transaction (SET LOCAL, from NX_SEARCH_ROUTE_PROBE_WORKERS, default 2, 0 means serial); with no worker free, or none
-    allowed, step 1 runs alone, as the per-arm probes do.
+    How many workers the statement may use is NOT set here: the workers come from the cluster-wide max_parallel_workers
+    pool that the engine's own arm permits do not count, so the bound belongs to the engine. It sets
+    max_parallel_workers_per_gather for the statement's transaction (SET LOCAL, from NX_SEARCH_ROUTE_PROBE_WORKERS,
+    default 2, 0 means serial), which replaces a role or database value for that statement: the operator's lever is the
+    env var. With no worker free, or none allowed, step 1 runs alone, as the per-arm probes do.
     Step 1 is bounded: it takes at most 2,000,000 rows (a subquery LIMIT) and raises SQLSTATE 54000
     (program_limit_exceeded) when the gate admits more, so the arrays never hold more than about 200 MB (two arrays of 2
     million entries, ~100 bytes a (collection, chash) pair, against the 1 GB array limit), while 120 collections at the

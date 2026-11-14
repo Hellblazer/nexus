@@ -44,7 +44,8 @@ public final class PgSession {
         // the probe, "substring" replaces it with a substring match (see PgVectorRepository.LEXICAL_TRGM_GUC).
         "nexus.lexical_trgm",
         // nexus-bbtc2: the shared text-gate probe's workers (LexicalGateProbe#runShared sets it for that statement's
-        // transaction alone; vectors-060's function does not set it, so an operator's lower value is never overridden).
+        // transaction alone, from NX_SEARCH_ROUTE_PROBE_WORKERS; that value replaces a role or database setting for the
+        // statement, so the operator's lever is the env var, 0 for serial).
         "max_parallel_workers_per_gather",
         "statement_timeout",
         // nexus-r0vkh: the taxonomy assign transaction bounds its lock WAIT as
