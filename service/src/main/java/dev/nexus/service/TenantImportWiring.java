@@ -10,6 +10,7 @@ import dev.nexus.service.db.TenantImportSessions;
 import dev.nexus.service.http.TenantImportHandler;
 
 import javax.sql.DataSource;
+import java.util.Collection;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -24,11 +25,12 @@ public final class TenantImportWiring {
     private volatile TenantImportSessions sessions;
     private volatile boolean singletonLockHeld;
 
-    /** Builds the sessions over {@code exports} (the cap they share) and registers the routes behind {@code authFilter}. */
+    /** Builds the sessions over {@code exports} (the cap they share) and registers the routes behind {@code authFilter}; {@code servedModels} names the models the engine can embed for (null result: not told, the open skips that check). */
     void register(HttpServer server, List<? extends Filter> authFilter, DataSource dataSource, Supplier<TenantExportSessions> exports,
-                  Supplier<Long> schemaChangesetCount) {
+                  Supplier<Long> schemaChangesetCount, Supplier<Collection<String>> servedModels) {
         this.sessions = new TenantImportSessions(exports, dataSource, TenantImportSessions.Config.fromEnv(System::getenv),
             CollectionRegistry::evictTenant, this::singletonLockHeld, schemaChangesetCount);
+        this.sessions.servedModels(servedModels);
         server.createContext(TenantImportHandler.PATH, new TenantImportHandler(this::sessions, exports))
             .getFilters().addAll(authFilter);
     }

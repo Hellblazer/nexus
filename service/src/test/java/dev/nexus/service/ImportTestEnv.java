@@ -58,6 +58,11 @@ final class ImportTestEnv implements AutoCloseable {
     }
 
     static ImportTestEnv start() throws Exception {
+        return start(null);
+    }
+
+    /** As above, with the engine's own embedder router (null: none), which is where the open reads the models it serves. */
+    static ImportTestEnv start(dev.nexus.service.vectors.EmbedderRouter router) throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -75,7 +80,7 @@ final class ImportTestEnv implements AutoCloseable {
         cfg.setMaximumPoolSize(14);
         cfg.setAutoCommit(true);
         HikariDataSource ds = new HikariDataSource(cfg);
-        NexusService service = new NexusService(0, ROOT, ds);
+        NexusService service = router == null ? new NexusService(0, ROOT, ds) : new NexusService(0, ROOT, ds, router);
         service.importWiring().declareSingletonLockHeld(true);
         service.start();
         return new ImportTestEnv(pg, ds, service);

@@ -1091,7 +1091,7 @@ public final class NexusService {
         server.createContext(dev.nexus.service.http.TenantExportHandler.PATH,
                 new dev.nexus.service.http.TenantExportHandler(() -> exportSessions, versionHandler::engineVersion,
                         versionHandler::schemaChangesetCount)).getFilters().addAll(authFilter);
-        importWiring.register(server, authFilter, dataSource, () -> exportSessions, versionHandler::schemaChangesetCount);
+        importWiring.register(server, authFilter, dataSource, () -> exportSessions, versionHandler::schemaChangesetCount, () -> docEmbedderRouter == null ? null : docEmbedderRouter.availableModels());
 
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.

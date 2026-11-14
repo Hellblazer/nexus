@@ -129,6 +129,26 @@ final class TenantImportStaging {
         }
     }
 
+    /**
+     * The names among {@code models} whose {@code embedding_models} row is a Voyage one and that are not in {@code served}
+     * (the models this engine can embed for). A model of another provider is not gated here.
+     */
+    List<String> unservedVoyageModels(Collection<String> models, Collection<String> served) {
+        if (models.isEmpty()) return List.of();
+        try (Connection conn = dataSource.getConnection()) {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            Field<String> model = DSL.field(DSL.name("embedding_models", "embedding_model"), String.class);
+            Field<String> provider = DSL.field(DSL.name("embedding_models", "provider"), String.class);
+            Set<String> voyage = new LinkedHashSet<>(ctx.select(model)
+                .from(DSL.table(DSL.name("nexus", "embedding_models"))).where(model.in(models).and(provider.eq("voyage"))).fetch(model));
+            List<String> unserved = new ArrayList<>();
+            for (String m : models) if (voyage.contains(m) && !served.contains(m) && !unserved.contains(m)) unserved.add(m);
+            return unserved;
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not read embedding_models", e);
+        }
+    }
+
     // ── emptiness ───────────────────────────────────────────────────────────────────────────────
 
     /**

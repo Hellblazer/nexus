@@ -345,6 +345,68 @@ class TenantImportRoutesTest {
         openOk(token, file);   // no session was opened
     }
 
+    // ── open: a model the engine has a row for but cannot serve (RDR-248, ask rdr248-cloud-to-local) ──
+
+    private ImportTestEnv.BackupFile fileNaming(String... models) {
+        ImportTestEnv.BackupFile f = file.copy();
+        var array = f.header.putArray("embedding_models");
+        for (String m : models) array.addObject().put("embedding_model", m);
+        f.seal();
+        return f;
+    }
+
+    @Test
+    void aVoyageModelTheEngineHasNoKeyForIsRefusedByTheOpenBeforeAnyWriteNamingTheModel() throws Exception {
+        String tenant = "t-imp-nokey";
+        String token = env.newTenant(tenant);
+        var sessions = env.importSessions(TenantImportSessions.Config.defaults(), List.of());
+        sessions.servedModels(() -> List.of("bge-base-en-v15-768"));   // a keyless local engine serves bge only
+
+        HttpResponse<String> r = env.open(token, fileNaming("voyage-context-3", "bge-base-en-v15-768"));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(422);
+        assertThat(json(r).get("reason").asText()).isEqualTo("embedding_model_not_served");
+        assertThat(json(r).get("error").asText()).contains("voyage-context-3").contains("NX_VOYAGE_API_KEY")
+            .doesNotContain("bge-base-en-v15-768");
+        assertThat(json(r).get("models").get(0).asText()).isEqualTo("voyage-context-3");
+        assertNothingWritten(tenant);
+        env.importSessions(TenantImportSessions.Config.defaults(), List.of());   // none was opened: a fresh open of the same tenant is not 409
+        openOk(token, file);
+    }
+
+    @Test
+    void aVoyageModelTheEngineServesOpensAndAModelOfAnotherProviderIsNotGatedByTheKey() throws Exception {
+        String token = env.newTenant("t-imp-haskey");
+        var sessions = env.importSessions(TenantImportSessions.Config.defaults(), List.of());
+        sessions.servedModels(() -> List.of("voyage-context-3", "voyage-code-3"));
+        openOk(token, fileNaming("voyage-context-3", "voyage-code-3"));
+        sessions = env.importSessions(TenantImportSessions.Config.defaults(), List.of());
+        sessions.servedModels(() -> List.of("voyage-context-3"));   // a Voyage-only engine and a file with a local-model collection
+        openOk(token, fileNaming("voyage-context-3", "bge-base-en-v15-768", "minilm-l6-v2-384"));
+    }
+
+    @Test
+    void theServicesOwnRouterDecidesWhichVoyageModelsTheOpenAccepts() throws Exception {
+        // the production wiring, no test seam: a router holding only bge (a local engine with no Voyage key) behind the service
+        var keyless = new dev.nexus.service.vectors.EmbedderRouter(new ReembedLocalGateTest.Fake("bge-base-en-v15-768", 768), "document");
+        try (ImportTestEnv own = ImportTestEnv.start(keyless)) {
+            String src = own.newTenant("t-imp-wired-src");
+            ImportTestEnv.BackupFile f = own.export(src);
+            String token = own.newTenant("t-imp-wired");
+            f.header.putArray("embedding_models").addObject().put("embedding_model", "voyage-code-3");
+            f.seal();
+
+            HttpResponse<String> r = own.open(token, f);
+
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(422);
+            assertThat(json(r).get("reason").asText()).isEqualTo("embedding_model_not_served");
+            assertThat(json(r).get("error").asText()).contains("voyage-code-3");
+            f.header.putArray("embedding_models").addObject().put("embedding_model", "bge-base-en-v15-768");
+            f.seal();
+            assertThat(own.open(token, f).statusCode()).as("a model the router serves").isEqualTo(200);
+        }
+    }
+
     @Test
     void aDeclaredSizeOverTheCapIsRefusedByTheOpen() throws Exception {
         String token = env.newTenant("t-imp-big");

@@ -19,6 +19,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -260,6 +261,13 @@ public final class TenantImportSessions implements AutoCloseable {
     private final Supplier<Boolean> singletonLockHeld;
     private final Supplier<Long> engineChangesets;
     private final List<TenantExport.Retired> retired;
+    /**
+     * The embedding model tokens this engine can embed for (its router's), or null when it is not told (a test engine with no
+     * embedder). The open refuses a file whose Voyage-provider model is not among them: the engine's {@code embedding_models}
+     * table is seeded alike on every engine, so a row existing does not say the engine holds a Voyage key (RDR-248, ask
+     * {@code rdr248-cloud-to-local}).
+     */
+    private volatile Supplier<Collection<String>> servedModels;
 
     private final Object lock = new Object();
     private final Map<String, Session> byTenant = new HashMap<>();
@@ -276,6 +284,11 @@ public final class TenantImportSessions implements AutoCloseable {
     private volatile Consumer<String> partHookForTests;
     /** Test seam: called with each status text the load reports, on the load's thread; null in production. */
     private volatile Consumer<String> loadHookForTests;
+
+    /** Names the models this engine can embed for; the open then refuses a Voyage model outside them. Null turns the check off. */
+    public void servedModels(Supplier<Collection<String>> served) {
+        this.servedModels = served;
+    }
 
     /** Test seam: a hook run inside a part's turn at the session's connection, before its COPY (a test holds it to keep a part in flight). */
     public void partHookForTests(Consumer<String> hook) {
@@ -374,6 +387,17 @@ public final class TenantImportSessions implements AutoCloseable {
             if (!missing.isEmpty()) {
                 throw new RefusedException(422, "missing_embedding_model", "the target has no embedding_models row for "
                     + String.join(", ", missing), null, Map.of("models", missing));
+            }
+            Supplier<Collection<String>> served = servedModels;
+            Collection<String> servedNow = served == null ? null : served.get();
+            if (servedNow != null) {
+                List<String> unserved = staging.unservedVoyageModels(req.embeddingModels(), servedNow);
+                if (!unserved.isEmpty()) {
+                    throw new RefusedException(422, "embedding_model_not_served", "the file names the Voyage embedding model "
+                        + String.join(", ", unserved) + ", which this engine cannot serve: it holds no Voyage key, so it could not "
+                        + "embed a query or a write for those collections. Give the engine a key (NX_VOYAGE_API_KEY) and restart it, "
+                        + "or restore into an engine that has one (nothing was written)", null, Map.of("models", unserved));
+                }
             }
             Map<String, String> skippedNow = new LinkedHashMap<>();
             String nonEmpty = staging.inTenantTransaction(tenant, ctx -> {
