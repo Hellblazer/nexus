@@ -667,14 +667,14 @@ public class TenantKeyedStateGateTest {
             // nexus-6pfgb.44 and .42: the catalog TTL and manifest chunk-index CHECK routes hold nothing between requests.
             for (String f : List.of("CatalogTtlCheckAdmin.TenantCensus.tenant", "CatalogTtlCheckHandler.tenants",
                     "CatalogTtlCheckHandler.Survey.checked", "CatalogTtlCheckHandler.Survey.census",
-                    "ManifestChunkIndexCheckAdmin.TenantCensus.tenant", "ManifestChunkIndexCheckHandler.tenants",
-                    "ManifestChunkIndexCheckHandler.Survey.checked", "ManifestChunkIndexCheckHandler.Survey.census")) {
+                    "ManifestCheckAdmin.TenantCensus.tenant", "ManifestCheckHandler.tenants",
+                    "ManifestCheckHandler.Survey.checked", "ManifestCheckHandler.Survey.census")) {
                 notKeyed.put(f, "a component of one request's census or survey, or the supplier of known tenant names "
                     + "(TokenStore#listKnownTenants) read on each request; built for that request, dropped with its response");
             }
-            for (String f : List.of("NexusService.catalogTtlCheckAdmin", "NexusService.manifestChunkIndexCheckAdmin")) {
-                notKeyed.put(f, "the admin-connection DDL object bound once at boot; table-wide, it opens a connection "
-                    + "per call and holds no per-tenant state");
+            for (String f : List.of("NexusService.catalogTtlCheckAdmin", "ManifestCheckWiring.admins")) {
+                notKeyed.put(f, "the admin-connection DDL object(s) bound once at boot (the wiring holds one per manifest "
+                    + "CHECK); table-wide, each opens a connection per call and holds no per-tenant state");
             }
             notKeyed.put("NexusService.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("AuthFilter.tokenCache", TOKEN_CACHE_REF);

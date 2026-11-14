@@ -672,6 +672,7 @@ public final class HttpUtil {
             log.warn("event={}_integrity_violation {} sqlstate={} constraint={} error={}",
                 event, context, sqlState, constraint, e.getMessage());
             String remedy = ttlDaysCheckRemedy(constraint);
+            if (remedy == null) remedy = manifestLabelsCheckRemedy(constraint);
             send(exchange, 409,
                 "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
                 + jsonString(sqlState)
@@ -744,6 +745,20 @@ public final class HttpUtil {
         if (constraint != null && constraint.endsWith("_ttl_days_positive_chk")) {
             return "ttl_days must be omitted, null, or a positive integer number "
                 + "of days — 0 does NOT mean permanent; null does";
+        }
+        return null;
+    }
+
+    /**
+     * nexus-6pfgb.42: the remedy of the manifest labels CHECK ({@code labels_written OR the three section labels are
+     * NULL}), once an operator has added it. A manifest write that sends {@code labels_written: false} beside a section
+     * label is refused 23514; the body says what to send instead.
+     */
+    static String manifestLabelsCheckRemedy(String constraint) {
+        if (dev.nexus.service.db.ManifestCheck.LABELS.constraint().equals(constraint)) {
+            return "a manifest row may carry section_title, section_type or page_number only with labels_written true: "
+                + "send labels_written true with the labels, or omit labels_written (a row that carries a label key is "
+                + "written), or send no label keys for a legacy row";
         }
         return null;
     }

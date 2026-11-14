@@ -28,12 +28,12 @@ NAMING_ALLOWED = {
     "service/src/test/java/dev/nexus/service/db/CatalogTtlCheckAdminIntegrationTest.java",
     "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
     "tests/test_catalog_ttl_check_no_trigger.py",
-    # the sibling manifest chunk-index CHECK step (nexus-6pfgb.42) names this step's classes in its javadoc and borrows
+    # the sibling manifest CHECK step (nexus-6pfgb.42) names this step's classes in its javadoc and borrows
     # its run-lock key in a test; it is reached by no automatic caller either (its own no-trigger test)
-    "service/src/main/java/dev/nexus/service/db/ManifestChunkIndexCheckAdmin.java",
-    "service/src/main/java/dev/nexus/service/http/ManifestChunkIndexCheckHandler.java",
-    "service/src/test/java/dev/nexus/service/db/ManifestChunkIndexCheckAdminIntegrationTest.java",
-    "tests/test_manifest_chunk_index_check_no_trigger.py",
+    "service/src/main/java/dev/nexus/service/db/ManifestCheckAdmin.java",
+    "service/src/main/java/dev/nexus/service/http/ManifestCheckHandler.java",
+    "service/src/test/java/dev/nexus/service/db/ManifestCheckAdminIntegrationBase.java",
+    "tests/test_manifest_check_no_trigger.py",
     "tests/test_catalog_ttl_check_shapes.py",
     # the chunk routes' own scan lists the one class that borrows its comparison; the file name is spelled in two parts
     # because that scan reads this file too
@@ -92,9 +92,9 @@ def test_the_engines_main_sources_name_the_classes_only_where_they_are_built_and
     }
 
     # The two classes, and the two places that mount and bind them.
-    # (and the sibling manifest chunk-index CHECK classes of nexus-6pfgb.42, which name them in a comment)
+    # (and the sibling manifest CHECK classes of nexus-6pfgb.42, which name them in a comment)
     assert callers == {"CatalogTtlCheckAdmin.java", "CatalogTtlCheckHandler.java", "NexusService.java", "Main.java",
-                       "ManifestChunkIndexCheckAdmin.java", "ManifestChunkIndexCheckHandler.java"}
+                       "ManifestCheckAdmin.java", "ManifestCheckHandler.java"}
 
 
 def test_nexus_service_and_main_never_invoke_the_operations_or_schedule_them() -> None:

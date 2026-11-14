@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.ManifestCheck;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.nexus.tables.CatalogDocumentChunks;
@@ -108,7 +109,9 @@ import javax.crypto.spec.SecretKeySpec;
  * <p><b>What it does not census.</b> The two equalities the CHECKs add ({@code chunk_text_hash} against the chash and
  * {@code embedding_model} against the column) are counted here and refuse the table-wide add, not the sweep. The manifest
  * redundancy the RDR's Phase 4 adds ({@code labels_written} false beside a label) is counted beside them as {@code
- * manifest_unwritten_label_rows} and refuses nothing (nexus-6pfgb.42). The Phase 3
+ * manifest_unwritten_label_rows}, by the very predicate of the operator's CHECK ({@link ManifestCheck#LABELS}), and
+ * refuses nothing: the constraint itself is added by the operator's census, add and validate routes
+ * ({@code /v1/admin/manifest-labels-check}), never by this sweep (nexus-6pfgb.42). The Phase 3
  * capability flags (the manifest-keyed reads the sweep's removal of POSITION and DOCUMENT keys depends on, RDR-236) are
  * constants in this binary, true by construction wherever this route exists, so the sweep does not read them from
  * {@code /version}.
@@ -583,13 +586,13 @@ public final class ChunkKeySweep {
         out.put("wrong_width_rows", (long) ctx.fetchCount(
             DSL.selectOne().from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).and(width(false))));
 
-        // RDR-236 Phase 4 Step 3 census (a) (nexus-6pfgb.42): the manifest CHECK "labels_written OR (section_title,
-        // section_type, page_number all NULL)" would refuse these rows. Every manifest row of the tenant, whether or not
-        // its document is live: the CHECK applies to all of them. Informational: not an acceptable residue, so it never
-        // blocks a sweep; the manifest constraints wait for the Phase 4 cut.
+        // RDR-236 Phase 4 Step 3 census (a) (nexus-6pfgb.42): the rows the manifest CHECK ManifestCheck.LABELS ("labels_written
+        // OR (section_title, section_type, page_number all NULL)") refuses, counted by that check's own predicate so the two
+        // cannot disagree. Every manifest row of the tenant, whether or not its document is live: the CHECK applies to all
+        // of them. Informational: not an acceptable residue, so it never blocks a sweep; the constraint is the operator's
+        // step (/v1/admin/manifest-labels-check), not the sweep's.
         out.put("manifest_unwritten_label_rows", (long) ctx.fetchCount(
-            DSL.selectOne().from(m).where(m.TENANT_ID.eq(tenant)).and(m.LABELS_WRITTEN.isFalse())
-                .and(m.SECTION_TITLE.isNotNull().or(m.SECTION_TYPE.isNotNull()).or(m.PAGE_NUMBER.isNotNull()))));
+            DSL.selectOne().from(m).where(m.TENANT_ID.eq(tenant)).and(ManifestCheck.LABELS.violation())));
 
         // Rows the sweep cannot rewrite by key: a metadata value that is not a JSON object.
         stage.accept("precondition:non_object_metadata_rows");

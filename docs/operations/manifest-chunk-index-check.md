@@ -8,7 +8,7 @@ It is the same shape as the [catalog TTL CHECK](catalog-ttl-check.md) and shares
 
 - **Not a Liquibase changeset.** A boot-time VALIDATE crash-loops an install whose rows differ from the measured one, and a release does not rewrite user data at engine boot.
 - **A NOT VALID CHECK is evaluated on every row version written**, an UPDATE that touches no column of the check included. A manifest row that breaks it could not be updated until `chunk_index` is set back to `position`. The add route therefore refuses while any such row exists.
-- **Out of scope:** the `labels_written` CHECK waits for a live count of its violators, which no census has taken yet. A manifest-collection constraint is not added at all: since RDR-191 a manifest row's collection is the caller's, so it is not an invariant.
+- **Out of scope:** the `labels_written` CHECK is the sibling step, [manifest labels CHECK](manifest-labels-check.md), with its own routes. A manifest-collection constraint is not added at all: since RDR-191 a manifest row's collection is the caller's, so it is not an invariant (RDR-236 keeps it as a census only, `GET /v1/catalog/manifest/foreign_collection`).
 - **After add, a write that breaks it is refused** with SQLSTATE 23514. That includes an older client or a tenant import that sends a `chunk_index` other than `position`, which no census can predict.
 
 ## The routes

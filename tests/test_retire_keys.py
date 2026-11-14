@@ -1586,12 +1586,12 @@ class TestNoAutomaticTrigger:
                    for tok in ("ChunkKeySweep", "ChunkConstraintAdmin", "ChunkKeysAdminHandler"))
         }
         # The classes themselves, the handler that mounts them, and the two places that build and bind them.
-        # CatalogTtlCheckHandler (nexus-6pfgb.44) and ManifestChunkIndexCheckHandler (nexus-6pfgb.42) call the handler's
+        # CatalogTtlCheckHandler (nexus-6pfgb.44) and ManifestCheckHandler (nexus-6pfgb.42) call the handler's
         # static undercount comparison and are reached by no automatic caller either
-        # (tests/test_catalog_ttl_check_no_trigger.py, tests/test_manifest_chunk_index_check_no_trigger.py).
+        # (tests/test_catalog_ttl_check_no_trigger.py, tests/test_manifest_check_no_trigger.py).
         assert callers == {"ChunkKeySweep.java", "ChunkConstraintAdmin.java", "ChunkKeysAdminHandler.java",
                            "NexusService.java", "Main.java", "CatalogTtlCheckHandler.java",
-                           "ManifestChunkIndexCheckHandler.java"}
+                           "ManifestCheckHandler.java"}
 
     def test_nexus_service_and_main_never_invoke_the_operations_or_schedule_them(self) -> None:
         """Not a file whitelist: every line of NexusService and Main that names the sweep, the admin or the handler
