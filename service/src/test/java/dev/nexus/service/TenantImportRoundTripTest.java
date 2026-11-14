@@ -329,7 +329,10 @@ class TenantImportRoundTripTest {
         damage.put("nx_answer_runs.run_summary", "UPDATE nexus.nx_answer_runs SET run_summary = jsonb_build_object('run', jsonb_build_object('plan_id', "
             + srcPlanId + ")) WHERE tenant_id = ? AND run_summary IS NOT NULL");
         damage.put("taxonomy_centroids.topic_id", "UPDATE nexus.taxonomy_centroids SET topic_id = " + srcTopicId + " WHERE tenant_id = ?");
-        damage.put("nx_answer_steps.run_id", "UPDATE nexus.nx_answer_steps SET run_id = " + srcRunId + " WHERE tenant_id = ?");
+        // One step only, with a step_index no seeded step holds: (run_id, step_index) is the primary key over the whole table,
+        // so moving every step, or a step whose index the source run already has, would collide instead of damaging.
+        damage.put("nx_answer_steps.run_id", "UPDATE nexus.nx_answer_steps SET run_id = " + srcRunId + ", step_index = 1000000"
+            + " WHERE ctid = (SELECT ctid FROM nexus.nx_answer_steps WHERE tenant_id = ? LIMIT 1)");
         int n = 0;
         for (var d : damage.entrySet()) {
             String tenant = "t-imp-rt-e" + n++;
