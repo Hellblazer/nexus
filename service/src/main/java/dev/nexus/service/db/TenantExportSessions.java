@@ -488,18 +488,65 @@ public final class TenantExportSessions implements AutoCloseable {
     }
 
     /**
+     * The longest a page read may hold its session's page gate, milliseconds (nexus-csayy.9): under the cloud edge's 30 s
+     * response-start limit, whatever the page's database budget, pool borrow or driver is doing. A page past it answers
+     * as over budget, so a client repeats it a few times and then reports it.
+     */
+    static final int PAGE_WALL_MS = 25_000;
+
+    /** Test seam: a shorter wall than {@link #PAGE_WALL_MS}; 0 in production. */
+    volatile int pageWallMsForTests;
+
+    /**
      * Runs {@code read} as the one page read of {@code session}; a second concurrent page is refused. The idle
      * clock restarts when the read ends, so a long page is not idle time.
+     *
+     * <p>The read runs on a virtual thread of its own, and this waits for it at most {@link #PAGE_WALL_MS}. At the wall
+     * the reader is interrupted (a virtual thread blocked in socket I/O has the socket closed under it, which ends a
+     * statement wait, and a pool borrow ends on the interrupt), the gate is released, and the page answers
+     * {@link TenantExportReads.PageOverBudgetException}: the gate is never held past the wall, even by a reader that
+     * does not stop (the 2026-11-14 cloud hang held it for minutes, spinning in the driver; see
+     * {@code TenantExportReads#copyOut}). A reader that is still finishing then holds its pool connection until it
+     * ends, so a session can briefly have two page reads on the pool while a retry runs.
      */
     public <T> T withPage(Session session, Function<Session, T> read) {
         if (!session.pageGate.tryAcquire()) throw new PageInFlightException();
         try {
-            return read.apply(session);
+            return underWall(session, read);
         } finally {
             synchronized (lock) {
                 session.lastActive = clock.instant();
             }
             session.pageGate.release();
+        }
+    }
+
+    private <T> T underWall(Session session, Function<Session, T> read) {
+        int wallMs = pageWallMsForTests > 0 ? pageWallMsForTests : PAGE_WALL_MS;
+        var result = new java.util.concurrent.CompletableFuture<T>();
+        Thread reader = Thread.ofVirtual().name("nx-export-page").start(() -> {
+            try {
+                result.complete(read.apply(session));
+            } catch (Throwable t) {
+                result.completeExceptionally(t);
+            }
+        });
+        try {
+            return result.get(wallMs, TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            reader.interrupt();
+            log.warn("event=export_page_wall_deadline tenant={} session={} wall_ms={}", session.owner, session.id, wallMs);
+            throw new TenantExportReads.PageOverBudgetException("the export page passed its " + wallMs
+                + " ms wall deadline");
+        } catch (InterruptedException e) {
+            reader.interrupt();
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while waiting for an export page", e);
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException r) throw r;
+            if (cause instanceof Error err) throw err;
+            throw new IllegalStateException("export page read failed", cause);
         }
     }
 

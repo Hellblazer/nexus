@@ -88,9 +88,10 @@ import java.util.regex.Pattern;
  * nexus/rdr248-local-spike-r2-2026-11-11}), so the budget bounds a pathological page and is not the expected
  * time. The budget does NOT include the pool borrow: that is bounded by the pool's own connection timeout
  * (HikariCP's 30 s default; {@code Main} does not change it for the engine's pool) and runs before the budget
- * starts. With a free pool connection a page starts its response well inside 30 s; on an exhausted pool the
- * borrow can take up to 30 s first, so a page may start up to about 50 s after the request, inside the 60 s
- * exchange limit but past the 30 s bound, and an exhausted pool answers 503 (see below). The header read of a
+ * starts. With a free pool connection a page starts its response well inside 30 s. Whatever the borrow, the budget
+ * or the driver does, a page holds its session's page gate at most 25 s ({@code TenantExportSessions#withPage}'s
+ * wall, nexus-csayy.9) and then answers 503 {@code export_page_over_budget}, so a page answers inside the 30 s
+ * bound, on an exhausted pool too (its borrow may wait 30 s, past the wall). The header read of a
  * POST gives each of its statements the full budget, not a shared one (they are catalog reads). A page is
  * buffered whole before its first byte is sent (its hash is a header), so the transfer is outside the
  * response-start bound and the database transaction is already closed while the client reads. Measured at 500,000
