@@ -272,3 +272,47 @@ The order, so nothing is lost:
 3. The verb verifies the whole file first, uploads it in parts of at most 8 MiB, commits, and follows the load. The load is one transaction, so it lands whole or not at all. When it ends the verb prints the rows loaded by class, the tables and columns it skipped, and how many soft-reference values were negated or dropped (rows that named a memory, plan or topic that was already gone when the backup was taken keep a negative id, so a second backup and restore keeps them negative).
 
 If your connection drops during the load the engine carries on; the verb reads the status again, and after an engine restart it reads the tenant's restore marker and says the load committed only when the marker names your file. If it prints that the outcome is unknown, the load may still be running or may have committed: it does not cancel it. Do not restore again at once; run `nx backup restore FILE` once more later. A tenant that holds the file's marker answers "this file was already restored", and an import that is still loading is left alone. A tenant that is not empty is refused, naming the table, before anything is uploaded. Another restore loading on the same database makes the commit wait: the verb tries again every 60 seconds, and gives up when the engine closes the session at its bound.
+
+#### The operator's order (RDR-248, nexus-csayy.7)
+
+The restore only works in this order, because the verb refuses a tenant that holds anything but the rows the engine writes itself. The verb never creates a tenant and never issues a token.
+
+1. **Run the current engine.** A file from an older engine loads when its columns still exist and have the same types in the engine that receives it, so nobody pins the engine to the file's version. The engine reports `tenant_import_supported` on `/version`; without it the verb refuses (see the table below).
+2. **Create the empty tenant and issue its token.** Managed service: the operator (`POST /v1/tenants/create`, the tenant's first token is in the answer). Local engine: `nx service token issue --tenant <tenant>`; `default` is the install's own tenant and must be empty. Create the tenant with its own name: the load lands in the tenant of the token, whatever tenant the file came from. Give the token only to the person who restores; a restore refuses the operator's root token (`import_scope_forbidden`).
+3. **The user restores.** Managed: `nx config set service_token <token>`. Local: `export NX_SERVICE_TOKEN=<token>`. Then `nx backup restore FILE`. Nothing else uses the tenant until the verb reports the outcome: a write made during the upload fails the load at its last check (`failed: tenant not empty: <table>`), nothing is written, and the tenant is then no longer empty, so it needs a fresh one.
+4. **Leave the engine running.** One load runs at a time on a database. A second restore (any tenant) is told `restore_busy` and keeps its upload staged; creating a new tenant while a load runs is told `tenant_creation_busy` with `Retry-After: 30` and succeeds once the load ends. A token for a tenant that already exists is not delayed.
+
+#### An engine restart, or a lost connection, during a restore
+
+The load is one transaction on one connection the engine holds. The engine keeps the outcome in memory for 24 hours, and the tenant's restore marker (`catalog_meta` key `rdr248_restore`) is written as the transaction's last statement, so it is the one record that survives a restart.
+
+- **The client loses its connection.** The load carries on. The verb reads the status route again until it reads `committed` or `failed`; if it cannot, it says the outcome is unknown, exits 1 and leaves the load alone. Run `nx backup restore FILE` again later.
+- **The engine restarts before or during the load.** The transaction ends with the connection and rolls back, and the session is gone. The verb reads `no such session`, then the marker. A marker that does not name this file means nothing was loaded, the tenant is as it was, and the verb says to run the restore again.
+- **The engine restarts after the commit.** The marker names the file (`header_sha256` is the SHA-256 of the file's header frame), and the verb reports the restore committed, printing the marker's session, time and row counts in place of the engine's report.
+- **Running the verb on the same file again is always safe.** A tenant that holds this file's marker answers "this file was already restored into this tenant"; a tenant with a load still running is left alone and the verb says to wait; a tenant that is empty gets a fresh restore. Do not delete the session of a load that may be running: `DELETE /v1/tenant/import/<id>` cancels it.
+- **Reading the marker by hand:** `GET /v1/tenant/import-marker` with the tenant token answers `{"present": true, "marker": {"header_sha256", "session_id", "committed_at", "row_counts"}}` when a load committed, and `{"present": false}` otherwise. `nx backup --check` does not print `header_sha256`; to learn whether a given file committed, run the verb on it.
+
+#### What each refusal means
+
+The verb prints the engine's own words; this is what they mean and what to do. Unless the line says otherwise, nothing was written.
+
+| The verb or engine says | Meaning | What to do |
+| --- | --- | --- |
+| `... does not verify` | The file is damaged or truncated (the same check as `nx backup --check`). Nothing was sent. | Take the backup again, or use another copy. |
+| no `tenant_import_supported`, "has no tenant import routes" | The engine is older than the import routes (0.1.192), or the public edge does not relay the field. | The operator upgrades the engine or the edge. |
+| `import_scope_forbidden`, "rejected the token (401)" | The token is the operator's root token, or is not current. | Use the tenant's own token (step 2 and 3 above). |
+| `tenant_not_empty`, naming a table | The tenant holds rows other than the ones the engine writes itself. When the marker names this file, the verb says "already restored" instead. | Restore into a new, empty tenant. |
+| `session_exists` | The tenant has an import or export session on the engine. The verb deletes one that is staging or finished and leaves one that is loading. | Wait: the engine closes an idle session after 10 minutes. |
+| `import_capacity_full` | The engine's session slots (shared by export and import) are all used. The verb waits and retries for a few minutes. | Try again later. |
+| `singleton_lock_not_held` | The engine cannot show it is the only engine on the database, so it will not hold sessions in memory. | The operator's: one engine per database, and the lock not switched off. |
+| `unsupported_format_version` | The file's export format is not one this engine reads. | Restore with an engine and `nx` that read it. |
+| `file_not_loadable`, naming a table or column | The file has a column this engine lacks (and has not retired), a column of another type, a table it cannot place, or lacks a NOT NULL column that has no default; or a child table came without its parent. | The file is older or newer than this engine's schema by more than the compatibility rule covers. Tell whoever runs the engine; the message names what differs. |
+| `missing_embedding_model` | The file's chunks use an embedding model the engine has no row for. | The operator adds the model, or restores into an engine that has it. |
+| `import_too_large` | The file's declared bytes, or the staged bytes so far, pass `NX_IMPORT_MAX_BYTES` (8 GiB by default). | The operator raises the cap, if the database has room. |
+| `restore_busy` (a commit) | Another restore holds the database's one load slot. The upload stays staged. | Nothing: the verb retries every 60 seconds until the engine's load bound (`NX_IMPORT_LOAD_MAX`, 60 minutes by default) passes, then the session closes; run the verb again. |
+| `failed: part T/k: ...`, `part_failed` | A part could not be staged (a full disk, a malformed part). The session is closed. | Run the verb again; if it repeats, tell the operator (disk space on the database). |
+| `failed: tenant not empty: <table>` | Something wrote to the tenant between the open and the load. | Use a fresh tenant; keep it unused until the verb reports. |
+| `failed: verification: ...` | The load's own count or reference check failed, for instance a row that names a parent the file does not hold. The transaction rolled back. | Keep the message and the file and tell whoever runs the engine; do not retry blindly. |
+| `failed: ... bound` (`idle`, `total`, `restore-wait`, `the load passed NX_IMPORT_LOAD_MAX`) | A time bound closed the session and the transaction rolled back. | Run the verb again on a faster link, or ask the operator for a larger `NX_IMPORT_LOAD_MAX`. |
+| `failed: aborted`, `failed: evicted`, `failed: engine stop` | The session was deleted, the tenant was reset, or the engine shut down. Rolled back. | Run the verb again. |
+| "the outcome is unknown" (exit 1) | The verb lost the engine during the load and could not read the status or the marker. | Do not restore again at once. Run the verb on the same file later: it says whether the load committed. |
