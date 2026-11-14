@@ -194,7 +194,7 @@ $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 <tr><td>CLI only</td><td>Install the <code>nx</code> command and decide about a service later</td><td>about 0.5 GB down (0.6 GB on Linux), 1.9 to 2.2 GB on disk</td></tr>
 <tr><td>Not now</td><td>Nothing is installed</td><td>none</td></tr>
 </table></div>
-<p class="note">These sizes include PDF support. <code>--slim</code> leaves it out, and the first PDF you index then installs it. The sizes on disk are the install itself, and uv keeps a separate download cache that <code>uv cache clean</code> empties. They were measured on version 7.89.0 on macOS and Linux, Windows was not measured, and none of them is a promise.</p>
+<p class="note">These sizes include PDF support. <code>--slim</code> leaves it out, and the first PDF you index then installs it. The sizes on disk are the install itself, and uv keeps a separate download cache that <code>uv cache clean</code> empties. Windows sizes have not been measured.</p>
 <p>Pressing Enter at the question, or running the script without a terminal, picks CLI only. Local adds a second question, whether the service should start when you log in, and the answer is No unless you type <code>y</code>.</p>
 <p>Cloud needs the service address and token. If your token is a mint credential, which is bound to one tenant, the script asks for that tenant too. The script asks for them in the terminal. Through the plugin a page opens in your browser instead, so Claude never sees the token.</p>
 
