@@ -88,7 +88,6 @@ if [[ -f "${PROD_MEMORY_DB}" ]]; then
     PROD_TELEMETRY_RUNS="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM nx_answer_runs;" 2>/dev/null || echo 0)"
     PROD_TELEMETRY_HOOKS="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM hook_failures;" 2>/dev/null || echo 0)"
     PROD_TELEMETRY_TIER="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM tier_writes;" 2>/dev/null || echo 0)"
-    PROD_TELEMETRY_FRECENCY="$(sqlite3 --readonly "${PROD_MEMORY_DB}" "SELECT COUNT(*) FROM frecency;" 2>/dev/null || echo 0)"
     # nexus-tzosw: the raw source COUNT(*) is NOT the right parity baseline for stores
     # whose ETL legitimately collapses rows. Three stores need the post-ETL-semantics
     # count instead (verified exact against the sandbox 2026-06-22):
@@ -111,7 +110,7 @@ if [[ -f "${PROD_MEMORY_DB}" ]]; then
     echo "[prod-copy]             topics=${PROD_TOPICS_COUNT} assignments=${PROD_TOPIC_ASSIGN_COUNT} topic_links=${PROD_TOPIC_LINKS_COUNT}"
     echo "[prod-copy]             telemetry: relevance=${PROD_TELEMETRY_RELEVANCE} search=${PROD_TELEMETRY_SEARCH}"
     echo "[prod-copy]                        nx_answer_runs=${PROD_TELEMETRY_RUNS} hook_failures=${PROD_TELEMETRY_HOOKS}"
-    echo "[prod-copy]                        tier_writes=${PROD_TELEMETRY_TIER} frecency=${PROD_TELEMETRY_FRECENCY}"
+    echo "[prod-copy]                        tier_writes=${PROD_TELEMETRY_TIER}"
     # nexus-tzosw: post-ETL-semantics baselines used for parity (vs raw COUNT above).
     echo "[prod-copy]             post-ETL baselines: topic_links_live=${PROD_TOPIC_LINKS_LIVE} nx_answer_runs_distinct=${PROD_TELEMETRY_RUNS_DISTINCT} plans_distinct=${PROD_PLANS_DISTINCT} hook_failures_distinct=${PROD_TELEMETRY_HOOKS_DISTINCT}"
     # Re-capture sidecar mtimes after reads (--readonly may create -shm if absent).
@@ -307,11 +306,10 @@ verify_pg_count_at_least "chash_index" "chash_index" "${PROD_CHASH_COUNT:-0}"
 # topics: exact (pure bulk copy)
 verify_pg_count_exact   "topics"              "topics"             "${PROD_TOPICS_COUNT:-0}"      0
 # relevance_log, search_telemetry, tier_writes: allow >= snapshot (live writes during ETL).
-# frecency: exact (rarely written during normal MCP operation).
+# frecency: retired (nexus-6pfgb.42, telemetry-019-1 drops nexus.frecency); no parity check.
 verify_pg_count_at_least "relevance_log"      "relevance_log"      "${PROD_TELEMETRY_RELEVANCE:-0}"
 verify_pg_count_at_least "search_telemetry"   "search_telemetry"   "${PROD_TELEMETRY_SEARCH:-0}"
 verify_pg_count_at_least "tier_writes"        "tier_writes"        "${PROD_TELEMETRY_TIER:-0}"
-verify_pg_count_exact   "frecency"            "frecency"           "${PROD_TELEMETRY_FRECENCY:-0}" 0
 # plans: imports fully (no type mismatch — the old nexus-5gaj7 override was telemetry,
 # misattributed). PG UNIQUE(tenant,project,query) collapses dimension-less duplicate plans
 # that SQLite's partial UNIQUE(project,dimensions) WHERE dimensions IS NOT NULL keeps, so

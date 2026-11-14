@@ -97,6 +97,16 @@ public final class PgCatalogProbes {
             : new ColumnInfo(r.get(dataType), r.get(isNullable), r.get(columnDefault), r.get(udtName));
     }
 
+    /** {@code pg_views.definition} of {@code schema.view}, or null when the view is absent. */
+    public static String viewDefinition(DSLContext ctx, String schema, String view) {
+        Field<String> definition = DSL.field(DSL.name("definition"), String.class);
+        return ctx.select(definition)
+            .from(DSL.table(DSL.name("pg_views")))
+            .where(DSL.field(DSL.name("schemaname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("viewname"), String.class).eq(view))
+            .fetchOne(definition);
+    }
+
     /** {@code pg_tables.tablename} for every table in {@code schema}. */
     public static List<String> tablesInSchema(DSLContext ctx, String schema) {
         Field<String> tablename = DSL.field(DSL.name("tablename"), String.class);

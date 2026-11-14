@@ -430,10 +430,14 @@ run:
    `nexus.chash_index` leg (the router table is being dropped; the gate
    filters by table_name, so an older view with the extra leg still
    satisfies it), and nexus-6pfgb.42 retired the `nexus.frecency` leg when
-   that table was dropped (the engine's `telemetry-019-1` re-points an
-   existing view; a view that still reads the table must be re-created
-   before the engine migrates, or the drop fails with its remedy named). Until re-created, debt counts report as unknown, never as
-   clean.
+   that table was dropped. When the engine's migrating role owns the view,
+   `taxonomy-011-8` (runAlways) re-points it at the four legs on every boot,
+   before `telemetry-019-1` runs; `telemetry-019-1` itself only checks and
+   drops. A view another role owns that still reads the table is not touched:
+   the drop fails with the view and the remedy named, and the engine does not
+   start until that role re-creates the view without the frecency leg (the
+   `CREATE OR REPLACE` above) or drops it. Until re-created, debt counts
+   report as unknown, never as clean.
 
 ## Tuning Parameters
 

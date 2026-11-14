@@ -103,7 +103,7 @@ def _cmd_sqlite_counts(args: argparse.Namespace) -> None:
         "memory", "plans", "chash_index",
         "topics", "topic_assignments", "topic_links", "taxonomy_meta",
         "relevance_log", "search_telemetry", "nx_answer_runs",
-        "hook_failures", "tier_writes", "frecency",
+        "hook_failures", "tier_writes",
     ]
     uri = f"file:{db_path}?mode=ro"
     try:

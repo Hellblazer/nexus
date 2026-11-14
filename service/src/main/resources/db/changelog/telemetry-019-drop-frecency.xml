@@ -21,7 +21,10 @@
        re-points the view before this changeset runs (an edit to a runAlways changeset is checksum-exempt). The one case it
        cannot reach is a view the migrating role does not own, which taxonomy-011-8 leaves alone with a NOTICE. That view
        would make the DROP fail with an unnamed dependency error, so the guard looks for any view that depends on the table
-       and fails with the remedy named, as taxonomy-011-1 does for the same view.
+       and fails with the remedy named, as taxonomy-011-1 does for the same view. The guard can also fire on a view the
+       migrating role DOES own: a long hop crosses vectors-030, which recreates the view owned by the migrating role from
+       its saved five-leg definition after taxonomy-011-8 has run in the same walk. The next boot re-points it (011-8 re-points
+       an owned view), so for an owned view the remedy is one restart; Telemetry019DropFrecencyLiquibaseTest pins both.
     3. DROP TABLE IF EXISTS nexus.frecency. The table's primary key, its three indexes, its two CHECK constraints, its
        tenant_isolation policy and the comment on chunk_id go with it. No other table references it (fk-005-1 recorded
        that no foreign key could, by grain), and nothing else in the schema reads it: the runAlways grants loop grants on
@@ -63,7 +66,7 @@ BEGIN
      WHERE d.refobjid = to_regclass('nexus.frecency')
        AND c.oid &lt;&gt; d.refobjid;
     IF v_views IS NOT NULL THEN
-        RAISE EXCEPTION 'nexus-6pfgb.42: nexus.frecency cannot be dropped while % reads it. Remedy: the view''s owning role must re-create it without the frecency leg (for nexus.diag_chash_conformance, the four-leg body of nexus.db.chash_tables.diag_conformance_view_ddl()) or drop it, then retry this migration.', v_views;
+        RAISE EXCEPTION 'nexus-6pfgb.42: nexus.frecency cannot be dropped while % reads it. Remedy: if the migrating role owns the view, restart the engine once (taxonomy-011-8 re-points nexus.diag_chash_conformance at four legs on every boot, before this changeset; a view of any other name is for its owner to re-create). Otherwise the view''s owning role must re-create it without nexus.frecency (for nexus.diag_chash_conformance, the four-leg body of nexus.db.chash_tables.diag_conformance_view_ddl()) or drop it, then retry this migration.', v_views;
     END IF;
 END
 $$;
