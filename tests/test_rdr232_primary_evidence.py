@@ -517,6 +517,7 @@ def test_an_open_fence_does_not_swallow_the_headings_of_a_non_adjacent_chunk() -
 
 def test_the_labeller_cost_is_flat_per_chunk_when_there_is_no_overlap() -> None:
     import random
+    import re
     import time
 
     rng = random.Random(7)
@@ -525,13 +526,25 @@ def test_the_labeller_cost_is_flat_per_chunk_when_there_is_no_overlap() -> None:
         f"## Section {i}\n\n" + " ".join(rng.choice(vocab) for _ in range(330)) + "\n\n```bash\nmake build && make test\n```"
         for i in range(3000)
     ]
-    started = time.perf_counter()
+    heading = re.compile(r"^#{1,6}\s+(.*)")
+
+    def best_of_3(fn: Any) -> float:
+        times = []
+        for _ in range(3):
+            started = time.perf_counter()
+            fn()
+            times.append(time.perf_counter() - started)
+        return min(times)
+
     labels = derive_content_labels(chunks)
-    elapsed = time.perf_counter() - started
     assert len(labels) == 3000 and labels[-1].label == "Section 2999"
     # r2 scanned every suffix of the previous chunk against the next one's head: 6.7 s for these 3,000 chunks (2.2 ms
-    # a chunk). The head probe makes it under 10 ms. Generous bound, not a benchmark.
-    assert elapsed < 1.0, f"{elapsed:.2f}s for 3000 chunks"
+    # a chunk), about 2,000x one pass that splits every chunk into lines and matches the heading pattern. The head
+    # probe makes the labeller about 3x that pass. The bound is relative to the pass, timed in the same run, so a slow
+    # or stalled runner moves both (an absolute 1 s bound failed at 1.71 s on a CI runner where this takes 9 ms).
+    baseline = best_of_3(lambda: sum(1 for c in chunks for line in c.splitlines() if heading.match(line)))
+    elapsed = best_of_3(lambda: derive_content_labels(chunks))
+    assert elapsed < 30 * baseline, f"labeller {elapsed * 1000:.1f} ms vs one line pass {baseline * 1000:.1f} ms"
 
 
 # ── Selection helpers ─────────────────────────────────────────────────────────────────────
