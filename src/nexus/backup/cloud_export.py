@@ -24,7 +24,8 @@ What the driver does on each answer (the csayy.2 review gate's client rules):
   ``export_page_busy`` or 409 ``page_in_flight`` is not a failure: it waits the ``Retry-After`` the engine gives, on
   its own budget (:data:`BUSY_WAIT_BUDGET_S` per request, which one last wait can overshoot), not the tries. When
   the tries or the budget run out the session is closed, the partial file removed, and the message says to run again.
-* A 503 ``export_page_over_budget`` is the engine cancelling the page at its page time budget (20 s by default). It
+* A 503 ``export_page_over_budget`` is the engine cancelling the page at its page time budget (20 s by default) or
+  cutting it at its 25 s page wall (``page_budget_ms`` carries whichever fired). It
   is a FAILED page, never a busy one: it takes the tries and the backoff ladder like any failure, and never the busy
   budget, because a statement that ran out of its budget is likely to run out again. When the tries run out the run
   fails naming the budget and saying to report it.
