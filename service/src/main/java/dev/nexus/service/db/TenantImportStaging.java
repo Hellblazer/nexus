@@ -39,7 +39,7 @@ import java.util.function.Function;
  * temp tables shaped from the FILE's columns, and the copy of one part into a stage. The load itself is
  * {@link TenantImportLoad}.
  *
- * <p>A stage is never {@code CREATE TABLE ... AS} or {@code LIKE} the target: that would lock every {@code chunks}
+ * <p>A stage is never created as a copy of the target ({@code AS} or {@code LIKE} it): that would lock every {@code chunks}
  * partition until commit. It is a temp table whose columns are the file's, named by position
  * ({@code nx_imp_stage_N}), so no request text reaches an identifier. A column's type is the target's own
  * {@code format_type} text for a known column (the plan proved the file's equal to it) and a validated plain type
