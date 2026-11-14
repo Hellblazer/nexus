@@ -146,9 +146,11 @@ class TenantExportTlsPageTest {
     }
 
     @Test
-    void aPageStillReadingAtTheWallAnswersOverBudgetAndReleasesTheGateAtTheWall() throws Exception {
+    void aPageStillReadingAtTheWallAnswersOverBudgetReleasesTheGateAndTheInterruptEndsTheReader() throws Exception {
         var s = sessions();
         var session = s.open(A).session();
+        var pool = ds.getHikariPoolMXBean();
+        int baseline = pool.getActiveConnections();   // the session's held connection
         s.pageWallMsForTests = 1_500;
         s.reads().beforeCopyForTests = ctx -> ctx.select(DSL.function("pg_sleep", Object.class, DSL.inline(6))).fetch();
         long t0 = System.nanoTime();
@@ -156,14 +158,22 @@ class TenantExportTlsPageTest {
             assertThatThrownBy(() -> s.withPage(session, held -> s.reads().page(held.snapshotId(), held.owner(),
                     chunks(), null, PAGE_BYTES, 100_000)))
                 .isInstanceOf(TenantExportReads.PageOverBudgetException.class)
-                .hasMessageContaining("wall deadline");
+                .hasMessageContaining("wall deadline")
+                .satisfies(e -> assertThat(((TenantExportReads.PageOverBudgetException) e).wallMs()).isEqualTo(1_500));
         } finally {
             s.reads().beforeCopyForTests = null;
             s.pageWallMsForTests = 0;
         }
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
         assertThat(elapsedMs).as("the gate is given up at the wall, not when the 6 s statement ends").isLessThan(4_000);
-        // the gate is free at once, and the reader the wall interrupted has given its connection back in a usable pool
+        // The interrupt ended the reader: it gave its connection back well before pg_sleep's 6 s are up (without the
+        // interrupt the reader holds the connection until the statement ends, about 4.5 s after the wall)
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (pool.getActiveConnections() > baseline && System.nanoTime() < deadline) Thread.sleep(25);
+        assertThat(pool.getActiveConnections()).as("the interrupted reader returned its pool connection")
+            .isEqualTo(baseline);
+        assertThat(s.liveReadersForTests(session)).as("and is no longer a live reader").isZero();
+        // the gate is free at once, and the pool is usable
         var page = s.withPage(session, held -> s.reads().page(held.snapshotId(), held.owner(), chunks(), null,
             PAGE_BYTES, 100_000));
         assertThat(page.rows()).isPositive();

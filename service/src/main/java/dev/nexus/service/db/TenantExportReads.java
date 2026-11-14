@@ -87,14 +87,36 @@ public final class TenantExportReads {
      * a few times and then reports it, instead of waiting it out.
      */
     public static final class PageOverBudgetException extends RuntimeException {
+        private final int wallMs;
+
         public PageOverBudgetException(Throwable cause) {
             super("export read cancelled at its page time budget", cause);
+            this.wallMs = 0;
         }
 
         PageOverBudgetException(String message) {
             super(message);
+            this.wallMs = 0;
+        }
+
+        /** The page was cut by the session's wall deadline ({@code wallMs}), not cancelled at the database budget. */
+        PageOverBudgetException(String message, int wallMs) {
+            super(message);
+            this.wallMs = wallMs;
+        }
+
+        /** The wall deadline that cut the page, milliseconds; 0 when the database budget cancelled it. */
+        public int wallMs() {
+            return wallMs;
         }
     }
+
+    /**
+     * Set by {@code TenantExportSessions#withPage} on the page's own reader thread: {@link #inSnapshot} runs it right after
+     * its pool borrow returns, so the wall can tell a pool that could not answer from a read that ran long. Unset (null) for
+     * a read outside a page, the header included.
+     */
+    static final ThreadLocal<Runnable> BORROW_RETURNED = new ThreadLocal<>();
 
     /** A table's name, class, key and the columns of its rows, as the header reports them. */
     public record TableHeader(String name, TenantExport.ExportClass exportClass, List<String> primaryKey,
@@ -232,7 +254,7 @@ public final class TenantExportReads {
      * the tenant before the first goes out, so a page cost time in proportion to the tenant's size, not the page's (gate
      * N1 scale run, nexus-csayy.4: a mid-table page of 100,000 rows, 918 ms with the sort and 233 ms as Merge Append).
      * With the sort off the planner takes the per-leaf index scans under Merge Append, which emit in key order and stop at
-     * the LIMIT or when the COPY is cancelled at the byte target. Such a scan reads only the tenant's rows, so no sort can
+     * the LIMIT or when the COPY is cut at the byte target. Such a scan reads only the tenant's rows, so no sort can
      * beat it.
      *
      * <p>A table keyed by {@code id} alone ({@code memory}, {@code plans}, ...) is left to the planner: its key order
@@ -450,6 +472,8 @@ public final class TenantExportReads {
         Txn txn = null;
         try {
             conn = dataSource.getConnection();
+            Runnable borrowed = BORROW_RETURNED.get();
+            if (borrowed != null) borrowed.run();
             conn.setAutoCommit(false);
             conn.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             conn.setReadOnly(true);
@@ -472,7 +496,9 @@ public final class TenantExportReads {
             RuntimeException limited = timeLimited(e);
             throw limited != null ? limited : new IllegalStateException("export read failed", e);
         } finally {
-            release(conn, txn != null && txn.discard);
+            // an interrupted reader (the wall's) may have its socket closed under it mid-statement: its stream is in a state
+            // nobody checked, whatever the sticky interrupt flag does to the pool's own close
+            release(conn, (txn != null && txn.discard) || Thread.currentThread().isInterrupted());
         }
     }
 
@@ -501,22 +527,40 @@ public final class TenantExportReads {
     private void release(Connection conn, boolean discard) {
         if (conn == null) return;
         if (discard) {
+            boolean aborted = false;
+            boolean alreadyClosed = false;
             try {
-                // the driver's network-level abort: no Terminate, no read. Not Connection.abort(Executor): PgJDBC 42.7.4
-                // guards it with SQLPermission.checkGuard, which throws on JDK 24 and later ("checking permissions is
-                // not supported"), so on this engine's JDK it never closes anything
-                conn.unwrap(org.postgresql.core.BaseConnection.class).getQueryExecutor().abort();
+                alreadyClosed = conn.isClosed();
             } catch (SQLException | RuntimeException e) {
-                log.warn("event=export_read_abort_failed error={}", e.toString());
+                log.debug("event=export_read_isclosed_failed error={}", e.toString());
+            }
+            if (alreadyClosed) {
+                // an interrupt closed its socket, or an earlier abort did: nothing left to abort
+                log.debug("event=export_read_abort_skipped reason=already_closed");
+            } else {
+                try {
+                    // the driver's network-level abort: no Terminate, no read. Not Connection.abort(Executor): PgJDBC 42.7.4
+                    // guards it with SQLPermission.checkGuard, which throws on JDK 24 and later ("checking permissions is
+                    // not supported"), so on this engine's JDK it never closes anything
+                    conn.unwrap(org.postgresql.core.BaseConnection.class).getQueryExecutor().abort();
+                    aborted = true;
+                } catch (SQLException | RuntimeException e) {
+                    log.warn("event=export_read_abort_failed error={}", e.toString());
+                }
             }
             if (dataSource instanceof com.zaxxer.hikari.HikariDataSource pool) {
-                pool.evictConnection(conn);   // never handed out again
+                pool.evictConnection(conn);   // never handed out again; the pool closes the physical connection itself
             }
-            try {
-                conn.close();
-            } catch (SQLException | RuntimeException e) {
-                log.debug("event=export_read_close_after_discard error={}", e.getMessage());
+            if (aborted || alreadyClosed) {
+                try {
+                    conn.close();
+                } catch (SQLException | RuntimeException e) {
+                    log.debug("event=export_read_close_after_discard error={}", e.getMessage());
+                }
             }
+            // else the abort failed: NOT conn.close(). The proxy's close rolls the connection back, which reads the stream
+            // (it skips leftover CopyData), and on a socket another thread is closing that read is the TLS skip spin of
+            // nexus-csayy.9. The eviction above already took the connection out of the pool's accounting.
             return;
         }
         try {

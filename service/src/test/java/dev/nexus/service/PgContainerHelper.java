@@ -488,6 +488,9 @@ public final class PgContainerHelper {
      *   <li>{@code WalkLockPreflightIntegrationTest} -- starts a cluster with a lowered
      *       {@code max_locks_per_transaction} and {@code max_connections} ({@link #startDedicated(List)}), postmaster
      *       settings a running cluster cannot take, to walk the largest tenant count the lock preflight admits.</li>
+     *   <li>{@code TenantExportTlsPageTest} -- starts a cluster with {@code ssl=on} ({@link #startDedicated(List)}), a
+     *       postmaster setting a running cluster cannot take, so export pages are read over TLS the way the managed cloud
+     *       connects (nexus-csayy.9).</li>
      *   <li>{@code PlpgsqlCheckGateTest} (a different image) and {@code PgBouncerTenantIsolationTest}
      *       (network-attached) build their own container through {@link #newContainer}.</li>
      * </ul>

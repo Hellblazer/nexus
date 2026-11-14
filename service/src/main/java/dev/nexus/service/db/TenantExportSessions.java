@@ -25,6 +25,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
@@ -78,8 +80,12 @@ public final class TenantExportSessions implements AutoCloseable {
      * target by at most one row plus one network read, so the target stays well under that.
      */
     static final int MAX_PAGE_BYTES = 19_000_000;
-    /** Longest a page's database time may be budgeted, seconds. */
-    static final long MAX_PAGE_BUDGET_SECONDS = 300;
+    /**
+     * Longest a page's database time may be budgeted, seconds: 5 s under {@link #PAGE_WALL_MS}, which leaves the wall room
+     * for the auth filter, the pool borrow and the response (nexus-csayy.9). A budget above the wall would never be reached:
+     * the wall would cut the page first and answer for it.
+     */
+    static final long MAX_PAGE_BUDGET_SECONDS = 20;
 
     /**
      * Session and page settings. {@code pageBytes} is the page's byte target (about 16 MB: under the cloud
@@ -88,7 +94,8 @@ public final class TenantExportSessions implements AutoCloseable {
      * page, all its statements together (default 20 s). The budget covers database statements only: the pool
      * borrow before the first one is bounded by the pool's own connection timeout (HikariCP's 30 s default, which
      * {@code Main} does not change), outside the budget, so the budget does not by itself keep a page inside the
-     * bead's 30 s response-start bound on a contended pool. The header read gives each of its statements the full
+     * bead's 30 s response-start bound on a contended pool; the page wall does ({@link #PAGE_WALL_MS}). It is capped under
+     * the wall ({@link #MAX_PAGE_BUDGET_SECONDS}). The header read gives each of its statements the full
      * budget (they are catalog reads, not table scans), not a shared one. {@code maxSessions} 0 disables export.
      * {@code retryAfterSeconds} is what a full engine asks a client to wait.
      */
@@ -300,6 +307,13 @@ public final class TenantExportSessions implements AutoCloseable {
         private final Instant openedAt;
         private Instant lastActive;
         private final Semaphore pageGate = new Semaphore(1);
+        /** Page readers of this session that have started and not ended; above 0 after a wall hit means one outlived it. */
+        private final AtomicInteger liveReaders = new AtomicInteger();
+        /**
+         * Set when the running page's pool borrow has returned (by the reader, through {@link TenantExportReads#BORROW_RETURNED}):
+         * a wall hit before it is a pool that could not answer, not a read that ran long. Reset at the start of each page.
+         */
+        private final AtomicBoolean borrowReturned = new AtomicBoolean();
 
         private Session(String id, String owner, String snapshotId, Connection held, Instant openedAt) {
             this.id = id;
@@ -489,13 +503,27 @@ public final class TenantExportSessions implements AutoCloseable {
 
     /**
      * The longest a page read may hold its session's page gate, milliseconds (nexus-csayy.9): under the cloud edge's 30 s
-     * response-start limit, whatever the page's database budget, pool borrow or driver is doing. A page past it answers
-     * as over budget, so a client repeats it a few times and then reports it.
+     * response-start limit, whatever the page's database budget, pool borrow or driver is doing. The page budget is capped
+     * under it ({@link #MAX_PAGE_BUDGET_SECONDS}), so a budget-cancelled statement answers first and the wall answers only
+     * for what the budget cannot bound: a pool borrow, the driver, a reader that spins.
      */
     static final int PAGE_WALL_MS = 25_000;
 
+    /** How long the wall waits for an interrupted reader to end before it logs the reader as stuck, milliseconds. */
+    static final int READER_JOIN_MS = 1_500;
+
     /** Test seam: a shorter wall than {@link #PAGE_WALL_MS}; 0 in production. */
     volatile int pageWallMsForTests;
+
+    /** Test seam for a test outside this package: see {@link #pageWallMsForTests}. */
+    public void pageWallMsForTests(int ms) {
+        pageWallMsForTests = ms;
+    }
+
+    /** Page readers of {@code session} that have not ended, for a test. */
+    int liveReadersForTests(Session session) {
+        return session.liveReaders.get();
+    }
 
     /**
      * Runs {@code read} as the one page read of {@code session}; a second concurrent page is refused. The idle
@@ -503,15 +531,24 @@ public final class TenantExportSessions implements AutoCloseable {
      *
      * <p>The read runs on a virtual thread of its own, and this waits for it at most {@link #PAGE_WALL_MS}. At the wall
      * the reader is interrupted (a virtual thread blocked in socket I/O has the socket closed under it, which ends a
-     * statement wait, and a pool borrow ends on the interrupt), the gate is released, and the page answers
-     * {@link TenantExportReads.PageOverBudgetException}: the gate is never held past the wall, even by a reader that
-     * does not stop (the 2026-11-14 cloud hang held it for minutes, spinning in the driver; see
-     * {@code TenantExportReads#copyOut}). A reader that is still finishing then holds its pool connection until it
-     * ends, so a session can briefly have two page reads on the pool while a retry runs.
+     * statement wait, and a pool borrow ends on the interrupt), joined for up to {@link #READER_JOIN_MS}, and the gate is
+     * released; the page then answers {@link TenantExportReads.PageOverBudgetException} (carrying the wall), or, when the
+     * read's pool borrow had not returned by the wall ({@link TenantExportReads#BORROW_RETURNED}), the exhausted-pool answer
+     * the route documents. The gate is never held past the wall plus the join, even by a reader that does not stop (the
+     * 2026-11-14 cloud hang held it for minutes, spinning in the driver; see {@code TenantExportReads#copyOut}).
+     *
+     * <p>A reader that ignores the interrupt keeps its pool connection and its carrier until it ends, and the session
+     * counts it: while any reader of the session is alive, a new page is refused as busy ({@link
+     * TenantExportReads.PageBusyException}, 503 {@code export_page_busy} with {@code Retry-After}), so a session never has
+     * two page reads on the pool, a stuck one included. Its end frees the session again.
      */
     public <T> T withPage(Session session, Function<Session, T> read) {
         if (!session.pageGate.tryAcquire()) throw new PageInFlightException();
         try {
+            if (session.liveReaders.get() != 0) {
+                throw new TenantExportReads.PageBusyException(
+                    "an earlier page read of this export session has not ended; retry");
+            }
             return underWall(session, read);
         } finally {
             synchronized (lock) {
@@ -524,20 +561,47 @@ public final class TenantExportSessions implements AutoCloseable {
     private <T> T underWall(Session session, Function<Session, T> read) {
         int wallMs = pageWallMsForTests > 0 ? pageWallMsForTests : PAGE_WALL_MS;
         var result = new java.util.concurrent.CompletableFuture<T>();
-        Thread reader = Thread.ofVirtual().name("nx-export-page").start(() -> {
+        session.borrowReturned.set(false);
+        Thread reader = Thread.ofVirtual().name("nx-export-page").unstarted(() -> {
+            TenantExportReads.BORROW_RETURNED.set(() -> session.borrowReturned.set(true));   // this thread is the page's alone
+            T value = null;
+            Throwable failure = null;
             try {
-                result.complete(read.apply(session));
+                value = read.apply(session);
             } catch (Throwable t) {
-                result.completeExceptionally(t);
+                failure = t;
+            } finally {
+                session.liveReaders.decrementAndGet();   // before the result: the next page must not see this reader as live
+            }
+            boolean delivered = failure == null ? result.complete(value) : result.completeExceptionally(failure);
+            if (!delivered && failure != null) {   // after the wall nobody waits for it: keep it findable
+                log.debug("event=export_page_reader_late_failure tenant={} session={} error={}", session.owner, session.id,
+                    failure.toString());
             }
         });
+        session.liveReaders.incrementAndGet();
+        try {
+            reader.start();
+        } catch (Throwable t) {
+            session.liveReaders.decrementAndGet();
+            throw t;
+        }
         try {
             return result.get(wallMs, TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
+            boolean borrowed = session.borrowReturned.get();
             reader.interrupt();
-            log.warn("event=export_page_wall_deadline tenant={} session={} wall_ms={}", session.owner, session.id, wallMs);
+            boolean ended = joinAfterInterrupt(reader);
+            if (!ended) {
+                log.warn("event=export_page_reader_stuck tenant={} session={} wall_ms={} join_ms={}", session.owner,
+                    session.id, wallMs, READER_JOIN_MS);
+            }
+            if (!borrowed) {
+                String message = "the export page's pool connection was not borrowed by its " + wallMs + " ms wall deadline";
+                throw new IllegalStateException(message, new java.sql.SQLTransientConnectionException(message));
+            }
             throw new TenantExportReads.PageOverBudgetException("the export page passed its " + wallMs
-                + " ms wall deadline");
+                + " ms wall deadline", wallMs);
         } catch (InterruptedException e) {
             reader.interrupt();
             Thread.currentThread().interrupt();
@@ -547,6 +611,16 @@ public final class TenantExportSessions implements AutoCloseable {
             if (cause instanceof RuntimeException r) throw r;
             if (cause instanceof Error err) throw err;
             throw new IllegalStateException("export page read failed", cause);
+        }
+    }
+
+    /** True when {@code reader} ended within {@link #READER_JOIN_MS} of its interrupt. */
+    private static boolean joinAfterInterrupt(Thread reader) {
+        try {
+            return reader.join(Duration.ofMillis(READER_JOIN_MS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return !reader.isAlive();
         }
     }
 

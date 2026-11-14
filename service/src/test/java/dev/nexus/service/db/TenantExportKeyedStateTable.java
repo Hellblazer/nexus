@@ -34,6 +34,11 @@ final class TenantExportKeyedStateTable {
         notKeyed.put("TenantExportSessions.opening", "the tenants whose session is being opened right now, one "
             + "open at a time per tenant; an entry lives only for the duration of that POST and is removed in its "
             + "finally, so no tenant's state is kept");
+        for (String f : List.of("TenantExportSessions.Session.liveReaders", "TenantExportSessions.Session.borrowReturned")) {
+            notKeyed.put(f, "a field of one live export session (the keyed entry, byOwner): the count of its page readers "
+                + "still alive and whether the running page's pool borrow has returned; closing the session drops them "
+                + "(nexus-csayy.9)");
+        }
         for (String f : List.of("TenantExportReads.TableHeader.primaryKey", "TenantExportReads.TableHeader.columns",
             "TenantExportReads.Header.tables", "TenantExportReads.Header.embeddingModels",
             "BinaryCopyPage.Result.lastKeyFields")) {
