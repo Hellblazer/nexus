@@ -9,10 +9,14 @@ import dev.nexus.service.db.TenantExport;
 import dev.nexus.service.db.TenantExport.ExportClass;
 import dev.nexus.service.db.TenantExport.ExportTable;
 import dev.nexus.service.db.TenantExport.Reference;
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.JSONB;
+import org.jooq.Query;
 import org.jooq.Record;
+import org.jooq.Table;
+import org.jooq.impl.SQLDataType;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -68,6 +72,10 @@ class TenantImportRoundTripTest {
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────
+
+    private static Condition tenantIs(String tenant) {
+        return DSL.field(DSL.name("tenant_id"), String.class).eq(tenant);
+    }
 
     private static Field<Object> col(String name) {
         return DSL.field(DSL.name(name));
@@ -256,38 +264,46 @@ class TenantImportRoundTripTest {
     private List<Resolution> resolution(String tenant) {
         return env.su(ctx -> {
             List<Resolution> out = new ArrayList<>();
+            Field<String> childTenant = DSL.field(DSL.name("c", "tenant_id"), String.class);
             for (ExportTable t : TenantExport.TABLES) {
                 if (!t.exported()) continue;
                 for (Reference r : t.references()) {
                     var parent = TenantExport.entry(r.parentTable());
                     if (parent.isEmpty() || !parent.get().exported()) continue;
-                    String child = "nexus." + t.table(), par = "nexus." + parent.get().table();
-                    String sql;
+                    Table<?> child = DSL.table(DSL.name("nexus", t.table())).as("c");
+                    Table<?> par = DSL.table(DSL.name("nexus", parent.get().table())).as("p");
+                    Field<String> parentTenant = DSL.field(DSL.name("p", "tenant_id"), String.class);
+                    Table<?> from = child;
+                    Condition present = DSL.trueCondition();
+                    Condition parentMatch;
                     if (r.array()) {
-                        sql = "SELECT count(*) FILTER (WHERE v > 0), count(*) FILTER (WHERE v > 0 AND NOT EXISTS (SELECT 1 FROM " + par
-                            + " p WHERE p.tenant_id = ? AND p." + r.parentColumns().get(0) + " = v)) FROM " + child
-                            + " c, unnest(c." + r.columns().get(0) + ") v WHERE c.tenant_id = ?";
+                        // each element of the array is a value to resolve
+                        Field<Long[]> array = DSL.field(DSL.name("c", r.columns().get(0)), SQLDataType.BIGINT.getArrayDataType());
+                        from = child.crossJoin(DSL.unnest(array).as("u", "v"));
+                        Field<Long> v = DSL.field(DSL.name("u", "v"), Long.class);
+                        present = v.gt(0L);
+                        parentMatch = DSL.field(DSL.name("p", r.parentColumns().get(0)), Long.class).eq(v);
                     } else if (r.jsonPath() != null) {
-                        String v = "(c." + r.columns().get(0) + " #>> '{" + r.jsonPath().replace('.', ',') + "}')::bigint";
-                        sql = "SELECT count(*) FILTER (WHERE " + v + " > 0), count(*) FILTER (WHERE " + v + " > 0 AND NOT EXISTS (SELECT 1 FROM "
-                            + par + " p WHERE p.tenant_id = ? AND p." + r.parentColumns().get(0) + " = " + v + ")) FROM " + child
-                            + " c WHERE c.tenant_id = ?";
+                        List<Field<?>> args = new ArrayList<>();
+                        args.add(DSL.field(DSL.name("c", r.columns().get(0)), SQLDataType.JSONB));
+                        for (String step : r.jsonPath().split("\\.")) args.add(DSL.val(step));
+                        Field<Long> v = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, args.toArray(new Field<?>[0]))
+                            .cast(SQLDataType.BIGINT);
+                        present = v.gt(0L);
+                        parentMatch = DSL.field(DSL.name("p", r.parentColumns().get(0)), Long.class).eq(v);
                     } else {
-                        StringBuilder on = new StringBuilder("p.tenant_id = ?");
-                        StringBuilder present = new StringBuilder();
+                        parentMatch = DSL.trueCondition();
                         for (int i = 0; i < r.columns().size(); i++) {
                             String c = r.columns().get(i), pc = r.parentColumns().get(i);
                             if (c.equals("tenant_id")) continue;
-                            on.append(" AND p.").append(pc).append(" = c.").append(c);
-                            present.append(" AND c.").append(c).append(r.foreignKey() ? " IS NOT NULL" : " > 0");
+                            Field<Object> cv = DSL.field(DSL.name("c", c));
+                            present = present.and(r.foreignKey() ? cv.isNotNull() : DSL.field(DSL.name("c", c), Long.class).gt(0L));
+                            parentMatch = parentMatch.and(DSL.field(DSL.name("p", pc)).eq(cv));
                         }
-                        sql = "SELECT count(*) FILTER (WHERE true" + present + "), count(*) FILTER (WHERE true" + present
-                            + " AND NOT EXISTS (SELECT 1 FROM " + par + " p WHERE " + on + ")) FROM " + child + " c WHERE c.tenant_id = ?";
                     }
-                    int params = (int) sql.chars().filter(ch -> ch == '?').count();
-                    Object[] binds = new Object[params];
-                    Arrays.fill(binds, tenant);
-                    Record row = ctx.fetchOne(sql, binds);
+                    Condition unresolved = present.and(DSL.notExists(DSL.selectOne().from(par).where(parentTenant.eq(tenant), parentMatch)));
+                    Record row = ctx.select(DSL.count().filterWhere(present), DSL.count().filterWhere(unresolved))
+                        .from(from).where(childTenant.eq(tenant)).fetchOne();
                     out.add(new Resolution(t.name() + "." + String.join(",", r.columns()) + " -> " + parent.get().name(),
                         row.get(0, Long.class), row.get(1, Long.class)));
                 }
@@ -323,23 +339,34 @@ class TenantImportRoundTripTest {
         long srcPlanId = labels("plans", "query", SRC).keySet().iterator().next();
         long srcTopicId = labels("topics", "label", SRC).keySet().iterator().next();
         long srcRunId = labels("nx_answer_runs", "question", SRC).keySet().iterator().next();
-        Map<String, String> damage = new LinkedHashMap<>();
-        damage.put("memory_summaries.source_ids", "UPDATE nexus.memory_summaries SET source_ids = ARRAY[" + srcMemoryId + "::bigint] WHERE tenant_id = ?");
-        damage.put("nx_answer_runs.plan_id", "UPDATE nexus.nx_answer_runs SET plan_id = " + srcPlanId + " WHERE tenant_id = ?");
-        damage.put("nx_answer_runs.run_summary", "UPDATE nexus.nx_answer_runs SET run_summary = jsonb_build_object('run', jsonb_build_object('plan_id', "
-            + srcPlanId + ")) WHERE tenant_id = ? AND run_summary IS NOT NULL");
-        damage.put("taxonomy_centroids.topic_id", "UPDATE nexus.taxonomy_centroids SET topic_id = " + srcTopicId + " WHERE tenant_id = ?");
+        // each damage is a typed update of ONE tenant's rows, built from the tenant it damages
+        Map<String, java.util.function.BiFunction<DSLContext, String, Query>> damage = new LinkedHashMap<>();
+        damage.put("memory_summaries.source_ids", (ctx, tn) -> ctx.update(DSL.table(DSL.name("nexus", "memory_summaries")))
+            .set(DSL.field(DSL.name("source_ids"), Long[].class), new Long[] {srcMemoryId}).where(tenantIs(tn)));
+        damage.put("nx_answer_runs.plan_id", (ctx, tn) -> ctx.update(DSL.table(DSL.name("nexus", "nx_answer_runs")))
+            .set(DSL.field(DSL.name("plan_id"), Long.class), srcPlanId).where(tenantIs(tn)));
+        damage.put("nx_answer_runs.run_summary", (ctx, tn) -> ctx.update(DSL.table(DSL.name("nexus", "nx_answer_runs")))
+            .set(DSL.field(DSL.name("run_summary"), JSONB.class), JSONB.valueOf("{\"run\": {\"plan_id\": " + srcPlanId + "}}"))
+            .where(tenantIs(tn), DSL.field(DSL.name("run_summary")).isNotNull()));
+        damage.put("taxonomy_centroids.topic_id", (ctx, tn) -> ctx.update(DSL.table(DSL.name("nexus", "taxonomy_centroids")))
+            .set(DSL.field(DSL.name("topic_id"), Long.class), srcTopicId).where(tenantIs(tn)));
         // One step only, with a step_index no seeded step holds: (run_id, step_index) is the primary key over the whole table,
         // so moving every step, or a step whose index the source run already has, would collide instead of damaging.
-        damage.put("nx_answer_steps.run_id", "UPDATE nexus.nx_answer_steps SET run_id = " + srcRunId + ", step_index = 1000000"
-            + " WHERE ctid = (SELECT ctid FROM nexus.nx_answer_steps WHERE tenant_id = ? LIMIT 1)");
+        damage.put("nx_answer_steps.run_id", (ctx, tn) -> {
+            Table<?> steps = DSL.table(DSL.name("nexus", "nx_answer_steps"));
+            Field<Long> runId = DSL.field(DSL.name("run_id"), Long.class);
+            Field<Integer> stepIndex = DSL.field(DSL.name("step_index"), Integer.class);
+            Record one = ctx.select(runId, stepIndex).from(steps).where(tenantIs(tn)).orderBy(runId, stepIndex).limit(1).fetchOne();
+            return ctx.update(steps).set(runId, srcRunId).set(stepIndex, 1_000_000)
+                .where(tenantIs(tn), runId.eq(one.get(runId)), stepIndex.eq(one.get(stepIndex)));
+        });
         int n = 0;
         for (var d : damage.entrySet()) {
             String tenant = "t-imp-rt-e" + n++;
             assertThat(env.restore(env.newTenant(tenant), file).get("status").asText()).isEqualTo("committed");
             assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0)).as("sound before the damage to " + d.getKey()).isEmpty();
 
-            env.su(ctx -> ctx.execute(d.getValue(), tenant));
+            env.su(ctx -> d.getValue().apply(ctx, tenant).execute());
 
             assertThat(resolution(tenant).stream().filter(r -> r.unresolved() > 0).map(Resolution::reference).toList())
                 .as("the resolution check names " + d.getKey() + " once it holds the source's id")
@@ -353,8 +380,8 @@ class TenantImportRoundTripTest {
         Map<Long, String> dstMemory = labels("memory", "title", tenant);
         assertThat(summarySources(tenant, dstMemory)).as("sound before the damage").isEqualTo(summarySources(SRC, srcMemory));
         env.su(ctx -> {
-            ctx.execute(damage.get("memory_summaries.source_ids"), tenant);
-            ctx.execute(damage.get("nx_answer_runs.plan_id"), tenant);
+            damage.get("memory_summaries.source_ids").apply(ctx, tenant).execute();
+            damage.get("nx_answer_runs.plan_id").apply(ctx, tenant).execute();
             return null;
         });
         assertThat(summarySources(tenant, dstMemory)).as("the join comparison sees it too").isNotEqualTo(summarySources(SRC, srcMemory));
@@ -362,9 +389,13 @@ class TenantImportRoundTripTest {
 
         // and the contents comparison sees a value changed in a column no restore touches
         ExportTable memory = TenantExport.entry("memory").orElseThrow();
-        env.su(ctx -> ctx.execute(
-            "UPDATE nexus.memory SET content = content || '!' WHERE tenant_id = ? AND id = (SELECT min(id) FROM nexus.memory WHERE tenant_id = ?)",
-            tenant, tenant));
+        env.su(ctx -> {
+            Table<?> mem = DSL.table(DSL.name("nexus", "memory"));
+            Field<Long> id = DSL.field(DSL.name("id"), Long.class);
+            Field<String> content = DSL.field(DSL.name("content"), String.class);
+            Long first = ctx.select(DSL.min(id)).from(mem).where(tenantIs(tenant)).fetchOne(0, Long.class);
+            return ctx.update(mem).set(content, content.concat("!")).where(tenantIs(tenant), id.eq(first)).execute();
+        });
         assertThat(rowsOf("memory", tenant, changedByDesign(memory))).isNotEqualTo(rowsOf("memory", SRC, changedByDesign(memory)));
     }
 

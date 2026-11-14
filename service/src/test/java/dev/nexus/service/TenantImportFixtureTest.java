@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import com.fasterxml.jackson.databind.JsonNode;
 import dev.nexus.service.db.TenantExport;
 import dev.nexus.service.db.TenantExport.ExportTable;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -142,7 +144,7 @@ class TenantImportFixtureTest {
     @Test
     void aMigrationThatDropsAnExportedColumnTurnsTheLoadRedNamingTheColumn() throws Exception {
         try (ImportTestEnv own = ImportTestEnv.start()) {
-            own.su(ctx -> ctx.execute("ALTER TABLE nexus.memory DROP COLUMN access_count"));
+            own.su(ctx -> ctx.alterTable(DSL.table(DSL.name("nexus", "memory"))).dropColumn(DSL.field(DSL.name("access_count"))).execute());
             HttpResponse<String> r = own.open(own.newTenant("t-fixture-dropped"), TenantBackupFiles.read(committed()));
 
             assertThat(r.statusCode()).as(r.body()).isEqualTo(422);
@@ -154,7 +156,7 @@ class TenantImportFixtureTest {
     @Test
     void aMigrationThatRetypesAnExportedColumnTurnsTheLoadRedNamingTheColumn() throws Exception {
         try (ImportTestEnv own = ImportTestEnv.start()) {
-            own.su(ctx -> ctx.execute("ALTER TABLE nexus.memory ALTER COLUMN access_count TYPE bigint"));
+            own.su(ctx -> ctx.alterTable(DSL.table(DSL.name("nexus", "memory"))).alterColumn(DSL.name("access_count")).set(SQLDataType.BIGINT).execute());
             HttpResponse<String> r = own.open(own.newTenant("t-fixture-retyped"), TenantBackupFiles.read(committed()));
 
             assertThat(r.statusCode()).as(r.body()).isEqualTo(422);
