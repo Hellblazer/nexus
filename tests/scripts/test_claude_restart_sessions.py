@@ -62,6 +62,8 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "KNOWN_MARKETPLACES", settings / "known_marketplaces.json")
     monkeypatch.setattr(crs, "INSTALLED", settings / "installed_plugins.json")
     monkeypatch.setattr(crs, "KEEP_DEV_CHANNEL", False)
+    # The exit-and-resume path; /restart has its own tests (test_claude_restart_sessions_slash.py).
+    monkeypatch.setattr(crs, "NO_SLASH", True)
     # A roll under test must not prune this machine's real /tmp (nexus-2v7da); that prune is pinned in
     # test_claude_restart_sessions_prune.py.
     monkeypatch.setattr(crs, "_prune_handoffs_at_write", lambda: None)
@@ -976,6 +978,8 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
     monkeypatch.setattr(crs, "script_sha256", lambda *_a: SHA)
     monkeypatch.setattr(crs, "claude_version", lambda *_a: "2.1.316")
+    # Live sessions here carry the test process's pid; its children are not background tasks of theirs.
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     monkeypatch.delenv("TMUX_PANE", raising=False)
     return tmp_path
 
@@ -1032,6 +1036,66 @@ def test_go_refuses_a_ready_reply_older_than_the_max_age(crs, rd) -> None:
     log = _log(rd)
     assert "beta: reply stale: ready reply is 15m old" in log and "alpha:" not in log.replace("alpha, ", "")
     assert _gate(crs, rd, max_age=1000) == 0  # the same reply, a longer window
+
+
+def test_go_refuses_a_ready_reply_while_background_tasks_still_run(crs, rd, monkeypatch) -> None:
+    # nexus-ct74m: labrun said ready twice while a wait loop ran; the answer is checked against the task list.
+    _live(rd, "alpha")
+    _live(rd, "beta")
+    _round(crs, rd, ["alpha", "beta"], alpha=60, beta=60)
+    tasks = {"sid-alpha": ["pid 5000 since Fri Nov 13 01:05:00 2026: nx ci wait abc", "pid 5001 since x: sleep 9"]}
+    monkeypatch.setattr(crs, "session_tasks", lambda s: tasks.get(s["sessionId"], []))
+    assert _gate(crs, rd) == 3
+    log = _log(rd)
+    assert "alpha: said ready, but 2 background task(s) still run: pid 5000 since Fri Nov 13 01:05:00 2026: " \
+           "nx ci wait abc (and 1 more)" in log and "beta:" not in log.replace("beta, ", "")
+
+
+def test_go_refuses_a_ready_reply_whose_tasks_could_not_be_listed(crs, rd, monkeypatch) -> None:
+    # Not knowing is not "none": the labrun case was a task nobody saw.
+    _live(rd, "alpha")
+    _round(crs, rd, ["alpha"], alpha=60)
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: None)
+    assert _gate(crs, rd) == 3
+    assert "alpha: said ready, but its background tasks could not be listed" in _log(rd)
+
+
+def test_the_caller_is_not_held_by_its_own_shells(crs, rd, monkeypatch) -> None:
+    _live(rd, "alpha", pane="%7")
+    _round(crs, rd, ["alpha"], alpha=60)
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: ["pid 1 since x: claude-restart-sessions --resume"])
+    assert _gate(crs, rd, caller_pane="%7") == 0
+
+
+def test_the_ready_ask_carries_the_task_list(crs, rd, monkeypatch) -> None:
+    s = {"name": "alpha", "sessionId": "sid-alpha", "pid": 1}
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: ["pid 5000 since t: nx ci wait abc"])
+    text = crs.ready_prompt(s, "/tmp/r.json")
+    assert "sees 1 background task(s) running under your session, which a restart would cut off: " \
+           "pid 5000 since t: nx ci wait abc. Stop each one you do not need, or answer not ready." in text
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
+    assert "sees no background task running under your session" in crs.ready_prompt(s, "/tmp/r.json")
+    assert "A session-only cron or reminder you set may be lost in a restart" in crs.ready_prompt(s, "/tmp/r.json")
+    monkeypatch.setattr(crs, "session_tasks", lambda _s: None)
+    assert "could not list your background tasks" in crs.ready_prompt(s, "/tmp/r.json")
+
+
+def test_session_tasks_reads_the_snapshot_shells_below_the_session(crs, monkeypatch) -> None:
+    sf = crs._facts()
+    assert sf is not None
+    snap = "/bin/zsh -c source /h/.claude/shell-snapshots/snapshot-zsh-1.sh && eval 'sleep 600' < /dev/null"
+    table = [sf.Proc(900, 1, "Fri Nov 13 01:00:00 2026", "claude"),
+             sf.Proc(901, 900, "Fri Nov 13 01:05:00 2026", snap),
+             sf.Proc(902, 900, "Fri Nov 13 01:00:01 2026", "node mcp.js")]
+    monkeypatch.setattr(sf, "process_table", lambda *_a: table)
+    assert crs.session_tasks({"pid": 900}) == ["pid 901 since Fri Nov 13 01:05:00 2026: sleep 600"]
+    # A standing mail wake is meant to run; this script's own shell (the caller's Bash tool) is not a task.
+    mine = sf.Proc(os.getpid(), 900, "Fri Nov 13 01:06:00 2026", snap.replace("sleep 600", "claude-restart-sessions"))
+    wake = sf.Proc(903, 900, "Fri Nov 13 01:07:00 2026", snap.replace("sleep 600", "nx tuple wait mailbox/x"))
+    monkeypatch.setattr(sf, "process_table", lambda *_a: [*table, mine, wake])
+    assert crs.session_tasks({"pid": 900}) == ["pid 901 since Fri Nov 13 01:05:00 2026: sleep 600"]
+    monkeypatch.setattr(sf, "process_table", lambda *_a: [])
+    assert crs.session_tasks({"pid": 900}) is None
 
 
 def test_go_names_a_session_that_went_busy_after_saying_ready(crs, rd) -> None:
@@ -2629,10 +2693,12 @@ class _Pane:
     after claude exits, then dies with the pane (it is not at a prompt until then)."""
 
     def __init__(self, pane: str, claude_pid: int, *, direct: bool, name: str = "wren", registers: bool = True,
-                 ignores_ctrl_c: bool = False, ignores_sigterm: bool = False,
+                 ignores_ctrl_c: bool = False, ignores_sigterm: bool = False, exits_late_after: int | None = None,
                  wrapper_dies_after: int | None = None, wrapper_args: str = "sh -c 'claude; sleep 3'") -> None:
         self.id, self.claude_pid, self.direct, self.name, self.registers = pane, claude_pid, direct, name, registers
         self.ignores_ctrl_c, self.ignores_sigterm = ignores_ctrl_c, ignores_sigterm
+        # with ignores_sigterm: claude exits on its own this many liveness looks after the SIGTERM (bob, 8.2.2 round)
+        self.exits_late_after, self.late_looks = exits_late_after, None
         self.pid = claude_pid if direct else claude_pid - 1  # a shell's pid, when there is one
         self.wrapper_polls, self.wrapper_args = wrapper_dies_after, wrapper_args
         self.wrapper_alive = False
@@ -2663,6 +2729,11 @@ class FakeTmux:
         self.next_new = 9
 
     def alive(self, pid: int) -> bool:
+        for pane in self.panes.values():
+            if pane.claude_pid == pid and pane.late_looks is not None and pid in self.alive_pids:
+                pane.late_looks -= 1
+                if pane.late_looks <= 0:
+                    self._claude_exits(pane)
         return pid in self.alive_pids
 
     def kill(self, pid: int, sig: int) -> None:
@@ -2671,6 +2742,8 @@ class FakeTmux:
         for pane in self.panes.values():
             if pane.claude_pid == pid and not pane.ignores_sigterm:
                 self._claude_exits(pane)
+            elif pane.claude_pid == pid and pane.exits_late_after is not None:
+                pane.late_looks = pane.exits_late_after
 
     def verbs(self, verb: str) -> list[list[str]]:
         return [c for c in self.calls if c[1] == verb]
@@ -2789,6 +2862,8 @@ def _fake_tmux(crs, monkeypatch, tmp_path: Path, panes: list[_Pane], **kw) -> Fa
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
     monkeypatch.setattr(crs, "alive", fake.alive)
     monkeypatch.setattr(crs, "RESULTS", {})
+    monkeypatch.setattr(crs, "LATE", [])
+    monkeypatch.setattr(crs, "STUCK", [])
     setattr_in(monkeypatch, crs, "subprocess.run", fake)
     setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
     setattr_in(monkeypatch, crs, "os.kill", fake.kill)
@@ -2865,6 +2940,19 @@ def _three(crs, monkeypatch, tmp_path, first: _Pane, nx: str = "", caller_pane: 
     args = _roll_args(nx=nx, caller_pane=caller_pane)
     code = crs._roll(args, found, list(found), [], {"idle"}, None)
     return fake, panes, found, code
+
+
+@pytest.mark.parametrize("first", ["late", "stuck"])
+def test_the_done_line_names_a_late_resume_and_a_claude_that_never_exited(crs, monkeypatch, tmp_path, first) -> None:
+    pane = _Pane("%1", 111, direct=False, ignores_ctrl_c=True, ignores_sigterm=True,
+                 exits_late_after=40 if first == "late" else None)
+    _fake, _panes, _found, code = _three(crs, monkeypatch, tmp_path, pane)
+    done = next(ln for ln in _log_text(tmp_path).splitlines() if "=== done:" in ln)
+    if first == "late":
+        assert code == 0 and done.endswith("3 of 3 restarted (0 fresh, 3 resumed); resumed late: wren"), done
+    else:
+        assert code == 1 and done.endswith(
+            "2 of 3 restarted (0 fresh, 2 resumed); never exited, not relaunched: wren (pid 111, pane %1)"), done
 
 
 @pytest.mark.parametrize("why", ["no-pane-to-relaunch-into", "claude-never-registers"])
@@ -2946,6 +3034,32 @@ def test_remain_on_exit_is_released_when_the_pid_will_not_exit(crs, monkeypatch,
     assert "FAIL wren: pid 111 did not exit" in _log_text(tmp_path)
     assert fake.kills == [(111, signal.SIGTERM)] and pane.typed == []
     assert pane.opts == {"-p": "", "-w": ""} and pane.state == "live"
+
+
+def test_a_claude_that_never_exits_is_named_with_its_pid_and_pane(crs, monkeypatch, tmp_path) -> None:
+    """After the SIGTERM window the script watches LATE_EXIT_WAIT more seconds, then fails naming pid and pane."""
+    pane = _Pane("%18", 111, direct=False, ignores_ctrl_c=True, ignores_sigterm=True)
+    _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is False
+    log = _log_text(tmp_path)
+    assert f"watching it up to {crs.LATE_EXIT_WAIT}s more" in log
+    assert f"FAIL wren: pid 111 did not exit within {crs.LATE_EXIT_WAIT}s" in log and "(pane %18)" in log
+    assert crs.STUCK == ["wren (pid 111, pane %18)"] and pane.typed == []
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["shell-pane", "claude-is-the-pane"])
+def test_a_claude_that_exits_after_the_sigterm_window_is_resumed_late(crs, monkeypatch, tmp_path, direct) -> None:
+    """bob on the 8.2.2 round (2026-11-13): claude exited a little after the SIGTERM window and was left at a
+    shell prompt, not relaunched. Now the late watch sees the exit, relaunches it, and logs it as resumed late."""
+    pane = _Pane("%18", 111, direct=direct, name="bob", ignores_ctrl_c=True, ignores_sigterm=True,
+                 exits_late_after=40)
+    fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
+    assert crs.restart(_sess(pane)) is True
+    log = _log_text(tmp_path)
+    assert "bob: pid 111 still running 15s after SIGTERM" in log and "exited" in log and "into the late watch" in log
+    assert "OK bob: resumed late as pid" in log and "FAIL" not in log
+    assert crs.LATE == ["bob"] and crs.STUCK == [] and len(pane.typed) == 1 and pane.lost == []
+    assert fake.kills == [(111, signal.SIGTERM)]
 
 
 def test_remain_on_exit_is_released_when_no_pane_is_left_to_relaunch_in(crs, monkeypatch, tmp_path) -> None:

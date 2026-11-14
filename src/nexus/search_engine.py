@@ -1429,6 +1429,7 @@ def search_cross_corpus(
     cluster_by: str | None = _CLUSTER_DEFAULT,
     catalog: Any | None = None,
     link_boost: bool = False,
+    mark_superseded: bool = False,
     taxonomy: Any | None = None,
     topic: str | None = None,
     threshold_override: float | None = None,
@@ -2591,6 +2592,14 @@ def search_cross_corpus(
             all_results, catalog,
             homes=(lambda: display_lookup.maps()[2]) if display_lookup is not None else None,
         )
+
+    # nexus-2k66t.6 (2A): a hit every one of whose owners is superseded is marked and demoted, for the caller that
+    # prints the mark (the MCP search tool). After the doc_id attach, before hybrid scoring reads topic_boost.
+    if mark_superseded and catalog and all_results:
+        from nexus.scoring import _link_owners  # noqa: PLC0415 — branch-local, like the link boost
+        from nexus.supersession import mark_superseded as _mark  # noqa: PLC0415
+
+        all_results = _mark(all_results, catalog, owners_of=_link_owners)
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
     _topic_assignments: dict[str, int] | None = None

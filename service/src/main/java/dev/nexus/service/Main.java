@@ -118,6 +118,24 @@ public final class Main {
         String dbUser = requireEnv("NX_DB_USER");
         String dbPass = requireEnv("NX_DB_PASS");
         int poolSize  = intEnv("NX_POOL_SIZE", 10);
+        // RDR-248 (nexus-csayy.2): the export session tunables, checked before any pool or listener exists, like the
+        // other environment values: a bad one is one clean line and exit 1, never a stack trace out of the service's
+        // constructor. A session cap the operator SET that the pool cannot carry is refused here too; a cap left unset
+        // is clamped to the pool (a pool of 2 carries none, so export is off there) and the boot says so.
+        try {
+            var exportConfig = dev.nexus.service.db.TenantExportSessions.Config.forPool(System::getenv, poolSize);
+            if (exportConfig.maxSessions() == 0) {
+                log.warn("event=export_disabled_by_pool_size pool_size={} every export open answers 503 "
+                        + "export_capacity_full; raise NX_POOL_SIZE to 3 or more to enable it", poolSize);
+            } else if (exportConfig.maxSessions() < dev.nexus.service.db.TenantExportSessions.Config.defaults().maxSessions()
+                    && java.util.Objects.requireNonNullElse(System.getenv(dev.nexus.service.db.TenantExportSessions.ENV_MAX_SESSIONS), "").isBlank()) {
+                log.warn("event=export_capped_by_pool_size pool_size={} max_sessions={}", poolSize,
+                        exportConfig.maxSessions());
+            }
+        } catch (IllegalArgumentException e) {
+            log.error("event=export_env_invalid error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
 
         var hikari = new HikariConfig();
         hikari.setJdbcUrl(dbUrl);

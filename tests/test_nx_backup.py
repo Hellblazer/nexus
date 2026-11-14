@@ -138,12 +138,18 @@ def _flat(text: str) -> str:
 # -- (b) managed mode, and no local engine: refused, nothing written ---------------------------------
 
 
-def test_managed_mode_is_refused_with_the_cloud_backups_are_conexus_side_message(
-    cloud_mode: None, _home: Path,
+@pytest.mark.expects_unresolvable_endpoint  # no token resolves, on purpose; no tenant
+def test_managed_mode_takes_the_cloud_arm_not_the_local_refusal(
+    cloud_mode: None, monkeypatch: pytest.MonkeyPatch, _home: Path,
 ) -> None:
+    """Managed mode used to be refused ("cloud backups are on the conexus side"); since nexus-csayy.3 it is the
+    cloud arm (an export of the caller's tenant), covered by ``tests/test_nx_backup_cloud.py``. Here: with no
+    token to read an export with, the verb says so, names how to set one, and writes nothing."""
+    monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:1")
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
     result = CliRunner().invoke(main, ["backup"])
     assert result.exit_code != 0
-    assert "conexus" in result.output and "cloud" in result.output.lower()
+    assert "conexus side" not in result.output and "service_token" in result.output
     assert not (_home / "nexus-backups").exists(), "a refusal must not create the default directory"
 
 

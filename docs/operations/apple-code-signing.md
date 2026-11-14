@@ -177,9 +177,10 @@ codesign -dv /tmp/testsign 2>&1 | grep TeamIdentifier   # must NOT say "not set"
 the same script the release runs, against a throwaway binary on both mac runners
 (hellmini's persistent runner and the lab pool's `lab-mac-s` class): sign,
 notarize, then TeamIdentifier, Hardened Runtime, the entitlement and Gatekeeper
-on a quarantined copy. It fails on missing secrets. It runs on a develop push
-that touches the signing inputs, or by dispatch once the file is on `main`. Do
-not go on to §5 until it passes, notarization included.
+on a quarantined copy. It fails on missing secrets. It runs only by dispatch,
+against develop (`gh workflow run mac-signing-rehearsal.yml --ref develop`),
+until the secrets are set; then its develop push trigger on the signing inputs
+comes back. Do not go on to §5 until it passes, notarization included.
 
 ## 5. Switch signing on, cut a tag, then GATE IT on real hardware
 

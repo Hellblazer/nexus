@@ -10,12 +10,12 @@
 # disable-library-validation entitlement, and Gatekeeper's verdict
 # ("source=Notarized Developer ID").
 #
-# Triggers: a push to develop that touches the signing inputs (Sam,
-# 2026-09-29: an accepted exception to hellmini's release-jobs-only rule,
-# because a workflow_dispatch workflow is only runnable once it is on the
-# default branch, main, and the apple-signing environment admits only develop
-# and engine-service-v* tags), plus workflow_dispatch once this file reaches
-# main. Never pull_request: this is a public repo on a self-hosted runner.
+# Trigger: workflow_dispatch only, run against develop (Sam, 2026-11-13: until the
+# APPLE_DEV_ID_* secrets are set in the apple-signing environment, every run fails
+# on them, so a push trigger only put a red on develop whenever this file changed).
+# It ran on develop pushes that touched the signing inputs from 2026-09-29; put the
+# push trigger back once the secrets exist. Never pull_request: this is a public
+# repo on a self-hosted runner.
 # Cost: hellmini is self-hosted (no per-minute billing), and the job is a few
 # seconds plus the notary wait.
 # Unlike the release, missing secrets FAIL here: a rehearsal that skips proves
@@ -31,13 +31,6 @@
 name: mac-signing-rehearsal
 
 on:
-  push:
-    branches: [develop]
-    paths:
-      - service/deploy/mac-sign.sh
-      - service/deploy/mac-entitlements.plist
-      - service/deploy/apple/**
-      - .github/workflows/mac-signing-rehearsal.yml
   workflow_dispatch:
     inputs:
       notarize:
@@ -134,7 +127,7 @@ jobs:
           echo "### signature: OK ($(printf '%s' "$info" | grep TeamIdentifier=))" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Notarize
-        if: github.event_name == 'push' || inputs.notarize
+        if: inputs.notarize
         env:
           APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
@@ -148,7 +141,7 @@ jobs:
           SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh notarize "$RUNNER_TEMP/rehearsal-bin"
 
       - name: Gatekeeper verdict (quarantined copy)
-        if: github.event_name == 'push' || inputs.notarize
+        if: inputs.notarize
         run: |
           set -euo pipefail
           bin="$RUNNER_TEMP/rehearsal-bin"

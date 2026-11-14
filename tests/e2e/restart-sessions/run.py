@@ -4,7 +4,8 @@
 
 Drives real Claude Code sessions through the coordinated restart and checks every outcome,
 with nothing written to the operator's ~/.claude. Five scenarios, each in its own sandbox
-(``--scenario``, default all, in this order):
+(``--scenario``, default all, in this order; ``--scenario slash`` adds the opt-in measure of
+Claude Code's own ``/restart`` in slash_restart.py, never part of a recorded pass):
 
 - ``roll``: the full continuation roll. Six sessions; three restart, each told a code word:
   ``rs_alpha`` (the conexus channel, left at its prompt with whatever suggested prompt Claude
@@ -35,15 +36,18 @@ with nothing written to the operator's ~/.claude. Five scenarios, each in its ow
   floor, with ``--engine-wait 0``. Each run must exit 2 in the foreground with the gate's
   ABORT line for that case, after one read, before any handoff is asked or anything installed.
 
-- ``pane`` (nexus-8rh0u): a ``--resume`` roll (no --nx, no handoffs) over ``rs_direct``, whose pane process
-  is claude itself (``new-window 'exec claude ...'``, no shell under it: the shape that closed six windows in
-  the 7.96.0 restart), and ``rs_alpha``, the caller, in an ordinary bash pane. Both must resume as the same
-  session ids on new processes, rs_direct in the SAME pane id and window (the exit must not close it; a
-  login shell is respawned there, remain-on-exit is released), rs_alpha last, no failure word in the log.
-  Each is told a code word first (that gives it the transcript ``claude --resume`` needs) and must still
-  answer its own word after the resume. Checked before the roll: claude really is rs_direct's pane process,
-  and rs_alpha's is a shell. After the roll each must have been woken exactly once (one ``woken by`` log line:
-  mail for rs_alpha, which has the channel; a typed pointer for rs_direct), with the wake text in its transcript.
+- ``pane`` (nexus-8rh0u): two ``--resume`` rolls (no --nx, no handoffs) over ``rs_direct``, whose pane
+  process is claude itself (``new-window 'exec claude ...'``, no shell under it: the shape that closed six
+  windows in the 7.96.0 restart), and ``rs_alpha``, the caller, in an ordinary bash pane. The first roll takes
+  Claude Code's /restart (every sandbox is a native install): each session comes back in place, same session
+  id, same pid with a later startedAt, no exit line, and rs_direct's pane still has claude as its process.
+  The second passes --no-slash-restart and takes the exit path: both resume as the same session ids on new
+  processes, rs_direct in the SAME pane id and window (a login shell is respawned there, remain-on-exit is
+  released). In each roll: rs_alpha last, no failure word in the log, each woken exactly once (one ``woken
+  by`` line: mail for rs_alpha, which has the channel; a typed pointer for rs_direct) with the wake text in
+  its transcript since the roll began, and each still answers the code word it was told at boot (that
+  gives it the transcript a resume needs). Checked before each roll: claude is rs_direct's pane process;
+  rs_alpha's is a shell.
 
 Shared by every scenario:
 
@@ -132,8 +136,8 @@ From a checkout, in the repo root::
     git show 2410760b9:scripts/claude-restart-sessions > /tmp/crs-before-8rh0u && chmod +x /tmp/crs-before-8rh0u
     NX_RESTART_SANDBOX_SCRIPT=/tmp/crs-before-8rh0u tests/e2e/restart-sessions/run.sh --scenario pane
 
-Expected: ``RESTART SANDBOX FAILED -- 1 scenario(s) (pane)``, the log lacking ``claude is the process of
-pane`` and ``OK rs_direct``, and rs_direct's window gone. The same command without the variable must PASS.
+Expected: ``RESTART SANDBOX FAILED -- 1 scenario(s) (pane)``. That copy predates /restart, so its first roll
+already fails (exit lines where /restart was expected, rs_direct's window gone) and the scenario stops there. The same command without the variable must PASS.
 (A single scenario never records a pass; only all five do.)
 
 Positive controls: ``NX_RESTART_SANDBOX_SCRIPT=<copy>`` runs another copy of the script; the
@@ -207,6 +211,9 @@ PASTE_TEXT = "\n".join(f"pasted line {i} the restart cannot save from the pane" 
 OPERATOR_HOME = Path.home()
 SANDBOX_PY = Path(__file__).resolve()
 SCENARIOS = ("roll", "variant", "abort", "gate", "pane")
+#: Opt-in scenarios, run only when named and never part of the recorded pass: ``slash`` measures Claude
+#: Code's own /restart (slash_restart.py), not the script.
+EXTRA_SCENARIOS = ("slash",)
 #: A fresh session is settled at its prompt when idle, or in ``shell``: a session launched without the
 #: channel is told by its SessionStart guidance to wait for mail with ``nx tuple wait`` in the
 #: background, and one that does so sits at its prompt in ``shell`` (the 2026-11-02 measuring roll:
@@ -274,6 +281,8 @@ SPECS = {
                     busy=("rs_late",), release_after=("rs_alpha", "rs_image")),
     "abort": Spec("abort", {}, (), frozenset({"rs_alpha"}), plain=("rs_alpha", "rs_nochan"), install_fails=True),
     "gate": Spec("gate", {}, ("rs_alpha",), frozenset({"rs_alpha"}), engine=("502",)),
+    "slash": Spec("slash", {"rs_alpha": "HELIOTROPE", "rs_clear": "MARZIPAN"}, (), frozenset({"rs_alpha"}),
+                  resume=True, wait=240),
     "pane": Spec("pane", {"rs_alpha": "HELIOTROPE", "rs_direct": "MARZIPAN"}, (), frozenset({"rs_alpha"}),
                  direct=("rs_direct",), resume=True, wait=240),
 }
@@ -703,8 +712,11 @@ class Sandbox:
         _git(self.work, "commit", "-q", "-m", "root")
         projects = {key: {"hasTrustDialogAccepted": True, "hasCompletedProjectOnboarding": True}
                     for key in {str(self.work), os.path.realpath(self.work)}}
+        # installMethod native: Claude Code offers /restart only to a native install (first slash run, 2026-11-13).
         (self.home / ".claude.json").write_text(
-            json.dumps({"hasCompletedOnboarding": True, "projects": projects}), encoding="utf-8")
+            json.dumps({"hasCompletedOnboarding": True, "projects": projects, "installMethod": "native"}),
+            encoding="utf-8")
+        self.native_layout()
         (self.home / ".claude" / "settings.json").write_text(
             json.dumps({"skipDangerousModePermissionPrompt": True, "promptSuggestionEnabled": True,
                         "autoMemoryEnabled": False}), encoding="utf-8")
@@ -727,6 +739,26 @@ class Sandbox:
         self.tmux("new-session", "-d", "-s", "rs", "-x", "220", "-y", "50", "-n", "ctl", "-c", str(self.work),
                   "bash --noprofile --norc", check=True)
         self.watch.start()
+
+    def native_layout(self) -> None:
+        """Give the scratch HOME a native install's layout, so the script's /restart path is the one tested.
+
+        Claude Code (2.1.323) offers /restart only when its resolved executable starts with
+        ``$XDG_DATA_HOME/claude/versions/`` (default ``$HOME/.local/share``). The operator's binary is copied
+        (a clone on APFS; the operator's install is only read) to ``~/.local/share/claude/versions/<v>``,
+        ``~/.local/bin/claude`` is linked to it, and the sessions and the script launch that link. The
+        scratch HOME is under /var, which resolves to /private/var, so XDG_DATA_HOME names the same
+        directory resolved (the slash scenario's third run failed the prefix check without it)."""
+        real = Path(os.path.realpath(self.claude))
+        versions = self.home / ".local" / "share" / "claude" / "versions"
+        versions.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["cp", "-c", str(real), str(versions / real.name)], check=True)
+        link = self.home / ".local" / "bin" / "claude"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(versions / real.name)
+        self.claude = str(link)
+        self.env.update(NX_RESTART_CLAUDE=self.claude,
+                        XDG_DATA_HOME=str(Path(os.path.realpath(self.home)) / ".local" / "share"))
 
     def socket_path(self) -> Path:
         """The private tmux server's socket file. kill-server leaves it behind (measured 2026-11-02)."""
@@ -937,17 +969,21 @@ class Sandbox:
         fresh session's first turn (reading its handoff) could still be writing its reply when the
         count was taken, so that reply raised the count and was read as the answer (the
         2026-11-02 roll: "THAT'S THE HANDOFF..." for a session that then answered HELIOTROPE).
-        The reply is the turn's last text after the user entry carrying *text* (reply_after).
+        The reply is the turn's last text after the user entry carrying *text* (reply_after), among
+        the entries written since this call: the pane scenario asks the same question after each of
+        its two rolls, and until the second landed the first matched, so the mailed wake's turn after
+        it read as the answer (2026-11-13).
         """
         d0 = self.wait_status(name, set(done), 120)
         sid = str(d0.get("sessionId", ""))
+        n0 = len(self.events(sid))
         self.tmux("send-keys", "-t", self.pane_of(name), "-l", text, check=True)
         time.sleep(1)
         self.tmux("send-keys", "-t", self.pane_of(name), "Enter", check=True)
         deadline = time.time() + timeout
         while time.time() < deadline:
             d = self.session(name) or {}
-            reply = reply_after(self.events(sid), text)
+            reply = reply_after(self.events(sid)[n0:], text)
             if d.get("status") in done and reply is not None:
                 return reply
             time.sleep(1)
@@ -1101,7 +1137,9 @@ def check_install(sb: Sandbox, lines: list[str], failures: list[str]) -> None:
 
 
 def check_caller_last(spec: Spec, lines: list[str], failures: list[str], notes: list[str]) -> None:
-    caller_exit = next((i for i, ln in enumerate(lines) if ln.startswith(f"exit {spec.caller} ")), -1)
+    # The caller leaves by an exit, or by /restart, which logs its OK line and no exit line.
+    caller_exit = next((i for i, ln in enumerate(lines) if ln.startswith(
+        (f"exit {spec.caller} ", f"OK {spec.caller}: restarted in place by /restart"))), -1)
     last_other = max((i for i, ln in enumerate(lines)
                       if re.match(rf"(OK|SKIP) rs_(?!{spec.caller[3:]}\b)", ln) and "no handoff asked" not in ln), default=-1)
     if caller_exit < 0 or caller_exit < last_other:
@@ -1237,17 +1275,20 @@ def hold_placeholder(sb: Sandbox, crs, name: str, text: str, mark: str, failures
         failures.append(f"precondition: {name}'s prompt does not read as a {mark}] draft")
 
 
-def watch_roll(sb: Sandbox, timeout: float, on_tick=None) -> str:
-    """Poll the restart log until the roll ends (done, ABORT or CRASH) or *timeout*; return it."""
+def watch_roll(sb: Sandbox, timeout: float, on_tick=None, since: int = 0) -> str:
+    """Poll the restart log until the roll ends (done, ABORT or CRASH) or *timeout*; return it, from line
+    *since* on (a second roll in one sandbox waits for its own end, not the first's)."""
+    def text() -> str:
+        return "\n".join(sb.read_log().splitlines()[since:])
     t0 = time.time()
     while time.time() - t0 < timeout:
-        text = sb.read_log()
+        now = text()
         if on_tick:
-            on_tick(text)
-        if "=== done:" in text or "=== ABORT" in text or "=== CRASH" in text or "=== STOP" in text:
+            on_tick(now)
+        if "=== done:" in now or "=== ABORT" in now or "=== CRASH" in now or "=== STOP" in now:
             break
         time.sleep(1)
-    return sb.read_log()
+    return text()
 
 
 def placeholder_line() -> str:
@@ -1490,69 +1531,117 @@ def scenario_abort(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -
 
 
 def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) -> None:
-    """A ``--resume`` roll over a session whose pane process is claude itself (nexus-8rh0u). Before the fix
-    the exit closed the pane and its window, the relaunch line went to a pane that was gone, and the roll
-    went on to the next session. Now the pane (same id, same window) takes a shell, the relaunch lands in
-    it, and both sessions resume as the same session ids. rs_alpha, in an ordinary bash pane, is the
-    caller and goes last. Each session is told a code word in boot() first: that writes the transcript
-    ``claude --resume`` needs (a session never prompted has none to resume), and afterwards each must still
-    answer its word."""
+    """Two ``--resume`` rolls over the same two sessions, one of them in a pane whose process is claude
+    itself (nexus-8rh0u). rs_alpha, in an ordinary bash pane, is the caller and goes last. Each session is
+    told a code word in boot() first: that writes the transcript a resume needs, and after each roll each
+    must still answer its word.
+
+    The first roll takes Claude Code's own /restart (the sandbox is a native install): each session comes
+    back in place, as the same session id, with no exit, so rs_direct's pane keeps claude as its process.
+    The second roll passes --no-slash-restart and takes the exit path, which a session gets wherever
+    /restart is not offered: before the pane fix the exit closed rs_direct's pane and window and the
+    relaunch line went nowhere; now the pane (same id, same window) takes a shell and the relaunch lands
+    in it. It runs on sessions /restart has just relaunched, whose launch line /restart rewrote."""
     spec = sb.spec
     before = boot(sb, failures)
     sb.before = before
     pane = sb.pane_id("rs_direct")
-    pane_pid = sb.tmux("display-message", "-p", "-t", pane, "#{pane_pid}").stdout.strip()
-    if pane_pid != str(before["rs_direct"].get("pid")):
-        failures.append(f"precondition: claude (pid {before['rs_direct'].get('pid')}) is not the process of pane "
-                        f"{pane} (pane_pid {pane_pid}); the scenario would not test the 7.96.0 shape")
     alpha_pid = sb.tmux("display-message", "-p", "-t", sb.pane_id("rs_alpha"), "#{pane_pid}").stdout.strip()
     if alpha_pid == str(before["rs_alpha"].get("pid")):
         failures.append("precondition: rs_alpha's pane has no shell under claude; it is the control")
+    _pane_is_claude(sb, pane, before["rs_direct"], "before the /restart roll", failures)
     if failures:
         return
     t0 = time.time()
-    sb.tmux("send-keys", "-t", "rs:ctl", "-l", roll_command(sb), check=True)
+    _pane_roll(sb, a, pane, before, failures, notes, slash=True)
+    if failures:
+        return
+    t1 = time.time()
+    mid = {name: dict(sb.session(name) or {}) for name in spec.words}
+    _pane_is_claude(sb, pane, mid["rs_direct"], "after /restart (it re-executes in place)", failures)
+    if failures:
+        return
+    _pane_roll(sb, a, pane, mid, failures, notes, slash=False)
+    notes.append(f"pane: /restart roll {t1 - t0:.0f}s, exit-path roll {time.time() - t1:.0f}s; rs_direct kept {pane}")
+
+
+def _pane_is_claude(sb: Sandbox, pane: str, d: dict, when: str, failures: list[str]) -> None:
+    pane_pid = sb.tmux("display-message", "-p", "-t", pane, "#{pane_pid}").stdout.strip()
+    if pane_pid != str(d.get("pid")):
+        failures.append(f"precondition: {when}, claude (pid {d.get('pid')}) is not the process of pane {pane} "
+                        f"(pane_pid {pane_pid}); the exit-path roll would not test the 7.96.0 shape")
+
+
+def _pane_roll(sb: Sandbox, a, pane: str, was_all: dict[str, dict], failures: list[str], notes: list[str], *,
+               slash: bool) -> None:
+    """One --resume roll of the pane scenario and its checks: by /restart when *slash*, else by the exit path."""
+    spec = sb.spec
+    tag = "/restart roll" if slash else "exit-path roll"
+    n0 = len(sb.read_log().splitlines())
+    seen = {name: len(sb.events(str(was_all[name].get("sessionId")))) for name in spec.words}
+    sb.tmux("send-keys", "-t", "rs:ctl", "-l", roll_command(sb, extra="" if slash else "--no-slash-restart"),
+            check=True)
     sb.tmux("send-keys", "-t", "rs:ctl", "Enter", check=True)
-    log = watch_roll(sb, a.timeout)
-    print(f"[sandbox:{spec.name}] restart log:\n" + "\n".join("    " + ln for ln in log.splitlines()), flush=True)
-    expect = [f"rs_direct: claude is the process of pane {pane} (no shell under it); keeping the pane across the exit",
-              f"rs_direct: pane {pane} respawned with", "OK rs_direct: resumed as pid", "OK rs_alpha: resumed as pid",
-              "=== done: 2 of 2 restarted (0 fresh, 2 resumed)"]
+    log = watch_roll(sb, a.timeout, since=n0)
+    print(f"[sandbox:{spec.name}] {tag} log:\n" + "\n".join("    " + ln for ln in log.splitlines()), flush=True)
+    done = "=== done: 2 of 2 restarted (0 fresh, 2 resumed)"
+    if slash:
+        expect = ["OK rs_direct: restarted in place by /restart, pid", "OK rs_alpha: restarted in place by /restart, pid",
+                  done]
+        for bad in ("/restart not taken", "keeping the pane across the exit", "exit rs_"):
+            if bad in log:
+                failures.append(f"{tag}: the log has {bad!r}; /restart was not taken where it is offered")
+    else:
+        expect = ["rs_direct: /restart not taken (--no-slash-restart); exiting and resuming instead",
+                  "rs_alpha: /restart not taken (--no-slash-restart); exiting and resuming instead",
+                  f"rs_direct: claude is the process of pane {pane} (no shell under it); keeping the pane across the exit",
+                  f"rs_direct: pane {pane} respawned with", "OK rs_direct: resumed as pid", "OK rs_alpha: resumed as pid",
+                  done]
+        if "restarted in place by /restart" in log:
+            failures.append(f"{tag}: a session took /restart under --no-slash-restart")
     lines = check_lines(log, expect, set(), failures)
     check_caller_last(spec, lines, failures, notes)
     if "=== STOP" in log:
-        failures.append("pane: the roll stopped on a relaunch that produced no session")
+        failures.append(f"{tag}: the roll stopped on a relaunch that produced no session")
     panes = sb.tmux("list-panes", "-a", "-F", "#{pane_id} #{window_name}").stdout.split("\n")
     if f"{pane} rs_direct" not in panes:
-        failures.append(f"pane: pane {pane} of window rs_direct is gone ({panes})")
+        failures.append(f"{tag}: pane {pane} of window rs_direct is gone ({panes})")
     if sb.tmux("show-options", "-p", "-t", pane, "remain-on-exit").stdout.strip():
-        failures.append(f"pane: remain-on-exit is still set on {pane}")
+        failures.append(f"{tag}: remain-on-exit is still set on {pane}")
     for name, word in spec.words.items():
         now = sb.wait_status(name, {"idle"}, 240)  # the wake's own turn ends first
-        was = before[name]
-        if now.get("sessionId") != was.get("sessionId") or now.get("pid") == was.get("pid"):
-            failures.append(f"{name}: not resumed as the same session on a new process (was {was.get('pid')}, "
-                            f"now {now.get('pid')}, session {was.get('sessionId')} -> {now.get('sessionId')})")
+        was = was_all[name]
+        sid = str(was.get("sessionId"))
+        # /restart re-executes on the same pid with a later startedAt; the exit path starts a new process.
+        moved = (now.get("pid") != was.get("pid") if not slash
+                 else now.get("pid") != was.get("pid") or (now.get("startedAt") or 0) > (was.get("startedAt") or 0))
+        if now.get("sessionId") != was.get("sessionId") or not moved:
+            failures.append(f"{tag}: {name} not resumed as the same session on a new start (was pid {was.get('pid')} "
+                            f"started {was.get('startedAt')}, now pid {now.get('pid')} started {now.get('startedAt')}, "
+                            f"session {was.get('sessionId')} -> {now.get('sessionId')})")
             continue
+        if str(now.get("tmux", "")).rsplit(".", 1)[-1] != str(was.get("tmux", "")).rsplit(".", 1)[-1]:
+            failures.append(f"{tag}: {name} resumed in {now.get('tmux')}, not in its pane {was.get('tmux')}")
+        if slash and (lost := _load_slash().lost_flags(sb, name, now)):
+            failures.append(f"{tag}: {name} lost across /restart: {lost}")
         # The wake (Sam, 2026-11-11): a resumed session gets one prompt instead of sitting idle. rs_alpha has the
         # channel and must take the mailed wake (the typed fallback would mean the mail path failed); rs_direct
         # has none and gets the typed pointer. The log says which, once, and the wake text is in the transcript.
         how = re.findall(rf"^\S+ {re.escape(name)}: woken by (mail|a typed prompt)$", log, re.MULTILINE)
         want = "mail" if name in spec.channel else "a typed prompt"
         if how != [want]:
-            failures.append(f"{name}: expected one 'woken by {want}' log line after the resume, found {how}")
+            failures.append(f"{tag}: {name}: expected one 'woken by {want}' log line after the resume, found {how}")
         else:
-            notes.append(f"{name} woken by {want}")
+            notes.append(f"{tag}: {name} woken by {want}")
         # mail arrives through the UserPromptSubmit hook as an `attachment` entry; a typed pointer as a `user`
-        # entry and the file's text in the Read result
-        if not any(e.get("type") in ("user", "attachment") and WAKE_MARK in json.dumps(e)
-                   for e in sb.events(str(was.get("sessionId")))):
-            failures.append(f"{name}: no wake prompt ({WAKE_MARK!r}) in its resumed transcript")
+        # entry and the file's text in the Read result. Only this roll's events count.
+        events = sb.events(sid)[seen[name]:]
+        if not any(e.get("type") in ("user", "attachment") and WAKE_MARK in json.dumps(e) for e in events):
+            failures.append(f"{tag}: {name}: no wake prompt ({WAKE_MARK!r}) in its transcript after this roll")
         elif name in spec.channel:
             # The mail is unattested, so the session checks the script's marker first (origin_note) and acts only
             # on `present`. A marker removed too early reads as forged mail: the session declines while the log
             # says "woken by mail" (the 22:17 run, before the wake's marker was kept out of the footprint).
-            events = sb.events(str(was.get("sessionId")))
             checks = {c.get("id") for e in events if e.get("type") == "assistant"
                       for c in (e.get("message") or {}).get("content") or []
                       if c.get("type") == "tool_use" and "test -f" in json.dumps(c.get("input"))
@@ -1561,19 +1650,16 @@ def scenario_pane(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
                        for c in ((e.get("message") or {}).get("content") or [])
                        if isinstance(c, dict) and c.get("type") == "tool_result" and c.get("tool_use_id") in checks]
             if not checks:
-                failures.append(f"{name}: never ran the marker check on the mailed wake")
+                failures.append(f"{tag}: {name}: never ran the marker check on the mailed wake")
             elif not any("present" in out for out in printed):
-                failures.append(f"{name}: the marker check on the mailed wake did not print present ({printed[:2]})")
+                failures.append(f"{tag}: {name}: the marker check on the mailed wake did not print present ({printed[:2]})")
             else:
-                notes.append(f"{name}: the marker check on the mailed wake printed present")
-        # A resume brings the transcript back: the session still knows the word it was told before the roll.
+                notes.append(f"{tag}: {name}: the marker check on the mailed wake printed present")
+        # A resume brings the transcript back: the session still knows the word it was told before the rolls.
         reply = sb.prompt(name, "What is the project code word for this task? Reply with only the word.").upper()
         others = [w for n, w in spec.words.items() if n != name]
         if word not in reply or any(w in reply for w in others):
-            failures.append(f"{name}: after the resume it answered {reply[:80]!r}, not its word {word}")
-    if str(sb.session("rs_direct").get("tmux", "")).rsplit(".", 1)[-1] != pane:
-        failures.append(f"rs_direct: resumed in {sb.session('rs_direct').get('tmux')}, not in pane {pane}")
-    notes.append(f"pane took {time.time() - t0:.0f}s; rs_direct kept {pane}")
+            failures.append(f"{tag}: {name}: after the resume it answered {reply[:80]!r}, not its word {word}")
 
 
 def run_roll(sb: Sandbox, tag: str, extra: str = "", timeout: float = 120) -> tuple[str, str]:
@@ -1718,6 +1804,19 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
 
 RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario_abort, "gate": scenario_gate,
            "pane": scenario_pane}
+
+
+def _load_slash():
+    """slash_restart.py beside this file, by path: run.py runs under ``python -I``, which leaves its own
+    directory off sys.path."""
+    loc = importlib.util.spec_from_file_location("restart_sandbox_slash", SANDBOX_PY.with_name("slash_restart.py"))
+    mod = importlib.util.module_from_spec(loc)
+    loc.loader.exec_module(mod)
+    return mod
+
+
+RUNNERS["slash"] = lambda sb, crs, a, failures, notes: _load_slash().scenario_slash(
+    sb, crs, a, failures, notes, boot=boot)
 
 
 def check_withdrawals(log: str, before: dict[str, dict], failures: list[str]) -> int:
@@ -2274,7 +2373,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         if sb.before:
             n = check_withdrawals(sb.read_log(), sb.before, failures)
             notes.append(f"withdrawals: {n} mailed handoff ask(s) checked against the log")
-            if n == 0 and name not in ("gate", "pane"):  # every --fresh roll mails at least one ask: none found is a broken check
+            if n == 0 and name not in ("gate", "pane", "slash"):  # every --fresh roll mails at least one ask: none found is a broken check
                 failures.append("withdrawals: no mailed handoff ask found in the log to check")
         ok = not failures
     except Exception as exc:  # noqa: BLE001 -- a harness fault is a failed run with its reason
@@ -2680,7 +2779,7 @@ def main() -> int:
     ap.add_argument("--model", default="sonnet")
     ap.add_argument("--keep", action="store_true", help="keep each scratch HOME and tmux server even on a pass")
     ap.add_argument("--timeout", type=int, default=1200, help="seconds for each roll to finish")
-    ap.add_argument("--scenario", action="append", choices=SCENARIOS,
+    ap.add_argument("--scenario", action="append", choices=SCENARIOS + EXTRA_SCENARIOS,
                     help="run only this scenario (repeatable; default: all, in order)")
     a = ap.parse_args()
 
@@ -2696,7 +2795,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     signal.signal(signal.SIGHUP, lambda *_: sys.exit(129))  # a closed terminal: same cleanup
     crs = load_script()
-    chosen = [s for s in SCENARIOS if s in (a.scenario or SCENARIOS)]
+    chosen = [s for s in SCENARIOS + EXTRA_SCENARIOS if s in (a.scenario or SCENARIOS)]
     results = {}
     t0 = time.time()
     # The pass covers what the scenarios ran: the script's bytes and Claude Code's version as they

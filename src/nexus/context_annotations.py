@@ -382,10 +382,16 @@ def note_facts(per_owner: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 def hit_annotation_line(metadata: Mapping[str, Any], *, now: datetime | None = None) -> str:
     """The age/expiry line of one search hit, from its owners' agreed facts
-    (:data:`OWNER_FACTS_KEY`). The chunk row's own ``indexed_at``, ``bib_year`` and
+    (:data:`OWNER_FACTS_KEY`), led by ``superseded by <title> (<date>)`` when every owner is superseded. The chunk row's own ``indexed_at``, ``bib_year`` and
     ``ttl_days`` are the last writer's and are never read; a hit with no resolved
     owners, or owners that disagree, prints nothing for the fields in question."""
-    return annotation_line(metadata.get(OWNER_FACTS_KEY) or {}, now=now)
+    line = annotation_line(metadata.get(OWNER_FACTS_KEY) or {}, now=now)
+    # nexus-2k66t.6 (2A): a hit whose owners are all superseded says so first.
+    from nexus.supersession import superseded_note  # noqa: PLC0415 — keeps this module's import surface flat
+
+    if note := superseded_note(metadata):
+        return f"{note} · {line}" if line else note
+    return line
 
 
 def source_note(

@@ -3161,6 +3161,7 @@ nexus-csayy.8
 nexus-csayy.9
 nexus-csrto
 nexus-ct17r
+nexus-ct74m
 nexus-ct92f
 nexus-ct9sv
 nexus-ctmtq

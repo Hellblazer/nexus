@@ -45,11 +45,14 @@ than silently folded in:
    through it. Gone as of bead nexus-b5ugt: the T2 section calls
    ``nexus.hooks.t2_prefix_scan`` in-process and no path is resolved.
 
-**Payload is unused.** The script never reads stdin at all -- it resolves
-everything from ``CLAUDE_PROJECT_DIR``/``os.getcwd()`` and local
-environment variables, so ``run``'s ``payload`` parameter is accepted (for
-the shared ``run(payload: dict | None) -> HookResult`` contract every verb
-implements) and ignored, exactly as the script ignored stdin.
+**Payload: the session id only.** The script never read stdin -- it
+resolves everything from ``CLAUDE_PROJECT_DIR``/``os.getcwd()`` and local
+environment variables. Since nexus-ct74m ``run`` reads one payload field,
+``session_id``, to find the session's threads board entry and print its due
+threads (``nexus.hooks.board_due``); a payload without one prints no such
+section. Like the T2 section's ``t2_prefix_scan``, that module is imported
+inside ``run`` and is not stdlib-only: the STDLIB ONLY rule below covers this
+module's own top-level imports, not the sections it defers to.
 
 **STDLIB ONLY, in this module.** No ``structlog``, no
 ``nexus.logging_setup``, no import from a sibling ``nexus.hooks`` module --
@@ -227,7 +230,7 @@ def _build_capabilities_block() -> list[str]:
     ]
 
 
-def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script never reads stdin; payload is unused, matching it
+def run(payload: dict | None) -> HookResult:
     """Run the SessionStart T2/beads/capabilities/knowledge-map hook.
 
     Carried from ``session_start_hook.py``'s ``main()``: same helpers, same
@@ -246,6 +249,17 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — the script neve
 
     # nexus-mtheb: the T1 contract leads the context.
     output_lines: list[str] = list(_T1_TOP_LINES)
+
+    # --- Threads board: this session's threads whose due: has come (nexus-ct74m) ---
+    # The one use of the payload: its session id finds the session's own board entry.
+    session_id = str((payload or {}).get("session_id") or "")
+    if session_id:
+        try:
+            from nexus.hooks.board_due import due_lines  # noqa: PLC0415 — deferred: only a payload with a session id pays
+
+            output_lines.extend(due_lines(session_id))
+        except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
+            debug("threads board due section skipped")
 
     # --- T2 memory context ---
     if which('nx'):

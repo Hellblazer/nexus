@@ -321,6 +321,8 @@ public final class NexusService {
     private volatile dev.nexus.service.db.CatalogTtlCheckAdmin catalogTtlCheckAdmin;
     /** nexus-f3yqd: the admin-connection VALIDATE behind {@code /v1/admin/validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.db.ChashConstraintValidator chashConstraintValidator;
+    /** nexus-csayy.2 (RDR-248): the tenant export sessions behind {@code /v1/tenant/export}; swapped whole by a test. */
+    private volatile dev.nexus.service.db.TenantExportSessions exportSessions;
     /** nexus-f3yqd: the engine-wide validate job, one at a time and never tenant-scoped, so no tenant reset reaches it. */
     private final dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ValidateConstraintsJobs.Progress> validateConstraintsJobs =
         dev.nexus.service.http.ValidateConstraintsJobs.registry(System::currentTimeMillis);
@@ -1082,6 +1084,13 @@ public final class NexusService {
                         }));
         reembedCtx.getFilters().addAll(authFilter);
 
+        // RDR-248 (nexus-csayy.2): the tenant export session routes. Always registered; sessions come from the env.
+        this.exportSessions = new dev.nexus.service.db.TenantExportSessions(dataSource,
+                dev.nexus.service.db.TenantExportSessions.Config.forDataSource(System::getenv, dataSource), java.time.Clock.systemUTC());
+        server.createContext(dev.nexus.service.http.TenantExportHandler.PATH,
+                new dev.nexus.service.http.TenantExportHandler(() -> exportSessions, versionHandler::engineVersion,
+                        versionHandler::schemaChangesetCount)).getFilters().addAll(authFilter);
+
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
         this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository));
@@ -1125,10 +1134,18 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("NexusService.dataSweepFailuresByTenant",
                 t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
             dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("TenantExportSessions", t -> exportSessions.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs",
                 t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
+    }
+
+    /** Test seam (nexus-csayy.2): replace the export sessions (a test's own bounds and clock); the old ones close. */
+    public void exportSessions(dev.nexus.service.db.TenantExportSessions replacement) {
+        var old = this.exportSessions;
+        this.exportSessions = replacement;
+        old.close();
     }
 
     /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
@@ -2228,6 +2245,7 @@ public final class NexusService {
         reconcileJobs.shutdown();
         manifestFillJobs.shutdown();
         validateConstraintsJobs.shutdown();
+        exportSessions.close();   // a held export snapshot must not outlive the engine's pool
         if (chashConstraintValidator != null) {
             chashConstraintValidator.cancelRunning();   // a VALIDATE must not outlive the engine that asked for it
         }

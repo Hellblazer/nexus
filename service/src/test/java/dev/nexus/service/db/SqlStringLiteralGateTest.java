@@ -119,9 +119,12 @@ class SqlStringLiteralGateTest {
         // per-fork cluster control before any target database exists: the role-settings reset DO loop (no jOOQ
         // ALTER ROLE), CREATE DATABASE .. TEMPLATE and DROP DATABASE .. WITH (FORCE) (jOOQ has neither clause;
         // neither statement can run inside a function or transaction)
-        Map.entry("dev/nexus/service/SharedCluster.java", 3));
+        Map.entry("dev/nexus/service/SharedCluster.java", 3),
+        // the export battery loads each export page with PostgreSQL's own binary COPY into its stage table, the
+        // client's half of the format under test; COPY ... FROM STDIN has no jOOQ form (nexus-csayy.4)
+        Map.entry("dev/nexus/service/TenantExportBatteryTest.java", 1));
 
-    private static final int EXEMPT_TOTAL = 7;
+    private static final int EXEMPT_TOTAL = 8;
 
     /** SQL the tests never send to a database, per file, frozen. Each entry says what the text is for. */
     private static final Map<String, Integer> TEXT = Map.ofEntries(

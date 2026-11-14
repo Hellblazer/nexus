@@ -16,5 +16,6 @@ Moved from AGENTS.md on 2026-10-14 (nexus-2ziaz). AGENTS.md is loaded into every
 | Workflows § Engine-service release (authority) | [engine-service-release.md](engine-service-release.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
 | Workflows § Cutting a release | [cutting-a-release.md](cutting-a-release.md) | [`.claude/rules/releases-and-engine.md`](../../.claude/rules/releases-and-engine.md) |
 | Worktrees: one session, one worktree | [worktrees.md](worktrees.md) | `AGENTS.md` |
+| Cross-session board (thread fields) | [threads-board.md](threads-board.md) | `AGENTS.md` |
 
 The `engine-release` skill and every document that cites the engine-service release rules treat [engine-service-release.md](engine-service-release.md) as the authority on wording conflicts.

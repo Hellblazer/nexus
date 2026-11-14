@@ -142,6 +142,9 @@ def _quotes(text: str, secret: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9]){re.escape(secret)}(?![A-Za-z0-9])", text) is not None
 
 
+_BEARER_VALUE = re.compile(r"(?i)\bBearer\s+[^\s'\"]+")
+
+
 def scrub_transport_error(exc: BaseException, url: str) -> str:
     """The error text for *exc*, a failure a transport raised about *url*.
 
@@ -154,7 +157,9 @@ def scrub_transport_error(exc: BaseException, url: str) -> str:
     piece of them, or the query, the text is replaced whole by the exception
     type name and the log-safe ``host[:port]``.
     """
-    text = str(exc)
+    # a bearer token quoted by the transport (httpx: "Illegal header value b'Bearer <token>'") is never message text;
+    # [^\s'"]+ takes the token's escaped CR/LF/NUL too, as repr() shows them
+    text = _BEARER_VALUE.sub("Bearer <redacted>", str(exc))
     whole, pieces = _secret_forms(url)
     if "@" in text or any(_quotes(text, s) for s in whole | pieces):
         return f"{type(exc).__name__} (error text withheld: it quoted the URL's credentials) at {log_endpoint(url)}"

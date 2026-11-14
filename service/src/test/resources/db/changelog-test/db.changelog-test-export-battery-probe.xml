@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-csayy.4: the tenant export battery's probe table, holding the column types no exported table of the registry
+    has (smallint, a uuid key, arrays, interval, inet, real, date, time, json, bit, an identity column and a generated
+    column), with row-level security on tenant_id like the product tables and SELECT for the service role. Seven rows of
+    tenant t-battery-a (five filled, one all NULL, one with NULLs elsewhere) and one of t-battery-b. No SQL strings in
+    Java, tests included; the jOOQ DDL has no CREATE POLICY. Run once by TenantExportBatteryTest#startAll.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="export-battery-probe" author="nexus-csayy.4">
+        <sql>CREATE TABLE nexus.export_battery_probe (
+            tenant_id text NOT NULL, k uuid NOT NULL, id bigint GENERATED ALWAYS AS IDENTITY, s smallint, i integer,
+            big bigint, ba bigint[], ta text[], f4 real, f8 double precision, n numeric(12,4), b boolean, d date, t time,
+            tsn timestamp, tstz timestamp with time zone, iv interval, ip inet, by bytea, j json, jb jsonb,
+            v nexus.vector(3), bt bit(5), g integer GENERATED ALWAYS AS (i * 2) STORED, pad text,
+            PRIMARY KEY (tenant_id, k))</sql>
+        <sql>ALTER TABLE nexus.export_battery_probe ENABLE ROW LEVEL SECURITY</sql>
+        <sql>CREATE POLICY probe_tenant ON nexus.export_battery_probe USING (tenant_id = current_setting('nexus.tenant', true))</sql>
+        <sql>GRANT SELECT ON nexus.export_battery_probe TO nexus_svc</sql>
+        <sql>INSERT INTO nexus.export_battery_probe (tenant_id, k, s, i, big, ba, ta, f4, f8, n, b, d, t, tsn, tstz, iv, ip, by, j, jb, v, bt, pad) VALUES
+            ('t-battery-a', gen_random_uuid(), -32768, -2, -9223372036854775808, ARRAY[0, 9223372036854775807, -1]::bigint[],
+             ARRAY['a', 'b,c', NULL, 'it''s', '']::text[], 0.5, 0.0, 0.0, true, DATE '2026-11-10', TIME '12:34:50.123456',
+             TIMESTAMP '2026-11-12 10:15:30.123456', TIMESTAMPTZ '2026-11-12 10:15:30.123456+00',
+             INTERVAL '1 days 03:04:05.678901', INET '192.168.0.0/24', '\x00ff00'::bytea,
+             '{"a": [1, 2, {"b": null}]}'::json, '{"z": 1, "a": 0}'::jsonb, '[0, 2, 3]'::nexus.vector, B'10100', repeat('x', 1200)),
+            ('t-battery-a', gen_random_uuid(), -16768, -1, -9223372036854775807, ARRAY[1, 9223372036854775807, -1]::bigint[],
+             ARRAY['a', 'b,c', NULL, 'it''s', '']::text[], 1.5, 1.0E-300, 1234.5678, false, DATE '2026-11-11', TIME '12:34:51.123456',
+             TIMESTAMP '2026-11-12 10:15:30.123456', TIMESTAMPTZ '2026-11-12 10:15:30.123456+00',
+             INTERVAL '2 days 03:04:05.678901', INET '192.168.0.1/24', '\x00ff10'::bytea,
+             '{"a": [1, 2, {"b": null}]}'::json, '{"z": 1, "a": 1}'::jsonb, '[1, 2, 3]'::nexus.vector, B'10101', repeat('x', 1200)),
+            ('t-battery-a', gen_random_uuid(), -768, 0, -9223372036854775806, ARRAY[2, 9223372036854775807, -1]::bigint[],
+             ARRAY['a', 'b,c', NULL, 'it''s', '']::text[], 2.5, 2.0E-300, 2469.1356, true, DATE '2026-11-12', TIME '12:34:52.123456',
+             TIMESTAMP '2026-11-12 10:15:30.123456', TIMESTAMPTZ '2026-11-12 10:15:30.123456+00',
+             INTERVAL '3 days 03:04:05.678901', INET '192.168.0.2/24', '\x00ff20'::bytea,
+             '{"a": [1, 2, {"b": null}]}'::json, '{"z": 1, "a": 2}'::jsonb, '[2, 2, 3]'::nexus.vector, B'10100', repeat('x', 1200)),
+            ('t-battery-a', gen_random_uuid(), 15232, 1, -9223372036854775805, ARRAY[3, 9223372036854775807, -1]::bigint[],
+             ARRAY['a', 'b,c', NULL, 'it''s', '']::text[], 3.5, 3.0E-300, 3703.7034, false, DATE '2026-11-13', TIME '12:34:53.123456',
+             TIMESTAMP '2026-11-12 10:15:30.123456', TIMESTAMPTZ '2026-11-12 10:15:30.123456+00',
+             INTERVAL '4 days 03:04:05.678901', INET '192.168.0.3/24', '\x00ff30'::bytea,
+             '{"a": [1, 2, {"b": null}]}'::json, '{"z": 1, "a": 3}'::jsonb, '[3, 2, 3]'::nexus.vector, B'10101', repeat('x', 1200)),
+            ('t-battery-a', gen_random_uuid(), 31232, 2, -9223372036854775804, ARRAY[4, 9223372036854775807, -1]::bigint[],
+             ARRAY['a', 'b,c', NULL, 'it''s', '']::text[], 4.5, 4.0E-300, 4938.2712, true, DATE '2026-11-14', TIME '12:34:54.123456',
+             TIMESTAMP '2026-11-12 10:15:30.123456', TIMESTAMPTZ '2026-11-12 10:15:30.123456+00',
+             INTERVAL '5 days 03:04:05.678901', INET '192.168.0.4/24', '\x00ff40'::bytea,
+             '{"a": [1, 2, {"b": null}]}'::json, '{"z": 1, "a": 4}'::jsonb, '[4, 2, 3]'::nexus.vector, B'10100', repeat('x', 1200))</sql>
+        <sql>INSERT INTO nexus.export_battery_probe (tenant_id, k) VALUES ('t-battery-a', gen_random_uuid())</sql>
+        <sql>INSERT INTO nexus.export_battery_probe (tenant_id, k, s, pad) VALUES
+            ('t-battery-a', gen_random_uuid(), NULL, 'nulls elsewhere'), ('t-battery-b', gen_random_uuid(), 7, 'other tenant')</sql>
+    </changeSet>
+</databaseChangeLog>

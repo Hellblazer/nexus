@@ -253,8 +253,10 @@ nx upgrade        <span class="c"># update the service, the data, and the plugin
 <p>Follow these four steps in this order. None of them touches a managed cloud tenant, because they remove only what is on this computer.</p>
 <ol class="steps">
 <li><div class="step">
-  <h3>Optional: keep a copy of your knowledge</h3>
-  <p>You can export the knowledge store to a file, but you cannot export memory or scratch.</p>
+  <h3>Optional: keep a copy of your data</h3>
+  <p>On a local install, <code>nx backup</code> writes the whole database, memory included, to one file in <code>~/nexus-backups/</code>. Move that file somewhere you keep before you remove the data.</p>
+  <div class="cmd"><pre>nx backup</pre><button class="copy" type="button">Copy</button></div>
+  <p>To keep only the knowledge store, in a form a new install can import one collection at a time, export it:</p>
   <div class="cmd"><pre>nx store export --all -o <span class="ph">&lt;A-DIRECTORY-TO-KEEP&gt;</span>   <span class="c"># one .nxexp file per collection</span></pre><button class="copy" type="button">Copy</button></div>
   <p class="note">Later, <code>nx store import <span class="ph">&lt;FILE&gt;</span>.nxexp</code> restores a collection into a new install.</p>
 </div></li>

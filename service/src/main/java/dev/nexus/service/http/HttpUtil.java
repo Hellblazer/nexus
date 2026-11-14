@@ -410,6 +410,14 @@ public final class HttpUtil {
      *       carries {@code retry_after_seconds}, {@code nothing_moved} (false when an earlier sibling had already
      *       committed), {@code audit_ids} and {@code moved_chashes} (what those earlier siblings committed).
      *       Retryable.</li>
+     *   <li>The tenant export routes ({@code /v1/tenant/export}, nexus-csayy.2, RDR-248) answer their own typed
+     *       bodies from {@code TenantExportHandler}, whose class javadoc is the contract: {@code
+     *       export_scope_forbidden} (403), {@code no_such_session} (404), {@code unknown_table} and {@code
+     *       malformed_after} (400), {@code export_session_exists} and {@code page_in_flight} (409, the
+     *       latter with {@code Retry-After}), {@code
+     *       session_closed} (410), {@code export_capacity_full} (503, with {@code retry_after_seconds}) and
+     *       {@code export_page_busy} (503, with {@code Retry-After}: a lock bound) and {@code export_page_over_budget} (503, no {@code Retry-After}: the page's time budget). The client's copy of these values lands with the client half of
+     *       RDR-248 (nexus-csayy.3).</li>
      * </ul>
      * The typed 409 bodies predate the rule and discriminate on {@code status}
      * ({@code conflict_running}, {@code stale_run}) or on {@code constraint}; those

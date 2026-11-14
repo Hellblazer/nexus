@@ -58,8 +58,8 @@ LOCK_WAIT_TIMEOUT = "60s"
 _VERIFY_TIMEOUT_S = 300.0
 
 MANAGED_REFUSAL = (
-    "nx backup backs up the LOCAL engine's database only. This install is in managed (cloud) mode: "
-    "cloud backups are on the conexus side, not something you run here."
+    "This resolver finds the LOCAL engine's database, and this install is in managed (cloud) mode, which has "
+    "none. `nx backup` takes the cloud arm there (an export of your tenant); nothing should reach here."
 )
 NOT_RUNNING_REFUSAL = (
     "The local database is not accepting connections on 127.0.0.1:{port}, so there is nothing to "
@@ -252,7 +252,7 @@ def _publish(tmp: Path, dest: Path) -> None:
     A hard link fails if the name exists, which a rename would not on POSIX. A filesystem without
     hard links (exFAT, an SMB share) takes the fallback: reserve *dest* with ``O_EXCL``, so a file that
     appears at any moment is refused, then rename *tmp* over our own empty placeholder; the placeholder
-    is removed again if the rename fails."""
+    is removed again if the rename fails or an interrupt lands before it completes."""
     from nexus._winsec import open_private  # noqa: PLC0415 - as in run_dump
 
     try:
@@ -261,20 +261,29 @@ def _publish(tmp: Path, dest: Path) -> None:
         raise already_there(dest) from None
     except OSError:
         try:
-            fd = open_private(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            raise already_there(dest) from None
-        except OSError as exc:
-            raise cannot_write(dest, exc) from None
-        os.close(fd)
-        try:
+            try:
+                fd = open_private(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                raise already_there(dest) from None
+            except OSError as exc:
+                raise cannot_write(dest, exc) from None
+            os.close(fd)
             os.replace(tmp, dest)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                dest.unlink()
+        except BackupRefused:  # nothing was claimed
+            raise
+        except BaseException:  # an interrupt or a failed rename, any time after the claim: no empty file is left at dest
+            _drop_empty_placeholder(dest)
             raise
         return
     tmp.unlink()
+
+
+def _drop_empty_placeholder(dest: Path) -> None:
+    """Remove *dest* if it is the empty placeholder :func:`_publish` just claimed. A finished dump is never
+    empty, so a file with bytes in it (another run's) is left alone."""
+    with contextlib.suppress(OSError):
+        if dest.stat().st_size == 0:
+            dest.unlink()
 
 
 def _stderr_text(handle: object) -> str:

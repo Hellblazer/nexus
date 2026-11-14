@@ -36,6 +36,8 @@ def crs(tmp_path, monkeypatch):
     loader.exec_module(module)
     monkeypatch.setattr(module, "LOG", tmp_path / "restart.log")
     setattr_in(monkeypatch, module, "time.sleep", lambda _s: None)
+    # The exit-and-resume path under test here; /restart has its own tests (test_claude_restart_sessions_slash.py).
+    monkeypatch.setattr(module, "NO_SLASH", True)
     return module
 
 

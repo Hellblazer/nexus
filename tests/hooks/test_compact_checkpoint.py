@@ -132,6 +132,7 @@ def mod():
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    module._load_siblings()  # main() does this inside its guard; the unit tests call functions directly
     return module
 
 
@@ -1414,8 +1415,14 @@ class TestScript:
         assert roots, "the walk found no imports; it went blind"
         outside = {r for r in roots if r not in sys.stdlib_module_names and not r.startswith("_")}
         assert not outside, outside
-        assert {r for r in roots if r.startswith("_")} <= {"__future__", "_cli_lookup", "_endpoint_resolve"}
-        assert (SCRIPT.parent / "_cli_lookup.py").is_file() and (SCRIPT.parent / "_endpoint_resolve.py").is_file()
+        own = {"_cli_lookup", "_endpoint_resolve", "_session_facts"}
+        assert {r for r in roots if r.startswith("_")} <= {"__future__", *own}
+        assert all((SCRIPT.parent / f"{m}.py").is_file() for m in own)
+        # The sibling the checkpoint shares with the restart script holds to the same rule.
+        facts = ast.parse((SCRIPT.parent / "_session_facts.py").read_text(encoding="utf-8"))
+        theirs = {a.name.split(".")[0] for n in ast.walk(facts) if isinstance(n, ast.Import) for a in n.names}
+        theirs |= {n.module.split(".")[0] for n in ast.walk(facts) if isinstance(n, ast.ImportFrom) and n.module}
+        assert theirs and all(r in sys.stdlib_module_names or r in ("__future__", "_exec_path") for r in theirs), theirs
 
     def test_the_sibling_imports_sit_inside_main_so_an_import_error_exits_zero(self, tmp_path: Path) -> None:
         tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
