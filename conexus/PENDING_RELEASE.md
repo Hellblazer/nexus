@@ -43,15 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.2.2)
+## Awaiting the next release (pinned: v8.2.3)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/hooks/scripts/compact_checkpoint.py`
-  the PreCompact checkpoint checks the board against the facts: board lines
-  resolved, unnamed worktree work, background tasks and crons, the worktree by
-  newest commit, stamped sections (nexus-ct74m)
-- `conexus/hooks/scripts/_session_facts.py`
-  new: the facts module the checkpoint and claude-restart-sessions share (nexus-ct74m)
 
 ## Deferred to the next client release
