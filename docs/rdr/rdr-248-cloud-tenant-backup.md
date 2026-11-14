@@ -297,6 +297,11 @@ check holds a lock through the upload. Refusals, each naming what failed, and no
   the engine's registry with the same type nor listed as retired (see *Cross-release*); or a target column the
   file lacks is NOT NULL with no default.
 - **Missing model.** An `embedding_models` row the header names does not exist.
+- **Model not served.** The header names a Voyage-provider model that the engine's embedder does not serve (the engine
+  holds no Voyage key). The `embedding_models` table is seeded alike on every engine, voyage rows included, so the row
+  check above does not catch this; the open reads the models the engine's router serves and refuses with 422
+  `embedding_model_not_served`, naming the model, before any part is sent. A model of another provider is not gated,
+  and an engine told of no embedder (a test engine) is not asked.
 - **Too large.** The declared row bytes exceed `NX_IMPORT_MAX_BYTES` (default 8 GiB, about twice tenant `nexus`).
 - **Busy.** The tenant already has an import or export session (409, naming the open session's id, so a client
   that lost its earlier session can `DELETE` it), or the engine is at its session cap (503 with a retry-after).
@@ -433,25 +438,39 @@ match, it is skipped and named in the status, together with every table that ref
 later migration is entered there with the changeset that removed it, and a file's data in a retired table or
 column is skipped and reported, not refused. The parity test cannot see a column that is gone; the committed
 fixture's test is what catches a drop that was not entered in the retired list. A `data` column that is missing and not retired still refuses, by
-name. Supported cloud-to-local cases are Sam's decision (ask `rdr248-cloud-to-local`).
+name. A cloud file restores into a local engine under this rule, plus the model rule of the Restore verb (Sam, 2026-11-14, ask `rdr248-cloud-to-local`, option 1).
 The committed fixture (Step 6) is not silently regenerable: its test pins the fixture's SHA-256 and its header's
 `engine_version`, so a regenerated fixture fails until a reviewed change edits both, and the change must say why.
 
 *Capacity* (S2). The engine has no disk or WAL check today (no `pg_stat_wal`, `statvfs` or database-size check
 on any engine path; the only ones are the local `LocalDiskPreflight.java:94` and the client's
 `pg_backup.py:195-219`). A load stages about the file's size in temp tables, then writes it again with WAL and
-HNSW maintenance, on the database every tenant shares. What bounds that is Sam's decision (ask
-`rdr248-import-capacity`); the byte cap above is the floor whatever he decides.
+HNSW maintenance, on the database every tenant shares. Decided (Sam, 2026-11-14, ask `rdr248-import-capacity`,
+option 1): the engine checks no disk space. What bounds a restore is the byte cap above (`NX_IMPORT_MAX_BYTES`, 8 GiB
+by default, checked at the open), one load at a time per database, and an operator step the runbook makes explicit:
+before the restore token is issued, the operator checks that the database has at least 3 times the file's size free
+(the Step 6 run needed about that), WAL included.
 
 **Restore verb.** `nx backup restore FILE` (cloud and local) starts an import session, uploads the
 pages, commits and polls the status until it ends. A cloud file restores into a local engine under the
-same column-compatibility rule; which cloud-to-local cases are supported is the ask `rdr248-cloud-to-local`. The local `pg_restore` runbook stays
+same column-compatibility rule, and when the local engine has every embedding model the file names: a file with Voyage
+collections needs a local engine that holds a Voyage key, and otherwise the open is refused before any upload, naming
+the model (`embedding_model_not_served`; a model with no `embedding_models` row is `missing_embedding_model`), which
+the verb prints as the engine's words (Sam, 2026-11-14, ask `rdr248-cloud-to-local`, option 1; the engine's seeded
+table does not say whether a key is held, so the open asks the embedder router). The local `pg_restore` runbook stays
 for whole-cluster restores. An empty tenant comes from tenant create: the operator on the cloud
-(conexus). On a local install `nx` holds only the supervisor's root token, which the import routes refuse, so a
-local restore uses a tenant token in `NX_SERVICE_TOKEN` (`nx service token issue --tenant <t>`, `default` for
-the install's own tenant, which must be empty). Whether the verb should issue that token itself is the ask
-`rdr248-local-root`. The runbook's order is: the operator runs the current
-engine, creates the empty tenant and issues its token; the user restores, and does not use the tenant until
+(conexus). On a local install `nx` holds only the supervisor's root token, which the import routes refuse. Decided
+(Sam, 2026-11-14, ask `rdr248-local-root`, option 1): when the token the client would send equals the supervisor's
+(the live lease's), the verb asks the engine's token route, the one `nx service token issue` uses, for a four-hour
+token of the `default` tenant (the install's own, which must be empty) and uses it for the import routes. The root
+token goes to the token route and never to an import route, and what a root token may do on the import routes is
+not widened. The minted token is replaced before it expires (ten minutes of margin; four hours covers the longest
+session of about 3 h 12 min at the defaults) and once more when the engine rejects it. A token the user exports as
+`NX_SERVICE_TOKEN` that is not the supervisor's is used as it is, which is how a restore into another tenant is made;
+if the mint fails the verb refuses before sending anything and prints the manual step (`nx service token issue
+--tenant default`, `export NX_SERVICE_TOKEN=<token>`). The cloud path is unchanged. The runbook's order is: the operator runs the current
+engine, checks the database has room (3 times the file's size), creates the empty tenant and issues its token (the
+cloud; a local install needs none); the user restores, and does not use the tenant until
 the verb reports the outcome (a write during the upload refuses the load at its re-check). Nobody pins an engine
 version. The verb first verifies the whole file, then opens, uploads, commits, and polls; after a lost
 connection it polls the status, and after "no such session" it reads `/v1/tenant/import-marker`. It prints row
@@ -549,8 +568,10 @@ exporter; every new table needs a new exporter.
   has a total bound and an abort route; the Step 6 scale run records the load's time.
 - **Risk**: a load stages and then writes a whole tenant (3.8 GB for `nexus`) with WAL and HNSW maintenance on the
   database every tenant shares, and the engine has no disk or WAL check.
-  **Mitigation**: the per-file byte cap `NX_IMPORT_MAX_BYTES`, one load at a time, and the decision in ask
-  `rdr248-import-capacity` (Sam).
+  **Mitigation** (Sam, 2026-11-14, ask `rdr248-import-capacity`, option 1): the per-file byte cap `NX_IMPORT_MAX_BYTES`,
+  one load at a time, and an operator step before the restore token is issued: the database has at least 3 times the
+  file's size free, WAL included (runbook step 3). The engine checks no disk space; a load that runs out fails with the
+  database's error and rolls back whole.
 - **Risk**: an import holds a write transaction with an assigned transaction id for up to about three hours and 12 minutes (60 minutes of
   upload, up to `NX_IMPORT_LOAD_MAX` waiting on another load, then the load), which holds back vacuum on the shared database longer than the export's read snapshot,
   and is a hold A5 did not observe.
@@ -594,7 +615,7 @@ exporter; every new table needs a new exporter.
 - A commit meets `restore_busy` until the restore-wait bound: as above, the session closes with that reason.
 - An open while the engine's singleton lock is not held: refused naming the lock; no session is opened.
 - The database runs out of disk or WAL space during the load: the transaction fails and rolls back, and the status
-  reports the database error; what prevents it is ask `rdr248-import-capacity`.
+  reports the database error; what prevents it is the operator's 3-times-the-file free-space check before the token is issued (decided 2026-11-14).
 - Registry out of date: the parity test fails in CI before release.
 
 ## Implementation Plan
@@ -634,8 +655,8 @@ operator task from the file.
 #### Step 5: Import session (staged load, id reassignment, foreign-key order, verification, asynchronous commit with a status route, the one-load-at-a-time bound) and `nx backup restore` (engine + client)
 
 The design is settled in the Import session section (nexus-csayy.5). Its two open asks to Sam,
-`rdr248-cloud-to-local` and `rdr248-import-capacity`, do not block the routes; they decide one refusal and one
-pre-check, each added when answered. The tenant-create check is the `p_check_restore` parameter of
+`rdr248-cloud-to-local` and `rdr248-import-capacity`, did not block the routes; both were answered on 2026-11-14 (a
+refusal of a model the engine cannot serve, and an operator free-space step in the runbook). The tenant-create check is the `p_check_restore` parameter of
 `create_tenant_partitions`, on its slow path only, at its default for every runtime caller; the busy answer
 carries the restore-held fact on `TenantCreationBusyException`, sets the header and the body's
 `retry_after_seconds` alike, and the `TokenStore.java:151-154` javadoc is corrected.
@@ -732,6 +753,13 @@ None.
   succeeds.
 - **Scenario**: the target lacks an `embedding_models` row the file needs — **Verify**: refused before
   any write, naming the model.
+- **Scenario**: the file names a Voyage model and the engine holds no Voyage key (its embedder router does not serve it) —
+  **Verify**: refused at the open with `embedding_model_not_served` before any part is sent, naming the model; a model the
+  router serves opens; the service's own router, not a test seam, decides.
+- **Scenario**: a local `nx backup restore` holds the supervisor's root token — **Verify**: a `default`-tenant token is
+  minted through the token route and every import request carries it, the root token on none; an exported token that is
+  not the supervisor's is used and nothing is minted; a mint that fails refuses before anything is sent, naming the manual
+  step; the minted token is replaced before it expires and once when rejected; the cloud path is unchanged.
 
 ## Validation
 
@@ -925,3 +953,6 @@ tenants. Nothing to trim.
 - 2026-11-13: Step 5 client review (T2 `nexus/review-a8efcfcef-nexus-csayy.6-client-2026-11-13`, `nexus/critique-a8efcfcef-nexus-csayy.6-2026-11-13`): the Restore verb states its rules for a load it cannot see (fail-closed stale delete, nothing deleted after a commit attempt, marker settles any failed answer), its failsafe waits, `header_sha256` and `row_bytes`, the both-lists upload, no automatic restart after a part failure, and that a local restore uses a tenant token, the default tenant's included (ask `rdr248-local-root`). Amended under standing grant 3 to match reviewed code.
 - 2026-11-14: Step 6 (nexus-csayy.7): the round trip, the committed fixture, the runbook and the commit at scale (33 minutes for 500,000 chunks, one run); the load bound the RDR promised to set with a 2x margin is left as a decision for Sam (ask `rdr248-load-bound`) because the measured load is over 30 minutes; review round 1 (T2 `nexus/critique-a4e85add1-nexus-csayy.7-2026-11-14-r1`, `nexus/review-a4e85add1-nexus-csayy.7-2026-11-14-r1`) folded in.
 - 2026-11-14: `NX_IMPORT_LOAD_MAX` default raised from 3,600 s to 3,960 s, twice the Step 6 load, as a floor (Sam, ask `rdr248-load-bound`, option 1); the longest session hold becomes about 3 h 12 min. Amended under standing grant 3.
+- 2026-11-14: Ask `rdr248-cloud-to-local`, option 1 (Sam): a cloud file restores into a local engine that has every embedding model the file names (a Voyage key for Voyage collections); otherwise it is refused before upload, naming the model. The ask's premise was wrong: the missing-model refusal reads `embedding_models`, which every engine seeds with the Voyage rows, so a keyless local engine passed it. The engine's open now also refuses a Voyage model its embedder router does not serve (422 `embedding_model_not_served`); engine change under `service/`. Amended under standing grant 3.
+- 2026-11-14: Ask `rdr248-import-capacity`, option 1 (Sam): the byte cap, one load at a time, and an explicit operator step in the runbook before the restore token is issued (3 times the file's size free, WAL included); the engine checks no disk space. The Risks and Failure Modes entries that pointed at the ask say so. Amended under standing grant 3.
+- 2026-11-14: Ask `rdr248-local-root`, option 1 (Sam): on a local install the verb mints a four-hour `default`-tenant token through the existing token route when it holds the supervisor's root token, and uses it; the root token is never sent to an import route and what it may do there is not widened. An explicit non-supervisor token wins; a failed mint falls back to the manual step. Client change only. Amended under standing grant 3.
