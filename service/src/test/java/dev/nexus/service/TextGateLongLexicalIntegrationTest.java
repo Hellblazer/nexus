@@ -159,7 +159,7 @@ class TextGateLongLexicalIntegrationTest {
     void theProbes_areThreePlpgsqlFunctions_thatReadTheGuc() throws Exception {
         try (Connection su = pg.createConnection("")) {
             var probes = PgCatalogProbes.functionDefinitionsIn(DSL.using(su, org.jooq.SQLDialect.POSTGRES), "nexus")
-                .values().stream().filter(f -> f.identity().startsWith("text_gate_probe_")).toList();
+                .values().stream().filter(f -> f.identity().matches("text_gate_probe_\\d+\\(.*")).toList();
             assertThat(probes).as("non-vacuity: the three probes, one signature each").hasSize(3);
             for (var f : probes) {
                 assertThat(f.language()).as("%s language", f.identity()).isEqualTo("plpgsql");

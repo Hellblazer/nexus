@@ -62,19 +62,25 @@ class HnswServingGucParityTest {
      * Deliberate {@code setSearchStatementTimeout(} calls beyond one per iterative-scan site, per file, with
      * the reason. {@code PgVectorRepository#hybridRank}: a per-collection fan-out's lexical arm sets its bound
      * again between the gate probe and the rank, so the rank is bounded by the budget that remains
-     * (nexus-xd2rc); the site's first bound is the paired one.
+     * (nexus-xd2rc); the site's first bound is the paired one. {@code PgVectorRepository#runSharedProbe}
+     * (nexus-bbtc2): the fan-out's one shared text-gate probe bounds its single-statement probe and, when that
+     * hits its cap, bounds the per-collection probe again by what remains. Neither statement scans HNSW, so
+     * neither belongs to an iterative-scan site; {@link #everyFetchingTenantBlockBoundsItsStatementsFirst}
+     * holds the block to its own ordering.
      */
     private static final java.util.Map<String, Integer> EXTRA_STATEMENT_BOUNDS =
-        java.util.Map.of("PgVectorRepository.java", 1);
+        java.util.Map.of("PgVectorRepository.java", 3);
 
     /**
      * Deliberate {@code setSearchPlanCacheMode(} calls beyond one per iterative-scan site, per file: the three
      * {@code withTenant} blocks of the where-taking get reads ({@code PgVectorRepository#getWhere}, both branches,
      * and {@code #getAllMetadata}, nexus-u9dc5). They scan no HNSW index, so they carry no other GUC of the group;
-     * {@link #everyWhereGetReadPinsACustomPlanBeforeItsFetch} holds them to their own pairing.
+     * {@link #everyWhereGetReadPinsACustomPlanBeforeItsFetch} holds them to their own pairing. And the fan-out's
+     * shared text-gate probe block ({@code PgVectorRepository#runSharedProbe}, nexus-bbtc2), which scans no HNSW
+     * index either; {@link #everyFetchingTenantBlockBoundsItsStatementsFirst} holds it to its pairing.
      */
     private static final java.util.Map<String, Integer> EXTRA_PLAN_MODE_PINS =
-        java.util.Map.of("PgVectorRepository.java", 3);
+        java.util.Map.of("PgVectorRepository.java", 4);
 
     /**
      * Where a window the sweeps read begins: every {@code tenantScope.withTenant(} block, and the body of

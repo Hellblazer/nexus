@@ -307,7 +307,10 @@ class JooqRecordReflectionFeatureTest {
     // function (CatalogLinksUpsertManyRecord); catalog_link_endpoint returns text and catalog_link_same_content jsonb
     // (scalars, no Record type), +1.
     // 132 -> 131: nexus-6pfgb.42, telemetry-019-1 dropped nexus.frecency, so FrecencyRecord is no longer generated, -1.
-    private static final int EXPECTED_RECORD_TYPES = 131;
+    // 131 -> 134: nexus-bbtc2, vectors-060-text-gate-probe-by-collection.xml added nexus.text_gate_probe_by_collection_384/768/1024,
+    // three RETURNS TABLE functions, three generated Record types (TextGateProbeByCollection384Record, ...768Record,
+    // ...1024Record), +3.
+    private static final int EXPECTED_RECORD_TYPES = 134;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

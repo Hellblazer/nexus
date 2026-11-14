@@ -178,7 +178,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
                 .containsExactly("tenant_isolation roles={public} cmd=ALL");
             assertThat(PgCatalogProbes.policyExists(ctx, "nexus", "chunks", "chunks_gate_probe_owner_read")).isFalse();
             var probes = PgCatalogProbes.functionShapesIn(ctx, List.of("nexus")).stream()
-                .filter(f -> f.identity().startsWith("text_gate_probe_")).toList();
+                .filter(f -> f.identity().matches("text_gate_probe_\\d+\\(.*")).toList();
             assertThat(probes).as("the three gate probes exist (the changelog walked past vectors-023)").hasSize(3);
             for (var f : probes) {
                 assertThat(f.securityDefiner()).as("%s must stay SECURITY INVOKER", f).isFalse();
@@ -232,7 +232,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
     void migratedAsTheServiceRole_theInvokerProbesAreNowPlpgsql_andHonourTheTrigramSwitch() throws Exception {
         try (Connection su = pg.createConnection("")) {
             var probes = PgCatalogProbes.functionDefinitionsIn(DSL.using(su, SQLDialect.POSTGRES), "nexus")
-                .values().stream().filter(f -> f.identity().startsWith("text_gate_probe_")).toList();
+                .values().stream().filter(f -> f.identity().matches("text_gate_probe_\\d+\\(.*")).toList();
             assertThat(probes).as("the three probes, one signature each").hasSize(3);
             for (var f : probes) {
                 assertThat(f.securityDefiner()).as("%s stays SECURITY INVOKER", f.identity()).isFalse();
@@ -441,7 +441,7 @@ class TextGateProbeSingleRoleGuardIntegrationTest {
 
     private static List<PgCatalogProbes.FunctionShape> definerProbes(DSLContext ctx) {
         return PgCatalogProbes.functionShapesIn(ctx, List.of("nexus")).stream()
-            .filter(f -> f.identity().startsWith("text_gate_probe_")).filter(f -> f.securityDefiner()).toList();
+            .filter(f -> f.identity().matches("text_gate_probe_\\d+\\(.*")).filter(f -> f.securityDefiner()).toList();
     }
 
     private static void assertChangesetSkipped(Connection su, String why) {

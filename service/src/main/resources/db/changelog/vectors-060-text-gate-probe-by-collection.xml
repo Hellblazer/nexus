@@ -1,0 +1,641 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-bbtc2: one text-gate probe over a request's collections that answers per collection.
+
+    WHY. On the per-collection route (searchPerCollection with the lexical leg) every collection's lexical arm ran
+    text_gate_probe_<dim> as its own one-collection statement. The trigram and tsvector GIN indexes are per leaf
+    (tenant x model), not per collection, so each arm rebuilt the leaf-wide bitmap for the pattern before ANDing it down
+    to its collection: about 65 ms an arm for resolve_active_session_id, 120 arms, 7.9 s of index work against 2.7 s for
+    /hybrid-search's batches of three and 0.09 s for one statement over all of them (T2
+    nexus/bbtc2-query-e-diagnosis-2026-11-14). The engine now runs the probe once over all the request's collections.
+    When that statement returns 5,000 chashes or fewer, each arm ranks from the set (no function here). When it hits the
+    cap, which is what an unselective query does ('advisory lock', 'serialization'), one statement over all of them
+    still cannot say which collections are dense and which are not: that is this function.
+
+    WHAT IT RETURNS. nexus.text_gate_probe_by_collection_<dim>(p_text, p_collections, p_where, p_where_path, p_cap,
+    p_embedding_model, p_tenant) has text_gate_probe_<dim>'s arguments and the same gate in all three modes
+    (nexus.lexical_trgm 'off', 'substring', anything else), one scan of the leaf, and returns (collection, chash)
+    capped PER COLLECTION at p_cap rows, with the dense collections collapsed:
+      - a collection with fewer than p_cap gated rows returns every one as (collection, chash): exactly the chashes
+        text_gate_probe_<dim> returns for that collection alone, which the arm ranks with text_gated_search_by_chash;
+      - a collection with p_cap or more gated rows returns ONE row, (collection, NULL), and its chashes are not sent.
+        The engine passes the same p_cap + 1 = 5,001 its per-arm probe uses, so a collection is dense here exactly when
+        its own probe would have counted more than 5,000 rows and ranked HNSW-first.
+      - a collection with no gated row returns nothing.
+    A row's gate does not depend on its collection (chunk_text and chunk_tsv are the chunk's), so the rows an arm gets from
+    here are the rows its own probe returns.
+
+    WHAT STAYS. text_gate_probe_<dim> and every other function are untouched. The new functions take the posture the
+    probes have, read back as vectors-057-1 and vectors-058-1 read it: SECURITY DEFINER with search_path pinned and
+    EXECUTE revoked from PUBLIC when the three probes are definer functions (the migrating role owns them, and the
+    chunks_gate_probe_owner_read policy of vectors-029 lets the body use the GIN indexes), SECURITY INVOKER otherwise.
+    EXECUTE is granted to nexus_svc either way. plan_cache_mode = force_custom_plan, so the substring pattern is a
+    constant when the statement is planned. Rollback drops the three functions.
+
+    No DATA EFFECT: function definitions only. Placed after vectors-059, before the grants-nexus-svc.xml runAlways block.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-060-1" author="nexus-bbtc2">
+        <comment>nexus-bbtc2: nexus.text_gate_probe_by_collection_384/768/1024 return (collection, chash) for the rows the text gate admits, capped per collection (a collection at the cap returns one (collection, NULL) row), in one scan of the leaf. The engine uses them when one probe over all of a request's collections hits its cap. Posture read from text_gate_probe_&lt;dim&gt;: definer with search_path pinned and EXECUTE revoked from PUBLIC, else invoker; EXECUTE granted to nexus_svc. No data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $do$
+DECLARE
+    definer boolean;
+    n_def   int;
+    n_probe int;
+BEGIN
+    SELECT count(*), count(*) FILTER (WHERE p.prosecdef) INTO n_probe, n_def
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_probe <> 3 THEN
+        RAISE EXCEPTION 'vectors-060-1: expected exactly 3 text_gate_probe functions, found %', n_probe;
+    END IF;
+    IF n_def NOT IN (0, 3) THEN
+        RAISE EXCEPTION 'vectors-060-1: % of the 3 text_gate_probe functions are SECURITY DEFINER; the three must agree before this changeset reads the posture', n_def;
+    END IF;
+    definer := n_def = 3;
+    IF definer THEN
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace(p_text, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSE
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace(p_text, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSE
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace(p_text, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSE
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    END IF;
+END
+$$$f$;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_384(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_768(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_1024(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+    ELSE
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace(p_text, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSE
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace(p_text, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSE
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    END IF;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+AS $$
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace(p_text, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    ELSE
+    RETURN QUERY
+    WITH g AS (
+        SELECT c.collection AS coll, c.chash AS ch,
+               pg_catalog.row_number() OVER (PARTITION BY c.collection) AS rn
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = p_embedding_model
+         AND c.tenant_id = p_tenant
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY(p_collections)
+         AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+         AND (p_where IS NULL OR c.metadata @> p_where)
+         AND (p_where_path IS NULL OR c.metadata @@ p_where_path::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', p_text) OR p_text OPERATOR(nexus.<%) c.chunk_text)
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+    END IF;
+END
+$$$f$;
+    END IF;
+    GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_384(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+    GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_768(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+    GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_1024(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+END
+$do$;
+
+
+DO $post$
+DECLARE
+    n         int;
+    n_def     int;
+    n_probe_def int;
+BEGIN
+    SELECT count(*), count(*) FILTER (WHERE p.prosecdef) INTO n, n_def
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_by_collection_384', 'text_gate_probe_by_collection_768',
+                         'text_gate_probe_by_collection_1024');
+    IF n <> 3 THEN
+        RAISE EXCEPTION 'vectors-060-1: expected exactly 3 text_gate_probe_by_collection functions, found %', n;
+    END IF;
+    SELECT count(*) FILTER (WHERE p.prosecdef) INTO n_probe_def
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_def <> n_probe_def THEN
+        RAISE EXCEPTION 'vectors-060-1: % of the 3 new functions are SECURITY DEFINER but % of the probes are; the posture must match', n_def, n_probe_def;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_384(text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_768(text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_1024(text, text[], jsonb, text, int, text, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

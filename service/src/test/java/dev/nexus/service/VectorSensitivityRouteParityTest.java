@@ -452,6 +452,15 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_768(p_text text, p_collections text[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
             new Classified("SETOF bytea", Exposure.NO_TEXT,
                 "text gate; SETOF bytea, the chashes whose text matches, no text. Its count only picks the plan: the chashes are ranked by text_gated_search_by_chash_<dim>, which carries p_exclude_sensitive"));
+        CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_by_collection_1024(p_text text, p_collections text[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
+            new Classified("TABLE(collection text, chash bytea)", Exposure.NO_TEXT,
+                "text gate, per collection (vectors-060, nexus-bbtc2); (collection, chash) of the rows whose text matches, no text. The chashes are ranked by text_gated_search_by_chash_<dim>, which carries p_exclude_sensitive, as the probe's are"));
+        CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_by_collection_384(p_text text, p_collections text[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
+            new Classified("TABLE(collection text, chash bytea)", Exposure.NO_TEXT,
+                "text gate, per collection (vectors-060, nexus-bbtc2); (collection, chash) of the rows whose text matches, no text. The chashes are ranked by text_gated_search_by_chash_<dim>, which carries p_exclude_sensitive, as the probe's are"));
+        CLASSIFIED_DEFINITION_READERS.put("text_gate_probe_by_collection_768(p_text text, p_collections text[], p_where jsonb, p_where_path text, p_cap integer, p_embedding_model text, p_tenant text)",
+            new Classified("TABLE(collection text, chash bytea)", Exposure.NO_TEXT,
+                "text gate, per collection (vectors-060, nexus-bbtc2); (collection, chash) of the rows whose text matches, no text. The chashes are ranked by text_gated_search_by_chash_<dim>, which carries p_exclude_sensitive, as the probe's are"));
     }
 
     @Test

@@ -880,7 +880,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             // yet, and it must create the tenant's partitions as their owner.
             assertThat(definers).containsExactly(
                 "create_tenant_partitions", "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
-                "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768");
+                "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768",
+                // nexus-bbtc2 (vectors-060): the by-collection probes take the probes' posture, definer here.
+                "text_gate_probe_by_collection_1024", "text_gate_probe_by_collection_384",
+                "text_gate_probe_by_collection_768");
         }
     }
 

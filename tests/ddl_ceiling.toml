@@ -210,7 +210,9 @@ migration_wal_bytes_per_worker = 12143000
 # Counted from the changesets' statements (13) and measured: chas lab-m via lab-remote, 2026-11-09, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-bbtc2 tree, gate jar rebuilt, ddl: migration=2413.
 # 2413 -> 2417 (2026-11-13, nexus-csayy.6, RDR-248 Step 5): vectors-059-1 drops nexus.create_tenant_partitions(regclass, text, boolean) and creates the four-parameter function (p_check_restore), then REVOKEs EXECUTE from PUBLIC and GRANTs it to nexus_svc: 1 DROP FUNCTION, 1 CREATE FUNCTION, 1 REVOKE, 1 GRANT, no table.
 # Counted from the changeset's statements (4) and measured: local laptop (macOS), 2026-11-13, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-csayy.6 tree (gate jar rebuilt), ddl: migration=2417.
-migration_ddl_per_worker = 2417
+# 2417 -> 2426 (2026-11-14, nexus-bbtc2): vectors-060-1 creates nexus.text_gate_probe_by_collection_384, _768 and _1024 (the per-collection shared probe of the route's lexical leg), REVOKEs EXECUTE from PUBLIC and GRANTs it to nexus_svc on each: 3 CREATE FUNCTION, 3 REVOKE, 3 GRANT, no table.
+# Counted from the changeset's statements (9) and measured: chas lab-m via lab-remote, 2026-11-14, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-bbtc2 route-probe tree (gate jar rebuilt), ddl: migration=2426.
+migration_ddl_per_worker = 2426
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

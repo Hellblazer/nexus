@@ -695,14 +695,7 @@ public class TenantKeyedStateGateTest {
                 + "tenant-independent");
             notKeyed.put("HttpUtil.BEFORE_SEND", "send hook per in-flight HttpExchange, removed when the response "
                 + "is sent; request-scoped");
-            notKeyed.put("PgVectorRepository.FanoutMerger.worstOnTop", "the merge heap of one fan-out search; "
-                + "dies with the request");
-            notKeyed.put("PgVectorRepository.LexicalLeg.rows", "the lexical arms' rows of one fan-out search "
-                + "(nexus-xd2rc); dies with the request");
-            notKeyed.put("PgVectorRepository.LexicalLeg.Union.extras", "the lexical rows one fan-out search "
-                + "returns beside its vector rows; dies with the request");
-            notKeyed.put("PgVectorRepository.LexicalLeg.Union.stats", "per-collection lexical stats of one "
-                + "fan-out search; dies with the request");
+            FanoutSearchKeyedStateTable.fill(notKeyed);   // nexus-xd2rc, nexus-bbtc2: one fan-out search's state
             notKeyed.put("TupleWaitRegistry.MultiWaiter.pendingSubspaces", "wake bookkeeping of one parked wait; "
                 + "dies when that request ends");
             notKeyed.put("TupleWaitRegistry.MultiWaiter.tenant", "the tenant of one parked wait, immutable; "
