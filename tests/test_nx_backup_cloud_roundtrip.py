@@ -243,8 +243,8 @@ class _Held:
 def _case_a_local_root_token_is_swapped_for_a_default_tenant_token_the_import_routes_accept() -> None:
     """RDR-248 ask ``rdr248-local-root``: against the real engine, the supervisor's root token is refused by an import
     route, and the credentials a local restore uses mint a ``default``-tenant token through the real token route that the
-    same route accepts. (The default tenant is not empty in a shared substrate, so this case stops at the marker read.)"""
-    from nexus.backup.local_token import LOCAL_TENANT, LocalRestoreCredentials  # noqa: PLC0415
+    same route accepts, then revoke it when released. (The default tenant is not empty in a shared substrate, so this case stops at the marker read.)"""
+    from nexus.backup.local_token import LocalRestoreCredentials  # noqa: PLC0415
 
     state = ensure_engine()
     marker = f"{state['base_url']}/v1/tenant/import-marker"
@@ -253,8 +253,11 @@ def _case_a_local_root_token_is_swapped_for_a_default_tenant_token_the_import_ro
     creds = LocalRestoreCredentials(_Held(state["bearer"]), state["base_url"], root_token=lambda: state["bearer"])
     minted = creds.bearer()
     assert minted and minted != state["bearer"] and creds.bearer() == minted, "one mint, reused"
-    ok = httpx.get(marker, headers={"Authorization": f"Bearer {minted}", "X-Nexus-Tenant": LOCAL_TENANT}, timeout=10)
+    ok = httpx.get(marker, headers={"Authorization": f"Bearer {minted}"}, timeout=10)   # the request shape ImportClient sends: a bearer, no tenant header
     assert ok.status_code == 200 and "present" in ok.json(), ok.text
+    creds.release()   # the run is over: the real revoke route takes the token back, and the engine stops accepting it
+    gone = httpx.get(marker, headers={"Authorization": f"Bearer {minted}"}, timeout=10)
+    assert gone.status_code == 401, gone.text
 
 
 def _case_the_engine_advertises_the_routes_the_client_gates_on() -> None:

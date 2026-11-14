@@ -199,6 +199,13 @@ class ImportClient:
     def close_http(self) -> None:
         self._http.close()
 
+    def release_credentials(self) -> None:
+        """Tell the credentials the run is over (a local restore revokes the token it minted). Never raises."""
+        release = getattr(self._creds, "release", None)
+        if release is not None:
+            with contextlib.suppress(Exception):
+                release()
+
     # -- one logical request: retried, re-authenticated, classified ------------------------------------
 
     def _exchange(
@@ -711,7 +718,22 @@ def run_restore(
 
     Raises :class:`RestoreRefused` (nothing staged or loaded), :class:`RestoreFailed` (the load did not commit),
     :class:`RestoreOutcomeUnknown` (the engine was lost mid-load and the marker could not be read), or whatever
-    interrupted it. A session that cannot be loading is deleted on the way out; one that may be is left to finish."""
+    interrupted it. A session that cannot be loading is deleted on the way out; one that may be is left to finish.
+    A token the client minted for a local restore is revoked when the run ends, however it ends."""
+    try:
+        return _run_restore(client, path, on_progress=on_progress, on_note=on_note, poll_interval_s=poll_interval_s)
+    finally:
+        client.release_credentials()
+
+
+def _run_restore(
+    client: ImportClient,
+    path: Path,
+    *,
+    on_progress: Progress | None,
+    on_note: Callable[[str], None] | None,
+    poll_interval_s: float | None,
+) -> RestoreResult:
     note = on_note or (lambda _msg: None)
     client.note = note
     started = time.monotonic()

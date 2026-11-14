@@ -216,8 +216,11 @@ class TenantImportSeededRowsTest {
         // the file says knowledge is bge and the engine's own row says voyage: a different profile
         JsonNode failed = env.restore(token, file);
 
+        // RDR-248 rdr248-cloud-to-local: this is also what a cloud file (voyage profile rows) meets in a local engine whose profile is
+        // bge: the rows are data, not header, so the open cannot see them and the load is where it fails, naming the text below
         assertThat(failed.get("status").asText()).startsWith("failed: ").contains("embedding_profile").contains("knowledge")
-            .contains("embedding_model");
+            .contains("embedding_model")
+            .contains("a different profile means the restored vectors do not match this engine's embedder");
         for (String t : List.of("catalog_owners", "catalog_collections", "chunks", "memory")) {
             assertThat(env.count(t, TenantConstants.DEFAULT_TENANT)).as("rolled back: " + t).isZero();
         }

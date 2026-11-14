@@ -48,17 +48,24 @@ class Static:
 
 
 class Issuer:
-    """The token route: records every call and hands out ``minted-1``, ``minted-2``, ..."""
+    """The token route: records every call and hands out ``minted-1``, ``minted-2``, ... (hash ``hash-1``, ...)."""
 
     def __init__(self, fail: Exception | None = None) -> None:
         self.calls: list[tuple[str, str, str, int, str]] = []
         self.fail = fail
+        self.revoked: list[tuple[str, str, str]] = []
+        self.revoke_fails: Exception | None = None
 
-    def __call__(self, base_url: str, root: str, tenant: str, ttl: int, label: str) -> str:
+    def __call__(self, base_url: str, root: str, tenant: str, ttl: int, label: str) -> tuple[str, str | None]:
         self.calls.append((base_url, root, tenant, ttl, label))
         if self.fail is not None:
             raise self.fail
-        return f"minted-{len(self.calls)}"
+        return f"minted-{len(self.calls)}", f"hash-{len(self.calls)}"
+
+    def revoke(self, base_url: str, root: str, token_hash: str) -> None:
+        self.revoked.append((base_url, root, token_hash))
+        if self.revoke_fails is not None:
+            raise self.revoke_fails
 
 
 class WallClock:
@@ -92,7 +99,9 @@ def _client(engine: FakeImportEngine, creds: LocalRestoreCredentials, *, remote:
 
 
 def _local(engine: FakeImportEngine, held: str, issuer: Issuer, clock: WallClock | None = None) -> LocalRestoreCredentials:
-    return LocalRestoreCredentials(Static(held), engine.base_url, root_token=lambda: ROOT, issue=issuer, clock=clock or WallClock())
+    return LocalRestoreCredentials(
+        Static(held), engine.base_url, root_token=lambda: ROOT, issue=issuer, revoke=issuer.revoke, clock=clock or WallClock(),
+    )
 
 
 def _bearers(engine: FakeImportEngine) -> list[str]:
@@ -127,10 +136,12 @@ def test_an_explicit_token_that_is_not_the_supervisors_wins_and_nothing_is_minte
     assert set(sent) == {"my-tenant-token"} and issuer.calls == []
 
 
-def test_with_no_lease_to_compare_against_the_held_token_is_used_as_it_is(backup_file: Path) -> None:
+def test_a_token_the_user_set_with_no_lease_to_compare_against_is_used_as_it_is(backup_file: Path) -> None:
     issuer = Issuer()
     with FakeImportEngine(accepted={"tok"}) as engine:
-        creds = LocalRestoreCredentials(Static("tok"), engine.base_url, root_token=lambda: None, issue=issuer)
+        creds = LocalRestoreCredentials(
+            Static("tok"), engine.base_url, root_token=lambda: None, issue=issuer, explicit=lambda token: token == "tok",
+        )
         run_restore(_client(engine, creds), backup_file, poll_interval_s=0.0)
     assert issuer.calls == []
 
@@ -150,7 +161,7 @@ def test_a_mint_that_fails_refuses_before_anything_is_sent_and_names_the_manual_
 
 def test_the_minted_token_is_replaced_before_it_expires_mid_restore() -> None:
     clock, issuer = WallClock(), Issuer()
-    creds = LocalRestoreCredentials(Static(ROOT), "http://x", root_token=lambda: ROOT, issue=issuer, clock=clock)
+    creds = LocalRestoreCredentials(Static(ROOT), "http://x", root_token=lambda: ROOT, issue=issuer, revoke=issuer.revoke, clock=clock)
     assert creds.bearer() == "minted-1" and creds.bearer() == "minted-1" and len(issuer.calls) == 1
     clock.now += RESTORE_TOKEN_TTL_S - REFRESH_MARGIN_S - 1
     assert creds.bearer() == "minted-1", "still inside its life, so not replaced"
@@ -193,12 +204,127 @@ def test_connect_wraps_the_credentials_for_a_local_engine_only(monkeypatch: pyte
     assert cloud._remote is True and type(cloud._creds) is ManagedCredentials, "the cloud path keeps its own credentials"
 
 
-def test_a_cloud_client_never_mints_whatever_token_it_holds(backup_file: Path) -> None:
+def test_a_cloud_client_built_by_connect_never_mints_even_when_a_lease_names_its_token(
+    backup_file: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through ``connect()`` with a ``service_url`` configured: if connect ever wrapped the cloud credentials, the lease below
+    (which equals the held token) would make it mint from the token route, and the engine here has none."""
     with FakeImportEngine(accepted={ROOT}) as engine:
         engine.script.append(lambda req: Reply(403, {"error": "no", "reason": "import_scope_forbidden"}) if req.kind == "open" else None)
-        client = ImportClient(engine.base_url, Static(ROOT), sleep=lambda _s: None, remote=True)
-        with pytest.raises(RestoreRefused, match="nx config set service_token"):
-            run_restore(client, backup_file)
+        monkeypatch.setenv("NX_SERVICE_URL", engine.base_url)
+        monkeypatch.setenv("NX_SERVICE_TOKEN", ROOT)
+        monkeypatch.setattr("nexus.db.service_endpoint.discover_lease", lambda: (engine.base_url, ROOT))
+        client = ci.connect()
+        try:
+            assert client._remote is True and type(client._creds) is ManagedCredentials
+            with pytest.raises(RestoreRefused, match="nx config set service_token"):
+                run_restore(client, backup_file)
+        finally:
+            client.close_http()
+        sent = _bearers(engine)
+        paths = [r.path for r in engine.log]
+    assert set(sent) == {ROOT}, "the cloud path sends the token it holds, as before"
+    assert not any("service-tokens" in p for p in paths), "and never asks the token route for another"
+
+
+# -- the lease can be unreadable mid-run; the minted token is revoked when the run ends ------------------------------
+
+
+def test_a_lease_that_stops_being_readable_mid_run_does_not_let_the_root_token_reach_an_import_route(backup_file: Path) -> None:
+    """The held token is the root (the user exported it), the first read sees the lease and later reads fail: the root token
+    stays known as the supervisor's, so it is still swapped, never sent."""
+    reads = iter([ROOT])
+
+    def lease() -> str | None:
+        return next(reads, None)   # the first read sees the lease, every later one fails
+
+    issuer = Issuer()
+    with FakeImportEngine(accepted={"minted-1"}) as engine:
+        creds = LocalRestoreCredentials(
+            Static(ROOT), engine.base_url, root_token=lease, issue=issuer, revoke=issuer.revoke, explicit=lambda _t: True,
+        )
+        result = run_restore(_client(engine, creds), backup_file, poll_interval_s=0.0)
+        sent = _bearers(engine)
+    assert result.outcome.source == "status"
+    assert sent and ROOT not in sent and set(sent) == {"minted-1"}
+    assert len(issuer.calls) == 1
+
+
+def test_a_refresh_after_the_lease_is_lost_still_mints_from_the_remembered_root() -> None:
+    clock, issuer = WallClock(), Issuer()
+    reads = iter([ROOT])
+    creds = LocalRestoreCredentials(
+        Static(ROOT), "http://x", root_token=lambda: next(reads, None), issue=issuer, revoke=issuer.revoke, clock=clock,
+        explicit=lambda _t: True,
+    )
+    assert creds.bearer() == "minted-1"
+    clock.now += RESTORE_TOKEN_TTL_S - REFRESH_MARGIN_S + 1
+    assert creds.bearer() == "minted-2", "the lease cannot be read, and the held token is still known as the supervisor's"
+    assert [c[1] for c in issuer.calls] == [ROOT, ROOT]
+    assert issuer.revoked == [("http://x", ROOT, "hash-1")], "the replaced token is revoked"
+
+
+def test_a_token_that_cannot_be_told_from_the_supervisors_is_refused_not_sent(backup_file: Path) -> None:
+    """No lease has ever been read and the held token is not one the user set: it may be the root token, so nothing is sent."""
+    issuer = Issuer()
+    with FakeImportEngine() as engine:
+        creds = LocalRestoreCredentials(
+            Static(ROOT), engine.base_url, root_token=lambda: None, issue=issuer, revoke=issuer.revoke, explicit=lambda _t: False,
+        )
+        with pytest.raises(RestoreRefused, match="could not be told from the supervisor's operator token") as err:
+            run_restore(_client(engine, creds), backup_file)
+        sent = _bearers(engine)
+    assert sent == [] and issuer.calls == [] and "nx service token issue --tenant default" in str(err.value)
+    assert ROOT not in str(err.value)
+
+
+def test_a_lease_read_that_raises_is_a_missing_lease_not_a_crash(backup_file: Path) -> None:
+    def broken() -> str | None:
+        raise OSError("lease file is mid-write")
+
+    with FakeImportEngine(accepted={"tok"}) as engine:
+        creds = LocalRestoreCredentials(Static("tok"), engine.base_url, root_token=broken, explicit=lambda t: t == "tok")
+        run_restore(_client(engine, creds), backup_file, poll_interval_s=0.0)
+
+
+def test_the_minted_token_is_revoked_when_the_restore_ends_with_the_root_token_as_the_bearer(backup_file: Path) -> None:
+    issuer = Issuer()
+    with FakeImportEngine(accepted={"minted-1"}) as engine:
+        run_restore(_client(engine, _local(engine, ROOT, issuer)), backup_file, poll_interval_s=0.0)
+        base = engine.base_url
+    assert issuer.revoked == [(base, ROOT, "hash-1")]
+
+
+def test_the_minted_token_is_revoked_when_the_restore_is_refused_too(backup_file: Path) -> None:
+    issuer = Issuer()
+    refuse = Reply(409, {"error": "tenant default holds rows in memory", "reason": "tenant_not_empty", "table": "memory"})
+    with FakeImportEngine(accepted={"minted-1"}) as engine:
+        engine.script.append(lambda req: refuse if req.kind == "open" else None)
+        with pytest.raises(RestoreRefused, match="not empty"):
+            run_restore(_client(engine, _local(engine, ROOT, issuer)), backup_file)
+    assert [r[2] for r in issuer.revoked] == ["hash-1"]
+
+
+def test_an_explicit_token_is_never_revoked_because_nothing_was_minted(backup_file: Path) -> None:
+    issuer = Issuer()
+    with FakeImportEngine(accepted={"mine"}) as engine:
+        run_restore(_client(engine, _local(engine, "mine", issuer)), backup_file, poll_interval_s=0.0)
+    assert issuer.revoked == []
+
+
+def test_a_revoke_that_fails_changes_neither_the_outcome_nor_a_failure_the_restore_already_had(backup_file: Path) -> None:
+    issuer = Issuer()
+    issuer.revoke_fails = RuntimeError("the token route is down")
+    with FakeImportEngine(accepted={"minted-1"}) as engine:
+        result = run_restore(_client(engine, _local(engine, ROOT, issuer)), backup_file, poll_interval_s=0.0)
+    assert result.outcome.source == "status" and len(issuer.revoked) == 1, "tried once, and the restore still reports committed"
+    refuse = Reply(409, {"error": "tenant default holds rows in memory", "reason": "tenant_not_empty", "table": "memory"})
+    issuer2 = Issuer()
+    issuer2.revoke_fails = RuntimeError("the token route is down")
+    with FakeImportEngine(accepted={"minted-1"}) as engine:
+        engine.script.append(lambda req: refuse if req.kind == "open" else None)
+        with pytest.raises(RestoreRefused, match="not empty"):
+            run_restore(_client(engine, _local(engine, ROOT, issuer2)), backup_file)
 
 
 # -- rdr248-cloud-to-local: a model the engine cannot serve is refused at the open, naming it -------------------------
