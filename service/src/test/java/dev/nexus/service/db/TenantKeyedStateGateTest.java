@@ -544,8 +544,7 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("EngineJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
                 + "job that holds it is evicted under EngineJobs.jobs");
             notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
-            notKeyed.put("TenantImportSessions.servedModels", "the engine-wide supplier of the embedding models this "
-                + "engine's router serves (nexus-csayy, the open's Voyage check); it holds no tenant's data");
+            notKeyed.put("TenantImportSessions.servedModels", "the router's served-model supplier; holds no tenant's data");
             notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
             notKeyed.put("EngineJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
                 + "settable by a test): no tenant's data");
