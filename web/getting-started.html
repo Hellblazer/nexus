@@ -172,7 +172,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Index this repository into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs the terminal command <code>nx index repo .</code>, and Claude Code shows a Bash tool call with that command. The command reads every file, cuts it into chunks, and stores the chunks, which takes longer on a large repository. At the end the output shows <code>Done.</code> and, after the first index, the topics that Nexus found.</p>
+<p>Claude runs the terminal command <code>nx index repo .</code>, and Claude Code shows a Bash tool call with that command. The command reads every file, cuts it into chunks, and stores the chunks, which takes longer on a large repository. At the end the output shows <code>Done.</code> and, after the first index, a line with the number of topics that Nexus found.</p>
 <p class="note">If you index the same repository again later, Nexus skips files that did not change and shows <code>skipped: index fresh</code> for them.</p>
 
 <h3>Find out what is in the index</h3>
@@ -180,13 +180,13 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Which topics did Nexus find in this repository? List them with a short description of each.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude runs <code>nx taxonomy list</code> and describes each topic. The topics are groups of related code that Nexus found by itself, and together they are a map of your repository. Pick one for the next step.</p>
+<p>Claude runs <code>nx taxonomy list</code> and describes each topic. Nexus names the topics in the background, so a topic can be unnamed at first. The topics are groups of related code that Nexus found by itself, and together they are a map of your repository. Pick one for the next step.</p>
 
 <h3>Search one topic</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Use Nexus search to show me the main files for the topic "<span class="ph">&lt;TOPIC&gt;</span>", and explain in a few sentences what they do.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks with the file path and line number of each. Claude answers from those chunks and names the files. Open one of the files to check that the answer is correct.</p>
+<p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks with the file path and line number of each. Claude answers from those chunks and names the files. Each hit also carries a short <code>id=</code> of eight characters. A hit from a document that a newer document replaced says <code>superseded by</code> and names the newer one. Open one of the files to check that the answer is correct.</p>
 <div class="callout"><p>If Claude uses <code>grep</code> instead, say <em>"Use Nexus search, not grep."</em> Grep finds exact words. Nexus search finds meaning, so it also finds code that uses different words for the same idea.</p></div>
 
 <h3>Ask your own questions</h3>
@@ -270,7 +270,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections, and they are often the most important ideas in the project. You can then limit a search to one topic. Say <em>"Search for <span class="ph">&lt;A QUESTION&gt;</span> inside the topic <span class="ph">&lt;TOPIC&gt;</span> only."</em> Claude gives the topic to the <code>search</code> tool, which leaves out results from other topics.</p>
-<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> Claude runs <code>nx taxonomy rename</code>. To move one chunk to a topic, say <em>"Assign <span class="ph">&lt;CHUNK OR FILE&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>,"</em> and Claude runs <code>nx taxonomy assign</code>. To review every topic, run <code>nx taxonomy review</code> in the terminal, which goes through them one by one while you accept, rename, or merge each.</p>
+<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> Claude runs <code>nx taxonomy rename</code>. To move one chunk to a topic, say <em>"Assign <span class="ph">&lt;CHUNK&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>,"</em> and Claude runs <code>nx taxonomy assign</code>. To review every topic, run <code>nx taxonomy review</code> in the terminal, which goes through them one by one while you accept, rename, or merge each.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how links change search ranking.</li>
@@ -383,12 +383,13 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <h3>Health check</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
-<p>No line may show ✗. Read every ⚠ line. Right after <code>nx self install</code>, "Orphan uv install" is normal, and it goes away once the old uv copy is removed. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
+<p>No line may show ✗. Read every ⚠ line. If you installed by hand, "Orphan uv install" is normal right after <code>nx self install</code>. It goes away once the old uv copy is removed. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
 
 <h3>Back up before you update</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Back up the Nexus database.</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude runs <code>nx backup</code>, which writes the local database to one file in <code>~/nexus-backups/</code> while the engine keeps running. The file is about as large as the database. Nothing runs a backup for you, not <code>nx upgrade</code> and not a hook, so ask for one before an update.</p>
+<p>Claude runs <code>nx backup</code>, which writes the local database to one file in <code>~/nexus-backups/</code> while the engine keeps running. The file is about as large as the database. Nothing runs a backup for you, not <code>nx upgrade</code> and not a hook, so ask for one before an update. If your store still holds old-format rows, Nexus refuses to start the engine until a backup exists, and the message says so.</p>
+<p>On a managed service, <code>nx backup</code> writes your own tenant to a <code>.nxtenant</code> file in the same folder. To check that file without contacting the service, run <code>nx backup --check <span class="ph">&lt;FILE&gt;</span></code>.</p>
 
 <h3>Update</h3>
 <div class="see">You might say</div>
