@@ -154,9 +154,11 @@ checks for this draft, 2026-11-12, in the worktree at origin/develop.
   `outcome` as dimensions (when the adapter's `FOLD_RESULT_DIMS` switch is
   on), so a red develop sha can be matched on dimensions alone, without
   reading the body.
-- **Verified (source):** RDR-240's header parser refuses anything past four
-  header lines (`nexus.lua_runtime.header.parse`). A trigger in the header
-  would amend an accepted format; Sam chose a separate file.
+- **Verified (source):** RDR-240's header parser reads exactly four header
+  lines and ignores a fifth (`nexus.lua_runtime.header.parse` loops over its
+  four keys and reads nothing past them). A trigger line there would be an
+  unchecked comment, and making it count would amend an accepted format;
+  Sam chose a separate file.
 - **Documented (RDR-242 TD1, TD10):** no write verb exists, and adding one
   waits for an approval document that only Sam signs.
 - **Documented (nexus-mdbds comment, 2026-11-08):** `memory.get` counts as an
@@ -196,7 +198,6 @@ in the engine, and the procedure can still only read.
    aura = "ci_develop_red"
    summary = "A red develop sha, posted to this session's threads entry."
    procedure = "ci_red_notice"
-   on_by_default = true
 
    [trigger]
    subspace = "board/ci/nexus-develop--done"
@@ -238,10 +239,6 @@ in the engine, and the procedure can still only read.
      block in your threads entry`. The aura name and the threads value come
      from the aura file, and the subspace and tuple id from the engine row,
      so nothing a tuple writer controls reaches the channel.
-   - `on_by_default = true` turns the aura on in every install unless it is
-     turned off (Technical Design 3). Only a package-root aura may set it; a
-     repo-root aura that sets it is refused (inferred, not read: cloning a
-     repo must not start a procedure).
    - Any other key, a missing key, or a type mismatch refuses the file.
 
 2. **Checking.** `nx aura check [NAME]` parses every aura (or one), resolves
@@ -251,22 +248,31 @@ in the engine, and the procedure can still only read.
    summary, trigger and whether it is enabled. Both run without the engine
    only for the parts that need none, and say which checks were skipped.
 
-3. **Enabling.** An aura with `on_by_default = true` runs in every install
-   unless turned off; `ci_develop_red` ships that way (Sam, 2026-11-15:
-   "Ship it on by default"). Every other aura runs only when enabled by
-   name. Both use nexus's config hierarchy, read when the MCP server
-   starts, in which "Environment variables (`NX_*`)" have the "highest
-   priority", then `.nexus.yml`, then `~/.config/nexus/config.yml`
-   (`docs/configuration.md` § Config Hierarchy):
-   - In config, `auras: {<name>: on}` enables an aura and `auras: {<name>:
-     off}` turns it off. A user turns `ci_develop_red` off in
-     `~/.config/nexus/config.yml` (Sam, 2026-11-15: "user config and env
-     var").
+3. **Enabling.** Every aura ships off, `ci_develop_red` included, and runs
+   only when turned on by name (Sam, 2026-11-15: "Off by default"). Nexus
+   ships nothing that turns one on: each user opts in (Sam, 2026-11-15:
+   "Each user opts in"). The switches use nexus's config hierarchy, read
+   when the MCP server starts, in which "Environment variables (`NX_*`)"
+   have the "highest priority", then `.nexus.yml`, then
+   `~/.config/nexus/config.yml` (`docs/configuration.md` § Config
+   Hierarchy):
+   - In config, `auras: {<name>: on}` turns an aura on and `auras: {<name>:
+     off}` turns it off. A nexus developer turns `ci_develop_red` on in
+     `~/.config/nexus/config.yml`.
    - `NX_AURAS_OFF` overrides the config: `all` turns every aura off, and a
      comma-separated list of names turns those off. It covers a CI job or a
      `claude -p` child that should run none.
    - `nx aura list` shows each aura as on or off and the level that decided
      it (default, global config, repo config, env).
+   - An aura's trigger subscription is aura-owned and is kept out of the
+     `board_topics` list in the channel status record. The Stop-hook wake
+     guard (`conexus/hooks/scripts/stop_wake_guard.py`) reads that list and
+     counts any `board/ci/[^/]+--done` topic in it as a covering CI wake
+     (the status record's comment: "a live waiter, the channel flag and a
+     board/ci/*--done topic together are a CI wake"). A global opt-in would
+     otherwise put `board/ci/nexus-develop--done` in every repo's sessions
+     and let a turn stop on a CI wait nothing will wake. The session's own
+     subscription to the same topic still counts.
    A repo-root aura follows RDR-242
    residual S5 for repo-root procedures (confirmed by Sam, 2026-11-13). Enabling
    subscribes the trigger subspace, within `MAX_BOARD_TOPICS`; an aura past
@@ -325,8 +331,8 @@ follow from RDR-242's read-only version 1 rather than a separate decision.
 
 ### Alternative 1: Trigger and display lines in the procedure header
 
-One file per aura, but RDR-240's header refuses a fifth line, so it amends
-an accepted format, and a procedure could not be shared by two auras.
+One file per aura, but RDR-240's header parser ignores a fifth line, so
+making one count amends an accepted format, and a procedure could not be shared by two auras.
 Rejected by Sam (2026-11-12, "1").
 
 ### Alternative 2: Auras declared in the dictionary's template doc blocks
@@ -356,11 +362,12 @@ was scrapped, and RDR-212 excludes it. Would need Sam to override RDR-212.
   session opened after it; the post stays readable with `tuple_rd`.
 - Several sessions enabling one aura each write their own threads block, by
   decision: there is no lock tuple.
-- `ci_develop_red` is on by default, so it reaches every install, including
-  users outside nexus. Its trigger, `board/ci/nexus-develop--done`, gets
-  posts only from nexus's own CI, so outside nexus it never fires. It still
-  holds one of the `MAX_BOARD_TOPICS` (32) board subscriptions and one
-  waiter spec in every session until it is turned off (inferred, not read).
+- `ci_develop_red` ships off, so it reaches no install until its user turns
+  it on. A user who turns it on in `~/.config/nexus/config.yml` gets it in
+  every repo's sessions: it holds one of the `MAX_BOARD_TOPICS` (32) board
+  subscriptions there and fires only when nexus's develop CI posts. Because
+  the subscription is aura-owned, it never arms the Stop-hook CI wake guard
+  (Technical Design 3).
 
 ### Risks and Mitigations
 
@@ -412,10 +419,13 @@ dictionary. Tests against a real engine's registry (self-provisioned).
 
 #### Step 1: Waiter path
 
-Enable from config, subscribe, match, run in a thread, condition, channel and
+Resolve on and off from config and `NX_AURAS_OFF`, subscribe (aura-owned,
+outside the status record's `board_topics`), match, run in a thread, condition, channel and
 threads display, the handled-id record, the failure and queue rules. Tests
 with a real engine and a real worker: one fire, no fire on a non-match, a
-failing procedure disabled after three.
+failing procedure disabled after three; with an aura subscribed to
+`board/ci/nexus-develop--done` and no session subscription to it, the Stop
+hook still blocks a turn that ends on a develop-CI wait.
 
 #### Step 2: Drain path for `mailbox/self`
 
@@ -424,8 +434,8 @@ handled-id record prevents a second fire.
 
 ### Phase 3: The first consumer
 
-`ci_red_notice.lua` and `ci_develop_red.aura.toml` (with `on_by_default =
-true`) in the package root; measure one fire's cost (the Critical
+`ci_red_notice.lua` and `ci_develop_red.aura.toml` in the package root,
+shipped off; measure one fire's cost (the Critical
 Assumption).
 
 ### New Dependencies
@@ -439,9 +449,10 @@ tests against a self-provisioned engine for subscription, announce-once
 evaluation, the drain fallback and the threads block. A test that posts a
 tuple whose dimensions and body carry instruction-like text and asserts the
 channel notification equals the fixed template, with none of that text in
-it (RDR-211). Tests of the off switch at each level: the default, an `off`
-in global config, an `on` in repo config, and `NX_AURAS_OFF` over a config
-`on`. A gate test that fails if no aura was evaluated (non-vacuity).
+it (RDR-211). Tests of the switch at each level: the default (off), an
+`on` in global config, an `off` in repo config over a global `on`, and
+`NX_AURAS_OFF` over a config `on`. A Stop-hook test: an aura-owned
+`board/ci/*--done` subscription does not count as a CI wake. A gate test that fails if no aura was evaluated (non-vacuity).
 
 ## Resolved Questions
 
@@ -464,13 +475,17 @@ Gate round 1 raised two more, answered 2026-11-15:
    procedure text; RDR-211 stands unchanged.
 5. Enablement (S1): "Ship it on by default", by dialog in halcyon's
    session; confirmed in marginalia's session with "On; user config and env
-   var". `ci_develop_red` is on in every install, and the off switch is the
-   config key and `NX_AURAS_OFF` (Technical Design 3).
+   var". Superseded the same day by answer 6.
+6. Default (gate round 2 Critical): "Off by default", by dialog in
+   halcyon's session; confirmed in marginalia's session, which also asked
+   whether nexus turns `ci_develop_red` on: "Each user opts in". Auras ship
+   off; a user turns one on in config, and `NX_AURAS_OFF` still turns them
+   off (Technical Design 3).
 
 ## References
 
 - T2 `nexus/design-declarative-auras.md` (design of record).
-- RDR-110, 111, 212, 213, 220, 239, 240, 242, 245; postmortem
+- RDR-110, 111, 211, 212, 213, 220, 239, 240, 242, 245; postmortem
   `docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md`.
 - WeakAuras2 wiki (trigger types, conditions, actions, regions), via mirror,
   read 2026-11-11.
@@ -481,3 +496,4 @@ Gate round 1 raised two more, answered 2026-11-15:
 - 2026-11-13: Sam's answers to the three open questions folded in (one
   block per session; `ci_develop_red` on in nexus; S5 confirmed).
 - 2026-11-15: Gate round 1 — BLOCKED (1 Critical, 8 Significant, 1 ship-blocker(s)); commit `d0c72fbce`; critique `nexus_rdr/249-gate-critique-2026-11-15-r1`.
+- 2026-11-15: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0b769887e`; critique `nexus_rdr/249-gate-critique-2026-11-15-r2`.
