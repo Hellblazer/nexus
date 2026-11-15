@@ -127,7 +127,22 @@ def resolve_session_name(
     pid_alive: Callable[[int], bool] | None = None,
     log_miss: bool = True,
 ) -> str | None:
-    """The name Claude Code shows for the live interactive session whose id
+    """The name of :func:`resolve_session_entry`'s entry, or None."""
+    entry = resolve_session_entry(session_id, sessions_dir=sessions_dir, pid_alive=pid_alive, log_miss=log_miss)
+    return entry[0] if entry is not None else None
+
+
+def resolve_session_entry(
+    session_id: str,
+    *,
+    sessions_dir: Path | None = None,
+    pid_alive: Callable[[int], bool] | None = None,
+    log_miss: bool = True,
+) -> tuple[str, int] | None:
+    """The name and pid of the registry entry for *session_id* (RDR-249 reads the pid to tell a ``claude -p``
+    child carrying its parent's session id from the session itself, nexus-mdbds.11.1).
+
+    The name Claude Code shows for the live interactive session whose id
     is *session_id*, read from ``<config>/sessions/<pid>.json`` (fields
     ``sessionId``, ``name``, ``kind``, ``pid``, ``updatedAt``). None for any
     miss: no directory, an unreadable or malformed file, no matching entry,
@@ -151,7 +166,7 @@ def resolve_session_name(
     if pid_alive is None:
         from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — the one liveness probe (test_pid_alive_single_probe_lint); deferred, stdlib-heavy module
     base = sessions_dir if sessions_dir is not None else _claude_sessions_dir()
-    best: tuple[float, str] | None = None
+    best: tuple[float, str, int] | None = None
     read = 0
     try:
         files = sorted(base.glob("*.json"))
@@ -178,7 +193,7 @@ def resolve_session_name(
         except (OSError, ValueError, TypeError, OverflowError, RecursionError):
             continue
         if best is None or rank >= best[0]:
-            best = (rank, name.strip())
+            best = (rank, name.strip(), pid)
     if best is None:
         if log_miss and _dir_exists(base):
             _log.info(
@@ -186,7 +201,7 @@ def resolve_session_name(
                 session_id=session_id, sessions_dir=str(base), files_read=read,
             )
         return None
-    return best[1]
+    return best[1], best[2]
 
 
 def _dir_exists(path: Path) -> bool:

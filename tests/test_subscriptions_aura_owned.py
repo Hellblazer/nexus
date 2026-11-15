@@ -7,9 +7,11 @@ and is not persisted: it is made again at each load (nexus-mdbds.11.1)."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from nexus.mcp.subscriptions import MAX_BOARD_TOPICS, SubscriptionSet
+from nexus.mcp.subscriptions import MAX_BOARD_TOPICS, SubscriptionSet, resolve_session_entry, resolve_session_name
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 
 _SID = "11111111-2222-3333-4444-555555555555"
@@ -112,3 +114,18 @@ def test_an_aura_subscribe_and_release_notify_the_waiter() -> None:
     subs.subscribe_aura("ci-red", _TOPIC)  # idempotent: no second bump
     subs.release_auras()
     assert len(seen) == 2
+
+
+def test_the_registry_entry_carries_the_pid_the_aura_loader_checks(tmp_path) -> None:
+    (tmp_path / "77.json").write_text(
+        json.dumps({"sessionId": _SID, "name": "tamsin", "kind": "interactive", "pid": 77, "updatedAt": 1}),
+        encoding="utf-8",
+    )
+    (tmp_path / "78.json").write_text(
+        json.dumps({"sessionId": _SID, "name": "child", "kind": "sdk-cli", "pid": 78, "updatedAt": 2}),
+        encoding="utf-8",
+    )
+    alive = lambda _pid: True  # noqa: E731
+    assert resolve_session_entry(_SID, sessions_dir=tmp_path, pid_alive=alive) == ("tamsin", 77)
+    assert resolve_session_name(_SID, sessions_dir=tmp_path, pid_alive=alive) == "tamsin"
+    assert resolve_session_entry("nobody", sessions_dir=tmp_path, pid_alive=alive) is None
