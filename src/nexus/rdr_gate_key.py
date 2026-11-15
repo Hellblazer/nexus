@@ -81,9 +81,10 @@ def gated_key(blob: str | None, commit: str | None) -> GatedKey:
     return GatedKey("", "", "")
 
 
-def _git(repo_root: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+def _git(repo_root: str, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str] | None:
+    """One bounded git call; ``None`` when it could not run or timed out."""
     try:
-        return run_bounded(["git", "-C", repo_root, *args], timeout=_GIT_TIMEOUT_S)
+        return run_bounded(["git", "-C", repo_root, *args], timeout=_GIT_TIMEOUT_S, input=input_text)
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning("rdr_gate_key_git_failed", args=list(args), error=str(exc))
         return None
@@ -147,3 +148,69 @@ def blob_delta(repo_root: str, rel: str, gated_blob: str) -> BlobDelta:
 def blob_range(gated_blob: str, current: str) -> str:
     """The command a fix check reads for a blob key."""
     return f"git diff {gated_blob} {current}"
+
+
+#: What the gate prints when the RDR file on disk is not the text HEAD holds:
+#: the blob is read from HEAD, so it would name text the critic never judged.
+DIRTY_NOTE = (
+    "RDR file has uncommitted edits; commit before gating — the blob would name "
+    "text the critic did not judge."
+)
+
+
+def has_uncommitted_edits(repo_root: str, rel: str) -> bool:
+    """True when the working-tree file differs from ``HEAD:<rel>``. ``False``
+    when either side cannot be read (an untracked file has no blob to
+    misname)."""
+    head = file_blob(repo_root, rel, abbrev=None)
+    if head is None:
+        return False
+    proc = _git(repo_root, "hash-object", "--", git_path(rel))
+    if proc is None or proc.returncode != 0:
+        return False
+    return proc.stdout.strip() != head
+
+
+#: Most commits :func:`fix_commits` walks back through the file's history.
+FIX_LOG_CAP = 50
+
+
+@dataclass(frozen=True)
+class FixCommits:
+    """The commits that changed the RDR file since the gated text."""
+
+    found: bool  # the gated blob was met within the walk
+    commits: tuple[str, ...] = ()  # ``<abbrev> <subject>``, newest first
+    capped: bool = False  # the walk hit :data:`FIX_LOG_CAP` before finding it
+    error: str = ""
+
+
+def fix_commits(repo_root: str, rel: str, gated_blob: str, cap: int = FIX_LOG_CAP) -> FixCommits:
+    """Walk the file's history from HEAD and stop at the first commit whose
+    ``<commit>:<rel>`` blob is the gated blob; the commits above it are the
+    fix commits (nexus-3jjkg). Reads no commit named by the gate record, so a
+    rebase that replaced the gated commit lists the same commits, and the
+    rebased copy of the gated commit is the stop, never a fix. Bounded: one
+    ``git log`` and one ``cat-file --batch-check``, at most *cap* commits."""
+    path = git_path(rel)
+    log = _git(repo_root, "log", "--format=%H %h %s", "-n", str(cap), "--", path)
+    if log is None or log.returncode != 0:
+        err = (log.stderr if log is not None else "git did not run").strip()[:160]
+        return FixCommits(False, error=f"git log failed: {err}")
+    rows = [ln.split(" ", 2) for ln in log.stdout.splitlines() if ln.strip()]
+    rows = [r for r in rows if len(r) == 3]
+    if not rows:
+        return FixCommits(False)
+    check = _git(
+        repo_root, "cat-file", "--batch-check", input_text="".join(f"{r[0]}:{path}\n" for r in rows),
+    )
+    if check is None or check.returncode != 0:
+        err = (check.stderr if check is not None else "git did not run").strip()[:160]
+        return FixCommits(False, error=f"git cat-file failed: {err}")
+    blobs = [ln.split() for ln in check.stdout.splitlines()]
+    fixes: list[str] = []
+    for row, parts in zip(rows, blobs):
+        if len(parts) >= 2 and parts[1] == "blob" and prefix_match(parts[0], gated_blob):
+            return FixCommits(True, tuple(fixes))
+        fixes.append(f"{row[1]} {row[2]}")
+    return FixCommits(False, capped=len(rows) >= cap)

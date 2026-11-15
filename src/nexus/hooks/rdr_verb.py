@@ -649,8 +649,8 @@ def _unchecked_fix_edits(
         except subprocess.TimeoutExpired:
             cut_short = True  # this file was not checked either
             continue
-        except (OSError, subprocess.SubprocessError):
-            continue
+        except (OSError, subprocess.SubprocessError, ValueError):
+            continue  # ValueError: os.path.relpath across drives on Windows; the hook never raises
         if not tip:
             continue  # untracked or uncommitted file: unknown, not "past the gate"
         gate_key = gated_blob or gated_norm[key]

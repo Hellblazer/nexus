@@ -1103,3 +1103,19 @@ def test_a_rebase_that_keeps_the_text_is_silent_and_an_edit_is_not(rdr_hook_mod,
     out = mod._unchecked_fix_edits(root, [f], {"204": "draft"}, {"204": c1}, {"204": blob})
     assert len(out) == 1 and "RDR-204: edits since the gated blob " + blob in out[0], out
     assert "/conexus:rdr-fix 204" in out[0]
+
+
+def test_the_hook_never_raises_when_relpath_cannot_be_computed(rdr_hook_mod, tmp_path, monkeypatch) -> None:
+    """Review item 5: os.path.relpath raises ValueError across drives on
+    Windows; the hook skips the file and carries on."""
+    from tests._module_seam import setattr_in
+
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    files = [root / "docs" / "rdr" / "rdr-001-x.md"]
+
+    def cross_drive(*_a, **_k):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    setattr_in(monkeypatch, mod, "os.path.relpath", cross_drive)
+    assert mod._unchecked_fix_edits(root, files, {"1": "draft"}, {}, {"1": "0123456789ab"}) == []

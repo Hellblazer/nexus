@@ -106,7 +106,9 @@ def test_an_edit_after_the_blob_gate_is_detected_and_names_the_new_blob(rdr_env,
 
 
 @pytest.mark.t2_tenant
-def test_blob_keyed_fix_commits_say_so_when_the_gated_commit_is_gone(rdr_env, monkeypatch):
+def test_blob_keyed_fix_commits_survive_a_gc_of_the_gated_commit(rdr_env, monkeypatch):
+    """After gc the gated commit is gone; the listing walks the file's own
+    history to the gated blob and never needed it."""
     c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
     gated_blob = _blob_at_head(rdr_env)
     _git_commit_rdr(rdr_env, _ROUND_BODY + "\nmore\n", "fix")
@@ -121,7 +123,8 @@ def test_blob_keyed_fix_commits_say_so_when_the_gated_commit_is_gone(rdr_env, mo
     _use_t2(monkeypatch, {"204-gate-latest": _blob_gate(c1, gated_blob, prior=None)})
     out = _preamble("rdr-gate", "--", "204").output
     assert "### Fix check (required before Layer 1)" in out, out
-    assert "no longer resolves" in out, out
+    assert "- " in out.split("Fix commits:", 1)[1] and "fix replayed" in out, out
+    assert "no longer resolves" not in out, out
 
 
 @pytest.mark.t2_tenant
@@ -182,3 +185,114 @@ def test_the_verdict_block_writes_blob_and_keys_the_fix_check_and_history_line_t
     assert f"commit: " in out
     assert f"204-fix-check-{blob}" in out, out
     assert f"blob `{blob}`" in out, out
+
+
+# ---------------------------------------------------------------------------
+# round 1 review (ef27a76c4): the transition, the dirty file, the fix-commit walk
+# ---------------------------------------------------------------------------
+
+_CRIT = (
+    "## Critical Issues\n\n### Issue: one thing\n- Location: a\n\n"
+    "## Verdict\n- **outcome**: not-justified\n- **critical_count**: 1\n"
+)
+_VERDICT_ARGS = ("rdr-verdict", "--", "204", "204-gate-critique-2026-09-12-r2")
+
+
+def _title_sha(out: str) -> str:
+    import re
+
+    m = re.search(r"204-fix-check-([0-9a-f]{6,40})", out)
+    assert m, out
+    return m.group(1)
+
+
+@pytest.mark.t2_tenant
+def test_a_commit_only_record_hands_off_to_a_blob_keyed_next_round(rdr_env, monkeypatch):
+    """Review item 1: the gate record being re-gated has only `commit:`, so the
+    re-gate preamble titled the fix check by the tip COMMIT while the verdict
+    printer wrote `blob:` and a blob `fix_check:`, and accept refused the pair.
+    Both now name the file's current blob, and accept admits the record."""
+    import nexus.commands.rdr as rdr_mod
+
+    c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
+    _git_commit_rdr(rdr_env, _ROUND_BODY + "\nFive registration sites, not one.\n", "fix")
+    blob = _blob_at_head(rdr_env)
+    tip_commit = _git_in(rdr_env, "log", "-1", "--format=%h", "--", _RDR_REL)
+    old = f'outcome: "BLOCKED"\ndate: "2026-09-07"\ncommit: {c1}\n'
+    _use_t2(monkeypatch, {"204-gate-latest": old, "204-gate-critique-2026-09-12-r2": _CRIT})
+
+    gate_out = _preamble("rdr-gate", "--", "204").output
+    assert "### Fix check (required before Layer 1)" in gate_out, gate_out
+    assert _title_sha(gate_out) == blob, gate_out
+    assert tip_commit not in gate_out.split("### Fix check", 1)[1].split("Range:", 1)[0]
+    assert "equal to its `blob:`" in gate_out
+
+    verdict_out = _preamble(*_VERDICT_ARGS).output
+    assert f"blob: {blob}" in verdict_out, verdict_out
+    assert _title_sha(verdict_out) == blob
+
+    new = _blob_gate(c1, blob, fix_check=f"nexus_rdr/204-fix-check-{_title_sha(gate_out)}")
+    assert rdr_mod._gate_record_accept_defect(new, "204-gate-latest") is None
+    _use_t2(monkeypatch, {"204-gate-latest": new, f"204-fix-check-{blob}": _THREE_RUNS})
+    assert rdr_mod._gate_outcome_for("204", "nexus") == ("passed", None)
+
+
+@pytest.mark.t2_tenant
+def test_rdr_fix_preamble_titles_a_commit_only_record_by_the_blob(rdr_env, monkeypatch):
+    c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
+    _git_commit_rdr(rdr_env, _ROUND_BODY + "\nfixed\n", "fix one")
+    blob = _blob_at_head(rdr_env)
+    _use_t2(monkeypatch, {"204-gate-latest": f'outcome: "BLOCKED"\ncommit: {c1}\n'})
+    out = _preamble("rdr-fix", "--", "204").output
+    assert f"204-fix-check-{blob}" in out, out
+    assert f"git diff {c1}..HEAD -- {_RDR_REL}" in out, out  # the prior key still picks the range
+
+
+@pytest.mark.t2_tenant
+def test_a_dirty_rdr_file_leaves_the_blob_unfilled_and_says_so(rdr_env, monkeypatch):
+    """Review item 2: HEAD:<rel> is not what the critic read when the working
+    file has uncommitted edits."""
+    _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
+    head_blob = _blob_at_head(rdr_env)
+    path = rdr_env["rdr_dir"] / "rdr-204-example.md"
+    _use_t2(monkeypatch, {"204-gate-critique-2026-09-12-r2": _CRIT})
+
+    clean = _preamble(*_VERDICT_ARGS).output
+    assert f"blob: {head_blob}" in clean and "uncommitted edits" not in clean, clean
+    assert "uncommitted edits" not in _preamble("rdr-gate", "--", "204").output
+
+    path.write_text(path.read_text() + "\nan edit nobody committed\n")
+    for argv in (_VERDICT_ARGS, ("rdr-gate", "--", "204")):
+        out = _preamble(*argv).output
+        assert "RDR file has uncommitted edits; commit before gating" in out, out
+    out = _preamble(*_VERDICT_ARGS).output
+    assert head_blob not in out, "the dirty file must not be keyed to HEAD's blob"
+    assert "blob: <git rev-parse" in out, out
+
+
+@pytest.mark.t2_tenant
+def test_fix_commits_skip_the_rebased_copy_of_the_gated_commit_without_gc(rdr_env, monkeypatch):
+    """Review item 4: before gc the old gated commit still resolves, and
+    `<old commit>..HEAD` listed its rebased twin as a fix commit."""
+    c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
+    gated_blob = _blob_at_head(rdr_env)
+    _git_commit_rdr(rdr_env, _ROUND_BODY + "\nmore\n", "fix")
+    _git_in(rdr_env, "reset", "-q", "--hard", "HEAD~1")
+    _git_in(rdr_env, "commit", "-q", "--amend", "-m", "rebased copy of the gated commit")
+    _git_commit_rdr(rdr_env, _ROUND_BODY + "\nmore\n", "fix replayed")
+    _git_in(rdr_env, "cat-file", "-e", f"{c1}^{{commit}}")  # still resolves: no gc ran
+    _use_t2(monkeypatch, {"204-gate-latest": _blob_gate(c1, gated_blob, prior=None)})
+    out = _preamble("rdr-gate", "--", "204").output
+    listing = out.split("Fix commits:", 1)[1].split("Dispatch substantive-critic", 1)[0]
+    assert "fix replayed" in listing, out
+    assert "rebased copy" not in listing and " gated" not in listing, listing
+
+
+@pytest.mark.t2_tenant
+def test_a_gated_blob_absent_from_the_files_history_is_said(rdr_env, monkeypatch):
+    c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
+    _git_commit_rdr(rdr_env, _ROUND_BODY + "\nmore\n", "fix")
+    _use_t2(monkeypatch, {"204-gate-latest": _blob_gate(c1, "deadbeef0123", prior=None)})
+    out = _preamble("rdr-gate", "--", "204").output
+    assert "was not found in this file's history" in out, out
+    assert "re-gate" in out, out

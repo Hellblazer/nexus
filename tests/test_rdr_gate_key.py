@@ -102,3 +102,42 @@ def test_file_blob_reads_a_windows_relpath(repo: Path) -> None:
     caller saw an untracked file (nexus-3jjkg, caught on qwent native Windows)."""
     assert file_blob(str(repo), REL.replace("/", "\\")) == file_blob(str(repo), REL)
     assert file_blob(str(repo), REL) is not None
+
+
+def test_fix_commits_stop_at_the_gated_blob_and_never_read_a_gate_commit(repo: Path) -> None:
+    from nexus.rdr_gate_key import fix_commits
+
+    gated = file_blob(str(repo), REL)
+    for n in (1, 2):
+        (repo / REL).write_text("one\n" + "more\n" * n, encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", f"fix {n}")
+    found = fix_commits(str(repo), REL, gated)
+    assert found.found and [c.split(" ", 1)[1] for c in found.commits] == ["fix 2", "fix 1"]
+
+    absent = fix_commits(str(repo), REL, "deadbeef0123")
+    assert not absent.found and absent.error == ""
+    capped = fix_commits(str(repo), REL, "deadbeef0123", cap=2)
+    assert not capped.found and capped.capped
+
+
+def test_fix_commits_and_the_dirty_check_never_raise_on_a_git_timeout(repo: Path, monkeypatch) -> None:
+    """Review item 3: a TimeoutExpired from run_bounded is a named result."""
+    import nexus.rdr_gate_key as key_mod
+
+    def slow(argv, **_k):
+        raise subprocess.TimeoutExpired(argv, 1)
+
+    monkeypatch.setattr(key_mod, "run_bounded", slow)
+    found = key_mod.fix_commits(str(repo), REL, "0123456789ab")
+    assert not found.found and "git log failed" in found.error
+    assert key_mod.has_uncommitted_edits(str(repo), REL) is False
+    assert key_mod.file_blob(str(repo), REL) is None
+
+
+def test_has_uncommitted_edits(repo: Path) -> None:
+    from nexus.rdr_gate_key import has_uncommitted_edits
+
+    assert has_uncommitted_edits(str(repo), REL) is False
+    (repo / REL).write_text("edited\n", encoding="utf-8")
+    assert has_uncommitted_edits(str(repo), REL) is True
+    assert has_uncommitted_edits(str(repo), "docs/rdr/untracked.md") is False

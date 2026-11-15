@@ -457,9 +457,12 @@ def test_planted_bogus_bead_is_detected(tmp_path: Path) -> None:
     assert "nexus-zzzz9" not in _manifest_ids()
 
 
-def _git_blob_of_head(path: str) -> str:
+def _published_blob(path: str) -> str:
+    """A blob a published commit carries (origin/develop, not HEAD, so a
+    branch that edits the file does not turn this red)."""
     return subprocess.run(
-        ["git", "rev-parse", "--short=12", f"HEAD:{path}"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ["git", "rev-parse", "--short=12", f"origin/develop:{path}"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
     ).stdout.strip()
 
 
@@ -467,7 +470,7 @@ def test_a_cited_blob_sha_resolves(tmp_path: Path) -> None:
     """nexus-3jjkg: a gate keys to the RDR file's blob, and the Revision
     History line cites it. A blob is not a commit and survives a rebase: it
     resolves when the object exists and a published commit carries it."""
-    blob = _git_blob_of_head("docs/rdr/AGENTS.md")
+    blob = _published_blob("docs/rdr/AGENTS.md")
     doc = tmp_path / "planted.md"
     doc.write_text(f"Gate round 2: gated at blob `{blob}`.\n")
     assert [c[0] for c in _sha_cites([doc])] == [blob]
@@ -475,5 +478,15 @@ def test_a_cited_blob_sha_resolves(tmp_path: Path) -> None:
 
 
 def test_a_planted_bogus_sha_still_fails_next_to_a_blob() -> None:
-    blob = _git_blob_of_head("docs/rdr/AGENTS.md")
+    blob = _published_blob("docs/rdr/AGENTS.md")
     assert _unresolved_shas({blob, "deadbee5"}) == {"deadbee5"}
+
+
+def test_a_blob_present_only_locally_stays_unresolved(tmp_path: Path) -> None:
+    """The published check is the point: CI's fresh clone cannot open a blob
+    only this clone holds, so a hash-object -w of new text does not resolve."""
+    local = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"], cwd=REPO_ROOT, input=f"nexus-3jjkg local-only blob {tmp_path}\n",
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()[:12]
+    assert _unresolved_shas({local}) == {local}
