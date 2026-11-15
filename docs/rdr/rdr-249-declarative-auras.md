@@ -145,7 +145,10 @@ checks for this draft, 2026-11-12, in the worktree at origin/develop.
   subscriber (`announce` with `max=1`, stamped in `nexus.tuple_deliveries`,
   RDR-213 as amended by nexus-vsipz and nexus-q82tk). An aura on a board
   trigger therefore sees each post once, without its own bookkeeping, as long
-  as it is evaluated on the waiter's path.
+  as it is evaluated on the waiter's path and the post was created after the
+  topic was subscribed: the waiter drops "rows created before the topic's
+  subscribe time" less a 30 s margin (`_deliver_board_rows` in
+  `src/nexus/mcp/channel.py`; `DEFAULT_BOARD_START_SKEW_S`).
 - **Verified (source):** RDR-220's `--done` wake carries `kind=sha`, `sha` and
   `outcome` as dimensions (when the adapter's `FOLD_RESULT_DIMS` switch is
   on), so a red develop sha can be matched on dimensions alone, without
@@ -321,9 +324,10 @@ was scrapped, and RDR-212 excludes it. Would need Sam to override RDR-212.
 
 ### Consequences
 
-- An aura fires only while a session that enabled it is open. A red at
-  night is shown to the first session opened after it only if the post is
-  still within its retention and that session's waiter receives it.
+- An aura fires only while a session that enabled it is open, and only on
+  posts created after that session subscribed the topic (less 30 s). A red
+  posted at night, with no session open, is not evaluated by the first
+  session opened after it; the post stays readable with `tuple_rd`.
 - Several sessions enabling one aura each write their own threads block, by
   decision: there is no lock tuple.
 
@@ -424,3 +428,4 @@ a picker in halcyon's session:
 - 2026-11-12: drafted (marginalia) from Sam's choices "c" and "1".
 - 2026-11-13: Sam's answers to the three open questions folded in (one
   block per session; `ci_develop_red` on in nexus; S5 confirmed).
+- 2026-11-15: Gate round 1 — BLOCKED (1 Critical, 8 Significant, 1 ship-blocker(s)); commit `d0c72fbce`; critique `nexus_rdr/249-gate-critique-2026-11-15-r1`.
