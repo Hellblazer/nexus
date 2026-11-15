@@ -59,7 +59,13 @@ def test_the_smallest_file_parses_with_its_defaults() -> None:
     assert aura.limits == Limits()
 
 
-@pytest.mark.parametrize("subspace", ["board/topic", "board/ci/nexus-develop--done", "board/a.b_c-d", "board/ci/x"])
+@pytest.mark.parametrize(
+    "subspace",
+    [
+        "board/topic", "board/ci/nexus-develop--done", "board/a.b_c-d", "board/ci/x",
+        "board/ci/.github-main--done", "board/ci/a+b-main--done", "board/-lead", "board/ci/ci", "board/cix",
+    ],
+)
 def test_one_concrete_board_subspace_is_accepted(subspace: str) -> None:
     assert _parse(minimal().replace("board/topic", subspace)).subspace == subspace
 
@@ -246,7 +252,7 @@ def test_an_argument_name_that_breaks_the_argument_rule_is_refused(arg: str) -> 
         "board/ci/a/b",
         "queue/work",
         "board/a b",
-        "board/-lead",
+        "board/ci",
         " board/topic",
         "board/topic\n",
         "",
@@ -343,3 +349,52 @@ def test_a_blank_threads_value_is_refused() -> None:
 def test_a_refusal_kind_is_a_closed_set() -> None:
     with pytest.raises(ValueError, match="unknown AuraError kind"):
         AuraError("nope", "x.aura.toml", "aura", "detail")
+
+
+# -- the review fix round (51b40501d) --------------------------------------------------
+
+
+def test_a_file_nested_too_deeply_for_the_toml_reader_is_refused_not_a_recursion_error() -> None:
+    depth = 30_000
+    data = b"a = " + b"[" * depth + b"]" * depth
+    assert len(data) < READ_LIMIT
+    _refused(data, "bad_toml", "(file)")
+
+
+def test_the_read_bound_is_exact() -> None:
+    base = minimal()
+    exact = base + "#" * (READ_LIMIT - 1 - len(base) - 1) + "\n"
+    assert len(exact.encode()) == READ_LIMIT - 1
+    assert _parse(exact).name == "mini"
+    _refused(exact + "\n", "too_large", "(file)")  # one byte over
+
+
+@pytest.mark.parametrize("threads", [" lead", "trail ", " both "])
+def test_a_threads_value_with_leading_or_trailing_space_is_refused(threads: str) -> None:
+    _refused(minimal().replace('threads = "a block"', f'threads = "{threads}"'), "bad_threads", "display.threads")
+
+
+@pytest.mark.parametrize("summary", ["", "   ", "two\\nlines", "tab\\there", "nul\\u0000"])
+def test_a_summary_that_is_not_one_nonblank_printable_line_is_refused(summary: str) -> None:
+    _refused(minimal().replace('summary = "does a thing"', f'summary = "{summary}"'), "bad_summary", "summary")
+
+
+@pytest.mark.parametrize("field", ["", "1x", "a b", "a.b", "a-b"])
+def test_a_when_field_that_is_not_a_field_name_is_refused(field: str) -> None:
+    _refused(minimal(extra=f'\n[when]\nfield = "{field}"\n'), "bad_field", "when.field")
+
+
+@pytest.mark.parametrize("source", ["body.a.b", "body.a/b", "body.a*", "body.a b", "body.", "body./x"])
+def test_a_body_field_with_a_dot_slash_star_or_space_is_refused(source: str) -> None:
+    # body.a.b also kills a fullmatch -> match mutant: match would accept the prefix body.a.
+    _refused(minimal(extra=f'\n[args]\nsha = "{source}"\n'), "bad_source", "args.sha")
+
+
+def test_a_body_field_may_carry_a_hyphen_or_a_digit_first() -> None:
+    aura = _parse(minimal(extra='\n[args]\nsha = "body.1-x"\n'))
+    assert dict(aura.args) == {"sha": ArgSource("body", "1-x")}
+
+
+@pytest.mark.parametrize("source", ['= "x" trailing', '= "x"y', 'lead = "x"', '= "x""'])
+def test_a_literal_with_anything_after_its_closing_quote_is_refused(source: str) -> None:
+    _refused(minimal(extra=f"\n[args]\nsha = '{source}'\n"), "bad_source", "args.sha")

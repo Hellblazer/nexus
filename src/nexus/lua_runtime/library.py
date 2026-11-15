@@ -90,9 +90,12 @@ Root = Literal["shipped", "repo"]
 class LibraryError(Exception):
     """A name the library refuses; ``reason`` is one of :data:`REASONS`.
 
+    The library holds procedures (``<name>.lua``) and auras (``<name>.aura.toml``); the
+    reasons are the same for both.
+
     ``invalid_name`` the rule (or a reserved device name), ``not_found`` in neither root,
     ``outside_root`` a resolved path that leaves its root (or a repo root that leaves the
-    repo), ``shadows_shipped`` a repo file named like a shipped procedure, ``repo_root_off`` a
+    repo), ``shadows_shipped`` a repo file named like a shipped one, ``repo_root_off`` a
     name found only under the repo root while the switch is off, ``unreadable`` a file or
     directory the operating system would not let the library read (permission, vanished, not a
     regular file). ``run_script`` maps it to its own error; it is not a
@@ -153,6 +156,14 @@ def _check_name(name: object) -> str:
     if name in RESERVED_NAMES:
         raise LibraryError("invalid_name", f"{name!r} is a reserved device name")
     return name
+
+
+#: The public name of the name rule, for a caller that holds its own kind of file in the roots.
+check_name = _check_name
+
+#: What a ``probe=`` argument may be: a :func:`~nexus.lua_runtime.header.probe_repo` result,
+#: ``None`` (no repo), or :data:`UNPROBED` (the callee probes).
+ProbeArg = RepoProbe | None | _Unprobed
 
 
 def _inside(path: Path, root: Path) -> bool:

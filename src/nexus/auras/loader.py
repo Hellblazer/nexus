@@ -17,7 +17,7 @@ from nexus.lua_runtime.library import Procedure
 _NOUN = "aura"
 
 
-def load_aura(name: str, *, cwd: Path | None, probe: library.RepoProbe | None | library._Unprobed = library.UNPROBED) -> Aura:
+def load_aura(name: str, *, cwd: Path | None, probe: library.ProbeArg = library.UNPROBED) -> Aura:
     """The aura *name*, looked up from both roots for a session in *cwd*.
 
     A lookup the library refuses raises :class:`~nexus.lua_runtime.library.LibraryError` (a name

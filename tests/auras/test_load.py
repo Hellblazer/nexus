@@ -254,5 +254,31 @@ def test_the_listing_shows_auras_only_and_the_procedure_listing_shows_procedures
 
 def test_the_real_shipped_root_lists_without_failing() -> None:
     # nexus-mdbds.10.1 ships no aura yet; the first (ci_develop_red) lands with Phase 2.
-    for entry in auras.list_auras(cwd=None):
-        assert entry.root == "shipped"
+    entries = auras.list_auras(cwd=None)
+    assert isinstance(entries, list)
+    assert all(isinstance(e, library.Procedure) and e.root == "shipped" for e in entries)
+
+
+def test_a_file_nested_too_deeply_is_refused_by_load_and_listed_as_refused(shipped: Path) -> None:
+    depth = 30_000
+    _write(shipped, "deep", "a = " + "[" * depth + "]" * depth)
+    _write(shipped, "fine")
+    with pytest.raises(AuraError) as err:
+        auras.load_aura("deep", cwd=None)
+    assert (err.value.kind, err.value.file) == ("bad_toml", "deep.aura.toml")
+    listing = {e.name: e.summary for e in auras.list_auras(cwd=None)}
+    assert listing["deep"].startswith("refused: ")
+    assert listing["fine"] == "does a thing"
+
+
+def test_a_file_over_the_read_bound_is_refused_even_when_what_was_read_parses(shipped: Path) -> None:
+    # The library reads READ_LIMIT bytes; a file longer than that reaches the parser with
+    # exactly READ_LIMIT. Here the first READ_LIMIT bytes are a valid aura and the [clear]
+    # table (which would refuse the file) comes after the cut, so only the size check refuses.
+    base = minimal("big")
+    head = base + "#" * (library.READ_LIMIT - len(base) - 1) + "\n"
+    assert len(head.encode()) == library.READ_LIMIT
+    _write(shipped, "big", head + "[clear]\nmatch = {}\n")
+    with pytest.raises(AuraError) as err:
+        auras.load_aura("big", cwd=None)
+    assert err.value.kind == "too_large"

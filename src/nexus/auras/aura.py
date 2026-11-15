@@ -21,7 +21,7 @@ from dataclasses import dataclass, fields
 from typing import Literal
 
 from nexus.lua_runtime.header import ARG_NAME_RE, RESERVED
-from nexus.lua_runtime.library import READ_LIMIT, LibraryError, _check_name
+from nexus.lua_runtime.library import READ_LIMIT, LibraryError, check_name
 from nexus.lua_runtime.limits import Limits
 
 #: The aura file suffix; the name is the file name less the whole of it.
@@ -31,6 +31,7 @@ AURA_SUFFIX: str = ".aura.toml"
 KINDS: tuple[str, ...] = (
     "bad_toml", "too_large", "unknown_key", "missing_key", "wrong_type", "invalid_name", "name_mismatch",
     "bad_subspace", "reserved_arg", "bad_source", "clear_equals_trigger", "bad_limit", "bad_threads",
+    "bad_summary", "bad_field",
 )
 
 #: ``AuraError.key`` for a refusal of the file as a whole.
@@ -38,10 +39,14 @@ FILE_KEY: str = "(file)"
 
 # One concrete board subspace: board/<topic> or board/ci/<topic>. A topic carries no slash and
 # no wildcard; no other prefix (mailbox triggers are cut from version 1).
-_SUBSPACE_RE = re.compile(r"board/(?:ci/)?[A-Za-z0-9][A-Za-z0-9._-]*")
+# A topic is any run of characters but "/", "*" and whitespace: the repo's own topics are looser
+# than a slug (ci_wait builds board/ci/{repo}-{branch}--done unsanitized). "board/ci" alone is no
+# topic: ci/ needs a topic after it.
+_SUBSPACE_RE = re.compile(r"board/(?:ci/[^/*\s]+|(?!ci$)[^/*\s]+)")
 _FIELD = r"[A-Za-z_][A-Za-z0-9_]*"
 _DIMS_RE = re.compile(rf"dims\.({_FIELD})")
-_BODY_RE = re.compile(rf"body\.({_FIELD})")
+_BODY_RE = re.compile(r"body\.([^/*\s.]+)")
+_FIELD_RE = re.compile(_FIELD)
 _LITERAL_RE = re.compile(r'= "([^"\n]*)"')
 
 _TOP_KEYS = frozenset({"aura", "summary", "procedure", "trigger", "args", "when", "clear", "display", "limits"})
@@ -126,7 +131,7 @@ class _Reader:
 
     def name_of(self, value: str, key: str) -> str:
         try:
-            return _check_name(value)
+            return check_name(value)
         except LibraryError as exc:
             raise self.fail("invalid_name", key, exc.detail) from exc
 
@@ -184,6 +189,8 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
         doc = tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise r.fail("bad_toml", FILE_KEY, f"is not TOML: {exc}") from exc
+    except RecursionError as exc:  # a file of nested arrays under the size bound
+        raise r.fail("bad_toml", FILE_KEY, "is nested too deeply to read") from exc
 
     top = r.table(doc, "", _TOP_KEYS)
     aura = r.string(r.required(top, "aura", ""), "aura")
@@ -219,6 +226,8 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
     if "when" in top:
         when = r.table(top["when"], "when", _WHEN_KEYS)
         when_field = r.string(r.required(when, "field", "when."), "when.field")
+        if _FIELD_RE.fullmatch(when_field) is None:
+            raise r.fail("bad_field", "when.field", f"{when_field!r} is not a field name {_FIELD}")
 
     clear_match: tuple[tuple[str, str], ...] | None = None
     if "clear" in top:
@@ -227,8 +236,13 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
         if dict(clear_match) == dict(match):
             raise r.fail("clear_equals_trigger", "clear.match", "equals trigger.match, so a post would both fire and clear")
 
-    if not threads.strip() or not threads.isprintable():
-        raise r.fail("bad_threads", "display.threads", "must be one printable line that is not blank")
+    if not threads.strip() or not threads.isprintable() or threads != threads.strip():
+        raise r.fail(
+            "bad_threads", "display.threads",
+            "must be one printable line that is not blank and has no leading or trailing space",
+        )
+    if not summary.strip() or not summary.isprintable():
+        raise r.fail("bad_summary", "summary", "must be one printable line that is not blank")
     channel = display.get("channel", False)
     if not isinstance(channel, bool):
         raise r.fail("wrong_type", "display.channel", f"must be a boolean, got {type(channel).__name__}")
