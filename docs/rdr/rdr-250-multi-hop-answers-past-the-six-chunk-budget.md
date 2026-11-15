@@ -165,11 +165,29 @@ assumption, with no run. **Code-read** means read from source at the named sha.
   (Projected, from the MVV rows.)
 - `MAX_REPAIR_ITEMS` is 12 (`coverage_repair.py:89`). At most 11 keys occur
   at N≤80, so it does not bind here. (Code-read, io7tw research follow-up.)
+- Paid `nx_answer` runs, 2026-11-15, on the RDR-147 sandbox. Each config ran
+  once, for 3.37 USD in all, and the baseline call reproduced the RDR-147 row
+  exactly. (Measured, T2 `nexus_rdr/io7tw-paid-mvv-2026-11-15`.) Scores below
+  are recall, precision and F1.
+
+  | Config | issue5 | key8 held-out F1 | agg2 |
+  |---|---|---|---|
+  | `vector_budget_chunks` 6 (RDR-147 run) | .407 / .800 / .500 | .135 | 0 |
+  | `vector_budget_chunks` 20 | .667 / .967 / .764 | .145 | 0 |
+  | 20 plus the lexical leg on step 1 | .920 / .853 / .866 | .358 | 0 |
+
+  - At 20, every answer named exactly its anchor-key companies, and
+    `anchors_scanned` was 20, so the projection held to three decimals.
+  - The lexical leg brings other companies' keys into the anchors, and the
+    answer names them. That drops precision below the 0.95 gate.
+  - Two of the lexical key8 rows ran on grown plans, not plan 10.
+  - Passing `vector_budget_chunks` as a binding changes which plan matches
+    unless the strategy is pinned: two questions went to plan 8 (same scores).
 
 ### Critical Assumptions
 
-- [ ] The companies of the top N anchors are the companies the answer names, at N above 6. Status: Unverified (only N=6 is measured). Method: Spike.
-- [ ] Generation names exactly the anchor-key companies when N is above 6. Status: Unverified. Method: Spike (a paid run; see Minimum Viable Validation).
+- [x] The companies of the top N anchors are the companies the answer names, at N above 6. Status: Verified at N=20 on issue5 (paid run, 2026-11-15); N=40 and above unmeasured. Method: Spike.
+- [x] Generation names exactly the anchor-key companies when N is above 6. Status: Verified at N=20, 5 of 5 answers, one run each; model variance not bounded. Method: Spike.
 - [ ] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Unverified. No LLM filter has been measured. Method: Spike.
 - [ ] Option A's gain is not specific to HERB's template overlap. Status: Unverified. This RDR does not claim it generalises. Method: Spike on a second corpus.
 - [ ] Option B assumes entity keys sit in retrievable announcement chunks. Status: Unverified in general; true on HERB. Method: Spike.
@@ -185,11 +203,12 @@ The draft's lean, for Sam to accept or reject: for Gap 1, Option E is the
 largest lever in the record, and it changes the coverage boundary's anchor input
 without touching the generator's budget. It needs a precision filter before it
 can meet the gate, so it cannot ship on the projection alone. A cheaper interim
-step is to pass `vector_budget_chunks: 20` per call, with no code change. That
-is projected at F1 0.764 with precision 0.967, inside the gate, but it is also
-unmeasured. For Gap 2, Option A is a flag-level change with a measured gain on
-the script, but its size depends on HERB's template. Option B is the cleanest
-key-based lever, and it needs a new engine filter.
+step is a budget of 20, which needs no code change: measured at F1 0.764 with
+precision 0.967, inside the gate. Passed per call, it must also pin the plan's
+strategy, or the binding changes which plan matches. For Gap 2, Option A has the
+largest measured F1 inside `nx_answer` (0.866), but its precision (0.853) fails
+the gate without a filter, and its size depends on HERB's template. Option B is
+the cleanest key-based lever, and it needs a new engine filter.
 
 ### Technical Design
 
@@ -391,8 +410,8 @@ Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
 
 ### Open Questions for Sam
 
-1. Which lever or levers to build. Options E and B need code. Option A is a flag. The per-call budget of 20 needs no code, but it is unmeasured.
-2. Whether to spend on the paid MVV run now, and in which window.
+1. Which lever or levers to build. Options E and B need code. Option A is a flag, and it fails the precision gate without a filter. A budget of 20 needs no code and passes the gate on issue5 (measured, one run).
+2. Answered 2026-11-15: the paid run was made, for 3.37 USD (Key Discoveries). Another run is needed for the lever chosen, and to bound variance.
 3. Whether the 20 held-out questions in the RDR-147 MVV were used for tuning. If they were, a new held-out set is needed.
 4. Whether changing the plan 10 default is in scope, or only per-call bindings.
 
