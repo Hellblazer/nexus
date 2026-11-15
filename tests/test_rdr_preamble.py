@@ -1983,11 +1983,12 @@ def test_prior_chain_names_each_rounds_own_critique_never_the_upserted_latest_id
 def test_verdict_prints_the_one_line_revision_history_form(rdr_env, monkeypatch):
     """nexus-yjf5l.12: a gate round appends ONE Revision History line (date,
     round, outcome, critical and significant counts, ship-blockers, the gated
-    commit and the critique's T2 record title) and nothing else. The
+    blob and the critique's T2 record title) and nothing else. The
     gate-latest record's own title is NOT named: it is upserted under one fixed
     title, so a pointer to it in an older round's line would resolve to a later
     round's content. The finding titles live only in the T2 records."""
-    sha = _git_commit_rdr(rdr_env, _VERDICT_BODY, "gated")
+    _git_commit_rdr(rdr_env, _VERDICT_BODY, "gated")  # nexus-3jjkg: the line cites the file's blob, which a rebase keeps
+    sha = subprocess.check_output(["git", "-C", str(rdr_env["repo_root"]), "rev-parse", "--short=12", "HEAD:docs/rdr/rdr-204-example.md"], text=True).strip()
     project = f"{rdr_env['repo_root'].name}_rdr"
     crit = (
         "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n- **Ship-blocker**: yes\n\n"
@@ -2000,7 +2001,7 @@ def test_verdict_prints_the_one_line_revision_history_form(rdr_env, monkeypatch)
     today = datetime.now(timezone.utc).date().isoformat()
     expected = (
         f"- {today}: Gate round 4 — BLOCKED (1 Critical, 1 Significant, "
-        f"1 ship-blocker(s)); commit `{sha}`; critique `{project}/c`."
+        f"1 ship-blocker(s)); blob `{sha}`; critique `{project}/c`."
     )
     assert expected in out, out
     after = out.split("Revision History line to append", 1)[1]
@@ -2226,3 +2227,4 @@ def test_no_fix_rule_gives_a_gloss_commit_its_own_fix_check():
     stale = [name for name, text in texts.items()
              if "own fix check" in text or "gated separately" in text]
     assert not stale, f"per-commit fix-check wording survives in: {stale}"
+

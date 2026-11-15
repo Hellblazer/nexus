@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash
-description: Fix an RDR's gate findings — prints the findings with their sites, the diff since the gated commit, the pre-edit research title, and the fix rules
+description: Fix an RDR's gate findings — prints the findings with their sites, the diff since the gate, the pre-edit research title, and the fix rules
 ---
 
 # RDR Fix

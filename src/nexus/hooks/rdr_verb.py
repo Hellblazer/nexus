@@ -562,6 +562,31 @@ def _load_gated_commits(repo_name: str) -> dict[str, str]:
     return gated
 
 
+def _load_gated_blobs(repo_name: str) -> dict[str, str]:
+    """``{rdr_id: blob}`` from every ``<id>-gate-latest`` T2 record that
+    carries a ``blob:`` field (nexus-3jjkg). A record with only ``commit:``
+    is absent here and keeps the commit comparison."""
+    gated: dict[str, str] = {}
+    try:
+        for entry in _fetch_rdr_rows(repo_name):
+            title = entry.get("title", "")
+            if not title.endswith("-gate-latest"):
+                continue
+            num = re.search(r"(\d+)", title[: -len("-gate-latest")])
+            if not num:
+                continue
+            for line in entry.get("content", "").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("blob:"):
+                    val = stripped.split(":", 1)[1].strip().strip('"').strip("'").strip("`")
+                    if val:
+                        gated[str(int(num.group(1)))] = val
+                    break
+    except Exception:  # noqa: BLE001 — the hook must never fail; an unreachable T2 degrades to no gated blobs
+        pass
+    return gated
+
+
 #: The line :func:`_unchecked_fix_edits` adds when the budget ended its walk
 #: before every draft RDR was checked.
 _FIX_CHECK_CUT_SHORT_NOTE = (
@@ -570,8 +595,14 @@ _FIX_CHECK_CUT_SHORT_NOTE = (
 )
 
 
-def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, str], gated: dict[str, str]) -> list[str]:
-    """Lines naming draft RDRs whose file tip is past the gated commit."""
+def _unchecked_fix_edits(
+    root: Path, rdr_files: list[Path], statuses: dict[str, str], gated: dict[str, str],
+    blobs: dict[str, str] | None = None,
+) -> list[str]:
+    """Lines naming draft RDRs whose file is past the gate. A record that
+    carries ``blob:`` (*blobs*) is compared by the RDR file's blob at HEAD,
+    which a rebase keeps; one with only ``commit:`` (*gated*) by the tip
+    commit that touched the file, as before (nexus-3jjkg)."""
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
 
     from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 - stdlib-only, a few microseconds; function-level so the hook module itself stays import-light
@@ -584,7 +615,8 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
             continue
         key = str(int(rid))
         gated_norm = {str(int(k)): v for k, v in gated.items() if k.isdigit()}
-        if key not in gated_norm:
+        blobs_norm = {str(int(k)): v for k, v in (blobs or {}).items() if k.isdigit()}
+        if key not in gated_norm and key not in blobs_norm:
             continue
         # nexus-u1jxt.7: a closed or accepted RDR with no T2 status row (or
         # two disagreeing shapes, which the loader drops) defaulted to draft
@@ -599,11 +631,19 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
         if left <= 0:
             cut_short = True
             break  # nexus-wozn6: out of budget; a pointer missed this session beats a cancelled hook
+        gated_blob = blobs_norm.get(key)
         try:
-            tip = run_bounded(
-                argv_off_cwd(["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)]),
-                timeout=left,
-            ).stdout.strip()
+            if gated_blob:
+                rel = os.path.relpath(str(path), str(root))
+                tip = run_bounded(
+                    argv_off_cwd(["git", "-C", str(root), "rev-parse", "--verify", "-q", f"HEAD:{rel}"]),
+                    timeout=left,
+                ).stdout.strip()
+            else:
+                tip = run_bounded(
+                    argv_off_cwd(["git", "-C", str(root), "log", "-1", "--format=%h", "--", str(path)]),
+                    timeout=left,
+                ).stdout.strip()
         except subprocess.TimeoutExpired:
             cut_short = True  # this file was not checked either
             continue
@@ -611,13 +651,13 @@ def _unchecked_fix_edits(root: Path, rdr_files: list[Path], statuses: dict[str, 
             continue
         if not tip:
             continue  # untracked or uncommitted file: unknown, not "past the gate"
-        commit = gated_norm[key]
-        n = min(len(tip), len(commit))
-        if n >= 7 and tip[:n] == commit[:n]:
+        gate_key = gated_blob or gated_norm[key]
+        n = min(len(tip), len(gate_key))
+        if n >= 7 and tip[:n] == gate_key[:n]:
             continue
         lines.append(
-            f"RDR-{rid}: edits since the gated commit {commit}; run /conexus:rdr-fix {rid} "
-            "before re-gating (fix check first)."
+            f"RDR-{rid}: edits since the gated {'blob' if gated_blob else 'commit'} {gate_key}; "
+            f"run /conexus:rdr-fix {rid} before re-gating (fix check first)."
         )
     if cut_short:
         # A filter that selects nothing looks exactly like a quiet success
@@ -765,6 +805,8 @@ def _run() -> HookResult:
     if repo_name in _T2_LATE:
         lines.append(f"     {_T2_LATE_NOTE}")
 
-    lines.extend(_unchecked_fix_edits(root, rdr_files, statuses, _load_gated_commits(repo_name)))
+    lines.extend(_unchecked_fix_edits(
+        root, rdr_files, statuses, _load_gated_commits(repo_name), _load_gated_blobs(repo_name),
+    ))
 
     return HookResult(stdout="\n".join(lines))

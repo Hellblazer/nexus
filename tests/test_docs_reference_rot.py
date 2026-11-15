@@ -43,6 +43,7 @@ bogus value of each shape reds its leg (``test_planted_*``).
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shutil
@@ -200,9 +201,54 @@ def _published_commits() -> set[str]:
     return set(out.split())
 
 
+@functools.cache
+def _published_blobs() -> frozenset[str]:
+    """Every blob carried by a commit :func:`_published_commits` counts
+    (nexus-3jjkg). The RDR gate keys to the RDR file's blob, which a rebase
+    does not change; it is as citable as a commit while some published
+    commit holds it. Computed once, and only when a citation is not a
+    commit."""
+    out = subprocess.run(
+        ["git", "rev-list", "--objects", "--remotes", "--tags"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return frozenset(line.split(" ", 1)[0] for line in out.splitlines() if line)
+
+
+def _unresolved_blobs(values: set[str]) -> set[str]:
+    """The subset of *values* that is not a published blob."""
+    if not values:
+        return set()
+    proc = subprocess.run(
+        ["git", "cat-file", "--batch-check"],
+        cwd=REPO_ROOT,
+        input="".join(f"{v}\n" for v in sorted(values)),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    published = _published_blobs()
+    resolved: set[str] = set()
+    for v, line in zip(sorted(values), proc.stdout.splitlines()):
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "blob" and parts[0] in published:
+            resolved.add(v)
+    return values - resolved
+
+
 def _unresolved_shas(values: set[str]) -> set[str]:
     """Values that do not name a PUBLISHED commit (see
-    :func:`_published_commits`): missing, ambiguous, or local-only."""
+    :func:`_published_commits`) or a published blob (see
+    :func:`_published_blobs`): missing, ambiguous, or local-only."""
+    not_commits = _unresolved_commits(values)
+    return _unresolved_blobs(not_commits)
+
+
+def _unresolved_commits(values: set[str]) -> set[str]:
+    """Values that do not name a PUBLISHED commit."""
     if not values:
         return set()
     proc = subprocess.run(
@@ -409,3 +455,25 @@ def test_planted_bogus_bead_is_detected(tmp_path: Path) -> None:
     doc.write_text("Tracked as nexus-zzzz9 (nexus-zzzz9.3 is its child, nexus-zzzz9-wip its branch).\n")
     assert [c[0] for c in _scan(_BEAD_RE, [doc])] == ["zzzz9", "zzzz9", "zzzz9"], "suffixed forms resolve through the base id"
     assert "nexus-zzzz9" not in _manifest_ids()
+
+
+def _git_blob_of_head(path: str) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "--short=12", f"HEAD:{path}"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_a_cited_blob_sha_resolves(tmp_path: Path) -> None:
+    """nexus-3jjkg: a gate keys to the RDR file's blob, and the Revision
+    History line cites it. A blob is not a commit and survives a rebase: it
+    resolves when the object exists and a published commit carries it."""
+    blob = _git_blob_of_head("docs/rdr/AGENTS.md")
+    doc = tmp_path / "planted.md"
+    doc.write_text(f"Gate round 2: gated at blob `{blob}`.\n")
+    assert [c[0] for c in _sha_cites([doc])] == [blob]
+    assert _unresolved_shas({blob}) == set()
+
+
+def test_a_planted_bogus_sha_still_fails_next_to_a_blob() -> None:
+    blob = _git_blob_of_head("docs/rdr/AGENTS.md")
+    assert _unresolved_shas({blob, "deadbee5"}) == {"deadbee5"}

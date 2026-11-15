@@ -35,7 +35,9 @@ In any brief or relay, put the absolute path itself where `<RDR dir>` stands, ne
 has a `{id}-gate-latest` record, PASSED or BLOCKED: the prior outcome, the
 gate round number (derived from the record's `prior:` chain), the critique's
 Critical and Significant lines verbatim, the diff of the RDR file since the
-gated commit, and the Fix check section. Do this before anything else:
+gated blob, and the Fix check section. The gate is keyed to the RDR file's blob,
+so a rebase that leaves the text alone orphans nothing; a record with only
+`commit:` is keyed to that commit, as before. Do this before anything else:
 
 1. For every prior finding printed under "Prior findings" (the last two rounds'
    critiques; a finding absent from both, printed under "Retired from the
@@ -57,10 +59,10 @@ gated commit, and the Fix check section. Do this before anything else:
 
 A first gate has no Layer 0. A re-gate after a PASSED result has one.
 
-### Fix check — diff-scoped verification (whenever the RDR changed since the gated commit)
+### Fix check — diff-scoped verification (whenever the RDR changed since the gate)
 
 The Re-gate block prints `Fix check: not required` when the file is unchanged.
-Otherwise it prints the exact range (`git diff <commit>..HEAD -- <file>`), the
+Otherwise it prints the exact range (`git diff <gated-blob> <blob-now>`; `<commit>..HEAD -- <file>` for a commit-only record), the
 fix commits, and the T2 title for the verdict. Then:
 
 1. Dispatch `substantive-critic` with ONLY that diff and the RDR file as input.
@@ -88,14 +90,14 @@ fix commits, and the T2 title for the verdict. Then:
       that constrains it, whether or not they share a name, and a pair the previous check already named is not named again.
 2. Deliverable: one row per clause, PASS or FAIL with line numbers, plus the
    standard Verdict block. Every row carries a `Class:` of exactly one of `BLOCKS-PLANNING` (an implementer executing the plan as written would build the wrong thing, or a step cannot run in the order given), `DISCOVER-AT-IMPLEMENTATION` (real, and the first test run or first hour at the keyboard surfaces it), or `OBSERVATION` (a wording, count, paraphrase or citation-form defect that changes no decision and no step; a documentation-accuracy defect is never BLOCKS-PLANNING, and an OBSERVATION is never counted and never a residual). Each dispatch reads no sibling scratch and writes no T1 or T2, and ends with the line `FIX CHECK: PASS` or `FIX CHECK: FAIL — <n> BLOCKS-PLANNING rows`.
-3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", tags="rdr,gate,fix-check") — omit `ttl` (memory_put's ttl is int|None; permanent by omission), where `<sha>` is the RDR file's tip commit as printed by the preamble.
+3. Store the verdict in T2: mcp__plugin_conexus_nexus__memory_put(project="{repo}_rdr", title="{id}-fix-check-<sha>", tags="rdr,gate,fix-check") — omit `ttl` (memory_put's ttl is int|None; permanent by omission), where `<sha>` is the RDR file's blob (`git rev-parse --short=12 HEAD:<file>`; the tip commit for a commit-only record) as printed by the preamble.
 4. The fix check is three independent dispatches of the fix-check brief on the same range, never one; the caller computes the consensus and stores one verdict naming all three; a defect counts only when at least two of the three raise it, whichever lines each cites, its Class is the one at least two of the three assign, and a three-way class split reads as BLOCKS-PLANNING; a defect one critic alone raises is recorded as an observation and never fails the check; the check fails only on a counted BLOCKS-PLANNING defect; a failed check is fixed once and checked once more, and a second failure ends the loop: its counted defects are written as `residuals:` lines of the gate record (`[<class>] <title> (fix check <sha>)`) for accept to disposition, the check is then closed, and nothing runs a third time. Do not enter Layer 1 or Layer 3 with a first failure
    open. The fix check and the gate critique are never
    dispatched against the same commit in parallel: fix, then check, then
    Layer 1 and Layer 3.
 
 Every re-gated record (one with a `prior:` chain) carries `fix_check:`: either
-`{repo}_rdr/{id}-fix-check-<sha>` with the sha equal to the record's `commit:`, or
+`{repo}_rdr/{id}-fix-check-<sha>` with the sha equal to the record's `blob:` (its `commit:` when it has no `blob:`), or
 the literal `none (no change since <sha>)` when the preamble printed `Fix check:
 not required`. A record with neither is a skipped fix check, not a clean one. The
 preamble prints `Fix check missing`, `Fix check pointer mismatch` or `Fix check
@@ -255,7 +257,7 @@ by hand. The rules it applies (stated here in full; the nexus wheel's `review-ro
 ### On Pass
 
 1. Store the critique in T2 FIRST, under the exact title the preamble printed (`Write this round's critique as ...`, the shape `{id}-gate-critique-{date}-r{N}` with N the round): mcp__plugin_conexus_nexus__memory_put(content="{critique}", project="{repo}_rdr", title="{id}-gate-critique-{date}-r{N}", tags="rdr,gate,critique") — omit `ttl` (memory_put's ttl is int|None; permanent by omission). The round in the title is what keeps two rounds on one day from upserting over each other. `{repo}_rdr` is the only home a gate critique has: the critic agent may also write its report under T2 project `{repo}`, and nothing reads it there; the copy under this title is the record. A T3 copy (collection="<subject>", title="gate-rdr-NNN-{date}") is optional and never the only copy.
-2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}-r{N}\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to commit:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<the previous round's own critique record id, never the latest record's id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", tags="rdr,gate") — omit `ttl` (memory_put's ttl is int|None; permanent by omission). `critique:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `commit:`. `nx rdr preamble rdr-verdict` computes and prints this whole block, `prior:` included — copy it verbatim rather than retyping the chain by hand.
+2. Write gate result to T2: mcp__plugin_conexus_nexus__memory_put(content="outcome: PASSED\ndate: YYYY-MM-DD\ncritical_count: 0\nsignificant_count: N\nobservation_count: N\nship_blockers: 0\nsummary: One-sentence summary\ncritique: {repo}_rdr/{id}-gate-critique-{date}-r{N}\nblob: <git rev-parse --short=12 HEAD:<rdr file>>\ncommit: <git log -1 --format=%h -- <rdr file>>\nfix_check: <{repo}_rdr/{id}-fix-check-<sha>, sha equal to blob:, or 'none (no change since <sha>)'; mandatory on every re-gate>\nresiduals: <one line per residual finding, round 3+, each `  - [<class>] <title>`, or `  - [<class>] <title> (carried from round <N>)` when it is carried forward from the prior record>\nprior: [<the previous round's own critique record id, never the latest record's id>] (<OUTCOME> <nC> <nS>), <the previous record's own prior chain>", project="{repo}_rdr", title="{id}-gate-latest", tags="rdr,gate") — omit `ttl` (memory_put's ttl is int|None; permanent by omission). `critique:`, `blob:`, `commit:` and `prior:` are what the re-gate block reads; `fix_check:` must equal `blob:`. `nx rdr preamble rdr-verdict` computes and prints this whole block, `prior:` included — copy it verbatim rather than retyping the chain by hand.
 3. Append the one printed Revision History line to the RDR's Revision History
    section — never the findings themselves; those live only in the two T2
    records written in steps 1 and 2.
@@ -265,7 +267,7 @@ Status remains **Draft** until the author explicitly accepts via `/conexus:rdr-a
 
 ### On Fail
 
-1. Store the critique in T2 first (same title scheme as On Pass), then write the gate result (same format, `outcome: "BLOCKED"`, with `critique:` and `commit:`). The next `nx rdr preamble rdr-gate` run turns these two fields into the Layer 0 block.
+1. Store the critique in T2 first (same title scheme as On Pass), then write the gate result (same format, `outcome: "BLOCKED"`, with `critique:`, `blob:` and `commit:`). The next `nx rdr preamble rdr-gate` run turns these two fields into the Layer 0 block.
 2. T3 copy optional (collection="<subject>", title="gate-rdr-NNN-{date}", tags="rdr,gate,critique,blocked")
 3. Display the critique with specific sections to address
 4. Status remains Draft
@@ -312,7 +314,7 @@ For additional optional fields, see [${CLAUDE_PLUGIN_ROOT}/resources/agent-share
 - [ ] Layer 2 assumption audit completed (findings counted by classification and method)
 - [ ] High-risk items flagged (classification=assumed AND verification_method=docs_only)
 - [ ] Layer 3 AI critique dispatched and results aggregated
-- [ ] Fix check run on the diff since the gated commit, verdict stored as `{id}-fix-check-<sha>`, before Layer 1
+- [ ] Fix check run on the diff since the gate, verdict stored as `{id}-fix-check-<sha>`, before Layer 1
 - [ ] Gate outcome computed by `nx rdr preamble rdr-verdict -- <id> <critique-title>`, never by hand
 - [ ] Gate result written to T2 as `{id}-gate-latest` (both pass and fail), with `prior:` chain, `fix_check:` and `residuals:`
 - [ ] On pass: the one printed Revision History line appended to Revision History, accept prompt displayed
