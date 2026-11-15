@@ -487,14 +487,21 @@ holder's pass:
 | Red canary | item 5: red on a run that had at least 10 queries (`RED_CANARY_MIN_QUERIES`), and not within 24 hours of the anchor's `built_at` or of the index's last red-canary REINDEX | REINDEX, then re-measure with the same queries |
 
 For a leaf's own HNSW index: the size rule at 1.5 times the install reference
-for its dimension, with the leaf's rows read from `n_live_tup` (an estimate is
-enough for a ratio), floored at the rows this pass counted exactly in the leaf's
-indexed collections (`PciLeafReindexRule.scan`: `max(n_live_tup, counted)`). The
-floor is there because the statistics lag the writes and only ever err low, which
-reads as a bloated index; a leaf just loaded would otherwise be rebuilt. The
-leaf's index size is read from the catalog snapshot, and the code as it stands
-puts no cooldown on the leaf rule beyond the per-pass limit and the failure
-backoff. The *install reference* for a dimension is the median
+for its dimension. The leaf's rows are `max(n_live_tup, reltuples)` (an estimate
+is enough for a ratio), floored at the rows this pass counted exactly in the
+leaf's indexed collections (`PciLeafReindexRule.scan`). The floor is there
+because the statistics lag the writes and only ever err low, which reads as a
+bloated index: a leaf just loaded, or one whose `n_live_tup` an unclean restart
+reset to 0, would otherwise be rebuilt. One consequence: bloat from deletes shows
+in the leaf rule only after a vacuum or analyze refreshes `reltuples`. The
+catalog read does not size leaf indexes, because `pg_relation_size` takes a lock
+and that read must take none. The REINDEX phase reads each candidate's size and
+anchor comment itself (`PciLeafIndexReads.facts`), one transaction per index
+under a 5 s `lock_timeout`; a locked index is skipped for that pass. A leaf
+index is size-reindexed at most once per 24 hours after its anchor's `built_at`
+(`LEAF_SIZE_MIN_INTERVAL`, restart-safe like the red-canary limit); with no
+anchor there is no cooldown. The per-pass limit and the failure backoff apply as
+for `pci_` indexes. The *install reference* for a dimension is the median
 bytes per row over this install's anchors with `"origin":"built"` at that
 dimension; with none, 8.2 KB per row for 1024 dimensions (RDR-227 A3, measured
 on fresh builds; it is the 8 KB page each element takes at that dimension, A3
