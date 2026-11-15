@@ -771,6 +771,7 @@ public final class PciBuilderSession {
          *
          * @return {@link DdlOutcome#REJECTED} (anchor null) when the guard refuses the index, {@link DdlOutcome#STALE}
          *         (anchor null) when the index is gone, else the comment's outcome with the anchor it carried
+         * @throws DataAccessException when the size read fails (a lock timeout on the index included)
          */
         public AnchorOutcome anchorAfterLeafReindex(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, long rows,
                                                     java.time.Instant builtAt) {
@@ -785,6 +786,11 @@ public final class PciBuilderSession {
                     index.valid());
                 return new AnchorOutcome(DdlOutcome.REJECTED, null);
             }
+            // The REINDEX before this left its own session settings (no lock timeout, hours of statement timeout): the
+            // size read takes a lock on the index, so it is bounded as the COMMENT after it is. A timeout is thrown to
+            // the caller, which owes the index its anchor.
+            setSession("lock_timeout", COMMENT_LOCK_TIMEOUT);
+            setSession("statement_timeout", OTHER_STATEMENT_TIMEOUT.toMillis() + "ms");
             Long bytes = ctx.select(DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
                     DSL.field(DSL.name("c", "oid"))))
                 .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))

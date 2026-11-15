@@ -509,7 +509,10 @@ dimension; with none, 8.2 KB per row for 1024 dimensions (RDR-227 A3, measured
 on fresh builds; it is the 8 KB page each element takes at that dimension, A3
 here) and no reference for any other dimension, in which case the
 leaf rule is inactive and the status counts it in `maintenance.unanchored`. After a leaf REINDEX the
-builder anchors the leaf index the same way.
+builder anchors the leaf index the same way (`PciLeafIndexReads.anchorAfterReindex`). An anchor that is not
+written (a statement failure, a lock timeout on the COMMENT, an exception, a pass that ended) leaves the leaf
+index owed it, as a `pci_` index is: the next pass retries it first, and the index is not a LEAF_SIZE
+candidate until it lands, so the cooldown always has an anchor to read.
 
 *Deletes since build is an estimate, deliberately low.* Worked through, it
 equals the rows present at build that have since been deleted plus those that a

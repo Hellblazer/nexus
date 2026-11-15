@@ -7,7 +7,9 @@ import org.jooq.exception.DataAccessException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Map;
 
@@ -26,6 +28,9 @@ import java.util.Map;
 final class PciLeafIndexReads {
 
     private static final Logger log = LoggerFactory.getLogger(PciLeafIndexReads.class);
+
+    /** The anchor's events are the reconciler's story, under its logger name, as {@link PciReindexPhase}'s are. */
+    private static final Logger anchorLog = LoggerFactory.getLogger(PciReconciler.class);
 
     /** How long a read of one leaf index waits for a lock held on it. */
     static final String LOCK_TIMEOUT = "5s";
@@ -75,5 +80,49 @@ final class PciLeafIndexReads {
         } catch (IllegalStateException e) {
             return null;   // the pass is over
         }
+    }
+
+    /**
+     * The fresh anchor of a leaf's own HNSW index right after its REINDEX (RDR-230 Technical Design 3): the live rows are
+     * read (the leaf's {@code n_live_tup}, {@code built_at} taken before it, as for a build) and the anchor is written
+     * through {@link PciBuilderSession.Pass#anchorAfterLeafReindex}. {@code leaf} is the snapshot the REINDEX ran on, and
+     * {@code indexName} must be one of its {@code hnswIndexes()}.
+     *
+     * <p>Anything that goes wrong, an outcome other than DONE or any {@link RuntimeException} (a statement failure, a
+     * pass that is over, the size read inside the write), is logged and answers {@code false}: the index stands with its
+     * old comment, and the caller owes it the anchor ({@link PciReindexState#anchorOwed}), because the 24 h LEAF_SIZE
+     * cooldown reads that anchor and a rule that stays true on a wrong estimate would rebuild the index every pass.
+     *
+     * @return whether the anchor was written
+     */
+    static boolean anchorAfterReindex(PciBuilderSession.Pass pass, PciCatalog.Leaf leaf, String indexName, Clock clock,
+                                      Duration statementTimeout) {
+        String where = leaf.schema() + "." + leaf.name();
+        PciCatalog.LeafIndex own = leaf.hnswIndexes().stream().filter(i -> i.name().equals(indexName)).findFirst()
+            .orElse(null);
+        if (own == null) {
+            anchorLog.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=not_the_leafs_own_index",
+                indexName, where);
+            return false;
+        }
+        try {
+            Instant builtAt = clock.instant();
+            long rows = pass.transaction(tx -> {
+                PgSession.setLocal(tx, "statement_timeout", Long.toString(statementTimeout.toMillis()));
+                return PciAnchorReads.leafStats(tx, leaf.schema(), leaf.name()).live();
+            });
+            PciBuilderSession.Pass.AnchorOutcome anchored = pass.anchorAfterLeafReindex(leaf, own, rows, builtAt);
+            if (anchored.outcome() == PciBuilderSession.DdlOutcome.DONE) {
+                anchorLog.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", indexName,
+                    where, anchored.anchor().rows(), anchored.anchor().bytes());
+                return true;
+            }
+            anchorLog.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"the index "
+                + "stands; the next pass retries it\"", indexName, where, anchored.outcome());
+        } catch (RuntimeException e) {
+            anchorLog.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=write_failed error=\"{}\" "
+                + "detail=\"the index stands; the next pass retries it\"", indexName, where, PciQueryRing.sanitize(e));
+        }
+        return false;
     }
 }

@@ -174,6 +174,7 @@ class PciLeafReindexRuleTest {
 
         assertThat(scan.candidates()).isEmpty();
         assertThat(scan.unanchored()).isZero();
+        assertThat(facts.read).as("no lock is taken on an index of a leaf with no rows").isEmpty();
     }
 
     @Test

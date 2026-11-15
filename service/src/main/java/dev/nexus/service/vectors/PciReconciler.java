@@ -305,6 +305,13 @@ public final class PciReconciler {
      * pass. A test sets it to throw, or to take the migration lock at that moment.
      */
     volatile Runnable reindexPhaseHook;
+    /** TEST SEAM: run after a leaf's own HNSW index is reindexed, before its anchor is written. */
+    volatile Runnable afterLeafReindexHook;
+
+    /** The anchors still owed after a REINDEX, by index name, for tests. */
+    Map<String, PciReindexState.Owed> owedAnchors() {
+        return reindex.owedAnchors();
+    }
     private final AtomicReference<String> building = new AtomicReference<>();
     private final AtomicInteger passes = new AtomicInteger();
     /** nexus-f3yqd.3: the {@code boot_work} entry; null until {@link #bootWork} binds a registry. */
@@ -1143,6 +1150,9 @@ public final class PciReconciler {
      * @return whether the anchor was written
      */
     boolean writeAnchor(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build, boolean afterReindex) {
+        if (build.collection() == null) {   // a leaf's own HNSW index (P2.3): its own anchor, the same retry
+            return PciLeafIndexReads.anchorAfterReindex(pass, leaf, build.name(), clock, countTimeout);
+        }
         String next = afterReindex ? "the next pass retries it" : "the next pass adopts it";
         Instant builtAt = clock.instant();
         Index index = new Index(build.name(), true, build.collection());
@@ -1261,9 +1271,10 @@ public final class PciReconciler {
         if (estimates == null) {
             return triggered;
         }
+        Map<String, ?> owed = reindex.owedAnchors();   // a leaf index owed its anchor is no candidate until it lands
         PciLeafReindexRule.Scan scan = PciLeafReindexRule.scan(tally.looks, estimates::get,
-            (leaf, own) -> PciLeafIndexReads.facts(pass, leaf, own, countTimeout), name -> reindex.backedOff(name, now),
-            now);
+            (leaf, own) -> PciLeafIndexReads.facts(pass, leaf, own, countTimeout),
+            name -> reindex.backedOff(name, now) || owed.containsKey(name), now);
         noteLeafUnanchored(scan.unanchored());
         if (scan.candidates().isEmpty()) {
             return triggered;
@@ -1280,9 +1291,9 @@ public final class PciReconciler {
      * with no statement, as a pci_ target with no subject is. The REINDEX goes through
      * {@link PciBuilderSession.Pass#reindex(Leaf, PciCatalog.LeafIndex)}, and the outcome is recorded in
      * {@link PciReindexState} exactly as {@link #reindexOne} does (started/finished, failure backoff, no backoff for a
-     * pass that ended). On DONE the index is anchored through
-     * {@link PciBuilderSession.Pass#anchorAfterLeafReindex}: {@code built_at} is taken before the leaf's live rows are
-     * read, as for a build. There is no canary re-measure (the leaf index serves no one collection) and no VACUUM.
+     * pass that ended). On DONE the index is anchored ({@link PciLeafIndexReads#anchorAfterReindex}, through
+     * {@link #writeAnchor}); an anchor that is not written is owed and retried like a pci_ index's. There is no canary
+     * re-measure (the leaf index serves no one collection) and no VACUUM.
      */
     void reindexLeafIndex(PciBuilderSession.Pass pass, PciCatalog.Snapshot snapshot, Reindex r, Tally tally) {
         Leaf leaf = null;
@@ -1315,8 +1326,13 @@ public final class PciReconciler {
                 tally.reindexes++;
                 log.info("event=pci_index_reindexed leaf={} index={} collection={} trigger={} bytes_before={}",
                     leafId(leaf), name, r.collection(), r.trigger().label(), r.bytes());
-                if (pass.live()) {
-                    anchorAfterLeafReindex(pass, leaf, own);
+                Runnable hook = afterLeafReindexHook;
+                if (hook != null) {
+                    hook.run();
+                }
+                // Owed like a pci_ index's: retried at the start of the next pass, and not a candidate until it lands.
+                if (!(pass.live() && writeAnchor(pass, leaf, own.dimension(), new Build(name, null), true))) {
+                    reindex.anchorOwed(name, leaf, own.dimension(), null);
                 }
             }
             case FAILED, REJECTED -> {
@@ -1326,30 +1342,6 @@ public final class PciReconciler {
                     reindex.nextRetryAt(name));
             }
             default -> log.info("event=pci_reindex_not_done leaf={} index={} outcome={}", leafId(leaf), name, outcome);
-        }
-    }
-
-    /** The leaf index's anchor after its REINDEX; anything that goes wrong leaves it as it was (the index stands). */
-    private void anchorAfterLeafReindex(PciBuilderSession.Pass pass, Leaf leaf, PciCatalog.LeafIndex own) {
-        Instant builtAt = clock.instant();
-        long rows;
-        try {
-            rows = pass.transaction(tx -> {
-                PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
-                return PciAnchorReads.leafStats(tx, leaf.schema(), leaf.name()).live();
-            });
-        } catch (DataAccessException e) {
-            log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_failed sqlstate={} "
-                + "detail=\"the index stands\"", own.name(), leafId(leaf), e.sqlState());
-            return;
-        }
-        PciBuilderSession.Pass.AnchorOutcome anchored = pass.anchorAfterLeafReindex(leaf, own, rows, builtAt);
-        if (anchored.outcome() == DdlOutcome.DONE) {
-            log.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", own.name(),
-                leafId(leaf), anchored.anchor().rows(), anchored.anchor().bytes());
-        } else {
-            log.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"the index "
-                + "stands\"", own.name(), leafId(leaf), anchored.outcome());
         }
     }
 

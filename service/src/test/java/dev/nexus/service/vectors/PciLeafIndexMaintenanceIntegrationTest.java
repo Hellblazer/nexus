@@ -809,4 +809,72 @@ class PciLeafIndexMaintenanceIntegrationTest {
         assertThat(logged("event=pci_reindex_started")).as("it was tried again on the very next pass").isEqualTo(2);
         assertThat(r.reindexes()).isEqualTo(1);
     }
+
+    /** Rows that go into the leaf's index and are deleted again, then vacuumed (so {@code reltuples} is fresh). */
+    void bloatAgain(String tenant, PciCatalog.Leaf leaf, String own, String collection) throws Exception {
+        dormantCollection(tenant, name(collection), 2_000);
+        deleteCollection(tenant, name(collection));
+        vacuumLeaf(leaf(tenant));
+        awaitLiveTuples(leaf(tenant), 250);
+        PciCatalog.Anchor reference = catalog.read().anchor(M384, tenant, name("keep")).orElseThrow();
+        assertThat((double) sizeOf(leaf.schema(), own) / 250).as("precondition: bloated again")
+            .isGreaterThan(1.5 * reference.bytes() / reference.rows());
+    }
+
+    private HeldIndexLock newHeldLock(PciCatalog.Leaf leaf, String index) {
+        try {
+            return new HeldIndexLock(leaf, index);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    @Test
+    @Timeout(value = 600, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aLeafReindexWhoseAnchorIsNotWritten_isOwedIt_isNoCandidateMeanwhile_andOnceItLandsTheCooldownHolds()
+            throws Exception {
+        String tenant = newTenant("owed");
+        MovingClock clock = new MovingClock();
+        PciReconciler r = bloatedLeaf(tenant, settings(), new ScriptedCanary(), clock);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String own = own384(tenant).name();
+        java.util.concurrent.atomic.AtomicReference<HeldIndexLock> held = new java.util.concurrent.atomic.AtomicReference<>();
+
+        // The REINDEX runs; a lock taken after it keeps the anchor's size read from landing (5 s lock timeout).
+        r.afterLeafReindexHook = () -> held.set(newHeldLock(leaf, own));
+        r.reconcileOnce();
+        r.afterLeafReindexHook = null;
+        held.get().close();
+
+        assertThat(r.reindexes()).isEqualTo(1);
+        assertThat(r.owedAnchors()).as("owed the fresh anchor").containsOnlyKeys(own);
+        assertThat(commentOf(leaf.schema(), own)).as("no anchor on the index").isNull();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_anchor_not_written") && l.contains("index=" + own));
+        String oid = oidOf(leaf.schema(), own);
+
+        // Bloat it again while it is owed: the rule is true, and the index must not be judged without its anchor.
+        bloatAgain(tenant, leaf, own, "bulk2");
+        r.reindexPhaseHook = () -> held.set(newHeldLock(leaf, own));   // the retry fails again
+        r.reconcileOnce();
+        r.reindexPhaseHook = null;
+        held.get().close();   // (its queued plain REINDEX rebuilds the index, in place: same oid)
+        assertThat(r.reindexes()).as("no candidate while its anchor is owed").isEqualTo(1);
+        assertThat(r.owedAnchors()).containsOnlyKeys(own);
+        assertThat(oidOf(leaf.schema(), own)).isEqualTo(oid);
+
+        bloatAgain(tenant, leaf, own, "bulk3");
+        r.reconcileOnce();   // the retry lands; the anchor now holds the cooldown
+        assertThat(r.owedAnchors()).as("written: no longer owed").isEmpty();
+        assertThat(PciCatalog.parseAnchor(commentOf(leaf.schema(), own))).isPresent();
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_anchor_retried") && l.contains("index=" + own));
+        assertThat(r.reindexes()).as("cooling down, though still bloated").isEqualTo(1);
+        r.reconcileOnce();
+        assertThat(r.reindexes()).isEqualTo(1);
+        assertThat(oidOf(leaf.schema(), own)).isEqualTo(oid);
+
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).as("after the 24 hours").isEqualTo(2);
+    }
 }

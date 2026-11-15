@@ -24,10 +24,11 @@ import java.util.function.Predicate;
  * <p>For every leaf the pass counted ({@code looks}), the index is the leaf's own HNSW index on the leaf's dimension
  * ({@link PciCatalog.Leaf#hnswIndex}), which must be valid. The install reference for the dimension is
  * {@link PciReindexPolicy#installReference} over every built anchor the looks read at that dimension, so the leaf
- * rule and the per-collection size rule share one reference. An index in its failure backoff is not a candidate.
+ * rule and the per-collection size rule share one reference. An index in its failure backoff, or owed the fresh anchor of
+ * its last REINDEX ({@code skip}), is not a candidate.
  *
  * <p><b>The index's size and anchor are read lazily</b>, by the caller's {@code facts} function, and only for an index
- * that has a reference at its dimension and is not in backoff: {@code pg_relation_size} takes a lock on the index, so
+ * that has a reference at its dimension, is not in backoff or owed its anchor, and whose leaf has rows: {@code pg_relation_size} takes a lock on the index, so
  * it is not part of the shared catalog read (see {@link PciCatalog.LeafIndex}). A {@code null} answer (a lock timeout,
  * a failed read, an index gone) skips the index for this pass.
  *
@@ -66,12 +67,12 @@ final class PciLeafReindexRule {
      * @param rowEstimates the leaf's row estimate by {@link #leafId}, or null when there is none (0)
      * @param facts        the index's size and comment now, or null to skip it this pass; called only for an index that
      *                     can be judged
-     * @param backedOff    whether an index name is in its REINDEX failure backoff
+     * @param skip         whether an index name is in its REINDEX failure backoff or owed its anchor
      * @param now          the pass's clock, for the cooldown
      */
     static Scan scan(List<PciReindexState.Look> looks, Function<String, Long> rowEstimates,
                      BiFunction<PciCatalog.Leaf, PciCatalog.LeafIndex, PciAnchorReads.IndexFacts> facts,
-                     Predicate<String> backedOff, Instant now) {
+                     Predicate<String> skip, Instant now) {
         Map<Integer, List<PciCatalog.Anchor>> anchorsByDimension = new TreeMap<>();
         for (PciReindexState.Look look : looks) {
             for (PciReconciler.IndexReading reading : look.readings().values()) {
@@ -91,16 +92,19 @@ final class PciLeafReindexRule {
                 unanchored++;
                 continue;
             }
-            if (backedOff.test(own.name())) {
-                continue;
-            }
-            PciAnchorReads.IndexFacts read = facts.apply(look.leaf(), own);
-            if (read == null) {
+            if (skip.test(own.name())) {
                 continue;
             }
             Long estimate = rowEstimates.apply(leafId(look.leaf()));
             long counted = look.readings().values().stream().mapToLong(PciReconciler.IndexReading::rows).sum();
             long rows = Math.max(estimate == null ? 0 : estimate, counted);
+            if (rows == 0) {
+                continue;   // an empty leaf is quiet whatever its index weighs: no lock is taken to find out
+            }
+            PciAnchorReads.IndexFacts read = facts.apply(look.leaf(), own);
+            if (read == null) {
+                continue;
+            }
             if (PciLeafSizeRule.evaluate(read.bytes(), rows, reference) != PciLeafSizeRule.Verdict.FIRE) {
                 continue;
             }
