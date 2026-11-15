@@ -39,12 +39,20 @@ probes once. A git that cannot answer raises :class:`~nexus.lua_runtime.header.R
 when the root is on, and it propagates: a shadow check that cannot see the repo root must not
 pass. While the root is off the probe only tells a mistyped name from an off one, so a probe
 that fails there reads as ``not_found``.
+
+The lookup and the listing are suffix-agnostic (:func:`find_file`, :func:`list_files`):
+procedures are ``<name>.lua``, and RDR-249's auras are ``<name>.aura.toml`` in the same two
+roots, under the one name rule, shadow refusal and repo-root switch. :func:`find` and
+:func:`procedures` are the ``.lua`` wrappers and behave as they always did. A caller with its
+own suffix passes it, and the noun its refusals use, and never copies the root logic. The
+name is the file name less the whole suffix (``Path.stem`` would leave ``x.aura``).
 """
 from __future__ import annotations
 
 import importlib.resources
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -67,6 +75,9 @@ REASONS: tuple[str, ...] = (
 RESERVED_NAMES: frozenset[str] = frozenset(
     {"con", "prn", "aux", "nul", *(f"com{n}" for n in range(1, 10)), *(f"lpt{n}" for n in range(1, 10))}
 )
+
+#: The procedure file suffix, the default of the suffix-agnostic lookup and listing.
+LUA_SUFFIX: str = ".lua"
 
 #: Bytes read from a procedure file: the static check's source bound plus one, so a file
 #: over the bound reaches the check's ``size`` rule without being read whole. Pinned equal
@@ -153,16 +164,16 @@ def _unreadable(what: str, exc: BaseException) -> LibraryError:
 
 
 def _lookup(
-    root: Path | None, name: str, label: str, *, top: Path | None = None
+    root: Path | None, name: str, label: str, *, top: Path | None = None, suffix: str = LUA_SUFFIX
 ) -> tuple[Path, Path] | None:
-    """``(file, resolved root)`` for ``<root>/<name>.lua``, or ``None`` when no such regular
+    """``(file, resolved root)`` for ``<root>/<name><suffix>``, or ``None`` when no such regular
     file exists. A file that resolves outside its resolved root is refused, and so is a root
     that resolves outside *top* (the repo top, for the repo root). The directory entry must be
-    named exactly ``<name>.lua``. A directory the system will not let us read is
+    named exactly ``<name><suffix>``. A directory the system will not let us read is
     ``unreadable``."""
     if root is None:
         return None
-    entry = f"{name}.lua"
+    entry = f"{name}{suffix}"
     try:
         with os.scandir(root) as it:
             if not any(e.name == entry for e in it):
@@ -205,78 +216,131 @@ def _read(path: Path) -> bytes:
         raise _unreadable(path.name, exc) from exc
 
 
-def find(
-    name: str, *, cwd: Path | None, probe: RepoProbe | None | _Unprobed = UNPROBED
+def find_file(
+    name: str,
+    *,
+    cwd: Path | None,
+    probe: RepoProbe | None | _Unprobed = UNPROBED,
+    suffix: str = LUA_SUFFIX,
+    noun: str = "procedure",
 ) -> tuple[Path, bytes]:
-    """The resolved path and bytes of the procedure *name*, looked up for a run in *cwd*.
+    """The resolved path and bytes of ``<name><suffix>``, looked up for a run in *cwd*.
 
     *probe* is the caller's :func:`~nexus.lua_runtime.header.probe_repo` result for *cwd*
-    (``None`` meaning no repo); left out, ``find`` probes itself. At most ``READ_LIMIT``
-    bytes are read, from a regular file only.
+    (``None`` meaning no repo); left out, ``find_file`` probes itself. At most ``READ_LIMIT``
+    bytes are read, from a regular file only. *noun* names the thing in the refusals
+    (``procedure``, ``aura``).
 
     Raises :class:`LibraryError` for a name that breaks the rule or is a reserved device name
     (``invalid_name``); a name in neither root (``not_found``); a resolved path outside its root, or a
-    repo root outside the repo (``outside_root``); a repo file named like a shipped procedure
+    repo root outside the repo (``outside_root``); a repo file named like a shipped one
     (``shadows_shipped``); a name found only under the repo root while it is off
     (``repo_root_off``); and a file or directory the system will not let it read
     (``unreadable``). Raises :class:`~nexus.lua_runtime.header.RepoProbeError` only when the
     repo root is on and git cannot say where the repo is.
     """
     _check_name(name)
-    shipped = _lookup(shipped_root(), name, "shipped")
+    shipped = _lookup(shipped_root(), name, "shipped", suffix=suffix)
     if not repo_root_enabled():
         if shipped is None:
             # The probe only tells a repo-root name from a mistyped one, so a probe that fails
             # never turns a mistyped name into a repo error.
             try:
                 located = _repo_root(cwd, probe)
-                in_off_root = located is not None and (located[0] / f"{name}.lua").exists()
+                in_off_root = located is not None and (located[0] / f"{name}{suffix}").exists()
             except (RepoProbeError, OSError):
                 in_off_root = False
             if in_off_root:
                 raise LibraryError(
                     "repo_root_off",
                     f"{name} is in .nexus/procedures/, which is off; set {REPO_ROOT_ENV}=1 "
-                    "to run repo procedures (RDR-242 S5)",
+                    f"to run repo {noun}s (RDR-242 S5)",
                 )
-            raise LibraryError("not_found", f"no procedure {name} in the shipped root")
+            raise LibraryError("not_found", f"no {noun} {name} in the shipped root")
         return shipped[0], _read(shipped[0])
     located = _repo_root(cwd, probe)
-    repo = _lookup(located[0], name, "repo", top=located[1]) if located else None
+    repo = _lookup(located[0], name, "repo", top=located[1], suffix=suffix) if located else None
     if shipped is not None and repo is not None:
-        raise LibraryError("shadows_shipped", f"the repo procedure {name} shadows a shipped one")
+        raise LibraryError("shadows_shipped", f"the repo {noun} {name} shadows a shipped one")
     found = shipped or repo
     if found is None:
-        raise LibraryError("not_found", f"no procedure {name} in the shipped or repo root")
+        raise LibraryError("not_found", f"no {noun} {name} in the shipped or repo root")
     return found[0], _read(found[0])
 
 
-def _entries(root: Path | None, label: Root, *, top: Path | None = None) -> dict[str, Procedure]:
+def find(
+    name: str, *, cwd: Path | None, probe: RepoProbe | None | _Unprobed = UNPROBED
+) -> tuple[Path, bytes]:
+    """The resolved path and bytes of the procedure *name*, looked up for a run in *cwd*.
+
+    :func:`find_file` for ``<name>.lua``; the refusals are listed there.
+    """
+    return find_file(name, cwd=cwd, probe=probe)
+
+
+def _lua_summary(name: str, data: bytes) -> str:
+    """The listing summary of a procedure: its header's, or the refusal."""
+    try:
+        return parse(data, name=name).summary
+    except ScriptError as exc:
+        return f"header refused: {exc.detail}"
+
+
+def _entries(
+    root: Path | None,
+    label: Root,
+    *,
+    top: Path | None = None,
+    suffix: str = LUA_SUFFIX,
+    summarize: Callable[[str, bytes], str] = _lua_summary,
+) -> dict[str, Procedure]:
     out: dict[str, Procedure] = {}
     try:
         if root is None or not root.is_dir():
             return out
-        paths = sorted(root.glob("*.lua"))
+        paths = sorted(root.glob(f"*{suffix}"))
     except (OSError, RuntimeError):
         return out  # a root the system will not let us list lists nothing; find says why
     for path in paths:
-        name = path.stem
+        name = path.name.removesuffix(suffix)  # not .stem: "x.aura.toml".stem is "x.aura"
         if not _valid_name(name):
             continue
         try:
-            hit = _lookup(root, name, label, top=top)
+            hit = _lookup(root, name, label, top=top, suffix=suffix)
         except LibraryError:
             continue
         if hit is None:
             continue
         try:
-            summary = parse(_read(hit[0]), name=name).summary
-        except ScriptError as exc:
-            summary = f"header refused: {exc.detail}"
+            summary = summarize(name, _read(hit[0]))
         except LibraryError as exc:
             summary = f"{exc.reason}: {exc.detail}"
         out[name] = Procedure(name, summary, label)
     return out
+
+
+def list_files(
+    *,
+    cwd: Path | None,
+    suffix: str = LUA_SUFFIX,
+    summarize: Callable[[str, bytes], str] = _lua_summary,
+) -> list[Procedure]:
+    """Every ``<name><suffix>`` file of both roots, sorted by name, with its *summarize* text.
+
+    *summarize(name, data)* returns the listing's summary for a file and handles its own
+    format's refusals (it is called with at most ``READ_LIMIT`` bytes); a file the library
+    cannot read is listed with the library's refusal. A repo file named like a shipped one is
+    left out (it cannot run), and the repo root is listed only while its switch is on.
+    """
+    shipped = _entries(shipped_root(), "shipped", suffix=suffix, summarize=summarize)
+    if not repo_root_enabled():
+        return sorted(shipped.values(), key=lambda p: p.name)
+    located = _repo_root(cwd)
+    repo_entries = (
+        _entries(located[0], "repo", top=located[1], suffix=suffix, summarize=summarize) if located else {}
+    )
+    repo = {n: p for n, p in repo_entries.items() if n not in shipped}
+    return sorted([*shipped.values(), *repo.values()], key=lambda p: p.name)
 
 
 def procedures(*, cwd: Path | None) -> list[Procedure]:
@@ -286,10 +350,4 @@ def procedures(*, cwd: Path | None) -> list[Procedure]:
     header does not parse, or that cannot be read, is listed with the refusal as its summary,
     so its author sees why. A root the system will not let it list lists nothing.
     """
-    shipped = _entries(shipped_root(), "shipped")
-    if not repo_root_enabled():
-        return sorted(shipped.values(), key=lambda p: p.name)
-    located = _repo_root(cwd)
-    repo_entries = _entries(located[0], "repo", top=located[1]) if located else {}
-    repo = {n: p for n, p in repo_entries.items() if n not in shipped}
-    return sorted([*shipped.values(), *repo.values()], key=lambda p: p.name)
+    return list_files(cwd=cwd)
