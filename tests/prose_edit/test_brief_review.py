@@ -17,6 +17,7 @@ from tests.prose_edit.test_brief import (
     NAMES_A_REPAIR,
     ORDER,
     SKILL,
+    skill_text,
     _frontmatter,
     _module,
     brief_ok,
@@ -410,7 +411,7 @@ def _agent() -> str:
 
 
 def _skill() -> str:
-    return SKILL.read_text(encoding="utf-8")
+    return skill_text()
 
 
 def test_the_protected_region_bullets_are_the_ones_the_filter_enforces() -> None:

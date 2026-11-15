@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_get, t2_json, t2_put, t2_titles
-from tests.prose_edit.test_brief import SKILL, brief_ok, edit, fenced, proposal, run_brief
+from tests.prose_edit.test_brief import skill_text, brief_ok, edit, fenced, proposal, run_brief
 from tests.prose_edit.test_memory import _module as memory_module
 from tests.prose_edit.test_review import E1, E2, _review, review_ok, run_review, start
 
@@ -425,7 +425,7 @@ def test_the_answer_grammar_takes_reject_and_rest() -> None:
 
 
 def test_the_skill_says_unnamed_edits_are_held_and_how_to_reject_with_a_reason() -> None:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     step11 = text[text.index("\n11. "):text.index("\n12. ")]
     step12 = text[text.index("\n12. "):text.index("\n13. ")]
     assert "left undecided" in step11 and "nothing is stored for it" in step11

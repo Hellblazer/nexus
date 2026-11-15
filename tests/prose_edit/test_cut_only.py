@@ -19,6 +19,7 @@ from tests.prose_edit.conftest import REPO_PROJECT, ROOT, Prose, t2_json
 from tests.prose_edit.test_brief import (
     AGENT,
     PLUGIN_SKILL,
+    skill_text,
     SKILL,
     _frontmatter,
     _module,
@@ -611,7 +612,7 @@ def test_a_normal_session_still_applies_an_edit_that_adds_words(prose: Prose) ->
 CUT_TEXT = CUT_SKILL.read_text(encoding="utf-8") if CUT_SKILL.exists() else ""
 CUT_ALLOWED = ("Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/brief.py *) "
                "Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/review.py *)")
-EDIT_TEXT = SKILL.read_text(encoding="utf-8")
+EDIT_TEXT = skill_text()
 
 
 def test_prose_cut_is_a_model_invocable_skill_with_the_same_script_permission() -> None:

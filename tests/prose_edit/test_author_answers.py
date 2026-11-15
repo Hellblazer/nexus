@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_json, t2_titles
-from tests.prose_edit.test_brief import SKILL, _module, edit, fenced, proposal, run_brief
+from tests.prose_edit.test_brief import skill_text, _module, edit, fenced, proposal, run_brief
 from tests.prose_edit.test_review import E1, review_ok, run_review, start
 
 Q1 = {"n": 1, "anchor": "queue drains", "text": "Is 'in order' exact?"}
@@ -131,7 +131,7 @@ def test_the_authors_own_edit_is_never_stored_as_a_rejection(prose: Prose, repo:
 
 
 def test_the_skill_routes_answers_through_review_answer_and_prints_the_answers_path() -> None:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     assert "`REVIEW answer --work '<work>' --from-file '<answers>'`" in text
     assert "never edit the document yourself" in text and "never rejected" in text
     assert "`REASONS=<path>` and `ANSWERS=<path>`" in text and "`ANSWERS=`, `ENTRY=`" in text

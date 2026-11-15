@@ -25,12 +25,12 @@ def _branch(letter: str) -> str:
 
 def _app_decided() -> str:
     s12 = step(12)
-    return s12[s12.index("    App-decided run:"):s12.index("    Before the real apply")]
+    return s12[s12.index("    App-decided run (a path run only):"):s12.index("    Before the real apply")]
 
 
 def _apply_paragraph() -> str:
     s12 = step(12)
-    return s12[s12.index("    Run `REVIEW apply --work"):s12.index("    App-decided run:")]
+    return s12[s12.index("    Run `REVIEW apply --work"):s12.index("    App-decided run (a path run only):")]
 
 
 def test_exactly_two_branches_split_on_undecided() -> None:
@@ -60,8 +60,8 @@ def test_the_no_ask_apply_needs_every_set_but_accept_and_reject_empty() -> None:
     para = _app_decided()
     assert "`undecided`, `hold` and `warnings` all empty" in para
     assert "`hold`, `unplaced` and `would_skip` all empty" in para
-    before(para, "is not App-decided", "ask `Apply` as above")
-    before(para, "do not ask `Apply`", "run the dry run", "show it", "Before the real apply", "without `--dry-run`")
+    before(para, "is not App-decided", "ask `Apply` as in step 12 of SKILL.md")
+    before(para, "do not ask `Apply`", "run the dry run", "show it", "Step 12 before the real apply", "without `--dry-run`")
     assert "never skip the dry run" in para
 
 
@@ -100,7 +100,7 @@ def test_a_run_with_chat_decisions_still_asks_apply() -> None:
     Apply confirm' requires."""
     para = _app_decided()
     assert "took Branch A of step 11 (no edit question was asked in chat)" in para
-    assert "When any edit was decided in chat, the run asks `Apply` as above." in para
+    assert "When any edit was decided in chat, the run asks `Apply` as in step 12 of SKILL.md." in para
     assert "ask the author to confirm unless the run is App-decided, below" in _apply_paragraph()
 
 

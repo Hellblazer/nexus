@@ -22,7 +22,7 @@ from tests.prose_edit.test_brief import (
     AGENT,
     BRIEF,
     NAMES_A_REPAIR,
-    SKILL,
+    skill_text,
     brief_ok,
     edit,
     fenced,
@@ -239,7 +239,7 @@ def _keyed_phrases(step: str) -> set[str]:
 def test_every_phrase_the_skill_keys_on_in_stderr_is_emitted_by_the_scripts_with_the_same_case(
     prose: Prose, repo: Path, tmp_path: Path
 ) -> None:
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     keyed = _keyed_phrases(_step(skill, 12))
     assert keyed == SKILL_STDERR_PHRASES, "the skill keys on a phrase this test does not exercise (or the reverse)"
     f = tracked(repo)
@@ -268,7 +268,7 @@ def test_every_phrase_the_skill_keys_on_in_stderr_is_emitted_by_the_scripts_with
 
 
 def test_the_skill_keeps_work_on_the_failures_a_retry_can_fix() -> None:
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     step12, step10, step9 = _step(skill, 12), _step(skill, 10), _step(skill, 9)
     assert "exit 2" in step12 and "keep WORK" in step12  # an argparse usage error: nothing happened
     assert "expired" in step12 and "swept" in step12  # a work directory that is gone: nothing to delete
@@ -355,7 +355,7 @@ def test_a_reasons_file_must_sit_directly_inside_the_work_directory_and_not_clas
 
 
 def test_the_skill_passes_reasons_in_a_file_and_never_in_a_shell_string() -> None:
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     step12 = _step(skill, 12)
     assert "--reasons-file '<reasons>'" in step12 and "`REASONS=` path" in step12 and "Write tool" in step12
     assert '--reason "' not in skill and "--reason <n>" not in skill
@@ -450,7 +450,7 @@ def test_filter_checks_nothing_when_the_work_directory_holds_no_brief_file(prose
 
 
 def test_the_skill_and_the_agent_pass_the_brief_by_file_and_the_id_is_read_from_it() -> None:
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     assert "The prompt is the brief, unchanged." not in skill
     step7 = _step(skill, 7)
     assert "DISPATCH=" in step7
@@ -468,7 +468,7 @@ def test_the_skill_and_the_agent_pass_the_brief_by_file_and_the_id_is_read_from_
 
 
 def test_the_stdin_text_row_says_it_is_the_text_with_the_accepted_edits_applied() -> None:
-    row = next(ln for ln in SKILL.read_text(encoding="utf-8").splitlines() if ln.strip().startswith("| `text` |"))
+    row = next(ln for ln in skill_text().splitlines() if ln.strip().startswith("| `text` |"))
     assert "accepted edits applied" in row and "unchanged" not in row
 
 
@@ -496,13 +496,13 @@ def test_the_agent_discards_the_target_document_from_the_genre_path_grep() -> No
 
 
 def test_the_skill_quotes_paths_and_tokens_on_the_bash_line() -> None:
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     assert "single quotes" in skill and "author input" in skill
     assert "< '<reply>'" in skill
 
 
 def test_the_skill_asks_for_pasted_text_before_it_makes_a_work_directory() -> None:
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     row = next(ln for ln in _step(skill, 3).splitlines() if ln.strip().startswith("| true |"))
     assert row.index("ask the author to paste") < row.index("BRIEF tmpdir")
     assert "no WORK exists yet" in row

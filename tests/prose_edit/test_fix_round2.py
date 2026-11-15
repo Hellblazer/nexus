@@ -22,7 +22,7 @@ from tests.prose_edit.test_brief import (
     AGENT,
     NAMES_A_REPAIR,
     ORDER,
-    SKILL,
+    skill_text,
     TREATMENTS,
     _module,
     brief_ok,
@@ -46,7 +46,7 @@ def _voice(text: str) -> str:
 
 
 def _step13() -> str:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     return text[text.index("\n13. "):text.index("\n## Rules")]
 
 

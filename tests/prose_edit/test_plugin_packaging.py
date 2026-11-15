@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from tests.prose_edit.conftest import ROOT, SCRIPT, SITE_PAGE_REL, Prose, git
-from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok, run_brief, seed
+from tests.prose_edit.test_brief import AGENT, SKILL, skill_text, brief_ok, run_brief, seed
 from tests.prose_edit.test_review import DOC, E1, E2, review_ok, start
 
 PLUGIN = ROOT / "prose-edit"
@@ -34,7 +34,7 @@ def test_the_skill_dispatches_the_plugins_own_agent_and_preapproves_exactly_its_
         (PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
     )
     agent = _frontmatter(AGENT.read_text(encoding="utf-8"))["name"]
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     assert f"`subagent_type` `{manifest['name']}:{agent}`" in skill
     rule = _frontmatter(skill)["allowed-tools"]
     pattern = re.fullmatch(r"Bash\((.*)\)", rule)

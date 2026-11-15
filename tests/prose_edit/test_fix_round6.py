@@ -11,10 +11,10 @@ import re
 from pathlib import Path
 
 from tests.prose_edit.conftest import Prose
-from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok
+from tests.prose_edit.test_brief import AGENT, skill_text, brief_ok
 from tests.prose_edit.test_fix_round1 import _step
 
-SKILL_TEXT = SKILL.read_text(encoding="utf-8")
+SKILL_TEXT = skill_text()
 AGENT_TEXT = AGENT.read_text(encoding="utf-8")
 DISPATCH = re.compile(r"^DISPATCH=(?P<prompt>.+)$", re.MULTILINE)
 PROMPT = re.compile(r'Read (?P<path>/\S+/brief\.md) in full with Read and follow it\. '

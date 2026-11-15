@@ -89,3 +89,4 @@ conexus/skills/writing-nx-skills/promotion.md 4847
 prose-edit/agents/line-editor.md 12468
 prose-edit/skills/prose-cut/SKILL.md 10832
 prose-edit/skills/prose-edit/SKILL.md 40041
+prose-edit/skills/prose-edit/markup-route.md 20570

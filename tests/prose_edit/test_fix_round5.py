@@ -30,11 +30,11 @@ from tests.prose_edit.test_acceptance_tools import (
     _script,
     _write_runs,
 )
-from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok
+from tests.prose_edit.test_brief import AGENT, skill_text, brief_ok
 from tests.prose_edit.test_fix_round1 import _step
 
 AGENT_TEXT = AGENT.read_text(encoding="utf-8")
-SKILL_TEXT = SKILL.read_text(encoding="utf-8")
+SKILL_TEXT = skill_text()
 GUARD = ACC / "runner_guard.bash"
 FAKE_NX = f"{sys.executable} {ACC / 'fake_nx_unavailable.py'}"
 

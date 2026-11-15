@@ -22,7 +22,7 @@ import pytest
 from tests.prose_edit.conftest import REPO_PROJECT, ROOT, Prose, git, t2_get, t2_json, t2_titles
 from tests.prose_edit.test_brief import (
     NAMES_A_REPAIR,
-    SKILL,
+    skill_text,
     brief_ok,
     edit,
     fenced,
@@ -578,7 +578,7 @@ def test_the_saved_filter_output_is_the_machine_format_filter_prints(prose: Pros
 
 
 def test_the_skill_runs_render_then_apply_and_deletes_work_only_after_the_answer() -> None:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     assert "scripts/review.py" in text and "| REVIEW |" in text
     assert "`BRIEF filter <target> --budget <budget> --save '<filtered>' [--file '<input>'] < '<reply>'`" in text
     assert "REVIEW render <target> --work '<work>'" in text and "REVIEW apply --work '<work>' --accept" in text

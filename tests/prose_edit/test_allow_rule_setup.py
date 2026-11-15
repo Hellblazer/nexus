@@ -15,11 +15,11 @@ import os
 from pathlib import Path
 
 from tests.prose_edit.conftest import Prose
-from tests.prose_edit.test_brief import SKILL, brief_ok
+from tests.prose_edit.test_brief import skill_text, brief_ok
 
 
 def _setup_run() -> str:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     start = text.index("\n## Setup run\n")
     end = text.find("\n## ", start + 1)
     return text[start:] if end < 0 else text[start:end]

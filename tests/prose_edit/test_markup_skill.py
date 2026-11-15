@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import re
 
-from tests.prose_edit.test_brief import ROOT, SKILL
+from tests.prose_edit.test_brief import POINTER, ROOT, SKILL, route_sections, skill_text
 
 README = ROOT / "prose-edit" / "README.md"
 REVIEW = ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "review.py"
-TEXT = SKILL.read_text(encoding="utf-8")
+TEXT = skill_text()
 
 
 def step(n: int) -> str:
@@ -29,6 +29,29 @@ def before(text: str, *needles: str) -> None:
         found = text.find(needle, at + 1)
         assert found > at, (needle, "is missing or out of order")
         at = found
+
+
+# ---------------------------------------------------------------------------
+# The route file: path-run text is read on demand, so SKILL.md only points at it
+# ---------------------------------------------------------------------------
+
+
+def test_every_pointer_names_a_section_of_the_route_file_and_every_section_has_a_pointer() -> None:
+    named = POINTER.findall(SKILL.read_text(encoding="utf-8"))
+    assert set(named) == set(route_sections())
+    assert len(set(named)) == 10  # a census: a vanished section or pointer is a change to read, not a pass over nothing
+
+
+def test_the_skill_tells_a_path_run_to_read_the_route_file_in_full_and_names_no_app_tool_itself() -> None:
+    raw = SKILL.read_text(encoding="utf-8")
+    assert "A path run reads `markup-route.md`, in this skill's base directory, in full with the Read tool now, once" in raw
+    for tool in ("open_document", "get_document", "propose_edits", "list_suggestions", "undo tool"):
+        assert tool not in raw, tool  # the app's tools are named in the route file only, so a stdin run never loads them
+
+
+def test_the_route_file_opens_by_saying_when_it_is_read() -> None:
+    head = (ROOT / "prose-edit" / "skills" / "prose-edit" / "markup-route.md").read_text(encoding="utf-8").split("\n## ", 1)[0]
+    assert "Read this file in full once, at the start of the run" in head and "A stdin run never reads this file" in head
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +329,7 @@ def test_the_expired_sentence_says_dont_save_never_save() -> None:
     s12 = step(12)
     expired = s12[s12.index("On exit 1 with `expired`"):s12.index("On exit 3, or exit 1 with `run apply again`")]
     assert "Don't Save" in expired and 'never "Save"' in expired, expired
-    assert "returns the app to the file" in expired  # suggestions may still sit in the app
+    assert "return the app to the file" in expired  # suggestions may still sit in the app
 
 
 def test_every_stop_after_suggestions_were_sent_runs_the_return_to_the_file_first() -> None:
