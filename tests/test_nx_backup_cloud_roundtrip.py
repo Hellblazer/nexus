@@ -171,6 +171,18 @@ def _case_an_interrupted_export_frees_the_engines_session_slot(tenant: str, tmp_
     client.close_http()
 
 
+def _roundtrip_compare():
+    """scripts/backup_roundtrip_compare.py, the offline comparison the cloud round trip runs (nexus-csayy.10)."""
+    import importlib.util  # noqa: PLC0415
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "backup_roundtrip_compare.py"
+    spec = importlib.util.spec_from_file_location("backup_roundtrip_compare", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 #: Tables whose row count may differ between a tenant and its restore, with why. Everything else must be equal.
 _RESTORE_COUNT_EXCEPTIONS = {
     "catalog_meta": "the restore writes its own marker row (rdr248_restore), and the tenant's first request seeds another",
@@ -213,6 +225,9 @@ def _case_a_restore_into_a_second_tenant_round_trips_with_equal_counts(
         # ids are reassigned, so the check is on what the rows say, not on what they are numbered
         for table, name in (("memory", "title"), ("catalog_documents", "title"), ("chunks", "chash")):
             assert column(dest, table, name) == column(second_file, table, name), f"{table}.{name} differs after the restore"
+        # the comparison the cloud round trip runs (nexus-csayy.10), against a real restore: every table, every column
+        report = _roundtrip_compare().compare(dest, second_file)
+        assert report["verdict"] == "PASS", (report["failures"], report["review"])
         marker = httpx.get(f"{state['base_url']}/v1/tenant/import-marker", headers={"Authorization": f"Bearer {token}"}, timeout=10).json()
         assert marker["present"] is True and marker["marker"]["header_sha256"], marker
 
