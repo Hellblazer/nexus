@@ -315,10 +315,10 @@ class PciCatalogTest {
     @Test
     void anchor_redUnfixed_isAnAdditiveOptionalField_thatRoundTrips_andTheOldRuleStillReadsIt() {
         var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
-        var red = new PciCatalog.RedUnfixed(java.time.Instant.parse("2026-10-21T09:30:00.123456Z"), 16421L, "ab12");
+        var red = new PciCatalog.RedUnfixed(java.time.Instant.parse("2026-10-21T09:30:00.123456Z"), 16421L, 58588L, "ab12");
         var anchor = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L, red);
-        String text = ANCHOR_WITH_RELFILENODE.replace("}",
-            ",\"red_unfixed\":{\"at\":\"2026-10-21T09:30:00.123456Z\",\"relfilenode\":16421,\"ring\":\"ab12\"}}");
+        String text = ANCHOR_WITH_RELFILENODE.replace("}", ",\"red_unfixed\":{\"at\":\"2026-10-21T09:30:00.123456Z\","
+            + "\"relfilenode\":16421,\"rows\":58588,\"queries\":\"ab12\"}}");
 
         assertThat(anchor.toJson()).isEqualTo(text);
         assertThat(PciCatalog.parseAnchor(text)).contains(anchor);
@@ -326,29 +326,28 @@ class PciCatalogTest {
         assertThat(anchor.withoutRedUnfixed().toJson()).isEqualTo(ANCHOR_WITH_RELFILENODE);
         assertThat(anchor.withRelfilenode(9L).redUnfixed()).as("carried forward by a rewrite").isEqualTo(red);
         assertThat(anchor.sameFigures(anchor.withoutRedUnfixed())).isTrue();
-        assertThat(red.holds(anchor, "ab12")).isTrue();
-        assertThat(red.holds(anchor, "cd34")).as("another ring").isFalse();
-        assertThat(red.holds(anchor.withRelfilenode(9L), "ab12")).as("another relfilenode").isFalse();
-        for (String bad : new String[] {"1", "\"x\"", "{}", "{\"at\":\"yesterday\",\"relfilenode\":1,\"ring\":\"a\"}",
-            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":-1,\"ring\":\"a\"}",
-            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"ring\":\"\"}"}) {
+        for (String bad : new String[] {"1", "\"x\"", "{}",
+            "{\"at\":\"yesterday\",\"relfilenode\":1,\"rows\":1,\"queries\":\"a\"}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":-1,\"rows\":1,\"queries\":\"a\"}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"queries\":\"a\"}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":\"\"}"}) {
             assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("}", ",\"red_unfixed\":" + bad + "}")))
                 .as(bad).hasValueSatisfying(a -> assertThat(a.redUnfixed()).isNull());
         }
     }
 
     @Test
-    void ringDigest_isTheSameForTheSameQueriesInAnyOrder_andDifferentForADifferentSet() {
+    void queryDigest_isTheSameForTheSameQueriesInAnyOrder_andDifferentForADifferentSet() {
         var a = new float[] {1f, 2f, 3f};
         var b = new float[] {4f, 5f, 6f};
         var c = new float[] {7f, 8f, 9f};
 
-        assertThat(PciQueryRing.ringDigest(java.util.List.of(a, b)))
-            .isEqualTo(PciQueryRing.ringDigest(java.util.List.of(b, a))).hasSize(64);
-        assertThat(PciQueryRing.ringDigest(java.util.List.of(a, b)))
-            .isNotEqualTo(PciQueryRing.ringDigest(java.util.List.of(a, c)));
-        assertThat(PciQueryRing.ringDigest(java.util.List.of(a)))
-            .isNotEqualTo(PciQueryRing.ringDigest(java.util.List.of(a, b)));
+        assertThat(PciQueryRing.queryDigest(java.util.List.of(a, b)))
+            .isEqualTo(PciQueryRing.queryDigest(java.util.List.of(b, a))).hasSize(64);
+        assertThat(PciQueryRing.queryDigest(java.util.List.of(a, b)))
+            .isNotEqualTo(PciQueryRing.queryDigest(java.util.List.of(a, c)));
+        assertThat(PciQueryRing.queryDigest(java.util.List.of(a)))
+            .isNotEqualTo(PciQueryRing.queryDigest(java.util.List.of(a, b)));
     }
 
     @Test

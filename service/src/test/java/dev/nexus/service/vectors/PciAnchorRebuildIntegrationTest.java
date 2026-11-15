@@ -165,16 +165,20 @@ class PciAnchorRebuildIntegrationTest {
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60));
     }
 
-    /** The canary: every run ends in {@link #state} with {@link #queries} queries; a red run's queries are {@link #sample}. */
+    /**
+     * The canary: every run ends in {@link #state} with {@link #queries} queries; a red run's queries are {@link #sample},
+     * and the ones of them that read red are {@link #reds} (all of them when null).
+     */
     static final class ScriptedCanary implements PciCanarySchedule.Runner {
         volatile PciCanary.State state = PciCanary.State.GREEN;
         volatile int queries = 10;
         volatile List<float[]> sample = List.of(new float[] {1f, 2f, 3f});
+        volatile List<float[]> reds;
 
         private Result result(Target target, String trigger) {
             boolean red = state == PciCanary.State.RED;
             return new Result(target, trigger, state, null, queries, red ? 0.9 : 1.0, red ? 0.95 : 1.0, red ? 1 : 0,
-                Instant.now(), red ? sample : null, null);
+                Instant.now(), red ? sample : null, null, red ? (reds != null ? reds : sample) : null);
         }
 
         @Override public Result run(Target target, String trigger) {
@@ -596,7 +600,8 @@ class PciAnchorRebuildIntegrationTest {
         assertThat(anchor.redUnfixed()).isNotNull();
         assertThat(anchor.redUnfixed().relfilenode()).isEqualTo(Long.parseLong(facts.relfilenode()))
             .isEqualTo(anchor.relfilenode());
-        assertThat(anchor.redUnfixed().ring()).isEqualTo(PciQueryRing.ringDigest(canary.sample));
+        assertThat(anchor.redUnfixed().queries()).isEqualTo(PciQueryRing.queryDigest(canary.sample));
+        assertThat(anchor.redUnfixed().rows()).as("the count at the red, after the REINDEX").isEqualTo(300);
         assertThat(anchor.redUnfixed().at()).isEqualTo(clock.instant());
         assertThat(facts.comment()).contains("\"red_unfixed\":{");
         assertThat(logged("event=pci_red_unfixed_recorded")).isEqualTo(1);
@@ -612,13 +617,13 @@ class PciAnchorRebuildIntegrationTest {
     }
 
     @Test
-    void aChangeOfTheQueryRing_liftsIt_soANewCauseIsRebuiltAgain() throws Exception {
+    void aNewRedQuery_liftsIt_soANewCauseIsRebuiltAgain() throws Exception {
         String tenant = newTenant("unfixed-ring");
         String coll = name("c");
         MutableClock clock = new MutableClock();
         ScriptedCanary canary = new ScriptedCanary();
         PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
-        String oldRing = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().ring();
+        String oldRed = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries();
 
         canary.sample = List.of(new float[] {9f, 8f, 7f});
         clock.advance(Duration.ofHours(25));
@@ -627,9 +632,9 @@ class PciAnchorRebuildIntegrationTest {
         r.reconcileOnce();
 
         assertThat(r.reindexes()).as("a new ring can mean a new cause").isEqualTo(2);
-        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().ring())
-            .as("recorded again, for the new ring").isEqualTo(PciQueryRing.ringDigest(canary.sample))
-            .isNotEqualTo(oldRing);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries())
+            .as("recorded again, for the new red queries").isEqualTo(PciQueryRing.queryDigest(canary.sample))
+            .isNotEqualTo(oldRed);
     }
 
     @Test
@@ -689,6 +694,152 @@ class PciAnchorRebuildIntegrationTest {
         clock.advance(Duration.ofHours(25));
         restarted.reconcileOnce();
         restarted.reconcileOnce();
-        assertThat(restarted.reindexes()).as("and a new ring lifts it on the restarted engine too").isEqualTo(1);
+        assertThat(restarted.reindexes()).as("and a new red query lifts it on the restarted engine too").isEqualTo(1);
+    }
+
+    // -- the hold is on the queries that read red, and on the collection's size ----------------------------------
+
+    private static final float[] OUTLIER = {1f, 2f, 3f};
+
+    private static List<float[]> window(float... greens) {
+        List<float[]> out = new java.util.ArrayList<>();
+        out.add(OUTLIER);
+        for (float g : greens) {
+            out.add(new float[] {g, g, g});
+        }
+        return out;
+    }
+
+    @Test
+    void oneOutlierThatStaysRed_withNewGreenQueriesEnteringTheWindow_isNeverRebuiltAgain() throws Exception {
+        String tenant = newTenant("outlier");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        canary.sample = window(10f, 11f);
+        canary.reds = List.of(OUTLIER);
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+        String held = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries();
+        assertThat(held).isEqualTo(PciQueryRing.queryDigest(List.of(OUTLIER)));
+
+        for (int day = 0; day < 4; day++) {
+            canary.sample = window(20f + day, 21f + day, 22f + day);   // the newest ten change; the outlier stays red
+            clock.advance(Duration.ofHours(25));
+            r.reconcileOnce();
+            r.reconcileOnce();
+        }
+
+        assertThat(r.reindexes()).as("the same outlier is the same red").isEqualTo(1);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries()).isEqualTo(held);
+    }
+
+    @Test
+    void aNewQueryThatReadsRed_liftsTheHold() throws Exception {
+        String tenant = newTenant("newred");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        canary.sample = window(10f);
+        canary.reds = List.of(OUTLIER);
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+
+        canary.sample = window(10f, 30f);
+        canary.reds = List.of(OUTLIER, new float[] {30f, 30f, 30f});   // a new cause
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();   // judged on the old red; the daily run then reads the new one
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).isEqualTo(2);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries())
+            .isEqualTo(PciQueryRing.queryDigest(canary.reds));
+    }
+
+    @Test
+    void theOutlierAgingOutOfTheWindow_withEverythingElseGreen_clearsViaTheGreenRun() throws Exception {
+        String tenant = newTenant("aged");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        canary.sample = window(10f);
+        canary.reds = List.of(OUTLIER);
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+
+        canary.state = PciCanary.State.GREEN;   // the outlier is out of the newest ten
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();   // the daily run reads green at the end of this pass
+        r.reconcileOnce();
+
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed()).isNull();
+        assertThat(logged("event=pci_red_unfixed_cleared")).isEqualTo(1);
+        assertThat(r.reindexes()).isEqualTo(1);
+    }
+
+    @Test
+    void insertOnlyGrowthOfTenPercentOrMore_liftsTheHold_andLessKeepsIt() throws Exception {
+        String tenant = newTenant("growth");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);   // 300 rows at the red
+
+        addRows(tenant, coll, 29);   // +9.67%
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
+        r.reconcileOnce();
+        assertThat(r.reindexes()).as("under 10%: held").isEqualTo(1);
+
+        addRows(tenant, coll, 1);   // 330 rows: +10%
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
+        r.reconcileOnce();
+        assertThat(r.reindexes()).as("10% or more: the red is judged afresh").isEqualTo(2);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().rows()).isEqualTo(330);
+    }
+
+    // -- a bulk delete owed while the index was backed off ---------------------------------------------------------
+
+    @Test
+    void aFallSeenWhileBackedOff_thenAHandReindex_givesNoBulkDeleteReindexAndNoVacuum() throws Exception {
+        String tenant = newTenant("owedbulk");
+        collection(tenant, name("c"), 300);
+        MutableClock clock = new MutableClock();
+        PciReconciler r = reindexingReconciler(clock, new ScriptedCanary());
+        r.reconcileOnce();
+        r.reconcileOnce();
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String index = indexOf(tenant, name("c")).name();
+
+        r.reindexState().failed(index, clock.instant());   // backed off for ten minutes
+        deleteRows(tenant, name("c"), 0, 120);   // 40%
+        clock.advance(Duration.ofMinutes(1));
+        r.reconcileOnce();   // the fall is seen and owed; the index is backed off
+        handReindex(leaf.schema(), index);
+        clock.advance(Duration.ofMinutes(1));
+        r.reconcileOnce();   // the rebuild is found: the baseline starts over
+        clock.advance(Duration.ofMinutes(11));   // the backoff is over
+        r.reconcileOnce();
+        r.reconcileOnce();
+
+        assertThat(logged("event=pci_anchor_rebuilt_detected")).isEqualTo(1);
+        assertThat(logged("trigger=bulk_delete")).as("the owed fall died with the old build").isZero();
+        assertThat(logged("event=pci_leaf_vacuumed")).isZero();
+        assertThat(logs()).as("the index is not rebuilt by the engine (the leaf's own index may be: another rule)")
+            .noneMatch(l -> l.contains("event=pci_index_reindexed") && l.contains("index=" + index));
+    }
+
+    /** {@code rows} more rows for an existing collection. */
+    void addRows(String tenant, String collection, int rows) throws Exception {
+        int gen = ++generation;
+        asSuperuser(su -> {
+            var step = su.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
+                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_384, CHUNKS.METADATA);
+            for (int i = 0; i < rows; i++) {
+                step = step.values(tenant, collection,
+                    Chash.fromHex(Chash.ofText(tenant + "/" + collection + "/add/" + gen + "/" + i).toHex()).toBytes(),
+                    M384, "added " + i, vector(1000 + gen * 100 + i), JSONB.jsonb("{}"));
+            }
+            step.onConflictDoNothing().execute();
+            return null;
+        });
     }
 }

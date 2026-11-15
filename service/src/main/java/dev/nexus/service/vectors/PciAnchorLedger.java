@@ -175,19 +175,19 @@ final class PciAnchorLedger {
 
     /**
      * A red-canary REINDEX of {@code indexName} was re-measured still red: write its anchor again with
-     * {@code red_unfixed} (the relfilenode of the fresh storage and {@code ring}), a second COMMENT after the one the
-     * REINDEX wrote. Nothing is written when the engine holds no anchor for the index or the index was rebuilt since.
+     * {@code red_unfixed} (the relfilenode of the fresh storage, the rows its fresh anchor counted, and {@code queries}, the
+     * digest of the queries that read red), a second COMMENT after the one the REINDEX wrote. Nothing is written when the engine holds no anchor for the index or the index was rebuilt since.
      *
      * @return whether the field was written
      */
     boolean markRedUnfixed(PciBuilderSession.Pass pass, Leaf leaf, String indexName, String collection, Instant at,
-                           String ring) {
+                           String queries) {
         String id = PciReconciler.leafId(leaf);
         IndexReading r = readings.get(new Key(id, indexName));
         if (r == null || r.anchor().relfilenode() == null) {
             return false;   // its fresh anchor is not written (owed): the retry writes it, and the next red marks it
         }
-        var red = new PciCatalog.RedUnfixed(at, r.anchor().relfilenode(), ring);
+        var red = new PciCatalog.RedUnfixed(at, r.anchor().relfilenode(), r.anchor().rows(), queries);
         var written = pass.write(leaf, new Index(indexName, true, collection), r.anchor().withRedUnfixed(red),
             r.anchor().relfilenode());
         if (written.outcome() != DdlOutcome.DONE) {
@@ -196,8 +196,8 @@ final class PciAnchorLedger {
         }
         readings.put(new Key(id, indexName), reading(r, written.anchor()));
         log.info("event=pci_red_unfixed_recorded index={} leaf={} relfilenode={} detail=\"still red after the REINDEX; "
-            + "not rebuilt for a red canary until the index or the query ring changes\"", indexName, id,
-            red.relfilenode());
+            + "no red-canary REINDEX while the index, the red queries and the collection's size are unchanged\"",
+            indexName, id, red.relfilenode());
         return true;
     }
 

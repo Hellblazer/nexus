@@ -50,6 +50,22 @@ class PciReindexStateTest {
     }
 
     @Test
+    void aRebuildBySomeoneElse_startsTheBaselineOver_andEndsAnOwedBulkDelete() {
+        var state = new PciReindexState();
+        pass(state, 1000, NOW, n -> null);
+        state.failed(NAME, NOW);
+        assertThat(pass(state, 880, NOW.plusSeconds(60), n -> null).get(0).bulkPending()).isTrue();
+
+        state.rebaseline(NAME, 880);   // a hand REINDEX was found: the fall is moot, 880 is the baseline
+
+        var later = pass(state, 880, NOW.plus(Duration.ofMinutes(11)), n -> null).get(0);
+        assertThat(later.backedOff()).isFalse();
+        assertThat(later.bulkPending()).as("no longer owed").isFalse();
+        assertThat(later.previousRows()).hasValue(880);
+        assertThat(PciReindexPolicy.trigger(later, NOW.plus(Duration.ofMinutes(11)))).isEmpty();
+    }
+
+    @Test
     void aBulkFallSeenWhileTheIndexIsBackedOff_staysOwedUntilItsReindexRuns() {
         var state = new PciReindexState();
         assertThat(pass(state, 1000, NOW, n -> null)).singleElement()

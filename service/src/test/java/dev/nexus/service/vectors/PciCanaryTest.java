@@ -232,6 +232,60 @@ class PciCanaryTest {
         assertThat(r.minRecall()).isCloseTo(0.9, org.assertj.core.data.Offset.offset(1e-9));
     }
 
+    /** The HNSW page of query {@code outlier} lacks its nearest row (a tie fills the page); every other is exact. */
+    private static Script oneOutlier(int outlier) {
+        return new Script((q, k) -> {
+            if (q != outlier) {
+                return exactPage(k);
+            }
+            List<Hit> page = new ArrayList<>(exactPage(k).subList(1, k));
+            page.add(new Hit("tied-" + k, 0.001 * k));
+            return page;
+        });
+    }
+
+    @Test
+    void aRedRun_namesTheQueriesThatReadRedThemselves_theOutlierAlone() {
+        Result r = canary(5, oneOutlier(2)).run(TARGET, "daily");
+
+        assertThat(r.state()).isEqualTo(State.RED);
+        assertThat(r.top1Misses()).isEqualTo(1);
+        assertThat(r.redSample()).as("the whole run").hasSize(5);
+        assertThat(r.redQueries()).as("only the outlier").hasSize(1);
+        assertThat(r.redQueries().get(0)).isEqualTo(vec(2));
+    }
+
+    @Test
+    void aMeanDrivenRed_namesTheQueryWhoseOwnMeanIsBelowTheBar() {
+        // Query 1 alone has a tenth of every page replaced by far rows: its mean is 0.9, the others are 1.0, the run's
+        // mean is 0.98, below the bar, and no query has a top-1 miss.
+        Script script = new Script((q, k) -> {
+            List<Hit> page = new ArrayList<>(exactPage(k));
+            if (q == 1) {
+                for (int i = k - k / 10; i < k; i++) {
+                    page.set(i, new Hit("far-" + i, 5.0 + i));
+                }
+            }
+            return page;
+        });
+
+        Result r = canary(5, script).run(TARGET, "daily");
+
+        assertThat(r.top1Misses()).isZero();
+        assertThat(r.state()).isEqualTo(State.RED);
+        assertThat(r.redQueries()).hasSize(1);
+        assertThat(r.redQueries().get(0)).isEqualTo(vec(1));
+    }
+
+    @Test
+    void aGreenRun_hasNoRedQueries() {
+        Result r = canary(5, new Script(PciCanaryTest::perfect)).run(TARGET, "daily");
+
+        assertThat(r.state()).isEqualTo(State.GREEN);
+        assertThat(r.redSample()).isNull();
+        assertThat(r.redQueries()).isNull();
+    }
+
     @Test
     void aShortPage_countsAgainstRecall() {
         Script script = new Script((q, k) -> exactPage(k / 2));

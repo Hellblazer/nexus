@@ -109,10 +109,21 @@ final class PciCanary implements PciCanarySchedule.Runner {
      * @param top1Misses queries with a top-1 miss; 0 unless measured
      * @param at        when the run ended, on the engine's clock
      * @param redSample a red run's queries, kept for the confirmation a later phase makes; null otherwise
+     * @param redQueries the queries of a red run that read red themselves ({@link Scored#readsRed}): the ones with a top-1
+     *                   miss or a mean recall below {@link PciCanaryPolicy#RED_MEAN_BELOW}; a subset of
+     *                   {@code redSample}; null unless red
      * @param detail    for an unmeasured result, what happened, one line (the plan's top node, the error class); may be null
      */
     record Result(Target target, String trigger, State state, String reason, int queries, Double minRecall,
-                  Double meanRecall, int top1Misses, Instant at, List<float[]> redSample, String detail) { }
+                  Double meanRecall, int top1Misses, Instant at, List<float[]> redSample, String detail,
+                  List<float[]> redQueries) {
+        /** A result whose red queries are all of its sample (a runner that does not tell them apart). */
+        Result(Target target, String trigger, State state, String reason, int queries, Double minRecall,
+               Double meanRecall, int top1Misses, Instant at, List<float[]> redSample, String detail) {
+            this(target, trigger, state, reason, queries, minRecall, meanRecall, top1Misses, at, redSample, detail,
+                redSample);
+        }
+    }
 
     private final RingSource ring;
     private final Statements statements;
@@ -201,7 +212,22 @@ final class PciCanary implements PciCanarySchedule.Runner {
     // -- scoring ---------------------------------------------------------------------------------------------
 
     /** One query's recalls (one per k, in {@link PciCanaryPolicy#KS} order) and whether it had a top-1 miss. */
-    record Scored(double[] recalls, boolean top1Miss, boolean measurable) { }
+    record Scored(double[] recalls, boolean top1Miss, boolean measurable) {
+        /** Whether this query is red by itself: a top-1 miss, or a mean recall over its k's below the bar. */
+        boolean readsRed() {
+            if (!measurable) {
+                return false;
+            }
+            if (top1Miss) {
+                return true;
+            }
+            double sum = 0;
+            for (double r : recalls) {
+                sum += r;
+            }
+            return recalls.length > 0 && sum / recalls.length < PciCanaryPolicy.RED_MEAN_BELOW;
+        }
+    }
 
     /**
      * Score one query: {@code exact} is the exact page (at least as long as the largest k when the collection has the
@@ -271,15 +297,24 @@ final class PciCanary implements PciCanarySchedule.Runner {
         }
         double mean = sum / cells;
         boolean red = mean < PciCanaryPolicy.RED_MEAN_BELOW || misses > 0;
+        List<float[]> reds = new ArrayList<>();
+        for (int i = 0; red && i < scored.size(); i++) {
+            if (scored.get(i).readsRed()) {
+                reds.add(queries.get(i));
+            }
+        }
+        if (red && reds.isEmpty()) {
+            reds.addAll(queries);   // the mean alone is red and no one query is: all of them share it
+        }
         return new Result(target, trigger, red ? State.RED : State.GREEN, null, n, min, mean, misses,
-            clock.instant(), red ? List.copyOf(queries) : null, null);
+            clock.instant(), red ? List.copyOf(queries) : null, null, red ? List.copyOf(reds) : null);
     }
 
     // -- results ---------------------------------------------------------------------------------------------
 
     private Result unmeasured(Target target, String trigger, String reason, int queries, String detail) {
         return new Result(target, trigger, State.UNMEASURED, reason, queries, null, null, 0, clock.instant(), null,
-            detail);
+            detail, null);
     }
 
     private Result notUsed(Target target, String trigger, int queries, String planDescription) {

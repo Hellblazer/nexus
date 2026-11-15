@@ -126,8 +126,8 @@ final class PciReindexState {
                 result == null ? null : result.state(), result == null ? 0 : result.queries(),
                 lastRedReindex.get(name), backedOff(name, now),
                 PciReindexPolicy.installReference(s.dimension(), anchorsByDimension.get(s.dimension())),
-                result != null && result.state() == PciCanary.State.RED && result.redSample() != null
-                    ? PciQueryRing.ringDigest(result.redSample()) : null));
+                result != null && result.state() == PciCanary.State.RED && result.redQueries() != null
+                    ? PciQueryRing.queryDigest(result.redQueries()) : null));
             previousRows.put(name, reading.rows());
         }
         forgetAllBut(snapshotIndexes);
@@ -175,10 +175,12 @@ final class PciReindexState {
 
     /**
      * {@code index} was rebuilt by someone else and re-anchored at {@code rows} (nexus-4lnn1.1.10): its row count is the
-     * new baseline, so the next look does not read the fall since the old build as a bulk delete.
+     * new baseline, so the next look does not read the fall since the old build as a bulk delete, and a bulk delete still
+     * owed its REINDEX is no longer owed: the rebuild did that work.
      */
     void rebaseline(String index, long rows) {
         previousRows.put(index, rows);
+        bulkOwed.remove(index);   // a fall seen before the rebuild (while backed off, or past the limit) is moot: it is rebuilt
     }
 
     /** A bulk delete was chosen for {@code index}; it stays owed until its REINDEX has run. */

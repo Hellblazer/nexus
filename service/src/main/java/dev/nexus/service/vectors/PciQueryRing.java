@@ -283,9 +283,10 @@ public final class PciQueryRing {
     /**
      * The digest of a set of query vectors, order-free: the hex SHA-256 of the sorted {@link #digest}s, each as 64 hex
      * digits, joined by newlines. The same queries give the same text; a different set gives a different one
-     * (nexus-4lnn1.1.10: a red canary that a REINDEX did not cure is held only while its ring is the same).
+     * (nexus-4lnn1.1.10: a red canary that a REINDEX did not cure is held only while the queries that read red are the
+     * same).
      */
-    public static String ringDigest(java.util.Collection<float[]> vectors) {
+    public static String queryDigest(java.util.Collection<float[]> vectors) {
         java.util.List<String> digests = new java.util.ArrayList<>();
         for (float[] v : vectors) {
             digests.add(java.util.HexFormat.of().formatHex(digest(v)));

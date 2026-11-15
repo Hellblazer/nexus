@@ -1145,6 +1145,7 @@ public class TenantKeyedStateGateTest {
                 "PciCanary.Target.tenant",
                 "PciCanary.Leg.hits",
                 "PciCanary.Result.redSample",
+                "PciCanary.Result.redQueries",
                 "PciReconciler.Tally.droppedIndexes",
                 "PciReconciler.Tally.builtTargets")) {
                 notKeyed.put(f, PCI_OFF);

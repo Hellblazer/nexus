@@ -239,35 +239,30 @@ public final class PciCatalog {
 
     /**
      * A red recall canary that a REINDEX did not cure (RDR-230 Phase 2, nexus-4lnn1.1.10), kept in the anchor:
-     * {@code "red_unfixed":{"at":"<ISO-8601 Z>","relfilenode":N,"ring":"<hex>"}}. The red-canary trigger skips an
-     * index while the field holds ({@link #holds}): the index has the relfilenode it names and the query ring has the
-     * digest it names. A rebuild or a change of the ring lifts it, with no write.
+     * {@code "red_unfixed":{"at":"<ISO-8601 Z>","relfilenode":N,"rows":N,"queries":"<hex>"}}. The red-canary trigger skips
+     * an index while the field holds ({@link PciReindexPolicy#redUnfixedHolds}): the index has the relfilenode it names,
+     * the queries that read red are the ones it names, and the collection has not grown by 10% or more since. A rebuild,
+     * a new red query or that growth lifts it, with no write.
      *
      * @param at          when the still-red re-measure was taken, truncated to microseconds
      * @param relfilenode the index's relfilenode at the red: the REINDEX's fresh storage
-     * @param ring        {@link PciQueryRing#ringDigest} of the queries the red run used
+     * @param rows        the collection's row count at the red (the count the REINDEX's fresh anchor holds)
+     * @param queries     {@link PciQueryRing#queryDigest} of the queries that read red in the re-measure
      */
-    public record RedUnfixed(Instant at, long relfilenode, String ring) {
+    public record RedUnfixed(Instant at, long relfilenode, long rows, String queries) {
         public RedUnfixed {
             Objects.requireNonNull(at, "at");
-            Objects.requireNonNull(ring, "ring");
-            if (relfilenode < 0 || ring.isBlank()) {
-                throw new IllegalArgumentException("relfilenode must not be negative and ring must not be blank");
+            Objects.requireNonNull(queries, "queries");
+            if (relfilenode < 0 || rows < 0 || queries.isBlank()) {
+                throw new IllegalArgumentException("relfilenode and rows must not be negative, queries not blank");
             }
             at = at.truncatedTo(ChronoUnit.MICROS);
         }
 
         /** The field's value as JSON: numbers, a timestamp and a hex string, so nothing needs escaping. */
         String toJson() {
-            return "{\"at\":\"" + at + "\",\"relfilenode\":" + relfilenode + ",\"ring\":\"" + ring + "\"}";
-        }
-
-        /**
-         * Whether the field still holds for an index with this anchor now and a red run on {@code currentRing}: the
-         * index's relfilenode is the anchor's and the field's own, and the ring is the same.
-         */
-        public boolean holds(Anchor anchor, String currentRing) {
-            return anchor.relfilenode() != null && anchor.relfilenode() == relfilenode && ring.equals(currentRing);
+            return "{\"at\":\"" + at + "\",\"relfilenode\":" + relfilenode + ",\"rows\":" + rows
+                + ",\"queries\":\"" + queries + "\"}";
         }
     }
 
@@ -316,13 +311,15 @@ public final class PciCatalog {
         }
         JsonNode at = n.get("at");
         JsonNode rf = n.get("relfilenode");
-        JsonNode ring = n.get("ring");
+        JsonNode rows = n.get("rows");
+        JsonNode queries = n.get("queries");
         try {
             if (at == null || !at.isTextual() || rf == null || !rf.isIntegralNumber() || !rf.canConvertToLong()
-                || rf.asLong() < 0 || ring == null || !ring.isTextual() || ring.asText().isBlank()) {
+                || rf.asLong() < 0 || rows == null || !rows.isIntegralNumber() || !rows.canConvertToLong()
+                || rows.asLong() < 0 || queries == null || !queries.isTextual() || queries.asText().isBlank()) {
                 return null;
             }
-            return new RedUnfixed(Instant.parse(at.asText()), rf.asLong(), ring.asText());
+            return new RedUnfixed(Instant.parse(at.asText()), rf.asLong(), rows.asLong(), queries.asText());
         } catch (DateTimeParseException e) {
             return null;
         }
