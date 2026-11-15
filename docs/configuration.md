@@ -425,9 +425,12 @@ run:
    `nexus_diag`'s direct table SELECT on its next boot, and
    `grants-nexus-diag-3` grants back only the one column of each table the
    view reads (content hashes and ids), so the role cannot read chunk text
-   through them. Two changesets still grant whole tables: `grants-nexus-diag-4`
-   (`gc_audit`, `search_telemetry`) and `grants-nexus-diag-5` (the three
-   tuple-space tables, whose rows the role can read for every tenant). (This SQL is
+   through them. `grants-nexus-diag-5` grants only the columns of
+   `nexus.tuples` that `nx doctor`'s lock check reads, never a tuple's keys,
+   dims or body. Four tables keep a whole-table grant, and the role reads
+   their rows for every tenant: `gc_audit` and `search_telemetry`
+   (`grants-nexus-diag-4`), and `tuple_claim_log` and `tuple_tenants`
+   (`grants-nexus-diag-5`), none of which holds a payload. (This SQL is
    generated from `nexus.db.chash_tables.CHASH_BEARING_TABLES`; a drift test
    pins this rendered copy to the generator.) DBAs who created an earlier
    view generation: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t

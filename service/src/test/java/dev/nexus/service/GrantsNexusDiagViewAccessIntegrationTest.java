@@ -31,6 +31,8 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -248,13 +250,45 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                     }
                 }
                 assertThat(denied)
-                    .as("nexus_diag must hold direct SELECT on nexus.tuples, "
+                    .as("nexus_diag must be able to count nexus.tuples, "
                         + "nexus.tuple_claim_log and nexus.tuple_tenants after a full "
                         + "changelog walk (bead nexus-f1pbh)")
                     .isEmpty();
+                // nexus-edchb: the grant on nexus.tuples is column-level, so this BYPASSRLS role
+                // never reads a tenant's tuple payload.
+                assertThatThrownBy(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(TUPLES.BODY).from(TUPLES).limit(1).fetch())
+                    .as("nexus_diag reading a tuple body is refused")
+                    .hasMessageContaining("permission denied");
+                // The shape of health._lock_claim_started_sql, the one statement that reads
+                // nexus.tuples as nexus_diag: it must run on the column grant.
+                assertThatCode(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(DSL.min(TUPLE_CLAIM_LOG.AT)).from(TUPLES)
+                        .join(TUPLE_CLAIM_LOG).on(TUPLE_CLAIM_LOG.TENANT_ID.eq(TUPLES.TENANT_ID)
+                            .and(TUPLE_CLAIM_LOG.TUPLE_ID.eq(TUPLES.ID))
+                            .and(TUPLE_CLAIM_LOG.CLAIM_ID.eq(TUPLES.CLAIM_ID)))
+                        .where(TUPLES.SUBSPACE.eq("lock/x")).and(TUPLES.CLAIMANT.eq("c"))
+                        .and(TUPLES.CLAIM_STATE.eq("claimed")).and(TUPLES.CONSUMED_AT.isNull())
+                        .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime()))
+                        .and(TUPLE_CLAIM_LOG.TRANSITION.eq("claim"))
+                        .fetch())
+                    .as("nx doctor's lock-held fallback query runs as nexus_diag")
+                    .doesNotThrowAnyException();
             }
+            var asSu = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(asSu.select(DSL.function("has_table_privilege", Boolean.class,
+                    DSL.inline(DIAG_ROLE), DSL.inline("nexus.tuples"), DSL.inline("SELECT"))).fetchOne(0, Boolean.class))
+                .as("no table-level SELECT on nexus.tuples").isFalse();
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus", List.of("tuples")))
+                .as("nexus_diag may read only the tuples columns nx doctor's lock check reads")
+                .containsExactly(TUPLES_DIAG_COLUMNS);
         }
     }
+
+    /** The columns of nexus.tuples health._lock_claim_started_sql reads (grants-nexus-diag-5). */
+    static final String[] TUPLES_DIAG_COLUMNS = {
+        "tuples.claim_id", "tuples.claim_state", "tuples.claimant", "tuples.consumed_at",
+        "tuples.id", "tuples.lease_until", "tuples.subspace", "tuples.tenant_id"};
 
     /**
      * RDR-222 Phase 1 (bead nexus-yye8l.1, Sam's ruling 2026-10-18): after a full

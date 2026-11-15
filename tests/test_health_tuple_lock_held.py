@@ -9,6 +9,7 @@ so the row's SQL is proved against the real tables and the real lint.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -431,3 +432,21 @@ class TestLockHeldRealEngine:
         started = h._parse_tuple_timestamp(out[0] if out else None)
         assert started is not None
         assert 2.9 * 3600 < (datetime.now(UTC) - started).total_seconds() < 3.1 * 3600
+
+
+def test_lock_claim_query_reads_only_the_tuples_columns_nexus_diag_is_granted() -> None:
+    """nexus-edchb: grants-nexus-diag-5 grants nexus_diag a column list on
+    nexus.tuples, never the payload. Every ``t.<column>`` this query reads must
+    be in that list, or the check fails with permission denied on a live box."""
+    xml = (
+        Path(__file__).resolve().parents[1]
+        / "service/src/main/resources/db/changelog/grants-nexus-diag.xml"
+    ).read_text()
+    grant = re.search(r"GRANT SELECT \(([^)]*)\)\s+ON nexus\.tuples\s+TO nexus_diag", xml)
+    assert grant, "grants-nexus-diag-5 no longer grants a column list on nexus.tuples"
+    granted = {c.strip() for c in grant.group(1).split(",")}
+    assert not granted & {"keys", "dims", "body"}, "a tuple payload column is granted to nexus_diag"
+
+    read = set(re.findall(r"\bt\.(\w+)", h._lock_claim_started_sql("lock/x", "claimant")))
+    assert read, "no t.<column> found in the query: the pin checks nothing"
+    assert read <= granted, f"query reads ungranted tuples columns: {sorted(read - granted)}"

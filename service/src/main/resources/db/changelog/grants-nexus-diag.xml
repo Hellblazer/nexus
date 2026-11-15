@@ -501,6 +501,17 @@ $$;
             No foreign-owner guard needed (matches -3/-4's own reasoning):
             nexus_admin creates all three tables via ordinary forward DDL
             (tuples-001-baseline.xml) and always owns them.
+
+            COLUMN GRANT ON nexus.tuples (nexus-edchb, Sam 2026-11-15): the
+            role reads only the eight columns nx doctor's tuples.lock_held
+            fallback joins and filters on (health._lock_claim_started_sql),
+            never a payload column (keys, dims, body), which it could
+            otherwise read for every tenant. COUNT(*) needs SELECT on one
+            column only, so a row count still works. tuple_claim_log and
+            tuple_tenants carry no payload and keep the table grant. No
+            REVOKE here: in the view era -2 revokes the table grant every
+            boot before this runs, and in the legacy era -1's schema-wide
+            grant applies anyway.
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
@@ -510,7 +521,8 @@ BEGIN
         RETURN;
     END IF;
 
-    GRANT SELECT ON nexus.tuples          TO nexus_diag;
+    GRANT SELECT (id, tenant_id, subspace, claimant, claim_id, claim_state, consumed_at, lease_until)
+                    ON nexus.tuples          TO nexus_diag;
     GRANT SELECT ON nexus.tuple_claim_log TO nexus_diag;
     GRANT SELECT ON nexus.tuple_tenants   TO nexus_diag;
 END
