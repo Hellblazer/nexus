@@ -793,11 +793,14 @@ class PciBuilderSessionIntegrationTest {
             assertThat(pass.currentSetting("lock_timeout")).isEqualTo("5s");
         }
 
-        assertThat(commentOf(leaf, name)).isEqualTo(
-            "{\"nexus_pci\":1,\"built_at\":\"2026-11-05T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
-                + "\"origin\":\"built\"}");
-        assertThat(indexOn(M1024, T1, name).orElseThrow().anchor()).contains(anchor);
-        assertThat(catalog.read().anchor(M1024, T1, collection)).contains(anchor);
+        // nexus-4lnn1.1.10: the writer stamps the relfilenode (v2) on its own session, right before the COMMENT.
+        assertThat(commentOf(leaf, name)).startsWith(
+            "{\"nexus_pci\":2,\"built_at\":\"2026-11-05T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
+                + "\"origin\":\"built\",\"relfilenode\":");
+        assertThat(indexOn(M1024, T1, name).orElseThrow().anchor()).hasValueSatisfying(
+            a -> assertThat(a.sameFigures(anchor) && a.relfilenode() != null).isTrue());
+        assertThat(catalog.read().anchor(M1024, T1, collection)).hasValueSatisfying(
+            a -> assertThat(a.sameFigures(anchor) && a.relfilenode() != null).isTrue());
     }
 
     @Test

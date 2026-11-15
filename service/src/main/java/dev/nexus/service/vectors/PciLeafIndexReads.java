@@ -83,6 +83,21 @@ final class PciLeafIndexReads {
     }
 
     /**
+     * A leaf's own HNSW index whose v2 anchor names another relfilenode than the index's now (nexus-4lnn1.1.10) was
+     * rebuilt by someone else: log it once and anchor the index as freshly built ({@link #anchorAfterReindex}: the leaf's
+     * live rows, the index's size now, {@code built_at} now). An anchor that is not written leaves the old comment, and
+     * the next pass finds the index rebuilt again.
+     *
+     * @return whether the anchor was written
+     */
+    static boolean reanchorRebuilt(PciBuilderSession.Pass pass, PciLeafReindexRule.Rebuilt r, Clock clock,
+                                   Duration statementTimeout) {
+        anchorLog.info("event=pci_anchor_rebuilt_detected index={} leaf={}.{} old_relfilenode={} new_relfilenode={}",
+            r.own().name(), r.leaf().schema(), r.leaf().name(), r.oldRelfilenode(), r.newRelfilenode());
+        return pass.live() && anchorAfterReindex(pass, r.leaf(), r.own().name(), clock, statementTimeout);
+    }
+
+    /**
      * The fresh anchor of a leaf's own HNSW index right after its REINDEX (RDR-230 Technical Design 3): the live rows are
      * read (the leaf's {@code n_live_tup}, {@code built_at} taken before it, as for a build) and the anchor is written
      * through {@link PciBuilderSession.Pass#anchorAfterLeafReindex}. {@code leaf} is the snapshot the REINDEX ran on, and

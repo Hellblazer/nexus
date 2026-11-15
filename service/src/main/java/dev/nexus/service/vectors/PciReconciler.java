@@ -268,7 +268,8 @@ public final class PciReconciler {
     }
 
     /** An index with no parseable anchor, and what to write on it. */
-    private record Adoption(Index index, String reason, long rows, long bytes) { }
+    private record Adoption(Index index, String reason, long rows, long bytes, Long oldRelfilenode,
+                            Long newRelfilenode) { }
 
     /** What the counting transaction read for anchors; applied only once the transaction has committed. */
     private record AnchorReads(PciAnchorReads.LeafStats stats, Map<String, IndexReading> readings,
@@ -1023,7 +1024,14 @@ public final class PciReconciler {
             if (anchor.isEmpty()) {
                 long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
                 adoptions.add(new Adoption(index, facts.comment() == null ? "missing" : "unparsable", rows,
-                    facts.bytes()));
+                    facts.bytes(), null, null));
+                continue;
+            }
+            if (anchor.get().rebuiltSince(facts.relfilenode())) {
+                // Rebuilt by someone else (a hand REINDEX CONCURRENTLY keeps the comment): anchor it as freshly built.
+                long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
+                adoptions.add(new Adoption(index, "rebuilt", rows, facts.bytes(), anchor.get().relfilenode(),
+                    facts.relfilenode()));
                 continue;
             }
             IndexReading last = readings.get(new LeafKey(id, index.name()));
@@ -1117,17 +1125,26 @@ public final class PciReconciler {
 
     private void adopt(PciBuilderSession.Pass pass, Leaf leaf, Adoption adoption) {
         Index index = adoption.index();
-        var anchor = new PciCatalog.Anchor(clock.instant(), adoption.rows(), adoption.bytes(),
-            PciCatalog.ORIGIN_ADOPTED);
-        DdlOutcome outcome = pass.comment(leaf, index, anchor);
-        if (outcome == DdlOutcome.DONE) {
+        boolean rebuilt = adoption.oldRelfilenode() != null;   // nexus-4lnn1.1.10: built, not adopted
+        String origin = rebuilt ? PciCatalog.ORIGIN_BUILT : PciCatalog.ORIGIN_ADOPTED;
+        if (rebuilt) {
+            log.info("event=pci_anchor_rebuilt_detected index={} leaf={} old_relfilenode={} new_relfilenode={} rows={} "
+                + "bytes={}", index.name(), leafId(leaf), adoption.oldRelfilenode(), adoption.newRelfilenode(),
+                adoption.rows(), adoption.bytes());
+        }
+        var written = pass.write(leaf, index,
+            new PciCatalog.Anchor(clock.instant(), adoption.rows(), adoption.bytes(), origin));
+        if (written.outcome() == DdlOutcome.DONE) {
             readings.put(new LeafKey(leafId(leaf), index.name()),
-                new IndexReading(anchor, adoption.bytes(), adoption.rows(), 0, anchor.builtAt()));
-            log.info("event=pci_anchor_adopted reason={} index={} leaf={} rows={} bytes={}", adoption.reason(),
-                index.name(), leafId(leaf), adoption.rows(), adoption.bytes());
+                new IndexReading(written.anchor(), adoption.bytes(), adoption.rows(), 0, written.anchor().builtAt()));
+            if (!rebuilt) {
+                log.info("event=pci_anchor_adopted reason={} index={} leaf={} rows={} bytes={}", adoption.reason(),
+                    index.name(), leafId(leaf), adoption.rows(), adoption.bytes());
+            }
         } else {
-            log.info("event=pci_anchor_not_written origin=adopted index={} leaf={} outcome={} detail=\"the next pass "
-                + "adopts it again\"", index.name(), leafId(leaf), outcome);
+            log.info("event=pci_anchor_not_written origin={} index={} leaf={} outcome={} detail=\"the next pass "
+                + "{} it again\"", origin, index.name(), leafId(leaf), written.outcome(),
+                rebuilt ? "detects" : "adopts");
         }
     }
 
@@ -1182,11 +1199,12 @@ public final class PciReconciler {
                 leafId(leaf), next);
             return false;
         }
-        var anchor = new PciCatalog.Anchor(builtAt, figures[0], figures[1], PciCatalog.ORIGIN_BUILT);
-        DdlOutcome outcome = pass.comment(leaf, index, anchor);
+        var written = pass.write(leaf, index,
+            new PciCatalog.Anchor(builtAt, figures[0], figures[1], PciCatalog.ORIGIN_BUILT));
+        DdlOutcome outcome = written.outcome();
         if (outcome == DdlOutcome.DONE) {
             readings.put(new LeafKey(leafId(leaf), build.name()),
-                new IndexReading(anchor, figures[1], figures[0], 0, builtAt));
+                new IndexReading(written.anchor(), figures[1], figures[0], 0, builtAt));
             log.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", build.name(),
                 leafId(leaf), figures[0], figures[1]);
             refreshSweep("anchor", false);
@@ -1276,6 +1294,7 @@ public final class PciReconciler {
             (leaf, own) -> PciLeafIndexReads.facts(pass, leaf, own, countTimeout),
             name -> reindex.backedOff(name, now) || owed.containsKey(name), now);
         noteLeafUnanchored(scan.unanchored());
+        scan.rebuilt().forEach(r -> PciLeafIndexReads.reanchorRebuilt(pass, r, clock, countTimeout));
         if (scan.candidates().isEmpty()) {
             return triggered;
         }

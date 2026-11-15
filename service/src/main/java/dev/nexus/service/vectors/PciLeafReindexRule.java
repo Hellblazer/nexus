@@ -54,8 +54,17 @@ final class PciLeafReindexRule {
     /** At most one LEAF_SIZE REINDEX of an index in this long, counted from the anchor its last REINDEX wrote. */
     static final Duration LEAF_SIZE_MIN_INTERVAL = Duration.ofHours(24);
 
-    /** The REINDEXes the rule calls for (in leaf order; the caller sorts) and the indexes it cannot judge. */
-    record Scan(List<Reindex> candidates, int unanchored) { }
+    /**
+     * A leaf's own HNSW index whose v2 anchor names a relfilenode other than the index's now: rebuilt by someone else
+     * (nexus-4lnn1.1.10). Not judged this pass; the caller re-anchors it.
+     */
+    record Rebuilt(PciCatalog.Leaf leaf, PciCatalog.LeafIndex own, long oldRelfilenode, long newRelfilenode) { }
+
+    /**
+     * The REINDEXes the rule calls for (in leaf order; the caller sorts), the indexes it cannot judge, and the ones it
+     * found rebuilt by hand.
+     */
+    record Scan(List<Reindex> candidates, int unanchored, List<Rebuilt> rebuilt) { }
 
     /** {@code schema.name}, the key of a leaf in the statistics map and in logs. */
     static String leafId(PciCatalog.Leaf leaf) {
@@ -80,6 +89,7 @@ final class PciLeafReindexRule {
             }
         }
         List<Reindex> out = new ArrayList<>();
+        List<Rebuilt> rebuilt = new ArrayList<>();
         int unanchored = 0;
         for (PciReindexState.Look look : looks) {
             PciCatalog.LeafIndex own = look.leaf().hnswIndex(look.dimension()).orElse(null);
@@ -105,15 +115,19 @@ final class PciLeafReindexRule {
             if (read == null) {
                 continue;
             }
+            PciCatalog.Anchor anchor = PciCatalog.parseAnchor(read.comment()).orElse(null);
+            if (anchor != null && anchor.rebuiltSince(read.relfilenode())) {
+                rebuilt.add(new Rebuilt(look.leaf(), own, anchor.relfilenode(), read.relfilenode()));
+                continue;   // its size and its anchor describe a build that is gone; the caller anchors the new one
+            }
             if (PciLeafSizeRule.evaluate(read.bytes(), rows, reference) != PciLeafSizeRule.Verdict.FIRE) {
                 continue;
             }
-            boolean cooling = PciCatalog.parseAnchor(read.comment())
-                .map(a -> now.isBefore(a.builtAt().plus(LEAF_SIZE_MIN_INTERVAL))).orElse(false);
+            boolean cooling = anchor != null && now.isBefore(anchor.builtAt().plus(LEAF_SIZE_MIN_INTERVAL));
             if (!cooling) {
                 out.add(new Reindex(own.name(), null, Trigger.LEAF_SIZE, read.bytes()));
             }
         }
-        return new Scan(List.copyOf(out), unanchored);
+        return new Scan(List.copyOf(out), unanchored, List.copyOf(rebuilt));
     }
 }

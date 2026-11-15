@@ -31,8 +31,14 @@ final class PciAnchorReads {
      *
      * @param comment {@code obj_description}: the anchor text, or {@code null} when the index has no comment
      * @param bytes   {@code pg_relation_size} of the index
+     * @param relfilenode {@code pg_class.relfilenode} of the index, which every rebuild changes; {@code null} when not
+     *                known (a caller that read none), which is never evidence of a rebuild
      */
-    record IndexFacts(String comment, long bytes) { }
+    record IndexFacts(String comment, long bytes, Long relfilenode) {
+        IndexFacts(String comment, long bytes) {
+            this(comment, bytes, null);
+        }
+    }
 
     /**
      * The leaf's {@code pg_stat_user_tables} row. A leaf with no row yet (never touched since the statistics were
@@ -54,7 +60,8 @@ final class PciAnchorReads {
         Field<String> comment = DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB, oid,
             DSL.inline("pg_class"));
         Field<Long> bytes = DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT, oid);
-        Record row = tx.select(comment, bytes)
+        Field<Long> relfilenode = DSL.field(DSL.name("c", "relfilenode")).cast(SQLDataType.BIGINT);
+        Record row = tx.select(comment, bytes, relfilenode)
             .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
             .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
             .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
@@ -65,7 +72,23 @@ final class PciAnchorReads {
         if (row == null || row.get(bytes) == null) {
             return null;
         }
-        return new IndexFacts(row.get(comment), row.get(bytes));
+        return new IndexFacts(row.get(comment), row.get(bytes), row.get(relfilenode));
+    }
+
+    /**
+     * {@code pg_class.relfilenode} of {@code schema.indexName}, or {@code null} when no such index exists. The builder
+     * reads it on its own session right before it writes an anchor, so the anchor records the storage it was written
+     * against.
+     */
+    static Long relfilenode(DSLContext ctx, String schema, String indexName) {
+        return ctx.select(DSL.field(DSL.name("c", "relfilenode")).cast(SQLDataType.BIGINT))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+            .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(indexName))
+            .and(DSL.field(DSL.name("c", "relkind"), String.class).eq("i"))
+            .fetchOne(0, Long.class);
     }
 
     /** The leaf's statistics row, or {@link LeafStats#EMPTY} when it has none. */

@@ -244,6 +244,34 @@ class PciCatalogTest {
         assertThat(PciCatalog.parseAnchor(fine.toJson())).contains(fine);
     }
 
+    private static final String ANCHOR_V2 =
+        "{\"nexus_pci\":2,\"built_at\":\"2026-10-20T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
+            + "\"origin\":\"built\",\"relfilenode\":16421}";
+
+    @Test
+    void anchorV2_recordsTheRelfilenodeItWasWrittenAgainst_roundTrips_andV1StaysReadable() {
+        var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
+        var v2 = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L);
+
+        assertThat(PciCatalog.ANCHOR_VERSION).isEqualTo(2);
+        assertThat(v2.toJson()).isEqualTo(ANCHOR_V2);
+        assertThat(PciCatalog.parseAnchor(ANCHOR_V2)).contains(v2);
+        // A v1 text (no relfilenode) is a valid anchor exactly as before: relfilenode is unknown, not an error.
+        var v1 = PciCatalog.parseAnchor(ANCHOR_TEXT).orElseThrow();
+        assertThat(v1.relfilenode()).isNull();
+        assertThat(v1.builtAt()).isEqualTo(at);
+        assertThat(v1.rows()).isEqualTo(58588);
+        // A v1 anchor is never "rebuilt": it has no relfilenode to differ from.
+        assertThat(v1.rebuiltSince(99L)).isFalse();
+        assertThat(v2.rebuiltSince(16421L)).isFalse();
+        assertThat(v2.rebuiltSince(16500L)).isTrue();
+        assertThat(v2.rebuiltSince(null)).as("an unreadable current relfilenode is no evidence").isFalse();
+        assertThat(v2.withRelfilenode(7L).relfilenode()).isEqualTo(7L);
+        assertThat(v1.sameFigures(v2)).as("the figures, not the relfilenode").isTrue();
+        // An unknown extra field on a v2 text is ignored.
+        assertThat(PciCatalog.parseAnchor(ANCHOR_V2.replace("}", ",\"future\":1}"))).contains(v2);
+    }
+
     @Test
     void anchor_aTextWeDoNotWrite_isRefusedByTheWriter_andReadableByTheParser() {
         // Phase 2 adds an origin of its own; a reader of today still reads it, and this engine writes only two.
@@ -259,7 +287,11 @@ class PciCatalogTest {
     void parseAnchor_everythingThatIsNotOneAnchorIsEmpty_andNothingThrows() {
         for (String text : new String[] {
             null, "", "   ", "an operator's note", "[]", "[1]", "\"x\"", "42", "null", "{", "{}",
-            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":2"),
+            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":3"),
+            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":2"),   // v2 without its relfilenode
+            ANCHOR_V2.replace("\"relfilenode\":16421", "\"relfilenode\":\"16421\""),
+            ANCHOR_V2.replace("\"relfilenode\":16421", "\"relfilenode\":-1"),
+            ANCHOR_V2.replace("\"relfilenode\":16421", "\"relfilenode\":1.5"),
             ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":\"1\""),
             ANCHOR_TEXT.replace("\"nexus_pci\":1,", ""),
             ANCHOR_TEXT.replace("\"built_at\":\"2026-10-20T08:00:00Z\",", ""),

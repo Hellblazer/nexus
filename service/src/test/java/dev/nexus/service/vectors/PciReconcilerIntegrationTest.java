@@ -2430,7 +2430,7 @@ class PciReconcilerIntegrationTest {
         assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).containsExactly(index);
         assertThat(leaf(tenant).indexes().get(0).valid()).isTrue();
         reconciler(s, sweep).reconcileOnce();
-        assertThat(commentOf(leaf, index)).isEqualTo(text);
+        assertThat(commentOf(leaf, index)).as("re-anchored at v2 (nexus-4lnn1.1.10)").isNotEqualTo(text).contains("nexus_pci\":2");
         assertThat(logged("event=pci_anchor_adopted")).isZero();
     }
 

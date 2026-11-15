@@ -651,7 +651,8 @@ class PciLeafIndexIntegrationTest {
             assertThat(pass.comment(leaf, own, anchor)).isEqualTo(DdlOutcome.DONE);
         }
 
-        assertThat(commentOf(leaf.schema(), own.name())).isEqualTo(anchor.toJson());
+        assertThat(commentOf(leaf.schema(), own.name())).startsWith(anchor.toJson().replace("\"nexus_pci\":1",
+            "\"nexus_pci\":2").replace("}", ",\"relfilenode\":"));   // nexus-4lnn1.1.10: stamped (v2) by the writer
     }
 
     @Test

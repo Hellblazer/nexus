@@ -58,6 +58,11 @@ class PciLeafReindexRuleTest {
             return this;
         }
 
+        Facts put(String index, long bytes, String comment, long relfilenode) {
+            byName.put(index, new PciAnchorReads.IndexFacts(comment, bytes, relfilenode));
+            return this;
+        }
+
         @Override
         public PciAnchorReads.IndexFacts apply(Leaf leaf, LeafIndex own) {
             read.add(own.name());
@@ -211,10 +216,34 @@ class PciLeafReindexRuleTest {
         Leaf l = leaf("leaf_a", 1024, true);
         Map<String, Long> rows = Map.of("nexus.leaf_a", 1000L);
 
-        for (String comment : new String[] {null, "", "not json", "{\"nexus_pci\":2}"}) {
+        for (String comment : new String[] {null, "", "not json", "{\"nexus_pci\":2}", "{\"nexus_pci\":3}"}) {
             var facts = new Facts().put(idx("leaf_a", 1024), 99_000_000, comment);
             assertThat(scan(List.of(look(l, 1024)), rows, facts).candidates()).as("comment " + comment).hasSize(1);
         }
+    }
+
+    @Test
+    void aV2AnchorWhoseRelfilenodeMoved_isRebuilt_andNoCandidate_whileV1AndUnmovedOnesAreJudgedAsBefore() {
+        Leaf l = leaf("leaf_a", 1024, true);
+        Map<String, Long> rows = Map.of("nexus.leaf_a", 1000L);
+        String index = idx("leaf_a", 1024);
+        var v2 = new Anchor(T, 1000, 8_200_000, PciCatalog.ORIGIN_BUILT, 500L);
+        String v1 = new Anchor(T, 1000, 8_200_000, PciCatalog.ORIGIN_BUILT).toJson();
+        // The size rule fires on 99 MB for 1000 rows, and the cooldown (T is long before NOW) is over.
+        var moved = scan(List.of(look(l, 1024)), rows, new Facts().put(index, 99_000_000, v2.toJson(), 777L));
+        var unmoved = scan(List.of(look(l, 1024)), rows, new Facts().put(index, 99_000_000, v2.toJson(), 500L));
+        var legacy = scan(List.of(look(l, 1024)), rows, new Facts().put(index, 99_000_000, v1, 777L));
+
+        assertThat(moved.candidates()).as("a rebuilt index is re-anchored, not judged, this pass").isEmpty();
+        assertThat(moved.rebuilt()).singleElement().satisfies(r -> {
+            assertThat(r.own().name()).isEqualTo(index);
+            assertThat(r.oldRelfilenode()).isEqualTo(500L);
+            assertThat(r.newRelfilenode()).isEqualTo(777L);
+        });
+        assertThat(unmoved.rebuilt()).isEmpty();
+        assertThat(unmoved.candidates()).hasSize(1);
+        assertThat(legacy.rebuilt()).as("v1 has no relfilenode to differ from").isEmpty();
+        assertThat(legacy.candidates()).hasSize(1);
     }
 
     @Test

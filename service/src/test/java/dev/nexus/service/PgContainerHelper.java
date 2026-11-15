@@ -2494,7 +2494,7 @@ public final class PgContainerHelper {
     }
 
     /**
-     * {@code COMMENT ON INDEX schema.index} with a well-formed PCI anchor of {@code "nexus_pci":2}
+     * {@code COMMENT ON INDEX schema.index} with a well-formed PCI anchor of {@code "nexus_pci":3}
      * (nexus-4lnn1.1.1), through {@code db.changelog-test-index-comment-wrong-version.xml}. The text is fixed in the
      * changelog; both names go through {@link #requireTestIdentifier}.
      */
@@ -2503,6 +2503,18 @@ public final class PgContainerHelper {
         requireTestIdentifier(index);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-wrong-version.xml",
             "databasechangelog_test_index_comment_wrong_version", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code COMMENT ON INDEX schema.index} with a well-formed v1 PCI anchor, {@code "nexus_pci":1} and no relfilenode
+     * (nexus-4lnn1.1.10), through {@code db.changelog-test-index-comment-v1-anchor.xml}. The text is fixed in the
+     * changelog; both names go through {@link #requireTestIdentifier}.
+     */
+    public static void commentIndexV1Anchor(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-v1-anchor.xml",
+            "databasechangelog_test_index_comment_v1_anchor", Map.of("schema", schema, "index", index));
     }
 
     /**

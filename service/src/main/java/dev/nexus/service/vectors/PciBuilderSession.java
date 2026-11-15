@@ -696,44 +696,51 @@ public final class PciBuilderSession {
          * operator's {@code pci_} index included, is {@link DdlOutcome#REJECTED} and nothing is sent. The leaf's own
          * HNSW index has its own overload, {@link #comment(PciCatalog.Leaf, PciCatalog.LeafIndex, PciCatalog.Anchor)}.
          *
-         * <p>5 s lock timeout, as a drop. A comment takes a lock on the index that a long-running statement on it
-         * would hold; one that expires leaves the old comment, and the next pass writes it again (an index with no
-         * parseable anchor is adopted).
+         * <p>The anchor is written at v2: this session reads the index's relfilenode right before the COMMENT
+         * (nexus-4lnn1.1.10), whatever {@code anchor} carried. 5 s lock timeout, as a drop. A comment takes a lock on
+         * the index that a long-running statement on it would hold; one that expires leaves the old comment, and the
+         * next pass writes it again (an index with no parseable anchor is adopted).
          */
         public DdlOutcome comment(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor).outcome();
+        }
+
+        /** As {@link #comment(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor)}, answering with the anchor written. */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor) {
             if (ended != null) {
-                return ended;
+                return new AnchorOutcome(ended, null);
             }
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
             Objects.requireNonNull(anchor, "anchor");
-            String text;
             try {
                 if (!ownsForComment(leaf, index)) {
                     log.warn("event=pci_ddl_rejected op=comment reason=not_builders_index name={} parsed={} valid={}",
                         index.name(), index.parsed(), index.valid());
-                    return DdlOutcome.REJECTED;
+                    return new AnchorOutcome(DdlOutcome.REJECTED, null);
                 }
-                text = anchor.toJson();
+                anchor.checkWritable();
             } catch (IllegalStateException e) {
                 log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
-                return DdlOutcome.REJECTED;
+                return new AnchorOutcome(DdlOutcome.REJECTED, null);
             }
-            return run("comment", COMMENT_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, index.name(), leaf, () -> {
-                String sql = render(COMMENT_TEMPLATE, leaf.schema(), index.name(), text);
-                runComment(sql);
-            });
+            return stampAndComment(leaf, index.name(), anchor);
         }
 
         /**
          * As {@link #comment(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor)}, for one of the leaf's own HNSW
          * indexes (RDR-230, nexus-4lnn1.1.10). Only an index {@link #ownsForComment(PciCatalog.Leaf,
          * PciCatalog.LeafIndex)} accepts is touched; any other is {@link DdlOutcome#REJECTED} and nothing is sent.
-         * Same statement, same 5 s lock timeout.
+         * Same statement, same 5 s lock timeout, same v2 stamp.
          */
         public DdlOutcome comment(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor).outcome();
+        }
+
+        /** As {@link #comment(PciCatalog.Leaf, PciCatalog.LeafIndex, PciCatalog.Anchor)}, answering with the anchor written. */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, PciCatalog.Anchor anchor) {
             if (ended != null) {
-                return ended;
+                return new AnchorOutcome(ended, null);
             }
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
@@ -741,19 +748,35 @@ public final class PciBuilderSession {
             if (!ownsForComment(leaf, index)) {
                 log.warn("event=pci_ddl_rejected op=comment reason=not_leafs_own_index name={} valid={}", index.name(),
                     index.valid());
-                return DdlOutcome.REJECTED;
+                return new AnchorOutcome(DdlOutcome.REJECTED, null);
             }
-            String text;
             try {
-                text = anchor.toJson();
+                anchor.checkWritable();
             } catch (IllegalStateException e) {
                 log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
-                return DdlOutcome.REJECTED;
+                return new AnchorOutcome(DdlOutcome.REJECTED, null);
             }
-            return run("comment", COMMENT_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, index.name(), leaf, () -> {
-                String sql = render(COMMENT_TEMPLATE, leaf.schema(), index.name(), text);
-                runComment(sql);
-            });
+            return stampAndComment(leaf, index.name(), anchor);
+        }
+
+        /**
+         * The COMMENT, with the index's relfilenode read on this session right before it (the precheck, after the lock
+         * and statement timeouts are set): the anchor records the storage it was written against. An index that is gone
+         * is {@link DdlOutcome#STALE} and nothing is sent.
+         */
+        private AnchorOutcome stampAndComment(PciCatalog.Leaf leaf, String indexName, PciCatalog.Anchor anchor) {
+            PciCatalog.Anchor[] stamped = {anchor};
+            DdlOutcome outcome = run("comment", COMMENT_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, indexName, leaf, () -> {
+                Long relfilenode = PciAnchorReads.relfilenode(ctx, leaf.schema(), indexName);
+                if (relfilenode == null) {
+                    log.info("event=pci_anchor_skipped reason=gone index={} leaf={}.{}", indexName, leaf.schema(),
+                        leaf.name());
+                    return DdlOutcome.STALE;
+                }
+                stamped[0] = anchor.withRelfilenode(relfilenode);
+                return null;
+            }, () -> runComment(render(COMMENT_TEMPLATE, leaf.schema(), indexName, stamped[0].toJson())));
+            return new AnchorOutcome(outcome, stamped[0]);
         }
 
         /** What {@link #anchorAfterLeafReindex} did: the comment's outcome and the anchor it tried to write. */
@@ -804,8 +827,7 @@ public final class PciBuilderSession {
                     leaf.name());
                 return new AnchorOutcome(DdlOutcome.STALE, null);
             }
-            var anchor = new PciCatalog.Anchor(builtAt, rows, bytes, PciCatalog.ORIGIN_BUILT);
-            return new AnchorOutcome(comment(leaf, index, anchor), anchor);
+            return write(leaf, index, new PciCatalog.Anchor(builtAt, rows, bytes, PciCatalog.ORIGIN_BUILT));
         }
 
         /**

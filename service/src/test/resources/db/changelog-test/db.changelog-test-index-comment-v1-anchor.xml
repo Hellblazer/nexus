@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-4lnn1.1.10 (RDR-230 P2): COMMENT ON INDEX ${schema}.${index} with a well-formed v1 anchor ("nexus_pci":1, no
+    relfilenode), as every anchor written before the relfilenode field existed. jOOQ has no COMMENT ON INDEX.
+
+    A test shows such an anchor stays valid: it is neither re-anchored nor adopted, and gains the field the next time the
+    engine writes it. The text is fixed here; only the two names are parameters, checked by
+    PgContainerHelper#commentIndexV1Anchor. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="index-comment-v1-anchor" author="nexus-4lnn1.1.10" runAlways="true">
+        <sql>COMMENT ON INDEX ${schema}.${index} IS '{"nexus_pci":1,"built_at":"2026-10-20T08:00:00Z","rows":1,"bytes":1,"origin":"built"}'</sql>
+    </changeSet>
+</databaseChangeLog>
