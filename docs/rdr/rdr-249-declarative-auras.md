@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-11-12
 accepted_date:
 related_issues: ["nexus-mdbds"]
-related_rdrs: [RDR-239, RDR-240, RDR-242, RDR-212, RDR-213, RDR-220, RDR-245, RDR-110, RDR-111]
+related_rdrs: [RDR-239, RDR-240, RDR-242, RDR-211, RDR-212, RDR-213, RDR-220, RDR-245, RDR-110, RDR-111]
 ---
 
 # RDR-249: Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure
@@ -87,6 +87,7 @@ scrapped.
 | RDR-240 Procedures as Sandboxed Lua Scripts (accepted 2026-11-07) | Builds on it | The procedure library (`src/nexus/procedures/` shipped, `.nexus/procedures/` per repo), the four-line header, the argument types and the reserved arguments `now` and `repo`. An aura names a procedure and maps tuple fields onto its declared arguments. The header is not changed. |
 | RDR-242 Sandboxed Lua Runtime (accepted 2026-11-07) | Builds on it | `run_script(name, args, limits)`, the worker process, the read-only verb table and the default limits (50M instructions, 64 MiB, 60 s wall, 1 MiB result). Its version 1 has no write verb; a write waits for its approval document (its Technical Design 1 and 10). So an aura's procedure cannot write, and this RDR adds no write path. |
 | RDR-239 Tuple-Space Dictionary (closed) | Uses it | `GET /v1/tuples/registry?doc=1` describes each subspace's fields. `nx aura check` reads it to refuse a trigger filter or an argument mapping that names a field the template does not have. |
+| RDR-211 channel delivery (Sam's reference-only decision, 2026-09-17, T2 `nexus_rdr/211-decision-push-reference-2026-09-17`) | Constraint honoured | "The channel notification carries a REFERENCE, never the body"; its content is "a fixed template built only from identifiers the server controls or verifies". An aura's channel display is such a template (Technical Design 1): aura name, subspace, tuple id and a pointer to the threads block, never procedure text (Sam, 2026-11-15: "Fixed template only"). RDR-211 is unchanged. |
 | RDR-213 channel push (amends RDR-211) | Hosts it | The channel waiter is the MCP server's one background task. It parks a wait over the session's subscriptions, and the engine announces each board post to a subscriber once (`nexus.tuple_deliveries`). Auras are evaluated on what the waiter receives. |
 | RDR-220 CI board | First consumer's source | `board/ci/<topic>` and its `--done` wake, with `kind`, `sha` and `outcome` dimensions. |
 | RDR-245 Structured asks on the threads board | Display target | The threads board entry (T2 project `threads`, one per session) is where a durable display lands. |
@@ -195,6 +196,7 @@ in the engine, and the procedure can still only read.
    aura = "ci_develop_red"
    summary = "A red develop sha, posted to this session's threads entry."
    procedure = "ci_red_notice"
+   on_by_default = true
 
    [trigger]
    subspace = "board/ci/nexus-develop--done"
@@ -224,11 +226,22 @@ in the engine, and the procedure can still only read.
      not be mapped. Every required argument must be mapped.
    - `when.field` names a boolean field of the procedure's result table; the
      aura shows only when it is `true`. Absent means always show.
-   - `display.channel` sends the procedure's `text` result field as a
-     channel notification. `display.threads` writes the same text as a block
-     titled `aura: <value>` in this session's threads entry, replacing the
-     previous block of that title (the latest fire wins). At least one
-     display is required.
+   - `display.threads` is required. It writes the procedure's `text` result
+     field as a block titled `aura: <value>` in this session's threads
+     entry, replacing the previous block of that title (the latest fire
+     wins). The threads block is the only place procedure text appears.
+   - `display.channel = true` also sends a channel notification, which is a
+     fixed template and never carries procedure text (RDR-211; Sam,
+     2026-11-15: "Fixed template only"). It holds only the aura name, the
+     subspace, the tuple id and a pointer to the threads block: `aura
+     <name> fired on <subspace> tuple <id>; see the "aura: <threads value>"
+     block in your threads entry`. The aura name and the threads value come
+     from the aura file, and the subspace and tuple id from the engine row,
+     so nothing a tuple writer controls reaches the channel.
+   - `on_by_default = true` turns the aura on in every install unless it is
+     turned off (Technical Design 3). Only a package-root aura may set it; a
+     repo-root aura that sets it is refused (inferred, not read: cloning a
+     repo must not start a procedure).
    - Any other key, a missing key, or a type mismatch refuses the file.
 
 2. **Checking.** `nx aura check [NAME]` parses every aura (or one), resolves
@@ -238,11 +251,23 @@ in the engine, and the procedure can still only read.
    summary, trigger and whether it is enabled. Both run without the engine
    only for the parts that need none, and say which checks were skipped.
 
-3. **Enabling.** No aura runs unless enabled. An aura is enabled by name in
-   the repo's `.nexus.yml` (`auras: [ci_develop_red]`) or in the user config,
-   read when the MCP server starts. The nexus repo's `.nexus.yml` enables
-   `ci_develop_red`; every other aura is off everywhere until a repo or user
-   config names it (Sam, 2026-11-13). A repo-root aura follows RDR-242
+3. **Enabling.** An aura with `on_by_default = true` runs in every install
+   unless turned off; `ci_develop_red` ships that way (Sam, 2026-11-15:
+   "Ship it on by default"). Every other aura runs only when enabled by
+   name. Both use nexus's config hierarchy, read when the MCP server
+   starts, in which "Environment variables (`NX_*`)" have the "highest
+   priority", then `.nexus.yml`, then `~/.config/nexus/config.yml`
+   (`docs/configuration.md` § Config Hierarchy):
+   - In config, `auras: {<name>: on}` enables an aura and `auras: {<name>:
+     off}` turns it off. A user turns `ci_develop_red` off in
+     `~/.config/nexus/config.yml` (Sam, 2026-11-15: "user config and env
+     var").
+   - `NX_AURAS_OFF` overrides the config: `all` turns every aura off, and a
+     comma-separated list of names turns those off. It covers a CI job or a
+     `claude -p` child that should run none.
+   - `nx aura list` shows each aura as on or off and the level that decided
+     it (default, global config, repo config, env).
+   A repo-root aura follows RDR-242
    residual S5 for repo-root procedures (confirmed by Sam, 2026-11-13). Enabling
    subscribes the trigger subspace, within `MAX_BOARD_TOPICS`; an aura past
    the limit is refused at load with its name.
@@ -283,6 +308,7 @@ in the engine, and the procedure can still only read.
 | Mailbox drain hook | Yes | The no-channel floor for mailbox auras. |
 | Dictionary with field docs | Yes (RDR-239) | `nx aura check` reads it. |
 | Threads board entry | Yes (RDR-245) | The durable display. |
+| Config hierarchy (env, `.nexus.yml`, `~/.config/nexus/config.yml`) | Yes (`docs/configuration.md`) | The on and off switch. |
 | Similarity on tuples | No | Out of scope. |
 | Write verbs | No (RDR-242 v1) | Out of scope. |
 
@@ -330,6 +356,11 @@ was scrapped, and RDR-212 excludes it. Would need Sam to override RDR-212.
   session opened after it; the post stays readable with `tuple_rd`.
 - Several sessions enabling one aura each write their own threads block, by
   decision: there is no lock tuple.
+- `ci_develop_red` is on by default, so it reaches every install, including
+  users outside nexus. Its trigger, `board/ci/nexus-develop--done`, gets
+  posts only from nexus's own CI, so outside nexus it never fires. It still
+  holds one of the `MAX_BOARD_TOPICS` (32) board subscriptions and one
+  waiter spec in every session until it is turned off (inferred, not read).
 
 ### Risks and Mitigations
 
@@ -337,6 +368,9 @@ was scrapped, and RDR-212 excludes it. Would need Sam to override RDR-212.
   checked before any worker starts, and the per-aura queue is capped.
 - An aura hides an announcement the agent should have read: it never
   suppresses the announcement; it adds to it.
+- A tuple writer controls the procedure's arguments, and so its text: that
+  text never reaches the channel, which carries only the fixed template
+  (RDR-211), and lands only in the threads block.
 
 ### Failure Modes
 
@@ -358,7 +392,8 @@ dimensions.
 
 The first consumer, enabled in one session, writes an `aura: develop CI
 red` block within a minute of a real red develop sha, and nothing for a
-green one.
+green one; its channel notification is the fixed template, with no
+procedure text; and `NX_AURAS_OFF=ci_develop_red` stops it.
 
 ### Phase 1: The aura file, its check and its list
 
@@ -389,9 +424,9 @@ handled-id record prevents a second fire.
 
 ### Phase 3: The first consumer
 
-`ci_red_notice.lua` and `ci_develop_red.aura.toml` in the package root, and
-`auras: [ci_develop_red]` in the nexus repo's `.nexus.yml`; measure one
-fire's cost (the Critical Assumption).
+`ci_red_notice.lua` and `ci_develop_red.aura.toml` (with `on_by_default =
+true`) in the package root; measure one fire's cost (the Critical
+Assumption).
 
 ### New Dependencies
 
@@ -401,8 +436,12 @@ None (`tomllib` is in the standard library).
 
 Unit tests for the parser's refusals and the argument mapping. Integration
 tests against a self-provisioned engine for subscription, announce-once
-evaluation, the drain fallback and the threads block. A gate test that fails
-if no aura was evaluated (non-vacuity).
+evaluation, the drain fallback and the threads block. A test that posts a
+tuple whose dimensions and body carry instruction-like text and asserts the
+channel notification equals the fixed template, with none of that text in
+it (RDR-211). Tests of the off switch at each level: the default, an `off`
+in global config, an `on` in repo config, and `NX_AURAS_OFF` over a config
+`on`. A gate test that fails if no aura was evaluated (non-vacuity).
 
 ## Resolved Questions
 
@@ -413,7 +452,20 @@ a picker in halcyon's session:
    its own block; no lock tuple.
 2. Default enablement: "ci_develop_red on in nexus". `ci_develop_red` is on
    in the nexus repo's `.nexus.yml`; every other aura is off everywhere.
+   Superseded 2026-11-15 by answer 5: `.nexus.yml` is gitignored, so it
+   could not ship (gate round 1, S1).
 3. Repo-root auras: "Confirm S5". They follow RDR-242 residual S5.
+
+Gate round 1 raised two more, answered 2026-11-15:
+
+4. Channel content (Critical 1): "Fixed template only", by dialog in
+   halcyon's session. The channel notification carries the aura name, the
+   subspace, the tuple id and a pointer to the threads block, with no
+   procedure text; RDR-211 stands unchanged.
+5. Enablement (S1): "Ship it on by default", by dialog in halcyon's
+   session; confirmed in marginalia's session with "On; user config and env
+   var". `ci_develop_red` is on in every install, and the off switch is the
+   config key and `NX_AURAS_OFF` (Technical Design 3).
 
 ## References
 
