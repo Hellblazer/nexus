@@ -791,7 +791,9 @@ None.
 ### Testing Strategy
 
 Engine-substrate integration tests drive both routes against a local engine (no cloud). The cloud is
-exercised once per release in an announced window.
+exercised once per engine release, in its deploy window: the `engine-release` skill's Step 6.2 runs an export,
+a restore into a throwaway tenant and `tests/e2e/backup_roundtrip_compare.py` against the newly live engine
+(Sam, 2026-11-15, "Add it to the engine release").
 
 ### Performance Expectations
 
@@ -1014,4 +1016,4 @@ tenants. Nothing to trim.
 - 2026-11-14: Ask `rdr248-local-root`, option 1 (Sam): on a local install the verb mints a four-hour `default`-tenant token through the existing token route when it holds the supervisor's root token, and uses it; the root token is never sent to an import route and what it may do there is not widened. An explicit non-supervisor token wins; a failed mint falls back to the manual step. Client change only. Amended under standing grant 3.
 - 2026-11-14: Review round 1 of the three asks (T2 `nexus/review-817d75982-nexus-csayy-2026-11-14-r1`, `nexus/critique-817d75982-nexus-csayy-asks-2026-11-14-r1`) folded in: the remembered lease root and the refusal of a token that cannot be told from the supervisor's, the minted token revoked at the end, three mints (not two) stated, the Voyage-only gate and the embedding-profile condition stated, the capacity step's cap and 2x-3x floor stated, and the ledger's load bound corrected to 3,960 s.
 - 2026-11-15: Activation Step 2 recorded (nexus-csayy.9, .10): the first cloud export and restore round trip on engine 0.1.192, the per-page hang on 0.1.191 and the edge header fix (conexus PR #710).
-- 2026-11-15: Close critique (T2 `nexus/critique-8a97bb459-nexus-csayy-2026-11-15-r1`) folded in: what Activation Step 2 measured and did not (per-page starts, pool size, import xmin; a tenant a fifth of the target), which tables held rows, the snapshot release wording, the load-bound margin at scale, Gap 2's tuples and the Decision Rationale's "complete" matched to the registry, and "no new authorization code" replaced by the scope checks. Amended under standing grant 3.
+- 2026-11-15: Close critique (T2 `nexus/critique-8a97bb459-nexus-csayy-2026-11-15-r1`) folded in: what Activation Step 2 measured and did not (per-page starts, pool size, import xmin; a tenant a fifth of the target), which tables held rows, the snapshot release wording, the load-bound margin at scale, Gap 2's tuples and the Decision Rationale's "complete" matched to the registry, and "no new authorization code" replaced by the scope checks; the Testing Strategy's per-release cloud run points at engine-release Step 6.2 (Sam: "Add it to the engine release"). Amended under standing grant 3.
