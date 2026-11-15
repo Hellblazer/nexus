@@ -32,7 +32,8 @@
       direct table SELECT. What remains is SELECT on the view, the
       Liquibase journal, the one address column of each table the view
       reads (grants-nexus-diag-3; the view is security_invoker, so the
-      role needs them), and the tables -4 and -5 name. Those address
+      role needs them), the four whole tables -4 and -5 name, and the
+      nexus.tuples columns -5 names. Those address
       columns hold content hashes and ids, never chunk text (column grants
       since nexus-edchb; -3 granted whole tables before, chunk_text
       included); the choke-point lint remains as defense in depth. The
@@ -493,8 +494,9 @@ $$;
             file's own header) already exempts it from that policy for
             every other tenant-scoped table it holds SELECT on today (the
             legacy era's schema-wide grant, before the view narrowed it) —
-            this changeset grants the SAME diagnostic visibility to these
-            three tables specifically, not a new privilege class.
+            this changeset grants diagnostic visibility on these three
+            tables, not a new privilege class (on nexus.tuples, by column;
+            see below).
             nexus.tuple_tenants carries no RLS at all (no tenant_id column
             — tuples-001-baseline.xml changeset 3's own comment).
 

@@ -297,6 +297,37 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         }
     }
 
+    /**
+     * nexus-edchb, the upgrade path: an install whose earlier engine granted nexus_diag the whole
+     * nexus.tuples table must lose that grant at the next boot. The walk's view-era revoke
+     * (grants-nexus-diag-2) strips the table grant, and -5 grants back only the column list.
+     */
+    @Test
+    void anOldWholeTableGrantOnTuplesIsNarrowedAtTheNextBoot() throws Exception {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+            var asSu = DSL.using(su, SQLDialect.POSTGRES);
+            // The grant the previous -5 made.
+            asSu.grant(DSL.privilege("select")).on(TUPLES).to(DSL.role(DIAG_ROLE)).execute();
+            assertThat(tableSelect(asSu, "nexus.tuples"))
+                .as("precondition: nexus_diag holds the old table grant on nexus.tuples").isTrue();
+
+            liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
+
+            assertThat(tableSelect(asSu, "nexus.tuples"))
+                .as("the next boot removes the table grant on nexus.tuples").isFalse();
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus", List.of("tuples")))
+                .as("and leaves only the columns nx doctor's lock check reads")
+                .containsExactly(TUPLES_DIAG_COLUMNS);
+        }
+    }
+
+    private static boolean tableSelect(org.jooq.DSLContext ctx, String table) {
+        return ctx.select(DSL.function("has_table_privilege", Boolean.class,
+            DSL.inline(DIAG_ROLE), DSL.inline(table), DSL.inline("SELECT"))).fetchOne(0, Boolean.class);
+    }
+
     /** The columns of nexus.tuples health._lock_claim_started_sql reads (grants-nexus-diag-5). */
     static final String[] TUPLES_DIAG_COLUMNS = {
         "tuples.claim_id", "tuples.claim_state", "tuples.claimant", "tuples.consumed_at",

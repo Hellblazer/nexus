@@ -944,8 +944,8 @@ public final class PgCatalogProbes {
         return ctx.selectDistinct(tbl, col)
             .from(DSL.table(DSL.name("information_schema", "column_privileges")).as("cp"))
             .where(g.eq(grantee)).and(priv.eq("SELECT")).and(sch.eq(schema)).and(tbl.in(tables))
-            .orderBy(tbl, col)
-            .fetch(r -> r.get(tbl) + "." + r.get(col));
+            .fetch(r -> r.get(tbl) + "." + r.get(col))
+            .stream().sorted().toList();
     }
 
     /** One {@code pg_policies} row with its schema and table. */

@@ -444,6 +444,9 @@ def test_lock_claim_query_reads_only_the_tuples_columns_nexus_diag_is_granted() 
     ).read_text()
     grant = re.search(r"GRANT SELECT \(([^)]*)\)\s+ON nexus\.tuples\s+TO nexus_diag", xml)
     assert grant, "grants-nexus-diag-5 no longer grants a column list on nexus.tuples"
+    assert not re.search(r"GRANT SELECT ON nexus\.tuples\s+TO nexus_diag", xml), (
+        "a whole-table grant on nexus.tuples would make the column list moot"
+    )
     granted = {c.strip() for c in grant.group(1).split(",")}
     assert not granted & {"keys", "dims", "body"}, "a tuple payload column is granted to nexus_diag"
 

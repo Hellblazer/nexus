@@ -498,7 +498,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .isEqualTo(viewEraRows);
                     assertThat(diagBaseTableGrants(c))
                         .as("view era holds across a reboot too — the same four tables, "
-                            + "re-granted fresh by grants-nexus-diag-3, grants-nexus-diag-4 and "
+                            + "re-granted fresh by grants-nexus-diag-4 and "
                             + "grants-nexus-diag-5 every boot (nexus-lhuhe; gc_audit incident "
                             + "2026-08-19; nexus-f1pbh)")
                         .containsExactly(
