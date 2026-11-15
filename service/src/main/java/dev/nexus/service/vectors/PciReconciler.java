@@ -12,6 +12,7 @@ import dev.nexus.service.vectors.PciCatalog.Leaf;
 import dev.nexus.service.vectors.PciReconcilePlanner.Action;
 import dev.nexus.service.vectors.PciReconcilePlanner.Build;
 import dev.nexus.service.vectors.PciReconcilePlanner.Drop;
+import dev.nexus.service.vectors.PciReconcilePlanner.Reindex;
 import dev.nexus.service.vectors.PciReconcilePlanner.RegistryRow;
 import dev.nexus.service.vectors.PciReconcilePlanner.SkipCountSuspect;
 import org.jooq.DSLContext;
@@ -1024,6 +1025,8 @@ public final class PciReconciler {
                     }
                 }
                 case Build b -> build(pass, leaf, dim, b, tally);
+                // plan() never returns one: a REINDEX is chosen across the whole pass and runs after its drops and builds.
+                case Reindex r -> log.warn("event=pci_reindex_in_leaf_plan leaf={} index={}", leafId(leaf), r.name());
             }
         }
     }

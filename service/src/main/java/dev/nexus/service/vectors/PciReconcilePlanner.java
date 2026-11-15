@@ -156,7 +156,53 @@ public final class PciReconcilePlanner {
     }
 
     /** One step of a plan. */
-    public sealed interface Action permits Build, Drop, SkipCountSuspect { }
+    public sealed interface Action permits Build, Drop, SkipCountSuspect, Reindex { }
+
+    /**
+     * Why an index is reindexed (RDR-230 Technical Design 3); {@link #label()} is the value for the log line. The
+     * thresholds are {@link PciReindexPolicy}'s.
+     */
+    public enum Trigger {
+        /** Bytes per row grew to {@link PciReindexPolicy#SIZE_RATIO} of the anchor's (or of the install reference). */
+        SIZE("size"),
+        /** Deletes since build reached {@link PciReindexPolicy#DELETES_SINCE_BUILD_FRACTION} of the rows. */
+        DELETES_SINCE_BUILD("deletes_since_build"),
+        /** The row count fell by {@link PciReindexPolicy#BULK_DELETE_FRACTION} since the previous check: REINDEX, then VACUUM. */
+        BULK_DELETE("bulk_delete"),
+        /** The recall canary is red on at least {@link PciReindexPolicy#RED_CANARY_MIN_QUERIES} queries. */
+        RED_CANARY("red_canary"),
+        /** A leaf's own HNSW index grew to {@link PciReindexPolicy#LEAF_SIZE_RATIO} of the reference (RDR-230 P2.3). */
+        LEAF_SIZE("leaf_size");
+
+        private final String label;
+
+        Trigger(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
+
+    /**
+     * {@code REINDEX INDEX CONCURRENTLY} of the existing index {@code name}, which serves {@code collection} (null for
+     * a leaf's own HNSW index, which serves none). {@code bytes} is the index's size when it was read: the order of the
+     * pass's REINDEXes is largest first. After the REINDEX the executor writes a fresh anchor and re-measures the
+     * canary; after a {@link Trigger#BULK_DELETE} REINDEX it also runs {@code VACUUM (ANALYZE)} on the index's leaf
+     * ({@link #vacuumAfter()}).
+     */
+    public record Reindex(String name, String collection, Trigger trigger, long bytes) implements Action {
+        public Reindex {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(trigger, "trigger");
+        }
+
+        /** True when the leaf is vacuumed after the REINDEX: only the bulk-delete trigger. */
+        public boolean vacuumAfter() {
+            return trigger == Trigger.BULK_DELETE;
+        }
+    }
 
     /** Build {@code name} on the leaf for {@code collection}; {@code name} is {@link PciCatalog#indexName}. */
     public record Build(String name, String collection) implements Action { }
