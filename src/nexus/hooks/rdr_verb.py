@@ -634,7 +634,9 @@ def _unchecked_fix_edits(
         gated_blob = blobs_norm.get(key)
         try:
             if gated_blob:
-                rel = os.path.relpath(str(path), str(root))
+                # git's HEAD:<path> reads forward slashes only; relpath gives
+                # backslashes on Windows, which resolve to nothing (nexus-3jjkg).
+                rel = os.path.relpath(str(path), str(root)).replace("\\", "/")
                 tip = run_bounded(
                     argv_off_cwd(["git", "-C", str(root), "rev-parse", "--verify", "-q", f"HEAD:{rel}"]),
                     timeout=left,

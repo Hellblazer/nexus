@@ -94,3 +94,11 @@ def test_commit_resolves_follows_the_object_store(repo: Path) -> None:
     _git(repo, "reflog", "expire", "--expire=now", "--all")
     _git(repo, "gc", "-q", "--prune=now")
     assert not commit_resolves(str(repo), c1)
+
+
+def test_file_blob_reads_a_windows_relpath(repo: Path) -> None:
+    """os.path.relpath gives backslashes on Windows; git's HEAD:<path> reads
+    only forward slashes, so an unnormalised path resolved to nothing and the
+    caller saw an untracked file (nexus-3jjkg, caught on qwent native Windows)."""
+    assert file_blob(str(repo), REL.replace("/", "\\")) == file_blob(str(repo), REL)
+    assert file_blob(str(repo), REL) is not None

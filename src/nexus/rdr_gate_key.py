@@ -89,11 +89,19 @@ def _git(repo_root: str, *args: str) -> subprocess.CompletedProcess[str] | None:
         return None
 
 
+def git_path(rel: str) -> str:
+    """*rel* with forward slashes, the only separator git's ``<rev>:<path>``
+    syntax reads. ``os.path.relpath`` gives backslashes on Windows, and
+    ``HEAD:docs\\rdr\\x.md`` resolves to nothing, which the callers read as an
+    untracked file (the quiet miss nexus-3jjkg exists to remove)."""
+    return rel.replace("\\", "/")
+
+
 def file_blob(repo_root: str, rel: str, rev: str = "HEAD", *, abbrev: int | None = BLOB_ABBREV) -> str | None:
     """The blob id of *rel* at *rev*, abbreviated to *abbrev* hex digits
     (``None`` for the full id), or ``None`` when git cannot say (an
     untracked file, a bad rev)."""
-    proc = _git(repo_root, "rev-parse", "--verify", "-q", f"{rev}:{rel}")
+    proc = _git(repo_root, "rev-parse", "--verify", "-q", f"{rev}:{git_path(rel)}")
     if proc is None or proc.returncode != 0:
         return None
     full = proc.stdout.strip()
