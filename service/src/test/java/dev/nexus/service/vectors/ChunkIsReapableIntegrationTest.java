@@ -839,6 +839,142 @@ class ChunkIsReapableIntegrationTest {
         assertThat(orphanRecordedRecently(t, KNOWLEDGE, left)).as("lost its owner, fresh: recorded").isTrue();
     }
 
+    /** One chash at two positions of one document, dropped together: one record (the keys are distinct). */
+    @Test
+    void oneChashAtTwoPositionsDroppedTogetherIsRecordedOnce() throws Exception {
+        String t = "reap-two-positions";
+        register(t, KNOWLEDGE);
+        String hex = orphan(t, KNOWLEDGE, "twice", Duration.ofMinutes(3));
+        document(t, "two-positions", KNOWLEDGE, false);
+        manifestRow(t, "two-positions", KNOWLEDGE, hex, 0);
+        manifestRow(t, "two-positions", KNOWLEDGE, hex, 5);
+
+        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("two-positions"))).execute());
+
+        assertThat(orphanRecordedRecently(t, KNOWLEDGE, hex)).isTrue();
+        assertThat(recordCount(t)).isEqualTo(1);
+    }
+
+    /**
+     * The same chash stored in two collections of one tenant is two chunks. Dropping its last owner in one
+     * collection records that collection's chunk only; the other collection's owner and chunk are untouched.
+     */
+    @Test
+    void aChashInTwoCollectionsIsRecordedInTheCollectionItWasDroppedFrom() throws Exception {
+        String t = "reap-two-collections";
+        register(t, KNOWLEDGE);
+        register(t, OTHER);
+        String hex = ch(t + "/shared");
+        su(ctx -> {
+            for (String coll : List.of(KNOWLEDGE, OTHER)) {
+                PgContainerHelper.insertChunks(ctx, t, coll, List.of(hex), List.of("shared text"),
+                    List.of(new float[384]), List.of(Map.of()));
+            }
+        });
+        document(t, "two-coll-k", KNOWLEDGE, false);
+        document(t, "two-coll-o", OTHER, false);
+        manifestRow(t, "two-coll-k", KNOWLEDGE, hex, 0);
+        manifestRow(t, "two-coll-o", OTHER, hex, 0);
+
+        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("two-coll-k"))).execute());
+
+        assertThat(orphanRecordedRecently(t, KNOWLEDGE, hex)).as("dropped from knowledge").isTrue();
+        assertThat(orphanedAt(t, OTHER, hex)).as("still owned in the other collection: no record").isNull();
+        assertThat(recordCount(t)).isEqualTo(1);
+    }
+
+    /**
+     * One INSERT ... ON CONFLICT DO UPDATE statement fires BOTH statement triggers: position 0 conflicts (its row
+     * moves from {@code left} to {@code moved}), position 1 is new ({@code added}). End state: {@code left}
+     * recorded; {@code moved} (cleared by the UPDATE trigger) and {@code added} (cleared by the INSERT trigger)
+     * owned with no record, both of which carried one before.
+     */
+    @Test
+    void anUpsertAppendThatFiresBothTriggersEndsWithOwnedChunksAndNoRecord() throws Exception {
+        String t = "reap-upsert-both";
+        register(t, KNOWLEDGE);
+        String left = orphan(t, KNOWLEDGE, "left", Duration.ofMinutes(4));
+        String moved = orphan(t, KNOWLEDGE, "moved", Duration.ofMinutes(4));
+        String added = orphan(t, KNOWLEDGE, "added", Duration.ofMinutes(4));
+        document(t, "upsert-both", KNOWLEDGE, false);
+        manifestRow(t, "upsert-both", KNOWLEDGE, left, 0);
+        recordOrphaning(t, KNOWLEDGE, moved, DAYS_40);
+        recordOrphaning(t, KNOWLEDGE, added, DAYS_40);
+
+        su(ctx -> {
+            String model = PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE);
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(t, "upsert-both", 0, 0, bytes(moved), KNOWLEDGE, model)
+               .values(t, "upsert-both", 1, 1, bytes(added), KNOWLEDGE, model)
+               .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
+               .doUpdate().set(CATALOG_DOCUMENT_CHUNKS.CHASH, DSL.excluded(CATALOG_DOCUMENT_CHUNKS.CHASH))
+               .execute();
+        });
+
+        assertThat(orphanRecordedRecently(t, KNOWLEDGE, left)).as("displaced from position 0").isTrue();
+        assertThat(orphanedAt(t, KNOWLEDGE, moved)).as("moved onto position 0: UPDATE trigger cleared it").isNull();
+        assertThat(orphanedAt(t, KNOWLEDGE, added)).as("new at position 1: INSERT trigger cleared it").isNull();
+        assertThat(recordCount(t)).isEqualTo(1);
+    }
+
+    /**
+     * Two writers replacing documents that share chunks, listing them in opposite orders, against the record
+     * triggers, over the engine's own manifest write (CatalogRepository#writeManifest, under DeadlockRetry). Every
+     * replace must commit: a deadlock between the writers is retried, not surfaced. The end state is every chunk
+     * owned and no record, because each replace lists again every chunk it dropped.
+     */
+    @Test
+    void twoConcurrentReplacesOfDocumentsThatShareChunksBothCommit_andLeaveNoRecord() throws Exception {
+        String t = "reap-concurrent-replace";
+        register(t, KNOWLEDGE);
+        List<String> hexes = new java.util.ArrayList<>();
+        for (int i = 0; i < 6; i++) hexes.add(orphan(t, KNOWLEDGE, "shared-" + i, Duration.ofMinutes(10)));
+        document(t, "conc-a", KNOWLEDGE, false);
+        document(t, "conc-b", KNOWLEDGE, false);
+        List<String> reversed = new java.util.ArrayList<>(hexes);
+        java.util.Collections.reverse(reversed);
+        var repo = new dev.nexus.service.db.CatalogRepository(tenantScope);
+        repo.writeManifest(t, "conc-a", KNOWLEDGE, rowsOf(hexes));
+        repo.writeManifest(t, "conc-b", KNOWLEDGE, rowsOf(reversed));
+
+        int rounds = 40;
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        CompletableFuture<Void> a = CompletableFuture.runAsync(() -> {
+            await(go);
+            for (int i = 0; i < rounds; i++) repo.writeManifest(t, "conc-a", KNOWLEDGE, rowsOf(hexes));
+        });
+        CompletableFuture<Void> b = CompletableFuture.runAsync(() -> {
+            await(go);
+            for (int i = 0; i < rounds; i++) repo.writeManifest(t, "conc-b", KNOWLEDGE, rowsOf(reversed));
+        });
+        go.countDown();
+        a.get(120, TimeUnit.SECONDS);
+        b.get(120, TimeUnit.SECONDS);
+
+        assertThat(repo.getManifest(t, "conc-a")).hasSize(6);
+        assertThat(repo.getManifest(t, "conc-b")).hasSize(6);
+        assertThat(recordCount(t)).as("every dropped chunk was listed again by the same replace").isZero();
+    }
+
+    private static List<Map<String, Object>> rowsOf(List<String> hexes) {
+        List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        for (int i = 0; i < hexes.size(); i++) rows.add(Map.of("position", i, "chash", hexes.get(i), "chunk_index", i));
+        return rows;
+    }
+
+    private static void await(java.util.concurrent.CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
+    }
+
     /** The clear function is held to the same posture as the stamp functions, and locks the records in key order. */
     @Test
     void theClearFunctionIsInvokerNotPublic_locksTheRecordsInKeyOrder_andNeverWritesChunks() throws Exception {

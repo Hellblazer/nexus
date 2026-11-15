@@ -71,7 +71,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
  *
  * <p><b>What it does not touch.</b> {@code catalog_documents.indexed_at} and every chunk row. The only UPDATE trigger on
  * the manifest ({@code trg_catalog_chunks_stamp_on_update}) acts on the {@code (collection, chash)} keys a statement
- * drops, and this statement drops none, so the restamp the client's append path suffered (and its restore step) does
+ * drops (it also clears the record of the keys a statement adds), and this statement drops and adds none, so the restamp the client's append path suffered (and its restore step) does
  * not exist here. {@code ManifestFillJobTest} proves both.
  *
  * <p><b>Resume.</b> Fill-only: a filled row leaves the predicate, so a restart reruns from the start and the rows

@@ -393,12 +393,20 @@ public final class TenantExport {
         data("catalog_document_chunks").pk("tenant_id text", "doc_id text", "position integer")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
             .fk(CHUNK_KEY, "chunks", CHUNK_KEY)
-            // The stamp triggers fire on delete and update only; the chunk_index default fires only when
-            // the inserted value is null, which an exported row never is.
+            // The stamp triggers fire on delete and update only; the clear trigger (vectors-061, nexus-z0o2p.29)
+            // fires on insert, and so on every load statement, but deletes from chunk_orphaned_at only the
+            // records of the keys it inserts. No loadsAfter for it: chunk_orphaned_at is registered below this
+            // table, so it loads after the manifest, the trigger finds it empty and deletes nothing, and the
+            // file's records are then restored as they were (a record on a chunk that has an owner is allowed,
+            // and harmless to the reaper). Loading it first would let the manifest insert delete the file's
+            // stale records of owned chunks: also harmless, but a needless difference from the source tenant.
+            // The chunk_index default fires only when the inserted value is null, which an exported row never is.
             .trigger("trg_catalog_chunks_stamp_on_delete",
                 "AFTER DELETE REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT")
             .trigger("trg_catalog_chunks_stamp_on_update",
                 "AFTER UPDATE REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT")
+            .trigger("trg_catalog_chunks_clear_orphan_on_insert",
+                "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             .trigger("trg_catalog_document_chunks_chunk_index_default", "BEFORE INSERT FOR EACH ROW")
             .build(),
         derived("chunk_orphaned_at").pk("tenant_id text", "collection text", "chash bytea")

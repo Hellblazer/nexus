@@ -273,9 +273,10 @@ public final class CombinedWriteService {
         // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
         if (metadataMode.merge()) response.put("metadata_merge", true);
         // Distinct chashes of the request's chunks that no registered document's rows referenced:
-        // neither embedded nor refreshed. Same field as the append routes. Non-zero is usually a client
-        // bug, but a client that pages a request of more than 1000 docs sends page 0 the chunks of
-        // later pages, and those count here too: the later page's write embeds them.
+        // neither embedded nor refreshed. Same field as the append routes. Non-zero is usually a client bug.
+        // One caller sends it legitimately: the python client splits a request of more than 1000 docs into pages
+        // and sends `chunks` on page 0 only (http_catalog_client.py, page_carries_chunks), so the chunks of later
+        // pages' docs count here. Those docs fail in place on their own page, as they did before this change.
         response.put("chunks_unreferenced", split.unreferenced());
         logUnreferenced(tenant, collection, "write_many", split.unreferenced());
         return new CombinedWriteResult(response, batch.tokens());
@@ -562,10 +563,20 @@ public final class CombinedWriteService {
         return referenced;
     }
 
-    @SuppressWarnings("unchecked")
+    /**
+     * Whether append_many would refuse this document's rows for a duplicate position. A row that is not a map is
+     * left to the handler's own row validation and the in-transaction check: it is not a duplicate here.
+     */
     private static boolean refusedForDuplicatePosition(List<?> rows) {
+        List<Map<String, Object>> maps = new ArrayList<>(rows.size());
+        for (Object r : rows) {
+            if (!(r instanceof Map<?, ?> m)) return false;
+            @SuppressWarnings("unchecked")
+            Map<String, Object> row = (Map<String, Object>) m;
+            maps.add(row);
+        }
         try {
-            CatalogRepository.requireDistinctPositions((List<Map<String, Object>>) rows);
+            CatalogRepository.requireDistinctPositions(maps);
             return false;
         } catch (IllegalArgumentException e) {
             return true;

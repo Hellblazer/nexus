@@ -27,11 +27,23 @@
          concurrent writer's uncommitted drop (RDR-192, the lost record). So the record is unconditional on a drop and
          cleared on an insert: a new AFTER INSERT statement trigger deletes the record of every key the statement
          inserted, and the UPDATE trigger deletes the record of every key the statement added (new keys minus old).
-         The clear takes the record rows FOR UPDATE in key order first, the order the stamp upserts in, so two of
-         them cannot deadlock on record rows; it takes no chunk lock. A concurrent writer's uncommitted record is
-         invisible to it, and it may then commit on a chunk another transaction owns: such a record is harmless (the
-         chunk is owned, so not reapable) and the next drop refreshes it. The invariant the pair keeps: a chunk with
-         no own-collection owner row has a record; a chunk with an owner row usually has none, and may have a stale one.
+         A concurrent writer's uncommitted record is invisible to a clear, and it may then commit on a chunk another
+         transaction owns: such a record is harmless (the chunk is owned, so not reapable) and the next drop refreshes
+         it. The invariant the pair keeps: a chunk with no own-collection owner row has a record; a chunk with an
+         owner row usually has none, and may have a stale one (dropping one of two owners of a shared chunk records it
+         too, because the stamp never reads the manifest).
+
+    LOCKS. Every trigger takes the chunk rows first (FOR NO KEY UPDATE, key order), then the record rows in key order:
+    the DELETE trigger by its upsert, the INSERT trigger by a FOR UPDATE pass before its delete, the UPDATE trigger by
+    one FOR UPDATE pass over the union of the keys it drops and the keys it adds before it upserts and deletes. Chunk
+    then record is the one order everywhere, so two statements that touch the same keys cannot wait on each other
+    through it. What remains: the INSERT trigger takes no chunk lock, so a transaction whose earlier statement holds
+    record rows can meet another whose later statement wants the chunk row (a replace is a DELETE then an INSERT), and
+    an upsert waiting on a key another transaction inserted but has not committed cannot be ordered. Such a cycle ends
+    in SQLSTATE 40P01. The writers' transactions run under DeadlockRetry (CatalogRepository.manifestWriteTxn: the
+    manifest write, append and write_many paths), which re-runs the whole transaction. Paths OUTSIDE it, which see the
+    40P01: purge_trash step 4 (the FK cascade of a hard document delete), the tenant import's manifest INSERT, and
+    quarantine_restore_chunks' reattach INSERT.
 
     THE REAPER. chunk_is_reapable takes the later of last_written_at and orphaned_at, so a record on a chunk written
     minutes ago starts its grace at the drop: never sooner than before (no record meant last_written_at alone).
@@ -108,6 +120,22 @@ BEGIN
       ORDER BY c.tenant_id, c.collection, c.chash
         FOR NO KEY UPDATE OF c;
 
+    -- The record rows of every key this statement touches, the dropped keys (upserted below) and the added keys
+    -- (deleted below), locked in ONE key-ordered pass before either, so two UPDATE statements that swap keys
+    -- take their record rows in the same total order. The chunk rows come first, as in the DELETE trigger.
+    PERFORM 1
+       FROM nexus.chunk_orphaned_at q
+       JOIN ((SELECT tenant_id, collection, chash FROM old_rows
+              EXCEPT
+              SELECT tenant_id, collection, chash FROM new_rows)
+             UNION
+             (SELECT tenant_id, collection, chash FROM new_rows
+              EXCEPT
+              SELECT tenant_id, collection, chash FROM old_rows)) k
+         ON k.tenant_id = q.tenant_id AND k.collection = q.collection AND k.chash = q.chash
+      ORDER BY q.tenant_id, q.collection, q.chash
+        FOR UPDATE OF q;
+
     -- RDR-225: carries the chunk's embedding_model; the arbiter stays the table's own three-column key.
     INSERT INTO nexus.chunk_orphaned_at AS q (tenant_id, collection, chash, orphaned_at, embedding_model)
     SELECT c.tenant_id, c.collection, c.chash, now(), c.embedding_model
@@ -122,16 +150,7 @@ BEGIN
        SET orphaned_at = EXCLUDED.orphaned_at
      WHERE q.orphaned_at < now() - interval '1 hour';
 
-    -- A chunk this statement gave an owner (a key of new_rows not in old_rows) carries no record: lock the
-    -- record rows in key order (the order the upserts take them in), then delete them.
-    PERFORM 1
-       FROM nexus.chunk_orphaned_at q
-       JOIN (SELECT tenant_id, collection, chash FROM new_rows
-             EXCEPT
-             SELECT tenant_id, collection, chash FROM old_rows) n
-         ON n.tenant_id = q.tenant_id AND n.collection = q.collection AND n.chash = q.chash
-      ORDER BY q.tenant_id, q.collection, q.chash
-        FOR UPDATE OF q;
+    -- A chunk this statement gave an owner (a key of new_rows not in old_rows) carries no record.
     DELETE FROM nexus.chunk_orphaned_at q
      USING (SELECT tenant_id, collection, chash FROM new_rows
             EXCEPT
@@ -178,6 +197,7 @@ CREATE TRIGGER trg_catalog_chunks_clear_orphan_on_insert
 DROP TRIGGER IF EXISTS trg_catalog_chunks_clear_orphan_on_insert ON nexus.catalog_document_chunks;
 DROP FUNCTION IF EXISTS nexus.clear_orphaned_on_manifest_insert();
 
+-- ---- stamp_chunks_on_manifest_delete
 CREATE OR REPLACE FUNCTION nexus.stamp_chunks_on_manifest_delete()
  RETURNS trigger
  LANGUAGE plpgsql
@@ -196,10 +216,10 @@ BEGIN
       ORDER BY c.tenant_id, c.collection, c.chash
         FOR NO KEY UPDATE OF c;
 
-    -- Record the orphaning of EVERY dropped key. A chunk already recorded within the hour is
+    -- Record the orphaning. The one-hour guard: a chunk written within the hour is skipped here
+    -- (the select filters on last_written_at) and a chunk already recorded within the hour is
     -- skipped by the DO UPDATE's WHERE. Driven from the chunk rows, so a key with no chunk (the
-    -- foreign key would refuse it) records nothing. A key the same transaction inserts again is cleared by
-    -- the INSERT trigger.
+    -- foreign key would refuse it) records nothing.
     -- RDR-225: the orphaned-at row carries the chunk's embedding_model (the four-column chunk foreign key);
     -- its own primary key, and so this arbiter, stays (tenant_id, collection, chash).
     INSERT INTO nexus.chunk_orphaned_at AS q (tenant_id, collection, chash, orphaned_at, embedding_model)
@@ -217,6 +237,7 @@ BEGIN
 END;
 $function$;
 
+-- ---- stamp_chunks_on_manifest_update
 CREATE OR REPLACE FUNCTION nexus.stamp_chunks_on_manifest_update()
  RETURNS trigger
  LANGUAGE plpgsql
