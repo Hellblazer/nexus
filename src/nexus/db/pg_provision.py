@@ -2163,6 +2163,19 @@ class RolesCreated(NamedTuple):
     diag_created: bool
 
 
+#: The column grants the engine's ``grants-nexus-diag-4`` and ``-5`` give
+#: nexus_diag on tables with a content column it must not read (nexus-edchb):
+#: every gc_audit column but ``details`` (the reaper's sample of titles and
+#: paths) and the nexus.tuples columns nx doctor's lock check reads (no keys,
+#: dims or body). Pinned to the changelog's lists by test.
+DIAG_COLUMN_GRANTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("nexus.gc_audit", ("id", "tenant_id", "operation", "collection", "actor", "dry_run",
+                        "chash_count", "chashes", "created_at")),
+    ("nexus.tuples", ("id", "tenant_id", "subspace", "claimant", "claim_id", "claim_state",
+                      "consumed_at", "lease_until")),
+)
+
+
 def _diag_best_effort_grants_sql() -> str:
     """nexus_diag's best-effort grants on an EXISTING install, run by both
     ``_create_roles`` and ``_backfill_diag_role`` so the role is usable before
@@ -2172,12 +2185,21 @@ def _diag_best_effort_grants_sql() -> str:
     grants (nexus-edchb): SELECT on only the column of each table the
     security_invoker view reads, plus SELECT on the view itself, so the role
     reads the view at once and never a content column. A bulk grant there would hand this BYPASSRLS role every
-    tenant's chunk_text until the engine's next boot revoked it."""
+    tenant's chunk_text until the engine's next boot revoked it. Also in the view era, the
+    :data:`DIAG_COLUMN_GRANTS` of ``-4`` and ``-5``, so a role created after the engine's last boot
+    can run nx doctor's lock check at once; each sits in its own sub-block, so a table or column an
+    older engine lacks skips that grant and keeps the rest."""
     from nexus.db.chash_tables import CHASH_BEARING_TABLES  # noqa: PLC0415 — deferred, keeps provision import-light
 
     view_inputs = "".join(
         f"IF to_regclass('{t.table}') IS NOT NULL THEN GRANT SELECT ({t.column}) ON {t.table} TO nexus_diag; END IF; "
         for t in CHASH_BEARING_TABLES
+    )
+    column_grants = "".join(
+        f"IF to_regclass('{table}') IS NOT NULL THEN BEGIN "
+        f"GRANT SELECT ({', '.join(cols)}) ON {table} TO nexus_diag; "
+        "EXCEPTION WHEN undefined_column THEN NULL; END; END IF; "
+        for table, cols in DIAG_COLUMN_GRANTS
     )
     return (
         "DO $$ BEGIN "
@@ -2187,6 +2209,7 @@ def _diag_best_effort_grants_sql() -> str:
         "BEGIN GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag; "
         "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
         f"{view_inputs}"
+        f"{column_grants}"
         "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
         "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
         "END IF; "

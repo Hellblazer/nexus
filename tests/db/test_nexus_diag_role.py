@@ -416,3 +416,77 @@ def test_view_era_grants_land_on_the_view_input_columns(diag_cluster):
         su("DROP TABLE IF EXISTS nexus.chunks")
         if not had_view:
             su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+
+
+def test_provisioning_column_grants_match_the_engine_changesets():
+    """nexus-edchb: provisioning grants nexus_diag the same column lists on
+    gc_audit and nexus.tuples as grants-nexus-diag-4 and -5, never a content
+    column (gc_audit.details, a tuple's keys, dims or body)."""
+    import re
+    from pathlib import Path
+
+    from nexus.db.pg_provision import DIAG_COLUMN_GRANTS
+
+    xml = (
+        Path(__file__).resolve().parents[2]
+        / "service/src/main/resources/db/changelog/grants-nexus-diag.xml"
+    ).read_text()
+    assert DIAG_COLUMN_GRANTS, "no column grants: the pin checks nothing"
+    for table, cols in DIAG_COLUMN_GRANTS:
+        m = re.search(
+            rf"GRANT SELECT \(([^)]*)\)\s+ON {re.escape(table)}\s+TO nexus_diag", xml
+        )
+        assert m, f"the changelog grants no column list on {table}"
+        engine = {c.strip() for c in m.group(1).split(",")}
+        assert set(cols) == engine, f"{table}: provisioning {sorted(cols)} vs engine {sorted(engine)}"
+        assert not set(cols) & {"details", "keys", "dims", "body"}, table
+
+
+def test_view_era_grants_land_on_the_gc_audit_and_tuples_columns(diag_cluster):
+    """nexus-edchb: in the view era provisioning grants the DIAG_COLUMN_GRANTS
+    columns and no content column. A table missing one of its columns (an older
+    engine) skips only its own grant: the view grant and the other table's
+    columns still land."""
+    from nexus.db.pg_provision import _diag_best_effort_grants_sql
+
+    su = diag_cluster["su"]
+    if su("SELECT to_regclass('nexus.tuples') IS NOT NULL OR to_regclass('nexus.gc_audit') IS NOT NULL") == "t":
+        pytest.skip("this fixture's cluster already has an engine nexus.tuples or nexus.gc_audit")
+    had_view = su(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+    ) == "1"
+    try:
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.tuples (id bytea, tenant_id text, subspace text, "
+           "claimant text, claim_id text, claim_state text, consumed_at timestamptz, "
+           "lease_until timestamptz, keys jsonb, dims jsonb, body text)")
+        # No chashes column: the older-engine shape whose grant must skip on its own.
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.gc_audit (id bigint, tenant_id text, operation text, "
+           "collection text, actor text, dry_run boolean, chash_count int, created_at timestamptz, details jsonb)")
+        su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+           "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+           "FROM nexus.diag_probe WHERE length(chash) <> 32")
+        su(_diag_best_effort_grants_sql())
+
+        def col(table: str, c: str) -> str:
+            return su(f"SELECT has_column_privilege('nexus_diag', '{table}', '{c}', 'SELECT')")
+
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.tuples', 'SELECT')") == "f"
+        for c in ("id", "tenant_id", "subspace", "claimant", "claim_id", "claim_state", "consumed_at", "lease_until"):
+            assert col("nexus.tuples", c) == "t", c
+        for c in ("keys", "dims", "body"):
+            assert col("nexus.tuples", c) == "f", c
+        assert col("nexus.gc_audit", "id") == "f", "a missing column skips the whole table's grant"
+        assert col("nexus.gc_audit", "details") == "f"
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.diag_chash_conformance', 'SELECT')") == "t"
+
+        su("SET ROLE nexus_admin; ALTER TABLE nexus.gc_audit ADD COLUMN chashes jsonb")
+        su(_diag_best_effort_grants_sql())
+        assert col("nexus.gc_audit", "id") == "t"
+        assert col("nexus.gc_audit", "chashes") == "t"
+        assert col("nexus.gc_audit", "details") == "f"
+    finally:
+        su("DROP TABLE IF EXISTS nexus.tuples")
+        su("DROP TABLE IF EXISTS nexus.gc_audit")
+        if not had_view:
+            su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")
