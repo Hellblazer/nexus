@@ -336,7 +336,7 @@ class TestProvisionBestEffortGrantsEra:
     grant stays for the legacy era, when no view exists to read through."""
 
     def test_bulk_table_grant_only_before_the_view(self, diag_cluster):
-        from nexus.db.pg_provision import _DIAG_BEST_EFFORT_GRANTS_SQL
+        from nexus.db.pg_provision import _diag_best_effort_grants_sql
 
         su = diag_cluster["su"]
 
@@ -353,16 +353,31 @@ class TestProvisionBestEffortGrantsEra:
                "FROM nexus.diag_probe WHERE length(chash) <> 32")
             su("REVOKE SELECT ON nexus.diag_probe FROM nexus_diag")
             assert can_select() == "f"  # non-vacuity: the grant really is gone first
-            su(_DIAG_BEST_EFFORT_GRANTS_SQL)
+            su(_diag_best_effort_grants_sql())
             assert can_select() == "f", "view era: provisioning must not re-grant whole tables"
 
             su("DROP VIEW nexus.diag_chash_conformance")
-            su(_DIAG_BEST_EFFORT_GRANTS_SQL)
+            su(_diag_best_effort_grants_sql())
             assert can_select() == "t", "legacy era: the bulk grant still applies"
         finally:
             su("GRANT SELECT ON nexus.diag_probe TO nexus_diag")
-            if had_view:
+            if not had_view:
+                su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+            else:
                 su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
                    "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
                    "FROM nexus.diag_probe WHERE length(chash) <> 32")
                 su("GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag")
+
+
+def test_both_provisioning_paths_run_the_era_gated_grants():
+    """nexus-edchb: ``_create_roles`` and ``_backfill_diag_role`` both run
+    ``_diag_best_effort_grants_sql()``, not an inline bulk grant of their own."""
+    import inspect
+
+    from nexus.db import pg_provision
+
+    for fn in (pg_provision._create_roles, pg_provision._backfill_diag_role):
+        src = inspect.getsource(fn)
+        assert "_diag_best_effort_grants_sql()" in src, fn.__name__
+        assert "ALL TABLES IN SCHEMA" not in src, fn.__name__

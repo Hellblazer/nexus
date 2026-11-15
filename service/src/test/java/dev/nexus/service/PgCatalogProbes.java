@@ -928,6 +928,26 @@ public final class PgCatalogProbes {
             .fetch(r -> new TableGrant(r.get(grantee), r.get(privilege), r.get(schema), r.get(table), r.get(relkind)));
     }
 
+    /**
+     * Column SELECT grants a role holds on {@code schema.table}, as {@code table.column}, sorted
+     * (nexus-edchb). Read from {@code information_schema.column_privileges}, which also lists every
+     * column of a table the role holds table-level SELECT on, so a table-level grant shows here as
+     * all of its columns.
+     */
+    public static List<String> columnSelectGrants(DSLContext ctx, String grantee, String schema,
+                                                  Collection<String> tables) {
+        Field<String> g = DSL.field(DSL.name("cp", "grantee"), String.class);
+        Field<String> priv = DSL.field(DSL.name("cp", "privilege_type"), String.class);
+        Field<String> sch = DSL.field(DSL.name("cp", "table_schema"), String.class);
+        Field<String> tbl = DSL.field(DSL.name("cp", "table_name"), String.class);
+        Field<String> col = DSL.field(DSL.name("cp", "column_name"), String.class);
+        return ctx.selectDistinct(tbl, col)
+            .from(DSL.table(DSL.name("information_schema", "column_privileges")).as("cp"))
+            .where(g.eq(grantee)).and(priv.eq("SELECT")).and(sch.eq(schema)).and(tbl.in(tables))
+            .orderBy(tbl, col)
+            .fetch(r -> r.get(tbl) + "." + r.get(col));
+    }
+
     /** One {@code pg_policies} row with its schema and table. */
     public record PolicyRow(String schema, String table, String policyname, String qual, String withCheck) {
     }

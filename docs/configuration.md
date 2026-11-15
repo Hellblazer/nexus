@@ -424,8 +424,10 @@ run:
    Once the view exists, the engine's `grants-nexus-diag-2` changeset revokes
    `nexus_diag`'s direct table SELECT on its next boot, and
    `grants-nexus-diag-3` grants back only the one column of each table the
-   view reads (content hashes and ids). The diagnostic role then reads the
-   view's counts and those columns, never chunk text or other row content. (This SQL is
+   view reads (content hashes and ids), so the role cannot read chunk text
+   through them. Two changesets still grant whole tables: `grants-nexus-diag-4`
+   (`gc_audit`, `search_telemetry`) and `grants-nexus-diag-5` (the three
+   tuple-space tables, whose rows the role can read for every tenant). (This SQL is
    generated from `nexus.db.chash_tables.CHASH_BEARING_TABLES`; a drift test
    pins this rendered copy to the generator.) DBAs who created an earlier
    view generation: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t

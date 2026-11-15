@@ -2163,34 +2163,45 @@ class RolesCreated(NamedTuple):
     diag_created: bool
 
 
-#: nexus_diag's best-effort grants on an EXISTING install, run by both
-#: ``_create_roles`` and ``_backfill_diag_role`` so the role is usable before
-#: the engine's next boot. Schema USAGE always; the bulk table SELECT only in
-#: the LEGACY era (no counts view yet), the same era guard as the engine's
-#: ``grants-nexus-diag-1``. In the view era the engine grants nexus_diag only
-#: the columns the view reads (``grants-nexus-diag-3``, nexus-edchb); a bulk
-#: grant here would hand this BYPASSRLS role every tenant's chunk_text until
-#: that boot revoked it again.
-_DIAG_BEST_EFFORT_GRANTS_SQL: str = (
-    "DO $$ BEGIN "
-    "IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-    "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance') THEN "
-    "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
-    "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
-    "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
-    "END IF; "
-    "RETURN; "
-    "END IF; "
-    "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'nexus') THEN "
-    "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
-    "GRANT SELECT ON ALL TABLES IN SCHEMA nexus TO nexus_diag; "
-    "END IF; "
-    "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
-    "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
-    "GRANT SELECT ON ALL TABLES IN SCHEMA t1 TO nexus_diag; "
-    "END IF; "
-    "END $$;"
-)
+def _diag_best_effort_grants_sql() -> str:
+    """nexus_diag's best-effort grants on an EXISTING install, run by both
+    ``_create_roles`` and ``_backfill_diag_role`` so the role is usable before
+    the engine's next boot. Schema USAGE always. In the LEGACY era (no counts
+    view yet, the same era guard as the engine's ``grants-nexus-diag-1``) the
+    bulk table SELECT. In the view era what the engine's ``grants-nexus-diag-3``
+    grants (nexus-edchb): SELECT on only the column of each table the
+    security_invoker view reads, plus SELECT on the view itself, so the role
+    reads the view at once and never a content column. A bulk grant there would hand this BYPASSRLS role every
+    tenant's chunk_text until the engine's next boot revoked it."""
+    from nexus.db.chash_tables import CHASH_BEARING_TABLES  # noqa: PLC0415 — deferred, keeps provision import-light
+
+    view_inputs = "".join(
+        f"IF to_regclass('{t.table}') IS NOT NULL THEN GRANT SELECT ({t.column}) ON {t.table} TO nexus_diag; END IF; "
+        for t in CHASH_BEARING_TABLES
+    )
+    return (
+        "DO $$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance') THEN "
+        "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
+        "BEGIN GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag; "
+        "EXCEPTION WHEN insufficient_privilege THEN NULL; END; "
+        f"{view_inputs}"
+        "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
+        "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
+        "END IF; "
+        "RETURN; "
+        "END IF; "
+        "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'nexus') THEN "
+        "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
+        "GRANT SELECT ON ALL TABLES IN SCHEMA nexus TO nexus_diag; "
+        "END IF; "
+        "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
+        "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
+        "GRANT SELECT ON ALL TABLES IN SCHEMA t1 TO nexus_diag; "
+        "END IF; "
+        "END $$;"
+    )
 
 
 def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) -> None:
@@ -2606,7 +2617,7 @@ def _create_roles(
     try:
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,
-            _DIAG_BEST_EFFORT_GRANTS_SQL,
+            _diag_best_effort_grants_sql(),
         )
     except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
         _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
@@ -3091,7 +3102,7 @@ def _backfill_diag_role(
     try:
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,
-            _DIAG_BEST_EFFORT_GRANTS_SQL,
+            _diag_best_effort_grants_sql(),
         )
     except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
         _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))

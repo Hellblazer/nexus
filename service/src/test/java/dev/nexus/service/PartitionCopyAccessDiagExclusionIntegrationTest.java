@@ -26,9 +26,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * bead nexus-h4w9o: {@code nexus.partition_copy_access} (vectors-030-1, redefined by vectors-039-1) copies the
- * parent table's ACL onto a new leaf or model partition. The parent {@code nexus.chunks} carries SELECT for
+ * parent table's ACL onto a new leaf or model partition. The parent {@code nexus.chunks} carried SELECT for
  * {@code nexus_diag} (BYPASSRLS), re-granted every boot by {@code grants-nexus-diag-3} for the
- * {@code diag_chash_conformance} view, and {@code grants-nexus-diag-2} strips leaves only at the NEXT boot. Before
+ * {@code diag_chash_conformance} view (a column grant since nexus-edchb, so the test grants the table
+ * itself), and {@code grants-nexus-diag-2} strips leaves only at the NEXT boot. Before
  * vectors-039-1 a tenant or a model created between boots therefore got {@code nexus_diag} SELECT on its leaves.
  *
  * <p>The fixture is {@link GrantsNexusDiagViewAccessIntegrationTest}'s: two walks as a non-superuser owner, with a
@@ -69,12 +70,16 @@ class PartitionCopyAccessDiagExclusionIntegrationTest {
                 admin.setAutoCommit(true);
                 DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
 
-                // Precondition: the parent holds the diag grant, so a copy that did not skip it would carry it.
-                // Only nexus.chunks has one (grants-nexus-diag-3); the taxonomy_centroids parent has none, so its
+                // Precondition: the parent holds a table-level diag grant, so a copy that did not skip it would
+                // carry it. Since nexus-edchb grants-nexus-diag-3 grants nexus_diag only columns of nexus.chunks,
+                // which partition_copy_access (relacl only) never copies, so the test grants the table itself:
+                // a DBA or an older engine can leave one there. The taxonomy_centroids parent has none, so its
                 // assertions below guard against a future parent grant and are not evidence for this fix.
+                ctx.grant(DSL.privilege("SELECT")).on(DSL.table(DSL.name("nexus", "chunks")))
+                    .to(DSL.role(DIAG_ROLE)).execute();
                 assertThat(privileges(admin, DIAG_ROLE, "chunks"))
-                    .as("nexus_diag must hold SELECT on the nexus.chunks parent after the walk "
-                        + "(grants-nexus-diag-3); without it this test proves nothing")
+                    .as("nexus_diag must hold table-level SELECT on the nexus.chunks parent; "
+                        + "without it this test proves nothing")
                     .contains("SELECT");
                 assertThat(privileges(admin, SVC_ROLE, "chunks"))
                     .as("nexus_svc's DML on the nexus.chunks parent").containsAll(DML);
@@ -130,7 +135,7 @@ class PartitionCopyAccessDiagExclusionIntegrationTest {
                     }
                 }
 
-                // 4. The parent keeps its diag grant: the view still reads through it.
+                // 4. The parent keeps its diag grant: partition_sync_access changes the partitions only.
                 soft.assertThat(privileges(admin, DIAG_ROLE, "chunks"))
                     .as("the nexus.chunks parent keeps nexus_diag's SELECT").contains("SELECT");
                 soft.assertAll();

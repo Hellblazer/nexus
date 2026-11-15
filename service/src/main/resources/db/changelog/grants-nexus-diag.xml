@@ -284,8 +284,9 @@ $$;
             grants stick as the final word every boot — re-granting
             exactly what security_invoker=true requires: SELECT on the
             view itself, PLUS direct SELECT on every column the view reads
-            internally (column grants since nexus-edchb; table-level before,
-            which let the role read chunk_text across tenants) (security_invoker means Postgres checks the
+            internally. Since nexus-edchb these are column grants. Before,
+            they were table grants, which let the role read chunk_text
+            across tenants. (security_invoker means Postgres checks the
             INVOKING role's OWN table privileges for the relations the
             view references — nexus_diag's BYPASSRLS exempts it from
             row-level policies, never from ordinary GRANT-based privilege

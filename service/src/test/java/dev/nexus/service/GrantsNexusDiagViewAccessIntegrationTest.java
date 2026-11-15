@@ -64,7 +64,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>Fix lives in {@code grants-nexus-diag-3} (the changeset that runs LAST
  * among the runAlways grants blocks every boot): it re-grants SELECT on the
  * view plus the four {@code CHASH_BEARING_TABLES}
- * (src/nexus/db/chash_tables.py) every boot, making the grants the final
+ * (src/nexus/db/chash_tables.py) every boot (since nexus-edchb only the one
+ * column of each that the view reads), making the grants the final
  * word regardless of what -1/-2/taxonomy-011-8 did earlier in the same
  * walk.
  *
@@ -156,15 +157,16 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             // nexus-edchb: the grant is column-level, so this BYPASSRLS role reads the view's one
             // address column of each table and never a content column of any tenant.
             var asSu = DSL.using(su, SQLDialect.POSTGRES);
-            assertThat(asSu.select(DSL.function("has_table_privilege", Boolean.class,
-                    DSL.inline(DIAG_ROLE), DSL.inline("nexus.chunks"), DSL.inline("SELECT"))).fetchOne(0, Boolean.class))
-                .as("no table-level SELECT on nexus.chunks").isFalse();
-            assertThat(columnPrivilege(asSu, CHUNKS.CHASH.getName()))
-                .as("SELECT on nexus.chunks.chash, which the view reads").isTrue();
-            for (var content : List.of(CHUNKS.CHUNK_TEXT, CHUNKS.METADATA, CHUNKS.COLLECTION)) {
-                assertThat(columnPrivilege(asSu, content.getName()))
-                    .as("no SELECT on nexus.chunks." + content.getName()).isFalse();
+            for (String table : UNDERLYING_TABLES) {
+                assertThat(asSu.select(DSL.function("has_table_privilege", Boolean.class,
+                        DSL.inline(DIAG_ROLE), DSL.inline(table), DSL.inline("SELECT"))).fetchOne(0, Boolean.class))
+                    .as("no table-level SELECT on " + table).isFalse();
             }
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus",
+                    UNDERLYING_TABLES.stream().map(t -> t.substring(t.indexOf('.') + 1)).toList()))
+                .as("SELECT on only the column of each table the view reads")
+                .containsExactly("catalog_document_chunks.chash", "chunks.chash",
+                    "relevance_log.chunk_id", "topic_assignments.doc_id");
             try (Connection diag = DriverManager.getConnection(pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
                 assertThatThrownBy(() -> DSL.using(diag, SQLDialect.POSTGRES)
                         .select(CHUNKS.CHUNK_TEXT).from(CHUNKS).limit(1).fetch())
@@ -623,11 +625,6 @@ class GrantsNexusDiagViewAccessIntegrationTest {
      * proves the grant is USABLE (see this class's own javadoc), not merely present
      * in the catalog. Schema-agnostic {@code DSL.name(schema, table)}: some callers
      * pass a diag-view / table pair with no jOOQ codegen relevance to this probe. */
-    private static boolean columnPrivilege(org.jooq.DSLContext ctx, String column) {
-        return ctx.select(DSL.function("has_column_privilege", Boolean.class, DSL.inline(DIAG_ROLE),
-                DSL.inline("nexus.chunks"), DSL.inline(column), DSL.inline("SELECT"))).fetchOne(0, Boolean.class);
-    }
-
     private static long countAs(Connection c, String schema, String table) throws Exception {
         return DSL.using(c, SQLDialect.POSTGRES)
             .selectCount()
