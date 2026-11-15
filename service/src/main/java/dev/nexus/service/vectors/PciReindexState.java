@@ -171,6 +171,14 @@ final class PciReindexState {
         return v == null ? OptionalLong.empty() : OptionalLong.of(v);
     }
 
+    /**
+     * {@code index} was rebuilt by someone else and re-anchored at {@code rows} (nexus-4lnn1.1.10): its row count is the
+     * new baseline, so the next look does not read the fall since the old build as a bulk delete.
+     */
+    void rebaseline(String index, long rows) {
+        previousRows.put(index, rows);
+    }
+
     /** A bulk delete was chosen for {@code index}; it stays owed until its REINDEX has run. */
     void bulkDeleteOwed(String index) {
         bulkOwed.add(index);

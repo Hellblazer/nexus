@@ -123,12 +123,11 @@ public final class PciCatalog {
         Pattern.compile("^FOR VALUES IN \\('((?:[^']++|'')*+)'\\)$", Pattern.DOTALL);
 
     /**
-     * The anchor's format version, the one this engine writes: {@code "nexus_pci":2}, which adds {@code relfilenode}
-     * (nexus-4lnn1.1.10).
+     * The anchor's format version: {@code "nexus_pci":1}. It stays 1 when an optional field is added (an engine that
+     * knows only the older fields reads the text and ignores the rest, so a rollback or a mixed-engine fleet does not
+     * re-adopt); the fields an anchor has are what its readers test.
      */
-    public static final int ANCHOR_VERSION = 2;
-    /** The first format, still read: no {@code relfilenode}. Never refused and never re-anchored for the missing field. */
-    public static final int ANCHOR_VERSION_V1 = 1;
+    public static final int ANCHOR_VERSION = 1;
     /** {@link Anchor#origin()} of an index the builder built and anchored right after the build. */
     public static final String ORIGIN_BUILT = "built";
     /** {@link Anchor#origin()} of an index found with no parseable anchor and anchored by the pass that saw it. */
@@ -139,18 +138,19 @@ public final class PciCatalog {
     /**
      * The index's anchor (RDR-230 Technical Design 1): what the builder knew when the index was built, kept as the
      * index's PostgreSQL comment,
-     * {@code {"nexus_pci":2,"built_at":"<ISO-8601 Z>","rows":N,"bytes":N,"origin":"built","relfilenode":N}}. A comment
+     * {@code {"nexus_pci":1,"built_at":"<ISO-8601 Z>","rows":N,"bytes":N,"origin":"built","relfilenode":N}}. A comment
      * follows the index through {@code REINDEX CONCURRENTLY} and goes with it when it is dropped, but
      * {@code pg_class.relfilenode} changes with every rebuild, so an anchor whose relfilenode differs from the index's
-     * now describes a build the engine did not do.
+     * now describes a build the engine did not do (nexus-4lnn1.1.10). {@code relfilenode} is optional: an anchor without
+     * it stays valid, and the engine stamps it once.
      *
      * @param builtAt     when the index was built (adopted: when it was first seen), truncated to microseconds
      * @param rows        the collection's uncapped row count on its leaf at that moment
      * @param bytes       {@code pg_relation_size} of the index at that moment
      * @param origin      {@link #ORIGIN_BUILT} or {@link #ORIGIN_ADOPTED} (a parsed anchor may carry another word)
      * @param relfilenode {@code pg_class.relfilenode} of the index the anchor was written against, or {@code null} for
-     *                    a v1 anchor (and for an anchor the engine has not yet stamped: the writer sets it on the same
-     *                    session, right before the COMMENT)
+     *                    an anchor written before the field existed (and for one the engine has not yet stamped: the
+     *                    writer sets it on the same session, right before the COMMENT)
      */
     public record Anchor(Instant builtAt, long rows, long bytes, String origin, Long relfilenode) {
         public Anchor {
@@ -165,7 +165,7 @@ public final class PciCatalog {
             builtAt = builtAt.truncatedTo(ChronoUnit.MICROS);
         }
 
-        /** An anchor with no relfilenode yet (v1 when read; the writer stamps it). */
+        /** An anchor with no relfilenode yet (the writer stamps it). */
         public Anchor(Instant builtAt, long rows, long bytes, String origin) {
             this(builtAt, rows, bytes, origin, null);
         }
@@ -176,8 +176,8 @@ public final class PciCatalog {
         }
 
         /**
-         * Whether the index was rebuilt since this anchor was written: it has a relfilenode and the index's differs. A v1
-         * anchor, or an index whose relfilenode could not be read ({@code null}), is never rebuilt: no evidence.
+         * Whether the index was rebuilt since this anchor was written: it has a relfilenode and the index's differs. An
+         * anchor without one, or an index whose relfilenode could not be read ({@code null}), is never rebuilt: no evidence.
          */
         public boolean rebuiltSince(Long currentRelfilenode) {
             return relfilenode != null && currentRelfilenode != null && !relfilenode.equals(currentRelfilenode);
@@ -193,20 +193,26 @@ public final class PciCatalog {
          * @throws IllegalStateException when the origin is neither {@link #ORIGIN_BUILT} nor {@link #ORIGIN_ADOPTED}
          */
         public void checkWritable() {
-            if (!ORIGIN_BUILT.equals(origin) && !ORIGIN_ADOPTED.equals(origin)) {
+            if (!writable()) {
                 throw new IllegalStateException("not an origin this engine writes: " + origin);
             }
         }
 
+        /** Whether the origin is one this engine writes ({@link #ORIGIN_BUILT} or {@link #ORIGIN_ADOPTED}). */
+        public boolean writable() {
+            return ORIGIN_BUILT.equals(origin) || ORIGIN_ADOPTED.equals(origin);
+        }
+
         /**
          * The comment text. It is built from numbers, a timestamp and one of two fixed words, so nothing in it needs
-         * escaping. With a relfilenode it is v2; without, the v1 text (the engine always stamps before it writes).
+         * escaping. The optional {@code relfilenode} is last, so an anchor without one is the text this engine wrote
+         * before the field existed (the engine always stamps before it writes).
          *
          * @throws IllegalStateException when the origin is neither {@link #ORIGIN_BUILT} nor {@link #ORIGIN_ADOPTED}
          */
         public String toJson() {
             checkWritable();
-            String head = "{\"nexus_pci\":" + (relfilenode == null ? ANCHOR_VERSION_V1 : ANCHOR_VERSION)
+            String head = "{\"nexus_pci\":" + ANCHOR_VERSION
                 + ",\"built_at\":\"" + builtAt + "\",\"rows\":" + rows + ",\"bytes\":" + bytes + ",\"origin\":\""
                 + origin + "\"";
             return relfilenode == null ? head + "}" : head + ",\"relfilenode\":" + relfilenode + "}";
@@ -215,8 +221,9 @@ public final class PciCatalog {
 
     /**
      * The anchor in {@code comment}, or empty when there is none: a null or blank comment, text that is not a JSON
-     * object, a {@code nexus_pci} other than 1 or {@value #ANCHOR_VERSION}, or a field that is missing or of the wrong
-     * type (a v2 anchor's {@code relfilenode} included; a v1 anchor has none). Unknown fields are ignored. Never throws.
+     * object, a {@code nexus_pci} other than {@value #ANCHOR_VERSION}, or a required field that is missing or of the
+     * wrong type. Unknown fields are ignored, and so is an optional one of the wrong type (a {@code relfilenode} that is
+     * not a non-negative integer reads as none). Never throws.
      */
     public static Optional<Anchor> parseAnchor(String comment) {
         if (comment == null || comment.isBlank()) {
@@ -233,21 +240,16 @@ public final class PciCatalog {
             JsonNode bytes = n.get("bytes");
             JsonNode origin = n.get("origin");
             if (version == null || !version.isIntegralNumber() || !version.canConvertToInt()
-                || (version.asInt() != ANCHOR_VERSION && version.asInt() != ANCHOR_VERSION_V1)
+                || version.asInt() != ANCHOR_VERSION
                 || builtAt == null || !builtAt.isTextual()
                 || rows == null || !rows.isIntegralNumber() || !rows.canConvertToLong() || rows.asLong() < 0
                 || bytes == null || !bytes.isIntegralNumber() || !bytes.canConvertToLong() || bytes.asLong() < 0
                 || origin == null || !origin.isTextual() || origin.asText().isBlank()) {
                 return Optional.empty();
             }
-            Long relfilenode = null;
-            if (version.asInt() == ANCHOR_VERSION) {
-                JsonNode rf = n.get("relfilenode");
-                if (rf == null || !rf.isIntegralNumber() || !rf.canConvertToLong() || rf.asLong() < 0) {
-                    return Optional.empty();
-                }
-                relfilenode = rf.asLong();
-            }
+            JsonNode rf = n.get("relfilenode");
+            Long relfilenode = rf != null && rf.isIntegralNumber() && rf.canConvertToLong() && rf.asLong() >= 0
+                ? rf.asLong() : null;
             return Optional.of(new Anchor(Instant.parse(builtAt.asText()), rows.asLong(), bytes.asLong(),
                 origin.asText(), relfilenode));
         } catch (JsonProcessingException | DateTimeParseException e) {

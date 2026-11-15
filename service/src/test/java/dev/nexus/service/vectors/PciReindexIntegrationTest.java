@@ -817,6 +817,7 @@ class PciReindexIntegrationTest {
         assertThat(anchorOf(tenant, coll).rows()).as("the fresh anchor counts the rows now").isEqualTo(220);
         assertThat(anchorOf(tenant, coll).builtAt()).isAfter(old.builtAt());
         assertThat(r.reindexes()).as("the old anchor in this pass's looks fires nothing").isEqualTo(1);
+        assertThat(logged("event=pci_anchor_rebuilt_detected")).as("the engine's own REINDEX is no hand rebuild").isZero();
 
         r.reconcileOnce();
         assertThat(r.reindexes()).as("and the fresh anchor judges it from here on").isEqualTo(1);

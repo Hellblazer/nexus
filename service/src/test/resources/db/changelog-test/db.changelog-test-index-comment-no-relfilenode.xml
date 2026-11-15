@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-4lnn1.1.10 (RDR-230 P2): COMMENT ON INDEX ${schema}.${index} with a well-formed anchor that has no
+    relfilenode, as every anchor written before the field existed. jOOQ has no COMMENT ON INDEX.
+
+    A test shows such an anchor stays valid: it is not adopted again, and the engine stamps the field on first sight. The text is fixed here; only the two names are parameters, checked by
+    PgContainerHelper#commentIndexAnchorWithoutRelfilenode. runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="index-comment-no-relfilenode" author="nexus-4lnn1.1.10" runAlways="true">
+        <sql>COMMENT ON INDEX ${schema}.${index} IS '{"nexus_pci":1,"built_at":"2026-10-20T08:00:00Z","rows":1,"bytes":1,"origin":"built"}'</sql>
+    </changeSet>
+</databaseChangeLog>

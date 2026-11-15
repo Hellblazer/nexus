@@ -61,10 +61,16 @@ final class PciLeafReindexRule {
     record Rebuilt(PciCatalog.Leaf leaf, PciCatalog.LeafIndex own, long oldRelfilenode, long newRelfilenode) { }
 
     /**
-     * The REINDEXes the rule calls for (in leaf order; the caller sorts), the indexes it cannot judge, and the ones it
-     * found rebuilt by hand.
+     * A leaf's own HNSW index whose anchor has no relfilenode (written before the field existed): the caller stamps it
+     * once, with the anchor's own figures and the relfilenode now.
      */
-    record Scan(List<Reindex> candidates, int unanchored, List<Rebuilt> rebuilt) { }
+    record Stamp(PciCatalog.Leaf leaf, PciCatalog.LeafIndex own, PciCatalog.Anchor anchor, long relfilenode) { }
+
+    /**
+     * The REINDEXes the rule calls for (in leaf order; the caller sorts), the indexes it cannot judge, the ones it found
+     * rebuilt by hand, and the ones whose anchor wants its relfilenode stamped.
+     */
+    record Scan(List<Reindex> candidates, int unanchored, List<Rebuilt> rebuilt, List<Stamp> stamps) { }
 
     /** {@code schema.name}, the key of a leaf in the statistics map and in logs. */
     static String leafId(PciCatalog.Leaf leaf) {
@@ -90,6 +96,7 @@ final class PciLeafReindexRule {
         }
         List<Reindex> out = new ArrayList<>();
         List<Rebuilt> rebuilt = new ArrayList<>();
+        List<Stamp> stamps = new ArrayList<>();
         int unanchored = 0;
         for (PciReindexState.Look look : looks) {
             PciCatalog.LeafIndex own = look.leaf().hnswIndex(look.dimension()).orElse(null);
@@ -120,6 +127,9 @@ final class PciLeafReindexRule {
                 rebuilt.add(new Rebuilt(look.leaf(), own, anchor.relfilenode(), read.relfilenode()));
                 continue;   // its size and its anchor describe a build that is gone; the caller anchors the new one
             }
+            if (anchor != null && anchor.relfilenode() == null && read.relfilenode() != null && anchor.writable()) {
+                stamps.add(new Stamp(look.leaf(), own, anchor, read.relfilenode()));   // judged as before, stamped after
+            }
             if (PciLeafSizeRule.evaluate(read.bytes(), rows, reference) != PciLeafSizeRule.Verdict.FIRE) {
                 continue;
             }
@@ -128,6 +138,6 @@ final class PciLeafReindexRule {
                 out.add(new Reindex(own.name(), null, Trigger.LEAF_SIZE, read.bytes()));
             }
         }
-        return new Scan(List.copyOf(out), unanchored, List.copyOf(rebuilt));
+        return new Scan(List.copyOf(out), unanchored, List.copyOf(rebuilt), List.copyOf(stamps));
     }
 }

@@ -675,9 +675,8 @@ class PciCatalogIntegrationTest {
 
         assertThat(leaf.name()).isEqualTo(leafName);
         PciCatalog.Index a = index(leaf, PciCatalog.indexName(M1024, T1, anchored)).orElseThrow();
-        // nexus-4lnn1.1.10: the writer stamps the relfilenode (v2) on its own session; the figures are the given ones.
-        assertThat(a.comment()).startsWith(anchor.toJson().replace("\"nexus_pci\":1", "\"nexus_pci\":2")
-            .replace("}", ",\"relfilenode\":"));
+        // nexus-4lnn1.1.10: the writer adds the relfilenode on its own session; the figures are the given ones.
+        assertThat(a.comment()).startsWith(anchor.toJson().replace("}", ",\"relfilenode\":"));
         assertThat(a.anchor()).hasValueSatisfying(x -> assertThat(x.sameFigures(anchor)).isTrue());
         assertThat(snap.anchor(M1024, T1, anchored)).isPresent();
         PciCatalog.Index g = index(leaf, PciCatalog.indexName(M1024, T1, garbled)).orElseThrow();

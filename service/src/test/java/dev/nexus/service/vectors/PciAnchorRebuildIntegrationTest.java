@@ -11,6 +11,8 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.jooq.binding.Vector;
+import dev.nexus.service.vectors.PciCanary.Result;
+import dev.nexus.service.vectors.PciCanary.Target;
 import org.jooq.DSLContext;
 import org.jooq.JSONB;
 import org.jooq.SQLDialect;
@@ -33,8 +35,6 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.OptionalDouble;
-import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -165,13 +165,34 @@ class PciAnchorRebuildIntegrationTest {
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60));
     }
 
-    /** REINDEX on, with a canary that is always green: the leaf size rule runs, and reads the leaf index's anchor. */
-    PciReconciler reindexingReconciler(Clock clock) {
+    /** The canary: every run ends in {@link #state} with {@link #queries} queries; a red run's queries are {@link #sample}. */
+    static final class ScriptedCanary implements PciCanarySchedule.Runner {
+        volatile PciCanary.State state = PciCanary.State.GREEN;
+        volatile int queries = 10;
+        volatile List<float[]> sample = List.of(new float[] {1f, 2f, 3f});
+
+        private Result result(Target target, String trigger) {
+            boolean red = state == PciCanary.State.RED;
+            return new Result(target, trigger, state, null, queries, red ? 0.9 : 1.0, red ? 0.95 : 1.0, red ? 1 : 0,
+                Instant.now(), red ? sample : null, null);
+        }
+
+        @Override public Result run(Target target, String trigger) {
+            return result(target, trigger);
+        }
+
+        @Override public Result remeasure(Target target, String trigger, List<float[]> sameQueries) {
+            return result(target, trigger);
+        }
+    }
+
+    /** REINDEX on, with the scripted canary: the leaf size rule and the REINDEX triggers run. */
+    PciReconciler reindexingReconciler(Clock clock, ScriptedCanary canary) {
         PciSettings s = new PciSettings(true, B, 600, 16);
         return new PciReconciler(catalog::read, builderSession(s), PciIndexSweep.create(svcDs, s), s, clock,
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60),
             java.util.random.RandomGenerator.getDefault(), tenantsSeen -> 0,
-            new PciCanarySchedule(new PciLeafIndexMaintenanceIntegrationTest.ScriptedCanary(), clock, System::nanoTime));
+            new PciCanarySchedule(canary, clock, System::nanoTime));
     }
 
     @SuppressWarnings("deprecation")
@@ -290,9 +311,6 @@ class PciAnchorRebuildIntegrationTest {
         handReindex(leaf.schema(), index);
 
         Facts after = factsOf(leaf.schema(), index);
-        System.out.println("SUBSTRATE-FACT index=" + index + " oid_before=" + before.oid() + " oid_after=" + after.oid()
-            + " relfilenode_before=" + before.relfilenode() + " relfilenode_after=" + after.relfilenode()
-            + " comment_carried=" + before.comment().equals(after.comment()));
         // The name is what the engine keys on (factsOf found the index by it). The oid is NOT kept: REINDEX CONCURRENTLY
         // builds a new index and swaps the names, so the new one has a new oid as well as new storage.
         assertThat(after.oid()).as("a new index under the same name").isNotEqualTo(before.oid());
@@ -300,18 +318,18 @@ class PciAnchorRebuildIntegrationTest {
         assertThat(after.comment()).as("the COMMENT is carried across the swap").isEqualTo(before.comment());
     }
 
-    // -- the engine's anchors are v2 ---------------------------------------------------------------------------
+    // -- the engine's anchors carry the relfilenode ------------------------------------------------------------
 
     @Test
-    void aBuild_anchorsAtV2_withTheRelfilenodeItWasWrittenAgainst() throws Exception {
-        String tenant = newTenant("v2-built");
+    void aBuild_anchorsWithTheRelfilenodeItWasWrittenAgainst_underTheSameVersion() throws Exception {
+        String tenant = newTenant("rf-built");
         collection(tenant, name("c"), 300);
 
         reconciler(settings(), Clock.systemUTC()).reconcileOnce();
 
         PciCatalog.Leaf leaf = leaf(tenant);
         Facts facts = factsOf(leaf.schema(), indexOf(tenant, name("c")).name());
-        assertThat(facts.comment()).contains("\"nexus_pci\":2");
+        assertThat(facts.comment()).startsWith("{\"nexus_pci\":1,").contains("\"relfilenode\":" + facts.relfilenode());
         PciCatalog.Anchor anchor = indexOf(tenant, name("c")).anchor().orElseThrow();
         assertThat(anchor.origin()).isEqualTo("built");
         assertThat(anchor.relfilenode()).isEqualTo(Long.parseLong(facts.relfilenode()));
@@ -366,8 +384,9 @@ class PciAnchorRebuildIntegrationTest {
     }
 
     @Test
-    void aV1Anchor_staysValid_isNeitherReanchoredNorAdopted_andGainsTheFieldAtTheNextEngineWrite() throws Exception {
-        String tenant = newTenant("v1");
+    void anAnchorWithoutARelfilenode_isStampedOnce_withItsOwnFigures_andALaterHandReindexIsThenDetected()
+            throws Exception {
+        String tenant = newTenant("stamp");
         collection(tenant, name("c"), 300);
         MutableClock clock = new MutableClock();
         PciReconciler r = reconciler(settings(), clock);
@@ -375,105 +394,167 @@ class PciAnchorRebuildIntegrationTest {
         PciCatalog.Leaf leaf = leaf(tenant);
         String index = indexOf(tenant, name("c")).name();
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.commentIndexV1Anchor(su, leaf.schema(), index);
+            PgContainerHelper.commentIndexAnchorWithoutRelfilenode(su, leaf.schema(), index);
         }
-        String v1 = factsOf(leaf.schema(), index).comment();
-        assertThat(v1).contains("\"nexus_pci\":1").doesNotContain("relfilenode");
+        String before = factsOf(leaf.schema(), index).comment();
+        assertThat(before).doesNotContain("relfilenode");
+        PciCatalog.Anchor figures = PciCatalog.parseAnchor(before).orElseThrow();
 
-        handReindex(leaf.schema(), index);   // a v1 anchor has no relfilenode to differ from
         clock.advance(Duration.ofHours(1));
         r.reconcileOnce();
+
+        Facts stamped = factsOf(leaf.schema(), index);
+        assertThat(stamped.comment()).as("the same text, byte for byte, plus the field")
+            .isEqualTo(before.replace("}", ",\"relfilenode\":" + stamped.relfilenode() + "}"));
+        assertThat(PciCatalog.parseAnchor(stamped.comment()).orElseThrow().sameFigures(figures)).isTrue();
+        assertThat(logged("event=pci_anchor_relfilenode_stamped")).isEqualTo(1);
+        assertThat(logged("event=pci_anchor_rebuilt_detected")).as("a stamp is no rebuild").isZero();
+        assertThat(logged("event=pci_anchor_adopted")).isZero();
+        assertThat(r.reading(leaf, index).anchor()).as("the reading carries it").isEqualTo(
+            PciCatalog.parseAnchor(stamped.comment()).orElseThrow());
+
+        clock.advance(Duration.ofHours(1));
+        r.reconcileOnce();
+        assertThat(factsOf(leaf.schema(), index).comment()).as("stamped once").isEqualTo(stamped.comment());
+        assertThat(logged("event=pci_anchor_relfilenode_stamped")).isEqualTo(1);
+
+        handReindex(leaf.schema(), index);
+        clock.advance(Duration.ofHours(1));
         r.reconcileOnce();
 
-        assertThat(factsOf(leaf.schema(), index).comment()).as("left exactly as it was").isEqualTo(v1);
-        assertThat(logged("event=pci_anchor_rebuilt_detected")).isZero();
-        assertThat(logged("event=pci_anchor_adopted")).isZero();
-        assertThat(PciCatalog.parseAnchor(v1)).hasValueSatisfying(a -> assertThat(a.relfilenode()).isNull());
-
-        // The next time the engine writes it, it is v2, stamped on the writing session.
-        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
-            var anchor = new PciCatalog.Anchor(clock.instant(), 300, 1, PciCatalog.ORIGIN_BUILT);
-            assertThat(pass.comment(leaf, indexOf(tenant, name("c")), anchor))
-                .isEqualTo(PciBuilderSession.DdlOutcome.DONE);
-        }
-        Facts now = factsOf(leaf.schema(), index);
-        assertThat(now.comment()).contains("\"nexus_pci\":2");
-        assertThat(PciCatalog.parseAnchor(now.comment())).hasValueSatisfying(
-            a -> assertThat(a.relfilenode()).isEqualTo(Long.parseLong(now.relfilenode())));
-    }
-
-    // -- what the policies count from the new anchor -----------------------------------------------------------
-
-    static PciReindexPolicy.Candidate candidate(PciCatalog.Anchor anchor, long rows, long writtenSince,
-                                                PciCanary.State canary, int queries) {
-        return new PciReindexPolicy.Candidate("pci_x", "c", 384, anchor, 1000, rows, writtenSince, OptionalLong.empty(),
-            false, canary, queries, null, false, OptionalDouble.empty());
+        assertThat(logged("event=pci_anchor_rebuilt_detected")).as("now a hand rebuild is seen").isEqualTo(1);
+        assertThat(PciCatalog.parseAnchor(factsOf(leaf.schema(), index).comment()).orElseThrow().builtAt())
+            .isEqualTo(clock.instant());
     }
 
     @Test
-    void afterTheReanchor_theDeletesRuleAndTheDayFloor_countFromTheNewAnchor() throws Exception {
-        String tenant = newTenant("policy");
+    void aRebuildBetweenTheReadAndTheWrite_isNotStampedOverOldFigures() throws Exception {
+        String tenant = newTenant("veto");
+        collection(tenant, name("c"), 300);
+        reconciler(settings(), Clock.systemUTC()).reconcileOnce();
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.Index index = indexOf(tenant, name("c"));
+        Facts read = factsOf(leaf.schema(), index.name());
+        handReindex(leaf.schema(), index.name());   // lands after the read
+        String text = factsOf(leaf.schema(), index.name()).comment();
+        var anchor = new PciCatalog.Anchor(Instant.now(), 300, 1, PciCatalog.ORIGIN_BUILT);
+
+        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
+            var vetoed = pass.write(leaf, index, anchor, Long.parseLong(read.relfilenode()));
+            assertThat(vetoed.outcome()).isEqualTo(PciBuilderSession.DdlOutcome.STALE);
+            assertThat(factsOf(leaf.schema(), index.name()).comment()).as("nothing was sent").isEqualTo(text);
+            var current = Long.parseLong(factsOf(leaf.schema(), index.name()).relfilenode());
+            assertThat(pass.write(leaf, index, anchor, current).outcome()).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+        }
+        assertThat(logged("event=pci_anchor_skipped reason=rebuilt_since_read")).isEqualTo(1);
+    }
+
+    @Test
+    void aCommentOnAnIndexThatIsGone_isStale_andSendsNothing() throws Exception {
+        String tenant = newTenant("gone");
+        collection(tenant, name("c"), 300);
+        reconciler(settings(), Clock.systemUTC()).reconcileOnce();
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.Index index = indexOf(tenant, name("c"));
+
+        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
+            assertThat(pass.drop(leaf, index)).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+            var gone = pass.write(leaf, index, new PciCatalog.Anchor(Instant.now(), 1, 1, PciCatalog.ORIGIN_BUILT));
+            assertThat(gone.outcome()).isEqualTo(PciBuilderSession.DdlOutcome.STALE);
+            assertThat(pass.comment(leaf, index, new PciCatalog.Anchor(Instant.now(), 1, 1,
+                PciCatalog.ORIGIN_BUILT))).isEqualTo(PciBuilderSession.DdlOutcome.STALE);
+        }
+        assertThat(logged("event=pci_anchor_skipped reason=gone index=" + index.name())).isEqualTo(2);
+        assertThat(logged("event=pci_ddl_failed op=comment")).as("no COMMENT statement was sent").isZero();
+    }
+
+    // -- what the engine does with the new anchor --------------------------------------------------------------
+
+    @Test
+    void aHandReindexAfterABulkDelete_isNoBulkDelete_noDeletesRebuild_andNoVacuum() throws Exception {
+        String tenant = newTenant("bulk");
         collection(tenant, name("c"), 300);
         MutableClock clock = new MutableClock();
-        PciReconciler r = reconciler(settings(), clock);
+        ScriptedCanary canary = new ScriptedCanary();
+        PciReconciler r = reindexingReconciler(clock, canary);
         r.reconcileOnce();
+        r.reconcileOnce();   // the first look records the 300 rows as the previous count
         PciCatalog.Leaf leaf = leaf(tenant);
         String index = indexOf(tenant, name("c")).name();
-        PciCatalog.Anchor old = indexOf(tenant, name("c")).anchor().orElseThrow();
-        assertThat(old.rows()).isEqualTo(300);
 
-        deleteRows(tenant, name("c"), 0, 150);
+        deleteRows(tenant, name("c"), 0, 120);   // 40%
         handReindex(leaf.schema(), index);
-        clock.advance(Duration.ofHours(2));
-        r.reconcileOnce();   // detects, re-anchors at 150 rows
-        r.reconcileOnce();   // reads from the new anchor
-        PciReconciler.IndexReading reading = r.reading(leaf, index);
-        PciCatalog.Anchor fresh = reading.anchor();
-        assertThat(fresh.rows()).isEqualTo(150);
-        assertThat(fresh.builtAt()).isEqualTo(clock.instant());
+        for (int i = 0; i < 3; i++) {
+            clock.advance(Duration.ofMinutes(10));
+            r.reconcileOnce();
+        }
 
-        Instant now = clock.instant();
-        // Deletes since build: 300 - 150 from the old anchor is the whole index again; from the new one it is nothing.
-        assertThat(PciReindexPolicy.trigger(candidate(old, reading.rows(), reading.writtenSince(),
-            PciCanary.State.GREEN, 10), now)).contains(PciReconcilePlanner.Trigger.DELETES_SINCE_BUILD);
-        assertThat(PciReindexPolicy.trigger(candidate(fresh, reading.rows(), reading.writtenSince(),
-            PciCanary.State.GREEN, 10), now)).isEmpty();
-        // The red-canary day floor: 23 h after the new anchor, 25 h after the old one.
-        Instant later = fresh.builtAt().plus(Duration.ofHours(23));
-        assertThat(later).isAfter(old.builtAt().plus(Duration.ofHours(24)));
-        assertThat(PciReindexPolicy.trigger(candidate(old, 150, 0, PciCanary.State.RED, 10), later))
-            .contains(PciReconcilePlanner.Trigger.RED_CANARY);
-        assertThat(PciReindexPolicy.trigger(candidate(fresh, 150, 0, PciCanary.State.RED, 10), later)).isEmpty();
-        assertThat(PciReindexPolicy.trigger(candidate(fresh, 150, 0, PciCanary.State.RED, 10),
-            fresh.builtAt().plus(Duration.ofHours(25)))).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        assertThat(logged("event=pci_anchor_rebuilt_detected")).isEqualTo(1);
+        assertThat(logged("trigger=bulk_delete")).as("the fall since the old build is not a bulk delete").isZero();
+        assertThat(logged("trigger=deletes_since_build")).as("deletes count from the new anchor").isZero();
+        assertThat(logged("event=pci_leaf_vacuumed")).isZero();
+        assertThat(r.reading(leaf, index).anchor().rows()).isEqualTo(180);
+    }
+
+    @Test
+    void aHandReindexOfAnIndexWithARedCanary_holdsTheRedCanaryDayFromTheDetection() throws Exception {
+        String tenant = newTenant("redfloor");
+        collection(tenant, name("c"), 300);
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        canary.state = PciCanary.State.RED;
+        PciReconciler r = reindexingReconciler(clock, canary);
+        r.reconcileOnce();   // builds; the canary is red on ten queries after the build
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String index = indexOf(tenant, name("c")).name();
+
+        clock.advance(Duration.ofHours(30));   // the build's own day is over: a red would REINDEX now
+        handReindex(leaf.schema(), index);
+        r.reconcileOnce();   // detects, re-anchors at built_at = now
+        assertThat(logged("event=pci_anchor_rebuilt_detected")).isEqualTo(1);
+        assertThat(r.reindexes()).isZero();
+
+        clock.advance(Duration.ofHours(23));   // 53 h after the build, 23 h after the detection
+        r.reconcileOnce();
+        assertThat(r.reindexes()).as("23 h after the detection").isZero();
+
+        clock.advance(Duration.ofHours(2));
+        r.reconcileOnce();
+        assertThat(r.reindexes()).as("25 h after the detection").isEqualTo(1);
+        assertThat(logged("trigger=red_canary")).isGreaterThanOrEqualTo(1);
     }
 
     // -- a leaf's own HNSW index -------------------------------------------------------------------------------
 
     @Test
-    void aLeafsOwnIndex_withAV2Anchor_isReanchoredAfterAHandReindex() throws Exception {
+    void aLeafsOwnIndex_isStampedOnce_thenAHandReindexIsDetectedAndReanchored() throws Exception {
         String tenant = newTenant("leaf");
         collection(tenant, name("keep"), 250);
         MutableClock clock = new MutableClock();
-        PciReconciler r = reindexingReconciler(clock);
+        PciReconciler r = reindexingReconciler(clock, new ScriptedCanary());
         r.reconcileOnce();   // builds the pci_ index: the install reference the leaf rule needs
         PciCatalog.Leaf leaf = leaf(tenant);
         PciCatalog.LeafIndex own = leaf.hnswIndex(384).orElseThrow();
-        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
-            var anchored = pass.anchorAfterLeafReindex(leaf, own, 250, clock.instant());
-            assertThat(anchored.outcome()).isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.commentIndexAnchorWithoutRelfilenode(su, leaf.schema(), own.name());
         }
-        Facts v2 = factsOf(leaf.schema(), own.name());
-        assertThat(PciCatalog.parseAnchor(v2.comment())).hasValueSatisfying(
-            a -> assertThat(a.relfilenode()).isEqualTo(Long.parseLong(v2.relfilenode())));
+        String before = factsOf(leaf.schema(), own.name()).comment();
+
         clock.advance(Duration.ofHours(1));
         r.reconcileOnce();
-        assertThat(factsOf(leaf.schema(), own.name()).comment()).as("unmoved: left alone").isEqualTo(v2.comment());
+
+        Facts stamped = factsOf(leaf.schema(), own.name());
+        assertThat(stamped.comment()).as("stamped, nothing else changed")
+            .isEqualTo(before.replace("}", ",\"relfilenode\":" + stamped.relfilenode() + "}"));
+        assertThat(logged("event=pci_anchor_relfilenode_stamped index=" + own.name())).isEqualTo(1);
+        clock.advance(Duration.ofHours(1));
+        r.reconcileOnce();
+        assertThat(factsOf(leaf.schema(), own.name()).comment()).as("unmoved: left alone").isEqualTo(stamped.comment());
         assertThat(logged("event=pci_anchor_rebuilt_detected")).isZero();
 
         handReindex(leaf.schema(), own.name());
         Facts rebuilt = factsOf(leaf.schema(), own.name());
-        assertThat(rebuilt.relfilenode()).isNotEqualTo(v2.relfilenode());
+        assertThat(rebuilt.relfilenode()).isNotEqualTo(stamped.relfilenode());
         clock.advance(Duration.ofHours(1));
         r.reconcileOnce();
 
@@ -482,8 +563,7 @@ class PciAnchorRebuildIntegrationTest {
         assertThat(re.builtAt()).isEqualTo(clock.instant());
         assertThat(re.origin()).isEqualTo("built");
         assertThat(logs()).anyMatch(l -> l.contains("event=pci_anchor_rebuilt_detected")
-            && l.contains("index=" + own.name()) && l.contains("old_relfilenode=" + v2.relfilenode())
+            && l.contains("index=" + own.name()) && l.contains("old_relfilenode=" + stamped.relfilenode())
             && l.contains("new_relfilenode=" + rebuilt.relfilenode()));
-        assertThat(r.reindexes()).as("a rebuilt index is no REINDEX candidate this pass").isZero();
     }
 }

@@ -18,6 +18,7 @@ final class PciReindexNotKeyedFields {
         "PciReconciler.Tally.looks",
         "PciLeafReindexRule.Scan.candidates",
         "PciLeafReindexRule.Scan.rebuilt",
+        "PciLeafReindexRule.Scan.stamps",
         "PciCatalog.Leaf.hnswIndexes",
         "PciCatalog.Leaf.leafLeftovers",
         "PciCatalog.LeafBuilder.candidates",

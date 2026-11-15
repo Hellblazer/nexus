@@ -244,32 +244,72 @@ class PciCatalogTest {
         assertThat(PciCatalog.parseAnchor(fine.toJson())).contains(fine);
     }
 
-    private static final String ANCHOR_V2 =
-        "{\"nexus_pci\":2,\"built_at\":\"2026-10-20T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
+    private static final String ANCHOR_WITH_RELFILENODE =
+        "{\"nexus_pci\":1,\"built_at\":\"2026-10-20T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
             + "\"origin\":\"built\",\"relfilenode\":16421}";
 
-    @Test
-    void anchorV2_recordsTheRelfilenodeItWasWrittenAgainst_roundTrips_andV1StaysReadable() {
-        var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
-        var v2 = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L);
+    /**
+     * The anchor rule of the engine before the relfilenode field (af47a7334), as the deployed engine runs it: the
+     * version must be 1, the four fields must be there and well typed, and any other field is ignored. The text this
+     * engine writes must pass it, so a rollback or a mixed-engine fleet does not re-adopt.
+     */
+    private static boolean oldRuleReadsIt(String comment) {
+        try {
+            var n = new com.fasterxml.jackson.databind.ObjectMapper().readTree(comment);
+            if (n == null || !n.isObject()) {
+                return false;
+            }
+            var version = n.get("nexus_pci");
+            var builtAt = n.get("built_at");
+            var rows = n.get("rows");
+            var bytes = n.get("bytes");
+            var origin = n.get("origin");
+            if (version == null || !version.isIntegralNumber() || version.asInt() != 1
+                || builtAt == null || !builtAt.isTextual()
+                || rows == null || !rows.isIntegralNumber() || !rows.canConvertToLong() || rows.asLong() < 0
+                || bytes == null || !bytes.isIntegralNumber() || !bytes.canConvertToLong() || bytes.asLong() < 0
+                || origin == null || !origin.isTextual() || origin.asText().isBlank()) {
+                return false;
+            }
+            java.time.Instant.parse(builtAt.asText());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
-        assertThat(PciCatalog.ANCHOR_VERSION).isEqualTo(2);
-        assertThat(v2.toJson()).isEqualTo(ANCHOR_V2);
-        assertThat(PciCatalog.parseAnchor(ANCHOR_V2)).contains(v2);
-        // A v1 text (no relfilenode) is a valid anchor exactly as before: relfilenode is unknown, not an error.
-        var v1 = PciCatalog.parseAnchor(ANCHOR_TEXT).orElseThrow();
-        assertThat(v1.relfilenode()).isNull();
-        assertThat(v1.builtAt()).isEqualTo(at);
-        assertThat(v1.rows()).isEqualTo(58588);
-        // A v1 anchor is never "rebuilt": it has no relfilenode to differ from.
-        assertThat(v1.rebuiltSince(99L)).isFalse();
-        assertThat(v2.rebuiltSince(16421L)).isFalse();
-        assertThat(v2.rebuiltSince(16500L)).isTrue();
-        assertThat(v2.rebuiltSince(null)).as("an unreadable current relfilenode is no evidence").isFalse();
-        assertThat(v2.withRelfilenode(7L).relfilenode()).isEqualTo(7L);
-        assertThat(v1.sameFigures(v2)).as("the figures, not the relfilenode").isTrue();
-        // An unknown extra field on a v2 text is ignored.
-        assertThat(PciCatalog.parseAnchor(ANCHOR_V2.replace("}", ",\"future\":1}"))).contains(v2);
+    @Test
+    void anchor_recordsTheRelfilenodeItWasWrittenAgainst_asAnAdditiveField_andAnAnchorWithoutOneStaysValid() {
+        var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
+        var stamped = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L);
+
+        assertThat(PciCatalog.ANCHOR_VERSION).as("additive: the version stays 1").isEqualTo(1);
+        assertThat(stamped.toJson()).isEqualTo(ANCHOR_WITH_RELFILENODE);
+        assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE)).contains(stamped);
+        // The text this engine writes is read by the engine before the field existed.
+        assertThat(oldRuleReadsIt(ANCHOR_WITH_RELFILENODE)).isTrue();
+        assertThat(oldRuleReadsIt(ANCHOR_TEXT)).as("the check reads the old text too").isTrue();
+        assertThat(oldRuleReadsIt(ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":2")))
+            .as("and the old rule refuses a version it does not know").isFalse();
+        // An anchor written before the field existed is a valid anchor: its relfilenode is unknown, not an error.
+        var old = PciCatalog.parseAnchor(ANCHOR_TEXT).orElseThrow();
+        assertThat(old.relfilenode()).isNull();
+        assertThat(old.builtAt()).isEqualTo(at);
+        assertThat(old.rows()).isEqualTo(58588);
+        assertThat(old.rebuiltSince(99L)).as("no relfilenode, nothing to differ from").isFalse();
+        assertThat(stamped.rebuiltSince(16421L)).isFalse();
+        assertThat(stamped.rebuiltSince(16500L)).isTrue();
+        assertThat(stamped.rebuiltSince(null)).as("an unreadable current relfilenode is no evidence").isFalse();
+        assertThat(stamped.withRelfilenode(7L).relfilenode()).isEqualTo(7L);
+        assertThat(old.sameFigures(stamped)).as("the figures, not the relfilenode").isTrue();
+        assertThat(old.withRelfilenode(16421L).toJson()).as("stamping adds the field and nothing else")
+            .isEqualTo(ANCHOR_TEXT.replace("}", ",\"relfilenode\":16421}"));
+        // An unknown extra field is ignored, and so is an optional field of the wrong type.
+        assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("}", ",\"future\":1}"))).contains(stamped);
+        for (String bad : new String[] {"\"16421\"", "-1", "1.5", "null"}) {
+            assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("16421", bad))).as(bad)
+                .hasValueSatisfying(a -> assertThat(a.relfilenode()).isNull());
+        }
     }
 
     @Test
@@ -287,11 +327,7 @@ class PciCatalogTest {
     void parseAnchor_everythingThatIsNotOneAnchorIsEmpty_andNothingThrows() {
         for (String text : new String[] {
             null, "", "   ", "an operator's note", "[]", "[1]", "\"x\"", "42", "null", "{", "{}",
-            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":3"),
-            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":2"),   // v2 without its relfilenode
-            ANCHOR_V2.replace("\"relfilenode\":16421", "\"relfilenode\":\"16421\""),
-            ANCHOR_V2.replace("\"relfilenode\":16421", "\"relfilenode\":-1"),
-            ANCHOR_V2.replace("\"relfilenode\":16421", "\"relfilenode\":1.5"),
+            ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":2"),
             ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":\"1\""),
             ANCHOR_TEXT.replace("\"nexus_pci\":1,", ""),
             ANCHOR_TEXT.replace("\"built_at\":\"2026-10-20T08:00:00Z\",", ""),

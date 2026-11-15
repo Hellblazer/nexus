@@ -829,6 +829,42 @@ class PciLeafIndexMaintenanceIntegrationTest {
         }
     }
 
+    /**
+     * A bloated leaf index that someone rebuilt by hand and that has bloated again since: the size rule would fire (its
+     * anchor is a day old), but the pass finds it rebuilt, anchors it as built now, and judges nothing; the cooldown then
+     * counts from that anchor, so the rule fires a day later (nexus-4lnn1.1.10).
+     */
+    @Test
+    @Timeout(value = 600, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    void aLeafIndexRebuiltByHand_isReanchored_notJudged_andTheCooldownCountsFromThere() throws Exception {
+        String tenant = newTenant("handrebuilt");
+        MovingClock clock = new MovingClock();
+        PciReconciler r = bloatedLeaf(tenant, settings(), new ScriptedCanary(), clock);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String own = own384(tenant).name();
+        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
+            assertThat(pass.anchorAfterLeafReindex(leaf, own384(tenant), 250, clock.instant()).outcome())
+                .isEqualTo(PciBuilderSession.DdlOutcome.DONE);
+        }
+        clock.advance(Duration.ofHours(25));   // its cooldown is over
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.reindexIndexConcurrently(su, leaf.schema(), own);
+        }
+        bloatAgain(tenant, leaf, own, "bulk2");   // the rule would fire on it now, with the old anchor
+
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).as("found rebuilt: re-anchored, not judged").isZero();
+        assertThat(logged("event=pci_anchor_rebuilt_detected index=" + own)).isEqualTo(1);
+        r.reconcileOnce();
+        assertThat(r.reindexes()).as("cooling down from the new anchor, though bloated").isZero();
+
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).as("a day after the detection").isEqualTo(1);
+    }
+
     @Test
     @Timeout(value = 600, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     void aLeafReindexWhoseAnchorIsNotWritten_isOwedIt_isNoCandidateMeanwhile_andOnceItLandsTheCooldownHolds()

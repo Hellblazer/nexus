@@ -1106,11 +1106,12 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("PciReconciler.failures", PCI_OFF);
             // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
             // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
-            // AnchorReads fields are one counting transaction's result, applied once it commits.
-            notKeyed.put("PciReconciler.lastStats", PCI_OFF);
-            notKeyed.put("PciReconciler.readings", PCI_OFF);
-            notKeyed.put("PciReconciler.AnchorReads.readings", PCI_OFF);
-            notKeyed.put("PciReconciler.AnchorReads.adoptions", PCI_OFF);
+            // The Reads fields are one counting transaction's result, applied once it commits. They live in
+            // PciAnchorLedger since nexus-4lnn1.1.10 (moved out of PciReconciler to keep it under its size cap).
+            notKeyed.put("PciAnchorLedger.lastStats", PCI_OFF);
+            notKeyed.put("PciAnchorLedger.readings", PCI_OFF);
+            notKeyed.put("PciAnchorLedger.Reads.readings", PCI_OFF);
+            notKeyed.put("PciAnchorLedger.Reads.writes", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
             // nexus-4lnn1.1.10 (RDR-230 Phase 2): the REINDEX phase's in-memory fields; the list and why.
             PciReindexNotKeyedFields.FIELDS.forEach(f -> notKeyed.put(f, PCI_OFF));

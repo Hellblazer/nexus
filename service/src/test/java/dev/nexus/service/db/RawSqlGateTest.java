@@ -3100,8 +3100,8 @@ class RawSqlGateTest {
         "vacuum-table", "auto-explain-reset",
         // nexus-4lnn1.1.1 (RDR-230 P1.1): the anchor is an index comment; each text is fixed in its changelog
         "index-comment-not-an-anchor", "index-comment-wrong-version", "index-comment-clear",
-        // nexus-4lnn1.1.10: the v1 anchor text (no relfilenode), behind PgContainerHelper.commentIndexV1Anchor
-        "index-comment-v1-anchor",
+        // nexus-4lnn1.1.10: an anchor text with no relfilenode, behind PgContainerHelper.commentIndexAnchorWithoutRelfilenode
+        "index-comment-no-relfilenode",
         // earlier batches, each behind a requireTestIdentifier helper (or taking no caller input) and named nowhere
         // else in code
         "role-planner-guc", "nologin-role", "schema-usage", "schema-default-select-acl", "table-owner",

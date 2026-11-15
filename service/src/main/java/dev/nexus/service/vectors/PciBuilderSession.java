@@ -696,7 +696,7 @@ public final class PciBuilderSession {
          * operator's {@code pci_} index included, is {@link DdlOutcome#REJECTED} and nothing is sent. The leaf's own
          * HNSW index has its own overload, {@link #comment(PciCatalog.Leaf, PciCatalog.LeafIndex, PciCatalog.Anchor)}.
          *
-         * <p>The anchor is written at v2: this session reads the index's relfilenode right before the COMMENT
+         * <p>The anchor is written with the index's relfilenode: this session reads it right before the COMMENT
          * (nexus-4lnn1.1.10), whatever {@code anchor} carried. 5 s lock timeout, as a drop. A comment takes a lock on
          * the index that a long-running statement on it would hold; one that expires leaves the old comment, and the
          * next pass writes it again (an index with no parseable anchor is adopted).
@@ -707,6 +707,16 @@ public final class PciBuilderSession {
 
         /** As {@link #comment(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor)}, answering with the anchor written. */
         public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor, null);
+        }
+
+        /**
+         * As {@link #write(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor)}; with {@code expectedRelfilenode} the
+         * COMMENT is sent only if the index still has it on this session ({@link DdlOutcome#STALE} otherwise): a rebuild
+         * that landed after the caller read the index must not be stamped over figures taken from the old build.
+         */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor,
+                                   Long expectedRelfilenode) {
             if (ended != null) {
                 return new AnchorOutcome(ended, null);
             }
@@ -724,7 +734,7 @@ public final class PciBuilderSession {
                 log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
                 return new AnchorOutcome(DdlOutcome.REJECTED, null);
             }
-            return stampAndComment(leaf, index.name(), anchor);
+            return stampAndComment(leaf, index.name(), anchor, expectedRelfilenode);
         }
 
         /**
@@ -739,6 +749,12 @@ public final class PciBuilderSession {
 
         /** As {@link #comment(PciCatalog.Leaf, PciCatalog.LeafIndex, PciCatalog.Anchor)}, answering with the anchor written. */
         public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor, null);
+        }
+
+        /** As above, with the expected relfilenode of {@link #write(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor, Long)}. */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, PciCatalog.Anchor anchor,
+                                   Long expectedRelfilenode) {
             if (ended != null) {
                 return new AnchorOutcome(ended, null);
             }
@@ -756,21 +772,27 @@ public final class PciBuilderSession {
                 log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
                 return new AnchorOutcome(DdlOutcome.REJECTED, null);
             }
-            return stampAndComment(leaf, index.name(), anchor);
+            return stampAndComment(leaf, index.name(), anchor, expectedRelfilenode);
         }
 
         /**
          * The COMMENT, with the index's relfilenode read on this session right before it (the precheck, after the lock
          * and statement timeouts are set): the anchor records the storage it was written against. An index that is gone
-         * is {@link DdlOutcome#STALE} and nothing is sent.
+         * is {@link DdlOutcome#STALE} and nothing is sent; so is one whose relfilenode is not {@code expected} (when given).
          */
-        private AnchorOutcome stampAndComment(PciCatalog.Leaf leaf, String indexName, PciCatalog.Anchor anchor) {
+        private AnchorOutcome stampAndComment(PciCatalog.Leaf leaf, String indexName, PciCatalog.Anchor anchor,
+                                              Long expected) {
             PciCatalog.Anchor[] stamped = {anchor};
             DdlOutcome outcome = run("comment", COMMENT_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, indexName, leaf, () -> {
                 Long relfilenode = PciAnchorReads.relfilenode(ctx, leaf.schema(), indexName);
                 if (relfilenode == null) {
                     log.info("event=pci_anchor_skipped reason=gone index={} leaf={}.{}", indexName, leaf.schema(),
                         leaf.name());
+                    return DdlOutcome.STALE;
+                }
+                if (expected != null && !expected.equals(relfilenode)) {
+                    log.info("event=pci_anchor_skipped reason=rebuilt_since_read index={} leaf={}.{} expected_relfilenode={} "
+                        + "relfilenode={}", indexName, leaf.schema(), leaf.name(), expected, relfilenode);
                     return DdlOutcome.STALE;
                 }
                 stamped[0] = anchor.withRelfilenode(relfilenode);
@@ -798,6 +820,12 @@ public final class PciBuilderSession {
          */
         public AnchorOutcome anchorAfterLeafReindex(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, long rows,
                                                     java.time.Instant builtAt) {
+            return anchorAfterLeafReindex(leaf, index, rows, builtAt, null);
+        }
+
+        /** As above; with {@code expectedRelfilenode} the write is vetoed if the index was rebuilt meanwhile (see {@code write}). */
+        public AnchorOutcome anchorAfterLeafReindex(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, long rows,
+                                                    java.time.Instant builtAt, Long expectedRelfilenode) {
             if (ended != null) {
                 return new AnchorOutcome(ended, null);
             }
@@ -827,7 +855,8 @@ public final class PciBuilderSession {
                     leaf.name());
                 return new AnchorOutcome(DdlOutcome.STALE, null);
             }
-            return write(leaf, index, new PciCatalog.Anchor(builtAt, rows, bytes, PciCatalog.ORIGIN_BUILT));
+            return write(leaf, index, new PciCatalog.Anchor(builtAt, rows, bytes, PciCatalog.ORIGIN_BUILT),
+                expectedRelfilenode);
         }
 
         /**

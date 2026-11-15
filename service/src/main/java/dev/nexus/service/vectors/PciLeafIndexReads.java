@@ -94,7 +94,33 @@ final class PciLeafIndexReads {
                                    Duration statementTimeout) {
         anchorLog.info("event=pci_anchor_rebuilt_detected index={} leaf={}.{} old_relfilenode={} new_relfilenode={}",
             r.own().name(), r.leaf().schema(), r.leaf().name(), r.oldRelfilenode(), r.newRelfilenode());
-        return pass.live() && anchorAfterReindex(pass, r.leaf(), r.own().name(), clock, statementTimeout);
+        return pass.live() && anchorAfterReindex(pass, r.leaf(), r.own().name(), clock, statementTimeout,
+            r.newRelfilenode());
+    }
+
+    /**
+     * Stamp the relfilenode on a leaf's own HNSW index whose anchor has none (nexus-4lnn1.1.10): the same {@code built_at},
+     * rows, bytes and origin, so it is no rebuild and moves no floor. Refused if the index was rebuilt since it was read.
+     */
+    static boolean stamp(PciBuilderSession.Pass pass, PciLeafReindexRule.Stamp st) {
+        if (!pass.live()) {
+            return false;
+        }
+        try {
+            var written = pass.write(st.leaf(), st.own(), st.anchor(), st.relfilenode());
+            if (written.outcome() == PciBuilderSession.DdlOutcome.DONE) {
+                anchorLog.info("event=pci_anchor_relfilenode_stamped index={} leaf={}.{} relfilenode={}", st.own().name(),
+                    st.leaf().schema(), st.leaf().name(), written.anchor().relfilenode());
+                return true;
+            }
+            anchorLog.info("event=pci_anchor_not_written origin={} index={} leaf={}.{} outcome={} detail=\"the next pass "
+                + "reads it again\"", st.anchor().origin(), st.own().name(), st.leaf().schema(), st.leaf().name(),
+                written.outcome());
+        } catch (RuntimeException e) {
+            anchorLog.warn("event=pci_anchor_not_written origin={} index={} leaf={}.{} reason=write_failed error=\"{}\"",
+                st.anchor().origin(), st.own().name(), st.leaf().schema(), st.leaf().name(), PciQueryRing.sanitize(e));
+        }
+        return false;
     }
 
     /**
@@ -112,6 +138,12 @@ final class PciLeafIndexReads {
      */
     static boolean anchorAfterReindex(PciBuilderSession.Pass pass, PciCatalog.Leaf leaf, String indexName, Clock clock,
                                       Duration statementTimeout) {
+        return anchorAfterReindex(pass, leaf, indexName, clock, statementTimeout, null);
+    }
+
+    /** As above; with {@code expectedRelfilenode} the write is vetoed when the index was rebuilt since it was read. */
+    static boolean anchorAfterReindex(PciBuilderSession.Pass pass, PciCatalog.Leaf leaf, String indexName, Clock clock,
+                                      Duration statementTimeout, Long expectedRelfilenode) {
         String where = leaf.schema() + "." + leaf.name();
         PciCatalog.LeafIndex own = leaf.hnswIndexes().stream().filter(i -> i.name().equals(indexName)).findFirst()
             .orElse(null);
@@ -126,7 +158,8 @@ final class PciLeafIndexReads {
                 PgSession.setLocal(tx, "statement_timeout", Long.toString(statementTimeout.toMillis()));
                 return PciAnchorReads.leafStats(tx, leaf.schema(), leaf.name()).live();
             });
-            PciBuilderSession.Pass.AnchorOutcome anchored = pass.anchorAfterLeafReindex(leaf, own, rows, builtAt);
+            PciBuilderSession.Pass.AnchorOutcome anchored = pass.anchorAfterLeafReindex(leaf, own, rows, builtAt,
+                expectedRelfilenode);
             if (anchored.outcome() == PciBuilderSession.DdlOutcome.DONE) {
                 anchorLog.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", indexName,
                     where, anchored.anchor().rows(), anchored.anchor().bytes());
