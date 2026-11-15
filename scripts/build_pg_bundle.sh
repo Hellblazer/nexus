@@ -42,7 +42,7 @@
 #   BUNDLE_PREFIX   absolute install prefix (configure --prefix); also the tree root.
 # Optional env:
 #   PG_VERSION              default 17.5   (PG major aligned on 17; nexus-41bso)
-#   PGVECTOR_VERSION        default v0.8.2 (>=0.8 is the RDR-155 iterative_scan floor)
+#   PGVECTOR_VERSION        default v0.8.7 (>=0.8 is the RDR-155 iterative_scan floor)
 #   PG_BACKGROUND_VERSION   default v2.0.4 (nexus-f3yqd.2). Must be a version listed in
 #                           pg_background_pinned_commit below: the clone is refused unless
 #                           its HEAD is the pinned commit (a tag can be moved, a commit
@@ -64,7 +64,7 @@ set -euo pipefail
 
 : "${BUNDLE_PREFIX:?BUNDLE_PREFIX (absolute install prefix) is required}"
 PG_VERSION="${PG_VERSION:-17.5}"
-PGVECTOR_VERSION="${PGVECTOR_VERSION:-v0.8.2}"
+PGVECTOR_VERSION="${PGVECTOR_VERSION:-v0.8.7}"
 PG_BACKGROUND_VERSION="${PG_BACKGROUND_VERSION:-v2.0.4}"
 # Default to a private scratch dir we own (and clean up). If the caller supplies
 # WORK_DIR we leave it untouched on exit — it's theirs.

@@ -210,7 +210,7 @@ jobs:
         shell: pwsh
     env:
       PG_VERSION: "17.5"
-      PGVECTOR_VERSION: "v0.8.2"
+      PGVECTOR_VERSION: "v0.8.7"
       PG_BUNDLE_RUNNER: win-release
       NX_TEST_T2_SUBSTRATE: none
     steps:

@@ -69,7 +69,7 @@ def test_defaults_equal_the_shell_script_and_the_workflow_pins() -> None:
 
 
 def test_pins_from_env_overrides_and_falls_back() -> None:
-    assert bw.pins_from_env({}) == bw.Pins("17.5", "v0.8.2")
+    assert bw.pins_from_env({}) == bw.Pins("17.5", "v0.8.7")
     assert bw.pins_from_env({"PG_VERSION": "17.6", "PGVECTOR_VERSION": "v0.9.0"}) == bw.Pins(
         "17.6", "v0.9.0"
     )
@@ -112,7 +112,7 @@ def test_cache_key_cli_hashes_this_very_script(capsys: pytest.CaptureFixture[str
     assert rc == 0
     digest = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
     assert capsys.readouterr().out.strip() == (
-        f"pg-bundle-windows-x64-qwentescence-pg17.5-pgvectorv0.8.2-pgbgv2.0.4-img-native-{digest}"
+        f"pg-bundle-windows-x64-qwentescence-pg17.5-pgvectorv0.8.7-pgbgv2.0.4-img-native-{digest}"
     )
 
 
@@ -1196,9 +1196,10 @@ def test_refresh_refuses_an_unsigned_runtime_and_writes_no_notice(tmp_path: Path
 # --------------------------------------------------------------------------- #
 
 
-def test_the_pins_are_the_literals_measured_on_2026_10_05() -> None:
+def test_the_pins_are_the_measured_literals() -> None:
+    # PG 17.5's sha256 measured 2026-10-05; pgvector v0.8.7's commit by git ls-remote 2026-11-15 (nexus-4lnn1.1.10)
     assert bw.PINNED_PG_SHA256 == {"17.5": "fcb7ab38e23b264d1902cb25e6adafb4525a6ebcbd015434aeef9eda80f528d8"}
-    assert bw.PINNED_PGVECTOR_COMMITS == {"v0.8.2": "cab9da72c04353f143bb06b42ab70a403daac64a"}
+    assert bw.PINNED_PGVECTOR_COMMITS == {"v0.8.7": "f37c13f68b57d2c3472b2214fbcff699d6d34876"}
     assert bw.DEFAULT_PG_VERSION in bw.PINNED_PG_SHA256 and bw.DEFAULT_PGVECTOR_VERSION in bw.PINNED_PGVECTOR_COMMITS
     host = bw.Host(runner=bw.Runner())
     assert host.pg_sha256_pins == bw.PINNED_PG_SHA256 and host.pgvector_commit_pins == bw.PINNED_PGVECTOR_COMMITS

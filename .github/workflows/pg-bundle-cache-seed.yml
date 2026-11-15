@@ -130,7 +130,7 @@ jobs:
     env:
       # Pinned identically to engine-service-release.yml + ci.yml (see header).
       PG_VERSION: "17.5"
-      PGVECTOR_VERSION: "v0.8.2"
+      PGVECTOR_VERSION: "v0.8.7"
       # nexus-cd8b7 (follow-up to nexus-280ei): pin explicitly rather than
       # relying on build_pg_bundle.sh's own 13.0 default. Before this, the
       # release job's build-publish-pg-bundle job asserted 13.0 via this same
@@ -218,7 +218,7 @@ jobs:
     env:
       # Pinned identically to engine-service-release.yml + ci.yml (see header).
       PG_VERSION: "17.5"
-      PGVECTOR_VERSION: "v0.8.2"
+      PGVECTOR_VERSION: "v0.8.7"
       # Runner label segment of the cache key; must equal the release workflow's.
       PG_BUNDLE_RUNNER: win-release
     steps:

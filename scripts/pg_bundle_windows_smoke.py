@@ -5,7 +5,7 @@
 The gate, as on the other platforms: take the bundle (the EXACT archive about
 to be signed, or a staged tree), put it in a fresh directory that has no
 relationship to the build prefix, and prove it works from there: initdb,
-pg_ctl start, CREATE EXTENSION vector (expect 0.8.2), pg_trgm and pg_background
+pg_ctl start, CREATE EXTENSION vector (expect 0.8.7), pg_trgm and pg_background
 (a launched worker returns SELECT 1), an HNSW index that a query actually uses
 and that returns rows, pg_ctl stop.
 
@@ -66,7 +66,7 @@ VC_RUNTIME_DLLS: tuple[str, ...] = (
     "msvcp140_1.dll",
     "msvcp140_atomic_wait.dll",
 )
-EXPECT_VECTOR = "0.8.2"
+EXPECT_VECTOR = "0.8.7"
 ARCHIVE_ROOT = "bundle"
 _VERSIONED_VC_RUNTIME_RE = re.compile(r"^(?:vcruntime|msvcp)\d+(?:_\d+)?\.dll$")
 
