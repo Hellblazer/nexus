@@ -2,7 +2,8 @@
 title: "Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant"
 id: RDR-248
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-15
 priority: high
 author: Claude (linda, for Sam)
 reviewed-by: self
