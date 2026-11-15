@@ -1233,13 +1233,11 @@ public final class PciReconciler {
     /**
      * RDR-230 Technical Design 3, the leaf size rule: add the {@link PciReconcilePlanner.Trigger#LEAF_SIZE} REINDEXes
      * of the leaves' own HNSW indexes to the pci_ ones and sort the lot largest first ({@code BY_SIZE_THEN_NAME}), so
-     * they share the per-pass limit. The leaves' live row counts are {@code pg_stat_user_tables.n_live_tup} (the
-     * statistics row the leaf rule is specified on), read for every counted leaf in ONE typed statement on the pass's
-     * session; the decision is {@link PciLeafReindexRule}. The count of indexes it cannot judge for want of a reference
-     * is reported every pass, so it falls back to 0 once an anchor exists. A failed read leaves the pci_ candidates
-     * as they were and the previous count standing. (This method only runs when {@code NX_SEARCH_PCI_REINDEX} is on,
-     * so with it off nothing is read, no candidate is added, and {@code unanchored} stays 0: the rule is off, not
-     * inactive for want of a reference.)
+     * they share the per-pass limit. The decision is {@link PciLeafReindexRule}; what it reads, and how a lock on an
+     * index is bounded, is {@link PciLeafIndexReads}. The count of indexes it cannot judge for want of a reference is
+     * reported every pass, so it falls back to 0 once an anchor exists. (Only runs with {@code NX_SEARCH_PCI_REINDEX}
+     * on: with it off nothing is read, no candidate is added, and {@code unanchored} stays 0, since the rule is off,
+     * not inactive for want of a reference.)
      */
     private List<Reindex> withLeafSizeCandidates(PciBuilderSession.Pass pass, Tally tally, List<Reindex> triggered,
                                                  Instant now) {
@@ -1249,18 +1247,13 @@ public final class PciReconciler {
         }
         Set<String> schemas = new HashSet<>();
         tally.looks.forEach(look -> schemas.add(look.leaf().schema()));
-        Map<String, Long> live;
-        try {
-            live = pass.transaction(tx -> {
-                PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
-                return PciAnchorReads.liveRows(tx, schemas);
-            });
-        } catch (DataAccessException | IllegalStateException e) {
-            log.warn("event=pci_leaf_size_rule_skipped reason=stats_read_failed error=\"{}\"", e.getMessage());
+        Map<String, Long> estimates = PciLeafIndexReads.rowEstimates(pass, schemas, countTimeout);
+        if (estimates == null) {
             return triggered;
         }
-        PciLeafReindexRule.Scan scan = PciLeafReindexRule.scan(tally.looks, live::get,
-            name -> reindex.backedOff(name, now));
+        PciLeafReindexRule.Scan scan = PciLeafReindexRule.scan(tally.looks, estimates::get,
+            (leaf, own) -> PciLeafIndexReads.facts(pass, leaf, own, countTimeout), name -> reindex.backedOff(name, now),
+            now);
         noteLeafUnanchored(scan.unanchored());
         if (scan.candidates().isEmpty()) {
             return triggered;

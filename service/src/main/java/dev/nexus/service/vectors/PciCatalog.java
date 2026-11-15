@@ -285,16 +285,20 @@ public final class PciCatalog {
      * {@code embedding_1024}), so a leaf has up to three. Only the one on the leaf's model's dimension holds its
      * rows; {@link Leaf#hnswIndex(int)} picks it.
      *
+     * <p>The record carries no size and no anchor. {@code pg_relation_size} takes an {@code AccessShareLock} on the
+     * index, and this read locks nothing (it runs on the shared sweep's pool, and a migration holding an
+     * {@code AccessExclusiveLock} would stall every router refresh to the read bound), so the REINDEX phase reads the
+     * size and the anchor comment of the indexes it judges, lazily, under a 5 s {@code lock_timeout}.
+     *
      * @param name      the index name
      * @param valid     {@code pg_index.indisvalid}
-     * @param bytes     {@code pg_relation_size} of the index at the read
      * @param dimension the {@code n} of the key column {@code embedding_<n>}, or 0 when the key column is not of that form
      */
-    public record LeafIndex(String name, boolean valid, long bytes, int dimension) {
+    public record LeafIndex(String name, boolean valid, int dimension) {
         public LeafIndex {
             Objects.requireNonNull(name, "name");
-            if (bytes < 0 || dimension < 0) {
-                throw new IllegalArgumentException("bytes and dimension must not be negative");
+            if (dimension < 0) {
+                throw new IllegalArgumentException("dimension must not be negative");
             }
         }
     }
@@ -665,8 +669,6 @@ public final class PciCatalog {
         Field<String> indexComment = DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB,
             col("ix", "oid"), DSL.inline("pg_class"));
         Field<Boolean> noPredicate = DSL.field(col("i", "indpred").isNull());
-        Field<Long> indexBytes = DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
-            col("ix", "oid"));
         Field<String> indexKey = DSL.function(DSL.name("pg_catalog", "pg_get_indexdef"), SQLDataType.CLOB,
             col("ix", "oid"), DSL.inline(1), DSL.inline(false));
         Condition attached = attachedToChunksIndex();
@@ -679,7 +681,6 @@ public final class PciCatalog {
                 indexComment.as("index_comment"),
                 noPredicate.as("index_unpredicated"),
                 DSL.field(attached).as("index_attached"),
-                indexBytes.as("index_bytes"),
                 indexKey.as("index_key"))
             .from(catalog("pg_index", "i"))
             .join(catalog("pg_class", "ix")).on(col("ix", "oid").eq(col("i", "indexrelid")))
@@ -696,7 +697,6 @@ public final class PciCatalog {
         Field<String> pciComment = pci.field("index_comment", String.class);
         Field<Boolean> pciUnpredicated = pci.field("index_unpredicated", Boolean.class);
         Field<Boolean> pciAttached = pci.field("index_attached", Boolean.class);
-        Field<Long> pciBytes = pci.field("index_bytes", Long.class);
         Field<String> pciKey = pci.field("index_key", String.class);
         // Read in the statement that deparses the predicates, so the two are of one instant.
         Field<String> stringsSetting = DSL.function("current_setting", SQLDataType.VARCHAR,
@@ -716,7 +716,7 @@ public final class PciCatalog {
 
         Result<? extends Record> rows = ctx
             .select(leafSchemaName, leafName, leafBound, modelBound, pciName, pciValid, pciPredicate, pciMethod,
-                stringsSetting, pciComment, pciUnpredicated, pciAttached, pciBytes, pciKey)
+                stringsSetting, pciComment, pciUnpredicated, pciAttached, pciKey)
             .from(leaf)
             .join(leafSchema).on(col("ln", "oid").eq(col("l", "relnamespace")))
             .join(toModel).on(col("i1", "inhrelid").eq(leafOid))
@@ -738,8 +738,7 @@ public final class PciCatalog {
             if (row.get(pciName) != null) {
                 b.add(row.get(pciName), row.get(pciValid), row.get(pciPredicate), row.get(pciMethod),
                     row.get(stringsSetting), row.get(pciComment), Boolean.TRUE.equals(row.get(pciUnpredicated)),
-                    Boolean.TRUE.equals(row.get(pciAttached)),
-                    row.get(pciBytes) == null ? 0L : row.get(pciBytes), row.get(pciKey));
+                    Boolean.TRUE.equals(row.get(pciAttached)), row.get(pciKey));
             }
         }
         List<Leaf> out = new ArrayList<>(leaves.size());
@@ -758,7 +757,7 @@ public final class PciCatalog {
         /** Unpredicated hnsw candidates that are not pci_ indexes, sorted out in {@link #build()}. */
         private final List<Candidate> candidates = new ArrayList<>();
 
-        private record Candidate(String name, boolean valid, boolean attached, long bytes, String key) { }
+        private record Candidate(String name, boolean valid, boolean attached, String key) { }
 
         LeafBuilder(String schema, String name, String model, String tenant) {
             this.schema = schema;
@@ -768,12 +767,12 @@ public final class PciCatalog {
         }
 
         void add(String indexName, Boolean valid, String predicate, String method, String stringsSetting,
-                 String comment, boolean unpredicated, boolean attached, long bytes, String key) {
+                 String comment, boolean unpredicated, boolean attached, String key) {
             boolean isValid = Boolean.TRUE.equals(valid);
             if (!indexName.startsWith(PREFIX)) {
                 // Not a pci_ index: only an unpredicated hnsw index is of interest, as the leaf's own or its leftover.
                 if (unpredicated && ACCESS_METHOD.equals(method)) {
-                    candidates.add(new Candidate(indexName, isValid, attached, bytes, key));
+                    candidates.add(new Candidate(indexName, isValid, attached, key));
                 }
                 return;
             }
@@ -794,7 +793,7 @@ public final class PciCatalog {
                 // never attached, so an attached candidate is never read as one.
                 for (Candidate c : candidates) {
                     if (c.attached()) {
-                        own.add(new LeafIndex(c.name(), c.valid(), c.bytes(), dimensionOf(c.key())));
+                        own.add(new LeafIndex(c.name(), c.valid(), dimensionOf(c.key())));
                     }
                 }
                 for (Candidate c : candidates) {

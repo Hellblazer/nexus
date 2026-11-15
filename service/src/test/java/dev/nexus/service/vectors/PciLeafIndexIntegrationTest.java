@@ -380,8 +380,7 @@ class PciLeafIndexIntegrationTest {
         PciCatalog.Leaf leaf = leaf(tenant);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            // An operator's unpredicated hnsw index that is NOT attached to the parent's index, a btree, and an
-            // unpredicated hnsw index whose name only looks like a pci_ one.
+            // An operator's unpredicated hnsw index that is NOT attached to the parent's index, and a btree.
             PgContainerHelper.createHnswIndex(su, leaf.schema(), leaf.name(), "op_unattached_hnsw", "embedding_384");
             DSL.using(su, SQLDialect.POSTGRES).createIndex(DSL.name("op_plain_btree"))
                 .on(DSL.table(DSL.name(leaf.schema(), leaf.name())), DSL.field(DSL.name("chash"))).execute();
@@ -396,12 +395,9 @@ class PciLeafIndexIntegrationTest {
             leaf.name() + "_embedding_1024_idx");
         assertThat(read.hnswIndexes()).extracting(PciCatalog.LeafIndex::dimension)
             .containsExactlyInAnyOrder(384, 768, 1024);
-        assertThat(read.hnswIndexes()).allSatisfy(i -> {
-            assertThat(i.valid()).isTrue();
-            assertThat(i.bytes()).isPositive();
-        });
-        assertThat(read.hnswIndex(384).orElseThrow().bytes()).as("the populated one is the largest")
-            .isGreaterThan(read.hnswIndex(768).orElseThrow().bytes());
+        assertThat(read.hnswIndexes()).allSatisfy(i -> assertThat(i.valid()).isTrue());
+        assertThat(sizeOf(leaf.schema(), leaf.name() + "_embedding_384_idx")).as("the populated one is the largest")
+            .isGreaterThan(sizeOf(leaf.schema(), leaf.name() + "_embedding_768_idx"));
         // The pci_ index stays a pci_ index, and neither the operator's indexes nor the btree appear in either list.
         assertThat(read.indexes()).extracting(PciCatalog.Index::name)
             .containsExactly(PciCatalog.indexName(M384, tenant, name("big")));
@@ -672,10 +668,10 @@ class PciLeafIndexIntegrationTest {
             su.setAutoCommit(true);
             PgContainerHelper.createHnswIndex(su, leaf.schema(), leaf.name(), operator, "embedding_384");
         }
-        PciCatalog.LeafIndex operatorIndex = new PciCatalog.LeafIndex(operator, true, 8192, 384);
-        PciCatalog.LeafIndex forged = new PciCatalog.LeafIndex(own.name() + "_x", true, own.bytes(), 384);
-        PciCatalog.LeafIndex wrongDimension = new PciCatalog.LeafIndex(own.name(), true, own.bytes(), 768);
-        PciCatalog.LeafIndex invalidOwn = new PciCatalog.LeafIndex(own.name(), false, own.bytes(), 384);
+        PciCatalog.LeafIndex operatorIndex = new PciCatalog.LeafIndex(operator, true, 384);
+        PciCatalog.LeafIndex forged = new PciCatalog.LeafIndex(own.name() + "_x", true, 384);
+        PciCatalog.LeafIndex wrongDimension = new PciCatalog.LeafIndex(own.name(), true, 768);
+        PciCatalog.LeafIndex invalidOwn = new PciCatalog.LeafIndex(own.name(), false, 384);
         PciCatalog.Leaf unresolved = new PciCatalog.Leaf(leaf.schema(), leaf.name(), null, leaf.tenant(),
             leaf.indexes(), leaf.hnswIndexes(), leaf.leafLeftovers());
         var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-11-14T00:00:00Z"), 1, 1,
@@ -789,6 +785,14 @@ class PciLeafIndexIntegrationTest {
         });
     }
 
+    /** VACUUM refreshes {@code reltuples}, which the leaf rule floors the rows at: deletes show once it is refreshed. */
+    void vacuumLeaf(PciCatalog.Leaf leaf) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.vacuumTable(su, leaf.schema(), leaf.name());
+        }
+    }
+
     void deleteCollection(String tenant, String collection) throws Exception {
         asSuperuser(su -> su.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant))
             .and(CHUNKS.COLLECTION.eq(collection)).execute());
@@ -835,6 +839,7 @@ class PciLeafIndexIntegrationTest {
         PciReconciler r = reconciler(settings, canary);
         assertThat(r.reconcileOnce().builds()).as("the pci_ index that anchors the reference").isEqualTo(1);
         deleteCollection(tenant, name("bulk"));
+        vacuumLeaf(leaf(tenant));
         awaitLiveTuples(leaf(tenant), 250);
         return r;
     }
@@ -848,7 +853,8 @@ class PciLeafIndexIntegrationTest {
         PciCatalog.LeafIndex own = leaf.hnswIndex(384).orElseThrow();
         PciCatalog.Anchor reference = catalog.read().anchor(M384, tenant, name("keep")).orElseThrow();
         assertThat(PciCatalog.ORIGIN_BUILT).isEqualTo(reference.origin());
-        assertThat((double) own.bytes() / 250).as("precondition: the leaf index is far past 1.5x the reference")
+        long bytesBefore = sizeOf(leaf.schema(), own.name());
+        assertThat((double) bytesBefore / 250).as("precondition: the leaf index is far past 1.5x the reference")
             .isGreaterThan(1.5 * reference.bytes() / reference.rows());
         String oid = oidOf(leaf.schema(), own.name());
         String parent = parentIndexOf(leaf.schema(), own.name());
@@ -864,7 +870,7 @@ class PciLeafIndexIntegrationTest {
         PciCatalog.Anchor anchor = PciCatalog.parseAnchor(commentOf(leaf.schema(), own.name())).orElseThrow();
         assertThat(anchor.origin()).isEqualTo(PciCatalog.ORIGIN_BUILT);
         assertThat(anchor.rows()).isEqualTo(250);
-        assertThat(anchor.bytes()).isEqualTo(sizeOf(leaf.schema(), own.name())).isLessThan(own.bytes());
+        assertThat(anchor.bytes()).isEqualTo(sizeOf(leaf.schema(), own.name())).isLessThan(bytesBefore);
         assertThat(logs()).anyMatch(l -> l.contains("event=pci_index_reindexed") && l.contains("trigger=leaf_size")
             && l.contains("index=" + own.name()));
         assertThat(logs()).anyMatch(l -> l.contains("event=pci_anchor_written") && l.contains("index=" + own.name()));
@@ -954,6 +960,7 @@ class PciLeafIndexIntegrationTest {
         assertThat(r.reconcileOnce().builds()).isEqualTo(3);
         clock.advance(Duration.ofHours(25));   // a red canary rebuilds an index a day after its anchor, not before
         deleteCollection(lim, name("bulk"));
+        vacuumLeaf(leaf(lim));
         awaitLiveTuples(leaf(lim), 250);
         awaitLiveTuples(leaf(p1), 250);
         awaitLiveTuples(leaf(p2), 250);

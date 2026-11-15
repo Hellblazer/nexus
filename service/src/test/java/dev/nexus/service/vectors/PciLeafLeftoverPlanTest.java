@@ -38,7 +38,7 @@ class PciLeafLeftoverPlanTest {
         return new Leaf("nexus", "chunks_leaf", model, tenant, List.of(pci), own, leftovers);
     }
 
-    private static final List<LeafIndex> OWN_INDEX = List.of(new LeafIndex(OWN, true, 1_000_000, 768));
+    private static final List<LeafIndex> OWN_INDEX = List.of(new LeafIndex(OWN, true, 768));
 
     @Test
     void aLeafLeftover_isDropped_withNoCollection_whateverTheRegistryAndTheCountsSay() {
@@ -123,7 +123,7 @@ class PciLeafLeftoverPlanTest {
 
     @Test
     void hnswIndex_picksTheIndexOfTheDimension() {
-        var l = leaf(MODEL, TENANT, List.of(new LeafIndex("a", true, 1, 384), new LeafIndex("b", true, 2, 768)),
+        var l = leaf(MODEL, TENANT, List.of(new LeafIndex("a", true, 384), new LeafIndex("b", true, 768)),
             List.of());
 
         assertThat(l.hnswIndex(768)).hasValueSatisfying(i -> assertThat(i.name()).isEqualTo("b"));

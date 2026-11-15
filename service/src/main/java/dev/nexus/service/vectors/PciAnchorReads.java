@@ -90,20 +90,30 @@ final class PciAnchorReads {
     }
 
     /**
-     * {@code n_live_tup} of every table in {@code schemas} that has a {@code pg_stat_user_tables} row, by
-     * {@code schema.table} (the leaf key {@link PciLeafReindexRule#leafId} makes). One statement for all leaves of a
-     * pass: a leaf with no row is absent from the map, and the leaf rule skips it. The count is the statistics'
-     * estimate, which is enough for the size rule's ratio.
+     * The row estimate of every table in {@code schemas}, by {@code schema.table} (the leaf key
+     * {@link PciLeafReindexRule#leafId} makes): {@code max(n_live_tup, pg_class.reltuples)}, with a {@code reltuples}
+     * of {@code -1} (never analyzed) read as 0. One statement for all leaves of a pass.
+     *
+     * <p>Both are estimates and both err low, for different reasons: {@code n_live_tup} lags the writes and is zeroed by
+     * an unclean shutdown, {@code pg_stat_reset}, a restore or a major upgrade (it stays 0 until a vacuum or analyze
+     * runs, which a quiet leaf may never get); {@code reltuples} survives all of those but is only as fresh as the last
+     * vacuum or analyze. The larger of the two is the better floor, as {@code LeafBloatCatalog} reads "rows"
+     * (nexus-dxsjc). The reads are catalog and statistics views; they lock no relation.
      */
-    static java.util.Map<String, Long> liveRows(DSLContext tx, java.util.Collection<String> schemas) {
+    static java.util.Map<String, Long> leafRowEstimates(DSLContext tx, java.util.Collection<String> schemas) {
         Field<String> schema = DSL.field(DSL.name("s", "schemaname"), String.class);
         Field<String> table = DSL.field(DSL.name("s", "relname"), String.class);
         Field<Long> live = DSL.field(DSL.name("s", "n_live_tup"), SQLDataType.BIGINT);
+        Field<Double> planner = DSL.field(DSL.name("c", "reltuples")).cast(SQLDataType.DOUBLE);
         java.util.Map<String, Long> out = new java.util.HashMap<>();
-        for (Record row : tx.select(schema, table, live)
+        for (Record row : tx.select(schema, table, live, planner)
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_user_tables")).as("s"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("s", "relid"))))
                 .where(schema.in(schemas)).fetch()) {
-            out.put(row.get(schema) + "." + row.get(table), nz(row.get(live)));
+            Double est = row.get(planner);
+            long fromPlanner = est == null || est < 0 ? 0 : Math.round(est);
+            out.put(row.get(schema) + "." + row.get(table), Math.max(nz(row.get(live)), fromPlanner));
         }
         return out;
     }
