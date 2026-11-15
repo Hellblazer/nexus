@@ -28,6 +28,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
@@ -217,9 +218,24 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                         + "evidence for the production gc_audit InsufficientPrivilege "
                         + "incident")
                     .isEmpty();
+                // nexus-edchb (Sam 2026-11-15): gc_audit.details holds the reaper's refusal
+                // sample, document titles and source paths, so it is the one column withheld.
+                assertThatThrownBy(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(GC_AUDIT.DETAILS).from(GC_AUDIT).limit(1).fetch())
+                    .as("nexus_diag reading gc_audit.details is refused")
+                    .hasMessageContaining("permission denied");
             }
+            assertThat(PgCatalogProbes.columnSelectGrants(DSL.using(su, SQLDialect.POSTGRES), DIAG_ROLE,
+                    "nexus", List.of("gc_audit")))
+                .as("nexus_diag may read every gc_audit column but details")
+                .containsExactly(GC_AUDIT_DIAG_COLUMNS);
         }
     }
+
+    /** Every gc_audit column but details (grants-nexus-diag-4, nexus-edchb). */
+    static final String[] GC_AUDIT_DIAG_COLUMNS = {
+        "gc_audit.actor", "gc_audit.chash_count", "gc_audit.chashes", "gc_audit.collection",
+        "gc_audit.created_at", "gc_audit.dry_run", "gc_audit.id", "gc_audit.operation", "gc_audit.tenant_id"};
 
     /**
      * bead nexus-f1pbh (2026-09-11): the PITR fork walk rehearsal for

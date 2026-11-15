@@ -430,7 +430,8 @@ class SchemaRollbackRoundTripIntegrationTest {
      *
      * <p><strong>REVISED (nexus-edchb).</strong> {@code grants-nexus-diag-3} grants the view's input
      * COLUMNS, not whole tables, so this BYPASSRLS role cannot read chunk_text. The table-level set
-     * below is the five tables -4 and -5 grant, and the four view inputs are checked as column grants.
+     * below is the three tables -4 and -5 grant whole; the view inputs, gc_audit and nexus.tuples
+     * are checked as column grants.
      */
     @Test
     void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
@@ -463,7 +464,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("a FRESH cluster must land DIRECTLY in view era — "
                             + "grants-nexus-diag-1's legacy branch must NOT have fired "
                             + "(its bulk ALL-TABLES grant would produce a much wider set "
-                            + "than the four below) — grants-nexus-diag-3 must have "
+                            + "than the three below) — grants-nexus-diag-3 must have "
                             + "re-granted the view's input columns (checked next), "
                             + "restoring what grants-nexus-diag-2's own "
                             + "REVOKE loop stripped earlier in this SAME boot "
@@ -473,13 +474,15 @@ class SchemaRollbackRoundTripIntegrationTest {
                             + "deliberately excluded), and grants-nexus-diag-5 must have "
                             + "granted two RDR-205 tuple-space tables whole and nexus.tuples by column (nexus-f1pbh, nexus-edchb)")
                         .containsExactly(
-                            "nexus.gc_audit",
                             "nexus.search_telemetry",
                             "nexus.tuple_claim_log",
                             "nexus.tuple_tenants");
                     assertThat(PgCatalogProbes.columnSelectGrants(dsl(c), "nexus_diag", "nexus", List.of("tuples")))
                         .as("grants-nexus-diag-5 grants nexus_diag only the tuples columns nx doctor reads (nexus-edchb)")
                         .containsExactly(GrantsNexusDiagViewAccessIntegrationTest.TUPLES_DIAG_COLUMNS);
+                    assertThat(PgCatalogProbes.columnSelectGrants(dsl(c), "nexus_diag", "nexus", List.of("gc_audit")))
+                        .as("grants-nexus-diag-4 grants nexus_diag every gc_audit column but details (nexus-edchb)")
+                        .containsExactly(GrantsNexusDiagViewAccessIntegrationTest.GC_AUDIT_DIAG_COLUMNS);
                     assertThat(diagViewInputColumnGrants(c))
                         .as("grants-nexus-diag-3 grants nexus_diag only the column of each table "
                             + "the counts view reads, never a whole table (nexus-edchb)")
@@ -497,18 +500,20 @@ class SchemaRollbackRoundTripIntegrationTest {
                         .as("a reboot must re-stamp the runAlways rows in place")
                         .isEqualTo(viewEraRows);
                     assertThat(diagBaseTableGrants(c))
-                        .as("view era holds across a reboot too — the same four tables, "
+                        .as("view era holds across a reboot too — the same three tables, "
                             + "re-granted fresh by grants-nexus-diag-4 and "
                             + "grants-nexus-diag-5 every boot (nexus-lhuhe; gc_audit incident "
                             + "2026-08-19; nexus-f1pbh)")
                         .containsExactly(
-                            "nexus.gc_audit",
                             "nexus.search_telemetry",
                             "nexus.tuple_claim_log",
                             "nexus.tuple_tenants");
                     assertThat(PgCatalogProbes.columnSelectGrants(dsl(c), "nexus_diag", "nexus", List.of("tuples")))
                         .as("grants-nexus-diag-5 grants nexus_diag only the tuples columns nx doctor reads (nexus-edchb)")
                         .containsExactly(GrantsNexusDiagViewAccessIntegrationTest.TUPLES_DIAG_COLUMNS);
+                    assertThat(PgCatalogProbes.columnSelectGrants(dsl(c), "nexus_diag", "nexus", List.of("gc_audit")))
+                        .as("grants-nexus-diag-4 grants nexus_diag every gc_audit column but details (nexus-edchb)")
+                        .containsExactly(GrantsNexusDiagViewAccessIntegrationTest.GC_AUDIT_DIAG_COLUMNS);
                     assertThat(diagViewInputColumnGrants(c))
                         .as("grants-nexus-diag-3 grants nexus_diag only the column of each table "
                             + "the counts view reads, never a whole table (nexus-edchb)")

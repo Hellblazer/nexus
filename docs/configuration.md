@@ -427,10 +427,12 @@ run:
    view reads (content hashes and ids), so the role cannot read chunk text
    through them. `grants-nexus-diag-5` grants only the columns of
    `nexus.tuples` that `nx doctor`'s lock check reads, never a tuple's keys,
-   dims or body. Four tables keep a whole-table grant, and the role reads
-   their rows for every tenant: `gc_audit` and `search_telemetry`
-   (`grants-nexus-diag-4`), and `tuple_claim_log` and `tuple_tenants`
-   (`grants-nexus-diag-5`, tuple ids, claim records and sweep times). (This SQL is
+   dims or body, and `grants-nexus-diag-4` grants every column of `gc_audit`
+   except `details`, where the reaper stores document titles and paths.
+   Three tables keep a whole-table grant, and the role reads their rows for
+   every tenant: `search_telemetry` (`grants-nexus-diag-4`), and
+   `tuple_claim_log` and `tuple_tenants` (`grants-nexus-diag-5`, tuple ids,
+   claim records and sweep times). (This SQL is
    generated from `nexus.db.chash_tables.CHASH_BEARING_TABLES`; a drift test
    pins this rendered copy to the generator.) DBAs who created an earlier
    view generation: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t

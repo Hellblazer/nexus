@@ -10936,6 +10936,9 @@ public final class CatalogRepository {
      *       {@code title} field, but the INSERT into {@code gc_audit} extracts only the chash
      *       ({@code jsonb_agg(elem->>'chash')}, catalog-033-gc-audit-producers.xml) — title
      *       never reaches the persisted row. Confirmed false positive, closed 2026-08-19.</li>
+     *   <li>{@code gc_audit.details} DOES carry titles and source paths: the reaper's refusal
+     *       sample (ChunkReaper.sampleRow, since nexus-2x9xa). So {@code grants-nexus-diag-4}
+     *       grants every gc_audit column but {@code details} (nexus-edchb).</li>
      * </ul>
      *
      * <p><strong>{@code hook_failures} is deliberately EXCLUDED, not omitted by

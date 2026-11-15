@@ -20,9 +20,10 @@ it is never laundered again):
   SELECT. ``grants-nexus-diag-3`` then grants back only the column of each
   table the view reads (content hashes and ids, nexus-edchb). ``-5`` grants
   the columns of ``nexus.tuples`` the doctor's lock check reads, never a
-  payload column, and ``-4`` and ``-5`` grant four whole tables
-  (``gc_audit``, ``search_telemetry``, ``tuple_claim_log``,
-  ``tuple_tenants``). So chunk text and tuple payloads are out of reach at the DB level,
+  payload column; ``-4`` grants every ``gc_audit`` column but ``details``
+  (document titles and paths); and ``-4`` and ``-5`` grant three whole tables
+  (``search_telemetry``, ``tuple_claim_log``, ``tuple_tenants``). So chunk
+  text, tuple payloads and audit samples are out of reach at the DB level,
   but the boundary is not count-only there, and this choke point is what
   keeps every statement aggregate-only. In BOTH eras
   :func:`run_diagnostic_sql` refuses any statement failing

@@ -32,8 +32,8 @@
       direct table SELECT. What remains is SELECT on the view, the
       Liquibase journal, the one address column of each table the view
       reads (grants-nexus-diag-3; the view is security_invoker, so the
-      role needs them), the four whole tables -4 and -5 name, and the
-      nexus.tuples columns -5 names. Those address
+      role needs them), the three whole tables -4 and -5 name, and the
+      gc_audit and nexus.tuples columns they name. Those address
       columns hold content hashes and ids, never chunk text (column grants
       since nexus-edchb; -3 granted whole tables before, chunk_text
       included); the choke-point lint remains as defense in depth. The
@@ -458,7 +458,14 @@ BEGIN
     -- exists. hook_failures is deliberately NOT granted here (see comment
     -- above) -- do not add it for symmetry with -3's four-table list.
     GRANT SELECT ON nexus.search_telemetry TO nexus_diag;
-    GRANT SELECT ON nexus.gc_audit         TO nexus_diag;
+    -- Every gc_audit column but details (nexus-edchb, Sam 2026-11-15): the
+    -- reaper's refusal sample stores document titles and source paths there
+    -- (ChunkReaper.sampleRow), which this BYPASSRLS role would otherwise read
+    -- for every tenant. COUNT(*) still works on a column grant. No REVOKE:
+    -- in the view era -2 revokes the table grant every boot before this
+    -- runs, and in the legacy era -1's schema-wide grant applies anyway.
+    GRANT SELECT (id, tenant_id, operation, collection, actor, dry_run, chash_count, chashes, created_at)
+                    ON nexus.gc_audit         TO nexus_diag;
 END
 $$;
         </sql>
