@@ -282,6 +282,30 @@ class PciLeafIndexIntegrationTest {
             .fetchOne(0, String.class));
     }
 
+    /** The comment of the index {@code name} in {@code schema} ({@code obj_description}), or null. */
+    String commentOf(String schema, String name) throws Exception {
+        return asSuperuser(su -> su.select(DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB,
+                DSL.field(DSL.name("c", "oid")), DSL.inline("pg_class")))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+            .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(name))
+            .fetchOne(0, String.class));
+    }
+
+    /** {@code pg_relation_size} of the index {@code name} in {@code schema}. */
+    long sizeOf(String schema, String name) throws Exception {
+        return asSuperuser(su -> su.select(DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
+                DSL.field(DSL.name("c", "oid"))))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+            .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(name))
+            .fetchOne(0, Long.class));
+    }
+
     boolean exists(String schema, String name) throws Exception {
         return oidOf(schema, name) != null;
     }
@@ -576,5 +600,132 @@ class PciLeafIndexIntegrationTest {
         // A full pass drops nothing else either.
         assertThat(reconciler(settings()).reconcileOnce().drops()).isZero();
         assertThat(exists(leaf.schema(), operator + "_ccnew")).isTrue();
+    }
+
+    // -- RDR-230 P2.3b: REINDEX and COMMENT of the leaf's own HNSW index ----------------------------------------
+
+    @Test
+    void aLeafReindexThroughTheBuilder_keepsItAttached_andTheAnchorIsWrittenThroughTheCommentForm() throws Exception {
+        String tenant = newTenant("lreindex");
+        collection(tenant, name("c"), 20);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.LeafIndex own = own384(tenant);
+        String parentBefore = parentIndexOf(leaf.schema(), own.name());
+        String oidBefore = oidOf(leaf.schema(), own.name());
+        assertThat(commentOf(leaf.schema(), own.name())).isNull();
+        java.time.Instant builtAt = java.time.Instant.parse("2026-11-14T00:00:00Z");
+
+        PciCatalog.Anchor written;
+        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
+            assertThat(pass.reindex(leaf, own)).isEqualTo(DdlOutcome.DONE);
+            PciBuilderSession.Pass.AnchorOutcome anchored = pass.anchorAfterLeafReindex(leaf, own, 20, builtAt);
+            assertThat(anchored.outcome()).isEqualTo(DdlOutcome.DONE);
+            written = anchored.anchor();
+        }
+
+        assertThat(oidOf(leaf.schema(), own.name())).as("the index was rebuilt").isNotEqualTo(oidBefore);
+        assertThat(parentIndexOf(leaf.schema(), own.name())).as("still attached").isEqualTo(parentBefore);
+        assertThat(leaf(tenant).hnswIndex(384)).hasValueSatisfying(i -> assertThat(i.valid()).isTrue());
+        assertThat(leaf(tenant).leafLeftovers()).isEmpty();
+        assertThat(written.rows()).isEqualTo(20);
+        assertThat(written.origin()).isEqualTo(PciCatalog.ORIGIN_BUILT);
+        assertThat(written.builtAt()).isEqualTo(builtAt);
+        assertThat(written.bytes()).as("the size of the rebuilt index").isEqualTo(sizeOf(leaf.schema(), own.name()));
+        assertThat(PciCatalog.parseAnchor(commentOf(leaf.schema(), own.name()))).contains(written);
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_ddl_done") && l.contains("op=reindex")
+            && l.contains("index=" + own.name()));
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_ddl_done") && l.contains("op=comment")
+            && l.contains("index=" + own.name()));
+    }
+
+    @Test
+    void theLeafIndexCommentForm_writesTheGivenAnchor_onAnyOfTheLeafsOwnIndexes() throws Exception {
+        String tenant = newTenant("lcomment");
+        collection(tenant, name("c"), 20);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.LeafIndex own = leaf.hnswIndex(768).orElseThrow();
+        var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-11-14T01:02:03Z"), 7, 8192,
+            PciCatalog.ORIGIN_BUILT);
+
+        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
+            assertThat(pass.comment(leaf, own, anchor)).isEqualTo(DdlOutcome.DONE);
+        }
+
+        assertThat(commentOf(leaf.schema(), own.name())).isEqualTo(anchor.toJson());
+    }
+
+    @Test
+    void theLeafIndexGuard_rejectsAnythingButAValidMemberOfTheLeafsOwnIndexes_andSendsNoStatement() throws Exception {
+        String tenant = newTenant("lguard");
+        String otherTenant = newTenant("lguard2");
+        collection(tenant, name("c"), 20);
+        collection(otherTenant, name("d"), 20);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.LeafIndex own = own384(tenant);
+        PciCatalog.LeafIndex fromOtherLeaf = own384(otherTenant);
+        String operator = "op_unattached_hnsw";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.createHnswIndex(su, leaf.schema(), leaf.name(), operator, "embedding_384");
+        }
+        PciCatalog.LeafIndex operatorIndex = new PciCatalog.LeafIndex(operator, true, 8192, 384);
+        PciCatalog.LeafIndex forged = new PciCatalog.LeafIndex(own.name() + "_x", true, own.bytes(), 384);
+        PciCatalog.LeafIndex wrongDimension = new PciCatalog.LeafIndex(own.name(), true, own.bytes(), 768);
+        PciCatalog.LeafIndex invalidOwn = new PciCatalog.LeafIndex(own.name(), false, own.bytes(), 384);
+        PciCatalog.Leaf unresolved = new PciCatalog.Leaf(leaf.schema(), leaf.name(), null, leaf.tenant(),
+            leaf.indexes(), leaf.hnswIndexes(), leaf.leafLeftovers());
+        var anchor = new PciCatalog.Anchor(java.time.Instant.parse("2026-11-14T00:00:00Z"), 1, 1,
+            PciCatalog.ORIGIN_BUILT);
+        String ownOid = oidOf(leaf.schema(), own.name());
+        String operatorOid = oidOf(leaf.schema(), operator);
+        String otherOid = oidOf(leaf(otherTenant).schema(), fromOtherLeaf.name());
+
+        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
+            for (PciCatalog.LeafIndex bad : List.of(operatorIndex, fromOtherLeaf, forged, wrongDimension,
+                    invalidOwn)) {
+                assertThat(pass.reindex(leaf, bad)).as("reindex " + bad).isEqualTo(DdlOutcome.REJECTED);
+                assertThat(pass.comment(leaf, bad, anchor)).as("comment " + bad).isEqualTo(DdlOutcome.REJECTED);
+            }
+            assertThat(pass.reindex(unresolved, own)).as("a leaf the builder did not resolve")
+                .isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(unresolved, own, anchor)).isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.anchorAfterLeafReindex(leaf, operatorIndex, 1, anchor.builtAt()).outcome())
+                .as("the anchor helper goes through the same guard").isEqualTo(DdlOutcome.REJECTED);
+        }
+
+        assertThat(oidOf(leaf.schema(), own.name())).as("nothing was reindexed").isEqualTo(ownOid);
+        assertThat(oidOf(leaf.schema(), operator)).isEqualTo(operatorOid);
+        assertThat(oidOf(leaf(otherTenant).schema(), fromOtherLeaf.name())).isEqualTo(otherOid);
+        for (String touched : new String[] {own.name(), operator}) {
+            assertThat(commentOf(leaf.schema(), touched)).as("no comment on " + touched).isNull();
+        }
+        assertThat(commentOf(leaf(otherTenant).schema(), fromOtherLeaf.name())).isNull();
+        assertThat(logs()).noneMatch(l -> l.contains("event=pci_ddl_done") && (l.contains("op=reindex")
+            || l.contains("op=comment")));
+    }
+
+    @Test
+    void anInvalidLeafIndexAsTheCatalogReadsIt_isNotReindexed() throws Exception {
+        String tenant = newTenant("linvalid");
+        collection(tenant, name("c"), 20);
+        PciCatalog.Leaf before = leaf(tenant);
+        String name384 = own384(tenant).name();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.markIndexInvalid(su, before.schema(), name384);
+        }
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.LeafIndex invalid = leaf.hnswIndex(384).orElseThrow();
+        assertThat(invalid.valid()).isFalse();
+        String oid = oidOf(leaf.schema(), name384);
+
+        try (PciBuilderSession.Pass pass = builderSession(settings()).open()) {
+            assertThat(pass.reindex(leaf, invalid)).isEqualTo(DdlOutcome.REJECTED);
+            assertThat(pass.comment(leaf, invalid, new PciCatalog.Anchor(java.time.Instant.EPOCH, 0, 0,
+                PciCatalog.ORIGIN_BUILT))).isEqualTo(DdlOutcome.REJECTED);
+        }
+
+        assertThat(oidOf(leaf.schema(), name384)).isEqualTo(oid);
+        assertThat(commentOf(leaf.schema(), name384)).isNull();
     }
 }
