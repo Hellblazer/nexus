@@ -312,7 +312,9 @@ The response is the session id and the client part size the engine accepts.
 
 *2. Upload: `PUT /v1/tenant/import/{id}/rows?table=T&part=k`*, a body of at most 8 MiB (a part fits 60 s at
 about 1.1 Mbps; the 20 MB edge cap would need 2.7 Mbps). The client re-cuts each exported page at row boundaries
-into parts, each a complete binary COPY stream (header, rows, trailer), and sends its SHA-256 in a header.
+into parts, each a complete binary COPY stream (header, rows, trailer), and sends its SHA-256 in the
+`X-Nexus-Part-Sha256` request header (an edge that forwards only listed headers must list it; the cloud's did not
+until conexus PR #710, Activation Step 2).
 Before any upload the client verifies the whole file (every page's SHA-256 and the trailer's counts, the same check
 as `nx backup --check`), so a damaged file is refused before it costs the cloud anything. On the engine a part is read whole into memory (at most 8 MiB) and its SHA-256 checked before anything touches
 the session's transaction, so a part damaged in transit is refused and sent again without cost. A part that
@@ -799,6 +801,18 @@ was released before the walk ended; no export transaction was left open. At that
 takes about 6 minutes, the estimate above. The first attempt, on 0.1.191, hung on the first chunks page: PgJDBC's
 `PGStream.skip` spins on a TLS socket closed mid-skip, which the 0.1.192 page path no longer reaches (T2
 `nexus/csayy9-export-page-hang-diagnosis-2026-11-14`; run evidence T2 `conexus/csayy9-cloud-export-gate-xr789-run2-2026-11-15`).
+
+**First cloud restore round trip (Activation Step 2, nexus-csayy.10, 2026-11-15, engine 0.1.192).** A fresh export
+of `gate-xr789` (56.6 s, 633,145,600 bytes) was restored by the shipped client into an empty throwaway tenant made by
+the operator: 555.5 s wall, 233,107 data rows loaded in 19 tables, 0 derived rows, and 1 row the engine had already
+written for the tenant kept. An export of the restored tenant (57.9 s, 637,110,239 bytes) and the source export both
+verified with `nx backup --check`. `tests/e2e/backup_roundtrip_compare.py` judged 24 of the 25 tables equal in row
+count and in every row's content over the columns a restore keeps. The only differing columns were `tenant_id`
+everywhere, plus `plans.id` (a reassigned key). `catalog_meta` is not judged: it went from 1 row to 2, the restore's
+own `rdr248_restore` marker. The first attempt stopped at the edge after 2 s, with nothing loaded:
+the CloudFront origin request policy forwards only listed request headers, and `X-Nexus-Part-Sha256`, the one
+request header the import routes add, was not on the list (conexus PR #710 added it). Query strings, `PUT` and an
+8 MiB part body already passed the edge.
 
 **Gate N1 scale run (nexus-csayy.4, 2026-11-12, local engine on chas, `tests/e2e/export_scale_run.py`).** One tenant
 of 500,000 bge-768 chunks (distinct vectors, about 1 KB of text each), 500,000 manifest rows over 50,000 documents,
