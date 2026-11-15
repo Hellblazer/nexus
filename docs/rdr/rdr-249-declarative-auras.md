@@ -530,4 +530,4 @@ Gate round 1 raised two more, answered 2026-11-15:
 - 2026-11-15: Gate round 1 — BLOCKED (1 Critical, 8 Significant, 1 ship-blocker(s)); commit `d0c72fbce`; critique `nexus_rdr/249-gate-critique-2026-11-15-r1`.
 - 2026-11-15: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0b769887e`; critique `nexus_rdr/249-gate-critique-2026-11-15-r2`.
 - 2026-11-15: Gate round 3 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `8dec1a48b`; critique `nexus_rdr/249-gate-critique-2026-11-15-r3`.
-- 2026-11-15: Accepted (Sam). Residuals: S2 a122b329b (cut), S3 a122b329b, S4 a122b329b (fix check 249-fix-check-a122b329b); S-r3-1, S6, S7, S8 to the implementation beads under nexus-mdbds.
+- 2026-11-15: Accepted (Sam). Residuals: S2 a122b329b (cut), S3 a122b329b, S4 a122b329b (fix check 249-fix-check-a122b329b); S6 to nexus-mdbds.10.1 (Phase 1 parser and loader); S-r3-1, S7, S8 to nexus-mdbds.11.1 (Phase 2 waiter evaluation); the fix checks' rows to .10.1, .10.2, .11.1 and .12.1 (plan: T2 nexus/plan-rdr-249-declarative-auras.md).
