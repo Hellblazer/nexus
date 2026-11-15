@@ -2175,6 +2175,11 @@ DIAG_COLUMN_GRANTS: tuple[tuple[str, tuple[str, ...]], ...] = (
                       "consumed_at", "lease_until")),
 )
 
+#: The tables ``grants-nexus-diag-5`` grants nexus_diag whole, none with a
+#: payload column. nx doctor's lock check joins tuple_claim_log, so a role
+#: created after the engine's last boot needs it as well as the tuples columns.
+DIAG_TABLE_GRANTS: tuple[str, ...] = ("nexus.tuple_claim_log", "nexus.tuple_tenants")
+
 
 def _diag_best_effort_grants_sql() -> str:
     """nexus_diag's best-effort grants on an EXISTING install, run by both
@@ -2186,9 +2191,10 @@ def _diag_best_effort_grants_sql() -> str:
     security_invoker view reads, plus SELECT on the view itself, so the role
     reads the view at once and never a content column. A bulk grant there would hand this BYPASSRLS role every
     tenant's chunk_text until the engine's next boot revoked it. Also in the view era, the
-    :data:`DIAG_COLUMN_GRANTS` of ``-4`` and ``-5``, so a role created after the engine's last boot
-    can run nx doctor's lock check at once; each sits in its own sub-block, so a table or column an
-    older engine lacks skips that grant and keeps the rest."""
+    :data:`DIAG_COLUMN_GRANTS` and :data:`DIAG_TABLE_GRANTS` of ``-4`` and ``-5``, so a role created
+    after the engine's last boot can run nx doctor's lock check (it joins nexus.tuples and
+    nexus.tuple_claim_log) at once. Each table is guarded on its own, so a table or column an older
+    engine lacks skips that grant and keeps the rest."""
     from nexus.db.chash_tables import CHASH_BEARING_TABLES  # noqa: PLC0415 — deferred, keeps provision import-light
 
     view_inputs = "".join(
@@ -2198,8 +2204,13 @@ def _diag_best_effort_grants_sql() -> str:
     column_grants = "".join(
         f"IF to_regclass('{table}') IS NOT NULL THEN BEGIN "
         f"GRANT SELECT ({', '.join(cols)}) ON {table} TO nexus_diag; "
-        "EXCEPTION WHEN undefined_column THEN NULL; END; END IF; "
+        "EXCEPTION WHEN undefined_column OR undefined_table THEN NULL; END; END IF; "
         for table, cols in DIAG_COLUMN_GRANTS
+    ) + "".join(
+        f"IF to_regclass('{table}') IS NOT NULL THEN BEGIN "
+        f"GRANT SELECT ON {table} TO nexus_diag; "
+        "EXCEPTION WHEN undefined_table THEN NULL; END; END IF; "
+        for table in DIAG_TABLE_GRANTS
     )
     return (
         "DO $$ BEGIN "
