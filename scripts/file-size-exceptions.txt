@@ -58,7 +58,6 @@ service/src/test/java/dev/nexus/service/http/CatalogHandlerReconcileRoutesTest.j
 service/src/test/java/dev/nexus/service/reembed/ReembedCutoverTest.java 1281
 service/src/test/java/dev/nexus/service/tuples/TemplateRegistryTest.java 1131
 service/src/test/java/dev/nexus/service/vectors/CceEmbedderParallelTest.java 1283
-service/src/test/java/dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java 1144
 service/src/test/java/dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java 1107
 service/src/test/java/dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java 1103
 service/src/test/java/dev/nexus/service/vectors/OrtNativeDirTest.java 1469

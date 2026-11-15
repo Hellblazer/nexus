@@ -158,8 +158,10 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/db/TenantExportRegistryParityTest.java", 3),
         // a pattern matched against changelog text
         Map.entry("dev/nexus/service/db/TenantScopeVacuumMaintainGrantParityTest.java", 1),
-        // expected substrings of the trigger function bodies (and of the insert trigger's clear function, vectors-061)
-        Map.entry("dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java", 5),
+        // expected substrings of the trigger function bodies
+        Map.entry("dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java", 3),
+        // expected substrings of the insert trigger's clear function body (vectors-061)
+        Map.entry("dev/nexus/service/vectors/ChunkOrphanRecordTriggerIntegrationTest.java", 2),
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
