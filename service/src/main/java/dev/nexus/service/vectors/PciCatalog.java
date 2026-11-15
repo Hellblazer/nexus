@@ -253,7 +253,7 @@ public final class PciCatalog {
      */
     public record RedUnfixed(Instant at, long relfilenode, long rows, List<String> queries) {
         /** The most queries a canary run has, so the most it can read red. */
-        public static final int MAX_QUERIES = 10;
+        public static final int MAX_QUERIES = PciCanaryPolicy.MAX_QUERIES;   // the canary's window, one source
 
         public RedUnfixed {
             Objects.requireNonNull(at, "at");
