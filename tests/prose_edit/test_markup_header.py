@@ -30,11 +30,12 @@ def test_a_path_run_header_lists_the_markup_paths_in_order_inside_the_work_direc
         brief_ok(prose, "rmtmp", str(work))
 
 
-def test_a_stdin_runs_tmpdir_ready_header_is_unchanged(prose: Prose) -> None:
-    fields = _fields(brief_ok(prose, "tmpdir", "--ready").strip())
+def test_a_stdin_runs_tmpdir_ready_header_is_unchanged(bare: Prose) -> None:
+    """`tmpdir` never reads T2, so this one needs no tenant (nexus-h72g3)."""
+    fields = _fields(brief_ok(bare, "tmpdir", "--ready").strip())
     work = Path(fields["WORK"])
     try:
         assert list(fields) == ["WORK", "INPUT", "REPLY", "FILTERED", "REASONS", "ANSWERS", "ENTRY", "CARD"]
         assert not {"BLOCKS", "PROPOSED", "STATUSES"} & set(fields)
     finally:
-        brief_ok(prose, "rmtmp", str(work))
+        brief_ok(bare, "rmtmp", str(work))

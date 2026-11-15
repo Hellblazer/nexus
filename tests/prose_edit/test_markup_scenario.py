@@ -5,6 +5,11 @@ translate -> the app's propose_edits reply -> the app's list_suggestions reply -
 real). The app is a stand-in that returns real-shaped replies. The point: the document changes only at the accepted
 edits (everything else byte for byte, the wrapped paragraph included), rejections are stored once, and the session is
 logged once, because `apply` is the only writer and the only logger.
+
+Two tests, two tenants (nexus-h72g3: the tenant ceiling). The first is the journey itself. The second runs four
+smaller runs in one tenant, each on a document of its own: the fixed clock (`PROSE_EDIT_NOW`) gives every apply on one
+path the same log title, and the rejection record is kept for each path, so a path is how a run keeps its T2 records
+apart from the others'.
 """
 from __future__ import annotations
 
@@ -12,7 +17,7 @@ import json
 from pathlib import Path
 
 from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_get, t2_json, t2_titles
-from tests.prose_edit.test_brief import brief_ok, fenced, proposal, run_brief
+from tests.prose_edit.test_brief import brief_ok, fenced, proposal
 from tests.prose_edit.test_markup_verbs import (
     E1,
     E2,
@@ -40,8 +45,15 @@ def expected_text() -> str:
     return out
 
 
-def logs() -> list[str]:
-    return [t for t in t2_titles(REPO_PROJECT) if t.startswith("log/")]
+def logs(rel: str = "docs/s.md") -> list[str]:
+    return [t for t in t2_titles(REPO_PROJECT) if t.startswith(f"log/{rel}/")]
+
+
+def proposed_ids(prose: Prose, work: Path) -> list[dict]:
+    """The app takes every edit translate sent: its suggestions, as `proposed` records them."""
+    review_ok(prose, "proposed", "--work", str(work), "--from-file",
+              str(write_json(work / "proposed.json", app_reply(read(work / "propose.json")))))
+    return read_list(work / "suggestions.json")
 
 
 def test_the_file_changes_only_at_accepted_edits_and_each_edit_is_logged_and_rejected_once(
@@ -83,54 +95,54 @@ def test_the_file_changes_only_at_accepted_edits_and_each_edit_is_logged_and_rej
         [1, 2, 3], [1, 2, 3], [4], [5])
 
 
-def test_a_rejected_edit_is_not_proposed_again_on_the_next_run(prose: Prose, repo: Path) -> None:
-    work, _ = translated(prose, repo)
-    review_ok(prose, "proposed", "--work", str(work), "--from-file",
-              str(write_json(work / "proposed.json", app_reply(read(work / "propose.json")))))
-    sugg = read_list(work / "suggestions.json")
+def test_a_run_that_accepts_nothing_sends_nothing_or_meets_a_changed_file_logs_and_rejects_as_it_should(
+    prose: Prose, repo: Path
+) -> None:
+    # --- a rejected edit is not proposed again on the next run (docs/d.md)
+    rel = "docs/d.md"
+    work, _ = translated(prose, repo, rel=rel)
+    sugg = proposed_ids(prose, work)
     ids = {s["n"]: s["id"] for s in sugg}
     decided = json.loads(run_review(prose, "decisions", "--work", str(work), "--from-file", str(
         write_json(work / "statuses.json", listing(sugg, {ids[4]: "rejected", ids[3]: "accepted"})))).stdout)
     out = review_ok(prose, "apply", "--work", str(work), *decided["apply_args"])
-    assert out["rejected"] == [4]
-    (repo / "docs" / "s.md").write_text(TEXT, encoding="utf-8")
-    again = json.loads(brief_ok(prose, "filter", "docs/s.md", stdin=fenced(proposal([E3, E4]))))
+    assert out["rejected"] == [4], f"{rel}: apply rejected {out['rejected']}"
+    (repo / rel).write_text(TEXT, encoding="utf-8")
+    again = json.loads(brief_ok(prose, "filter", rel, stdin=fenced(proposal([E3, E4]))))
     assert [e["n"] for e in again["edits"]] == [3], again["dropped"]
-    assert [d["cause"] for d in again["dropped"]] == ["rejected"]
+    assert [d["cause"] for d in again["dropped"]] == ["rejected"], again["dropped"]
 
-
-def test_nothing_accepted_changes_nothing_and_still_logs_once(prose: Prose, repo: Path) -> None:
-    work, _ = translated(prose, repo)
-    review_ok(prose, "proposed", "--work", str(work), "--from-file",
-              str(write_json(work / "proposed.json", app_reply(read(work / "propose.json")))))
-    sugg = read_list(work / "suggestions.json")
+    # --- nothing accepted changes nothing and still logs once (docs/a.md)
+    rel = "docs/a.md"
+    work, _ = translated(prose, repo, rel=rel)
+    sugg = proposed_ids(prose, work)
     decided = json.loads(run_review(prose, "decisions", "--work", str(work), "--from-file",
                                     str(write_json(work / "statuses.json", listing(sugg, {})))).stdout)
-    assert decided["accept"] == [] and decided["hold"] == [1, 2, 3, 4]
+    assert decided["accept"] == [] and decided["hold"] == [1, 2, 3, 4], decided
     out = review_ok(prose, "apply", "--work", str(work), *decided["apply_args"])
-    assert out["applied"] == [] and (repo / "docs" / "s.md").read_text(encoding="utf-8") == TEXT
-    assert len(logs()) == 1 and t2_get(REPO_PROJECT, "doc/docs/s.md") is None
+    assert out["applied"] == [] and (repo / rel).read_text(encoding="utf-8") == TEXT, f"{rel}: {out['applied']}"
+    assert len(logs(rel)) == 1, f"{rel}: logged {logs(rel)}"
+    assert t2_get(REPO_PROJECT, f"doc/{rel}") is None, f"{rel}: a rejection record was stored"
 
-
-def test_a_run_that_sent_nothing_is_decided_in_the_chat_and_logged_once_by_apply(prose: Prose, repo: Path) -> None:
-    work, out = translated(prose, repo, edits=[E5])
-    assert out["sent"] == 0
+    # --- a run that sent nothing is decided in the chat and logged once by apply (docs/b.md)
+    rel = "docs/b.md"
+    work, out = translated(prose, repo, edits=[E5], rel=rel)
+    assert out["sent"] == 0, out
     decided = json.loads(run_review(prose, "decisions", "--work", str(work), "--accept", "5").stdout)
     done = review_ok(prose, "apply", "--work", str(work), *decided["apply_args"])
-    assert [e["n"] for e in done["applied"]] == [5]
-    assert (repo / "docs" / "s.md").read_text(encoding="utf-8") == TEXT.replace(E5["old"], E5["new"])
-    assert len(logs()) == 1
+    assert [e["n"] for e in done["applied"]] == [5], done["applied"]
+    assert (repo / rel).read_text(encoding="utf-8") == TEXT.replace(E5["old"], E5["new"]), f"{rel}: wrong text"
+    assert len(logs(rel)) == 1, f"{rel}: logged {logs(rel)}"
 
-
-def test_an_accepted_edit_that_no_longer_matches_the_file_is_skipped_not_guessed(prose: Prose, repo: Path) -> None:
-    work, _ = translated(prose, repo)
-    review_ok(prose, "proposed", "--work", str(work), "--from-file",
-              str(write_json(work / "proposed.json", app_reply(read(work / "propose.json")))))
-    sugg = read_list(work / "suggestions.json")
+    # --- an accepted edit that no longer matches the file is skipped, not guessed (docs/c.md)
+    rel = "docs/c.md"
+    work, _ = translated(prose, repo, rel=rel)
+    sugg = proposed_ids(prose, work)
     ids = {s["n"]: s["id"] for s in sugg}
     decided = json.loads(run_review(prose, "decisions", "--work", str(work), "--from-file", str(
         write_json(work / "statuses.json", listing(sugg, {ids[1]: "accepted"})))).stdout)
     # the author edited the file by hand in the meantime: the dry run sees it and apply says why
-    (repo / "docs" / "s.md").write_text(TEXT.replace("is basically ordered,", "is mostly ordered,"), encoding="utf-8")
+    (repo / rel).write_text(TEXT.replace("is basically ordered,", "is mostly ordered,"), encoding="utf-8")
     dry = review_ok(prose, "apply", "--work", str(work), *decided["apply_args"], "--dry-run", dry_first=False)
-    assert [s["n"] for s in dry["would_skip"]] == [1] and dry["would_skip"][0]["cause"] == "not-found"
+    assert [s["n"] for s in dry["would_skip"]] == [1], f"{rel}: {dry['would_skip']}"
+    assert dry["would_skip"][0]["cause"] == "not-found", dry["would_skip"]
