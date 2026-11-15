@@ -1149,7 +1149,7 @@ def _session_name_resolver(session_id: str) -> Callable[[], str | None]:
     return _resolve
 
 
-def _arm_session_name(subs: Any) -> None:
+def _arm_session_name(subs: Any, on_name: Callable[[str | None], None] | None = None) -> None:
     """Lease this session's `directory/<name>` row from the name Claude Code
     already knows (nexus-u839f), so `mailbox_send(to=<name>)` resolves after a
     restart or `--resume` without the model calling `tuple_subscribe`. Called
@@ -1161,14 +1161,38 @@ def _arm_session_name(subs: Any) -> None:
     arms one a startup miss did not find. Best-effort: no name or an
     unreadable registry is a logged miss (`session_name_unresolved`), and an
     explicit `tuple_subscribe` still works (and replaces an auto-armed
-    name)."""
+    name).
+
+    *on_name* (RDR-249, nexus-mdbds.11.1) is called with every resolve's result, the 60 s re-resolve
+    included, so auras load when the registry first names the session."""
     try:
         resolve = _session_name_resolver(subs.session_id)
+        if on_name is not None:
+            plain = resolve
+
+            def resolve() -> str | None:
+                found = plain()
+                on_name(found)
+                return found
+
         name = resolve()
         if subs.arm_session_name(name, store_factory=_t2_ctx, resolve=resolve):
             _log.info("session_name_armed", name=name, session_id=subs.session_id)
     except Exception as e:  # noqa: BLE001 — best-effort convenience; never blocks the waiter
         _log.warning("session_name_arm_failed", session_id=getattr(subs, "session_id", ""), error=str(e))
+
+
+def _aura_loader(waiter: Any, subs: Any) -> Callable[[str | None], None] | None:
+    """The RDR-249 aura loader for *waiter*'s session, as a resolve callback; None when it cannot be built."""
+    try:
+        import asyncio  # noqa: PLC0415
+
+        from nexus.auras.session import on_loop, start_for_waiter  # noqa: PLC0415 -- deferred: rare path
+
+        return on_loop(start_for_waiter(waiter, subs, store_ctx=_t2_ctx), asyncio.get_running_loop())
+    except Exception as e:  # noqa: BLE001 -- auras are optional; the waiter starts without them
+        _log.warning("auras_loader_failed", session_id=subs.session_id, error=str(e))
+        return None
 
 
 def _start_channel_waiter() -> None:
@@ -1219,11 +1243,11 @@ def _start_channel_waiter() -> None:
 
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
-        _arm_session_name(subs)
         waiter = _channel.ChannelWaiter(
             session_id, _t2_ctx, subs,
             state_dir=nexus_config_dir(),
         )
+        _arm_session_name(subs, _aura_loader(waiter, subs))
         _channel.register_active_waiter(waiter)
         waiter.start()
     except Exception as e:  # noqa: BLE001 — best-effort; see docstring

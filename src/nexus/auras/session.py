@@ -13,6 +13,7 @@ its trigger topic as an aura-owned subscription, and an aura past ``MAX_BOARD_TO
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -73,6 +74,7 @@ class AuraLoader:
         try:
             self._load()
         except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter
+            self.loaded = True  # config and files are read once a server start; a retry would only repeat this line
             _log.warning("auras_load_failed", session_id=self.session_id, error=str(exc))
 
     def _load(self) -> None:
@@ -104,3 +106,82 @@ class AuraLoader:
             return
         self._attach(self._make_runtime(accepted))
         _log.info("auras_loaded", session_id=self.session_id, auras=[a.name for a in accepted])
+
+
+def _discover(cwd: Path) -> list[Aura]:
+    """The parsed auras of both library roots; a refused file is logged by name and left out."""
+    from nexus.auras import enumerate_auras  # noqa: PLC0415 -- the library loads only when a session is named
+    from nexus.auras.check import check_clear  # noqa: PLC0415
+
+    out: list[Aura] = []
+    for entry in enumerate_auras(cwd=cwd):
+        if not isinstance(entry.result, Aura):
+            _log.warning("aura_file_refused", aura=entry.name, root=str(entry.root), reason=str(entry.result))
+            continue
+        # A [clear] a post could meet together with trigger.match has no tie-break here: refuse the aura, as
+        # nx aura check does (nexus.auras.check.check_clear).
+        if findings := check_clear(entry.result):
+            _log.warning("aura_refused", aura=entry.name, reason="; ".join(f.detail for f in findings))
+            continue
+        out.append(entry.result)
+    return out
+
+
+def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cwd: Path | None = None) -> AuraLoader:
+    """An :class:`AuraLoader` for *waiter*'s session with the server's real dependencies: the library roots of
+    *cwd*, the on/off resolver, the session registry, the process table, the run path, and a threads writer and
+    a channel notice that go through the waiter. Call it on the waiter's loop; :meth:`AuraLoader.on_resolve` is
+    then called on that loop too (see :func:`on_loop`)."""
+    import asyncio  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    from nexus.auras.enable import is_enabled  # noqa: PLC0415
+    from nexus.auras.runtime import AuraRuntime  # noqa: PLC0415
+    from nexus.auras.threads_block import ThreadsBlockWriter, t2_threads_io  # noqa: PLC0415
+    from nexus.daemon.service_registry import ancestor_pids  # noqa: PLC0415
+    from nexus.mcp.subscriptions import resolve_session_entry  # noqa: PLC0415
+
+    from nexus.lua_runtime.header import probe_repo  # noqa: PLC0415
+
+    where = cwd if cwd is not None else Path.cwd()
+    # The repo's .nexus.yml is at its git top level, the root enumerate_auras finds from *where*.
+    probe = probe_repo(where)
+    top = probe.root if probe else where
+    loop = asyncio.get_running_loop()
+    session_id = waiter.session_id
+
+    def notify(text: str, meta: dict[str, str]) -> None:
+        asyncio.run_coroutine_threadsafe(waiter._send(text, meta), loop)  # noqa: SLF001 -- the waiter's own send
+
+    def make_runtime(auras: list[Aura]) -> AuraRuntime:
+        read, put = t2_threads_io(store_ctx)
+        return AuraRuntime(auras, writer=ThreadsBlockWriter(session_id, read_entries=read, put=put), notify=notify)
+
+    def attach(runtime: AuraRuntime) -> None:
+        waiter.aura_sink = runtime.offer
+
+    return AuraLoader(
+        session_id, subs,
+        discover=lambda: _discover(where),
+        is_on=lambda name: is_enabled(name, repo_root=top),
+        entry=lambda sid: resolve_session_entry(sid, log_miss=False),
+        ancestors=ancestor_pids,
+        my_pid=os.getpid(),
+        make_runtime=make_runtime,
+        attach=attach,
+    )
+
+
+def on_loop(loader: AuraLoader, loop: Any) -> Callable[[str | None], None]:
+    """A callback for each registry resolve that runs :meth:`AuraLoader.on_resolve` on *loop*: the 60 s
+    re-resolve runs on the lease thread, and the subscription set is read on the waiter's loop."""
+
+    def call(name: str | None) -> None:
+        if loader.loaded:
+            return
+        try:
+            loop.call_soon_threadsafe(loader.on_resolve, name)
+        except RuntimeError:  # the loop is closed: the waiter is gone
+            pass
+
+    return call

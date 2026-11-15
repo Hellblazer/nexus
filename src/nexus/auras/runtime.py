@@ -128,7 +128,7 @@ class AuraRuntime:
     """Evaluates the session's loaded auras against board rows (see the module docstring).
 
     *writer* writes and removes threads blocks; *run* is ``run_script``; *notify* sends a channel text, or is
-    ``None`` when there is no channel; *sleep* waits between busy retries.
+    ``None`` when there is no channel (its meta carries the same three values as the text); *sleep* waits between busy retries.
     """
 
     def __init__(
@@ -137,7 +137,7 @@ class AuraRuntime:
         *,
         writer: BlockWriter,
         run: RunScript | None = None,
-        notify: Callable[[str], None] | None = None,
+        notify: Callable[[str, dict[str, str]], None] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if run is None:
@@ -245,7 +245,8 @@ class AuraRuntime:
         lane.strikes = 0
         if wrote and aura.channel and self._notify is not None:
             try:
-                self._notify(channel_notice(aura, row.subspace, row.id))
+                meta = {"aura": aura.name, "subspace": row.subspace, "tuple_id": row.id}
+                self._notify(channel_notice(aura, row.subspace, row.id), meta)
             except Exception as exc:  # noqa: BLE001 -- the block is written; a lost notice is only logged
                 _log.warning("aura_notice_failed", aura=aura.name, tuple_id=row.id, error=str(exc))
 

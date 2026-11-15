@@ -126,16 +126,16 @@ class ThreadsBlockWriter:
             return True
 
 
-def t2_threads_io() -> tuple[ReadEntries, PutEntry]:
-    """The board's reader and a whole-entry writer for T2 project ``threads``, over the CLI's T2 handle."""
-    from nexus.commands._helpers import t2_handle  # noqa: PLC0415 -- deferred: the MCP server imports this module
+def t2_threads_io(store_ctx: Callable[[], Any]) -> tuple[ReadEntries, PutEntry]:
+    """The board's reader and a whole-entry writer for T2 project ``threads``; *store_ctx* opens a T2 database
+    (the MCP server's ``t2_ctx``)."""
 
     def read() -> list[Mapping[str, Any]]:
-        with t2_handle() as db:
+        with store_ctx() as db:
             return list(db.memory.get_all(project=THREADS_PROJECT))
 
     def put(title: str, content: str, tags: str) -> None:
-        with t2_handle() as db:
+        with store_ctx() as db:
             db.memory.put(project=THREADS_PROJECT, title=title, content=content, tags=tags)
 
     return read, put

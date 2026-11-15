@@ -96,7 +96,7 @@ class _Run:
 def _runtime(run, writer, *, auras=None, notices=None, sleeps=None, **kw) -> AuraRuntime:
     return AuraRuntime(
         auras or [_aura()], writer=writer, run=run,
-        notify=(notices.append if notices is not None else None),
+        notify=((lambda text, meta: notices.append(text)) if notices is not None else None),
         sleep=(sleeps.append if sleeps is not None else (lambda _s: None)), **kw,
     )
 
@@ -249,15 +249,6 @@ def test_a_clear_queued_behind_a_running_fire_lands_after_it() -> None:
     _done(rt)
     assert [c[0] for c in writer.calls] == ["set", "remove"]
     assert writer.blocks == {}
-
-
-def test_a_row_matching_trigger_and_clear_fires() -> None:
-    both = _RED.replace('match = { kind = "sha", outcome = "success" }', 'match = { kind = "sha" }')
-    run, writer = _Run({"show": True, "text": "red"}), _Writer()
-    rt = _runtime(run, writer, auras=[_aura(both)])
-    rt.offer(_TOPIC, [_row("t1")])
-    _done(rt)
-    assert writer.blocks == {"develop CI red": "red"}
 
 
 def test_more_than_twenty_waiting_drops_the_oldest_fire_and_never_a_clear() -> None:
