@@ -44,7 +44,7 @@ It runs on macOS and Linux, not Windows.
 
 A run on a file reviews its edits in the MarkupEditor app, so it needs:
 
-- MarkupEditor 0.9.11 or later, the first release with suggestions (published 2026-11-07). The Unlimited release keeps working without renewal once you have installed it, and so does a build from source. The Evaluation build stops after two weeks.
+- MarkupEditor 0.9.11 or later, the first release with suggestions (published 2026-11-07 on the releases page of `stevengharris/MarkupEditorApp`). The Unlimited release keeps working without renewal once you have installed it, and so does a build from source. The Evaluation build stops after two weeks.
 - The app running, with Assistants turned on in its settings at read-write access and this program allowed to talk to it. Without read-write access the app refuses to show suggestions.
 - One MarkupEditor server. If two are registered in Claude Code, the run uses every tool from the one server that offers `propose_edits` and tells you which it is.
 - "Always allow" for the MarkupEditor tools: Claude Code asks the first time each one is used.

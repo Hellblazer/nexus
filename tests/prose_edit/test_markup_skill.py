@@ -241,7 +241,7 @@ def test_the_setup_run_checks_for_the_propose_edits_tool_and_names_the_requireme
 def test_the_readme_describes_the_markupeditor_review_in_plain_words() -> None:
     text = README.read_text(encoding="utf-8")
     assert "viewer" not in text.lower() and "marked-up" not in text.lower() and "typora" not in text.lower()
-    for needle in ("MarkupEditor", "Assistants", "suggestions", "Unlimited", "Evaluation", "stevengharris/MarkupEditorApp",
+    for needle in ("MarkupEditor", "Assistants", "suggestions", "Unlimited", "Evaluation", "stevengharris/MarkupEditorApp", "0.9.11",
                    "do not save", "Always allow", "pasted text"):
         assert needle in text, needle
     assert "—" not in text  # no em dash
