@@ -8824,11 +8824,12 @@ FROM scope s
                 // nexus-8ptg4: ask the manifest, bounded, whether the page already holds every chunk the predicate
                 // admits. The count runs BEFORE index scans are turned off, so it reads the manifest by its keys.
                 counting = true;
-                if (rebindTimeoutMs != null) {
-                    PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
-                }
-                int hits = qualifyingHits(ctx, qualifyingUpTo, first.size() + 1, taken[0], rebindTimeoutMs != null,
+                // nexus-h7kw2: the count has its own budget; one it spends answers "unknown" and the page re-runs.
+                ShortPageCountBudget.Bound bound = ShortPageCountBudget.apply(ctx, rebindTimeoutMs);
+                int hits = qualifyingHits(ctx, ShortPageCountBudget.watch(bound, qualifyingUpTo, tenant, collection),
+                                          first.size() + 1, taken[0], rebindTimeoutMs != null && !bound.budgetBinds(),
                                           tenant, collection);
+                ShortPageCountBudget.restore(ctx, bound);
                 if (hits <= first.size()) {
                     SHORT_PAGE_SKIPS.incrementAndGet();
                     log.info("event=vector_short_page_complete tenant={} collection={} page_rows={} qualifying={} n_results={}",
@@ -8895,10 +8896,10 @@ FROM scope s
         java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
         ctx.connection(conn -> taken[0] = conn.setSavepoint());
         try {
-            if (rebindTimeoutMs != null) {
-                PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
-            }
-            int hits = qualifyingHits(ctx, qualifyingUpTo, 1, taken[0], rebindTimeoutMs != null, tenant, collection);
+            ShortPageCountBudget.Bound bound = ShortPageCountBudget.apply(ctx, rebindTimeoutMs);
+            int hits = qualifyingHits(ctx, ShortPageCountBudget.watch(bound, qualifyingUpTo, tenant, collection), 1,
+                                      taken[0], rebindTimeoutMs != null && !bound.budgetBinds(), tenant, collection);
+            ShortPageCountBudget.restore(ctx, bound);
             if (hits == 0) {
                 SHORT_PAGE_SKIPS.incrementAndGet();
                 log.info("event=vector_short_page_complete tenant={} collection={} page_rows=0 qualifying=0 n_results={}",

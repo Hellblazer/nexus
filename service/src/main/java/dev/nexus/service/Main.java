@@ -207,6 +207,9 @@ public final class Main {
             log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
+            // nexus-h7kw2: same fail-fast for NX_SHORT_PAGE_COUNT_BUDGET_MS.
+            log.info("event=short_page_count_budget budget_ms={}",
+                     dev.nexus.service.vectors.ShortPageCountBudget.startupBudgetMs());
             // nexus-u9zkn: same fail-fast for NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS.
             log.info("event=pg_network_bound margin_ms={} tcp_keep_alive=true",
                      dev.nexus.service.db.PgSession.startupNetworkBoundMarginMs());

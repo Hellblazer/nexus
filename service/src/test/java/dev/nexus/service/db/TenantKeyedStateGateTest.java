@@ -826,6 +826,7 @@ public class TenantKeyedStateGateTest {
                 "RequestLedgerActivity.KEY_REUSED",
                 "RequestLedgerActivity.REPLAYS",
                 "RequestLedgerActivity.TAKEOVERS",
+                "ShortPageCountBudget.SPENT",
                 "SuppliedVectorMismatchActivity.MISMATCHES_TOTAL",
                 "TupleWaitRegistry.claimantRefused",
                 "TupleWaitRegistry.globalParked",

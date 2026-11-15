@@ -437,7 +437,7 @@ public final class PgSession {
      * {@code statement_timeout=0} and {@code lock_timeout=0} both mean
      * DISABLED, the unbounded state the setting exists to end.
      */
-    static int boundedTimeoutMs(String envName, String raw, int defaultMs) {
+    public static int boundedTimeoutMs(String envName, String raw, int defaultMs) {
         if (raw == null || raw.isBlank()) {
             return defaultMs;
         }
