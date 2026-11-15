@@ -282,3 +282,67 @@ def test_a_file_over_the_read_bound_is_refused_even_when_what_was_read_parses(sh
     with pytest.raises(AuraError) as err:
         auras.load_aura("big", cwd=None)
     assert err.value.kind == "too_large"
+
+
+# -- the structured enumeration (nexus-mdbds.10.2: what nx aura check walks) -------------------------
+
+
+def _by_key(entries: list[auras.AuraEntry]) -> dict[tuple[str, str], object]:
+    return {(e.name, e.root): e.result for e in entries}
+
+
+def test_the_enumeration_yields_an_aura_a_grammar_refusal_and_a_name_refusal_per_file(shipped: Path) -> None:
+    _write(shipped, "good")
+    _write(shipped, "bad", 'zzz = "x"\n')
+    (shipped / "Bad-Name.aura.toml").write_text(minimal("Bad-Name"), encoding="utf-8")
+    got = _by_key(auras.enumerate_auras(cwd=None))
+    assert isinstance(got[("good", "shipped")], auras.Aura)
+    assert isinstance(got[("bad", "shipped")], AuraError)
+    refused = got[("Bad-Name", "shipped")]
+    assert isinstance(refused, LibraryError) and refused.reason == "invalid_name"
+
+
+@needs_git
+def test_the_enumeration_keeps_a_repo_file_that_shadows_a_shipped_aura(shipped: Path, repo: Path) -> None:
+    _write(shipped, "common")
+    _write(_repo_root(repo), "common")
+    _write(_repo_root(repo), "mine")
+    got = _by_key(auras.enumerate_auras(cwd=repo))
+    assert isinstance(got[("common", "shipped")], auras.Aura)
+    shadow = got[("common", "repo")]
+    assert isinstance(shadow, LibraryError) and shadow.reason == "shadows_shipped"
+    assert isinstance(got[("mine", "repo")], auras.Aura)
+
+
+@needs_git
+def test_the_enumeration_does_not_walk_the_repo_root_while_it_is_off(shipped: Path, repo_dir: Path) -> None:
+    _write(shipped, "common")
+    _write(_repo_root(repo_dir), "mine")
+    assert [(e.name, e.root) for e in auras.enumerate_auras(cwd=repo_dir)] == [("common", "shipped")]
+
+
+@needs_git
+def test_an_enumerated_file_that_leaves_its_root_is_a_library_refusal_not_dropped(
+    shipped: Path, repo: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside"
+    _write(outside, "mine")
+    _write(_repo_root(repo), "other")
+    (_repo_root(repo) / "mine.aura.toml").symlink_to(outside / "mine.aura.toml")
+    got = _by_key(auras.enumerate_auras(cwd=repo))
+    escaped = got[("mine", "repo")]
+    assert isinstance(escaped, LibraryError) and escaped.reason == "outside_root"
+    assert isinstance(got[("other", "repo")], auras.Aura)
+
+
+def test_the_enumeration_is_sorted_by_name_then_root(shipped: Path) -> None:
+    for name in ("zeta", "alpha", "mid"):
+        _write(shipped, name)
+    assert [e.name for e in auras.enumerate_auras(cwd=None)] == ["alpha", "mid", "zeta"]
+
+
+def test_the_procedure_listing_still_hides_what_the_enumeration_shows(shipped: Path) -> None:
+    # .lua behavior is unchanged: library.procedures drops a name that breaks the rule silently.
+    (shipped / "Bad-Name.lua").write_text("-- procedure: x\n", encoding="utf-8")
+    assert library.procedures(cwd=None) == []
+    assert [e.name for e in library.scan_files(cwd=None, suffix=".lua", noun="procedure")] == ["Bad-Name"]

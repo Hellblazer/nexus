@@ -362,3 +362,59 @@ def procedures(*, cwd: Path | None) -> list[Procedure]:
     so its author sees why. A root the system will not let it list lists nothing.
     """
     return list_files(cwd=cwd)
+
+
+class Scanned(NamedTuple):
+    """One file :func:`scan_files` saw: its name (the file name less the suffix, valid or not),
+    the root it is in, and either its bytes or the :class:`LibraryError` that refuses it."""
+
+    name: str
+    root: Root
+    found: bytes | LibraryError
+
+
+def _scan_root(root: Path | None, label: Root, *, top: Path | None, suffix: str) -> list[Scanned]:
+    out: list[Scanned] = []
+    try:
+        if root is None or not root.is_dir():
+            return out
+        paths = sorted(root.glob(f"*{suffix}"))
+    except (OSError, RuntimeError):
+        return out  # a root the system will not let us list lists nothing; find_file says why
+    for path in paths:
+        name = path.name.removesuffix(suffix)
+        try:
+            _check_name(name)
+            hit = _lookup(root, name, label, top=top, suffix=suffix)
+            if hit is None:  # not a regular file (a directory, a dangling link)
+                continue
+            out.append(Scanned(name, label, _read(hit[0])))
+        except LibraryError as exc:
+            out.append(Scanned(name, label, exc))
+    return out
+
+
+def scan_files(*, cwd: Path | None, suffix: str = LUA_SUFFIX, noun: str = "file") -> list[Scanned]:
+    """Every ``<name><suffix>`` file of both roots, with its bytes or the reason it is refused.
+
+    The enumeration behind a check that must see what :func:`list_files` hides: a name that
+    breaks the rule (``invalid_name``), a path that leaves its root (``outside_root``), an
+    unreadable file, and a repo file named like a shipped one (``shadows_shipped``, which
+    :func:`find_file` raises for it too). Sorted by name, then shipped before repo. The repo root
+    is walked only while its switch is on, as in :func:`list_files`, and then a repo probe that
+    cannot answer raises :class:`~nexus.lua_runtime.header.RepoProbeError`. *noun* names the
+    thing in the shadow refusal. Nothing in :func:`find`, :func:`procedures` or
+    :func:`list_files` depends on it.
+    """
+    shipped = _scan_root(shipped_root(), "shipped", top=None, suffix=suffix)
+    out = list(shipped)
+    if repo_root_enabled():
+        located = _repo_root(cwd)
+        taken = {s.name for s in shipped if isinstance(s.found, bytes)}
+        for s in _scan_root(located[0], "repo", top=located[1], suffix=suffix) if located else []:
+            if s.name in taken and isinstance(s.found, bytes):
+                s = Scanned(
+                    s.name, s.root, LibraryError("shadows_shipped", f"the repo {noun} {s.name} shadows a shipped one")
+                )
+            out.append(s)
+    return sorted(out, key=lambda s: (s.name, s.root))

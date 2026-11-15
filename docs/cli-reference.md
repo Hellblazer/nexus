@@ -7091,6 +7091,21 @@ An error prints as `<kind>: <detail>` on standard error and the exit status is 1
 
 ---
 
+## nx aura
+
+```
+nx aura check [NAME]
+nx aura list [--json]
+```
+
+Declarative auras (RDR-249): `<name>.aura.toml` files in the same two roots as procedures (`src/nexus/procedures/` and, only while `NX_PROCEDURES_REPO_ROOT=1`, the checkout's `.nexus/procedures/`). Nothing here runs an aura.
+
+`nx aura check` parses every aura file (or `NAME`) against the closed key set and checks what a file cannot check alone: the `procedure` resolves through the library and its header parses; every required argument of the header is mapped and no mapping names an argument it lacks; a `[clear]` that a post could meet together with `trigger.match` is refused (so is one beside an absent `trigger.match`); two auras that write the same `display.threads` block are both refused; and, from the engine's registry, `trigger.subspace` resolves to a template and every field of `trigger.match`, `clear.match` and each `dims.<field>` source is a dimension of it (a `body.<field>` source is checked against the template's `doc.body` where it serves one). Each refusal names the aura, the check and the key. A repo file that shadows a shipped aura, and a file whose name breaks the name rule, are listed as refused. When the registry cannot be read the dictionary checks are skipped, each skipped check is printed by name with the reason (`pass; skipped: dictionary`), and the rest still run; a skipped check is never shown as a plain pass. Exit status 1 when any aura is refused.
+
+`nx aura list` prints one line per aura: name, summary, trigger (subspace and match), `on` or `off`, and the level that decided it (`default`, `global`, `repo` or `env`). A file that breaks the grammar is listed with its refusal. `--json` prints a list of objects with `name`, `root`, `summary`, `trigger` (`subspace`, `match`), `state`, `level` and `error`. A value under `auras:` that is not on or off is an error that names the file and the key (exit 1). See [Configuration](configuration.md#auras).
+
+---
+
 ## nx command-context
 
 Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
