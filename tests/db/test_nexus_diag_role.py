@@ -422,9 +422,6 @@ def test_provisioning_column_grants_match_the_engine_changesets():
     """nexus-edchb: provisioning grants nexus_diag the same column lists on
     gc_audit and nexus.tuples as grants-nexus-diag-4 and -5, never a content
     column (gc_audit.details, a tuple's keys, dims or body)."""
-    import re
-    from pathlib import Path
-
     from nexus.db.pg_provision import DIAG_COLUMN_GRANTS
 
     xml = (
