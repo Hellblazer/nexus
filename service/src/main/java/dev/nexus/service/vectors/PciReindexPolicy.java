@@ -3,11 +3,14 @@
 package dev.nexus.service.vectors;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 
 /**
  * The REINDEX triggers' thresholds and bounds in one place (RDR-230 Technical Design 3 and 8; Open Question 4: the
@@ -80,5 +83,35 @@ final class PciReindexPolicy {
         int n = perRow.size();
         double median = n % 2 == 1 ? perRow.get(n / 2) : (perRow.get(n / 2 - 1) + perRow.get(n / 2)) / 2.0;
         return OptionalDouble.of(median);
+    }
+
+    /**
+     * What the trigger rules read of one valid, parsed per-collection index (RDR-230 Technical Design 3).
+     *
+     * @param name           the index name
+     * @param collection     the collection it serves
+     * @param dimension      the embedding dimension of its leaf
+     * @param anchor         the anchor on the index
+     * @param bytes          {@code pg_relation_size} now
+     * @param rows           the collection's uncapped row count now
+     * @param writtenSince   rows written after {@code anchor.builtAt()}
+     * @param previousRows   the row count at this engine's previous check of the index; empty after a boot or a change
+     *                       of holder
+     * @param bulkPending    a bulk delete was seen on an earlier pass and its REINDEX has not run yet
+     * @param canary         the canary's latest state for the index on this engine, or null when it has none
+     * @param canaryQueries  the distinct ring queries that result had
+     * @param lastRedReindexAt when the last red-canary REINDEX of the index finished, or null
+     * @param backedOff      the index's REINDEX is in its failure backoff
+     * @param reference      the install reference (bytes per row) for the index's dimension, for an adopted anchor
+     */
+    record Candidate(String name, String collection, int dimension, PciCatalog.Anchor anchor, long bytes, long rows,
+                     long writtenSince, OptionalLong previousRows, boolean bulkPending, PciCanary.State canary,
+                     int canaryQueries, Instant lastRedReindexAt, boolean backedOff, OptionalDouble reference) { }
+
+    /**
+     * The trigger that fires for {@code c} at {@code now}, if any. Stub: the rules land with the implementation.
+     */
+    static Optional<PciReconcilePlanner.Trigger> trigger(Candidate c, Instant now) {
+        return Optional.empty();
     }
 }

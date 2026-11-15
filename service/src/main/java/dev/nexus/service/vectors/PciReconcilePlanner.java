@@ -300,4 +300,18 @@ public final class PciReconcilePlanner {
         }
         return List.copyOf(plan);
     }
+
+    /**
+     * The REINDEXes the triggers call for, largest index first (then name): one per candidate whose
+     * {@link PciReindexPolicy#trigger} fires. Not limited: the caller adds any leaf-index REINDEX and then
+     * {@link #firstPerPass}. Stub: lands with the implementation.
+     */
+    static List<Reindex> reindexes(Collection<PciReindexPolicy.Candidate> candidates, java.time.Instant now) {
+        return List.of();
+    }
+
+    /** The first {@link PciReindexPolicy#MAX_PER_PASS} of {@code ordered}. Stub: lands with the implementation. */
+    static List<Reindex> firstPerPass(List<Reindex> ordered) {
+        return List.of();
+    }
 }

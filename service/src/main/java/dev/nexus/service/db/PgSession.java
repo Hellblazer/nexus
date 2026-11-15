@@ -890,12 +890,19 @@ public final class PgSession {
      * @param maxPerLeaf     {@code NX_SEARCH_PCI_MAX_PER_LEAF}
      * @param buildMemMb     {@code NX_SEARCH_PCI_BUILD_MEM_MB}: the builder session's maintenance_work_mem in MB,
      *                       or {@code null} when unset
+     * @param reindex        {@code NX_SEARCH_PCI_REINDEX} (RDR-230 Technical Design 8): REINDEX and the post-delete
+     *                       VACUUM; false stops them alone, builds, drops and the canary continue. Default true.
      */
     public record PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf,
-                              Integer buildMemMb) {
+                              Integer buildMemMb, boolean reindex) {
+        /** The five settings that predate the REINDEX switch, with it on. */
+        public PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf, Integer buildMemMb) {
+            this(enabled, buildMinRows, sweepSeconds, maxPerLeaf, buildMemMb, true);
+        }
+
         /** The four settings that predate the build memory, with it unset. */
         public PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf) {
-            this(enabled, buildMinRows, sweepSeconds, maxPerLeaf, null);
+            this(enabled, buildMinRows, sweepSeconds, maxPerLeaf, null, true);
         }
     }
 
@@ -911,7 +918,13 @@ public final class PgSession {
             searchPciBuildMinRows(env.apply("NX_SEARCH_PCI_BUILD_MIN_ROWS")),
             searchPciSweepSeconds(env.apply("NX_SEARCH_PCI_SWEEP_SECONDS")),
             searchPciMaxPerLeaf(env.apply("NX_SEARCH_PCI_MAX_PER_LEAF")),
-            searchPciBuildMemMb(env.apply("NX_SEARCH_PCI_BUILD_MEM_MB")));
+            searchPciBuildMemMb(env.apply("NX_SEARCH_PCI_BUILD_MEM_MB")),
+            searchPciReindex(env.apply("NX_SEARCH_PCI_REINDEX")));
+    }
+
+    /** Parse {@code NX_SEARCH_PCI_REINDEX}. Stub: the strict 0/1 parse lands with the implementation. */
+    static boolean searchPciReindex(String raw) {
+        return true;
     }
 
     /**

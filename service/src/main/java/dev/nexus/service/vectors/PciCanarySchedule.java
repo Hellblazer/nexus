@@ -70,6 +70,14 @@ final class PciCanarySchedule {
     @FunctionalInterface
     interface Runner {
         Result run(Target target, String trigger);
+
+        /**
+         * Measure {@code target} again with exactly {@code queries} (a red run's sample, kept in memory) instead of the
+         * ring's: the re-measure after a REINDEX. A runner with no such path reads the ring.
+         */
+        default Result remeasure(Target target, String trigger, List<float[]> queries) {
+            return run(target, trigger);
+        }
     }
 
     /** What one {@link #runPass} did. */

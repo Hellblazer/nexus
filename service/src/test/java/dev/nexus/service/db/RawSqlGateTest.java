@@ -431,7 +431,17 @@ class RawSqlGateTest {
             // format() with %I and %L (PciBuilderSession.Pass#render), so no identifier or JSON text is concatenated
             // in Java, and Pass#comment refuses any index that is not a builder index of the leaf before it renders.
             // Plain JDBC Statement.execute for the reason runBuild gives. Single-homed: Pass#comment.
-            "runComment", Map.of(".execute(sql)", 1))),
+            "runComment", Map.of(".execute(sql)", 1),
+            // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): REINDEX INDEX CONCURRENTLY has no typed jOOQ form and cannot run
+            // inside a function or a transaction block. Same rendering as runBuild (format() with %I on the server), and
+            // Pass#reindex refuses any index that is not a builder index on the leaf it names before it renders. Plain
+            // JDBC Statement.execute for the reason runBuild gives. Single-homed: Pass#reindex.
+            "runReindex", Map.of(".execute(sql)", 1),
+            // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): VACUUM (ANALYZE) has no typed jOOQ form and cannot run inside a
+            // function or a transaction block. Same rendering as runBuild (format() with %I on the server); Pass#vacuum
+            // takes only a leaf of the pass's catalog snapshot, never another table. Plain JDBC Statement.execute for the
+            // reason runBuild gives. Single-homed: Pass#vacuum, after a bulk-delete REINDEX.
+            "runVacuum", Map.of(".execute(sql)", 1))),
         Map.entry("AdminDdlSession.java", Map.of(
             // SANCTIONED RAW (RDR-236 Phase 4 Step 3, nexus-6pfgb.43; shared with nexus-6pfgb.44): ALTER TABLE ... ADD
             // CONSTRAINT ... NOT VALID and VALIDATE CONSTRAINT take a rendered CHECK expression, which has no typed

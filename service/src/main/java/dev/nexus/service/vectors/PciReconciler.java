@@ -430,6 +430,16 @@ public final class PciReconciler {
         return (int) failures.values().stream().filter(f -> f.consecutive() >= FAILING_AFTER).count();
     }
 
+    /** REINDEXes this engine has finished since boot. Stub: lands with the implementation. */
+    int reindexes() {
+        return 0;
+    }
+
+    /** Whether the index's last red-canary REINDEX re-measured red. Stub: lands with the implementation. */
+    boolean redAfterReindex(String indexName) {
+        return false;
+    }
+
     /** Passes started since boot, for tests. */
     int passes() {
         return passes.get();

@@ -707,6 +707,16 @@ public final class PciBuilderSession {
             }
         }
 
+        /** Stub: REINDEX INDEX CONCURRENTLY of a builder index; lands with the implementation. */
+        public DdlOutcome reindex(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+            return DdlOutcome.REJECTED;
+        }
+
+        /** Stub: VACUUM (ANALYZE) of a leaf of the pass's snapshot; lands with the implementation. */
+        public DdlOutcome vacuum(PciCatalog.Leaf leaf) {
+            return DdlOutcome.REJECTED;
+        }
+
         /** {@link DdlOutcome#STALE} when the leftover is valid or gone now, else {@code null}: go on to the DROP. */
         private DdlOutcome staleLeftover(PciCatalog.Leaf leaf, String name) {
             Boolean valid = ctx.select(DSL.field(DSL.name("i", "indisvalid"), Boolean.class))

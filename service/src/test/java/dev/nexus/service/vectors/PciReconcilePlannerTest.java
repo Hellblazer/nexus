@@ -10,13 +10,19 @@ import dev.nexus.service.vectors.PciReconcilePlanner.Build;
 import dev.nexus.service.vectors.PciReconcilePlanner.Drop;
 import dev.nexus.service.vectors.PciReconcilePlanner.DropReason;
 import dev.nexus.service.vectors.PciReconcilePlanner.RegistryRow;
+import dev.nexus.service.vectors.PciReconcilePlanner.Reindex;
+import dev.nexus.service.vectors.PciReconcilePlanner.Trigger;
 import dev.nexus.service.vectors.PciReconcilePlanner.SkipCountSuspect;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -509,5 +515,183 @@ class PciReconcilePlannerTest {
         assertThat(first).isEqualTo(second).hasSize(2);
         assertThat(counts).hasSize(2);
         assertThat(registry).hasSize(2);
+    }
+
+    // -- REINDEX triggers (RDR-230 Technical Design 3, nexus-4lnn1.1.10) ------------------------------------------
+
+    private static final Instant NOW = Instant.parse("2026-11-14T00:00:00Z");
+
+    private static PciCatalog.Anchor built(long rows, long bytes) {
+        return new PciCatalog.Anchor(NOW.minus(Duration.ofDays(1)), rows, bytes, PciCatalog.ORIGIN_BUILT);
+    }
+
+    private static PciCatalog.Anchor adopted(long rows, long bytes) {
+        return new PciCatalog.Anchor(NOW.minus(Duration.ofDays(1)), rows, bytes, PciCatalog.ORIGIN_ADOPTED);
+    }
+
+    /** A candidate with nothing to trigger on: built at 1000 rows and 8,000,000 bytes, unchanged, no canary result. */
+    private static final class Cand {
+        String collection = "c";
+        PciCatalog.Anchor anchor = built(1000, 8_000_000);
+        long bytes = 8_000_000;
+        long rows = 1000;
+        long written;
+        OptionalLong previous = OptionalLong.empty();
+        boolean bulkPending;
+        PciCanary.State canary;
+        int queries;
+        Instant lastRedReindexAt;
+        boolean backedOff;
+        OptionalDouble reference = OptionalDouble.empty();
+
+        Cand collection(String v) { collection = v; return this; }
+        Cand anchor(PciCatalog.Anchor v) { anchor = v; return this; }
+        Cand now(long bytesNow, long rowsNow, long writtenSince) {
+            bytes = bytesNow; rows = rowsNow; written = writtenSince; return this;
+        }
+        Cand previous(long v) { previous = OptionalLong.of(v); return this; }
+        Cand red(int q) { canary = PciCanary.State.RED; queries = q; return this; }
+        Cand green() { canary = PciCanary.State.GREEN; queries = 10; return this; }
+        Cand lastRed(Duration ago) { lastRedReindexAt = NOW.minus(ago); return this; }
+        Cand reference(double v) { reference = OptionalDouble.of(v); return this; }
+
+        PciReindexPolicy.Candidate build() {
+            return new PciReindexPolicy.Candidate(name(collection), collection, 1024, anchor, bytes, rows, written,
+                previous, bulkPending, canary, queries, lastRedReindexAt, backedOff, reference);
+        }
+    }
+
+    private static List<Reindex> reindexes(Cand... cands) {
+        return PciReconcilePlanner.reindexes(java.util.Arrays.stream(cands).map(Cand::build).toList(), NOW);
+    }
+
+    private static Trigger only(Cand c) {
+        List<Reindex> out = reindexes(c);
+        assertThat(out).as("one REINDEX").hasSize(1);
+        return out.get(0).trigger();
+    }
+
+    @Test
+    void pureIngestToTwiceTheSize_triggersNothing() {
+        // 1000 rows at build, 1000 more written since, 2000 now: bytes per row unchanged, nothing deleted.
+        assertThat(reindexes(new Cand().now(16_000_000, 2000, 1000))).isEmpty();
+        // And a tenfold ingest.
+        assertThat(reindexes(new Cand().now(80_000_000, 10_000, 9000))).isEmpty();
+    }
+
+    @Test
+    void churnOfAQuarter_triggersDeletesSinceBuild_atTheThresholdAndNotBelow() {
+        // anchor 1000 rows, none written since, 800 now: 200 deleted = 25% of 800 exactly.
+        assertThat(only(new Cand().now(8_000_000, 800, 0))).isEqualTo(Trigger.DELETES_SINCE_BUILD);
+        // 801 now: 199 deleted, below 25% of 801.
+        assertThat(reindexes(new Cand().now(8_000_000, 801, 0))).isEmpty();
+        // Re-writes count as dead graph entries: 1000 at build, 300 re-written, 1000 now: 300 dead = 30%.
+        assertThat(only(new Cand().now(8_000_000, 1000, 300))).isEqualTo(Trigger.DELETES_SINCE_BUILD);
+        // A collection that grew past its anchor has no deletes (max(0, ...)).
+        assertThat(reindexes(new Cand().now(8_000_000, 1500, 0))).isEmpty();
+    }
+
+    @Test
+    void aTenPercentBulkDelete_triggersBulkDelete_whichVacuumsAfter() {
+        // The previous check saw 1000 rows, now 900: fell by exactly 10%. (anchor 900 so no other rule fires.)
+        var bulk = new Cand().anchor(built(900, 7_200_000)).now(7_200_000, 900, 0).previous(1000);
+
+        List<Reindex> out = reindexes(bulk);
+
+        assertThat(out).hasSize(1);
+        assertThat(out.get(0).trigger()).isEqualTo(Trigger.BULK_DELETE);
+        assertThat(out.get(0).vacuumAfter()).as("REINDEX, then VACUUM (ANALYZE)").isTrue();
+        // 9.9% is not enough.
+        assertThat(reindexes(new Cand().anchor(built(901, 7_208_000)).now(7_208_000, 901, 0).previous(1000))).isEmpty();
+        // Another trigger's REINDEX is not followed by a vacuum.
+        var deletes = new Cand().now(8_000_000, 700, 0);
+        assertThat(only(deletes)).isEqualTo(Trigger.DELETES_SINCE_BUILD);
+        assertThat(reindexes(deletes).get(0).vacuumAfter()).isFalse();
+    }
+
+    @Test
+    void theBulkDeleteRule_hasNoPreviousCountAfterABoot_andFiresFromAPendingFlag() {
+        // Without a previous count (a restart, a new holder) a 40% fall is the deletes rule's to judge, not the bulk rule's.
+        var afterBoot = new Cand().anchor(built(600, 4_800_000)).now(4_800_000, 600, 0);
+        assertThat(reindexes(afterBoot)).isEmpty();
+        // A bulk delete seen on an earlier pass whose REINDEX the per-pass limit deferred stays owed.
+        var pending = new Cand().anchor(built(600, 4_800_000)).now(4_800_000, 600, 0);
+        pending.bulkPending = true;
+        assertThat(only(pending)).isEqualTo(Trigger.BULK_DELETE);
+    }
+
+    @Test
+    void aRedCanary_triggersOnlyWithTenQueries_andOnlyOncePerDay() {
+        assertThat(only(new Cand().red(10))).isEqualTo(Trigger.RED_CANARY);
+        // Below ten queries the red is recorded and shown, and triggers nothing (Sam, 2026-11-14).
+        assertThat(reindexes(new Cand().red(9))).isEmpty();
+        assertThat(reindexes(new Cand().red(3))).isEmpty();
+        // A green result, or none, triggers nothing.
+        assertThat(reindexes(new Cand().green())).isEmpty();
+        assertThat(reindexes(new Cand())).isEmpty();
+        // The last red-canary REINDEX of this index was an hour ago: still red, not rebuilt (red_after_reindex).
+        assertThat(reindexes(new Cand().red(10).lastRed(Duration.ofHours(1)))).isEmpty();
+        assertThat(reindexes(new Cand().red(10).lastRed(Duration.ofHours(23)))).isEmpty();
+        // 24 hours on it may run again, once.
+        assertThat(only(new Cand().red(10).lastRed(Duration.ofHours(24)))).isEqualTo(Trigger.RED_CANARY);
+    }
+
+    @Test
+    void theSizeRule_comparesAgainstTheAnchor_orForAnAdoptedIndexTheInstallReference() {
+        // built at 8000 bytes a row: 1.4x is 11,200.
+        assertThat(only(new Cand().now(11_300_000, 1000, 0))).isEqualTo(Trigger.SIZE);
+        assertThat(reindexes(new Cand().now(11_100_000, 1000, 0))).isEmpty();
+        // An adopted anchor is a snapshot of an index of unknown age: it is judged against the reference, 8200 a row.
+        var adoptedBig = new Cand().anchor(adopted(1000, 8_000_000)).now(11_500_000, 1000, 0).reference(8_200);
+        assertThat(only(adoptedBig)).isEqualTo(Trigger.SIZE);
+        var adoptedSmall = new Cand().anchor(adopted(1000, 8_000_000)).now(11_400_000, 1000, 0).reference(8_200);
+        assertThat(reindexes(adoptedSmall)).isEmpty();
+        // No reference for the dimension: the rule is off for an adopted index, however big.
+        assertThat(reindexes(new Cand().anchor(adopted(1000, 8_000_000)).now(80_000_000, 1000, 0))).isEmpty();
+    }
+
+    @Test
+    void zeroRows_triggerNothing() {
+        assertThat(reindexes(new Cand().now(8_000_000, 0, 0))).isEmpty();
+        assertThat(reindexes(new Cand().now(0, 0, 0).red(10))).as("not even a red canary: nothing to rebuild").isEmpty();
+    }
+
+    @Test
+    void aBackedOffIndex_isNotReindexed_whateverTheTrigger() {
+        var c = new Cand().now(8_000_000, 700, 0);
+        c.backedOff = true;
+        assertThat(reindexes(c)).isEmpty();
+    }
+
+    @Test
+    void whenSeveralRulesFire_bulkDeleteNamesTheTrigger_soItsVacuumIsNotLost() {
+        var c = new Cand().anchor(built(1000, 8_000_000)).now(8_000_000, 700, 0).previous(1000).red(10);
+        assertThat(only(c)).isEqualTo(Trigger.BULK_DELETE);
+    }
+
+    @Test
+    void theReindexesAreLargestFirst_andAPassTakesTwo() {
+        var small = new Cand().collection("small").now(1_000, 700, 0).anchor(built(1000, 1_000));
+        var middle = new Cand().collection("middle").now(5_000, 700, 0).anchor(built(1000, 5_000));
+        var big = new Cand().collection("big").now(9_000, 700, 0).anchor(built(1000, 9_000));
+
+        List<Reindex> ordered = reindexes(small, middle, big);
+
+        assertThat(ordered).extracting(Reindex::collection).containsExactly("big", "middle", "small");
+        assertThat(ordered).extracting(Reindex::bytes).containsExactly(9_000L, 5_000L, 1_000L);
+        assertThat(PciReconcilePlanner.firstPerPass(ordered)).extracting(Reindex::collection)
+            .containsExactly("big", "middle");
+        assertThat(PciReindexPolicy.MAX_PER_PASS).isEqualTo(2);
+    }
+
+    @Test
+    void theThresholds_areThoseSamRecordedOn2026_11_14() {
+        assertThat(PciReindexPolicy.SIZE_RATIO).isEqualTo(1.4);
+        assertThat(PciReindexPolicy.LEAF_SIZE_RATIO).isEqualTo(1.5);
+        assertThat(PciReindexPolicy.DELETES_SINCE_BUILD_FRACTION).isEqualTo(0.25);
+        assertThat(PciReindexPolicy.BULK_DELETE_FRACTION).isEqualTo(0.10);
+        assertThat(PciReindexPolicy.MAX_PER_PASS).isEqualTo(2);
+        assertThat(PciReindexPolicy.RED_REINDEX_MIN_INTERVAL).isEqualTo(Duration.ofHours(24));
+        assertThat(PciReindexPolicy.RED_CANARY_MIN_QUERIES).isEqualTo(10);
     }
 }
