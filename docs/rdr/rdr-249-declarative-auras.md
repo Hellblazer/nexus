@@ -237,9 +237,12 @@ in the engine, and the procedure can still only read.
      `trigger.match`, against posts on the same subspace. A post that
      matches it removes this session's `aura: <threads value>` block without
      running the procedure; for `ci_develop_red`, the next green develop sha
-     clears the red (Sam, 2026-11-15: "amend two"). A post that matches both
-     `trigger.match` and `clear.match` refuses the file at `nx aura check`
-     when the two tables are equal; otherwise the trigger wins.
+     clears the red (Sam, 2026-11-15: "amend two"). A `[clear]` that a post
+     could meet together with `trigger.match` refuses the file at `nx aura
+     check`: that is the case when `trigger.match` is absent (every post is
+     a trigger, so none could clear), or when no key is in both tables with
+     different values. `ci_develop_red`'s tables differ on `outcome`, so no
+     post meets both.
    - `display.threads` is required. It writes the procedure's `text` result
      field as a block titled `aura: <value>` in this session's threads
      entry, replacing the previous block of that title (the latest fire
@@ -277,10 +280,18 @@ in the engine, and the procedure can still only read.
 
 2. **Checking.** `nx aura check [NAME]` parses every aura (or one), resolves
    its procedure through RDR-240's library, checks the argument mapping
-   against the procedure's header, and checks the trigger's fields against
-   the dictionary (`tuple_registry` with docs). `nx aura list` shows name,
-   summary, trigger and whether it is enabled. Both run without the engine
-   only for the parts that need none, and say which checks were skipped.
+   against the procedure's header (every required argument mapped, none
+   the header lacks), and checks the `trigger.match`, `clear.match` and
+   `dims.<field>` fields against the subspace template's dimensions and
+   `body.<field>` against its `doc.body` (`tuple_registry` with docs). It
+   also refuses a dead `[clear]` (Technical Design 1) and two auras that
+   share a `display.threads` value, since their fires would overwrite one
+   block; that check is static, spans both roots, and ignores on and off.
+   A shadowed or badly named file is reported, not dropped. `nx aura list`
+   shows name, summary, trigger, on or off, and the level that decided it.
+   Both run without the engine only for the parts that need none, and say
+   which checks were skipped, an unscanned repo root (switch off) and a
+   configured name that matches no aura included.
 
 3. **Enabling.** Every aura ships off, `ci_develop_red` included, and runs
    only when turned on by name (Sam, 2026-11-15: "Off by default"). Nexus
@@ -449,8 +460,11 @@ RDR-240. Tests: every refusal kind, a valid file, shadowing.
 
 #### Step 2: `nx aura check` and `nx aura list`
 
-Argument mapping against the procedure header; trigger fields against the
-dictionary. Tests against a real engine's registry (self-provisioned).
+Argument mapping against the procedure header; trigger, clear and `dims`
+fields against the dictionary, and `body` fields against `doc.body`; the
+dead-`[clear]` and shared-threads refusals; the on and off resolver of
+Technical Design 3, which `nx aura list` shows. Tests against a real
+engine's registry (self-provisioned).
 
 ### Phase 2: Evaluation
 
@@ -541,3 +555,4 @@ Gate round 1 raised two more, answered 2026-11-15:
 - 2026-11-15: Gate round 3 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `8dec1a48b`; critique `nexus_rdr/249-gate-critique-2026-11-15-r3`.
 - 2026-11-15: Accepted (Sam). Residuals: S2 a122b329b (cut), S3 a122b329b, S4 a122b329b (fix check 249-fix-check-a122b329b); S6 to nexus-mdbds.10.1 (Phase 1 parser and loader); S-r3-1, S7, S8 to nexus-mdbds.11.1 (Phase 2 waiter evaluation); the fix checks' rows to .10.1, .10.2, .11.1 and .12.1 (plan: T2 nexus/plan-rdr-249-declarative-auras.md).
 - 2026-11-15: S6 (nexus-mdbds.10.1): RDR-212's exclusion of "any reaction loop" is narrowed on purpose, client-side only (Sam, by dialog in halcyon's session: "Narrow it on purpose"); counted fix-check wording observations folded in (drain-hook bullet, `[limits]` in Technical Design 1, Resolved Question 2's pointer, the measured worker start).
+- 2026-11-15: Technical Design 1 and 2 and Phase 1 Step 2 amended to match the reviewed `nx aura check` (nexus-mdbds.10.2, its feat and fix commits; standing grant 3). The `[clear]` rule was too narrow as "equal tables": a `[clear]` is refused when a post could meet both tables, that is, `trigger.match` is absent or no key is in both with different values. The check also covers `clear.match`, `dims` and `body` fields and refuses two auras sharing a threads block.
