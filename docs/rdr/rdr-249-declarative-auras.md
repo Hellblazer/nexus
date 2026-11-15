@@ -210,14 +210,19 @@ in the engine, and the procedure can still only read.
    [when]
    field = "show"
 
+   [clear]
+   match = { kind = "sha", outcome = "success" }
+
    [display]
    channel = true
    threads = "develop CI red"
    ```
 
-   - `trigger.subspace` is one concrete board or mailbox subspace
-     (`board/<topic>`, `board/ci/<topic>`, or `mailbox/self`, which stands
-     for the session's own mailbox). No wildcards in version 1.
+   - `trigger.subspace` is one concrete board subspace (`board/<topic>` or
+     `board/ci/<topic>`). No wildcards in version 1. Mailbox triggers
+     (`mailbox/self`) and the drain-hook path they needed are out of
+     version 1 (Sam, 2026-11-15: "Cut one"): no consumer uses one, and the
+     drain hook is a stdlib-only plugin script that cannot run a procedure.
    - `trigger.match` is equality on dimensions only; every pair must hold.
      Absent means every post on the subspace.
    - `args` maps each of the procedure's declared arguments to a source:
@@ -227,10 +232,34 @@ in the engine, and the procedure can still only read.
      not be mapped. Every required argument must be mapped.
    - `when.field` names a boolean field of the procedure's result table; the
      aura shows only when it is `true`. Absent means always show.
+   - `clear.match` (optional) is equality on dimensions, like
+     `trigger.match`, against posts on the same subspace. A post that
+     matches it removes this session's `aura: <threads value>` block without
+     running the procedure; for `ci_develop_red`, the next green develop sha
+     clears the red (Sam, 2026-11-15: "amend two"). A post that matches both
+     `trigger.match` and `clear.match` refuses the file at `nx aura check`
+     when the two tables are equal; otherwise the trigger wins.
    - `display.threads` is required. It writes the procedure's `text` result
      field as a block titled `aura: <value>` in this session's threads
      entry, replacing the previous block of that title (the latest fire
-     wins). The threads block is the only place procedure text appears.
+     wins). The threads block is the only place procedure text appears. The
+     write follows four rules (Sam, 2026-11-15: "amend two"):
+     - The entry is the one whose first line is `session: <this session's
+       id>` in T2 project `threads`, found by that line, never by title.
+     - The host never creates an entry. When none carries the line, the
+       fire is logged with the aura name and nothing is written.
+     - The block is the heading `## aura: <value>` and one line, `state:
+       <text>`. `<text>` keeps only printable ASCII, turns each newline or
+       tab into a space, and is cut to 200 characters, so it cannot start a
+       heading, an `ask:` line or another field.
+     - The host reads the entry, replaces only its own block, and writes
+       the whole entry back. T2 has no compare-and-set, so an agent's
+       `memory_put` between that read and write can be lost, and the
+       write refreshes the entry's updated time (inferred, not read).
+   - Auras do not load in a `claude -p` child: the MCP server loads them
+     only when `resolve_session_name` names the session, and it returns
+     None for "a non-interactive entry (a ``claude -p`` child)"
+     (`src/nexus/mcp/subscriptions.py`).
    - `display.channel = true` also sends a channel notification, which is a
      fixed template and never carries procedure text (RDR-211; Sam,
      2026-11-15: "Fixed template only"). It holds only the aura name, the
@@ -282,11 +311,8 @@ in the engine, and the procedure can still only read.
    it is rendered: for each enabled aura whose subspace and match fit the
    row, build the arguments, run the procedure through `run_script` in a
    thread (the waiter's loop is never blocked), test `when`, and display.
-   The normal announcement of the row is unchanged. Mail matched by a
-   `mailbox/self` aura is evaluated on the waiter when the channel is live,
-   and by the drain hook at the next prompt otherwise. The aura records the
-   tuple ids it handled in the session's state directory, so the two paths
-   never both fire on one row.
+   The normal announcement of the row is unchanged. A row that matches an
+   aura's `clear.match` removes its block instead.
 
 5. **Failure.** A `ScriptError`, a missing result field, or a display error
    is logged with the aura name and the tuple id, and shown once in the
@@ -311,7 +337,6 @@ in the engine, and the procedure can still only read.
 |---|---|---|
 | Procedure library, header, `run_script` | Yes (RDR-240, 242) | Unchanged; an aura calls it. |
 | Channel waiter, board announce-once | Yes (RDR-213) | The evaluation site. |
-| Mailbox drain hook | Yes | The no-channel floor for mailbox auras. |
 | Dictionary with field docs | Yes (RDR-239) | `nx aura check` reads it. |
 | Threads board entry | Yes (RDR-245) | The durable display. |
 | Config hierarchy (env, `.nexus.yml`, `~/.config/nexus/config.yml`) | Yes (`docs/configuration.md`) | The on and off switch. |
@@ -421,16 +446,13 @@ dictionary. Tests against a real engine's registry (self-provisioned).
 
 Resolve on and off from config and `NX_AURAS_OFF`, subscribe (aura-owned,
 outside the status record's `board_topics`), match, run in a thread, condition, channel and
-threads display, the handled-id record, the failure and queue rules. Tests
+threads display under its four write rules, the clear match, the failure and queue rules. Tests
 with a real engine and a real worker: one fire, no fire on a non-match, a
-failing procedure disabled after three; with an aura subscribed to
+failing procedure disabled after three, a green post that removes the red
+block, no write when the session has no entry, no aura in a `claude -p`
+child; with an aura subscribed to
 `board/ci/nexus-develop--done` and no session subscription to it, the Stop
 hook still blocks a turn that ends on a develop-CI wait.
-
-#### Step 2: Drain path for `mailbox/self`
-
-The same evaluation from the drain hook when no channel is live; the
-handled-id record prevents a second fire.
 
 ### Phase 3: The first consumer
 
@@ -446,7 +468,9 @@ None (`tomllib` is in the standard library).
 
 Unit tests for the parser's refusals and the argument mapping. Integration
 tests against a self-provisioned engine for subscription, announce-once
-evaluation, the drain fallback and the threads block. A test that posts a
+evaluation, the clear match and the threads block, with a tuple whose
+procedure text carries a newline, a `## ` heading and an `ask:` line, which
+must land as one capped `state:` line. A test that posts a
 tuple whose dimensions and body carry instruction-like text and asserts the
 channel notification equals the fixed template, with none of that text in
 it (RDR-211). Tests of the switch at each level: the default (off), an
@@ -481,6 +505,10 @@ Gate round 1 raised two more, answered 2026-11-15:
    whether nexus turns `ci_develop_red` on: "Each user opts in". Auras ship
    off; a user turns one on in config, and `NX_AURAS_OFF` still turns them
    off (Technical Design 3).
+7. Accept dispositions (gate round 3 residuals S2, S3, S4): "Cut one,
+   amend two, then accept", by dialog in halcyon's session. Mailbox
+   triggers and the drain path are cut from version 1, and the threads
+   write rules and the clear match are added (Technical Design 1).
 
 ## References
 
