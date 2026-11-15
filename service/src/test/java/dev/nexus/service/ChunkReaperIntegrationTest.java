@@ -1344,9 +1344,9 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
             assertThat(d.get("sample")).as("up to five sample rows").hasSize(5);
             for (var row : d.get("sample")) {
                 // RDR-236 Phase 3: the row's title and source_path (stale on a shared chunk, swept in Phase 4) are
-                // never shown. Chunk text is never persisted either: nexus_diag reads gc_audit across tenants
-                // under a content-free premise (grants-nexus-diag-4), so a stored sample row is chash, title,
-                // source_path and nothing else.
+                // never shown. Chunk text is never persisted either, so a stored sample row is chash, title,
+                // source_path and nothing else; nexus_diag, which reads gc_audit across tenants, is not
+                // granted details (grants-nexus-diag-4, nexus-edchb).
                 assertThat(row.fieldNames()).toIterable().containsExactlyInAnyOrder("chash", "title", "source_path");
                 assertThat(row.get("title").isNull()).as("no manifest owner, no title").isTrue();
                 assertThat(row.get("source_path").isNull()).isTrue();

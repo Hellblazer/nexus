@@ -397,7 +397,11 @@ $$;
             catalog-033-gc-audit-producers.xml — the in-memory sample also
             carries a title field, but title never reaches the persisted
             row; nexus-kgft3 claimed otherwise and was closed as a
-            confirmed false positive, 2026-08-19). relevance_log is already
+            confirmed false positive, 2026-08-19). That held for the
+            quarantine producers only: since nexus-2x9xa the reaper's
+            refusal sample stores title and source_path in gc_audit.details,
+            so gc_audit is granted by column without details (nexus-edchb,
+            below). relevance_log is already
             granted above (a CHASH_BEARING table). This is NOT a
             default-privileges fix and deliberately not a bulk ON ALL
             TABLES grant: default privileges stay revoked in the view era
@@ -451,10 +455,10 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Era-independent by design (unlike -1/-2/-3's view-era dance): these
-    -- two tables carry no content-boundary concern at all (verified
-    -- individually — see CatalogRepository.NEXUS_DIAG_READABLE_TABLES),
-    -- so nexus_diag should see them whether or not the counts view
+    -- Era-independent by design (unlike -1/-2/-3's view-era dance): what
+    -- this grants carries no content (search_telemetry whole, gc_audit
+    -- without details; see CatalogRepository.NEXUS_DIAG_READABLE_TABLES),
+    -- so nexus_diag should see it whether or not the counts view
     -- exists. hook_failures is deliberately NOT granted here (see comment
     -- above) -- do not add it for symmetry with -3's four-table list.
     GRANT SELECT ON nexus.search_telemetry TO nexus_diag;

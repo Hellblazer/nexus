@@ -83,7 +83,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * nexus_diag after a full changelog walk). Most of those 31 are correctly
  * denied (real content or credentials); {@code gc_audit} and
  * {@code search_telemetry} are not — both independently VERIFIED
- * content-free at the row/write-path level (see
+ * content-free at the row/write-path level, gc_audit except its
+ * {@code details} column, which is not granted (nexus-edchb; see
  * {@link CatalogRepository#NEXUS_DIAG_READABLE_TABLES}'s javadoc for the
  * per-table evidence). {@code hook_failures} shares
  * {@link CatalogRepository#AUDIT_ONLY_TABLES}'s "no content" CLASSIFICATION
