@@ -183,11 +183,23 @@ assumption, with no run. **Code-read** means read from source at the named sha.
   - Two of the lexical key8 rows ran on grown plans, not plan 10.
   - Passing `vector_budget_chunks` as a binding changes which plan matches
     unless the strategy is pinned: two questions went to plan 8 (same scores).
+- The budget-20 run repeated three times, 2026-11-15, same conditions, for
+  1.53 USD (Sam: "yes, run the repeat"; T2
+  `nexus_rdr/io7tw-paid-mvv-repeat-2026-11-15`). issue5 F1 .764, .764, .764
+  and .614; mean over the four runs .726. Precision .967 in three, .767 in one.
+  - Retrieval did not vary: every plan-10 row returned the same anchor keys as
+    the first run.
+  - The low run lost one question. Its evidence held all five gold keys, but
+    the resolution branch was not entered, so the answer named customer ids
+    instead of companies and scored 0. That variance belongs to the branch's
+    entry, not to the budget.
+  - The strategy pin still missed on one question in two of the runs (the
+    inline planner answered it, with the same score). No plan was saved.
 
 ### Critical Assumptions
 
 - [x] The companies of the top N anchors are the companies the answer names, at N above 6. Status: Verified at N=20 on issue5 (paid run, 2026-11-15); N=40 and above unmeasured. Method: Spike.
-- [x] Generation names exactly the anchor-key companies when N is above 6. Status: Verified at N=20, 5 of 5 answers, one run each; model variance not bounded. Method: Spike.
+- [x] Generation names exactly the anchor-key companies when N is above 6. Status: Verified at N=20 in 19 of 20 answers over four runs; the one miss did not enter the resolution branch and named ids. Method: Spike.
 - [ ] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Unverified. No LLM filter has been measured. Method: Spike.
 - [ ] Option A's gain is not specific to HERB's template overlap. Status: Unverified. This RDR does not claim it generalises. Method: Spike on a second corpus.
 - [ ] Option B assumes entity keys sit in retrievable announcement chunks. Status: Unverified in general; true on HERB. Method: Spike.
@@ -418,7 +430,7 @@ Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
 ### Open Questions for Sam
 
 1. Answered 2026-11-15 (option 2): budget 20 as the default now, then Option E with a precision filter. Which lever or levers to build. Options E and B need code. Option A is a flag, and it fails the precision gate without a filter. A budget of 20 needs no code and passes the gate on issue5 (measured, one run).
-2. Answered 2026-11-15: the paid run was made, for 3.37 USD (Key Discoveries). Another run is needed for the lever chosen, and to bound variance.
+2. Answered 2026-11-15: the paid run was made, for 3.37 USD (Key Discoveries). The budget-20 repeat was run the same day (three runs, Key Discoveries).
 3. Whether the 20 held-out questions in the RDR-147 MVV were used for tuning. If they were, a new held-out set is needed.
 4. Answered 2026-11-15: the plan 10 default changes (option 2).
 
@@ -435,4 +447,4 @@ Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
 ## Revision History
 
 - 2026-11-15: Draft created from nexus-io7tw and its research record. Not gated, not accepted.
-- 2026-11-15: Sam chose ask `rdr250-lever` option 2; Approach, Phase 1 and Open Questions 1 and 4 record it, and plan 10's default budget moves to 20.
+- 2026-11-15: Sam chose ask `rdr250-lever` option 2; Approach, Phase 1 and Open Questions 1 and 4 record it, and plan 10's default budget moves to 20. The budget-20 repeat (three runs) is in Key Discoveries.

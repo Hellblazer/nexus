@@ -1,0 +1,3 @@
+### Changed
+
+- **Lookup answers read 20 retrieved chunks instead of 6** (nexus-io7tw, RDR-250). The `hybrid-factual-lookup` and `entity-resolution` builtin plans now default `vector_budget_chunks` to 20. At 6, a question whose answer is spread over many documents was answered from about half of what search found: on the HERB multi-hop issue questions F1 rose from 0.500 to 0.764 (precision 0.967; three of four paid runs, the fourth 0.614 after one answer skipped entity resolution). Per-call cost was about the same. An install picks the new default up at its next `nx plan reseed`; a caller can still pass `vector_budget_chunks` per call.
