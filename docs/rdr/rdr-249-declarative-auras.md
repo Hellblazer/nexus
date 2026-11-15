@@ -248,22 +248,45 @@ in the engine, and the procedure can still only read.
      entry, replacing the previous block of that title (the latest fire
      wins). The threads block is the only place procedure text appears. The
      write follows four rules (Sam, 2026-11-15: "amend two"):
-     - The entry is the one whose first line is `session: <this session's
-       id>` in T2 project `threads`, found by that line, never by title.
+     - The entry is the one in T2 project `threads` that the board's own
+       reader (`nexus.console.threads.parse_session`) gives this session's
+       id from its `session: <id>` line, found by that line, never by title.
      - The host never creates an entry. When none carries the line, the
-       fire is logged with the aura name and nothing is written.
+       fire is logged with the aura name and nothing is written. When more
+       than one carries it (the board's duplicate-session finding), nothing
+       is written and `aura_threads_ambiguous` is logged with their titles.
      - The block is the heading `## aura: <value>` and one line, `state:
        <text>`. `<text>` keeps only printable ASCII, turns each newline or
        tab into a space, and is cut to 200 characters, so it cannot start a
-       heading, an `ask:` line or another field.
-     - The host reads the entry, replaces only its own block, and writes
-       the whole entry back. T2 has no compare-and-set, so an agent's
+       heading, an `ask:` line or another field. The error and the disabled
+       notice of Technical Design 5 are that line's text, never more lines.
+       `display.threads` itself is one line of printable ASCII of at most 80
+       characters, or the parser refuses the file.
+     - The host reads the entry, replaces only its own block (the heading
+       and its `state:` line), and writes the whole entry back. One lock in
+       the server process covers every such read-modify-write, for all
+       auras, fires and clears, and a clear on an entry with no such block
+       writes nothing. T2 has no compare-and-set, so an agent's
        `memory_put` between that read and write can be lost, and the
        write refreshes the entry's updated time (inferred, not read).
-   - Auras do not load in a `claude -p` child: the MCP server loads them
-     only when `resolve_session_name` names the session, and it returns
-     None for "a non-interactive entry (a ``claude -p`` child)"
-     (`src/nexus/mcp/subscriptions.py`).
+   - Loading. The MCP server loads the auras turned on for a session the
+     first time Claude Code's session registry names it: at server start, or
+     at a later 60 s re-resolve after a startup miss. A later miss does not
+     unload them. A host with no registry loads none and logs one INFO
+     `auras_not_loaded` line. A file the library or the parser refuses, an
+     aura whose `[clear]` a post could meet together with its trigger (the
+     `nx aura check` rule, applied again at load), and a second aura writing
+     a threads block another loaded aura writes are each refused by name. A
+     load that fails, on a bad `auras:` value for one, is logged, releases
+     any topic it already held and is not retried in that server.
+   - Auras do not load in a `claude -p` child. `resolve_session_name` names
+     only an interactive entry, and a child that inherited its parent's
+     session id resolves to the parent's entry, so the server also walks up
+     its own process tree to the nearest process that has a registry entry
+     of any kind and loads only when that process is the interactive
+     entry's. A child's own claude registers a non-interactive entry and is
+     nearer. When the walk cannot reach a registered process, it loads none
+     and says why.
    - `display.channel = true` also sends a channel notification, which is a
      fixed template and never carries procedure text (RDR-211; Sam,
      2026-11-15: "Fixed template only"). It holds only the aura name, the
@@ -271,7 +294,9 @@ in the engine, and the procedure can still only read.
      <name> fired on <subspace> tuple <id>; see the "aura: <threads value>"
      block in your threads entry`. The aura name and the threads value come
      from the aura file, and the subspace and tuple id from the engine row,
-     so nothing a tuple writer controls reaches the channel.
+     so nothing a tuple writer controls reaches the channel. It is sent
+     whether or not the threads block could be written; a notice the
+     channel does not take is logged.
    - `[limits]` (optional) lowers RDR-242's limits for this aura's fires
      (Technical Design 6); its keys are the limit names, and a value above
      the default or an unknown name refuses the file.
@@ -318,6 +343,11 @@ in the engine, and the procedure can still only read.
      otherwise put `board/ci/nexus-develop--done` in every repo's sessions
      and let a turn stop on a CI wait nothing will wake. The session's own
      subscription to the same topic still counts.
+   - A row on a topic only an aura holds is evaluated and not announced to
+     the agent; `display.channel` is its only channel notice. A topic the
+     session also subscribes keeps its announcement unchanged. The
+     session's `tuple_unsubscribe` never removes an aura's hold, and an aura
+     topic counts toward the session's `MAX_BOARD_TOPICS`.
    A repo-root aura follows RDR-242
    residual S5 for repo-root procedures (confirmed by Sam, 2026-11-13). Enabling
    subscribes the trigger subspace, within `MAX_BOARD_TOPICS`; an aura past
@@ -327,19 +357,34 @@ in the engine, and the procedure can still only read.
    it is rendered: for each enabled aura whose subspace and match fit the
    row, build the arguments, run the procedure through `run_script` in a
    thread (the waiter's loop is never blocked), test `when`, and display.
-   The normal announcement of the row is unchanged. A row that matches an
-   aura's `clear.match` removes its block instead.
+   On a topic the session subscribes the row's announcement is unchanged;
+   on a topic only an aura holds it is not announced (Technical Design 3). A
+   row that matches an aura's `clear.match` removes its block instead and
+   runs nothing. No post meets both tables: such an aura is refused at
+   `nx aura check` and at load.
 
-5. **Failure.** A `ScriptError`, a missing result field, or a display error
-   is logged with the aura name and the tuple id, and shown once in the
-   threads block as an error line. A failing aura never blocks the waiter or
-   the announcement. Three consecutive failures disable the aura for the
-   rest of the session, and the threads block says so.
+5. **Failure.** A failure is a `ScriptRunError` other than
+   `ScriptBusyError` (a script error, a limit, a worker that died), an
+   argument source the tuple lacks, a missing or mistyped result field, a
+   display error, or any other exception in the fire. It is logged with the
+   aura name and the tuple id, and the block's line becomes `aura error:
+   <kind> on tuple <id>`. A failing aura never blocks the waiter or the
+   announcement. Three consecutive failures disable the aura for the rest of
+   the session, and the line becomes `aura disabled after 3 failures:
+   <kind>`; a disabled aura neither fires nor clears. A success, a `when`
+   of false included, resets the count. `ScriptBusyError` is not a failure:
+   the run path's four workers are shared with `procedure_run` and `nx run`,
+   so the item goes back to the head of its queue and is retried every 5 s,
+   up to 12 times, and is then dropped and logged (`aura_busy_dropped`). A
+   clear removes the whole block, error line included.
 
 6. **Limits.** Each fire uses RDR-242's default limits, or lower ones the
-   aura file declares. At most one fire per aura at a time; an arrival while
-   one runs waits behind it, and more than 20 waiting drops the oldest with a
-   logged count.
+   aura file declares. Each aura has one queue that holds its fires and
+   clears together, in arrival order, and runs one item at a time, so a
+   clear that arrives during a fire lands after it. With more than 20 items
+   waiting the oldest fire is dropped with a logged count; a clear is never
+   dropped, and a clear queued straight after another clear is not queued,
+   since it removes nothing more.
 
 7. **The first consumer.** `ci_develop_red.aura.toml` and a procedure
    `ci_red_notice.lua` (header: `args: sha:string, outcome:string`,
@@ -415,6 +460,10 @@ was scrapped, and it is outside the narrowing of RDR-212 that this RDR makes
   subscriptions there and fires only when nexus's develop CI posts. Because
   the subscription is aura-owned, it never arms the Stop-hook CI wake guard
   (Technical Design 3).
+- `clear.match` is equality on dimensions, so `ci_develop_red`'s clear
+  matches kind and outcome only: a late green for an older sha clears the
+  block of a newer red. Whether a clear should also match the sha is Sam's
+  choice (asked on the threads board, `aura-clear-sha`).
 
 ### Risks and Mitigations
 
@@ -556,3 +605,4 @@ Gate round 1 raised two more, answered 2026-11-15:
 - 2026-11-15: Accepted (Sam). Residuals: S2 a122b329b (cut), S3 a122b329b, S4 a122b329b (fix check 249-fix-check-a122b329b); S6 to nexus-mdbds.10.1 (Phase 1 parser and loader); S-r3-1, S7, S8 to nexus-mdbds.11.1 (Phase 2 waiter evaluation); the fix checks' rows to .10.1, .10.2, .11.1 and .12.1 (plan: T2 nexus/plan-rdr-249-declarative-auras.md).
 - 2026-11-15: S6 (nexus-mdbds.10.1): RDR-212's exclusion of "any reaction loop" is narrowed on purpose, client-side only (Sam, by dialog in halcyon's session: "Narrow it on purpose"); counted fix-check wording observations folded in (drain-hook bullet, `[limits]` in Technical Design 1, Resolved Question 2's pointer, the measured worker start).
 - 2026-11-15: Technical Design 1 and 2 and Phase 1 Step 2 amended to match the reviewed `nx aura check` (nexus-mdbds.10.2, its feat and fix commits; standing grant 3). The `[clear]` rule was too narrow as "equal tables": a `[clear]` is refused when a post could meet both tables, that is, `trigger.match` is absent or no key is in both with different values. The check also covers `clear.match`, `dims` and `body` fields and refuses two auras sharing a threads block.
+- 2026-11-15: Technical Design 1, 3, 4, 5 and 6 and Consequences amended to match the reviewed waiter path (nexus-mdbds.11.1, review round 1 and its fixes; standing grant 3): loading and the `claude -p` rule as built, the not-announced rule for an aura-only topic, the threads write rules, the failure kinds and the busy retry, and the per-aura queue.
