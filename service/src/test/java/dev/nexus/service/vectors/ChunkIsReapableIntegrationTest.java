@@ -123,6 +123,15 @@ class ChunkIsReapableIntegrationTest {
         }
     }
 
+    /** {@link #su} in ONE transaction: a manifest replace is a DELETE and an INSERT that commit together. */
+    private void suTxn(java.util.function.Consumer<DSLContext> work) throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            work.accept(DSL.using(c, SQLDialect.POSTGRES));
+            c.commit();
+        }
+    }
+
     private void register(String tenant, String collection) throws Exception {
         su(ctx -> PgContainerHelper.insertCollection(ctx, tenant, collection));
     }
@@ -621,9 +630,13 @@ class ChunkIsReapableIntegrationTest {
         assertThat(orphanedAt(t, KNOWLEDGE, incoming)).isNull();
     }
 
-    /** The one-hour margin: a chunk written moments ago is not recorded (it is inside its grace). */
+    /**
+     * nexus-z0o2p.29: no write-time margin. A chunk written moments ago and then left with no owner is
+     * recorded like an aged one (it used to be skipped, leaving it ownerless with no record when the drop's
+     * sweep then failed). Its grace starts at the drop: the later of its write and its record.
+     */
     @Test
-    void aChunkWrittenWithinTheLastHourIsNotRecorded() throws Exception {
+    void aChunkWrittenWithinTheLastHourIsRecordedWhenItLosesItsLastOwner() throws Exception {
         String t = "reap-stamp-guard";
         register(t, KNOWLEDGE);
         String hex = orphan(t, KNOWLEDGE, "recent", Duration.ofMinutes(5));
@@ -633,7 +646,7 @@ class ChunkIsReapableIntegrationTest {
         su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-g1"))).execute());
 
-        assertThat(orphanedAt(t, KNOWLEDGE, hex)).as("written 5 minutes ago: no record").isNull();
+        assertThat(orphanRecordedRecently(t, KNOWLEDGE, hex)).as("written 5 minutes ago: recorded all the same").isTrue();
         assertThat(isReapable(t, KNOWLEDGE, hex)).isFalse();
     }
 
@@ -643,10 +656,11 @@ class ChunkIsReapableIntegrationTest {
         String t = "reap-stamp-guard-record";
         register(t, KNOWLEDGE);
         String hex = orphan(t, KNOWLEDGE, "rerecorded", DAYS_40);
-        recordOrphaning(t, KNOWLEDGE, hex, Duration.ofMinutes(20));
-        OffsetDateTime before = orphanedAt(t, KNOWLEDGE, hex);
         document(t, "stamp-gr1", KNOWLEDGE, false);
         manifestRow(t, "stamp-gr1", KNOWLEDGE, hex, 0);
+        // after the insert: an insert clears a record (nexus-z0o2p.29), so the record is written once the row exists
+        recordOrphaning(t, KNOWLEDGE, hex, Duration.ofMinutes(20));
+        OffsetDateTime before = orphanedAt(t, KNOWLEDGE, hex);
         su(ctx -> ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now().minus(DAYS_40))
             .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(KNOWLEDGE)).and(CHUNKS.CHASH.eq(bytes(hex)))).execute());
 
@@ -720,8 +734,134 @@ class ChunkIsReapableIntegrationTest {
 
         document(t, "record-reowned-doc", KNOWLEDGE, false);
         manifestRow(t, "record-reowned-doc", KNOWLEDGE, hex, 0);
+        // the insert cleared the record; put one back, as a racing writer's late commit would leave it
+        recordOrphaning(t, KNOWLEDGE, hex, DAYS_40);
 
         assertThat(isReapable(t, KNOWLEDGE, hex)).as("owned again: the old record means nothing").isFalse();
+    }
+
+    // ── a re-owned chunk carries no record (nexus-z0o2p.29) ───────────────────
+
+    /**
+     * A manifest REPLACE is a DELETE of the document's rows and an INSERT of them back, two statements in one
+     * transaction. The DELETE records every chunk it drops, the INSERT clears the record of every key it inserts,
+     * so a replace that keeps its chunks leaves no record, aged or just written.
+     */
+    @Test
+    void aReplaceThatKeepsTheSameChunksLeavesNoRecord() throws Exception {
+        String t = "reap-replace-same";
+        register(t, KNOWLEDGE);
+        String aged = orphan(t, KNOWLEDGE, "aged", DAYS_40);
+        String fresh = orphan(t, KNOWLEDGE, "fresh", Duration.ofMinutes(1));
+        document(t, "replace-same", KNOWLEDGE, false);
+        manifestRow(t, "replace-same", KNOWLEDGE, aged, 0);
+        manifestRow(t, "replace-same", KNOWLEDGE, fresh, 1);
+        su(ctx -> ageTo(ctx, t, KNOWLEDGE, aged, DAYS_40));
+
+        suTxn(ctx -> {
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("replace-same"))).execute();
+            String model = PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE);
+            int position = 0;
+            for (String hex : List.of(aged, fresh)) {
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                   .values(t, "replace-same", position++, bytes(hex), KNOWLEDGE, model).execute();
+            }
+        });
+
+        assertThat(orphanedAt(t, KNOWLEDGE, aged)).as("aged chunk, re-owned in the same transaction").isNull();
+        assertThat(orphanedAt(t, KNOWLEDGE, fresh)).as("fresh chunk, re-owned in the same transaction").isNull();
+        assertThat(recordCount(t)).isZero();
+    }
+
+    /** A replace that drops one chunk records exactly that one, whatever its age. */
+    @Test
+    void aReplaceThatDropsAChunkRecordsItAndOnlyIt() throws Exception {
+        String t = "reap-replace-drop";
+        register(t, KNOWLEDGE);
+        String kept = orphan(t, KNOWLEDGE, "kept", Duration.ofMinutes(1));
+        String dropped = orphan(t, KNOWLEDGE, "dropped", Duration.ofMinutes(1));
+        document(t, "replace-drop", KNOWLEDGE, false);
+        manifestRow(t, "replace-drop", KNOWLEDGE, kept, 0);
+        manifestRow(t, "replace-drop", KNOWLEDGE, dropped, 1);
+
+        suTxn(ctx -> {
+            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("replace-drop"))).execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+               .values(t, "replace-drop", 0, bytes(kept), KNOWLEDGE, PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
+               .execute();
+        });
+
+        assertThat(orphanedAt(t, KNOWLEDGE, kept)).isNull();
+        assertThat(orphanRecordedRecently(t, KNOWLEDGE, dropped)).as("fresh, dropped, recorded").isTrue();
+        assertThat(recordCount(t)).isEqualTo(1);
+    }
+
+    /** A chunk dropped in one transaction and listed again in a later one: the later insert clears its record. */
+    @Test
+    void aChunkDroppedAndListedAgainInALaterTransactionCarriesNoRecord() throws Exception {
+        String t = "reap-relist-later";
+        register(t, KNOWLEDGE);
+        String hex = orphan(t, KNOWLEDGE, "relisted", Duration.ofMinutes(2));
+        document(t, "relist-1", KNOWLEDGE, false);
+        document(t, "relist-2", KNOWLEDGE, false);
+        manifestRow(t, "relist-1", KNOWLEDGE, hex, 0);
+        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("relist-1"))).execute());
+        assertThat(orphanRecordedRecently(t, KNOWLEDGE, hex)).as("precondition: dropped, recorded").isTrue();
+
+        manifestRow(t, "relist-2", KNOWLEDGE, hex, 0);
+
+        assertThat(orphanedAt(t, KNOWLEDGE, hex)).as("listed again by another document: no record").isNull();
+    }
+
+    /** The UPDATE path: a row moved onto a chash that carried a record clears it, and records the chash it left. */
+    @Test
+    void anUpdateThatMovesARowOntoARecordedChashClearsItsRecord() throws Exception {
+        String t = "reap-update-clears";
+        register(t, KNOWLEDGE);
+        String left = orphan(t, KNOWLEDGE, "left", Duration.ofMinutes(2));
+        String arrived = orphan(t, KNOWLEDGE, "arrived", Duration.ofMinutes(2));
+        document(t, "update-clears", KNOWLEDGE, false);
+        manifestRow(t, "update-clears", KNOWLEDGE, left, 0);
+        recordOrphaning(t, KNOWLEDGE, arrived, DAYS_40);
+        assertThat(orphanedAt(t, KNOWLEDGE, arrived)).as("precondition").isNotNull();
+
+        su(ctx -> ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(arrived))
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("update-clears"))).execute());
+
+        assertThat(orphanedAt(t, KNOWLEDGE, arrived)).as("gained an owner: record cleared").isNull();
+        assertThat(orphanRecordedRecently(t, KNOWLEDGE, left)).as("lost its owner, fresh: recorded").isTrue();
+    }
+
+    /** The clear function is held to the same posture as the stamp functions, and locks the records in key order. */
+    @Test
+    void theClearFunctionIsInvokerNotPublic_locksTheRecordsInKeyOrder_andNeverWritesChunks() throws Exception {
+        String def = functionDefinition("nexus.clear_orphaned_on_manifest_insert()");
+        assertThat(def).contains("FOR UPDATE OF q");
+        assertThat(occurrences(def, "ORDER BY q.tenant_id, q.collection, q.chash")).isEqualTo(1);
+        assertThat(def.indexOf("FOR UPDATE OF q")).as("the lock comes before the delete")
+            .isLessThan(def.indexOf("DELETE FROM nexus.chunk_orphaned_at"));
+        assertThat(occurrences(def, "n.tenant_id = q.tenant_id")).as("tenant equality in the lock pass and the delete").isEqualTo(2);
+        assertThat(def).doesNotContain("nexus.chunks ").doesNotContain("UPDATE nexus.chunks");
+        var proc = DSL.table(DSL.name("pg_catalog", "pg_proc"));
+        var name = DSL.field(DSL.name("proname"), String.class);
+        var acl = DSL.cast(DSL.field(DSL.name("proacl")), SQLDataType.VARCHAR);
+        Boolean[] definer = new Boolean[1];
+        String[] aclText = new String[1];
+        su(ctx -> {
+            var r = ctx.select(DSL.field(DSL.name("prosecdef"), Boolean.class), acl).from(proc)
+                .where(name.eq("clear_orphaned_on_manifest_insert")).fetchOne();
+            definer[0] = r.value1();
+            aclText[0] = r.value2();
+        });
+        assertThat(definer[0]).as("SECURITY INVOKER").isFalse();
+        assertThat(aclText[0]).as("EXECUTE revoked from PUBLIC").isNotNull().doesNotContainPattern("(^\\{|,)=X/");
     }
 
     // ── the paths the triggers do not cover, and what is true of the roles ─────

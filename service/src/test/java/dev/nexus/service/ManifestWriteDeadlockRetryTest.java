@@ -266,9 +266,10 @@ class ManifestWriteDeadlockRetryTest {
             return null;
         });
         assertThat(manifest(s)).containsExactly(Map.entry(0, s.c1()), Map.entry(1, s.c3()));
-        // The DELETE trigger records every chash the statement removed, once; the discarded attempt's
-        // records rolled back with it and the retried attempt wrote them again.
-        assertThat(orphanRecords(s)).containsOnly(Map.entry(s.c1(), 1), Map.entry(s.c2(), 1));
+        // The DELETE trigger records every chash the statement removed, once; the INSERT trigger clears the
+        // record of c1, which the replace lists again (nexus-z0o2p.29). The discarded attempt's records rolled
+        // back with it and the retried attempt wrote them again, so one record, c2's, remains.
+        assertThat(orphanRecords(s)).containsOnly(Map.entry(s.c2(), 1));
         su(ctx -> assertThat(ctx.select(CATALOG_DOCUMENTS.CHUNK_COUNT).from(CATALOG_DOCUMENTS)
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(s.doc())))
             .fetchOne().value1()).isEqualTo(2));
@@ -294,8 +295,9 @@ class ManifestWriteDeadlockRetryTest {
         assertThat(result.get("swept")).isEqualTo(1);
         assertThat(chunkExists(s, s.c2())).as("the sweep ran, once, after the commit").isFalse();
         assertThat(gcAuditRows(s)).as("exactly one sweep audit row").isEqualTo(1);
-        // c1 was recorded as dropped by the DELETE trigger; c2's record went with the chunk the sweep deleted.
-        assertThat(orphanRecords(s)).containsOnly(Map.entry(s.c1(), 1));
+        // c1 was recorded as dropped by the DELETE trigger and cleared again by the INSERT that lists it;
+        // c2's record went with the chunk the sweep deleted.
+        assertThat(orphanRecords(s)).isEmpty();
     }
 
     @Test

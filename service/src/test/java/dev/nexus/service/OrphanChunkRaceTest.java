@@ -5,7 +5,6 @@ package dev.nexus.service;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
@@ -29,7 +28,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>The sweep's gate timeout is forced by holding the sweep gate SHARED from a second connection
  * (the sweeper's EXCLUSIVE acquire then hits its 2 s {@code lock_timeout}, SQLSTATE 55P03), never by
- * sleeping. Debug reproduction tests: the failing ones are the finding, not a regression suite.
+ * sleeping. These began as debug reproductions; with the fixes (a write_many that resolves only listed chunks, an
+ * append that refuses a duplicate position, vectors-061's record of every drop) each now pins one of the holes closed.
  */
 class OrphanChunkRaceTest extends AtomicWriteTestBase {
 
@@ -39,12 +39,11 @@ class OrphanChunkRaceTest extends AtomicWriteTestBase {
      * A's signature: rows a combined write INSERTED (fresh last_written_at), now with no owner, no
      * chunk_orphaned_at, no gc_audit. The insert and its owner row commit together; the owner is
      * then dropped by the next REPLACE of the document within the hour, and that write's post-commit
-     * sweep fails open on gate_timeout. The manifest trigger skips the drop (chunk written within the
-     * hour), and the failed sweep records nothing.
+     * sweep fails open on gate_timeout. The manifest trigger used to skip the drop (chunk written within
+     * the hour) and the failed sweep records nothing; vectors-061 records every drop.
      */
-    @Disabled("needs fix 1, ask orphan-drop-record: the manifest DELETE trigger skips a chunk written within the hour and the failed sweep records nothing; fix 1 must make every chunk with no own-collection owner row have a chunk_orphaned_at row, or a pending-sweep record if fix 1 queues the sweep (widen unaccounted() then)")
     @Test
-    void pathA_insertedChunksDroppedWithinTheHour_sweepGateTimeout_areOwnerlessAndUnrecorded() throws Exception {
+    void pathA_insertedChunksDroppedWithinTheHour_sweepGateTimeout_areRecorded() throws Exception {
         Fx f = fixture("pa");
         String a = ch("pa-a"), n1 = ch("pa-n1"), n2 = ch("pa-n2");
         // The run's write of the document: inserts n1, n2 (new) with their owner rows, one txn.
@@ -179,12 +178,11 @@ class OrphanChunkRaceTest extends AtomicWriteTestBase {
 
     /**
      * The same hole with the sweep switched off (a multi-batch write's first batch, sweep=false): a
-     * second write drops chunks the first one inserted within the hour. The manifest trigger skips
-     * the drop (written within the hour) and no sweep runs at all, so nothing records it.
+     * second write drops chunks the first one inserted within the hour. The manifest trigger used to
+     * skip the drop (written within the hour) and no sweep runs at all, so nothing recorded it.
      */
-    @Disabled("needs fix 1, ask orphan-drop-record: the manifest DELETE trigger skips a chunk written within the hour and sweep=false runs no sweep; fix 1 must make every chunk with no own-collection owner row have a chunk_orphaned_at row, or a pending-sweep record if fix 1 queues the sweep (widen unaccounted() then)")
     @Test
-    void pathA_insertedChunksDroppedWithinTheHour_sweepOff_areOwnerlessAndUnrecorded() throws Exception {
+    void pathA_insertedChunksDroppedWithinTheHour_sweepOff_areRecorded() throws Exception {
         Fx f = fixture("pg");
         String a = ch("pg-a"), n1 = ch("pg-n1");
         svc.writeManyCombined(TENANT, f.collection(),
@@ -251,12 +249,11 @@ class OrphanChunkRaceTest extends AtomicWriteTestBase {
      * The part of path B that fix 2 does not reach: c is listed by a REGISTERED document that then
      * fails in its own transaction (it also names a chash that exists nowhere). That document is a
      * referencer, so c is refreshed (outside any transaction, so the failure does not undo it), and
-     * the drop of c by the document that commits is then skipped by the trigger and left unrecorded by
-     * the failed sweep. Closing it takes fix 1, in the drop record.
+     * the drop of c by the document that commits used to be skipped by the trigger and left unrecorded by
+     * the failed sweep. vectors-061 records it in the dropping transaction, whatever the refresh did.
      */
-    @Disabled("needs fix 1, ask orphan-drop-record: a registered-but-failing doc still gets its chunks refreshed, so its drop is skipped by the trigger; fix 1 must make every chunk with no own-collection owner row have a chunk_orphaned_at row, or a pending-sweep record if fix 1 queues the sweep (widen unaccounted() then)")
     @Test
-    void pathB_chunkListedOnlyByARegisteredFailingDoc_isRefreshed_thenFailedSweep_leavesItOwnerlessAndUnrecorded()
+    void pathB_chunkListedOnlyByARegisteredFailingDoc_isRefreshed_thenFailedSweep_isRecordedAnyway()
             throws Exception {
         Fx f = fixture("ph");
         String failing = freshDoc("ph-failing", f.collection());

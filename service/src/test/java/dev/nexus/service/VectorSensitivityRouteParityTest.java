@@ -428,6 +428,9 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("service_tokens_create_tenant_partitions()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "partition maintenance: returns a count, a flag or nothing"));
+        CLASSIFIED_DEFINITION_READERS.put("clear_orphaned_on_manifest_insert()",
+            new Classified("trigger", Exposure.NO_TEXT,
+                "trigger function that clears chunk_orphaned_at; no result row"));
         CLASSIFIED_DEFINITION_READERS.put("stamp_chunks_on_manifest_delete()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "trigger function that stamps chunk_orphaned_at; no result row"));
