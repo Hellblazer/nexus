@@ -324,7 +324,8 @@ client.
 #### Step 5: Engine-side migrations and streamed exports
 
 The upgrade rungs whose rows live in the engine, and the export and recovery
-bundle as streamed routes.
+bundle as streamed routes. For the export, RDR-248 reads "streamed" as a session of short requests over an
+engine-held snapshot, the only shape the cloud edge allows (RDR-248 § Not a client walk).
 
 ### Day 2 Operations
 

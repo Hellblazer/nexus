@@ -253,7 +253,7 @@ It leaves out operational state: tuples and their claims and deliveries (their i
 
 Ctrl-C, SIGTERM and SIGHUP stop the run, remove the partial file (`.<name>.partial-<pid>` beside the destination) first, and then send a best-effort DELETE so the engine drops the snapshot at once instead of after its idle bound; a second signal during the DELETE cannot leave the file behind. A killed process (SIGKILL) cannot clean up: remove a leftover partial by hand; the engine closes the abandoned session itself, and the next run deletes it first if it is still listed.
 
-How long it takes is the connection's rate: the database reads a large tenant in about a minute and a half; the rest is the transfer (about 6 minutes for 3.8 GB at 10 MB/s). The first real cloud run records the actual rate (RDR-248 Activation Step 2).
+How long it takes is the connection's rate: the database reads a large tenant in about a minute and a half; the rest is the transfer (about 6 minutes for 3.8 GB at 10 MB/s). The first cloud run (2026-11-15, a 633 MB tenant of 116,492 chunks) took 59.8 s at 10.6 MB/s; its restore took 555.5 s (RDR-248 Activation Step 2).
 
 ### Checking a file
 

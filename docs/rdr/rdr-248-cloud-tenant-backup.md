@@ -8,7 +8,7 @@ author: Claude (linda, for Sam)
 reviewed-by: self
 created: 2026-11-11
 accepted_date: 2026-11-11
-related_issues: [nexus-f3yqd.4]
+related_issues: [nexus-csayy, nexus-f3yqd.4]
 related_rdrs: [RDR-108, RDR-155, RDR-243]
 ---
 
@@ -45,8 +45,9 @@ cloud tenant to the user's disk.
 #### Gap 2: The exports that do work in cloud mode are partial and not one snapshot
 
 `nx store export --all` writes T3 collections with their embeddings; `nx catalog export` writes catalog
-links and `store_put` notes, without embeddings. Nothing exports T2, document aspects, highlights, tuples
-or the full catalog document rows. Run one after another they read different moments, so a write between
+links and `store_put` notes, without embeddings. Nothing exports T2, document aspects, highlights
+or the full catalog document rows. (Tuple-space state is coordination, not data: the export leaves it out
+on purpose and the verb says so; see the registry's `excluded` class.) Run one after another they read different moments, so a write between
 them leaves the copies disagreeing.
 
 #### Gap 3: No restore path exists for a cloud tenant, so a backup would be unproven
@@ -514,9 +515,12 @@ engine requires every listed table closed before commit and skips it itself; an 
 
 ### Decision Rationale
 
-Sam chose the engine export (2026-11-11). It is the only design that is complete (every RLS table, by a
-tested registry) and consistent (one snapshot), and it gives the cloud a restore path that the user runs,
-into an empty tenant the operator created. RLS confines it to the caller's tenant without any new authorization code.
+Sam chose the engine export (2026-11-11). It is the only design that is complete (every data and derived table, by a
+tested registry that classifies every RLS table; in-flight work, coordination state such as tuples, session
+scratch and operational logs are excluded, and the verb lists what it left out) and consistent (one snapshot),
+and it gives the cloud a restore path that the user runs, into an empty tenant the operator created. RLS
+confines it to the caller's tenant; the routes add only a scope check that refuses a root token (403
+`export_scope_forbidden`, `import_scope_forbidden`).
 
 ## Alternatives Considered
 
@@ -685,6 +689,14 @@ The export records, beside time and size: the per-page response start for every 
 id-keyed tables, against the 5 s trigger in Risks), NX_POOL_SIZE and PG max_connections against the export
 cap, and any over-budget or busy answers. A tenant near nexus's size (about 540,000 chunks) is the target.
 
+Recorded (2026-11-15, both runs on test tenant `gate-xr789`, 116,492 chunks, about a fifth of the target): time,
+size, the snapshot's xmin age, and the absence of over-budget or busy answers (none in either run's log). Not
+measured: the per-page response start (the client logs only progress every 30 s, so only the mean is known), the
+cloud engine's `NX_POOL_SIZE` and PG `max_connections` (the export sampler counted 30 to 31 backends), and the
+database's oldest-xmin age during the import's hold (the sampler ran for the export only). The id-keyed tables
+held 13 rows (`plans`), one page each, so the 5 s trigger in Risks was not tested at size. Details under
+Performance Expectations.
+
 ### Day 2 Operations
 
 | Resource | List | Info | Verify | Delete | Rename |
@@ -796,8 +808,12 @@ parts of at most 8 MiB. An import holds one of the engine's export/import sessio
 **First cloud round trip (Activation Step 2, nexus-csayy.9, 2026-11-15, engine 0.1.192).** Test tenant
 `gate-xr789`, exported through `api.conexus-nexus.com` by the shipped client: 59.8 s end to end, a 633,145,600-byte
 file, 10.59 MB/s, 25 tables and 233,108 rows (chunks 116,492 rows in 37 pages). `nx backup --check` verified every
-page, table and the file. The export's snapshot transaction was 30 s old at its oldest sample (xmin age 38), and it
-was released before the walk ended; no export transaction was left open. At that rate the `nexus` tenant's 3.82 GB
+page, table and the file. A sampler of `pg_stat_activity` every 30 s saw the export's snapshot transaction held for the walk
+(age 0 at 11:54:40, 30 s old with xmin age 38 at 11:55:07), and gone at 11:55:37, one second after the verb
+returned at 11:55:36; no export transaction was left open. It held the snapshot about 60 s, inside A5's
+observed 60 minutes. 62 pages over 59.0 s is a mean of about 0.95 s a page, transfer included; per-page
+response starts were not logged. The tenant is 116,492 chunks, about a fifth of `nexus`, so this run does not
+stand in for the near-nexus-size target. At that rate the `nexus` tenant's 3.82 GB
 takes about 6 minutes, the estimate above. The first attempt, on 0.1.191, hung on the first chunks page: PgJDBC's
 `PGStream.skip` spins on a TLS socket closed mid-skip, which the 0.1.192 page path no longer reaches (T2
 `nexus/csayy9-export-page-hang-diagnosis-2026-11-14`; run evidence T2 `conexus/csayy9-cloud-export-gate-xr789-run2-2026-11-15`).
@@ -807,12 +823,18 @@ of `gate-xr789` (56.6 s, 633,145,600 bytes) was restored by the shipped client i
 the operator: 555.5 s wall, 233,107 data rows loaded in 19 tables, 0 derived rows, and 1 row the engine had already
 written for the tenant kept. An export of the restored tenant (57.9 s, 637,110,239 bytes) and the source export both
 verified with `nx backup --check`. `tests/e2e/backup_roundtrip_compare.py` judged 24 of the 25 tables equal in row
-count and in every row's content over the columns a restore keeps. The only differing columns were `tenant_id`
+count and in every row's content over the columns a restore keeps. Eight of the 25 tables held rows (chunks and
+the manifest 116,492 each, catalog documents 51, collections 43, owners 15, plans 13, embedding_profile 1,
+catalog_meta 1); the other 17 were empty in this tenant, so `memory`, `topics`, links, `memory_summaries` and
+`nx_answer_runs` were not exercised in the cloud: id reassignment beyond `plans` and every soft-reference rule
+are proven by the local round-trip test (Step 6) only. The only differing columns were `tenant_id`
 everywhere, plus `plans.id` (a reassigned key). `catalog_meta` is not judged: it went from 1 row to 2, the restore's
 own `rdr248_restore` marker. The first attempt stopped at the edge after 2 s, with nothing loaded:
 the CloudFront origin request policy forwards only listed request headers, and `X-Nexus-Part-Sha256`, the one
 request header the import routes add, was not on the list (conexus PR #710 added it). Query strings, `PUT` and an
-8 MiB part body already passed the edge.
+8 MiB part body already passed the edge. Scaled linearly from 116,492 chunks, the 555.5 s
+restore (upload included) is about 2,600 s for `nexus`'s 540,000, a 1.5 times margin under `NX_IMPORT_LOAD_MAX`
+(3,960 s), not the 2 times the bound was set for. The import hold's xmin age was not sampled.
 
 **Gate N1 scale run (nexus-csayy.4, 2026-11-12, local engine on chas, `tests/e2e/export_scale_run.py`).** One tenant
 of 500,000 bge-768 chunks (distinct vectors, about 1 KB of text each), 500,000 manifest rows over 50,000 documents,
@@ -991,3 +1013,5 @@ tenants. Nothing to trim.
 - 2026-11-14: Ask `rdr248-import-capacity`, option 1 (Sam): the byte cap, one load at a time, and an explicit operator step in the runbook before the restore token is issued (3 times the file's size free, WAL included); the engine checks no disk space. The Risks and Failure Modes entries that pointed at the ask say so. Amended under standing grant 3.
 - 2026-11-14: Ask `rdr248-local-root`, option 1 (Sam): on a local install the verb mints a four-hour `default`-tenant token through the existing token route when it holds the supervisor's root token, and uses it; the root token is never sent to an import route and what it may do there is not widened. An explicit non-supervisor token wins; a failed mint falls back to the manual step. Client change only. Amended under standing grant 3.
 - 2026-11-14: Review round 1 of the three asks (T2 `nexus/review-817d75982-nexus-csayy-2026-11-14-r1`, `nexus/critique-817d75982-nexus-csayy-asks-2026-11-14-r1`) folded in: the remembered lease root and the refusal of a token that cannot be told from the supervisor's, the minted token revoked at the end, three mints (not two) stated, the Voyage-only gate and the embedding-profile condition stated, the capacity step's cap and 2x-3x floor stated, and the ledger's load bound corrected to 3,960 s.
+- 2026-11-15: Activation Step 2 recorded (nexus-csayy.9, .10): the first cloud export and restore round trip on engine 0.1.192, the per-page hang on 0.1.191 and the edge header fix (conexus PR #710).
+- 2026-11-15: Close critique (T2 `nexus/critique-8a97bb459-nexus-csayy-2026-11-15-r1`) folded in: what Activation Step 2 measured and did not (per-page starts, pool size, import xmin; a tenant a fifth of the target), which tables held rows, the snapshot release wording, the load-bound margin at scale, Gap 2's tuples and the Decision Rationale's "complete" matched to the registry, and "no new authorization code" replaced by the scope checks. Amended under standing grant 3.
