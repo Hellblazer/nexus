@@ -195,19 +195,6 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void aDuplicatePosition_stillFailsTheWholeReplace_andLeavesTheManifestAsItWas() throws Exception {
-        Fx f = fixture("dup");
-        List<Map<String, Object>> rows = seedDoc(f, 3);
-        var before = snapshot(f.docId());
-
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.writeManifest(TENANT, f.docId(), f.collection(),
-            List.of(rich(0, (String) rows.get(0).get("chash")), rich(0, (String) rows.get(1).get("chash")))))
-            .isInstanceOf(RuntimeException.class);
-
-        assertThat(snapshot(f.docId())).as("the transaction rolled back").isEqualTo(before);
-    }
-
-    @Test
     void aReplaceToAnEmptyManifest_deletesEveryRow_andRecordsEveryChunk() throws Exception {
         Fx f = fixture("empty");
         seedDoc(f, 3);
@@ -219,54 +206,289 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
     }
 
     /**
-     * Whatever the sequence of replaces, the manifest ends as the last replace said: every column of every
-     * row equal to the incoming row, and a record exactly for the chunks that are listed by no row of the
-     * collection's documents.
+     * Whatever the sequence of replaces, the manifest ends as the last replace said, every column of every row,
+     * and a chunk carries an orphan record exactly when no row of the document lists it (every chunk starts listed,
+     * so a record is only ever written by a drop and only ever cleared by a listing). The pool is small, so a chunk
+     * is often at two positions, one of them changed: the shape that leaves a record on an owned chunk unless the
+     * clear covers every listed key.
      */
     @Test
-    void randomReplaces_alwaysEndWithExactlyTheIncomingRows() throws Exception {
-        Fx f = fixture("rand");
-        Random rnd = new Random(29);
-        List<String> pool = new ArrayList<>();
-        List<Map<String, Object>> chunks = new ArrayList<>();
-        for (int i = 0; i < 8; i++) {
-            String c = ch(f.docId() + "-p" + i);
-            pool.add(c);
-            chunks.add(chunk(c, "pool " + i));
-        }
-        List<Map<String, Object>> seedRows = new ArrayList<>();
-        for (int i = 0; i < pool.size(); i++) seedRows.add(rich(i, pool.get(i)));
-        svc.writeManyCombined(TENANT, f.collection(), chunks, List.of(doc(f.docId(), seedRows)), null, false, false);
-
-        for (int round = 0; round < 40; round++) {
-            List<Map<String, Object>> next = new ArrayList<>();
-            for (int p = 0; p < 7; p++) {
-                if (rnd.nextInt(3) == 0) continue;                         // a gap: that position is absent
-                Map<String, Object> r = rich(p, pool.get(rnd.nextInt(pool.size())));
-                if (rnd.nextBoolean()) r.put("section_title", "t" + rnd.nextInt(3));
-                if (rnd.nextBoolean()) r.remove("line_start");
-                if (rnd.nextBoolean()) r.put("labels_written", false);
-                next.add(r);
+    void randomReplaces_alwaysEndWithExactlyTheIncomingRows_andARecordExactlyForTheUnlistedChunks() throws Exception {
+        for (long seed = 1; seed <= 25; seed++) {
+            Fx f = fixture("rand" + seed);
+            Random rnd = new Random(seed);
+            List<String> pool = new ArrayList<>();
+            List<Map<String, Object>> chunks = new ArrayList<>();
+            List<Map<String, Object>> seedRows = new ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                String c = ch(f.docId() + "-p" + i);
+                pool.add(c);
+                chunks.add(chunk(c, "pool " + i));
+                seedRows.add(rich(i, c));
             }
+            svc.writeManyCombined(TENANT, f.collection(), chunks, List.of(doc(f.docId(), seedRows)), null, false, false);
+
+            for (int round = 0; round < 12; round++) {
+                List<Map<String, Object>> next = new ArrayList<>();
+                for (int p = 0; p < 6; p++) {
+                    if (rnd.nextInt(4) == 0) continue;                         // a gap: that position is absent
+                    Map<String, Object> r = rich(p, pool.get(rnd.nextInt(pool.size())));
+                    if (rnd.nextBoolean()) r.put("section_title", "t" + rnd.nextInt(3));
+                    if (rnd.nextBoolean()) r.remove("line_start");
+                    if (rnd.nextBoolean()) r.put("labels_written", false);
+                    next.add(r);
+                }
+                repo.writeManifest(TENANT, f.docId(), f.collection(), next);
+
+                String at = "seed " + seed + " round " + round;
+                var after = snapshot(f.docId());
+                assertThat(after.keySet()).as(at + " positions")
+                    .containsExactlyElementsOf(next.stream().map(r -> (Integer) r.get("position")).toList());
+                for (Map<String, Object> want : next) {
+                    Map<String, Object> got = columns(after.get((Integer) want.get("position")));
+                    assertThat(got.get("chash")).as(at + " chash").isEqualTo(want.get("chash"));
+                    for (String col : List.of("chunk_index", "line_start", "line_end", "char_start", "char_end",
+                            "section_title", "section_type", "page_number", "labels_written")) {
+                        assertThat(got.get(col)).as(at + " " + col + " at " + want.get("position")).isEqualTo(want.get(col));
+                    }
+                    assertThat(got.get("collection")).isEqualTo(f.collection());
+                }
+                List<String> listed = next.stream().map(r -> (String) r.get("chash")).distinct().toList();
+                for (String c : pool) {
+                    assertThat(hasRecord(f.collection(), c)).as(at + ": record on " + c.substring(0, 6)
+                        + " (listed=" + listed.contains(c) + ")").isEqualTo(!listed.contains(c));
+                }
+            }
+        }
+    }
+
+    // ── the record's end state, the cases a statement-level clear can miss ──────────────────────────
+
+    @Test
+    void aKeyUpdatedAwayAtOnePositionButKeptAtAnother_leavesNoRecord() throws Exception {
+        Fx f = fixture("xy");
+        String x = ch(f.docId() + "-x"), y = ch(f.docId() + "-y");
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(x, "x text"), chunk(y, "y text")),
+            List.of(doc(f.docId(), List.of(rich(0, x), rich(1, x), rich(2, y)))), null, false, false);
+
+        // p=X and q=X; p goes to Y, q is unchanged: the UPDATE stamps X (it never reads the manifest), q still lists it
+        repo.writeManifest(TENANT, f.docId(), f.collection(), List.of(rich(0, y), rich(1, x), rich(2, y)));
+
+        assertThat(hasRecord(f.collection(), x)).as("X is still listed at position 1").isFalse();
+        assertThat(records(f.collection())).isZero();
+    }
+
+    @Test
+    void aStaleRecordAnotherDocumentLeftOnAChunkThisOneKeeps_isClearedByAnUnchangedReplace() throws Exception {
+        Fx f = fixture("stale");
+        String x = ch(f.docId() + "-x");
+        String other = freshDoc("stale-b", f.collection());
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(x, "x text")),
+            List.of(doc(f.docId(), List.of(rich(0, x))), doc(other, List.of(rich(0, x)))), null, false, false);
+
+        // B drops X: the stamp records it although A still lists it
+        repo.writeManifest(TENANT, other, f.collection(), List.of());
+        assertThat(hasRecord(f.collection(), x)).as("precondition: the drop recorded X on an owned chunk").isTrue();
+
+        // A re-indexes unchanged: the old path's INSERT cleared the record of every key it wrote
+        repo.writeManifest(TENANT, f.docId(), f.collection(), List.of(rich(0, x)));
+
+        assertThat(hasRecord(f.collection(), x)).as("A lists X: no record").isFalse();
+    }
+
+    /**
+     * A chunk key lives in one collection and a collection has one embedding model, so the stamp's four-column key
+     * and the clear's three-column key name the same chunk: there is no manifest row of one collection whose chunk
+     * carries another model. The case that does move a row's model is a collection change, below.
+     */
+    @Test
+    void aCollectionChange_rehomesTheRow_recordsTheOldCollectionsChunk_andClearsTheNewOnes() throws Exception {
+        Fx f = fixture("coll");
+        Fx g = fixture("coll2");
+        List<Map<String, Object>> rows = seedDoc(f, 3);
+        List<Map<String, Object>> chunks = new ArrayList<>();
+        for (Map<String, Object> r : rows) chunks.add(chunk((String) r.get("chash"), f.docId() + " text " + ((Integer) r.get("position"))));
+
+        // the same document, same rows, now in the other collection (its chunks written there by the same call)
+        svc.writeManyCombined(TENANT, g.collection(), chunks, List.of(doc(f.docId(), rows)), null, false, false);
+
+        var after = snapshot(f.docId());
+        assertThat(after).hasSize(3);
+        after.values().forEach(r -> assertThat(r.get("collection")).isEqualTo(g.collection()));
+        assertThat(records(g.collection())).as("listed in the new collection: no record").isZero();
+        assertThat(records(f.collection())).as("left the old collection: all three recorded there").isEqualTo(3);
+    }
+
+    // ── the diff writes every payload column ─────────────────────────────────────────────────────
+
+    /** Each payload column, changed alone on one row: the diff must update it. {@code collection} and {@code embedding_model} are the test above. */
+    @Test
+    void everyPayloadColumnIsComparedAndWritten_andTheListMatchesTheTable() throws Exception {
+        var columns = new java.util.TreeSet<String>();
+        for (var field : CATALOG_DOCUMENT_CHUNKS.fields()) columns.add(field.getName());
+        columns.removeAll(List.of("tenant_id", "doc_id", "position"));
+        assertThat(dev.nexus.service.db.ManifestReplaceTestHooks.payloadColumns())
+            .as("the table gained or lost a column ManifestReplace does not know").isEqualTo(columns);
+
+        Fx f = fixture("cols");
+        List<Map<String, Object>> rows = seedDoc(f, 4);
+        String other = ch(f.docId() + "-other");
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(other, "other text")),
+            List.of(doc(freshDoc("cols-holder", f.collection()), List.of(row(0, other)))), null, false, false);
+
+        Map<String, java.util.function.Consumer<Map<String, Object>>> mutations = new LinkedHashMap<>();
+        mutations.put("chash", r -> r.put("chash", other));
+        mutations.put("chunk_index", r -> r.put("chunk_index", 99));
+        mutations.put("line_start", r -> r.put("line_start", 1234));
+        mutations.put("line_end", r -> r.put("line_end", 1235));
+        mutations.put("char_start", r -> r.put("char_start", 5678));
+        mutations.put("char_end", r -> r.put("char_end", 5679));
+        mutations.put("section_title", r -> r.put("section_title", "other title"));
+        mutations.put("section_type", r -> r.put("section_type", "other type"));
+        mutations.put("page_number", r -> r.put("page_number", 77));
+        mutations.put("labels_written", r -> r.put("labels_written", false));
+        assertThat(mutations.keySet()).as("every payload column but the two a collection change moves")
+            .containsExactlyInAnyOrderElementsOf(columns.stream()
+                .filter(c -> !c.equals("collection") && !c.equals("embedding_model")).toList());
+
+        for (var m : mutations.entrySet()) {
+            repo.writeManifest(TENANT, f.docId(), f.collection(), rows);              // back to the baseline
+            var before = snapshot(f.docId());
+            List<Map<String, Object>> next = new ArrayList<>();
+            for (Map<String, Object> r : rows) next.add(new LinkedHashMap<>(r));
+            m.getValue().accept(next.get(1));
             repo.writeManifest(TENANT, f.docId(), f.collection(), next);
 
             var after = snapshot(f.docId());
-            assertThat(after.keySet()).as("round %d positions", round)
-                .containsExactlyElementsOf(next.stream().map(r -> (Integer) r.get("position")).toList());
-            for (Map<String, Object> want : next) {
-                Map<String, Object> got = columns(after.get((Integer) want.get("position")));
-                assertThat(got.get("chash")).as("round %d chash", round).isEqualTo(want.get("chash"));
-                for (String col : List.of("chunk_index", "line_start", "line_end", "char_start", "char_end",
-                        "section_title", "section_type", "page_number", "labels_written")) {
-                    assertThat(got.get(col)).as("round %d %s at %s", round, col, want.get("position"))
-                        .isEqualTo(want.get(col));
-                }
-                assertThat(got.get("collection")).isEqualTo(f.collection());
+            assertThat(after.get(1).get(m.getKey())).as("column %s written", m.getKey())
+                .isEqualTo(m.getKey().equals("chash") ? other : next.get(1).get(m.getKey()));
+            assertThat(after.get(1).get("tuple")).as("column %s: the row was updated", m.getKey())
+                .isNotEqualTo(before.get(1).get("tuple"));
+            for (int p : List.of(0, 2, 3)) assertThat(after.get(p)).as("column %s: row %d untouched", m.getKey(), p).isEqualTo(before.get(p));
+        }
+    }
+
+    // ── the cap and the fallback ─────────────────────────────────────────────────────────────────
+
+    @Test
+    void theCapOnChangedRows_countsDeletedAndUpdated_andFallsBackOnePastIt() throws Exception {
+        Fx f = fixture("cap");
+        List<Map<String, Object>> rows = seedDoc(f, 8);
+        dev.nexus.service.db.ManifestReplaceTestHooks.maxChangedRows(3);
+        try {
+            // 3 updated rows: at the cap, the diff runs and the other five rows keep their tuples
+            var before = snapshot(f.docId());
+            List<Map<String, Object>> three = new ArrayList<>(rows);
+            for (int p : List.of(0, 1, 2)) three.set(p, withTitle(rows.get(p), "changed"));
+            repo.writeManifest(TENANT, f.docId(), f.collection(), three);
+            var afterThree = snapshot(f.docId());
+            for (int p = 3; p < 8; p++) assertThat(afterThree.get(p)).as("row %d kept at the cap", p).isEqualTo(before.get(p));
+
+            // 4 updated rows: one past the cap, the delete-and-insert runs and every row is a new tuple
+            List<Map<String, Object>> four = new ArrayList<>(three);
+            for (int p : List.of(0, 1, 2, 3)) four.set(p, withTitle(rows.get(p), "changed again"));
+            repo.writeManifest(TENANT, f.docId(), f.collection(), four);
+            var afterFour = snapshot(f.docId());
+            for (int p = 4; p < 8; p++) {
+                assertThat(afterFour.get(p).get("tuple")).as("row %d rewritten past the cap", p).isNotEqualTo(afterThree.get(p).get("tuple"));
+                assertThat(columns(afterFour.get(p))).isEqualTo(columns(afterThree.get(p)));
             }
-            List<String> listed = next.stream().map(r -> (String) r.get("chash")).distinct().toList();
-            for (String c : pool) {
-                if (listed.contains(c)) assertThat(hasRecord(f.collection(), c)).as("round %d listed %s", round, c.substring(0, 6)).isFalse();
+            assertThat(afterFour.get(0).get("section_title")).isEqualTo("changed again");
+
+            // 2 deleted and 2 updated also count 4
+            List<Map<String, Object>> mixed = new ArrayList<>();
+            for (int p = 0; p < 6; p++) mixed.add(p < 2 ? withTitle(four.get(p), "mixed") : four.get(p));
+            repo.writeManifest(TENANT, f.docId(), f.collection(), mixed);
+            var afterMixed = snapshot(f.docId());
+            assertThat(afterMixed.keySet()).containsExactly(0, 1, 2, 3, 4, 5);
+            assertThat(afterMixed.get(5).get("tuple")).as("deleted plus updated is 4: past the cap").isNotEqualTo(afterFour.get(5).get("tuple"));
+        } finally {
+            dev.nexus.service.db.ManifestReplaceTestHooks.maxChangedRows(0);
+        }
+    }
+
+    private static Map<String, Object> withTitle(Map<String, Object> row, String title) {
+        Map<String, Object> r = new LinkedHashMap<>(row);
+        r.put("section_title", title);
+        return r;
+    }
+
+    /** What a replace of {@code rows} raises, run by the diff and by the delete-and-insert; the manifest must be as it was after each. */
+    private void sameFailureOnBothPaths(Fx f, List<Map<String, Object>> rows) throws Exception {
+        var before = snapshot(f.docId());
+        Throwable[] raised = new Throwable[2];
+        for (int k = 0; k < 2; k++) {
+            dev.nexus.service.db.ManifestReplaceTestHooks.decline(k == 1);
+            try {
+                repo.writeManifest(TENANT, f.docId(), f.collection(), rows);
+            } catch (Throwable t) {
+                raised[k] = t;
+            } finally {
+                dev.nexus.service.db.ManifestReplaceTestHooks.decline(false);
+            }
+            assertThat(snapshot(f.docId())).as("the failed replace rolled back (path %d)", k).isEqualTo(before);
+        }
+        assertThat(raised[0]).as("the diff path fails").isNotNull();
+        assertThat(raised[1]).as("the delete-and-insert fails").isNotNull();
+        assertThat(raised[0].getClass()).isEqualTo(raised[1].getClass());
+        assertThat(String.valueOf(raised[0].getMessage()).split("\n")[0])
+            .isEqualTo(String.valueOf(raised[1].getMessage()).split("\n")[0]);
+    }
+
+    @Test
+    void aDuplicatePosition_failsTheSameWayAsTheDeleteAndInsert() throws Exception {
+        Fx f = fixture("dup");
+        List<Map<String, Object>> rows = seedDoc(f, 3);
+        sameFailureOnBothPaths(f, List.of(rich(0, (String) rows.get(0).get("chash")), rich(0, (String) rows.get(1).get("chash"))));
+        dev.nexus.service.db.ManifestReplaceTestHooks.decline(true);
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.writeManifest(TENANT, f.docId(), f.collection(),
+                List.of(rich(0, (String) rows.get(0).get("chash")), rich(0, (String) rows.get(1).get("chash")))))
+                .isInstanceOf(org.jooq.exception.IntegrityConstraintViolationException.class)
+                .hasMessageContaining("catalog_document_chunks_pk");
+        } finally {
+            dev.nexus.service.db.ManifestReplaceTestHooks.decline(false);
+        }
+    }
+
+    @Test
+    void aBlankChash_failsTheSameWayAsTheDeleteAndInsert() throws Exception {
+        Fx f = fixture("blank");
+        List<Map<String, Object>> rows = seedDoc(f, 3);
+        List<Map<String, Object>> bad = new ArrayList<>(rows);
+        bad.set(1, rich(1, ""));
+        sameFailureOnBothPaths(f, bad);
+    }
+
+    @Test
+    void aMissingPosition_failsTheSameWayAsTheDeleteAndInsert() throws Exception {
+        Fx f = fixture("nopos");
+        List<Map<String, Object>> rows = seedDoc(f, 3);
+        Map<String, Object> noPosition = new LinkedHashMap<>(rows.get(1));
+        noPosition.remove("position");
+        noPosition.remove("chunk_index");
+        List<Map<String, Object>> bad = new ArrayList<>(rows);
+        bad.set(1, noPosition);
+        sameFailureOnBothPaths(f, bad);
+    }
+
+    @Test
+    void aSupersededCollection_refusesAReplaceThatKeepsEveryRow() throws Exception {
+        Fx f = fixture("sup");
+        List<Map<String, Object>> rows = seedDoc(f, 3);
+        assertThat(repo.supersedeCollection(TENANT, f.collection(), f.collection().replace("__v1", "__v2"), "")).isEqualTo(1);
+        var before = snapshot(f.docId());
+
+        for (boolean decline : List.of(false, true)) {
+            dev.nexus.service.db.ManifestReplaceTestHooks.decline(decline);
+            try {
+                org.assertj.core.api.Assertions.assertThatThrownBy(
+                    () -> repo.writeManifest(TENANT, f.docId(), f.collection(), rows))
+                    .isInstanceOf(dev.nexus.service.db.CollectionSupersededException.class);
+            } finally {
+                dev.nexus.service.db.ManifestReplaceTestHooks.decline(false);
             }
         }
+        assertThat(snapshot(f.docId())).isEqualTo(before);
     }
 }

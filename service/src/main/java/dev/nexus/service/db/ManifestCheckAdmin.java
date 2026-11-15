@@ -47,9 +47,15 @@ import java.util.Objects;
  *   <li>Tenant import ({@code TenantImportLoad}, one INSERT ... SELECT of the export file's columns): carries the pair
  *       the source row held, so it can write a violating row only from a source row that already was one (which the
  *       census of the source engine counts). Pass-through.</li>
+ *   <li>{@code ManifestReplace.update} (nexus-z0o2p.29, the manifest replace of {@code writeManifestRows}): for a
+ *       position the document holds and the new set lists with other values, one UPDATE sets every payload column,
+ *       {@code chash} and the three labels and {@code labels_written} among them, from the incoming row. The pair
+ *       comes from the same {@code labelsWritten(row)} as the insert's, so it has the first item's one exposure: a
+ *       request that says {@code labels_written: false} beside a label, stored as sent, 23514 after the CHECK.
+ *       The delete-and-insert fallback is the first item.</li>
  *   <li>The collection rename ({@code ChashRepository.renameCollection}): UPDATEs {@code collection} and
- *       {@code embedding_model} only; no live code UPDATEs a manifest {@code chash}. A re-home that moves documents
- *       goes through the first item's INSERT. Cannot.</li>
+ *       {@code embedding_model} only. A re-home that moves documents goes through the first item's INSERT or the
+ *       replace above. Cannot.</li>
  *   <li>Triggers: the stamp triggers are statement-level and write {@code chunk_orphaned_at}; the chunk_index default
  *       trigger touches {@code chunk_index} only. Changesets: catalog-046 adds the columns (NULL, false); no changeset
  *       sets a label or the marker. Cannot.</li>

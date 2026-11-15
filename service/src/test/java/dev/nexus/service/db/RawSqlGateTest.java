@@ -1544,8 +1544,8 @@ class RawSqlGateTest {
     // t1 scratch grants (GRANT USAGE ON SCHEMA t1 plus the t1.scratch table grant) in ScratchRepositoryTest,
     // ScratchHandlerTest, TokenBoundaryAdversarialTest and ScratchSchemaLiquibaseTest go through
     // PgContainerHelper.grantT1ScratchTo (schema USAGE in db.changelog-test-t1-schema-usage.xml, table grant jOOQ);
-    // CatalogManifestSweepRepositoryTest's REVOKE/GRANT on chunks and catalog_document_chunks are jOOQ, its
-    // column-level GRANT SELECT is db.changelog-test-manifest-chunks-column-select.xml, and its slow BEFORE DELETE
+    // CatalogManifestSweepRepositoryTest's REVOKE/GRANT on chunks and catalog_document_chunks are jOOQ, and its
+    // slow BEFORE DELETE
     // trigger is install/drop changelogs (db.changelog-test-slow-sweep-delete-*.xml); TupleRepositoryTest's
     // poison-row trigger is db.changelog-test-poison-tuple-row-{install,drop-trigger,drop-function}.xml and its
     // pg_sleep is DSL.function; UpdatedAtTriggerTest's and CollectionVectorStatsTest's UPDATE/SELECT probes are
@@ -3130,8 +3130,6 @@ class RawSqlGateTest {
         Map.entry("role-membership", "grantRoleMembership: role names are fixed test literals, no validator"),
         Map.entry("t1-schema-usage", "grantT1ScratchTo: the role is a fixed test literal, no validator"),
         Map.entry("diag-view-foreign-owned", "Taxonomy011ForeignOwnedDiagViewTest runs it with fixed role literals"),
-        Map.entry("manifest-chunks-column-select", "CatalogManifestSweepRepositoryTest runs it with one fixed role "
-            + "literal"),
         Map.entry("tuples-column-select", "NexusServiceTupleSweepIsolationTest runs it with one fixed role literal"),
         Map.entry("chunks-text-column-select", "StoreGetIncludeColumnPrivilegeTest runs it with one fixed role "
             + "literal"),

@@ -5483,8 +5483,8 @@ public final class CatalogRepository {
     }
 
     /**
-     * Shared REPLACE body (delete all rows for docId, then insert the provided
-     * rows) used by both {@link #writeManifest} (one doc per transaction) and
+     * Shared REPLACE body (the document's rows become the provided rows, by diff:
+     * see {@link ManifestReplace}) used by both {@link #writeManifest} (one doc per transaction) and
      * {@link #writeManifestMany} (N docs, one transaction each). Assumes
      * {@code ctx} is already scoped to {@code tenant}. Folds
      * {@code documents.chunk_count = rows.size()} in the SAME transaction
@@ -5823,11 +5823,12 @@ public final class CatalogRepository {
     private static final String SWEEP_STATEMENT_TIMEOUT_MS = "5000";
 
     /**
-     * Test-only seam (RDR-223 fix round): invoked with the doc id INSIDE the savepoint-guarded
-     * previous-manifest read of {@link #writeManifestMany}, so a test can make that read fail and
-     * pin the {@code dropped_unknown} contract. Null (a no-op) in production.
+     * Test-only seam (RDR-223 fix round): invoked with the doc id and the transaction's context INSIDE
+     * the savepoint-guarded previous-manifest read of {@link #writeManifestMany}, so a test can make that
+     * read fail, by throwing or by running a statement Postgres refuses (which aborts the transaction until
+     * the savepoint is rolled back), and pin the {@code dropped_unknown} contract. Null (a no-op) in production.
      */
-    private volatile java.util.function.Consumer<String> beforeReadHookForTests;
+    private volatile java.util.function.BiConsumer<String, DSLContext> beforeReadHookForTests;
 
     /**
      * Test-only seam (RDR-223 fix round): invoked with the append transaction's own context right
@@ -5842,7 +5843,7 @@ public final class CatalogRepository {
     }
 
     /** Test-only: install (or clear with {@code null}) the previous-manifest read hook. */
-    public void setBeforeReadHookForTests(java.util.function.Consumer<String> hook) {
+    public void setBeforeReadHookForTests(java.util.function.BiConsumer<String, DSLContext> hook) {
         this.beforeReadHookForTests = hook;
     }
 
@@ -6032,9 +6033,9 @@ public final class CatalogRepository {
 
     /** Which {@code ON CONFLICT} shape {@link #insertManifestChunkRows} applies. */
     enum ManifestInsertMode {
-        /** Bare insert, no conflict handling — the caller ({@link #writeManifestRows}) has
-         *  already deleted every row for this doc_id in the SAME transaction, so no
-         *  conflict is possible in practice. */
+        /** Bare insert, no conflict handling — the caller ({@link #writeManifestRows}) inserts only
+         *  positions the document does not hold at that point (the rest deleted or updated in the SAME
+         *  transaction), so no conflict is possible in practice. */
         PLAIN,
         /** Mirrors {@link #appendManifestChunks}' pre-existing minimal upsert: only
          *  {@code chash}/{@code collection} (and, nexus-tko2w, the section labels that describe the
@@ -6063,7 +6064,9 @@ public final class CatalogRepository {
      * on that method's javadoc. Deliberately NOT taken here: the ordering
      * rule ("gate, then {@link #acquireIndexRunLock}") needs to stay visible
      * at each call site, not buried inside a helper that runs after both
-     * locks already exist.
+     * locks already exist. {@link ManifestReplace#replace} calls it from outside this
+     * file (package-private for that); its one caller, {@link #writeManifestRows}, has
+     * taken the gate and the index-run lock before it runs.
      *
      * @param rows one or more manifest rows written as ONE multi-row
      *             {@code INSERT ... VALUES (...), (...), ...} statement.
@@ -6219,15 +6222,17 @@ public final class CatalogRepository {
     }
 
     /**
-     * Shared per-doc REPLACE body: delete every existing row for {@code
-     * docId}, then insert {@code rows}, ALL stamped with the caller-supplied
+     * Shared per-doc REPLACE body: leave the document's manifest holding exactly {@code
+     * rows} (the difference is written, {@link ManifestReplace}; a bad row, or a rewrite of more
+     * than its cap, deletes every existing row for {@code docId} and then inserts {@code rows}),
+     * ALL stamped with the caller-supplied
      * {@code collection} (RDR-191, Hal ruling 2026-08-12 — writers send the
      * collection, the engine stamps it verbatim, never infers it). When
      * {@code resolvedChunks} is non-null (the combined-write path, {@link
      * #writeManifestMany(String, List, String, Map, boolean, Map)}), this
      * doc's chunk VECTOR rows are ALSO upserted into {@code chunks_<dim>}
      * INSIDE this SAME per-doc transaction, under the sweep gate SHARED
-     * already held below, BEFORE the manifest DELETE+INSERT — so a chunk row
+     * already held below, BEFORE the manifest rows are replaced (the diff, or the delete-and-insert fallback) — so a chunk row
      * from this path can never be observed committed without the manifest
      * row that references it (and vice versa).
      *
@@ -6298,12 +6303,12 @@ public final class CatalogRepository {
         acquireSweepGateShared(ctx, tenant, collection);
         // nexus-5xn3k.2 (stacked-review item 1): the WRITE side of the
         // completeIndexRun/writeManifestRows advisory-lock pair — see
-        // acquireIndexRunLock's javadoc. Acquired BEFORE the delete+insert below
+        // acquireIndexRunLock's javadoc. Acquired BEFORE the manifest rows are replaced below
         // so a concurrent completeIndexRun for the same doc either runs entirely
         // before or entirely after this manifest mutation, never interleaved.
         acquireIndexRunLock(ctx, tenant, docId);
         // nexus-kl2z6 increment 1 (design memo §0): the chunk-vector UPSERT
-        // runs BEFORE the manifest DELETE+INSERT below — a chash lands in
+        // runs BEFORE the manifest rows are replaced below — a chash lands in
         // chunks_<dim> before (in this same, still-open transaction) the
         // manifest row that references it is even written, so a concurrent
         // reader can only ever observe both or neither, never one without
@@ -6318,7 +6323,8 @@ public final class CatalogRepository {
         // nexus-pvkbv: the span clear below needs the rows this rewrite removes (collection, chash, and the
         // document's own span, which tells whether it could have written the chunk row's). The batch writer
         // already read them (priorRows, fail-open, one statement it paid for anyway); any other caller gets
-        // them from the delete itself (RETURNING), with no statement of its own.
+        // them from the document's rows, which the replace reads (and locks) itself (the fallback's delete
+        // RETURNs them, with no statement of its own).
         List<DepartedWriterSpans.Gone> removed;
         // nexus-z0o2p.29: a replace writes the difference (ManifestReplace) so a re-index that keeps a chunk's
         // row stops dropping and re-listing it; the delete-and-insert below remains for a bad row (it fails there
@@ -6373,7 +6379,7 @@ public final class CatalogRepository {
         // silent 0-row update here would misreport success to the caller
         // while quietly discarding the just-written manifest rows above (this
         // throw rolls back the whole per-doc transaction, including the
-        // delete+insert above — TenantScope.withTenant wraps this in one txn).
+        // replace above — TenantScope.withTenant wraps this in one txn).
         int updated = ctx.update(CATALOG_DOCUMENTS)
            .set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, docId))
            .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
@@ -6700,7 +6706,7 @@ public final class CatalogRepository {
     /**
      * Batch REPLACE manifest for multiple docs (bead nexus-u2kwq). Each doc is
      * replaced in its OWN {@link TenantScope#withTenant} transaction that folds
-     * together the {@link #writeManifest} REPLACE (delete all rows + insert) AND
+     * together the {@link #writeManifest} REPLACE (the rows become the provided rows) AND
      * a {@code documents.chunk_count = rows.size()} UPDATE — collapsing the
      * client's separate {@code /manifest/write} + chunk_count {@code /update}
      * round-trips into one atomic per-doc write. A failure on one doc rolls back
@@ -6803,8 +6809,8 @@ public final class CatalogRepository {
      * When {@code resolvedChunks} is non-null, each doc's chunk VECTOR rows
      * are upserted into {@code chunks_<dim>} INSIDE that doc's OWN per-doc
      * transaction (see {@link #writeManifestRows(DSLContext, String,
-     * String, String, List, Map, int[])}), BEFORE the manifest
-     * DELETE+INSERT, under the SAME sweep gate SHARED that transaction
+     * String, String, List, Map, int[])}), BEFORE the manifest rows are
+     * replaced, under the SAME sweep gate SHARED that transaction
      * already takes. A chunk row from this path can therefore never be
      * observed committed without the manifest row that references it (and
      * vice versa) — there is no window to size, because there is no
@@ -7016,8 +7022,8 @@ public final class CatalogRepository {
                         List<DepartedWriterSpans.Gone> beforeRows =
                             withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
                                   tenant, docId, () -> {
-                                      java.util.function.Consumer<String> hook = beforeReadHookForTests;
-                                      if (hook != null) hook.accept(docId);
+                                      java.util.function.BiConsumer<String, DSLContext> hook = beforeReadHookForTests;
+                                      if (hook != null) hook.accept(docId, ctx);
                                       return currentManifestRows(ctx, tenant, docId);
                                   }, null);
                         Set<String> beforeRead = beforeRows == null ? null : chashesOf(beforeRows);

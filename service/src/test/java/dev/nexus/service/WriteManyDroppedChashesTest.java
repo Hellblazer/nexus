@@ -169,7 +169,7 @@ class WriteManyDroppedChashesTest extends AtomicWriteTestBase {
         String[] abc = seedABC(f, "unk");
         String x = ch("unk-x");
         try {
-            repo.setBeforeReadHookForTests(docId -> {
+            repo.setBeforeReadHookForTests((docId, ctx) -> {
                 if (docId.equals(f.docId())) throw new IllegalStateException("simulated before-read failure");
             });
 
@@ -230,7 +230,7 @@ class WriteManyDroppedChashesTest extends AtomicWriteTestBase {
         var responses = new java.util.concurrent.ConcurrentHashMap<String, Map<String, Object>>();
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
-            repo.setBeforeReadHookForTests(docId -> {
+            repo.setBeforeReadHookForTests((docId, ctx) -> {
                 if (docId.equals(f.docId()) && firstSeen.compareAndSet(false, true)) {
                     firstInRead.countDown();
                     try {

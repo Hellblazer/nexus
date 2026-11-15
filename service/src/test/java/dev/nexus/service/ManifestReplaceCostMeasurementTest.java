@@ -61,17 +61,20 @@ class ManifestReplaceCostMeasurementTest extends AtomicWriteTestBase {
                 all.add(rich(i, hex.get(i), true));
             }
             svc.writeManyCombined(TENANT, f.collection(), chunks, List.of(doc(f.docId(), same)), null, false, false);
-            for (boolean diff : List.of(false, true, false, true)) {
-                ManifestReplaceTestHooks.decline(!diff);
-                for (String shape : List.of("same", "tenth_changed", "all_changed")) {
-                    List<Map<String, Object>> rows = shape.equals("same") ? same : shape.equals("tenth_changed") ? tenth : all;
-                    replaceMs(f, same);                       // reset to the baseline rows
-                    long ms = replaceMs(f, rows);
-                    System.out.println("MEASURE rows=" + n + " path=" + (diff ? "diff" : "delete+insert")
-                        + " shape=" + shape + " ms=" + ms);
+            try {
+                for (boolean diff : List.of(false, true, false, true)) {
+                    ManifestReplaceTestHooks.decline(!diff);
+                    for (String shape : List.of("same", "tenth_changed", "all_changed")) {
+                        List<Map<String, Object>> rows = shape.equals("same") ? same : shape.equals("tenth_changed") ? tenth : all;
+                        replaceMs(f, same);                       // reset to the baseline rows
+                        long ms = replaceMs(f, rows);
+                        System.out.println("MEASURE rows=" + n + " path=" + (diff ? "diff" : "delete+insert")
+                            + " shape=" + shape + " ms=" + ms);
+                    }
                 }
+            } finally {
+                ManifestReplaceTestHooks.decline(false);
             }
-            ManifestReplaceTestHooks.decline(false);
         }
     }
 }

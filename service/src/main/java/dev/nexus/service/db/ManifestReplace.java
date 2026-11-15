@@ -31,10 +31,15 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
  * whose payload changed, INSERT the new positions.
  *
  * <p>The row key is the table's primary key, {@code (tenant_id, doc_id, position)}. A row's payload is every
- * other column the replace wrote: chash, chunk_index, the four span columns, collection, embedding_model, the
- * three section labels and labels_written. The table has no timestamp or serial column, so a kept row comes out
- * byte-for-byte what a delete and re-insert would have left (an UPDATE writes every payload column from the
- * incoming row, NULLs included, exactly as the insert did).
+ * other column the replace wrote, {@link #PAYLOAD_COLUMNS}: chash, chunk_index, the four span columns, collection,
+ * embedding_model, the three section labels and labels_written. An UPDATE writes every payload column from the
+ * incoming row, NULLs included, exactly as the insert did, so a kept row comes out what a delete and re-insert
+ * would have left. {@code ManifestReplaceDiffTest} fails when the table gains or loses a column this class does
+ * not list, and changes each payload column of a row to check the diff writes it.
+ *
+ * <p>The orphan records end as the old path left them: the DELETE and UPDATE statements stamp what they drop (the
+ * vectors-061 triggers), and then the record of every chunk key the new set lists is cleared, kept rows included,
+ * which is what the old INSERT's trigger did for every row it wrote.
  *
  * <p>Locks: the document's rows are read {@code FOR UPDATE} (the DELETE of the old path locked the same rows),
  * then the chunk rows of every row about to be deleted or changed are locked in key order in ONE pass
@@ -47,11 +52,24 @@ final class ManifestReplace {
     private ManifestReplace() {
     }
 
-    /** More changed (deleted or updated) rows than this fall back to the delete-and-insert (bind limits, one lock pass). */
+    /**
+     * More changed (deleted or updated) rows than this fall back to the delete-and-insert. A cost bound, not a
+     * correctness one: past about this many the diff's UPDATE of every row costs what the delete-and-insert
+     * does (measured: 4000 changed rows 0.6 s against 1.1 s; 5000 about equal), and the chunk pre-lock and the
+     * UPDATE's VALUES list grow with the count.
+     */
     static final int MAX_CHANGED_ROWS = 4000;
 
-    /** Test hook: when set, {@link #replace} declines every replace, so a measurement can run the old path in one JVM. */
+    /** The payload columns of a manifest row: every column of the table except its primary key. */
+    static final java.util.Set<String> PAYLOAD_COLUMNS = java.util.Set.of("chash", "chunk_index", "line_start",
+        "line_end", "char_start", "char_end", "collection", "embedding_model", "section_title", "section_type",
+        "page_number", "labels_written");
+
+    /** Test hook: when set, {@link #replace} declines every replace, so a test can run the old path in one JVM. */
     static volatile boolean declineForTests;
+
+    /** Test hook: a positive value replaces {@link #MAX_CHANGED_ROWS}, so a small document can reach the cap. */
+    static volatile int maxChangedRowsForTests;
 
     /** One incoming row, as {@code insertManifestChunkRows} would write it. */
     private record Incoming(int position, String chashHex, int chunkIndex, Integer lineStart, Integer lineEnd,
@@ -135,7 +153,8 @@ final class ManifestReplace {
                 updatedFrom.add(old);
             }
         }
-        if (toDelete.size() + toUpdate.size() > MAX_CHANGED_ROWS) return null;
+        int cap = maxChangedRowsForTests > 0 ? maxChangedRowsForTests : MAX_CHANGED_ROWS;
+        if (toDelete.size() + toUpdate.size() > cap) return null;
         List<Map<String, Object>> toInsert = new ArrayList<>();
         for (int k = 0; k < rows.size(); k++) {
             if (!storedPositions.contains(incoming.get(k).position())) toInsert.add(rows.get(k));
@@ -178,20 +197,19 @@ final class ManifestReplace {
                 CatalogRepository.ManifestInsertMode.PLAIN);
         }
 
-        // A deleted row's key that the new set still lists elsewhere: the DELETE trigger stamped it (it never
-        // reads the manifest) and no later statement adds the key, so clear it here, as the old path's INSERT did.
-        if (!toDelete.isEmpty()) {
-            Set<String> listed = new HashSet<>();
-            for (Incoming in : incoming) listed.add(collection + "\u0000" + in.chashHex());
-            List<Row3<String, String, byte[]>> kept = new ArrayList<>();
+        // The record of every chunk key the new set lists, in this document's collection: what the old path's INSERT
+        // trigger did for every row it wrote. A key a DELETE or UPDATE statement above stamped and the new set still
+        // lists (the stamp never reads the manifest), and a record another document left on a chunk this one keeps,
+        // go here. The records are locked in key order first, as the clear function does, and deleted only if any
+        // exist. The record's own key is (tenant, collection, chash); the chunk's model is the collection's, so the
+        // stamp's fourth column never differs from the clear's three.
+        if (!incoming.isEmpty()) {
+            List<Row3<String, String, byte[]>> listed = new ArrayList<>();
             Set<String> seen = new HashSet<>();
-            for (Stored old : toDelete) {
-                String key = old.collection() + "\u0000" + old.hex();
-                if (old.collection().equals(collection) && listed.contains(key) && seen.add(key)) {
-                    kept.add(DSL.row(tenant, old.collection(), old.chash()));
-                }
+            for (Incoming in : incoming) {
+                if (seen.add(in.chashHex())) listed.add(DSL.row(tenant, collection, HexFormat.of().parseHex(in.chashHex())));
             }
-            if (!kept.isEmpty()) clearRecords(ctx, kept);
+            clearRecords(ctx, listed);
         }
         return before;
     }
@@ -260,10 +278,10 @@ final class ManifestReplace {
     /** Deletes the orphaning records of {@code keys}, the rows locked first in key order (the stamp upserts' order). */
     private static void clearRecords(DSLContext ctx, List<Row3<String, String, byte[]>> keys) {
         var key = DSL.row(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH);
-        ctx.selectOne().from(CHUNK_ORPHANED_AT).where(key.in(keys))
+        var locked = ctx.selectOne().from(CHUNK_ORPHANED_AT).where(key.in(keys))
             .orderBy(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
             .forUpdate()
             .fetch();
-        ctx.deleteFrom(CHUNK_ORPHANED_AT).where(key.in(keys)).execute();
+        if (!locked.isEmpty()) ctx.deleteFrom(CHUNK_ORPHANED_AT).where(key.in(keys)).execute();
     }
 }
