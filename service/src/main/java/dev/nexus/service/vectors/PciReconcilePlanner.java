@@ -304,14 +304,24 @@ public final class PciReconcilePlanner {
     /**
      * The REINDEXes the triggers call for, largest index first (then name): one per candidate whose
      * {@link PciReindexPolicy#trigger} fires. Not limited: the caller adds any leaf-index REINDEX and then
-     * {@link #firstPerPass}. Stub: lands with the implementation.
+     * {@link #firstPerPass}. A pure function of its arguments.
      */
     static List<Reindex> reindexes(Collection<PciReindexPolicy.Candidate> candidates, java.time.Instant now) {
-        return List.of();
+        List<Reindex> out = new ArrayList<>();
+        for (PciReindexPolicy.Candidate c : candidates) {
+            PciReindexPolicy.trigger(c, now)
+                .ifPresent(t -> out.add(new Reindex(c.name(), c.collection(), t, c.bytes())));
+        }
+        out.sort(BY_SIZE_THEN_NAME);
+        return List.copyOf(out);
     }
 
-    /** The first {@link PciReindexPolicy#MAX_PER_PASS} of {@code ordered}. Stub: lands with the implementation. */
+    /** Largest first, then name: the order a pass runs its REINDEXes in. */
+    static final Comparator<Reindex> BY_SIZE_THEN_NAME =
+        Comparator.comparingLong(Reindex::bytes).reversed().thenComparing(Reindex::name);
+
+    /** The first {@link PciReindexPolicy#MAX_PER_PASS} of {@code ordered}, which is already in pass order. */
     static List<Reindex> firstPerPass(List<Reindex> ordered) {
-        return List.of();
+        return List.copyOf(ordered.subList(0, Math.min(ordered.size(), PciReindexPolicy.MAX_PER_PASS)));
     }
 }

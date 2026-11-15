@@ -922,9 +922,21 @@ public final class PgSession {
             searchPciReindex(env.apply("NX_SEARCH_PCI_REINDEX")));
     }
 
-    /** Parse {@code NX_SEARCH_PCI_REINDEX}. Stub: the strict 0/1 parse lands with the implementation. */
+    /**
+     * Parse {@code NX_SEARCH_PCI_REINDEX} (RDR-230 Technical Design 8). Null or blank means on; the only other accepted
+     * values are exactly {@code "1"} (on) and {@code "0"} (off) after trimming, as for {@link #searchPci}: a switch that
+     * guards DDL does not guess.
+     */
     static boolean searchPciReindex(String raw) {
-        return true;
+        if (raw == null || raw.isBlank()) {
+            return true;
+        }
+        return switch (raw.trim()) {
+            case "1" -> true;
+            case "0" -> false;
+            default -> throw new IllegalArgumentException(
+                "NX_SEARCH_PCI_REINDEX must be 1 (on) or 0 (off), got: " + raw);
+        };
     }
 
     /**
@@ -1012,9 +1024,9 @@ public final class PgSession {
      * Called from {@code Main} inside the boot try block that refuses on a bad value.
      */
     public static void logPciBootSettings(PciSettings s, int routerMaxRows) {
-        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={} build_mem_mb={}",
-            s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf(),
-            s.buildMemMb() == null ? "auto" : s.buildMemMb());
+        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={} build_mem_mb={} "
+            + "reindex={}", s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf(),
+            s.buildMemMb() == null ? "auto" : s.buildMemMb(), s.reindex());
         // Nothing builds when the switch is off or the per-leaf cap is 0, so B above T strands nothing new.
         boolean builds = s.enabled() && s.maxPerLeaf() > 0;
         if (builds && pciBuildThresholdAboveRouter(s.buildMinRows(), routerMaxRows)) {

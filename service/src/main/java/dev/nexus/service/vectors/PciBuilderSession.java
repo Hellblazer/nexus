@@ -17,9 +17,11 @@ import org.slf4j.LoggerFactory;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * RDR-227 Step 2 (nexus-43ulx.16): the DDL half's database session. It builds and drops the per-collection HNSW
@@ -37,7 +39,7 @@ import java.util.Properties;
  * rendered by PostgreSQL ({@code format()} with {@code %I} and {@code %L}, called through {@code DSL.function}), so
  * identifiers and the collection are quoted by the server and Java concatenates none of them. Each statement
  * kind then goes out through one {@code Statement.execute(sql)} call ({@link #runBuild}, {@link #runDrop}, and
- * {@code runComment} for RDR-230's {@code COMMENT ON INDEX}), each registered in
+ * {@code runComment} for RDR-230's {@code COMMENT ON INDEX}, {@code runReindex} and {@code runVacuum}), each registered in
  * {@code RawSqlGateTest.SANCTIONED_STATEMENTS}. Plain JDBC rather than jOOQ's {@code execute(String)}
  * because jOOQ parses a plain-SQL string for bind markers and braces, and a collection name may hold either.
  *
@@ -105,6 +107,7 @@ public final class PciBuilderSession {
     private static final String BUILD_LOCK_TIMEOUT = "0";
     private static final String DROP_LOCK_TIMEOUT = "5s";
     private static final String COMMENT_LOCK_TIMEOUT = "5s";
+    private static final String VACUUM_LOCK_TIMEOUT = "5s";
 
     /** The pgvector operator class lives in schema {@code nexus} (search-path-001), and the builder has no search_path. */
     private static final String OPERATOR_CLASS = "nexus.vector_cosine_ops";
@@ -118,6 +121,12 @@ public final class PciBuilderSession {
 
     /** RDR-230: the index's anchor is its comment. {@code %L} quotes the JSON text on the server. */
     private static final String COMMENT_TEMPLATE = "COMMENT ON INDEX %I.%I IS %L";
+
+    /** RDR-230: the old index serves until the swap, and the swap keeps its name. */
+    private static final String REINDEX_TEMPLATE = "REINDEX INDEX CONCURRENTLY %I.%I";
+
+    /** RDR-230: reaps the leaf's dead tuples after a bulk delete; {@code ANALYZE} refreshes its statistics. */
+    private static final String VACUUM_TEMPLATE = "VACUUM (ANALYZE) %I.%I";
 
     /** SQLSTATE: invalid_password. */
     private static final String INVALID_PASSWORD = "28P01";
@@ -432,6 +441,8 @@ public final class PciBuilderSession {
         /** The outcome every DDL request returns once the pass is over, or {@code null} while it is live. */
         private DdlOutcome ended;
         private boolean skippedForMigration;
+        /** The ids ({@code schema.name}) of the leaves of the pass's catalog snapshot, or null before {@link #useSnapshot}. */
+        private volatile Set<String> leafIds;
 
         private Pass(PciBuilderSession owner, Connection conn, DSLContext ctx) {
             this.owner = owner;
@@ -695,7 +706,7 @@ public final class PciBuilderSession {
             });
         }
 
-        private static boolean ownsForComment(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+        static boolean ownsForComment(PciCatalog.Leaf leaf, PciCatalog.Index index) {
             if (!index.parsed() || !index.valid() || !PciCatalog.isBuilderName(index.name())
                 || leaf.model() == null || leaf.tenant() == null) {
                 return false;
@@ -707,14 +718,79 @@ public final class PciBuilderSession {
             }
         }
 
-        /** Stub: REINDEX INDEX CONCURRENTLY of a builder index; lands with the implementation. */
+        /**
+         * {@code REINDEX INDEX CONCURRENTLY} of {@code index} on {@code leaf} (RDR-230 Technical Design 4). The old
+         * index serves until the swap and the swap keeps its name, so the router's set never loses the collection; while
+         * it runs the read half counts the invalid {@code _ccnew} as a reindex leftover. Only an index
+         * {@link #ownsForReindex} accepts is touched; any other is {@link DdlOutcome#REJECTED} and nothing is sent.
+         *
+         * <p>No {@code lock_timeout} (the statement waits for older transactions the way a build does) and the build's
+         * statement timeout: a REINDEX the timeout cancels leaves an invalid copy, is retried from zero after its
+         * backoff, and could loop for ever on an index too big for the bound. A failure is
+         * {@code event=pci_ddl_failed op=reindex} and {@link DdlOutcome#FAILED}; a backend ended by a migration is
+         * {@link DdlOutcome#CONNECTION_LOST}, which says nothing about the statement. Either leaves an invalid
+         * {@code _ccnew}/{@code _ccold} that the leftover rule drops on a later pass.
+         */
         public DdlOutcome reindex(PciCatalog.Leaf leaf, PciCatalog.Index index) {
-            return DdlOutcome.REJECTED;
+            if (ended != null) {
+                return ended;
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            Objects.requireNonNull(index, "index");
+            if (!ownsForReindex(leaf, index)) {
+                log.warn("event=pci_ddl_rejected op=reindex reason=not_builders_index name={} parsed={} valid={}",
+                    index.name(), index.parsed(), index.valid());
+                return DdlOutcome.REJECTED;
+            }
+            return run("reindex", BUILD_LOCK_TIMEOUT, owner.buildStatementTimeout, index.name(), leaf, () -> {
+                String sql = render(REINDEX_TEMPLATE, leaf.schema(), index.name());
+                runReindex(sql);
+            });
         }
 
-        /** Stub: VACUUM (ANALYZE) of a leaf of the pass's snapshot; lands with the implementation. */
+        /**
+         * Tell the pass which leaves it may vacuum: those of the catalog snapshot the caller is working from.
+         * {@link #vacuum} refuses every other relation, and every leaf until this is called.
+         */
+        public void useSnapshot(PciCatalog.Snapshot snapshot) {
+            Objects.requireNonNull(snapshot, "snapshot");
+            Set<String> ids = new HashSet<>();
+            for (PciCatalog.Leaf leaf : snapshot.leaves()) {
+                ids.add(leaf.schema() + "." + leaf.name());
+            }
+            leafIds = Set.copyOf(ids);
+        }
+
+        /**
+         * {@code VACUUM (ANALYZE)} of {@code leaf}, which must be a leaf of the snapshot this pass was given
+         * ({@link #useSnapshot}) and never another table (RDR-230, the widened admin statement set). It runs after a
+         * bulk-delete REINDEX, to reap what the deletes left. It holds a {@code ShareUpdateExclusiveLock} on the leaf
+         * for its run, so autovacuum skips the leaf meanwhile; 5 s lock timeout, and the other statements' 30 minute
+         * statement timeout.
+         */
         public DdlOutcome vacuum(PciCatalog.Leaf leaf) {
-            return DdlOutcome.REJECTED;
+            if (ended != null) {
+                return ended;
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            if (leafIds == null || !leafIds.contains(leaf.schema() + "." + leaf.name())) {
+                log.warn("event=pci_ddl_rejected op=vacuum reason=not_a_leaf_of_the_snapshot leaf={}.{}", leaf.schema(),
+                    leaf.name());
+                return DdlOutcome.REJECTED;
+            }
+            return run("vacuum", VACUUM_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, leaf.name(), leaf, () -> {
+                String sql = render(VACUUM_TEMPLATE, leaf.schema(), leaf.name());
+                runVacuum(sql);
+            });
+        }
+
+        /**
+         * The REINDEX name guard: a parsed, valid index with the builder's name for this leaf and collection, exactly
+         * what {@link #comment} accepts. Nothing else is reindexed. RDR-230 Phase 2's leaf-index work extends this with
+         * the leaf's own HNSW index; until it does, that index is refused.
+         */
+        static boolean ownsForReindex(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+            return ownsForComment(leaf, index);
         }
 
         /** {@link DdlOutcome#STALE} when the leftover is valid or gone now, else {@code null}: go on to the DROP. */
@@ -848,6 +924,24 @@ public final class PciBuilderSession {
         // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.1): COMMENT ON INDEX has no typed jOOQ form. The text is rendered by
         // format() with %I/%L on the server (render), and the pass has already checked the name (ownsForComment).
         private void runComment(String sql) throws SQLException {
+            try (java.sql.Statement st = conn.createStatement()) {
+                st.execute(sql);
+            }
+        }
+
+        // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): REINDEX INDEX CONCURRENTLY has no typed jOOQ form and cannot run in a
+        // function or a transaction block. The text is rendered by format() with %I on the server (render), and the pass
+        // has already checked the name (ownsForReindex).
+        private void runReindex(String sql) throws SQLException {
+            try (java.sql.Statement st = conn.createStatement()) {
+                st.execute(sql);
+            }
+        }
+
+        // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): VACUUM (ANALYZE) has no typed jOOQ form and cannot run in a function
+        // or a transaction block. The text is rendered by format() with %I on the server (render), and the pass has
+        // already checked that the relation is a leaf of its snapshot (vacuum).
+        private void runVacuum(String sql) throws SQLException {
             try (java.sql.Statement st = conn.createStatement()) {
                 st.execute(sql);
             }

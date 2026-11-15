@@ -109,9 +109,68 @@ final class PciReindexPolicy {
                      int canaryQueries, Instant lastRedReindexAt, boolean backedOff, OptionalDouble reference) { }
 
     /**
-     * The trigger that fires for {@code c} at {@code now}, if any. Stub: the rules land with the implementation.
+     * The trigger that fires for {@code c} at {@code now}, if any; a pure function of its arguments. When several fire
+     * the label is the first of: bulk delete (its VACUUM must not be lost), red canary, deletes since build, size.
+     * An index with no rows has nothing to rebuild, and a backed-off one waits for its retry time, whatever the rules say.
      */
     static Optional<PciReconcilePlanner.Trigger> trigger(Candidate c, Instant now) {
+        if (c.backedOff() || c.rows() <= 0) {
+            return Optional.empty();
+        }
+        if (bulkDelete(c)) {
+            return Optional.of(PciReconcilePlanner.Trigger.BULK_DELETE);
+        }
+        if (redCanary(c, now)) {
+            return Optional.of(PciReconcilePlanner.Trigger.RED_CANARY);
+        }
+        if (deletesSinceBuild(c)) {
+            return Optional.of(PciReconcilePlanner.Trigger.DELETES_SINCE_BUILD);
+        }
+        if (size(c)) {
+            return Optional.of(PciReconcilePlanner.Trigger.SIZE);
+        }
         return Optional.empty();
+    }
+
+    /** {@code rows_now} fell by at least {@link #BULK_DELETE_FRACTION} since the previous check, or one is owed. */
+    private static boolean bulkDelete(Candidate c) {
+        if (c.bulkPending()) {
+            return true;
+        }
+        if (c.previousRows().isEmpty() || c.previousRows().getAsLong() <= 0) {
+            return false;
+        }
+        long previous = c.previousRows().getAsLong();
+        return (double) (previous - c.rows()) / previous >= BULK_DELETE_FRACTION;
+    }
+
+    /** Red on at least {@link #RED_CANARY_MIN_QUERIES} queries, and none of this index's last day's REINDEX was for it. */
+    private static boolean redCanary(Candidate c, Instant now) {
+        if (c.canary() != PciCanary.State.RED || c.canaryQueries() < RED_CANARY_MIN_QUERIES) {
+            return false;
+        }
+        return c.lastRedReindexAt() == null
+            || !now.isBefore(c.lastRedReindexAt().plus(RED_REINDEX_MIN_INTERVAL));
+    }
+
+    /** {@code max(0, anchor.rows + written_since - rows_now)} is at least {@link #DELETES_SINCE_BUILD_FRACTION} of the rows. */
+    private static boolean deletesSinceBuild(Candidate c) {
+        long dead = Math.max(0, c.anchor().rows() + c.writtenSince() - c.rows());
+        return (double) dead / c.rows() >= DELETES_SINCE_BUILD_FRACTION;
+    }
+
+    /**
+     * Bytes per row is at least {@link #SIZE_RATIO} times the reference: the anchor's own for an index this engine built,
+     * the install reference for an adopted one (an adopted anchor is a snapshot of an index of unknown age). With no
+     * reference the rule is off.
+     */
+    private static boolean size(Candidate c) {
+        PciCatalog.Anchor a = c.anchor();
+        boolean built = PciCatalog.ORIGIN_BUILT.equals(a.origin()) && a.rows() > 0 && a.bytes() > 0;
+        OptionalDouble base = built ? OptionalDouble.of((double) a.bytes() / a.rows()) : c.reference();
+        if (base.isEmpty() || base.getAsDouble() <= 0) {
+            return false;
+        }
+        return ((double) c.bytes() / c.rows()) / base.getAsDouble() >= SIZE_RATIO;
     }
 }
