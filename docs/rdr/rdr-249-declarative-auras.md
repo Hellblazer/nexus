@@ -2,12 +2,12 @@
 title: "Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure"
 id: RDR-249
 type: Feature
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-11-12
-accepted_date:
+accepted_date: 2026-11-15
 related_issues: ["nexus-mdbds"]
 related_rdrs: [RDR-239, RDR-240, RDR-242, RDR-211, RDR-212, RDR-213, RDR-220, RDR-245, RDR-110, RDR-111]
 ---
@@ -121,8 +121,9 @@ RDR-240 procedure rather than inline Lua.
   through `claude/channel`. The waiter runs whether or not Claude Code was
   launched with the channel enabled; without it, the notification is dropped
   by the client.
-- `src/nexus/hooks/mailbox_drain.py` runs on `UserPromptSubmit`, claims and
-  shows mail. It is the floor for mail when no channel is live.
+- The plugin's mailbox drain hook (`conexus/hooks/scripts/mailbox_drain.py`)
+  runs on `UserPromptSubmit`, claims and shows mail. It is the floor for
+  mail when no channel is live; version 1 auras do not use it.
 - `nexus.lua_runtime.run_script` runs a library procedure in a `python -I`
   worker and returns its result or raises `ScriptError` with a kind.
 
@@ -289,8 +290,9 @@ in the engine, and the procedure can still only read.
      off}` turns it off. A nexus developer turns `ci_develop_red` on in
      `~/.config/nexus/config.yml`.
    - `NX_AURAS_OFF` overrides the config: `all` turns every aura off, and a
-     comma-separated list of names turns those off. It covers a CI job or a
-     `claude -p` child that should run none.
+     comma-separated list of names turns those off. It covers a CI job or
+     any other process that should run none (a `claude -p` child already
+     loads none, Technical Design 1).
    - `nx aura list` shows each aura as on or off and the level that decided
      it (default, global config, repo config, env).
    - An aura's trigger subscription is aura-owned and is kept out of the
@@ -425,7 +427,8 @@ dimensions.
 The first consumer, enabled in one session, writes an `aura: develop CI
 red` block within a minute of a real red develop sha, and nothing for a
 green one; its channel notification is the fixed template, with no
-procedure text; and `NX_AURAS_OFF=ci_develop_red` stops it.
+procedure text; the next green develop sha removes the block; and
+`NX_AURAS_OFF=ci_develop_red` stops it.
 
 ### Phase 1: The aura file, its check and its list
 
@@ -505,7 +508,8 @@ Gate round 1 raised two more, answered 2026-11-15:
    whether nexus turns `ci_develop_red` on: "Each user opts in". Auras ship
    off; a user turns one on in config, and `NX_AURAS_OFF` still turns them
    off (Technical Design 3).
-7. Accept dispositions (gate round 3 residuals S2, S3, S4): "Cut one,
+7. Accept dispositions (round 1 findings S2, S3, S4, carried as gate
+   residuals): "Cut one,
    amend two, then accept", by dialog in halcyon's session. Mailbox
    triggers and the drain path are cut from version 1, and the threads
    write rules and the clear match are added (Technical Design 1).
@@ -526,3 +530,4 @@ Gate round 1 raised two more, answered 2026-11-15:
 - 2026-11-15: Gate round 1 — BLOCKED (1 Critical, 8 Significant, 1 ship-blocker(s)); commit `d0c72fbce`; critique `nexus_rdr/249-gate-critique-2026-11-15-r1`.
 - 2026-11-15: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0b769887e`; critique `nexus_rdr/249-gate-critique-2026-11-15-r2`.
 - 2026-11-15: Gate round 3 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `8dec1a48b`; critique `nexus_rdr/249-gate-critique-2026-11-15-r3`.
+- 2026-11-15: Accepted (Sam). Residuals: S2 a122b329b (cut), S3 a122b329b, S4 a122b329b (fix check 249-fix-check-a122b329b); S-r3-1, S6, S7, S8 to the implementation beads under nexus-mdbds.
