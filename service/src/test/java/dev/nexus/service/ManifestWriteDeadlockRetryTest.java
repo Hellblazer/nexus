@@ -236,7 +236,10 @@ class ManifestWriteDeadlockRetryTest {
               .forNoKeyUpdate().fetch();
 
             Future<T> writer = pool.submit(write);
-            assertThat(PgActivityProbe.waitsOnALock(pg, "%catalog_document_chunks%"))
+            // The statement that waits is the manifest write's lock of the chunk rows it drops (nexus-z0o2p.29: the
+            // replace's own pre-lock on nexus.chunks, formerly the DELETE's trigger), so any statement that names
+            // a chunks table counts.
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%chunks%"))
                 .as("the manifest write must block on the chunk row the other writer holds (else no race happened)")
                 .isTrue();
 

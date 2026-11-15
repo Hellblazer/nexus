@@ -74,7 +74,9 @@ class ManifestWriteRetryGateTest {
 
     private static final Path MAIN = Path.of("src", "main", "java");
     private static final Path DB = MAIN.resolve(Path.of("dev", "nexus", "service", "db"));
-    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository", "ManifestFill");
+    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository", "ManifestFill",
+        // nexus-z0o2p.29: the manifest replace's diff; it takes the caller's DSLContext, so it runs inside writeManifestRows' retried transaction
+        "ManifestReplace");
 
     /** Retried manifest-writing methods, as {@code File#method}. */
     private static final TreeSet<String> EXPECTED_RETRIED = new TreeSet<>(List.of(

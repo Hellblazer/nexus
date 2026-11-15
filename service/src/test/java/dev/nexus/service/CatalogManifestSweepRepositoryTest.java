@@ -701,31 +701,19 @@ class CatalogManifestSweepRepositoryTest {
             Map.<String, Object>of("doc_id", "swp.9", "rows", List.<Map<String, Object>>of(
                 Map.<String, Object>of("position", 0, "chash", ch("swp9-x"), "chunk_index", 0)))), col);
 
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-                .revoke(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).from(DSL.role(SVC_ROLE)).execute();
-            PgContainerHelper.runSuperuserTestChangelog(su,
-                "db/changelog-test/db.changelog-test-manifest-chunks-column-select.xml",
-                "databasechangelog_test_manifest_chunks_column_select", Map.of("role", SVC_ROLE));
-        }
-        // Only the operation under test runs with the column revoked — every
-        // verification read below (including this test's own getManifest
-        // assertion, which SELECTs chash) needs the grant restored FIRST, or
-        // it fails for the SAME reason the before-read does, masking what
-        // this test is actually proving.
+        // nexus-z0o2p.29: forced through the before-read hook, not a REVOKE of the chash column: a replace now
+        // reads the document's rows itself (it writes the difference), so a revoked column fails the write too.
         Map<String, Object> result;
         try {
+            repo.setBeforeReadHookForTests(docId -> {
+                if (docId.equals("swp.9")) throw new IllegalStateException("simulated before-read failure");
+            });
             result = writeManifestManySeeded(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.9", "rows", List.<Map<String, Object>>of(
                     Map.<String, Object>of("position", 0, "chash", ch("swp9-y"), "chunk_index", 0)))), col,
                 null, true);
         } finally {
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                DSL.using(su, SQLDialect.POSTGRES)
-                    .grant(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).to(DSL.role(SVC_ROLE)).execute();
-            }
+            repo.setBeforeReadHookForTests(null);
         }
 
         assertThat(result.get("docs"))

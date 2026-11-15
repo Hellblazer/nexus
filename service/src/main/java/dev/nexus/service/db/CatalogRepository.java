@@ -6031,7 +6031,7 @@ public final class CatalogRepository {
     }
 
     /** Which {@code ON CONFLICT} shape {@link #insertManifestChunkRows} applies. */
-    private enum ManifestInsertMode {
+    enum ManifestInsertMode {
         /** Bare insert, no conflict handling — the caller ({@link #writeManifestRows}) has
          *  already deleted every row for this doc_id in the SAME transaction, so no
          *  conflict is possible in practice. */
@@ -6081,7 +6081,7 @@ public final class CatalogRepository {
      *             dedupes by position before calling this, so its
      *             multi-row batches are safe as-is.
      */
-    private static void insertManifestChunkRows(DSLContext ctx, String tenant, String docId, String coll,
+    static void insertManifestChunkRows(DSLContext ctx, String tenant, String docId, String coll,
                                                  List<Map<String, Object>> rows, ManifestInsertMode mode) {
         if (rows == null || rows.isEmpty()) return;
         // RDR-191 (Hal ruling 2026-08-12): `coll` is the CALLER-SUPPLIED
@@ -6206,7 +6206,7 @@ public final class CatalogRepository {
      * of the three label keys (a client sends them all, "" for a chunk with no heading; a client that
      * predates catalog-046 sends none, and so does a backfill, which must not mint authoritative labels).
      */
-    private static boolean labelsWritten(Map<String, Object> row) {
+    static boolean labelsWritten(Map<String, Object> row) {
         if (row.get("labels_written") instanceof Boolean explicit) {
             return explicit;
         }
@@ -6320,27 +6320,36 @@ public final class CatalogRepository {
         // already read them (priorRows, fail-open, one statement it paid for anyway); any other caller gets
         // them from the delete itself (RETURNING), with no statement of its own.
         List<DepartedWriterSpans.Gone> removed;
-        var removal = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
-        if (priorRows == null) {
-            removed = DepartedWriterSpans.Gone.allOf(
-                removal.returningResult(DepartedWriterSpans.Gone.COLUMNS).fetch());
+        // nexus-z0o2p.29: a replace writes the difference (ManifestReplace) so a re-index that keeps a chunk's
+        // row stops dropping and re-listing it; the delete-and-insert below remains for a bad row (it fails there
+        // as it always did) and for a rewrite of more than ManifestReplace.MAX_CHANGED_ROWS rows.
+        List<DepartedWriterSpans.Gone> diffed = ManifestReplace.replace(ctx, tenant, docId, collection, rows);
+        if (diffed != null) {
+            if (!rows.isEmpty()) stampIndexedAt(ctx, tenant, docId);
+            removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows != null ? priorRows : diffed;
         } else {
-            removal.execute();
-            removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows;
-        }
-        if (!rows.isEmpty()) {
-            stampIndexedAt(ctx, tenant, docId);
-            // nexus-11gh6 §7d: routed through the single-homed insert helper.
-            // ONE multi-row PLAIN insert (not a per-row loop): PLAIN mode has
-            // no ON CONFLICT, so batching every row of ONE call into a single
-            // multi-row INSERT ... VALUES statement changes only round-trip
-            // count, never failure semantics (a genuine duplicate `position`
-            // within `rows` still violates the PK exactly as it would across
-            // separate per-row INSERTs). RDR-191: every row of `rows` is
-            // stamped with the SAME `collection` -- there is no longer a
-            // per-row resolution outcome to vary on, so there is nothing to
-            // skip.
-            insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
+            var removal = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
+            if (priorRows == null) {
+                removed = DepartedWriterSpans.Gone.allOf(
+                    removal.returningResult(DepartedWriterSpans.Gone.COLUMNS).fetch());
+            } else {
+                removal.execute();
+                removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows;
+            }
+            if (!rows.isEmpty()) {
+                stampIndexedAt(ctx, tenant, docId);
+                // nexus-11gh6 §7d: routed through the single-homed insert helper.
+                // ONE multi-row PLAIN insert (not a per-row loop): PLAIN mode has
+                // no ON CONFLICT, so batching every row of ONE call into a single
+                // multi-row INSERT ... VALUES statement changes only round-trip
+                // count, never failure semantics (a genuine duplicate `position`
+                // within `rows` still violates the PK exactly as it would across
+                // separate per-row INSERTs). RDR-191: every row of `rows` is
+                // stamped with the SAME `collection` -- there is no longer a
+                // per-row resolution outcome to vary on, so there is nothing to
+                // skip.
+                insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
+            }
         }
         // nexus-pvkbv: a chunk this document held and no longer does (edited so it dropped it, or now under
         // another collection) keeps the span this document wrote on the chunk row; the row records no writer, so
@@ -14480,7 +14489,7 @@ public final class CatalogRepository {
 
     // ── Null-safe helper statics ───────────────────────────────────────────────
 
-    private static String s(Map<String, Object> m, String k) {
+    static String s(Map<String, Object> m, String k) {
         Object v = m.get(k);
         return v instanceof String sv ? sv : null;
     }
@@ -14490,7 +14499,7 @@ public final class CatalogRepository {
         return v != null ? v : def;
     }
 
-    private static Integer i(Map<String, Object> m, String k) {
+    static Integer i(Map<String, Object> m, String k) {
         Object v = m.get(k);
         if (v instanceof Number n) return n.intValue();
         // nexus-cecqy: JSON booleans coerce to 0/1. Our integer columns that model flags
@@ -14690,7 +14699,7 @@ public final class CatalogRepository {
     }
 
     /** Non-null integer: returns def if null. */
-    private static int ni(Integer v, int def) { return v != null ? v : def; }
+    static int ni(Integer v, int def) { return v != null ? v : def; }
 
     /** Non-null double: returns 0.0 if null. */
     private static double nd(Double v) { return v != null ? v : 0.0; }
