@@ -635,10 +635,14 @@ public final class PciBuilderSession {
         }
 
         /**
-         * Drop {@code index} from {@code leaf}. Only two kinds are touched: a parsed index with the builder's name
-         * shape, and an INVALID REINDEX CONCURRENTLY leftover ({@link PciCatalog.Index#leftover()}) whose name is a
-         * builder name plus {@code _ccnew}/{@code _ccold} and a counter (nexus-rn1yd). An operator's {@code pci_} index
-         * and a valid {@code _ccnew} are {@link DdlOutcome#REJECTED}.
+         * Drop {@code index} from {@code leaf}. Only three kinds are touched: a parsed index with the builder's name
+         * shape; an INVALID REINDEX CONCURRENTLY leftover ({@link PciCatalog.Index#leftover()}) whose name is a
+         * builder name plus {@code _ccnew}/{@code _ccold} and a counter (nexus-rn1yd); and, from RDR-230, an INVALID
+         * leftover of the leaf's own HNSW index ({@link PciCatalog.Index#leafLeftover()}) whose name is that index's
+         * name, as {@code leaf} identifies it ({@link PciCatalog.Leaf#hnswIndexes()}), plus {@code _ccnew}/{@code
+         * _ccold} and a counter ({@link PciCatalog#isLeafLeftoverName}). An operator's {@code pci_} index, a valid
+         * {@code _ccnew} and the leaf's own index itself are {@link DdlOutcome#REJECTED}. The leaf leftover goes
+         * through exactly this path, the same re-read and the same 5 s lock timeout (Open Question 3's condition).
          *
          * <p>A leftover is judged on a snapshot that may be a pass old, so its drop re-reads
          * {@code pg_index.indisvalid} for that name on this session immediately before the DROP. An index that is valid
@@ -655,18 +659,34 @@ public final class PciBuilderSession {
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
             boolean ours = index.parsed() ? PciCatalog.isBuilderName(index.name())
-                : index.leftover() && !index.valid() && PciCatalog.isLeftoverName(index.name());
+                : index.leftover() ? !index.valid() && PciCatalog.isLeftoverName(index.name())
+                : index.leafLeftover() && !index.valid() && isLeafLeftover(leaf, index);
             if (!ours) {
-                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={} leftover={}",
-                    index.name(), index.parsed(), index.leftover());
+                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={} leftover={} "
+                    + "leaf_leftover={}", index.name(), index.parsed(), index.leftover(), index.leafLeftover());
                 return DdlOutcome.REJECTED;
             }
-            java.util.function.Supplier<DdlOutcome> recheck = index.leftover()
+            java.util.function.Supplier<DdlOutcome> recheck = index.leftover() || index.leafLeftover()
                 ? () -> staleLeftover(leaf, index.name()) : () -> null;
             return run("drop", DROP_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, index.name(), leaf, recheck, () -> {
                 String sql = render(DROP_TEMPLATE, leaf.schema(), index.name());
                 runDrop(sql);
             });
+        }
+
+        /**
+         * Whether {@code index} is a leftover of one of {@code leaf}'s own HNSW indexes: the leaf is one the builder
+         * resolved (model and tenant parsed), the index names the own index it was made from, that index is among
+         * {@code leaf.hnswIndexes()}, and the index's name is that name plus the REINDEX CONCURRENTLY suffix. Anchored
+         * to the leaf's own identified name, never to a generic pattern.
+         */
+        private static boolean isLeafLeftover(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+            if (leaf.model() == null || leaf.tenant() == null) {
+                return false;
+            }
+            String base = index.leafLeftoverOf();
+            return leaf.hnswIndexes().stream().anyMatch(own -> own.name().equals(base))
+                && PciCatalog.isLeafLeftoverName(base, index.name());
         }
 
         /**

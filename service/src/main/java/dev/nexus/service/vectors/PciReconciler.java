@@ -929,9 +929,11 @@ public final class PciReconciler {
         PciSettings uncapped = new PciSettings(settings.enabled(), b, settings.sweepSeconds(), Integer.MAX_VALUE);
         List<Action> preliminary = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, uncapped);
         long parsed = leaf.indexes().stream().filter(Index::parsed).count();
-        // A leftover is not a parsed index (it is not in `parsed`), so its drop frees no cap slot either.
+        // A leftover is not a parsed index (it is not in `parsed`), so its drop frees no cap slot either; nor is a
+        // leftover of the leaf's own HNSW index.
         long drops = preliminary.stream()
-            .filter(a -> a instanceof Drop d && d.reason() != PciReconcilePlanner.DropReason.REINDEX_LEFTOVER)
+            .filter(a -> a instanceof Drop d && d.reason() != PciReconcilePlanner.DropReason.REINDEX_LEFTOVER
+                && d.reason() != PciReconcilePlanner.DropReason.LEAF_REINDEX_LEFTOVER)
             .count();
         long slots = settings.maxPerLeaf() - (parsed - drops);
         List<String> candidates = preliminary.stream().filter(a -> a instanceof Build)
@@ -944,6 +946,15 @@ public final class PciReconciler {
             }
         }
         List<Action> actions = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, settings);
+        // TODO(nexus-4lnn1.1.10, trigger LEAF_SIZE): the leaf size rule waits for P2.2's Reindex candidates, which the
+        // reconciler (not plan()) collects after the drops and builds. At that seam, for the leaf's own index on the
+        // model's dimension, `leaf.hnswIndex(dimension)` (valid only), call
+        //   PciLeafSizeRule.evaluate(idx.bytes(), <the leaf's n_live_tup from the leaf stats row>,
+        //                            PciReindexPolicy.installReference(dimension, <built anchors at that dimension>))
+        // FIRE adds a Reindex(idx.name(), null /* collection */, Trigger.LEAF_SIZE, idx.bytes()) candidate; UNANCHORED
+        // is what the status reports for the leaf; QUIET does nothing. Then swap PciLeafSizeRule.LEAF_SIZE_RATIO for
+        // PciReindexPolicy.LEAF_SIZE_RATIO. Pass.reindex/ownsForReindex take a PciCatalog.Index, and a leaf's own index
+        // is a PciCatalog.LeafIndex, so the guard needs the LeafIndex form too (the leaf's own index, never another).
         AnchorReads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
         // line stays DEBUG (one per leaf per pass is a lot of lines at 20,000 collections); the pass line is INFO.
@@ -1270,7 +1281,8 @@ public final class PciReconciler {
     }
 
     private void drop(PciBuilderSession.Pass pass, Leaf leaf, Drop drop, Tally tally) {
-        Index index = leaf.indexes().stream().filter(i -> i.name().equals(drop.name())).findFirst().orElse(null);
+        Index index = java.util.stream.Stream.concat(leaf.indexes().stream(), leaf.leafLeftovers().stream())
+            .filter(i -> i.name().equals(drop.name())).findFirst().orElse(null);
         if (index == null) {
             return;
         }

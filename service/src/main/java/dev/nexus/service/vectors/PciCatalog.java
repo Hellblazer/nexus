@@ -211,8 +211,13 @@ public final class PciCatalog {
      *                     never set on a valid index (the constructor refuses both)
      * @param comment      the index's PostgreSQL comment as the read saw it ({@code obj_description}), or {@code null}
      *                     when it has none; {@link #anchor()} parses it
+     * @param leafLeftoverOf the name of the leaf's own HNSW index ({@link LeafIndex#name()}) this index is a REINDEX
+     *                     CONCURRENTLY leftover of (RDR-230, nexus-4lnn1.1.10; see the class comment), else
+     *                     {@code null}; never set together with {@code collection} or {@code leftoverOf}, and never
+     *                     set on a valid index (the constructor refuses both)
      */
-    public record Index(String name, boolean valid, String collection, String leftoverOf, String comment) {
+    public record Index(String name, boolean valid, String collection, String leftoverOf, String comment,
+                        String leafLeftoverOf) {
         public Index {
             if (collection != null && leftoverOf != null) {
                 throw new IllegalArgumentException("an index is parsed or a leftover, not both: " + name);
@@ -222,16 +227,28 @@ public final class PciCatalog {
                 // here means no consumer, planner or executor, can ever be handed a valid index as a leftover.
                 throw new IllegalArgumentException("a valid index is never a REINDEX CONCURRENTLY leftover: " + name);
             }
+            if (leafLeftoverOf != null && (collection != null || leftoverOf != null)) {
+                throw new IllegalArgumentException("a leaf leftover is neither parsed nor a pci_ leftover: " + name);
+            }
+            if (valid && leafLeftoverOf != null) {
+                // The same invariant as above, for the leaf's own index: a leaf leftover is never valid.
+                throw new IllegalArgumentException("a valid index is never a leaf REINDEX leftover: " + name);
+            }
+        }
+
+        /** An index that is not a leaf leftover. */
+        public Index(String name, boolean valid, String collection, String leftoverOf, String comment) {
+            this(name, valid, collection, leftoverOf, comment, null);
         }
 
         /** An index with no comment. */
         public Index(String name, boolean valid, String collection, String leftoverOf) {
-            this(name, valid, collection, leftoverOf, null);
+            this(name, valid, collection, leftoverOf, null, null);
         }
 
         /** An index that is parsed or plain unparsed, not a leftover, with no comment. */
         public Index(String name, boolean valid, String collection) {
-            this(name, valid, collection, null, null);
+            this(name, valid, collection, null, null, null);
         }
 
         /** False for an unparsed index and for a leftover: no consumer may route to or build against it. */
@@ -244,9 +261,41 @@ public final class PciCatalog {
             return leftoverOf != null;
         }
 
+        /**
+         * True for a REINDEX CONCURRENTLY leftover of a leaf's own HNSW index, the second kind of non-parsed index the
+         * reconciler drops. It is never in {@link Leaf#indexes()}: it is in {@link Leaf#leafLeftovers()}.
+         */
+        public boolean leafLeftover() {
+            return leafLeftoverOf != null;
+        }
+
         /** The anchor in {@link #comment()}, or empty when there is none or it does not parse. */
         public Optional<Anchor> anchor() {
             return parseAnchor(comment);
+        }
+    }
+
+    /**
+     * A leaf's own HNSW index, as the read identifies it (RDR-230 Technical Design 3 and 4): access method
+     * {@code hnsw}, no predicate, and attached to the parent's partitioned HNSW index (the index of the same column on
+     * {@code nexus.chunks}, reached through the model partition's). Nothing else qualifies: not a {@code pci_} partial
+     * index, not an operator's unpredicated HNSW index that is not attached, not any other access method.
+     *
+     * <p>{@code nexus.chunks} has one HNSW index per embedding column ({@code embedding_384}, {@code embedding_768},
+     * {@code embedding_1024}), so a leaf has up to three. Only the one on the leaf's model's dimension holds its
+     * rows; {@link Leaf#hnswIndex(int)} picks it.
+     *
+     * @param name      the index name
+     * @param valid     {@code pg_index.indisvalid}
+     * @param bytes     {@code pg_relation_size} of the index at the read
+     * @param dimension the {@code n} of the key column {@code embedding_<n>}, or 0 when the key column is not of that form
+     */
+    public record LeafIndex(String name, boolean valid, long bytes, int dimension) {
+        public LeafIndex {
+            Objects.requireNonNull(name, "name");
+            if (bytes < 0 || dimension < 0) {
+                throw new IllegalArgumentException("bytes and dimension must not be negative");
+            }
         }
     }
 
@@ -258,8 +307,30 @@ public final class PciCatalog {
      * @param model   the embedding model of its model partition, or {@code null} when that bound did not parse
      * @param tenant  the leaf's tenant, or {@code null} when its own bound did not parse
      * @param indexes its {@code pci_} indexes, in name order; empty when it has none
+     * @param hnswIndexes its own HNSW indexes ({@link LeafIndex}), in name order; empty when the leaf has none, or when
+     *                    its model or tenant did not parse (a leaf the builder did not resolve has no identified index)
+     * @param leafLeftovers the REINDEX CONCURRENTLY leftovers of {@code hnswIndexes}: invalid HNSW indexes with no
+     *                    predicate named {@code <own index name>_cc(new|old)[0-9]*}, each an {@link Index} with
+     *                    {@link Index#leafLeftover()} true, in name order; they are NOT in {@code indexes}
      */
-    public record Leaf(String schema, String name, String model, String tenant, List<Index> indexes) { }
+    public record Leaf(String schema, String name, String model, String tenant, List<Index> indexes,
+                       List<LeafIndex> hnswIndexes, List<Index> leafLeftovers) {
+        public Leaf {
+            indexes = List.copyOf(indexes);
+            hnswIndexes = List.copyOf(hnswIndexes);
+            leafLeftovers = List.copyOf(leafLeftovers);
+        }
+
+        /** A leaf with no identified own index and no leaf leftover. */
+        public Leaf(String schema, String name, String model, String tenant, List<Index> indexes) {
+            this(schema, name, model, tenant, indexes, List.of(), List.of());
+        }
+
+        /** The leaf's own HNSW index on the embedding column of {@code dimension}, if the read identified one. */
+        public Optional<LeafIndex> hnswIndex(int dimension) {
+            return hnswIndexes.stream().filter(i -> i.dimension() == dimension).findFirst();
+        }
+    }
 
     record Key(String model, String tenant, String collection) { }
 
@@ -279,6 +350,7 @@ public final class PciCatalog {
         private final int invalidCount;
         private final int unparsedCount;
         private final int reindexLeftoverCount;
+        private final int leafLeftoverCount;
 
         Snapshot(List<Leaf> leaves) {
             this.leaves = List.copyOf(leaves);
@@ -288,7 +360,9 @@ public final class PciCatalog {
             int invalidIndexes = 0;
             int unparsedIndexes = 0;
             int leftoverIndexes = 0;
+            int leafLeftoverIndexes = 0;
             for (Leaf leaf : this.leaves) {
+                leafLeftoverIndexes += leaf.leafLeftovers().size();
                 for (Index index : leaf.indexes()) {
                     if (index.leftover()) {
                         leftoverIndexes++;
@@ -312,6 +386,7 @@ public final class PciCatalog {
             this.invalidCount = invalidIndexes;
             this.unparsedCount = unparsedIndexes;
             this.reindexLeftoverCount = leftoverIndexes;
+            this.leafLeftoverCount = leafLeftoverIndexes;
         }
 
         /**
@@ -387,6 +462,14 @@ public final class PciCatalog {
         public int reindexLeftoverCount() {
             return reindexLeftoverCount;
         }
+
+        /**
+         * Invalid {@code _ccnew}/{@code _ccold} leftovers of a leaf's own HNSW index (RDR-230,
+         * nexus-4lnn1.1.10); in no other count. Not yet on the status object.
+         */
+        public int leafLeftoverCount() {
+            return leafLeftoverCount;
+        }
     }
 
     private final DataSource dataSource;
@@ -450,6 +533,18 @@ public final class PciCatalog {
     /** Whether {@code name} has the shape REINDEX CONCURRENTLY gives a builder index's leftover. */
     static boolean isLeftoverName(String name) {
         return name != null && LEFTOVER_NAME.matcher(name).matches();
+    }
+
+    /**
+     * Whether {@code name} is what REINDEX CONCURRENTLY names the leftover of the leaf's own HNSW index {@code
+     * ownIndexName}: that name, quoted (never a generic pattern), plus {@code _ccnew} or {@code _ccold} and a collision
+     * counter. PostgreSQL clips the base name only when the result would pass 63 bytes; a leaf index name is
+     * {@code chunks_<8 hex>_t_<16 hex>_embedding_<n>_idx}, at most 54 bytes, so no leaf index is ever clipped. A
+     * {@code pci_} name never reaches this: {@link #isLeftoverName} decides those.
+     */
+    static boolean isLeafLeftoverName(String ownIndexName, String name) {
+        return ownIndexName != null && name != null
+            && name.matches(Pattern.quote(ownIndexName) + "_cc(?:new|old)[0-9]*");
     }
 
     /**
@@ -556,7 +651,10 @@ public final class PciCatalog {
         Field<String> leafBound = bound("l");
         Field<String> modelBound = bound("m");
 
-        // The pci_ indexes, as a derived table so that a leaf with none still comes back (LEFT JOIN below).
+        // The pci_ indexes and the leaf's own HNSW index candidates, as a derived table so that a leaf with none still
+        // comes back (LEFT JOIN below). A candidate is an unpredicated hnsw index that is attached to the parent's
+        // partitioned HNSW index (the leaf's own index, see LeafIndex) or is invalid (a leftover is unattached, and is
+        // matched to a leaf's own index by name in Java; an invalid unpredicated hnsw index is rare).
         Field<Object> indexTable = col("i", "indrelid");
         Field<String> indexName = col("ix", "relname", String.class);
         Field<Boolean> indexValid = col("i", "indisvalid", Boolean.class);
@@ -566,17 +664,29 @@ public final class PciCatalog {
         // The anchor (RDR-230) is the index's comment: obj_description reads pg_description and locks nothing.
         Field<String> indexComment = DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB,
             col("ix", "oid"), DSL.inline("pg_class"));
+        Field<Boolean> noPredicate = DSL.field(col("i", "indpred").isNull());
+        Field<Long> indexBytes = DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
+            col("ix", "oid"));
+        Field<String> indexKey = DSL.function(DSL.name("pg_catalog", "pg_get_indexdef"), SQLDataType.CLOB,
+            col("ix", "oid"), DSL.inline(1), DSL.inline(false));
+        Condition attached = attachedToChunksIndex();
         Table<?> pci = ctx.select(
                 indexTable.as("indrelid"),
                 indexName.as("index_name"),
                 indexValid.as("index_valid"),
                 indexPredicate.as("index_predicate"),
                 indexMethod.as("index_method"),
-                indexComment.as("index_comment"))
+                indexComment.as("index_comment"),
+                noPredicate.as("index_unpredicated"),
+                DSL.field(attached).as("index_attached"),
+                indexBytes.as("index_bytes"),
+                indexKey.as("index_key"))
             .from(catalog("pg_index", "i"))
             .join(catalog("pg_class", "ix")).on(col("ix", "oid").eq(col("i", "indexrelid")))
             .join(catalog("pg_am", "am")).on(col("am", "oid").eq(col("ix", "relam")))
-            .where(DSL.left(indexName, PREFIX.length()).eq(PREFIX))
+            .where(DSL.left(indexName, PREFIX.length()).eq(PREFIX)
+                .or(indexMethod.eq(ACCESS_METHOD).and(col("i", "indpred").isNull())
+                    .and(attached.or(indexValid.isFalse()))))
             .asTable("x");
         Field<Object> pciTable = pci.field("indrelid", Object.class);
         Field<String> pciName = pci.field("index_name", String.class);
@@ -584,6 +694,10 @@ public final class PciCatalog {
         Field<String> pciPredicate = pci.field("index_predicate", String.class);
         Field<String> pciMethod = pci.field("index_method", String.class);
         Field<String> pciComment = pci.field("index_comment", String.class);
+        Field<Boolean> pciUnpredicated = pci.field("index_unpredicated", Boolean.class);
+        Field<Boolean> pciAttached = pci.field("index_attached", Boolean.class);
+        Field<Long> pciBytes = pci.field("index_bytes", Long.class);
+        Field<String> pciKey = pci.field("index_key", String.class);
         // Read in the statement that deparses the predicates, so the two are of one instant.
         Field<String> stringsSetting = DSL.function("current_setting", SQLDataType.VARCHAR,
             DSL.inline("standard_conforming_strings")).as("scs");
@@ -602,7 +716,7 @@ public final class PciCatalog {
 
         Result<? extends Record> rows = ctx
             .select(leafSchemaName, leafName, leafBound, modelBound, pciName, pciValid, pciPredicate, pciMethod,
-                stringsSetting, pciComment)
+                stringsSetting, pciComment, pciUnpredicated, pciAttached, pciBytes, pciKey)
             .from(leaf)
             .join(leafSchema).on(col("ln", "oid").eq(col("l", "relnamespace")))
             .join(toModel).on(col("i1", "inhrelid").eq(leafOid))
@@ -623,7 +737,9 @@ public final class PciCatalog {
                     parseBoundValue(row.get(leafBound)).orElse(null)));
             if (row.get(pciName) != null) {
                 b.add(row.get(pciName), row.get(pciValid), row.get(pciPredicate), row.get(pciMethod),
-                    row.get(stringsSetting), row.get(pciComment));
+                    row.get(stringsSetting), row.get(pciComment), Boolean.TRUE.equals(row.get(pciUnpredicated)),
+                    Boolean.TRUE.equals(row.get(pciAttached)),
+                    row.get(pciBytes) == null ? 0L : row.get(pciBytes), row.get(pciKey));
             }
         }
         List<Leaf> out = new ArrayList<>(leaves.size());
@@ -639,6 +755,10 @@ public final class PciCatalog {
         private final String model;
         private final String tenant;
         private final List<Index> indexes = new ArrayList<>();
+        /** Unpredicated hnsw candidates that are not pci_ indexes, sorted out in {@link #build()}. */
+        private final List<Candidate> candidates = new ArrayList<>();
+
+        private record Candidate(String name, boolean valid, boolean attached, long bytes, String key) { }
 
         LeafBuilder(String schema, String name, String model, String tenant) {
             this.schema = schema;
@@ -648,11 +768,18 @@ public final class PciCatalog {
         }
 
         void add(String indexName, Boolean valid, String predicate, String method, String stringsSetting,
-                 String comment) {
+                 String comment, boolean unpredicated, boolean attached, long bytes, String key) {
+            boolean isValid = Boolean.TRUE.equals(valid);
+            if (!indexName.startsWith(PREFIX)) {
+                // Not a pci_ index: only an unpredicated hnsw index is of interest, as the leaf's own or its leftover.
+                if (unpredicated && ACCESS_METHOD.equals(method)) {
+                    candidates.add(new Candidate(indexName, isValid, attached, bytes, key));
+                }
+                return;
+            }
             // An index cannot be attributed to a (model, tenant) when either bound did not parse.
             String collection = attributedCollection(indexName, method, predicate,
                 model != null && tenant != null, stringsSetting).orElse(null);
-            boolean isValid = Boolean.TRUE.equals(valid);
             String leftoverOf = collection != null ? null
                 : leftoverCollection(indexName, method, predicate, model != null && tenant != null, stringsSetting,
                     isValid).orElse(null);
@@ -660,8 +787,64 @@ public final class PciCatalog {
         }
 
         Leaf build() {
-            return new Leaf(schema, name, model, tenant, List.copyOf(indexes));
+            List<LeafIndex> own = new ArrayList<>();
+            List<Index> leftovers = new ArrayList<>();
+            if (model != null && tenant != null) {
+                // The leaf's own indexes first: attached and unpredicated hnsw (the read's condition). A leftover is
+                // never attached, so an attached candidate is never read as one.
+                for (Candidate c : candidates) {
+                    if (c.attached()) {
+                        own.add(new LeafIndex(c.name(), c.valid(), c.bytes(), dimensionOf(c.key())));
+                    }
+                }
+                for (Candidate c : candidates) {
+                    if (c.attached() || c.valid()) {
+                        continue;
+                    }
+                    own.stream().map(LeafIndex::name).filter(base -> isLeafLeftoverName(base, c.name())).findFirst()
+                        .ifPresent(base -> leftovers.add(new Index(c.name(), false, null, null, null, base)));
+                }
+            }
+            return new Leaf(schema, name, model, tenant, List.copyOf(indexes), List.copyOf(own),
+                List.copyOf(leftovers));
         }
+    }
+
+    private static final Pattern EMBEDDING_COLUMN = Pattern.compile("^embedding_([0-9]{1,6})$");
+
+    /** The {@code n} of {@code embedding_<n>}, or 0 for any other key column text (or none). */
+    private static int dimensionOf(String keyColumn) {
+        if (keyColumn == null) {
+            return 0;
+        }
+        Matcher m = EMBEDDING_COLUMN.matcher(keyColumn);
+        return m.matches() ? Integer.parseInt(m.group(1)) : 0;
+    }
+
+    /**
+     * An index of {@code nexus.chunks}'s parents' own indexes, as a condition on the derived table's {@code i} and
+     * {@code ix} aliases: the index's parent in {@code pg_inherits} is itself a child of an index on a chunks parent.
+     * For this layout that is leaf index, then model partition index, then the parent's index; PostgreSQL attaches an
+     * index only under an index of its own table's parent, so no further check of the middle is needed.
+     */
+    private static Condition attachedToChunksIndex() {
+        Set<List<String>> parents = new LinkedHashSet<>();
+        for (DimTables.ChunkTable chunks : DimTables.CHUNKS.values()) {
+            parents.add(List.of(chunks.table().getSchema().getName(), chunks.table().getName()));
+        }
+        List<Condition> any = new ArrayList<>();
+        for (List<String> qualified : parents) {
+            any.add(col("atn", "nspname", String.class).eq(qualified.get(0))
+                .and(col("att", "relname", String.class).eq(qualified.get(1))));
+        }
+        return DSL.exists(DSL.select(DSL.inline(1))
+            .from(catalog("pg_inherits", "ah1"))
+            .join(catalog("pg_inherits", "ah2")).on(col("ah2", "inhrelid").eq(col("ah1", "inhparent")))
+            .join(catalog("pg_index", "at")).on(col("at", "indexrelid").eq(col("ah2", "inhparent")))
+            .join(catalog("pg_class", "att")).on(col("att", "oid").eq(col("at", "indrelid")))
+            .join(catalog("pg_namespace", "atn")).on(col("atn", "oid").eq(col("att", "relnamespace")))
+            .where(col("ah1", "inhrelid").eq(col("i", "indexrelid")))
+            .and(DSL.or(any)));
     }
 
     private static Table<?> catalog(String relation, String alias) {
