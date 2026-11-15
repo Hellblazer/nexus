@@ -6,22 +6,36 @@ the accept check. Scenarios run against a real tmp git repo whose gated commit
 is made unreachable the way a rebase before landing makes it."""
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.test_rdr_preamble import (  # noqa: F401 — rdr_env and _rdr_git_template are fixtures
+from tests.test_rdr_preamble import (  # noqa: F401 — _rdr_git_template is a fixture
     _ROUND_BODY,
     _assert_output,
     _git_commit_rdr,
     _preamble,
     _rdr_git_template,
     _use_t2,
-    rdr_env,
 )
 
 _RDR_REL = "docs/rdr/rdr-204-example.md"
+
+
+@pytest.fixture()
+def rdr_env(tmp_path: Path, monkeypatch, _rdr_git_template: Path):
+    """The test_rdr_preamble ``rdr_env`` without its live T2 database. These
+    tests are about the RDR file's blob and the gate record's shape, and every
+    record they read comes from the in-memory double ``_use_t2`` installs, so
+    they ask for no tenant (storage-touch ceiling, tests/storage_touch_ceiling.toml)."""
+    shutil.copytree(_rdr_git_template / ".git", tmp_path / ".git")
+    monkeypatch.chdir(tmp_path)
+    rdr_dir = tmp_path / "docs" / "rdr"
+    rdr_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: tmp_path / "t2.db")
+    return {"rdr_dir": rdr_dir, "repo_root": tmp_path}
 _THREE_RUNS = "dispatches: 3\nFIX CHECK: PASS\nFIX CHECK: PASS\nFIX CHECK: PASS\n"
 
 
@@ -58,7 +72,6 @@ def _blob_gate(commit: str, blob: str, *, fix_check: str | None = None, prior: s
     return out
 
 
-@pytest.mark.t2_tenant
 def test_gate_keyed_to_a_blob_survives_a_rebase(rdr_env, monkeypatch):
     """The text the gate judged is unchanged, the commit that carried it is
     gone: the re-gate block reports no change, the fix-check pointer naming
@@ -87,7 +100,6 @@ def test_gate_keyed_to_a_blob_survives_a_rebase(rdr_env, monkeypatch):
     assert (gate_value, note) == ("passed", None)
 
 
-@pytest.mark.t2_tenant
 def test_an_edit_after_the_blob_gate_is_detected_and_names_the_new_blob(rdr_env, monkeypatch):
     c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
     gated_blob = _blob_at_head(rdr_env)
@@ -106,7 +118,6 @@ def test_an_edit_after_the_blob_gate_is_detected_and_names_the_new_blob(rdr_env,
     assert "Fix commits:" in out and "fix" in out
 
 
-@pytest.mark.t2_tenant
 def test_blob_keyed_fix_commits_survive_a_gc_of_the_gated_commit(rdr_env, monkeypatch):
     """After gc the gated commit is gone; the listing walks the file's own
     history to the gated blob and never needed it."""
@@ -128,7 +139,6 @@ def test_blob_keyed_fix_commits_survive_a_gc_of_the_gated_commit(rdr_env, monkey
     assert "no longer resolves" not in out, out
 
 
-@pytest.mark.t2_tenant
 def test_a_blob_record_rejects_a_fix_check_naming_the_commit(rdr_env, monkeypatch):
     """With `blob:` on the record the pointer must name the blob; the commit
     is no longer the key."""
@@ -142,7 +152,6 @@ def test_a_blob_record_rejects_a_fix_check_naming_the_commit(rdr_env, monkeypatc
     assert "older tree" in (rdr_mod._gate_record_accept_defect(gate, "204-gate-latest") or "")
 
 
-@pytest.mark.t2_tenant
 def test_a_commit_only_record_still_reports_an_orphaned_commit(rdr_env, monkeypatch):
     """Records written before nexus-3jjkg carry no blob: and behave as they
     always did, including saying so when the gated commit is gone."""
@@ -154,7 +163,6 @@ def test_a_commit_only_record_still_reports_an_orphaned_commit(rdr_env, monkeypa
     assert "gated blob" not in out
 
 
-@pytest.mark.t2_tenant
 def test_rdr_fix_preamble_reads_the_blob_key(rdr_env, monkeypatch):
     c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
     gated_blob = _blob_at_head(rdr_env)
@@ -171,7 +179,6 @@ def test_rdr_fix_preamble_reads_the_blob_key(rdr_env, monkeypatch):
     )
 
 
-@pytest.mark.t2_tenant
 def test_the_verdict_block_writes_blob_and_keys_the_fix_check_and_history_line_to_it(rdr_env, monkeypatch):
     _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
     blob = _blob_at_head(rdr_env)
@@ -207,7 +214,6 @@ def _title_sha(out: str) -> str:
     return m.group(1)
 
 
-@pytest.mark.t2_tenant
 def test_a_commit_only_record_hands_off_to_a_blob_keyed_next_round(rdr_env, monkeypatch):
     """Review item 1: the gate record being re-gated has only `commit:`, so the
     re-gate preamble titled the fix check by the tip COMMIT while the verdict
@@ -238,7 +244,6 @@ def test_a_commit_only_record_hands_off_to_a_blob_keyed_next_round(rdr_env, monk
     assert rdr_mod._gate_outcome_for("204", "nexus") == ("passed", None)
 
 
-@pytest.mark.t2_tenant
 def test_rdr_fix_preamble_titles_a_commit_only_record_by_the_blob(rdr_env, monkeypatch):
     c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
     _git_commit_rdr(rdr_env, _ROUND_BODY + "\nfixed\n", "fix one")
@@ -249,7 +254,6 @@ def test_rdr_fix_preamble_titles_a_commit_only_record_by_the_blob(rdr_env, monke
     assert f"git diff {c1}..HEAD -- {_RDR_REL}" in out, out  # the prior key still picks the range
 
 
-@pytest.mark.t2_tenant
 def test_a_dirty_rdr_file_leaves_the_blob_unfilled_and_says_so(rdr_env, monkeypatch):
     """Review item 2: HEAD:<rel> is not what the critic read when the working
     file has uncommitted edits."""
@@ -271,7 +275,6 @@ def test_a_dirty_rdr_file_leaves_the_blob_unfilled_and_says_so(rdr_env, monkeypa
     assert "blob: <git rev-parse" in out, out
 
 
-@pytest.mark.t2_tenant
 def test_fix_commits_skip_the_rebased_copy_of_the_gated_commit_without_gc(rdr_env, monkeypatch):
     """Review item 4: before gc the old gated commit still resolves, and
     `<old commit>..HEAD` listed its rebased twin as a fix commit."""
@@ -289,7 +292,6 @@ def test_fix_commits_skip_the_rebased_copy_of_the_gated_commit_without_gc(rdr_en
     assert "rebased copy" not in listing and " gated" not in listing, listing
 
 
-@pytest.mark.t2_tenant
 def test_a_gated_blob_absent_from_the_files_history_is_said(rdr_env, monkeypatch):
     c1 = _git_commit_rdr(rdr_env, _ROUND_BODY, "gated")
     _git_commit_rdr(rdr_env, _ROUND_BODY + "\nmore\n", "fix")
