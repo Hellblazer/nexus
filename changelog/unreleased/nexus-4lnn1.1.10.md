@@ -6,8 +6,3 @@
 
 - **A leaf table's own HNSW index is reindexed too, and its REINDEX leftovers are dropped** (nexus-4lnn1.1.10, RDR-230 P2.3). Each leaf's own HNSW index (one per embedding column) gets the size rule at 1.5 times the install's reference for its dimension, read from the leaf's live row estimate; a dimension with no reference reports `unanchored` and the rule stays off. It shares the two-per-pass limit with the per-collection indexes, largest first. A REINDEX that fails or is cut off leaves an invalid `_ccnew`/`_ccold` copy of a leaf index, which the next pass drops through the same path as the per-collection leftovers (the lock timeout protects one still running).
 - **`GET /v1/admin/chunks-leaves` `canary_indexes[]`** (operator-only) gains `red_after_reindex` (boolean) and a `trigger` value `after_reindex`. [additive]
-
-### Changed
-
-- The reconciler recounts an index's rows when its size changed in a way that could change the size rule's verdict (bytes over the stale row count, an upper bound on bytes per row, reaches the trigger), so the size rule divides bytes by a count that is current whenever it matters, and ingest that cannot trigger it costs no count.
-- A red canary rebuilds an index only a day after its anchor (a build, an adoption or the last REINDEX), so a persistent red is not rebuilt on every engine restart or change of holder. A REINDEX whose fresh anchor could not be written is retried at the next pass and the index is not judged against its old anchor meanwhile. A bulk delete seen while an index is backed off stays owed. The REINDEX phase can no longer fail a pass.

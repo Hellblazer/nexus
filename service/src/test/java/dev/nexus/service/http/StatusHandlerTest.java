@@ -666,7 +666,7 @@ class StatusHandlerTest {
             java.time.Instant.parse("2026-11-14T08:00:00.900Z"), 3, 2);
         start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, status)));
 
-        String raw = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/status")).GET().build(),
+        String raw = http.send(dev.nexus.service.TestHttp.request(baseUrl + "/v1/status").GET().build(),
             HttpResponse.BodyHandlers.ofString()).body();
         JsonNode m = MAPPER.readTree(raw).at("/per_collection_indexes/this_engine/maintenance");
 

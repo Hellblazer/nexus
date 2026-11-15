@@ -1111,33 +1111,8 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("PciReconciler.AnchorReads.readings", PCI_OFF);
             notKeyed.put("PciReconciler.AnchorReads.adoptions", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
-            // nexus-4lnn1.1.10 (RDR-230 Phase 2): the REINDEX phase's per-index memory (previous counts, owed
-            // bulk deletes and anchors, the red-canary limit, backoff, counters) and the leaf-index catalog reads,
-            // per engine in memory, keyed by index or leaf names that carry a hash of the tenant, lost on restart
-            // like the failures map above.
-            for (String f : List.of(
-                "PciReconciler.reindexPhaseHook",
-                "PciReconciler.afterLeafReindexHook",
-                "PciReconciler.Tally.looks",
-                "PciLeafReindexRule.Scan.candidates",
-                "PciCatalog.Leaf.hnswIndexes",
-                "PciCatalog.Leaf.leafLeftovers",
-                "PciCatalog.LeafBuilder.candidates",
-                "PciBuilderSession.Pass.leafIds",
-                "PciReindexState.Look.readings",
-                "PciReindexState.previousRows",
-                "PciReindexState.bulkOwed",
-                "PciReindexState.lastRedReindex",
-                "PciReindexState.redAfterReindex",
-                "PciReindexState.failures",
-                "PciReindexState.anchorOwed",
-                "PciReindexState.reindexes",
-                "PciReindexState.reindexing",
-                "PciReindexState.lastReindexAt",
-                "PciReindexState.references"
-            )) {
-                notKeyed.put(f, PCI_OFF);
-            }
+            // nexus-4lnn1.1.10 (RDR-230 Phase 2): the REINDEX phase's in-memory fields; the list and why.
+            PciReindexNotKeyedFields.FIELDS.forEach(f -> notKeyed.put(f, PCI_OFF));
             // nexus-f3yqd.3: GET /v1/status's boot_work. The registry lists the heavy work this engine is doing
             // (an index build, by id), names no tenant, and a process-wide piece of work is not carried across a reset.
             notKeyed.put("BootWorkRegistry.entries", "the engine's heavy work in flight, by work id (pci-reconcile); "
