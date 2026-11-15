@@ -76,8 +76,9 @@ earlier attempt, RDR-110's bindings (a tuple encoding a trigger, an action
 and a surface), was scrapped with the RDR-110 to 119 arc, together with the
 engine-side reaction loop it shipped (`_BindingWatcher`, PR #787; postmortem
 `docs/postmortem/2026-05-16-rdr110-113-remediation-chain.md`). RDR-212 then
-excluded "bindings and any reaction loop" from the cockpit on purpose. A
-stage 2 design has to give reactions a form without rebuilding what was
+wrote "Excluded, deliberately: bindings and any reaction loop" (RDR-212,
+line 409). An aura is a reaction loop, so a stage 2 design narrows that
+exclusion; it has to give reactions a form without rebuilding what was
 scrapped.
 
 ## Relationship to Prior RDRs
@@ -91,7 +92,7 @@ scrapped.
 | RDR-213 channel push (amends RDR-211) | Hosts it | The channel waiter is the MCP server's one background task. It parks a wait over the session's subscriptions, and the engine announces each board post to a subscriber once (`nexus.tuple_deliveries`). Auras are evaluated on what the waiter receives. |
 | RDR-220 CI board | First consumer's source | `board/ci/<topic>` and its `--done` wake, with `kind`, `sha` and `outcome` dimensions. |
 | RDR-245 Structured asks on the threads board | Display target | The threads board entry (T2 project `threads`, one per session) is where a durable display lands. |
-| RDR-212 Cockpit surfaces | Constraint honoured | Its exclusion of bindings and any engine reaction loop stands. Auras are evaluated in the session's own MCP server, never in the engine. |
+| RDR-212 Cockpit surfaces | Exclusion narrowed on purpose (Sam, 2026-11-15: "Narrow it on purpose") | RDR-212 line 409: "Excluded, deliberately: bindings and any reaction loop". RDR-249 brings a reaction loop back in one form only: client-side, in the session's own MCP server, running a read-only sandboxed procedure whose only action is a display, off by default, never in the engine, with no new engine table, route or template field, and one consumer. Bindings stay excluded. |
 | RDR-110, RDR-111 (scrapped) | Lesson applied | No new engine table, route or template field; one consumer first. |
 
 ## Context
@@ -121,9 +122,6 @@ RDR-240 procedure rather than inline Lua.
   through `claude/channel`. The waiter runs whether or not Claude Code was
   launched with the channel enabled; without it, the notification is dropped
   by the client.
-- The plugin's mailbox drain hook (`conexus/hooks/scripts/mailbox_drain.py`)
-  runs on `UserPromptSubmit`, claims and shows mail. It is the floor for
-  mail when no channel is live; version 1 auras do not use it.
 - `nexus.lua_runtime.run_script` runs a library procedure in a `python -I`
   worker and returns its result or raises `ScriptError` with a kind.
 
@@ -170,8 +168,10 @@ checks for this draft, 2026-11-12, in the worktree at origin/develop.
 
 - **Assumed:** running a procedure per matching arrival costs a worker start
   (a `python -I` process), on the order of a few hundred milliseconds, which
-  is acceptable for posts that arrive minutes apart. To verify in Phase 2 by
-  measuring a fire on the CI consumer.
+  is acceptable for posts that arrive minutes apart. Worker start measured
+  at gate round 1: 318 ms first, 47-57 ms warm (T2
+  `nexus_rdr/249-gate-critique-2026-11-15-r1`). A whole fire is measured in
+  Phase 3 on the CI consumer.
 - **Decided (Sam, 2026-11-13):** each enabled session shows its own block.
   Several sessions subscribed to the same topic each run the aura and each
   write their own threads block; there is no lock tuple limiting an aura to
@@ -269,7 +269,11 @@ in the engine, and the procedure can still only read.
      block in your threads entry`. The aura name and the threads value come
      from the aura file, and the subspace and tuple id from the engine row,
      so nothing a tuple writer controls reaches the channel.
-   - Any other key, a missing key, or a type mismatch refuses the file.
+   - `[limits]` (optional) lowers RDR-242's limits for this aura's fires
+     (Technical Design 6); its keys are the limit names, and a value above
+     the default or an unknown name refuses the file.
+   - Any other key, a missing required key, or a type mismatch refuses the
+     file.
 
 2. **Checking.** `nx aura check [NAME]` parses every aura (or one), resolves
    its procedure through RDR-240's library, checks the argument mapping
@@ -291,8 +295,7 @@ in the engine, and the procedure can still only read.
      `~/.config/nexus/config.yml`.
    - `NX_AURAS_OFF` overrides the config: `all` turns every aura off, and a
      comma-separated list of names turns those off. It covers a CI job or
-     any other process that should run none (a `claude -p` child already
-     loads none, Technical Design 1).
+     any other process that should run none.
    - `nx aura list` shows each aura as on or off and the level that decided
      it (default, global config, repo config, env).
    - An aura's trigger subscription is aura-owned and is kept out of the
@@ -349,9 +352,14 @@ in the engine, and the procedure can still only read.
 
 An aura file keeps the declaration (when and where) apart from the logic
 (what), so one procedure can serve several auras and an accepted header
-format stays untouched. Evaluating in the session's own server keeps the
-scrapped engine reaction loop scrapped: an aura runs only while a session
-that enabled it is open, and only for that session. Display-only actions
+format stays untouched. RDR-249 narrows RDR-212's exclusion of "any
+reaction loop" on purpose (Sam, 2026-11-15), and the narrowing is what
+keeps clear of RDR-110's failure. RDR-110 shipped an engine-side loop
+(`_BindingWatcher`) together with its substrate and its consumers, across
+nine RDRs. An aura's loop runs in the session's own server, only while a
+session that turned it on is open, and only for that session; it reads
+through the sandbox and can only display; it adds nothing to the engine;
+and it ships with one consumer, off by default. Display-only actions
 follow from RDR-242's read-only version 1 rather than a separate decision.
 
 ## Alternatives Considered
@@ -371,7 +379,8 @@ Gap 2's cost. Not chosen (Sam, "c").
 ### Alternative 3: Engine-side evaluation
 
 Fires without an open session, but it is the `_BindingWatcher` pattern that
-was scrapped, and RDR-212 excludes it. Would need Sam to override RDR-212.
+was scrapped, and it is outside the narrowing of RDR-212 that this RDR makes
+(client-side only). Would need Sam to override RDR-212.
 
 ### Briefly Rejected
 
@@ -490,7 +499,7 @@ a picker in halcyon's session:
    its own block; no lock tuple.
 2. Default enablement: "ci_develop_red on in nexus". `ci_develop_red` is on
    in the nexus repo's `.nexus.yml`; every other aura is off everywhere.
-   Superseded 2026-11-15 by answer 5: `.nexus.yml` is gitignored, so it
+   Superseded 2026-11-15 by answers 5 and 6 (6 is in force): `.nexus.yml` is gitignored, so it
    could not ship (gate round 1, S1).
 3. Repo-root auras: "Confirm S5". They follow RDR-242 residual S5.
 
@@ -531,3 +540,4 @@ Gate round 1 raised two more, answered 2026-11-15:
 - 2026-11-15: Gate round 2 — BLOCKED (1 Critical, 1 Significant, 1 ship-blocker(s)); commit `0b769887e`; critique `nexus_rdr/249-gate-critique-2026-11-15-r2`.
 - 2026-11-15: Gate round 3 — PASSED (0 Critical, 1 Significant, 0 ship-blocker(s)); commit `8dec1a48b`; critique `nexus_rdr/249-gate-critique-2026-11-15-r3`.
 - 2026-11-15: Accepted (Sam). Residuals: S2 a122b329b (cut), S3 a122b329b, S4 a122b329b (fix check 249-fix-check-a122b329b); S6 to nexus-mdbds.10.1 (Phase 1 parser and loader); S-r3-1, S7, S8 to nexus-mdbds.11.1 (Phase 2 waiter evaluation); the fix checks' rows to .10.1, .10.2, .11.1 and .12.1 (plan: T2 nexus/plan-rdr-249-declarative-auras.md).
+- 2026-11-15: S6 (nexus-mdbds.10.1): RDR-212's exclusion of "any reaction loop" is narrowed on purpose, client-side only (Sam, by dialog in halcyon's session: "Narrow it on purpose"); counted fix-check wording observations folded in (drain-hook bullet, `[limits]` in Technical Design 1, Resolved Question 2's pointer, the measured worker start).
