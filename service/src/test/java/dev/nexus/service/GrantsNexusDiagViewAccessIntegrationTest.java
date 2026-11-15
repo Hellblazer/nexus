@@ -282,6 +282,18 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus", List.of("tuples")))
                 .as("nexus_diag may read only the tuples columns nx doctor's lock check reads")
                 .containsExactly(TUPLES_DIAG_COLUMNS);
+            // The two tuple-space tables -5 grants whole: every column is readable for every tenant,
+            // so a column added to either fails here until someone decides nexus_diag may read it.
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus",
+                    List.of("tuple_claim_log", "tuple_tenants")))
+                .as("the columns nexus_diag reads whole in tuple_claim_log and tuple_tenants carry no payload")
+                .containsExactly(
+                    "tuple_claim_log.at", "tuple_claim_log.claim_id", "tuple_claim_log.claimant",
+                    "tuple_claim_log.expires_at", "tuple_claim_log.log_id", "tuple_claim_log.subspace",
+                    "tuple_claim_log.template", "tuple_claim_log.tenant_id", "tuple_claim_log.transition",
+                    "tuple_claim_log.tuple_id",
+                    "tuple_tenants.first_seen", "tuple_tenants.last_seen", "tuple_tenants.last_swept_at",
+                    "tuple_tenants.tenant_id");
         }
     }
 

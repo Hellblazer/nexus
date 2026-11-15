@@ -508,7 +508,9 @@ $$;
             never a payload column (keys, dims, body), which it could
             otherwise read for every tenant. COUNT(*) needs SELECT on one
             column only, so a row count still works. tuple_claim_log and
-            tuple_tenants carry no payload and keep the table grant. No
+            tuple_tenants carry no payload and keep the table grant; a test
+            pins their column lists, so a column added to either fails it
+            until someone decides whether nexus_diag may read it. No
             REVOKE here: in the view era -2 revokes the table grant every
             boot before this runs, and in the legacy era -1's schema-wide
             grant applies anyway.
