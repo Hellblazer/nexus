@@ -73,6 +73,18 @@ final class PciReindexState {
     List<PciReindexPolicy.Candidate> candidates(List<Look> looks, Set<String> dropped, Set<String> snapshotIndexes,
                                                 Function<String, PciCanary.Result> canaryLatest, Instant now,
                                                 Map<String, Subject> subjects) {
+        return candidates(looks, dropped, snapshotIndexes, Set.of(), canaryLatest, now, subjects);
+    }
+
+    /**
+     * As above, and {@code justAnchored}: indexes whose owed anchor was written at the start of this pass. The looks
+     * were taken before that write and still carry the old anchor, which would fire the deletes rule once more, so
+     * they are no candidates until the next pass reads the new one.
+     */
+    List<PciReindexPolicy.Candidate> candidates(List<Look> looks, Set<String> dropped, Set<String> snapshotIndexes,
+                                                Set<String> justAnchored,
+                                                Function<String, PciCanary.Result> canaryLatest, Instant now,
+                                                Map<String, Subject> subjects) {
         Map<Integer, List<PciCatalog.Anchor>> anchorsByDimension = new TreeMap<>();
         List<Subject> read = new ArrayList<>();
         for (Look look : looks) {
@@ -102,7 +114,7 @@ final class PciReindexState {
             if (PciReindexPolicy.bulkFall(previousRows(name), reading.rows())) {
                 bulkOwed.add(name);
             }
-            if (anchorOwed.containsKey(name)) {
+            if (anchorOwed.containsKey(name) || justAnchored.contains(name)) {
                 // Its REINDEX finished and the fresh anchor is not written: the old anchor would re-fire the size and
                 // deletes rules every pass. Not a candidate until the anchor lands.
                 previousRows.put(name, reading.rows());

@@ -64,12 +64,14 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      * @param measuredAt      when the run ended
      * @param anchor          {@code built} or {@code adopted}, or null when the index carries no anchor this engine can
      *                        read
-     * @param sizeRatio       bytes per row now over bytes per row at the anchor; null for an adopted index (it is judged
+     * @param sizeRatio       bytes per row at the last row count over bytes per row at the anchor (a coherent pair: after
+     *                        ingest that needed no recount the size is newer than the count); null for an adopted index (it is judged
      *                        against the install's reference, which Phase 2 builds), without a reading, or at zero rows
      * @param deletesSinceBuild {@code max(0, anchor.rows + written_since - rows_now) / rows_now}, the estimate of RDR-230
      *                        Technical Design 3; null without a reading or at zero rows
      * @param redAfterReindex the last red-canary REINDEX of the index re-measured red, and neither a later green run nor a
-     *                        day has passed: the index is not rebuilt until one does (operator-only; never on the
+     *                        day has passed (a green run clears the flag; the 24 hour floor on the next red-canary
+     *                        REINDEX stands either way; operator-only; never on the
      *                        unauthenticated status route)
      */
     public record Entry(String index, String state, String reason, int queries, Double minRecall, Double meanRecall,
@@ -196,7 +198,8 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
         if (reading.rows() <= 0 || a.rows() <= 0 || a.bytes() <= 0) {
             return null;
         }
-        return ((double) reading.bytes() / reading.rows()) / ((double) a.bytes() / a.rows());
+        // The size and the row count as of the last COUNT: the fresh size over a stale count would overstate it.
+        return ((double) reading.countedBytes() / reading.rows()) / ((double) a.bytes() / a.rows());
     }
 
     private static Double deletesSinceBuild(PciReconciler.IndexReading reading) {

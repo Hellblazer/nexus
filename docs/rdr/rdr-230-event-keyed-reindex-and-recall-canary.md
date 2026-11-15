@@ -453,7 +453,9 @@ live as long as its index, which a comment already does.
 setting, same per-statement 30 s timeout):
 
 - the leaf's `pg_stat_user_tables` row: `n_tup_del`, `n_tup_upd`,
-  `n_tup_hot_upd`, `n_live_tup`, `last_autovacuum`, `last_vacuum`;
+  `n_tup_hot_upd`, `n_live_tup`, `last_autovacuum`, `last_vacuum` (the leaf size
+  rule's own row estimate, `max(n_live_tup, reltuples)`, is not taken here: the
+  REINDEX phase reads it, as the leaf paragraph of item 3 says);
 - for each `pci_` index, its anchor and `pg_relation_size`;
 - only when the leaf's deletes or non-HOT updates (`n_tup_upd - n_tup_hot_upd`)
   advanced since this engine last looked, or a stats reset moved them backward,
@@ -554,19 +556,23 @@ with no rebuild between), and at most once per index per 24 hours. The
 (`PciReindexPolicy.redCanary`: `now` must be at or after the anchor's `built_at`
 plus 24 hours), so the limit holds across a restart or a change of holder, and a
 persistent red is not rebuilt on every restart. If the re-measure is still red,
-the index is reported `red_after_reindex` and not rebuilt again until a later
-canary run is green or the 24 hours pass; the state is logged as
-`event=pci_red_after_reindex` and shown on `canary_indexes` (item 7). When
+the index is reported `red_after_reindex`, logged as
+`event=pci_red_after_reindex` and shown on `canary_indexes` (item 7). A later
+canary run that is green clears the flag but does not lift the 24-hour floor: the
+floor is read from the anchor, and holds whatever the canary reads, because a
+REINDEX of a graph under a day old rebuilds essentially the same graph. When
 several triggers fire for one index, the label is the first of bulk delete, red
 canary, deletes since build, size (`PciReindexPolicy.trigger`); a REINDEX that
 a red canary was behind keeps the red's 24-hour limit and `red_after_reindex`
-whatever its label (`PciReindexState.finished`'s `canaryWasRed`). A bulk delete
+whatever its label (`PciReindexState.finished`'s `canaryWasRed`), when that red
+met the ten-query floor. A bulk delete
 stays owed until its REINDEX has run or the index leaves the snapshot, even if
 the per-pass limit or a failure backoff defers it (`bulkOwed`). A REINDEX that
 finishes but whose fresh anchor is not written is owed its anchor: the pass
 retries the write first (`PciReindexPhase.retryOwedAnchors`), and the index is
-not a candidate until it lands, because the old anchor would fire the size and
-deletes rules again. The REINDEX phase never fails the pass (a runtime error is
+not a candidate until it lands, because the old anchor would fire the deletes
+rule again (the size rule would not: a fresh graph is no bigger per row than the
+old anchor's). The REINDEX phase never fails the pass (a runtime error is
 logged as `event=pci_reindex_phase_failed` and the rest of the pass still runs).
 Once the anchor is written, the size and deletes rules reset themselves, because
 it is a fresh one.
@@ -1059,8 +1065,10 @@ near-tie noise.
   one class.
 - **Risk**: the canary goes red because of ordinary approximation on far
   queries, and REINDEX loops. **Mitigation**: own-topic admission, the
-  ten-query floor, the once-per-24-hours limit and the `red_after_reindex` state, which ends the
-  loop and is itself the evidence that the cause is not graph age.
+  ten-query floor and the 24-hour floor from the anchor, which holds across a
+  restart and whatever the canary reads; `red_after_reindex` marks the case where a
+  REINDEX did not turn the red green, and is itself the evidence that the cause is
+  not graph age.
 - **Risk**: a leaf REINDEX on the managed instance takes long enough to matter
   (unmeasured; A4 measured the leaf state but not this). **Mitigation**: the Phase 2 fork rehearsal measures it; the
   builder runs it one at a time under the build's 6-hour statement timeout; the

@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -50,21 +51,39 @@ final class PciReindexPhase {
     /**
      * Retry every fresh anchor a finished REINDEX left unwritten, for the indexes the snapshot still lists: a count
      * timeout, the COMMENT's lock timeout or an ended pass can leave the old anchor in place, which would re-fire the
-     * size and deletes rules every pass. {@link PciReindexState#candidates} skips an owed index until this lands.
+     * deletes rule every pass (the size rule would not: a fresh graph is no bigger per row than the old anchor's).
+     * {@link PciReindexState#candidates} skips an owed index until this lands, and the pass whose retry lands.
+     *
+     * @return the names whose anchor was written now
      */
-    void retryOwedAnchors(PciBuilderSession.Pass pass, Set<String> snapshotIndexes) {
+    Set<String> retryOwedAnchors(PciBuilderSession.Pass pass, Set<String> snapshotIndexes) {
+        Set<String> written = new HashSet<>();
         for (Map.Entry<String, PciReindexState.Owed> e : state.owedAnchors().entrySet()) {
             if (!pass.live() || Thread.currentThread().isInterrupted()) {
-                return;
+                break;
             }
             PciReindexState.Owed owed = e.getValue();
             if (!snapshotIndexes.contains(e.getKey())) {
                 continue;   // gone: the state forgets it with the snapshot
             }
-            if (anchorer.write(pass, owed.leaf(), owed.dimension(), new Build(e.getKey(), owed.collection()), true)) {
+            if (writeAnchor(pass, owed.leaf(), owed.dimension(), new Build(e.getKey(), owed.collection()))) {
                 state.anchorWritten(e.getKey());
+                written.add(e.getKey());
                 log.info("event=pci_anchor_retried index={} leaf={}", e.getKey(), PciReconciler.leafId(owed.leaf()));
             }
+        }
+        return written;
+    }
+
+    /** The anchor write; a runtime failure (a pass that ended between the liveness check and the transaction) is "not written". */
+    private boolean writeAnchor(PciBuilderSession.Pass pass, Leaf leaf, int dimension, Build build) {
+        try {
+            return pass.live() && anchorer.write(pass, leaf, dimension, build, true);
+        } catch (RuntimeException e) {
+            log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=error error={} "
+                + "detail=\"the next pass retries it\"", build.name(), PciReconciler.leafId(leaf),
+                PciQueryRing.sanitize(e));
+            return false;
         }
     }
 
@@ -77,8 +96,11 @@ final class PciReindexPhase {
     boolean reindexOne(PciBuilderSession.Pass pass, PciReindexState.Subject subject, Reindex r) {
         Leaf leaf = subject.leaf();
         String name = r.name();
-        boolean wasRed = canary != null && canary.latest(name) != null
-            && canary.latest(name).state() == PciCanary.State.RED;
+        // Red counts only when it met the floor that makes a red actionable: a red on fewer queries is shown, and is
+        // neither a reason to REINDEX nor a reason to hold the 24 hour limit or red_after_reindex against the index.
+        PciCanary.Result latest = canary == null ? null : canary.latest(name);
+        boolean wasRed = latest != null && latest.state() == PciCanary.State.RED
+            && latest.queries() >= PciReindexPolicy.RED_CANARY_MIN_QUERIES;
         log.info("event=pci_reindex_started leaf={} index={} collection={} trigger={} bytes={}",
             PciReconciler.leafId(leaf), name, r.collection(), r.trigger().label(), r.bytes());
         state.running(name);
@@ -95,8 +117,7 @@ final class PciReindexPhase {
                     PciReconciler.leafId(leaf), name, r.collection(), r.trigger().label(), r.bytes());
                 // A fresh graph, a fresh anchor (built, rows and bytes now). One that is not written is retried at the
                 // start of the next pass, and the index is not judged against its old anchor meanwhile.
-                boolean anchored = pass.live()
-                    && anchorer.write(pass, leaf, subject.dimension(), new Build(name, r.collection()), true);
+                boolean anchored = writeAnchor(pass, leaf, subject.dimension(), new Build(name, r.collection()));
                 if (!anchored) {
                     state.anchorOwed(name, leaf, subject.dimension(), r.collection());
                 }
@@ -132,9 +153,10 @@ final class PciReindexPhase {
 
     /**
      * The canary again on the REINDEXed index, with a red run's own queries when there are some (the same in-memory
-     * queries, so before and after are comparable). When the canary was red at the start, whatever the trigger's label, a
-     * re-measure that is still red is {@code red_after_reindex}: reported, and not rebuilt until a later green run or a
-     * day.
+     * queries, so before and after are comparable). When the canary was red at the start (on at least ten queries),
+     * whatever the trigger's label, a re-measure that is still red is {@code red_after_reindex}: reported. A later green
+     * run clears that flag; it does not lift the 24 hour floor, which holds the index's next red-canary REINDEX
+     * whatever the canary reads (a REINDEX of a graph under a day old rebuilds essentially the same graph).
      */
     private void remeasure(Leaf leaf, String name, Reindex r, boolean wasRed) {
         if (canary == null) {
@@ -149,7 +171,7 @@ final class PciReindexPhase {
             if (wasRed && after.state() == PciCanary.State.RED) {
                 state.stillRed(name);
                 log.warn("event=pci_red_after_reindex leaf={} index={} collection={} queries={} detail=\"still red "
-                    + "after the REINDEX; not rebuilt until a green run or a day\"", PciReconciler.leafId(leaf), name,
+                    + "after the REINDEX; not rebuilt for a red canary for 24 hours\"", PciReconciler.leafId(leaf), name,
                     r.collection(), after.queries());
             }
         } catch (RuntimeException e) {

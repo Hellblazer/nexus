@@ -46,6 +46,26 @@ class PciMaintenanceStatusTest {
             writtenSince, T0);
     }
 
+    /**
+     * After ingest that needed no recount the index's size is newer than its row count. The operator's {@code size_ratio}
+     * is taken from the size and the rows of the same count: the fresh size over the stale count would overstate it.
+     */
+    @Test
+    void sizeRatio_isTakenFromTheSizeAndRowsOfTheLastCount_notFromAFreshSizeOverAStaleCount() {
+        var anchor = new PciCatalog.Anchor(T0, 1000, 8_000_000, PciCatalog.ORIGIN_BUILT);
+        // Counted at 1000 rows and 8,000,000 bytes; the index has since grown to 10,000,000 bytes with the rows uncounted.
+        var skipped = new PciReconciler.IndexReading(anchor, 10_000_000, 1000, 0, T0, 8_000_000);
+        var counted = new PciReconciler.IndexReading(anchor, 10_000_000, 1000, 0, T0);   // counted at 10,000,000
+
+        var fromTheLastCount = PciMaintenanceStatus.entry(result(1, State.GREEN, T0), skipped, Optional.empty());
+        var fresh = PciMaintenanceStatus.entry(result(1, State.GREEN, T0), counted, Optional.empty());
+
+        assertThat(fromTheLastCount.sizeRatio()).as("not the overstated 1.25").isCloseTo(1.0,
+            org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(fresh.sizeRatio()).as("a count taken now reads its own size").isCloseTo(1.25,
+            org.assertj.core.data.Offset.offset(1e-9));
+    }
+
     // -- test 5: an engine that never held the lock ---------------------------------------------------------
 
     @Test

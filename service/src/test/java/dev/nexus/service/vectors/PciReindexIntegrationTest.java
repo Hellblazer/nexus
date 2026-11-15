@@ -202,9 +202,13 @@ class PciReindexIntegrationTest {
     }
 
     PciReconciler reconciler(PciSettings s, Clock clock, ScriptedCanary canary) {
+        return reconciler(s, clock, canary, PciReconciler.SET_LOCAL_TENANT);
+    }
+
+    PciReconciler reconciler(PciSettings s, Clock clock, ScriptedCanary canary, PciReconciler.TenantBinder binder) {
         PciIndexSweep sweep = PciIndexSweep.create(svcDs, s);
         var builder = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, s);
-        return new PciReconciler(catalog::read, builder, sweep, s, clock, PciReconciler.SET_LOCAL_TENANT,
+        return new PciReconciler(catalog::read, builder, sweep, s, clock, binder,
             PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60), RandomGenerator.getDefault(), tenantsSeen -> 0,
             new PciCanarySchedule(canary, clock, System::nanoTime));
     }
@@ -723,7 +727,7 @@ class PciReindexIntegrationTest {
     }
 
     /**
-     * A REINDEX whose fresh anchor is not written leaves the old anchor, which would fire the size and deletes rules on
+     * A REINDEX whose fresh anchor is not written leaves the old anchor, which would fire the deletes rule on
      * every pass: the index is owed its anchor, is no candidate meanwhile, and the next pass retries the write.
      */
     @Test
@@ -769,5 +773,133 @@ class PciReindexIntegrationTest {
         }
         assertThat(writes[0]).as("one write at the REINDEX, two retries, none once written").isEqualTo(3);
         assertThat(logged("event=pci_anchor_retried")).isEqualTo(1);
+    }
+
+    // -- fix round 2 (confirmation of a4266b8e8): the owed anchor end to end, the guard, the red floor ------------------
+
+    /**
+     * A real anchor-write failure, not a fake: the tenant does not bind for the write that follows the REINDEX (the
+     * counting transaction reads it back and skips), so the index is left on its old anchor and owed a fresh one. The
+     * next pass writes it through the real {@code writeAnchor} (pci_anchor_retried), and the pass whose retry lands does
+     * not judge the index from the old anchor its looks still carry: the REINDEX count does not move.
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aRealAnchorWriteFailure_isRetriedByTheNextPass_andThatPassDoesNotReindexAgain() throws Exception {
+        String tenant = newTenant("owedreal");
+        String coll = name("owedreal");
+        List<String> rows = collection(tenant, coll, 300);
+        var failBind = new java.util.concurrent.atomic.AtomicBoolean();
+        PciReconciler.TenantBinder binder = (tx, t) -> {
+            if (!failBind.get()) {
+                PciReconciler.SET_LOCAL_TENANT.bind(tx, t);
+            }
+        };
+        var r = reconciler(ON, Clock.systemUTC(), new ScriptedCanary(), binder);
+        buildAndSettle(r);
+        PciCatalog.Anchor old = anchorOf(tenant, coll);
+        assertThat(old.rows()).isEqualTo(300);
+        deleteRows(tenant, coll, rows.subList(0, 80));
+        r.reindexPhaseHook = () -> failBind.set(true);   // after this pass's leaf counting, before the anchor write
+
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).isEqualTo(1);
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_anchor_not_written")
+            && l.contains("the next pass retries it"));
+        assertThat(anchorOf(tenant, coll)).as("still the old anchor").isEqualTo(old);
+
+        failBind.set(false);
+        r.reindexPhaseHook = null;
+        r.reconcileOnce();
+
+        assertThat(logged("event=pci_anchor_retried")).as("the retry went through the real write").isEqualTo(1);
+        assertThat(anchorOf(tenant, coll).rows()).as("the fresh anchor counts the rows now").isEqualTo(220);
+        assertThat(anchorOf(tenant, coll).builtAt()).isAfter(old.builtAt());
+        assertThat(r.reindexes()).as("the old anchor in this pass's looks fires nothing").isEqualTo(1);
+
+        r.reconcileOnce();
+        assertThat(r.reindexes()).as("and the fresh anchor judges it from here on").isEqualTo(1);
+    }
+
+    private PciReindexPhase.Anchorer never() {
+        return (pass, l, dim, build, afterReindex) -> {
+            throw new IllegalStateException("the builder pass is over: CONNECTION_LOST");
+        };
+    }
+
+    /** A pass that ended between the liveness check and the anchor's transaction throws: the index is owed, not lost. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void anAnchorWriteThatThrows_isOwed_andNeverEscapesThePhase() throws Exception {
+        String tenant = newTenant("owedthrow");
+        String coll = name("owedthrow");
+        collection(tenant, coll, 300);
+        var r = reconciler(ON, Clock.systemUTC(), new ScriptedCanary());
+        buildAndSettle(r);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.Index idx = leaf.indexes().stream().filter(i -> i.parsed() && i.valid()).findFirst().orElseThrow();
+        var state = new PciReindexState();
+        var phase = new PciReindexPhase(state, null, Clock.systemUTC(), never());
+        var reindex = new PciReconcilePlanner.Reindex(idx.name(), coll, PciReconcilePlanner.Trigger.DELETES_SINCE_BUILD,
+            1000);
+        var subject = new PciReindexState.Subject(leaf, 384, idx,
+            new PciReconciler.IndexReading(anchorOf(tenant, coll), 1000, 300, 0, Instant.now()));
+        var builder = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, ON);
+
+        try (PciBuilderSession.Pass pass = builder.open()) {
+            assertThat(phase.reindexOne(pass, subject, reindex)).as("the REINDEX finished").isTrue();
+            assertThat(state.owedAnchors()).as("owed, and nothing escaped").containsOnlyKeys(idx.name());
+            assertThat(phase.retryOwedAnchors(pass, java.util.Set.of(idx.name()))).as("a retry that throws is none")
+                .isEmpty();
+            assertThat(state.owedAnchors()).containsOnlyKeys(idx.name());
+        }
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_anchor_not_written") && l.contains("reason=error"));
+    }
+
+    /**
+     * A red that did not meet the ten-query floor is shown and triggers nothing; it also must not stamp the 24 hour limit
+     * or arm {@code red_after_reindex} against an index a different trigger rebuilt.
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aRedBelowTheTenQueryFloor_isNotCountedAsTheCanaryBeingRed_whenAnotherTriggerReindexes() throws Exception {
+        String tenant = newTenant("floor");
+        String coll = name("floor");
+        collection(tenant, coll, 300);
+        var r = reconciler(ON, Clock.systemUTC(), new ScriptedCanary());
+        buildAndSettle(r);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.Index idx = leaf.indexes().stream().filter(i -> i.parsed() && i.valid()).findFirst().orElseThrow();
+        var target = new PciCanary.Target(PciReconciler.leafId(leaf), tenant, M384, coll, idx.name());
+        var reading = new PciReconciler.IndexReading(anchorOf(tenant, coll), 1000, 300, 0, Instant.now());
+        var subject = new PciReindexState.Subject(leaf, 384, idx, reading);
+        var reindex = new PciReconcilePlanner.Reindex(idx.name(), coll, PciReconcilePlanner.Trigger.SIZE, 1000);
+        var builder = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, ON);
+
+        for (int queries : new int[] {9, 10}) {
+            var runner = new ScriptedCanary();
+            runner.state = State.RED;
+            runner.queries = queries;
+            var schedule = new PciCanarySchedule(runner, Clock.systemUTC(), System::nanoTime);
+            schedule.remeasure(target, null);   // the canary's latest result: red on `queries` queries
+            var state = new PciReindexState();
+            var phase = new PciReindexPhase(state, schedule, Clock.systemUTC(), (pass, l, dim, b, after) -> true);
+
+            try (PciBuilderSession.Pass pass = builder.open()) {
+                assertThat(phase.reindexOne(pass, subject, reindex)).isTrue();
+            }
+
+            var candidate = state.candidates(List.of(new PciReindexState.Look(leaf, 384, java.util.Map.of(idx.name(),
+                reading))), java.util.Set.of(), java.util.Set.of(idx.name()), n -> null, Instant.now(),
+                new java.util.HashMap<>()).get(0);
+            if (queries >= PciReindexPolicy.RED_CANARY_MIN_QUERIES) {
+                assertThat(candidate.lastRedReindexAt()).as("red on %d queries", queries).isNotNull();
+                assertThat(state.redAfterReindex(idx.name(), Instant.now())).isTrue();
+            } else {
+                assertThat(candidate.lastRedReindexAt()).as("red on %d queries", queries).isNull();
+                assertThat(state.redAfterReindex(idx.name(), Instant.now())).isFalse();
+            }
+        }
     }
 }

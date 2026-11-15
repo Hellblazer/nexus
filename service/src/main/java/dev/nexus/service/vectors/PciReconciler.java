@@ -256,8 +256,16 @@ public final class PciReconciler {
      * @param rows         the collection's uncapped row count at {@code countedAt}
      * @param writtenSince rows whose {@code last_written_at} is later than {@code anchor.builtAt()}, at {@code countedAt}
      * @param countedAt    when {@code rows} and {@code writtenSince} were taken, on this engine's clock
+     * @param countedBytes {@code pg_relation_size} when {@code rows} was counted: with {@code rows}, a coherent pair (after
+     *                     a skipped recount {@code bytes} is fresh and {@code rows} is not)
      */
-    record IndexReading(PciCatalog.Anchor anchor, long bytes, long rows, long writtenSince, Instant countedAt) { }
+    record IndexReading(PciCatalog.Anchor anchor, long bytes, long rows, long writtenSince, Instant countedAt,
+                        long countedBytes) {
+        /** A reading whose count was taken now, at {@code bytes}. */
+        IndexReading(PciCatalog.Anchor anchor, long bytes, long rows, long writtenSince, Instant countedAt) {
+            this(anchor, bytes, rows, writtenSince, countedAt, bytes);
+        }
+    }
 
     /** An index with no parseable anchor, and what to write on it. */
     private record Adoption(Index index, String reason, long rows, long bytes) { }
@@ -1028,7 +1036,7 @@ public final class PciReconciler {
                 read.put(index.name(), new IndexReading(anchor.get(), facts.bytes(), rows, written, now));
             } else {
                 read.put(index.name(), new IndexReading(anchor.get(), facts.bytes(), last.rows(),
-                    last.writtenSince(), last.countedAt()));
+                    last.writtenSince(), last.countedAt(), last.countedBytes()));
             }
         }
         return new AnchorReads(stats, read, adoptions);
@@ -1201,9 +1209,11 @@ public final class PciReconciler {
         for (Leaf leaf : snapshot.leaves()) {
             leaf.hnswIndexes().forEach(i -> snapshotIndexes.add(i.name()));
         }
-        phase.retryOwedAnchors(pass, snapshotIndexes);   // a fresh anchor a REINDEX could not write last pass
+        // A fresh anchor a REINDEX could not write last pass. This pass's looks still carry the OLD anchor, so an index
+        // whose write just landed is judged on the next pass, from its new one.
+        Set<String> justAnchored = phase.retryOwedAnchors(pass, snapshotIndexes);
         List<PciReindexPolicy.Candidate> candidates = reindex.candidates(tally.looks, tally.droppedIndexes,
-            snapshotIndexes, name -> canary == null ? null : canary.latest(name), now, subjects);
+            snapshotIndexes, justAnchored, name -> canary == null ? null : canary.latest(name), now, subjects);
         List<Reindex> triggered = withLeafSizeCandidates(pass, tally, PciReconcilePlanner.reindexes(candidates, now),
             now);
         for (Reindex r : triggered) {

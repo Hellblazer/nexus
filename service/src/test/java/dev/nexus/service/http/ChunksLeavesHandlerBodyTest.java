@@ -116,7 +116,7 @@ class ChunksLeavesHandlerBodyTest {
         assertThat(unmeasured.get("size_ratio").isNull()).isTrue();
     }
 
-    /** Operator-only (RDR-230 Phase 2): a red-canary REINDEX re-measured red, and the index waits for a green run or a day. */
+    /** Operator-only (RDR-230 Phase 2): a red-canary REINDEX re-measured red, and a green run or a day clears the flag (the 24 hour floor stands). */
     @Test
     void redAfterReindex_isABooleanOnTheEntry_falseUnlessTheReconcilerSaysSo() throws Exception {
         var plain = entry("pci_" + "d".repeat(24), "red", null, 10, 0.9, 0.95, 1, "after_reindex", "built", 1.0, 0.0);
