@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-249 Phase 2 Step 1 acceptance tests 1 to 8 and 11 (nexus-mdbds.11.1), on
-the real run path (the Lua worker, procedures in a repo root) and a real engine
-tenant's T2 threads project. The busy refusal (part of test 3) is exercised in
+the real run path (the Lua worker, procedures in a repo root). The threads
+project is held in memory: the end-to-end server-path test reaches it through
+t2_threads_io's own reader and writer over a T2-shaped context, the others
+through the same two functions directly. The module mints no tenant; the
+threads entry's engine round trip is plain memory.get_all and memory.put. The busy refusal (part of test 3) is exercised in
 test_runtime.py: four live workers held open to provoke it would make this file
 time-dependent. Test 9 is tests/hooks/test_stop_wake_guard_auras.py; test 10 is
 test_session_load.py."""
@@ -21,16 +24,13 @@ import pytest
 from nexus.auras import parse_aura
 from nexus.auras.runtime import AuraRuntime, channel_notice
 from nexus.auras.session import start_for_waiter
-from nexus.auras.threads_block import THREADS_PROJECT, ThreadsBlockWriter, t2_threads_io
-from nexus.commands._helpers import t2_handle
+from nexus.auras.threads_block import THREADS_PROJECT, ThreadsBlockWriter
 from nexus.db.t2.records import TupleRow
 from nexus.lua_runtime import library, supervisor
 from nexus.lua_runtime import run_script as real_run_script
 from nexus.mcp import channel
 from nexus.mcp.subscriptions import SubscriptionSet
 from tests.test_mcp_channel import _FakeSender, _FakeTupleStore, _fake_store_factory
-
-pytestmark = pytest.mark.t2_tenant
 
 _TOPIC = "board/ci/nexus-develop--done"
 _PROCS = {
@@ -83,23 +83,65 @@ def _counting_run(name, args=None, limits=None):
     return real_run_script(name, args, limits)
 
 
+def _no_store():
+    raise AssertionError("this test writes no threads entry")
+
+
 def _sid() -> str:
     return str(uuid.uuid4())
 
 
+def _entry_text(sid: str) -> str:
+    return f"session: {sid}\n\n## Work\nref: nexus-x\nstate: going\nwaiting_on: none\nneeds_sam: none\n"
+
+
+class _Threads:
+    """The threads project in memory: ``rows`` by title, read and written whole like T2's."""
+
+    rows: dict[str, dict] = {}
+
+    @classmethod
+    def read(cls) -> list[dict]:
+        return [dict(r) for r in cls.rows.values()]
+
+    @classmethod
+    def put(cls, title: str, content: str, tags: str) -> None:
+        cls.rows[title] = {"title": title, "content": content, "tags": tags}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_threads():
+    _Threads.rows = {}
+    yield
+
+
 def _seed_entry(title: str, sid: str) -> None:
-    with t2_handle() as db:
-        db.memory.put(
-            project=THREADS_PROJECT, title=title,
-            content=f"session: {sid}\n\n## Work\nref: nexus-x\nstate: going\nwaiting_on: none\nneeds_sam: none\n",
-            tags="",
-        )
+    _Threads.put(title, _entry_text(sid), "")
 
 
 def _entry(title: str) -> str:
-    with t2_handle() as db:
-        row = db.memory.get(project=THREADS_PROJECT, title=title)
-    return str(row["content"]) if row else ""
+    return str(_Threads.rows.get(title, {}).get("content", ""))
+
+
+class _MemoryDb:
+    """A T2 database with only the two memory calls t2_threads_io makes, over :class:`_Threads`."""
+
+    class memory:  # noqa: N801 -- the attribute name T2Database has
+        @staticmethod
+        def get_all(*, project: str) -> list[dict]:
+            assert project == THREADS_PROJECT
+            return _Threads.read()
+
+        @staticmethod
+        def put(*, project: str, title: str, content: str, tags: str) -> None:
+            assert project == THREADS_PROJECT
+            _Threads.put(title, content, tags)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
 
 
 def _row(tid: str, outcome: str = "failure", **dims: str) -> TupleRow:
@@ -112,7 +154,7 @@ def _row(tid: str, outcome: str = "failure", **dims: str) -> TupleRow:
 
 
 def _runtime(sid: str, procedure: str, notices: list[str] | None = None, *, sleep=None) -> AuraRuntime:
-    read, put = t2_threads_io(t2_handle)
+    read, put = _Threads.read, _Threads.put
     aura = parse_aura(_aura_text("red", procedure).encode(), name="red")
     return AuraRuntime(
         [aura], writer=ThreadsBlockWriter(sid, read_entries=read, put=put), run=_counting_run,
@@ -183,8 +225,7 @@ def test_5_no_entry_or_two_entries_write_nothing(repo: Path) -> None:
     rt.offer(_TOPIC, [_row("t1")])
     _settle(rt)
     assert _ran(before) == 1, "the fire ran; only the write was skipped"
-    with t2_handle() as db:
-        assert not [r for r in db.memory.get_all(project=THREADS_PROJECT) if sid in str(r.get("content", ""))]
+    assert _Threads.rows == {}
     one, two = f"a-{uuid.uuid4().hex[:8]}", f"b-{uuid.uuid4().hex[:8]}"
     _seed_entry(one, sid)
     _seed_entry(two, sid)
@@ -290,7 +331,7 @@ def test_6_and_glue_the_server_path_loads_fires_and_notifies(repo: Path, tmp_pat
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(sid, _fake_store_factory(fake), subs, sender=sender)
         monkeypatch.setattr("nexus.daemon.service_registry.pid_alive", lambda _p: True)
-        loader = start_for_waiter(waiter, subs, store_ctx=t2_handle, cwd=repo)
+        loader = start_for_waiter(waiter, subs, store_ctx=_MemoryDb, cwd=repo)
         loader.on_resolve("tamsin")
         if waiter.aura_sink is not None:
             waiter.aura_sink.__self__._run = _counting_run  # type: ignore[attr-defined]
@@ -340,7 +381,7 @@ def test_the_load_reads_the_git_top_levels_config_and_refuses_an_overlapping_cle
     async def scenario():
         subs = SubscriptionSet(session_id=sid)
         waiter = channel.ChannelWaiter(sid, _fake_store_factory(_FakeTupleStore()), subs, sender=_FakeSender())
-        loader = start_for_waiter(waiter, subs, store_ctx=t2_handle, cwd=sub)
+        loader = start_for_waiter(waiter, subs, store_ctx=_no_store, cwd=sub)  # nothing fires here
         loader.on_resolve("tamsin")
         return subs
 
