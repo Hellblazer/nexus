@@ -197,7 +197,7 @@ def test_list_json_carries_the_same_fields(shipped: Path) -> None:
     _td1(shipped)
     res = _run("list", "--json")
     assert res.exit_code == 0, res.output
-    [row] = json.loads(res.output)
+    [row] = json.loads(res.stdout)
     assert row["name"] == "ci_develop_red" and row["root"] == "shipped"
     assert row["trigger"] == {"subspace": "board/ci/nexus-develop--done", "match": {"kind": "sha", "outcome": "failure"}}
     assert (row["state"], row["level"]) == ("off", "default")
@@ -211,7 +211,7 @@ def test_list_shows_a_refused_file_with_its_refusal(shipped: Path) -> None:
     assert res.exit_code == 0, res.output
     row = next(ln for ln in res.output.splitlines() if ln.startswith("bad"))
     assert "refused" in row and "zzz" in row
-    [j] = json.loads(_run("list", "--json").output)
+    [j] = json.loads(_run("list", "--json").stdout)
     assert j["trigger"] is None and "zzz" in j["error"]
 
 

@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 import yaml
 
-from nexus.config import nexus_config_dir, per_repo_config_path
+from nexus import config as _config
 
 #: The environment switch that can only turn auras off (``all``, or a list of names).
 ENV_OFF: str = "NX_AURAS_OFF"
@@ -99,8 +99,8 @@ def resolve(
     Raises :class:`AuraConfigError` for a value that is not on or off.
     """
     environ = os.environ if env is None else env
-    global_path = nexus_config_dir() / "config.yml"
-    repo_path = per_repo_config_path(repo_root)
+    global_path = _config.nexus_config_dir() / "config.yml"
+    repo_path = _config.per_repo_config_path(repo_root)
     global_layer = _read_layer(global_path)
     repo_layer = _read_layer(repo_path)
     all_off, off_names = _env_off(environ)
@@ -135,7 +135,7 @@ def unknown_names(
     environ = os.environ if env is None else env
     names = set(known)
     out: list[tuple[str, str]] = []
-    for path in (nexus_config_dir() / "config.yml", per_repo_config_path(repo_root)):
+    for path in (_config.nexus_config_dir() / "config.yml", _config.per_repo_config_path(repo_root)):
         out += [(n, str(path)) for n in _read_layer(path) if n not in names]
     _, off_names = _env_off(environ)
     out += [(n, ENV_OFF) for n in sorted(off_names) if n != "all" and n not in names]
