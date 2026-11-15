@@ -370,7 +370,7 @@ class PciReindexIntegrationTest {
         assertThat(r.maintenance().reindexes()).isZero();
     }
 
-    /** Test 2, on the substrate: a third of the rows deleted is deletes-since-build; the REINDEX writes a fresh anchor. */
+    /** Test 2, on the substrate: a third of the rows deleted is deletes-since-build, even after a restart; the REINDEX writes a fresh anchor. */
     @Test
     @Timeout(value = 300, unit = TimeUnit.SECONDS)
     void aQuarterOfTheRowsDeleted_reindexesOnce_writesAFreshAnchor_andMeasuresTheCanaryAgain() throws Exception {
@@ -385,7 +385,10 @@ class PciReindexIntegrationTest {
         assertThat(r.maintenance().reindex()).isEqualTo("on");
         int measuredBefore = canary.triggers.size();
 
+        // A restart: the new engine has no previous count, so a bulk delete is not what it sees; the anchor still
+        // says a third of the rows it was built from are gone (deletes since build survives a restart).
         deleteRows(tenant, coll, rows.subList(0, 100));
+        r = reconciler(ON, Clock.systemUTC(), canary);
         r.reconcileOnce();
 
         assertThat(r.reindexes()).isEqualTo(1);

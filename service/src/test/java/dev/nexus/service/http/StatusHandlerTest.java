@@ -658,6 +658,26 @@ class StatusHandlerTest {
         assertThat(withoutIt).isEqualTo(without);
     }
 
+    /** RDR-230 Phase 2: the REINDEX half carries this engine's values; an in-flight index is not named on this route. */
+    @Test
+    void maintenance_reportsTheReindexHalf_andNeverNamesTheIndexInFlight() throws Exception {
+        var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
+        var status = PciMaintenanceStatus.of(List.of(), true, "pci_3f9c0a1b2c3d4e5f6a7b8c9d",
+            java.time.Instant.parse("2026-11-14T08:00:00.900Z"), 3, 2);
+        start(withPci(() -> pciWith(read(1, 0, 0, false), ddl, status)));
+
+        String raw = http.send(HttpRequest.newBuilder(URI.create(baseUrl + "/v1/status")).GET().build(),
+            HttpResponse.BodyHandlers.ofString()).body();
+        JsonNode m = MAPPER.readTree(raw).at("/per_collection_indexes/this_engine/maintenance");
+
+        assertThat(m.get("reindex").asText()).isEqualTo("on");
+        assertThat(m.get("reindexing").asText()).as("in flight, unnamed").isEqualTo("in_flight");
+        assertThat(m.get("last_reindex_at").asText()).isEqualTo("2026-11-14T08:00:00Z");
+        assertThat(m.get("reindexes").asInt()).isEqualTo(3);
+        assertThat(m.get("unanchored").asInt()).isEqualTo(2);
+        assertThat(raw).as("the route is unauthenticated: no pci_ name").doesNotContain("pci_3f9c");
+    }
+
     @Test
     void maintenance_hasExactlyTheDocumentedKeysInOrder_andReindexIsOffInPhase1() throws Exception {
         var ddl = new PciReconciler.DdlStatus(PciBuilderSession.BuilderState.OK, 0, 0, DDL_AT);
@@ -665,7 +685,9 @@ class StatusHandlerTest {
 
         JsonNode m = get().at("/per_collection_indexes/this_engine/maintenance");
 
-        assertThat(keys(m)).containsExactly("reindex", "reindexing", "last_reindex_at", "reindexes", "canary");
+        assertThat(keys(m)).containsExactly("reindex", "reindexing", "last_reindex_at", "reindexes", "unanchored",
+            "canary");
+        assertThat(m.get("unanchored").asInt()).isZero();
         assertThat(m.get("reindex").asText()).isEqualTo("off");
         assertThat(m.get("reindexing").isNull()).isTrue();
         assertThat(m.get("last_reindex_at").isNull()).isTrue();

@@ -141,6 +141,19 @@ final class PciCanary implements PciCanarySchedule.Runner {
                 target.collection(), describe(e));
             return unmeasured(target, trigger, ERROR, 0, "ring_read " + e.getClass().getSimpleName());
         }
+        return measure(target, trigger, queries);
+    }
+
+    /**
+     * Measure {@code target} again with exactly {@code queries}: a red run's sample, kept in memory, so a REINDEX's
+     * before and after are over the same queries (RDR-230 Technical Design 3). Never throws.
+     */
+    @Override
+    public Result remeasure(Target target, String trigger, List<float[]> queries) {
+        return measure(target, trigger, List.copyOf(queries));
+    }
+
+    private Result measure(Target target, String trigger, List<float[]> queries) {
         int n = queries.size();
         if (n < PciCanaryPolicy.MIN_QUERIES) {
             return unmeasured(target, trigger, NO_QUERIES, n, null);

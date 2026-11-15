@@ -1,0 +1,178 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.vectors;
+
+import dev.nexus.service.vectors.PciCatalog.Index;
+import dev.nexus.service.vectors.PciCatalog.Leaf;
+import dev.nexus.service.vectors.PciReconciler.IndexReading;
+import dev.nexus.service.vectors.PciReconcilePlanner.Trigger;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+
+/**
+ * What the REINDEX half of the reconciler remembers (RDR-230 Technical Design 3), and the assembly of its candidates.
+ * All of it is in memory, per engine, and lost on restart, like the build backoff it mirrors: the rules that need a
+ * previous value (bulk delete) have none after a boot and the rules that read the anchor (deletes since build, size) do
+ * not need one. Keyed by index name, which is unique install-wide ({@link PciCatalog#indexName} hashes the model, tenant
+ * and collection).
+ *
+ * <p>Held per index: the row count at the previous check (the bulk-delete rule), whether a bulk delete is still owed its
+ * REINDEX (the per-pass limit can defer one, and the next check would see no fall), when the last red-canary REINDEX
+ * finished (its once-a-day limit), whether its re-measure was still red ({@code red_after_reindex}), and the
+ * failure backoff, which is RDR-227's ({@link PciReconciler#retryDelay}). Held for the engine: the number of REINDEXes
+ * finished, when the last did, and the name of the one in flight.
+ *
+ * <p>Called from the reconciler's pass thread; the readers behind the status route ({@link #reindexes},
+ * {@link #lastReindexAt}, {@link #reindexing}) are safe from any thread.
+ */
+final class PciReindexState {
+
+    private record Failure(int consecutive, Instant nextRetryAt) { }
+
+    /** One leaf's look this pass: the readings its counting transaction took, by index name. */
+    record Look(Leaf leaf, int dimension, Map<String, IndexReading> readings) { }
+
+    /** An index a REINDEX may be run on, with what the executor needs to run it. */
+    record Subject(Leaf leaf, int dimension, Index index, IndexReading reading) { }
+
+    private final Map<String, Long> previousRows = new ConcurrentHashMap<>();
+    private final Set<String> bulkOwed = ConcurrentHashMap.newKeySet();
+    private final Map<String, Instant> lastRedReindex = new ConcurrentHashMap<>();
+    private final Set<String> redAfterReindex = ConcurrentHashMap.newKeySet();
+    private final Map<String, Failure> failures = new ConcurrentHashMap<>();
+    private final AtomicInteger reindexes = new AtomicInteger();
+    private final AtomicReference<String> reindexing = new AtomicReference<>();
+    private volatile Instant lastReindexAt;
+
+    /**
+     * The candidates of this pass: every valid parsed index the looks read an anchor for that the pass did not drop. The
+     * bookkeeping reads (previous count, owed bulk delete, last red REINDEX, backoff) are taken before this look's row
+     * count replaces the previous one. {@code subjects} receives each candidate's index by name, for the executor.
+     *
+     * @param snapshotIndexes every index name of the pass's catalog snapshot: the history of any other index is forgotten.
+     *                        A leaf the pass skipped (a count timeout) has no look, and keeps its history.
+     * @param canaryLatest the canary's latest result for an index name on this engine, or null
+     */
+    List<PciReindexPolicy.Candidate> candidates(List<Look> looks, Set<String> dropped, Set<String> snapshotIndexes,
+                                                Function<String, PciCanary.Result> canaryLatest, Instant now,
+                                                Map<String, Subject> subjects) {
+        Map<Integer, List<PciCatalog.Anchor>> anchorsByDimension = new TreeMap<>();
+        List<Subject> read = new ArrayList<>();
+        for (Look look : looks) {
+            for (Index index : look.leaf().indexes()) {
+                IndexReading reading = look.readings().get(index.name());
+                if (reading == null || !index.parsed() || !index.valid() || dropped.contains(index.name())) {
+                    continue;
+                }
+                read.add(new Subject(look.leaf(), look.dimension(), index, reading));
+                anchorsByDimension.computeIfAbsent(look.dimension(), d -> new ArrayList<>()).add(reading.anchor());
+            }
+        }
+        List<PciReindexPolicy.Candidate> out = new ArrayList<>();
+        for (Subject s : read) {
+            String name = s.index().name();
+            subjects.put(name, s);
+            PciCanary.Result result = canaryLatest.apply(name);
+            if (result != null && result.state() == PciCanary.State.GREEN) {
+                redAfterReindex.remove(name);   // a later green run ends red_after_reindex
+            }
+            IndexReading reading = s.reading();
+            out.add(new PciReindexPolicy.Candidate(name, s.index().collection(), s.dimension(), reading.anchor(),
+                reading.bytes(), reading.rows(),
+                reading.writtenSince(), previousRows(name), bulkOwed.contains(name),
+                result == null ? null : result.state(), result == null ? 0 : result.queries(),
+                lastRedReindex.get(name), backedOff(name, now),
+                PciReindexPolicy.installReference(s.dimension(), anchorsByDimension.get(s.dimension()))));
+            previousRows.put(name, reading.rows());
+        }
+        forgetAllBut(snapshotIndexes);
+        return out;
+    }
+
+    /** Forget every index not in the snapshot: a dropped or renamed index has no history to keep. */
+    private void forgetAllBut(Set<String> present) {
+        previousRows.keySet().retainAll(present);
+        bulkOwed.retainAll(present);
+        lastRedReindex.keySet().retainAll(present);
+        redAfterReindex.retainAll(present);
+        failures.keySet().retainAll(present);
+    }
+
+    OptionalLong previousRows(String index) {
+        Long v = previousRows.get(index);
+        return v == null ? OptionalLong.empty() : OptionalLong.of(v);
+    }
+
+    /** A bulk delete was chosen for {@code index}; it stays owed until its REINDEX has run. */
+    void bulkDeleteOwed(String index) {
+        bulkOwed.add(index);
+    }
+
+    boolean backedOff(String index, Instant now) {
+        Failure f = failures.get(index);
+        return f != null && f.nextRetryAt().isAfter(now);
+    }
+
+    /** A REINDEX of {@code index} failed: the RDR-227 build backoff, per index. Returns the consecutive failures. */
+    int failed(String index, Instant now) {
+        return failures.compute(index, (k, old) -> {
+            int n = old == null ? 1 : old.consecutive() + 1;
+            return new Failure(n, now.plus(PciReconciler.retryDelay(n)));
+        }).consecutive();
+    }
+
+    Instant nextRetryAt(String index) {
+        Failure f = failures.get(index);
+        return f == null ? null : f.nextRetryAt();
+    }
+
+    /** A REINDEX of {@code index} finished for {@code trigger}. */
+    void finished(String index, Trigger trigger, Instant now) {
+        failures.remove(index);
+        bulkOwed.remove(index);
+        if (trigger == Trigger.RED_CANARY) {
+            lastRedReindex.put(index, now);
+        }
+        reindexes.incrementAndGet();
+        lastReindexAt = now;
+    }
+
+    /** The re-measure after a red-canary REINDEX of {@code index} was still red. */
+    void stillRed(String index) {
+        redAfterReindex.add(index);
+    }
+
+    /** Whether the index's last red-canary REINDEX re-measured red, and neither a green run nor a day has passed. */
+    boolean redAfterReindex(String index, Instant now) {
+        Instant last = lastRedReindex.get(index);
+        return redAfterReindex.contains(index) && last != null
+            && now.isBefore(last.plus(PciReindexPolicy.RED_REINDEX_MIN_INTERVAL));
+    }
+
+    /** The index whose REINDEX is running now, or null. */
+    void running(String index) {
+        reindexing.set(index);
+    }
+
+    int reindexes() {
+        return reindexes.get();
+    }
+
+    Instant lastReindexAt() {
+        return lastReindexAt;
+    }
+
+    String reindexing() {
+        return reindexing.get();
+    }
+}

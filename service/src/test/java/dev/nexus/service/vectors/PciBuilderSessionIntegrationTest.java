@@ -846,4 +846,76 @@ class PciBuilderSessionIntegrationTest {
                 .isEqualTo(DdlOutcome.INACTIVE);
         }
     }
+
+    // -- RDR-230 Phase 2: REINDEX and VACUUM (nexus-4lnn1.1.10) ----------------------------------------------------
+
+    @Test
+    void reindex_refusesEveryIndexThatIsNotTheBuildersForThisLeaf_andSendsNothing() throws Exception {
+        String collection = collectionName("reindex-reject");
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        String operatorMade = "pci_foo_reindex";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createLeafHnswIndex(su, leaf.schema(), leaf.name(), operatorMade, "embedding_1024", "x");
+        }
+        PciCatalog.Index unparsed = indexOn(M1024, T1, operatorMade).orElseThrow();
+        String ownName = PciCatalog.indexName(M1024, T1, collection);
+
+        List<String> lines = captureLogs(ctx -> {
+            try (PciBuilderSession.Pass pass = adminSession().open()) {
+                assertThat(pass.reindex(leaf, unparsed)).as("an operator's index").isEqualTo(DdlOutcome.REJECTED);
+                assertThat(pass.reindex(leaf, new PciCatalog.Index(PciCatalog.indexName(M1024, T2, collection), true,
+                    collection))).as("another tenant's name").isEqualTo(DdlOutcome.REJECTED);
+                assertThat(pass.reindex(leaf, new PciCatalog.Index(ownName, false, collection)))
+                    .as("an index that is not valid").isEqualTo(DdlOutcome.REJECTED);
+                assertThat(pass.reindex(leaf, new PciCatalog.Index(ownName + "_ccnew", false, null, collection)))
+                    .as("a leftover").isEqualTo(DdlOutcome.REJECTED);
+                assertThat(pass.reindex(new PciCatalog.Leaf(leaf.schema(), leaf.name(), null, leaf.tenant(), List.of()),
+                    new PciCatalog.Index(ownName, true, collection))).as("a leaf whose model did not parse")
+                    .isEqualTo(DdlOutcome.REJECTED);
+                assertThat(pass.state()).as("a rejection is not a state change").isEqualTo(BuilderState.OK);
+            }
+            return null;
+        });
+        assertThat(count(lines, "event=pci_ddl_rejected op=reindex")).isEqualTo(5);
+        assertThat(count(lines, "pci_ddl_done op=reindex")).isZero();
+    }
+
+    @Test
+    void reindex_ofABuilderIndex_keepsItsNameAndValidity_withNoLockTimeout() throws Exception {
+        String collection = collectionName("reindex-ok");
+        String name = PciCatalog.indexName(M1024, T1, collection);
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+
+        try (PciBuilderSession.Pass pass = adminSession().open()) {
+            assertThat(pass.build(leaf, 1024, collection)).isEqualTo(DdlOutcome.DONE);
+            assertThat(pass.reindex(leaf, indexOn(M1024, T1, name).orElseThrow())).isEqualTo(DdlOutcome.DONE);
+            assertThat(pass.currentSetting("lock_timeout")).as("waits for older transactions, as a build does")
+                .isEqualTo("0");
+        }
+        assertThat(indexOn(M1024, T1, name)).get().satisfies(i -> {
+            assertThat(i.valid()).isTrue();
+            assertThat(i.collection()).isEqualTo(collection);
+        });
+        assertThat(leaf(M1024, T1).indexes()).filteredOn(PciCatalog.Index::leftover).isEmpty();
+    }
+
+    @Test
+    void vacuum_takesOnlyALeafOfThePassesSnapshot() throws Exception {
+        PciCatalog.Leaf leaf = leaf(M1024, T1);
+        var invented = new PciCatalog.Leaf("nexus", "chunks", M1024, T1, List.of());
+
+        List<String> lines = captureLogs(ctx -> {
+            try (PciBuilderSession.Pass pass = adminSession().open()) {
+                assertThat(pass.vacuum(leaf)).as("no snapshot given yet").isEqualTo(DdlOutcome.REJECTED);
+                pass.useSnapshot(catalog.read());
+                assertThat(pass.vacuum(invented)).as("the parent table is not a leaf of the snapshot")
+                    .isEqualTo(DdlOutcome.REJECTED);
+                assertThat(pass.vacuum(leaf)).isEqualTo(DdlOutcome.DONE);
+                assertThat(pass.currentSetting("lock_timeout")).isEqualTo("5s");
+            }
+            return null;
+        });
+        assertThat(count(lines, "event=pci_ddl_rejected op=vacuum")).isEqualTo(2);
+        assertThat(count(lines, "pci_ddl_done op=vacuum")).isEqualTo(1);
+    }
 }

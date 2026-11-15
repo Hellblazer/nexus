@@ -171,8 +171,13 @@ class PciReconcilerIntegrationTest {
 
     // -- fixtures ----------------------------------------------------------------------------------------
 
+    /**
+     * REINDEX is off in this class: its clock stands in the past, so every row the database stamped counts as written
+     * since an anchor's {@code built_at} and the deletes rule would fire in tests about something else. The REINDEX has
+     * its own class ({@code PciReindexIntegrationTest}), on a real clock.
+     */
     static PciSettings settings(int maxPerLeaf) {
-        return new PciSettings(true, B, 600, maxPerLeaf);
+        return new PciSettings(true, B, 600, maxPerLeaf, null, false);
     }
 
     static final class MutableClock extends Clock {
@@ -2494,12 +2499,17 @@ class PciReconcilerIntegrationTest {
         assertThat(r.reading(leaf, index).rows()).as("first look").isEqualTo(350);
         assertThat(r.reading(leaf, index).bytes()).isEqualTo(relationSize(leaf, index));
 
-        // Inserts alone move none of the figures that trigger a count.
+        // Inserts alone move none of the leaf's statistics that trigger a count, but they grow the index, and the REINDEX
+        // size rule divides the index's bytes by its rows (nexus-4lnn1.1.10): a size change recounts, so ingest is never
+        // read as a bigger index per row. An unchanged index is not recounted (below).
         clock.advance(Duration.ofHours(1));
+        r.reconcileOnce();
+        assertThat(r.reading(leaf, index).countedAt()).as("nothing changed: no recount").isEqualTo(t0);
         addRows(tenant, name("c"), 50);
         r.reconcileOnce();
-        assertThat(r.reading(leaf, index).rows()).as("nothing was deleted: no recount").isEqualTo(350);
-        assertThat(r.reading(leaf, index).countedAt()).isEqualTo(t0);
+        assertThat(r.reading(leaf, index).bytes()).isEqualTo(relationSize(leaf, index)).isGreaterThan(0);
+        assertThat(r.reading(leaf, index).rows()).as("the index grew: recounted").isEqualTo(400);
+        assertThat(r.reading(leaf, index).countedAt()).isEqualTo(t0.plus(Duration.ofHours(1)));
 
         // Deletes advance n_tup_del (the statistics reach the shared view a moment after the commit).
         long deletedBefore = statsOf(leaf).deleted();
@@ -2529,13 +2539,14 @@ class PciReconcilerIntegrationTest {
         assertThat(r.reading(leaf, index).rows()).as("stats moved backward").isEqualTo(395);
 
         // Nothing moved; a day does.
-        addRows(tenant, name("c"), 5);
+        Instant countedAt = r.reading(leaf, index).countedAt();
         clock.advance(Duration.ofHours(23));
         r.reconcileOnce();
-        assertThat(r.reading(leaf, index).rows()).as("23 hours: not yet").isEqualTo(395);
+        assertThat(r.reading(leaf, index).countedAt()).as("23 hours: not yet").isEqualTo(countedAt);
         clock.advance(Duration.ofHours(2));
         r.reconcileOnce();
-        assertThat(r.reading(leaf, index).rows()).as("past 24 hours").isEqualTo(400);
+        assertThat(r.reading(leaf, index).countedAt()).as("past 24 hours").isEqualTo(clock.instant());
+        assertThat(r.reading(leaf, index).rows()).isEqualTo(395);
     }
 
     @Test

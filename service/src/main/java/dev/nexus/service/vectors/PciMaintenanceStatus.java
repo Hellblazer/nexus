@@ -15,8 +15,8 @@ import java.util.Optional;
 /**
  * The {@code maintenance} object of {@code GET /v1/status} {@code per_collection_indexes.this_engine} (RDR-230
  * Technical Design 7, bead nexus-4lnn1.1.5), as the reconciler holds it: values in memory, so the route runs no catalog
- * query (RDR-227's rule). Phase 1 reports the canary half; the REINDEX half is fixed at {@code off}, no index in
- * flight, no reindex yet, because nothing reindexes until Phase 2.
+ * query (RDR-227's rule). The canary half is the canary's latest results; the REINDEX half is this engine's own counts
+ * (Phase 2, nexus-4lnn1.1.10): on or off, the index in flight, when the last finished, how many.
  *
  * <p><b>Who may read what.</b> {@code GET /v1/status} is unauthenticated, so by Sam's rulings of 2026-10-19 and
  * 2026-11-06 it renders the counts of {@link Canary} and nothing else: no {@code pci_} name and no per-index list. The
@@ -28,14 +28,15 @@ import java.util.Optional;
  * more worth a look than a green one), then green; newest {@code measured_at} first within a state, then index name.
  * The counts cover every result, not only the entries listed.
  *
- * @param reindex       {@code on} or {@code off}; {@code off} until Phase 2
- * @param reindexing    the index being reindexed on the holder, or null
+ * @param reindex       {@code on} or {@code off}: REINDEX and the post-delete VACUUM are enabled
+ * @param reindexing    the index being reindexed on the holder, or null. Held as the index name for the operator-only
+ *                      views; the unauthenticated {@code GET /v1/status} must not render it (see {@code StatusHandler})
  * @param lastReindexAt when this engine last finished a reindex, or null
  * @param reindexes     reindexes this engine has finished since boot
  * @param canary        the canary's counts and entries
  */
 public record PciMaintenanceStatus(String reindex, String reindexing, Instant lastReindexAt, int reindexes,
-                                   Canary canary) {
+                                   int unanchored, Canary canary) {
 
     /** The most entries the list carries. */
     public static final int MAX_ENTRIES = 64;
@@ -103,8 +104,23 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
         return BigDecimal.valueOf(value).setScale(scale, RoundingMode.HALF_UP);
     }
 
-    /** The Phase 1 status: the canary half over {@code entries} (any order, any number), the reindex half off. */
+    /** The canary half over {@code entries} (any order, any number), the reindex half off. */
     public static PciMaintenanceStatus phase1(List<Entry> entries) {
+        return of(entries, false, null, null, 0, 0);
+    }
+
+    /**
+     * The status over {@code entries} with the REINDEX half as this engine holds it.
+     *
+     * @param reindexOn      whether REINDEX and the post-delete VACUUM are enabled ({@code NX_SEARCH_PCI} and
+     *                       {@code NX_SEARCH_PCI_REINDEX})
+     * @param reindexing     the index in flight, or null
+     * @param lastReindexAt  when this engine last finished a REINDEX, or null
+     * @param reindexes      REINDEXes this engine has finished since boot
+     * @param unanchored     leaf indexes whose size rule is inactive for want of an install reference
+     */
+    public static PciMaintenanceStatus of(List<Entry> entries, boolean reindexOn, String reindexing,
+                                          Instant lastReindexAt, int reindexes, int unanchored) {
         int green = 0;
         int red = 0;
         int unmeasured = 0;
@@ -120,7 +136,8 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
             }
         }
         List<Entry> shown = entries.stream().sorted(ORDER).limit(MAX_ENTRIES).toList();
-        return new PciMaintenanceStatus("off", null, null, 0, new Canary(green, red, unmeasured, lastRun, shown));
+        return new PciMaintenanceStatus(reindexOn ? "on" : "off", reindexing, lastReindexAt, reindexes,
+            unanchored, new Canary(green, red, unmeasured, lastRun, shown));
     }
 
     private static int rank(String state) {

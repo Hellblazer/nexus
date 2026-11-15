@@ -328,7 +328,7 @@ def test_the_golden_off_body_passes_with_the_switch_note() -> None:
 # Sam's ruling of 2026-11-06 (ask pci-names-on-status): /v1/status is unauthenticated, so the canary there is counts
 # only; the per-index list is on the authenticated GET /v1/admin/chunks-leaves (key canary_indexes).
 
-_MAINTENANCE_KEYS = ["reindex", "reindexing", "last_reindex_at", "reindexes", "canary"]
+_MAINTENANCE_KEYS = ["reindex", "reindexing", "last_reindex_at", "reindexes", "unanchored", "canary"]
 _CANARY_KEYS = ["green", "red", "unmeasured", "last_run_at"]
 _WITH_MAINTENANCE = ("holder_with_canary", "standby_with_canary_history", "never_held_lock")
 
@@ -359,8 +359,9 @@ def test_the_golden_maintenance_object_has_the_documented_shape() -> None:
         m = _GOLDEN[name]["this_engine"]["maintenance"]
         assert list(m) == _MAINTENANCE_KEYS, name
         assert list(m["canary"]) == _CANARY_KEYS, name
-        # Phase 1: the reindex half is fixed.
-        assert (m["reindex"], m["reindexing"], m["last_reindex_at"], m["reindexes"]) == ("off", None, None, 0), name
+        # These golden bodies are of an engine with REINDEX off and nothing reindexed: the fixed values.
+        assert (m["reindex"], m["reindexing"], m["last_reindex_at"], m["reindexes"], m["unanchored"]) == (
+            "off", None, None, 0, 0), name
 
 
 def test_no_golden_status_body_carries_a_pci_name_or_a_per_index_list() -> None:
