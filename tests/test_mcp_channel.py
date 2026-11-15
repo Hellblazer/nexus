@@ -955,7 +955,7 @@ class TestChannelWaiterFakeStore:
             session_id, _fake_store_factory(fake), _subs(session_id), tick_error_backoff_s=0.01,
         )
         run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.3)
+        await _poll_until(lambda: len(fake.wait_calls) >= 2)
         assert waiter.status()["alive"] is True
         assert waiter._stopped is False  # noqa: SLF001
         assert len(fake.wait_calls) >= 2, "the loop must keep ticking through a refused wait"
@@ -973,7 +973,7 @@ class TestChannelWaiterFakeStore:
             session_id, _fake_store_factory(fake), _subs(session_id), tick_error_backoff_s=0.01,
         )
         run_task = asyncio.create_task(waiter.run())
-        await asyncio.sleep(0.3)
+        await _poll_until(lambda: len(fake.wait_calls) >= 2)
         assert waiter.status()["alive"] is True
         assert len(fake.wait_calls) >= 2
         run_task.cancel()
