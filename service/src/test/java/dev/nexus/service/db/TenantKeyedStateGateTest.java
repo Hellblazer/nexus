@@ -901,6 +901,7 @@ public class TenantKeyedStateGateTest {
                 "ChunksIsolationCheck.StructureReport.gaps",
                 "ChunksLeafAutovacuumCheck.Report.autovacuumDisabled",
                 "ChunksLeafAutovacuumCheck.Report.policyUnset",
+                "CombinedWriteService.ChunkSplit.relevant",
                 "CombinedWriteService.CombinedWriteResult.response",
                 "CombinedWriteService.MetadataMode.deleteKeys",
                 "CombinedWriteService.ResolvedBatch.mismatchedChashes",

@@ -6386,6 +6386,28 @@ public final class CatalogRepository {
     private static final List<DepartedWriterSpans.Gone> PRIOR_ROWS_UNREAD =
         Collections.unmodifiableList(new ArrayList<>());
 
+    /**
+     * nexus-z0o2p.29: refuse two rows at one position in one document's append. The append upserts by
+     * position, so the second row would replace the first after the chunk upsert had already inserted
+     * BOTH chashes, committing the first chunk with no row that lists it. {@code write_many} needs no
+     * such check: its PLAIN insert violates the primary key on a duplicate position and fails the whole
+     * document, chunks included, in its own transaction. Rows without an integer position are left to
+     * the insert, as before.
+     *
+     * @throws IllegalArgumentException naming the position (a bad request, mapped to 400 on the
+     *         single-document routes and to a per-document failure on {@code append_many})
+     */
+    static void requireDistinctPositions(List<Map<String, Object>> rows) {
+        Set<Integer> seen = new HashSet<>();
+        for (var row : rows) {
+            Integer position = i(row, "position");
+            if (position != null && !seen.add(position)) {
+                throw new IllegalArgumentException(
+                    "duplicate 'position' " + position + " in one document's rows: an append writes one row per position");
+            }
+        }
+    }
+
     /** Position to the lower-case hex chash {@code rows} write there (the last row of a position wins), nexus-pvkbv. */
     private static Map<Integer, String> chashesByPosition(List<Map<String, Object>> rows) {
         Map<Integer, String> out = new LinkedHashMap<>();
@@ -7976,6 +7998,8 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "'expected' is honoured by manifest/append_many only; this route would write the row unguarded");
         }
+        // nexus-z0o2p.29: before the transaction, so no chunk is written for a refused document.
+        requireDistinctPositions(rows);
         requireNonBlank(collection, "collection");
         int[] chunksWritten = new int[1];
         // nexus-wbfpw.66: this transaction runs under DeadlockRetry and is re-run from scratch
