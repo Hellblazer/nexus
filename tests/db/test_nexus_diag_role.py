@@ -444,6 +444,11 @@ def test_provisioning_column_grants_match_the_engine_changesets():
         assert re.search(rf"GRANT SELECT ON {re.escape(table)}\s+TO nexus_diag", xml), (
             f"provisioning grants {table} whole but the engine does not"
         )
+    engine_tuple_tables = set(re.findall(r"GRANT SELECT ON (nexus\.tuple_\w+)\s+TO nexus_diag", xml))
+    assert engine_tuple_tables, "the changelog grants no tuple-space table whole: the reverse pin checks nothing"
+    assert engine_tuple_tables <= set(DIAG_TABLE_GRANTS), (
+        f"the engine grants {sorted(engine_tuple_tables - set(DIAG_TABLE_GRANTS))} whole; provisioning does not"
+    )
 
 
 def test_view_era_grants_land_on_the_gc_audit_and_tuples_columns(diag_cluster):
@@ -455,7 +460,8 @@ def test_view_era_grants_land_on_the_gc_audit_and_tuples_columns(diag_cluster):
 
     su = diag_cluster["su"]
     if su("SELECT to_regclass('nexus.tuples') IS NOT NULL OR to_regclass('nexus.gc_audit') IS NOT NULL "
-          "OR to_regclass('nexus.tuple_claim_log') IS NOT NULL") == "t":
+          "OR to_regclass('nexus.tuple_claim_log') IS NOT NULL "
+          "OR to_regclass('nexus.tuple_tenants') IS NOT NULL") == "t":
         pytest.skip("this fixture's cluster already has an engine tuple-space or gc_audit table")
     had_view = su(
         "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
@@ -468,6 +474,8 @@ def test_view_era_grants_land_on_the_gc_audit_and_tuples_columns(diag_cluster):
         su("SET ROLE nexus_admin; CREATE TABLE nexus.tuple_claim_log (log_id bigint, tenant_id text, "
            "subspace text, template text, tuple_id bytea, claim_id text, claimant text, transition text, "
            "at timestamptz, expires_at timestamptz)")
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.tuple_tenants (tenant_id text, first_seen timestamptz, "
+           "last_seen timestamptz, last_swept_at timestamptz)")
         lock_sql = h._lock_claim_started_sql("lock/x", "claimant")
         before = diag_cluster["diag"](lock_sql)
         assert before.returncode != 0 and "permission denied" in before.stderr, (
@@ -494,6 +502,7 @@ def test_view_era_grants_land_on_the_gc_audit_and_tuples_columns(diag_cluster):
         assert su("SELECT has_table_privilege('nexus_diag', 'nexus.diag_chash_conformance', 'SELECT')") == "t"
         after = diag_cluster["diag"](lock_sql)
         assert after.returncode == 0, f"nx doctor's lock query as nexus_diag: {after.stderr}"
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.tuple_tenants', 'SELECT')") == "t"
 
         su("SET ROLE nexus_admin; ALTER TABLE nexus.gc_audit ADD COLUMN chashes jsonb")
         su(_diag_best_effort_grants_sql())
@@ -503,6 +512,7 @@ def test_view_era_grants_land_on_the_gc_audit_and_tuples_columns(diag_cluster):
     finally:
         su("DROP TABLE IF EXISTS nexus.tuples")
         su("DROP TABLE IF EXISTS nexus.tuple_claim_log")
+        su("DROP TABLE IF EXISTS nexus.tuple_tenants")
         su("DROP TABLE IF EXISTS nexus.gc_audit")
         if not had_view:
             su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")
