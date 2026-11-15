@@ -827,6 +827,44 @@ class PciReindexIntegrationTest {
         assertThat(r.reindexes()).as("and the fresh anchor judges it from here on").isEqualTo(1);
     }
 
+    /**
+     * The second COMMENT of a still-red REINDEX throws: the failure is its own event, never charged to the canary, and
+     * the REINDEX, its anchor and the pass stand (nexus-4lnn1.1.10).
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aRedMarkerThatThrows_isLoggedAsItsOwnEvent_andNotAsACanaryFailure() throws Exception {
+        String tenant = newTenant("redmarkfail");
+        String coll = name("redmarkfail");
+        collection(tenant, coll, 300);
+        var canary = new ScriptedCanary();
+        canary.state = State.RED;
+        var r = reconciler(ON, Clock.systemUTC(), canary);
+        buildAndSettle(r);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.Index idx = leaf.indexes().stream().filter(i -> i.parsed() && i.valid()).findFirst().orElseThrow();
+        var schedule = new PciCanarySchedule(canary, Clock.systemUTC(), System::nanoTime);
+        schedule.remeasure(new PciCanary.Target(PciReconciler.leafId(leaf), tenant, M384, coll, idx.name()), null);
+        var state = new PciReindexState();
+        var phase = new PciReindexPhase(state, schedule, Clock.systemUTC(), (pass, l, dim, build, after) -> true,
+            (pass, l, index, collection, at, queries) -> {
+                throw new IllegalStateException("the marker failed");
+            });
+        var reindex = new PciReconcilePlanner.Reindex(idx.name(), coll, PciReconcilePlanner.Trigger.RED_CANARY, 1000);
+        var subject = new PciReindexState.Subject(leaf, 384, idx,
+            new PciReconciler.IndexReading(anchorOf(tenant, coll), 1000, 300, 0, Instant.now()));
+        long canaryFailures = logged("event=pci_canary_failed");
+
+        try (PciBuilderSession.Pass pass = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, ON)
+            .open()) {
+            assertThat(phase.reindexOne(pass, subject, reindex)).as("the REINDEX finished").isTrue();
+        }
+
+        assertThat(logged("event=pci_red_unfixed_failed")).isEqualTo(1);
+        assertThat(logged("event=pci_canary_failed")).as("not charged to the canary").isEqualTo(canaryFailures);
+        assertThat(logged("event=pci_red_after_reindex")).as("the still-red re-measure was reported").isEqualTo(1);
+    }
+
     private PciReindexPhase.Anchorer never() {
         return (pass, l, dim, build, afterReindex) -> {
             throw new IllegalStateException("the builder pass is over: CONNECTION_LOST");

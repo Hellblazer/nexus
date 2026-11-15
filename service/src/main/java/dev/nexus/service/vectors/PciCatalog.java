@@ -239,30 +239,40 @@ public final class PciCatalog {
 
     /**
      * A red recall canary that a REINDEX did not cure (RDR-230 Phase 2, nexus-4lnn1.1.10), kept in the anchor:
-     * {@code "red_unfixed":{"at":"<ISO-8601 Z>","relfilenode":N,"rows":N,"queries":"<hex>"}}. The red-canary trigger skips
-     * an index while the field holds ({@link PciReindexPolicy#redUnfixedHolds}): the index has the relfilenode it names,
-     * the queries that read red are the ones it names, and the collection has not grown by 10% or more since. A rebuild,
-     * a new red query or that growth lifts it, with no write.
+     * {@code "red_unfixed":{"at":"<ISO-8601 Z>","relfilenode":N,"rows":N,"queries":["<16 hex>",...]}}. The red-canary
+     * trigger skips an index while the field holds ({@link PciReindexPolicy#redUnfixedHolds}): the index has the
+     * relfilenode it names, every query that reads red now is among the queries it lists, and the collection has not
+     * grown by 10% or more since. A rebuild, a red query it does not list or that growth lifts it, with no write; a red
+     * set that only shrinks (the oldest red query left the window) does not.
      *
      * @param at          when the still-red re-measure was taken, truncated to microseconds
      * @param relfilenode the index's relfilenode at the red: the REINDEX's fresh storage
      * @param rows        the collection's row count at the red (the count the REINDEX's fresh anchor holds)
-     * @param queries     {@link PciQueryRing#queryDigest} of the queries that read red in the re-measure
+     * @param queries     {@link PciQueryRing#queryIds} of the queries that read red in the re-measure: sorted, distinct,
+     *                    at most {@value #MAX_QUERIES} (the canary's window), never empty
      */
-    public record RedUnfixed(Instant at, long relfilenode, long rows, String queries) {
+    public record RedUnfixed(Instant at, long relfilenode, long rows, List<String> queries) {
+        /** The most queries a canary run has, so the most it can read red. */
+        public static final int MAX_QUERIES = 10;
+
         public RedUnfixed {
             Objects.requireNonNull(at, "at");
             Objects.requireNonNull(queries, "queries");
-            if (relfilenode < 0 || rows < 0 || queries.isBlank()) {
-                throw new IllegalArgumentException("relfilenode and rows must not be negative, queries not blank");
+            if (relfilenode < 0 || rows < 0 || queries.isEmpty() || queries.size() > MAX_QUERIES
+                || queries.stream().anyMatch(q -> q == null || q.length() != PciQueryRing.QUERY_ID_HEX
+                    || !q.chars().allMatch(c -> Character.digit(c, 16) >= 0 && !Character.isUpperCase(c)))) {
+                throw new IllegalArgumentException("relfilenode and rows must not be negative, queries 1 to "
+                    + MAX_QUERIES + " lower-case " + PciQueryRing.QUERY_ID_HEX + "-hex ids");
             }
             at = at.truncatedTo(ChronoUnit.MICROS);
+            queries = List.copyOf(new java.util.TreeSet<>(queries));
         }
 
-        /** The field's value as JSON: numbers, a timestamp and a hex string, so nothing needs escaping. */
+        /** The field's value as JSON: numbers, a timestamp and hex strings, so nothing needs escaping. */
         String toJson() {
             return "{\"at\":\"" + at + "\",\"relfilenode\":" + relfilenode + ",\"rows\":" + rows
-                + ",\"queries\":\"" + queries + "\"}";
+                + ",\"queries\":[" + queries.stream().map(q -> "\"" + q + "\"")
+                    .collect(java.util.stream.Collectors.joining(",")) + "]}";
         }
     }
 
@@ -316,11 +326,18 @@ public final class PciCatalog {
         try {
             if (at == null || !at.isTextual() || rf == null || !rf.isIntegralNumber() || !rf.canConvertToLong()
                 || rf.asLong() < 0 || rows == null || !rows.isIntegralNumber() || !rows.canConvertToLong()
-                || rows.asLong() < 0 || queries == null || !queries.isTextual() || queries.asText().isBlank()) {
+                || rows.asLong() < 0 || queries == null || !queries.isArray()) {
                 return null;
             }
-            return new RedUnfixed(Instant.parse(at.asText()), rf.asLong(), rows.asLong(), queries.asText());
-        } catch (DateTimeParseException e) {
+            List<String> ids = new ArrayList<>();
+            for (JsonNode q : queries) {
+                if (!q.isTextual()) {
+                    return null;
+                }
+                ids.add(q.asText());
+            }
+            return new RedUnfixed(Instant.parse(at.asText()), rf.asLong(), rows.asLong(), ids);
+        } catch (DateTimeParseException | IllegalArgumentException e) {
             return null;
         }
     }

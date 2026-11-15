@@ -40,7 +40,8 @@ final class PciReindexPhase {
     @FunctionalInterface
     interface RedMarker {
         /** @return whether the field is written */
-        boolean mark(PciBuilderSession.Pass pass, Leaf leaf, String index, String collection, Instant at, String queries);
+        boolean mark(PciBuilderSession.Pass pass, Leaf leaf, String index, String collection, Instant at,
+                     List<String> queries);
     }
 
     private final PciReindexState state;
@@ -166,21 +167,12 @@ final class PciReindexPhase {
         }
     }
 
-    /**
-     * The canary again on the REINDEXed index, with a red run's own queries when there are some (the same in-memory
-     * queries, so before and after are comparable). When the canary was red at the start (on at least ten queries),
-     * whatever the trigger's label, a re-measure that is still red is {@code red_after_reindex}: reported, and recorded in
-     * the index's anchor as {@code red_unfixed} (a second COMMENT, after the fresh anchor the REINDEX wrote), which stops
-     * the daily red-canary trigger while the index, the queries that read red and the collection's size stay as they
-     * were. A later green run clears the flag and the field; the 24 hour floor, which holds the index's next red-canary REINDEX whatever the canary reads (a
-     * REINDEX of a graph under a day old rebuilds essentially the same graph), is independent of both.
-     */
     /** The second COMMENT: its own failure is logged as its own event and never charged to the canary. */
     private void markRedUnfixed(PciBuilderSession.Pass pass, Leaf leaf, String name, Reindex r, PciCanary.Result after) {
         try {
             if (after.redQueries() != null && pass.live()) {
                 redMarker.mark(pass, leaf, name, r.collection(), clock.instant(),
-                    PciQueryRing.queryDigest(after.redQueries()));
+                    PciQueryRing.queryIds(after.redQueries()));
             }
         } catch (RuntimeException e) {
             log.warn("event=pci_red_unfixed_failed index={} leaf={} error={} detail=\"the REINDEX and its anchor stand; "
@@ -188,6 +180,16 @@ final class PciReindexPhase {
         }
     }
 
+    /**
+     * The canary again on the REINDEXed index, with a red run's own queries when there are some (the same in-memory
+     * queries, so before and after are comparable). When the canary was red at the start (on at least ten queries),
+     * whatever the trigger's label, a re-measure that is still red is {@code red_after_reindex}: reported, and recorded in
+     * the index's anchor as {@code red_unfixed} (a second COMMENT, after the fresh anchor the REINDEX wrote), which stops
+     * the daily red-canary trigger while the index, the queries that read red and the collection's size stay as they
+     * were. A later green run clears the flag and the field; the 24 hour floor, which holds the index's next red-canary
+     * REINDEX whatever the canary reads (a REINDEX of a graph under a day old rebuilds essentially the same graph), is
+     * independent of both.
+     */
     private void remeasure(PciBuilderSession.Pass pass, Leaf leaf, String name, Reindex r, boolean wasRed) {
         if (canary == null) {
             return;

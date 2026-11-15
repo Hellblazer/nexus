@@ -87,18 +87,21 @@ class PciReindexPolicyTest {
     // -- red_unfixed (nexus-4lnn1.1.10): a red a REINDEX did not cure stops the daily red-canary trigger ----------------
 
     private static final Instant NOW = Instant.parse("2026-11-20T00:00:00Z");
-    private static final String RED_SET = "aa";
+    private static final String A = "aaaaaaaaaaaaaaaa";
+    private static final String B = "bbbbbbbbbbbbbbbb";
+    private static final String C = "cccccccccccccccc";
+    private static final List<String> RED_SET = List.of(A, B);
 
     /** An anchor of 1,000 rows whose red_unfixed names {@code redRelfilenode}, 1,000 rows and {@code queries}. */
-    private static PciCatalog.Anchor unfixed(long relfilenode, long redRelfilenode, String queries) {
+    private static PciCatalog.Anchor unfixed(long relfilenode, long redRelfilenode, List<String> queries) {
         return new PciCatalog.Anchor(Instant.parse("2026-11-01T00:00:00Z"), 1000, 8_000_000, PciCatalog.ORIGIN_BUILT,
             relfilenode, new PciCatalog.RedUnfixed(Instant.parse("2026-11-01T01:00:00Z"), redRelfilenode, 1000, queries));
     }
 
     private static PciReindexPolicy.Candidate red(PciCatalog.Anchor anchor, long rows, long bytes, OptionalLong previous,
-                                                  String redDigest) {
+                                                  List<String> redQueries) {
         return new PciReindexPolicy.Candidate("pci_x", "c", 384, anchor, bytes, rows, 0, previous, false,
-            PciCanary.State.RED, 10, null, false, OptionalDouble.empty(), redDigest);
+            PciCanary.State.RED, 10, null, false, OptionalDouble.empty(), redQueries);
     }
 
     @Test
@@ -111,14 +114,24 @@ class PciReindexPolicyTest {
     }
 
     @Test
-    void aRebuildOrANewRedQuery_liftsRedUnfixed_withNoWrite() {
+    void aRedSetThatOnlyShrinks_keepsTheHold_becauseTheOldestRedQueryLeftTheWindow() {
+        // Recorded {A, B}; A was the oldest and left the window, so now only B reads red, on the same graph.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), List.of(B)),
+            NOW)).isEmpty();
+    }
+
+    @Test
+    void aRedQueryTheFieldDoesNotList_aRebuild_orNoRedQueries_liftTheHold() {
+        // A new red query C joins A: a new cause.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, List.of(A)), 1000, 8_000_000, OptionalLong.empty(),
+            List.of(A, C)), NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
         // The index has been rebuilt since: the anchor's relfilenode is not the one the field names.
         assertThat(PciReindexPolicy.trigger(red(unfixed(9, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), RED_SET),
             NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
-        // A different set of queries reads red now, or none is known.
-        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), "bb"),
-            NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        // No red query is known for the latest run: nothing shows the red is the recorded one.
         assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), null),
+            NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), List.of()),
             NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
     }
 

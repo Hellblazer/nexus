@@ -315,10 +315,11 @@ class PciCatalogTest {
     @Test
     void anchor_redUnfixed_isAnAdditiveOptionalField_thatRoundTrips_andTheOldRuleStillReadsIt() {
         var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
-        var red = new PciCatalog.RedUnfixed(java.time.Instant.parse("2026-10-21T09:30:00.123456Z"), 16421L, 58588L, "ab12");
+        var red = new PciCatalog.RedUnfixed(java.time.Instant.parse("2026-10-21T09:30:00.123456Z"), 16421L, 58588L,
+            java.util.List.of("89abcdef01234567", "0123456789abcdef"));
         var anchor = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L, red);
         String text = ANCHOR_WITH_RELFILENODE.replace("}", ",\"red_unfixed\":{\"at\":\"2026-10-21T09:30:00.123456Z\","
-            + "\"relfilenode\":16421,\"rows\":58588,\"queries\":\"ab12\"}}");
+            + "\"relfilenode\":16421,\"rows\":58588,\"queries\":[\"0123456789abcdef\",\"89abcdef01234567\"]}}");
 
         assertThat(anchor.toJson()).isEqualTo(text);
         assertThat(PciCatalog.parseAnchor(text)).contains(anchor);
@@ -327,27 +328,31 @@ class PciCatalogTest {
         assertThat(anchor.withRelfilenode(9L).redUnfixed()).as("carried forward by a rewrite").isEqualTo(red);
         assertThat(anchor.sameFigures(anchor.withoutRedUnfixed())).isTrue();
         for (String bad : new String[] {"1", "\"x\"", "{}",
-            "{\"at\":\"yesterday\",\"relfilenode\":1,\"rows\":1,\"queries\":\"a\"}",
-            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":-1,\"rows\":1,\"queries\":\"a\"}",
-            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"queries\":\"a\"}",
-            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":\"\"}"}) {
+            "{\"at\":\"yesterday\",\"relfilenode\":1,\"rows\":1,\"queries\":[\"0123456789abcdef\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":-1,\"rows\":1,\"queries\":[\"0123456789abcdef\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"queries\":[\"0123456789abcdef\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":[]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":\"0123456789abcdef\"}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":[\"short\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":[1]}"}) {
             assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("}", ",\"red_unfixed\":" + bad + "}")))
                 .as(bad).hasValueSatisfying(a -> assertThat(a.redUnfixed()).isNull());
         }
     }
 
     @Test
-    void queryDigest_isTheSameForTheSameQueriesInAnyOrder_andDifferentForADifferentSet() {
+    void queryIds_areSortedAndDistinct_andAQueryKeepsItsIdWhateverElseIsInTheSet() {
         var a = new float[] {1f, 2f, 3f};
         var b = new float[] {4f, 5f, 6f};
         var c = new float[] {7f, 8f, 9f};
+        var idA = PciQueryRing.queryIds(java.util.List.of(a)).get(0);
 
-        assertThat(PciQueryRing.queryDigest(java.util.List.of(a, b)))
-            .isEqualTo(PciQueryRing.queryDigest(java.util.List.of(b, a))).hasSize(64);
-        assertThat(PciQueryRing.queryDigest(java.util.List.of(a, b)))
-            .isNotEqualTo(PciQueryRing.queryDigest(java.util.List.of(a, c)));
-        assertThat(PciQueryRing.queryDigest(java.util.List.of(a)))
-            .isNotEqualTo(PciQueryRing.queryDigest(java.util.List.of(a, b)));
+        assertThat(idA).hasSize(PciQueryRing.QUERY_ID_HEX).matches("[0-9a-f]+");
+        assertThat(PciQueryRing.queryIds(java.util.List.of(a, b))).isEqualTo(PciQueryRing.queryIds(java.util.List.of(b, a)))
+            .isSorted().hasSize(2).contains(idA);
+        assertThat(PciQueryRing.queryIds(java.util.List.of(a, c, a))).as("distinct").hasSize(2).contains(idA);
+        assertThat(PciQueryRing.queryIds(java.util.List.of(a, b))).doesNotContainAnyElementsOf(
+            PciQueryRing.queryIds(java.util.List.of(c)));
     }
 
     @Test

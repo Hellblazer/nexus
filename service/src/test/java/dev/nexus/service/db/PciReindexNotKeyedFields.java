@@ -19,6 +19,8 @@ final class PciReindexNotKeyedFields {
         "PciLeafReindexRule.Scan.candidates",
         "PciLeafReindexRule.Scan.rebuilt",
         "PciLeafReindexRule.Scan.stamps",
+        "PciReindexPolicy.Candidate.redQueries",
+        "PciCatalog.RedUnfixed.queries",
         "PciCatalog.Leaf.hnswIndexes",
         "PciCatalog.Leaf.leafLeftovers",
         "PciCatalog.LeafBuilder.candidates",

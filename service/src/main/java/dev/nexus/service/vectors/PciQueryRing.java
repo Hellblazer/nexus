@@ -280,24 +280,20 @@ public final class PciQueryRing {
         }
     }
 
+    /** The length of a query's id in {@link #queryIds}: the first 8 bytes of its {@link #digest}, in hex. */
+    public static final int QUERY_ID_HEX = 16;
+
     /**
-     * The digest of a set of query vectors, order-free: the hex SHA-256 of the sorted {@link #digest}s, each as 64 hex
-     * digits, joined by newlines. The same queries give the same text; a different set gives a different one
-     * (nexus-4lnn1.1.10: a red canary that a REINDEX did not cure is held only while the queries that read red are the
-     * same).
+     * The ids of a set of query vectors, sorted and distinct: each is the first {@value #QUERY_ID_HEX} hex digits of the
+     * vector's {@link #digest}. A query keeps its id whatever else is in the set, which is what lets a red canary that a
+     * REINDEX did not cure be held while its red queries are still among the recorded ones (nexus-4lnn1.1.10).
      */
-    public static String queryDigest(java.util.Collection<float[]> vectors) {
-        java.util.List<String> digests = new java.util.ArrayList<>();
+    public static java.util.List<String> queryIds(java.util.Collection<float[]> vectors) {
+        java.util.TreeSet<String> ids = new java.util.TreeSet<>();
         for (float[] v : vectors) {
-            digests.add(java.util.HexFormat.of().formatHex(digest(v)));
+            ids.add(java.util.HexFormat.of().formatHex(digest(v)).substring(0, QUERY_ID_HEX));
         }
-        java.util.Collections.sort(digests);
-        try {
-            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                .digest(String.join("\n", digests).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is a required JDK algorithm", e);
-        }
+        return java.util.List.copyOf(ids);
     }
 
     /**

@@ -301,7 +301,7 @@ public final class PciReconciler {
     /** TEST SEAM: run after a leaf's own HNSW index is reindexed, before its anchor is written. */
     volatile Runnable afterLeafReindexHook;
 
-    /** The REINDEX half's memory, for tests that set its backoff. */
+    /** TEST SEAM: the REINDEX half's memory, for tests that set its backoff. */
     PciReindexState reindexState() {
         return reindex;
     }

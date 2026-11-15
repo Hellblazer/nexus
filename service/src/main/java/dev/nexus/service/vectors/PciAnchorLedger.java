@@ -176,12 +176,12 @@ final class PciAnchorLedger {
     /**
      * A red-canary REINDEX of {@code indexName} was re-measured still red: write its anchor again with
      * {@code red_unfixed} (the relfilenode of the fresh storage, the rows its fresh anchor counted, and {@code queries}, the
-     * digest of the queries that read red), a second COMMENT after the one the REINDEX wrote. Nothing is written when the engine holds no anchor for the index or the index was rebuilt since.
+     * ids of the queries that read red), a second COMMENT after the one the REINDEX wrote. Nothing is written when the engine holds no anchor for the index or the index was rebuilt since.
      *
      * @return whether the field was written
      */
     boolean markRedUnfixed(PciBuilderSession.Pass pass, Leaf leaf, String indexName, String collection, Instant at,
-                           String queries) {
+                           java.util.List<String> queries) {
         String id = PciReconciler.leafId(leaf);
         IndexReading r = readings.get(new Key(id, indexName));
         if (r == null || r.anchor().relfilenode() == null) {

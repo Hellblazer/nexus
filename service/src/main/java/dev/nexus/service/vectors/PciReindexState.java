@@ -127,7 +127,7 @@ final class PciReindexState {
                 lastRedReindex.get(name), backedOff(name, now),
                 PciReindexPolicy.installReference(s.dimension(), anchorsByDimension.get(s.dimension())),
                 result != null && result.state() == PciCanary.State.RED && result.redQueries() != null
-                    ? PciQueryRing.queryDigest(result.redQueries()) : null));
+                    ? PciQueryRing.queryIds(result.redQueries()) : null));
             previousRows.put(name, reading.rows());
         }
         forgetAllBut(snapshotIndexes);

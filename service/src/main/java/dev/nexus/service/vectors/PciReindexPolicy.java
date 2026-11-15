@@ -103,13 +103,13 @@ final class PciReindexPolicy {
      * @param lastRedReindexAt when the last red-canary REINDEX of the index finished, or null
      * @param backedOff      the index's REINDEX is in its failure backoff
      * @param reference      the install reference (bytes per row) for the index's dimension, for an adopted anchor
-     * @param redDigest      {@link PciQueryRing#queryDigest} of the queries that read red in the canary's latest run when
-     *                       it was red, or null: what a {@code red_unfixed} in the anchor is compared with
+     * @param redQueries     {@link PciQueryRing#queryIds} of the queries that read red in the canary's latest run when it
+     *                       was red, or null: what a {@code red_unfixed} in the anchor is compared with
      */
     record Candidate(String name, String collection, int dimension, PciCatalog.Anchor anchor, long bytes, long rows,
                      long writtenSince, OptionalLong previousRows, boolean bulkPending, PciCanary.State canary,
                      int canaryQueries, Instant lastRedReindexAt, boolean backedOff, OptionalDouble reference,
-                     String redDigest) {
+                     java.util.List<String> redQueries) {
         Candidate(String name, String collection, int dimension, PciCatalog.Anchor anchor, long bytes, long rows,
                   long writtenSince, OptionalLong previousRows, boolean bulkPending, PciCanary.State canary,
                   int canaryQueries, Instant lastRedReindexAt, boolean backedOff, OptionalDouble reference) {
@@ -171,7 +171,7 @@ final class PciReindexPolicy {
         }
         // A red that a REINDEX did not cure is not rebuilt again while the index and the red queries are the same ones:
         // the anchor says so, so a restart or a change of holder keeps it.
-        if (redUnfixedHolds(c.anchor(), c.redDigest(), c.rows())) {
+        if (redUnfixedHolds(c.anchor(), c.redQueries(), c.rows())) {
             return false;
         }
         return c.lastRedReindexAt() == null
@@ -183,17 +183,20 @@ final class PciReindexPolicy {
 
     /**
      * Whether the anchor's {@code red_unfixed} still holds, so the red-canary trigger skips the index: the index has the
-     * relfilenode the field names (which the anchor's own relfilenode is kept equal to by the rebuild check), the queries
-     * that read red in the canary's latest run are the ones it names ({@code redDigest}), and the collection's rows have
-     * not grown by {@value #RED_UNFIXED_GROWTH_PERCENT}% or more since. Growth is read from {@code rows}, the uncapped
-     * count the deletes rule also divides by ({@code PciReconciler}'s reading: retaken at least every 24 h, and sooner on a
-     * delete, an update or a size that could change a verdict), against the count recorded at the red. A rebuild, a new
-     * red query or that growth lifts it; a green run clears it.
+     * relfilenode the field names (which the anchor's own relfilenode is kept equal to by the rebuild check), every query
+     * that reads red in the canary's latest run ({@code redQueries}, never empty) is among the ones the field lists, and
+     * the collection's rows have not grown by {@value #RED_UNFIXED_GROWTH_PERCENT}% or more since. The window of the
+     * newest ten queries moves with every new search, so the red set can shrink (the oldest red query left it) while the
+     * graph is the same: that keeps the hold. A red query the field does not list is a new cause and lifts it.
+     * Growth is read from {@code rows}, the uncapped count the deletes rule also divides by ({@code PciReconciler}'s
+     * reading: retaken at least every 24 h, and sooner on a delete, an update or a size that could change a verdict),
+     * against the count recorded at the red. A rebuild, a new red query or that growth lifts it; a green run clears it.
      */
-    static boolean redUnfixedHolds(PciCatalog.Anchor anchor, String redDigest, long rows) {
+    static boolean redUnfixedHolds(PciCatalog.Anchor anchor, java.util.List<String> redQueries, long rows) {
         PciCatalog.RedUnfixed red = anchor.redUnfixed();
         return red != null && anchor.relfilenode() != null && anchor.relfilenode() == red.relfilenode()
-            && red.queries().equals(redDigest) && rows * 100 < red.rows() * (100 + RED_UNFIXED_GROWTH_PERCENT);
+            && redQueries != null && !redQueries.isEmpty() && red.queries().containsAll(redQueries)
+            && rows * 100 < red.rows() * (100 + RED_UNFIXED_GROWTH_PERCENT);
     }
 
     /** {@code max(0, anchor.rows + written_since - rows_now)} is at least {@link #DELETES_SINCE_BUILD_FRACTION} of the rows. */

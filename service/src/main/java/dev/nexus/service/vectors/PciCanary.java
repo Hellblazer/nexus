@@ -117,7 +117,11 @@ final class PciCanary implements PciCanarySchedule.Runner {
     record Result(Target target, String trigger, State state, String reason, int queries, Double minRecall,
                   Double meanRecall, int top1Misses, Instant at, List<float[]> redSample, String detail,
                   List<float[]> redQueries) {
-        /** A result whose red queries are all of its sample (a runner that does not tell them apart). */
+        /**
+         * TEST ONLY: a result whose red queries are all of its sample, for a scripted runner that does not tell them
+         * apart. A real runner must pass {@code redQueries} (the 12-argument form), as {@code PciCanary#verdict} does: the
+         * red-canary hold compares the queries that read red, not the window.
+         */
         Result(Target target, String trigger, State state, String reason, int queries, Double minRecall,
                Double meanRecall, int top1Misses, Instant at, List<float[]> redSample, String detail) {
             this(target, trigger, state, reason, queries, minRecall, meanRecall, top1Misses, at, redSample, detail,

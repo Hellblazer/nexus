@@ -600,7 +600,7 @@ class PciAnchorRebuildIntegrationTest {
         assertThat(anchor.redUnfixed()).isNotNull();
         assertThat(anchor.redUnfixed().relfilenode()).isEqualTo(Long.parseLong(facts.relfilenode()))
             .isEqualTo(anchor.relfilenode());
-        assertThat(anchor.redUnfixed().queries()).isEqualTo(PciQueryRing.queryDigest(canary.sample));
+        assertThat(anchor.redUnfixed().queries()).isEqualTo(PciQueryRing.queryIds(canary.sample));
         assertThat(anchor.redUnfixed().rows()).as("the count at the red, after the REINDEX").isEqualTo(300);
         assertThat(anchor.redUnfixed().at()).isEqualTo(clock.instant());
         assertThat(facts.comment()).contains("\"red_unfixed\":{");
@@ -623,7 +623,7 @@ class PciAnchorRebuildIntegrationTest {
         MutableClock clock = new MutableClock();
         ScriptedCanary canary = new ScriptedCanary();
         PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
-        String oldRed = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries();
+        List<String> oldRed = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries();
 
         canary.sample = List.of(new float[] {9f, 8f, 7f});
         clock.advance(Duration.ofHours(25));
@@ -633,7 +633,7 @@ class PciAnchorRebuildIntegrationTest {
 
         assertThat(r.reindexes()).as("a new ring can mean a new cause").isEqualTo(2);
         assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries())
-            .as("recorded again, for the new red queries").isEqualTo(PciQueryRing.queryDigest(canary.sample))
+            .as("recorded again, for the new red queries").isEqualTo(PciQueryRing.queryIds(canary.sample))
             .isNotEqualTo(oldRed);
     }
 
@@ -719,8 +719,8 @@ class PciAnchorRebuildIntegrationTest {
         canary.sample = window(10f, 11f);
         canary.reds = List.of(OUTLIER);
         PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
-        String held = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries();
-        assertThat(held).isEqualTo(PciQueryRing.queryDigest(List.of(OUTLIER)));
+        List<String> held = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries();
+        assertThat(held).isEqualTo(PciQueryRing.queryIds(List.of(OUTLIER)));
 
         for (int day = 0; day < 4; day++) {
             canary.sample = window(20f + day, 21f + day, 22f + day);   // the newest ten change; the outlier stays red
@@ -731,6 +731,32 @@ class PciAnchorRebuildIntegrationTest {
 
         assertThat(r.reindexes()).as("the same outlier is the same red").isEqualTo(1);
         assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries()).isEqualTo(held);
+    }
+
+    @Test
+    void aRedSetThatShrinks_asTheOldestRedQueryLeavesTheWindow_keepsTheHold() throws Exception {
+        String tenant = newTenant("shrink");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        float[] b = {5f, 5f, 5f};
+        canary.sample = window(5f, 10f);   // A (the outlier) is the oldest, B the next
+        canary.reds = List.of(OUTLIER, b);
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+        List<String> recorded = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries();
+        assertThat(recorded).isEqualTo(PciQueryRing.queryIds(List.of(OUTLIER, b)));
+
+        // A new green query enters the window and A is evicted: B alone reads red, on the same graph.
+        canary.sample = List.of(b, new float[] {10f, 10f, 10f}, new float[] {11f, 11f, 11f});
+        canary.reds = List.of(b);
+        for (int day = 0; day < 2; day++) {
+            clock.advance(Duration.ofHours(25));
+            r.reconcileOnce();
+            r.reconcileOnce();
+        }
+
+        assertThat(r.reindexes()).as("B is the same uncured red: no wasted REINDEX").isEqualTo(1);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries()).isEqualTo(recorded);
     }
 
     @Test
@@ -751,7 +777,7 @@ class PciAnchorRebuildIntegrationTest {
 
         assertThat(r.reindexes()).isEqualTo(2);
         assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().queries())
-            .isEqualTo(PciQueryRing.queryDigest(canary.reds));
+            .isEqualTo(PciQueryRing.queryIds(canary.reds));
     }
 
     @Test
