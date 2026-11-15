@@ -29,10 +29,17 @@ from ._support import TD1_EXAMPLE, minimal
 
 HEADER = "-- procedure: {name}\n-- summary: a procedure\n-- args: {args}\n-- grants: none\nreturn 1\n"
 
+# The shape of service/src/main/resources/tuples/templates/board-ci.yaml: its four dimensions and
+# the ten fields of its doc.body (the values here are placeholders; only the names are checked).
 BOARD_CI = {
     "name": "board/ci/<topic>",
     "dimensions": {"from": {"type": "string"}, "kind": {"type": "string"}, "sha": {}, "outcome": {}},
-    "doc": {"body": {"state": "queued", "sha": "40 hex", "url": "a url"}},
+    "doc": {
+        "body": {
+            name: "..."
+            for name in ("state", "conclusion", "workflow", "job", "sha", "run", "n", "runs", "attempt", "url")
+        }
+    },
 }
 BOARD = {"name": "board/<topic>", "dimensions": {"from": {"type": "string"}}}
 

@@ -65,7 +65,7 @@ class AuraEntry(NamedTuple):
     result: Aura | AuraError | LibraryError
 
 
-def enumerate_auras(*, cwd: Path | None) -> list[AuraEntry]:
+def enumerate_auras(*, cwd: Path | None, probe: library.ProbeArg = library.UNPROBED) -> list[AuraEntry]:
     """Every aura file of both roots, sorted by name, each parsed or refused, none dropped.
 
     Unlike :func:`list_auras`, a repo file that shadows a shipped aura and a file whose name
@@ -73,7 +73,7 @@ def enumerate_auras(*, cwd: Path | None) -> list[AuraEntry]:
     while ``NX_PROCEDURES_REPO_ROOT=1``.
     """
     out: list[AuraEntry] = []
-    for s in library.scan_files(cwd=cwd, suffix=AURA_SUFFIX, noun=_NOUN):
+    for s in library.scan_files(cwd=cwd, suffix=AURA_SUFFIX, noun=_NOUN, probe=probe):
         result: Aura | AuraError | LibraryError
         if isinstance(s.found, LibraryError):
             result = s.found

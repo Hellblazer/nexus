@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 import yaml
 
-from nexus.config import _per_repo_config_path, nexus_config_dir
+from nexus.config import nexus_config_dir, per_repo_config_path
 
 #: The environment switch that can only turn auras off (``all``, or a list of names).
 ENV_OFF: str = "NX_AURAS_OFF"
@@ -100,7 +100,7 @@ def resolve(
     """
     environ = os.environ if env is None else env
     global_path = nexus_config_dir() / "config.yml"
-    repo_path = _per_repo_config_path(repo_root)
+    repo_path = per_repo_config_path(repo_root)
     global_layer = _read_layer(global_path)
     repo_layer = _read_layer(repo_path)
     all_off, off_names = _env_off(environ)
@@ -120,3 +120,23 @@ def resolve(
 def is_enabled(name: str, *, repo_root: Path | None = None, env: Mapping[str, str] | None = None) -> bool:
     """Whether the aura *name* is on: :func:`resolve` for one name."""
     return resolve([name], repo_root=repo_root, env=env)[name].on
+
+
+def unknown_names(
+    known: Iterable[str], *, repo_root: Path | None = None, env: Mapping[str, str] | None = None
+) -> list[tuple[str, str]]:
+    """The configured names that match no aura of *known*, as ``(name, source)``.
+
+    A misspelled name fails open (an aura the user meant to turn off stays on), so a caller says
+    so: *source* is the config file's path or ``"NX_AURAS_OFF"``. The value ``all`` of
+    ``NX_AURAS_OFF`` is exact and lowercase, so ``ALL`` is reported as an unknown name. Order:
+    global config, repo config, env. Raises :class:`AuraConfigError` as :func:`resolve` does.
+    """
+    environ = os.environ if env is None else env
+    names = set(known)
+    out: list[tuple[str, str]] = []
+    for path in (nexus_config_dir() / "config.yml", per_repo_config_path(repo_root)):
+        out += [(n, str(path)) for n in _read_layer(path) if n not in names]
+    _, off_names = _env_off(environ)
+    out += [(n, ENV_OFF) for n in sorted(off_names) if n != "all" and n not in names]
+    return out

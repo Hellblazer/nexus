@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import click
 
@@ -23,10 +23,12 @@ from nexus.auras import (
     enumerate_auras,
     load_aura,
     resolve,
+    unknown_names,
 )
 from nexus.auras.check import check_auras
-from nexus.lua_runtime.header import RepoProbeError
-from nexus.lua_runtime.library import LibraryError
+from nexus.lua_runtime.header import RepoProbe, RepoProbeError, probe_repo
+from nexus.lua_runtime.library import REPO_ROOT_ENV, REPO_ROOT_PARTS, LibraryError, repo_root_enabled
+from nexus.auras.aura import AURA_SUFFIX
 
 
 def _cwd() -> Path | None:
@@ -60,11 +62,58 @@ def _fail(message: str) -> SystemExit:
     return SystemExit(1)
 
 
-def _entries() -> list[AuraEntry]:
+class _Scope(NamedTuple):
+    """Where this run is: the working directory, its repo probe, and the repo root that both the
+    aura files (``<root>/.nexus/procedures/``) and the per-repo config (``<root>/.nexus.yml``) are
+    read from. Computed once, so the two cannot diverge."""
+
+    cwd: Path | None
+    probe: RepoProbe | None
+    repo_root: Path | None
+
+
+def _scope() -> _Scope:
+    cwd = _cwd()
     try:
-        return enumerate_auras(cwd=_cwd())
+        probe = probe_repo(cwd)
+    except RepoProbeError as exc:
+        if repo_root_enabled():  # the library would refuse too: a shadow check must see the repo root
+            raise _fail(f"cannot tell where the repository is: {exc}") from exc
+        probe = None  # root off: only the config lookup needs a root, and falls back to its default
+    return _Scope(cwd, probe, probe.root if probe is not None else None)
+
+
+def _entries(scope: _Scope) -> list[AuraEntry]:
+    try:
+        return enumerate_auras(cwd=scope.cwd, probe=scope.probe)
     except RepoProbeError as exc:
         raise _fail(f"cannot tell where the repository is: {exc}") from exc
+
+
+def _unknown_name_warnings(entries: list[AuraEntry], scope: _Scope) -> None:
+    """One warning line per configured or env name that matches no aura (it would fail open)."""
+    try:
+        unknown = unknown_names([e.name for e in entries], repo_root=scope.repo_root)
+    except AuraConfigError as exc:
+        raise _fail(str(exc)) from exc
+    for name, source in unknown:
+        where = f"{source} names no aura: {name}" if source == "NX_AURAS_OFF" else f"{source}: auras.{name} names no aura"
+        click.echo(f"warning: {where}", err=True)
+
+
+def _unscanned_repo_files(scope: _Scope) -> int:
+    """How many ``*.aura.toml`` files sit in the repo root while its switch is off (0 when on)."""
+    if repo_root_enabled() or scope.probe is None:
+        return 0
+    root = scope.probe.root.joinpath(*REPO_ROOT_PARTS)
+    try:
+        return sum(1 for p in root.glob(f"*{AURA_SUFFIX}") if p.is_file()) if root.is_dir() else 0
+    except OSError:
+        return 0
+
+
+def _unscanned_note(count: int) -> str:
+    return f"repo root not scanned ({REPO_ROOT_ENV} unset): {count} aura file(s) not checked"
 
 
 @click.group(name="aura")
@@ -80,14 +129,21 @@ def check_cmd(name: str | None) -> None:
 
     The dictionary checks read the engine's registry. When it cannot be read they are skipped,
     and each skipped check is printed by name with the reason: a skipped check is never a pass.
-    Exits 1 when any aura is refused.
+    While NX_PROCEDURES_REPO_ROOT is off the repo's own aura files are not checked, and one line
+    says how many (counted as a skip). A configured or NX_AURAS_OFF name that matches no aura is
+    warned about on standard error. Exits 1 when any aura is refused.
     """
-    entries = _entries()
+    scope = _scope()
+    entries = _entries(scope)
+    _unknown_name_warnings(entries, scope)
+    unscanned = _unscanned_repo_files(scope)
+    if unscanned:
+        click.echo(_unscanned_note(unscanned))
     selected = [e for e in entries if name is None or e.name == name]
     if name is not None and not selected:
         reason = "no aura file of that name in a root that is on"
         try:
-            load_aura(name, cwd=_cwd())
+            load_aura(name, cwd=scope.cwd, probe=scope.probe)
         except LibraryError as exc:
             reason = f"{exc.reason}: {exc.detail}"
         except (AuraError, RepoProbeError) as exc:
@@ -101,7 +157,9 @@ def check_cmd(name: str | None) -> None:
     if any(isinstance(e.result, Aura) for e in selected):
         templates, why = _templates()
     try:
-        results = check_auras(entries, cwd=_cwd(), templates=templates, unavailable=why, only=name)
+        results = check_auras(
+            entries, cwd=scope.cwd, templates=templates, unavailable=why, only=name, probe=scope.probe
+        )
     except RepoProbeError as exc:
         raise _fail(f"cannot tell where the repository is: {exc}") from exc
     refused = 0
@@ -116,7 +174,7 @@ def check_cmd(name: str | None) -> None:
             click.echo(f"  {f.check} {f.key}: {f.detail}")
         for s in c.skipped:
             click.echo(f"  skipped {s.check}: {s.reason}")
-    skipped_total = sum(1 for c in results if c.skipped)
+    skipped_total = sum(1 for c in results if c.skipped) + (1 if unscanned else 0)
     click.echo(f"{len(results)} checked, {refused} refused, {skipped_total} with skipped checks.")
     if refused:
         raise SystemExit(1)
@@ -131,12 +189,19 @@ def _match_text(match: tuple[tuple[str, str], ...]) -> str:
 def list_cmd(json_out: bool) -> None:
     """List every aura file: name, summary, trigger, on or off, and the level that decided
     (default, global config, repo config or env). Auras are off by default; NX_AURAS_OFF only
-    turns them off. A file that breaks the grammar is listed with its refusal."""
-    entries = _entries()
+    turns them off. A file that breaks the grammar is listed with its refusal. Warnings (a name
+    in the config or NX_AURAS_OFF that matches no aura; the repo root not scanned) go to standard
+    error, so --json stays parseable."""
+    scope = _scope()
+    entries = _entries(scope)
     try:
-        states = resolve([e.name for e in entries])
+        states = resolve([e.name for e in entries], repo_root=scope.repo_root)
     except AuraConfigError as exc:
         raise _fail(str(exc)) from exc
+    _unknown_name_warnings(entries, scope)
+    unscanned = _unscanned_repo_files(scope)
+    if unscanned:
+        click.echo(_unscanned_note(unscanned), err=True)
     rows: list[dict[str, Any]] = []
     for e in entries:
         d = states[e.name]

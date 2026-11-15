@@ -346,3 +346,39 @@ def test_the_procedure_listing_still_hides_what_the_enumeration_shows(shipped: P
     (shipped / "Bad-Name.lua").write_text("-- procedure: x\n", encoding="utf-8")
     assert library.procedures(cwd=None) == []
     assert [e.name for e in library.scan_files(cwd=None, suffix=".lua", noun="procedure")] == ["Bad-Name"]
+
+
+# -- review fixes (nexus-mdbds.10.2) -------------------------------------------------------------------------------
+
+
+@needs_git
+def test_one_name_in_both_roots_sorts_shipped_then_repo(shipped: Path, repo: Path) -> None:
+    _write(shipped, "common")
+    _write(_repo_root(repo), "common")
+    _write(shipped, "aaa")
+    assert [(s.name, s.root) for s in library.scan_files(cwd=repo, suffix=".aura.toml", noun="aura")] == [
+        ("aaa", "shipped"), ("common", "shipped"), ("common", "repo"),
+    ]
+    assert [(e.name, e.root) for e in auras.enumerate_auras(cwd=repo)] == [
+        ("aaa", "shipped"), ("common", "shipped"), ("common", "repo"),
+    ]
+
+
+def test_a_directory_named_like_an_aura_is_reported_not_dropped(shipped: Path) -> None:
+    (shipped / "dir.aura.toml").mkdir()
+    [entry] = auras.enumerate_auras(cwd=None)
+    assert (entry.name, entry.root) == ("dir", "shipped")
+    assert isinstance(entry.result, LibraryError) and entry.result.reason == "unreadable"
+    assert "not a regular file" in entry.result.detail
+
+
+def test_a_dangling_link_named_like_an_aura_is_reported_not_dropped(shipped: Path, tmp_path: Path) -> None:
+    (shipped / "gone.aura.toml").symlink_to(tmp_path / "nowhere.aura.toml")
+    [entry] = auras.enumerate_auras(cwd=None)
+    assert entry.name == "gone"
+    assert isinstance(entry.result, LibraryError) and entry.result.reason == "unreadable"
+
+
+def test_the_lua_listing_still_ignores_such_entries(shipped: Path) -> None:
+    (shipped / "dir.lua").mkdir()
+    assert library.procedures(cwd=None) == []

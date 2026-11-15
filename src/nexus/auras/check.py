@@ -159,9 +159,11 @@ def check_dictionary(aura: Aura, templates: Sequence[dict[str, Any]]) -> tuple[l
     return findings, skipped
 
 
-def _check_procedure(aura: Aura, cwd: Path | None) -> tuple[list[Finding], Header | None]:
+def _check_procedure(
+    aura: Aura, cwd: Path | None, probe: library.ProbeArg
+) -> tuple[list[Finding], Header | None]:
     try:
-        _, data = library.find_file(aura.procedure, cwd=cwd)
+        _, data = library.find_file(aura.procedure, cwd=cwd, probe=probe)
         return [], parse_header(data, name=aura.procedure)
     except LibraryError as exc:
         return [Finding("procedure", "procedure", f"{exc.reason}: {exc.detail}")], None
@@ -194,6 +196,7 @@ def check_auras(
     templates: Sequence[dict[str, Any]] | None,
     unavailable: str = NO_REGISTRY,
     only: str | None = None,
+    probe: library.ProbeArg = library.UNPROBED,
 ) -> list[AuraCheck]:
     """Check *entries* (from :func:`~nexus.auras.enumerate_auras`), or only the one named *only*.
 
@@ -219,7 +222,7 @@ def check_auras(
         elif isinstance(result, AuraError):
             findings.append(Finding("parse", result.key, result.detail))
         else:
-            proc_findings, header = _check_procedure(result, cwd)
+            proc_findings, header = _check_procedure(result, cwd, probe)
             findings += proc_findings
             if header is not None:
                 findings += check_arguments(result, header)

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from nexus.auras import AuraConfigError, Enablement, is_enabled, resolve
+from nexus.auras import AuraConfigError, Enablement, is_enabled, resolve, unknown_names
 from nexus.config import nexus_config_dir
 
 NAMES = ("ci_develop_red", "other")
@@ -192,3 +192,53 @@ def test_is_enabled_is_the_one_name_wrapper(repo: Path) -> None:
 
 def test_a_config_error_is_a_value_error() -> None:
     assert issubclass(AuraConfigError, ValueError)
+
+
+# -- review fixes (nexus-mdbds.10.2) -------------------------------------------------------------------------------
+
+
+def test_the_repo_config_is_read_from_nexus_repo_root_when_no_root_is_passed(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _repo(repo, "auras:\n  other: on\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # the working directory has no .nexus.yml; NEXUS_REPO_ROOT does
+    monkeypatch.setenv("NEXUS_REPO_ROOT", str(repo))
+    got = resolve(NAMES)["other"]
+    assert (got.on, got.level, got.source) == (True, "repo", str(repo / ".nexus.yml"))
+
+
+def test_an_explicit_repo_root_wins_over_nexus_repo_root(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = tmp_path / "other_repo"
+    other.mkdir()
+    (other / ".nexus.yml").write_text("auras:\n  other: on\n", encoding="utf-8")
+    monkeypatch.setenv("NEXUS_REPO_ROOT", str(other))
+    assert resolve(NAMES, repo_root=repo)["other"].level == "default"
+
+
+def test_unknown_names_reports_a_config_key_that_matches_no_aura_with_its_file(repo: Path) -> None:
+    g = _global("auras:\n  ci_develop_red: on\n  ci_develop_redd: on\n")
+    r = _repo(repo, "auras:\n  nope: off\n")
+    assert unknown_names(NAMES, repo_root=repo) == [("ci_develop_redd", str(g)), ("nope", str(r))]
+
+
+def test_unknown_names_reports_an_env_name_that_matches_no_aura(repo: Path) -> None:
+    got = unknown_names(NAMES, repo_root=repo, env={"NX_AURAS_OFF": "other, ci_develop_reds"})
+    assert got == [("ci_develop_reds", "NX_AURAS_OFF")]
+
+
+def test_all_is_exact_and_lowercase_in_the_env_switch(repo: Path) -> None:
+    assert unknown_names(NAMES, repo_root=repo, env={"NX_AURAS_OFF": "all"}) == []
+    assert unknown_names(NAMES, repo_root=repo, env={"NX_AURAS_OFF": "ALL, All"}) == [
+        ("ALL", "NX_AURAS_OFF"), ("All", "NX_AURAS_OFF"),
+    ]
+    # and an uppercase ALL does not turn everything off
+    assert resolve(NAMES, repo_root=repo, env={"NX_AURAS_OFF": "ALL"})["other"].level != "env"
+
+
+def test_unknown_names_is_empty_when_every_name_matches(repo: Path) -> None:
+    _global("auras:\n  other: on\n")
+    assert unknown_names(NAMES, repo_root=repo, env={"NX_AURAS_OFF": "ci_develop_red"}) == []

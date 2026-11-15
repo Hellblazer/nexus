@@ -386,15 +386,19 @@ def _scan_root(root: Path | None, label: Root, *, top: Path | None, suffix: str)
         try:
             _check_name(name)
             hit = _lookup(root, name, label, top=top, suffix=suffix)
-            if hit is None:  # not a regular file (a directory, a dangling link)
-                continue
+            if hit is None:  # a directory, or a dangling link: reported, never dropped
+                raise LibraryError(
+                    "unreadable", f"{path.name} in the {label} root is not a regular file (a directory or a dangling link)"
+                )
             out.append(Scanned(name, label, _read(hit[0])))
         except LibraryError as exc:
             out.append(Scanned(name, label, exc))
     return out
 
 
-def scan_files(*, cwd: Path | None, suffix: str = LUA_SUFFIX, noun: str = "file") -> list[Scanned]:
+def scan_files(
+    *, cwd: Path | None, suffix: str = LUA_SUFFIX, noun: str = "file", probe: ProbeArg = UNPROBED
+) -> list[Scanned]:
     """Every ``<name><suffix>`` file of both roots, with its bytes or the reason it is refused.
 
     The enumeration behind a check that must see what :func:`list_files` hides: a name that
@@ -402,14 +406,15 @@ def scan_files(*, cwd: Path | None, suffix: str = LUA_SUFFIX, noun: str = "file"
     unreadable file, and a repo file named like a shipped one (``shadows_shipped``, which
     :func:`find_file` raises for it too). Sorted by name, then shipped before repo. The repo root
     is walked only while its switch is on, as in :func:`list_files`, and then a repo probe that
-    cannot answer raises :class:`~nexus.lua_runtime.header.RepoProbeError`. *noun* names the
-    thing in the shadow refusal. Nothing in :func:`find`, :func:`procedures` or
+    cannot answer raises :class:`~nexus.lua_runtime.header.RepoProbeError`. A file that is not a
+    regular file (a directory, a dangling link) is ``unreadable``, not dropped. *probe* is as in
+    :func:`find_file`. *noun* names the thing in the shadow refusal. Nothing in :func:`find`, :func:`procedures` or
     :func:`list_files` depends on it.
     """
     shipped = _scan_root(shipped_root(), "shipped", top=None, suffix=suffix)
     out = list(shipped)
     if repo_root_enabled():
-        located = _repo_root(cwd)
+        located = _repo_root(cwd, probe)
         taken = {s.name for s in shipped if isinstance(s.found, bytes)}
         for s in _scan_root(located[0], "repo", top=located[1], suffix=suffix) if located else []:
             if s.name in taken and isinstance(s.found, bytes):
@@ -417,4 +422,4 @@ def scan_files(*, cwd: Path | None, suffix: str = LUA_SUFFIX, noun: str = "file"
                     s.name, s.root, LibraryError("shadows_shipped", f"the repo {noun} {s.name} shadows a shipped one")
                 )
             out.append(s)
-    return sorted(out, key=lambda s: (s.name, s.root))
+    return sorted(out, key=lambda s: (s.name, s.root != "shipped"))  # shipped, then repo
