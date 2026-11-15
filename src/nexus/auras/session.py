@@ -7,8 +7,8 @@ at server start, or at a later 60 s re-resolve after a startup miss. A later mis
 with no registry loads none and logs one INFO line saying why. A ``claude -p`` child that inherited its parent's
 session id resolves to the parent's interactive entry, so the loader also requires that entry's pid to be an
 ancestor of this server, and the nearest one that has a registry entry of any kind: a ``claude -p`` started from
-the session has the session's claude in its ancestor chain too, but its own claude, which registers a
-non-interactive entry, is nearer. When the chain cannot be read up to a registered process, it loads none and says
+the session has the session's claude in its ancestor chain too, but its own claude, which writes a registry file
+under its own pid and session id (observed 2026-11-15, with kind ``interactive``), is nearer. When the chain cannot be read up to a registered process, it loads none and says
 so. Each loaded aura holds its trigger topic as an aura-owned subscription. An aura past ``MAX_BOARD_TOPICS``, or
 one whose ``display.threads`` value another loaded aura already writes, is refused by name.
 """
@@ -204,11 +204,16 @@ def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cw
         that is shut holds the notice (``hold``) and it goes out when the gate opens."""
         if loop.is_closed():
             raise RuntimeError("the waiter's loop is closed")
-        sent = asyncio.run_coroutine_threadsafe(
+        future = asyncio.run_coroutine_threadsafe(
             waiter._send(text, meta, hold=lambda: None), loop,  # noqa: SLF001 -- the waiter's own send
-        ).result(timeout=NOTICE_TIMEOUT_S)
+        )
+        try:
+            sent = future.result(timeout=NOTICE_TIMEOUT_S)
+        except TimeoutError:
+            future.cancel()
+            raise RuntimeError(f"the waiter's loop did not take the notice in {NOTICE_TIMEOUT_S:g} s") from None
         if not sent:
-            raise RuntimeError("the channel did not take the notice now (held for an open gate, or no stream)")
+            raise RuntimeError("the channel did not take the notice now: held until the gate opens, or no stream")
 
     def make_runtime(auras: list[Aura]) -> AuraRuntime:
         read, put = t2_threads_io(store_ctx)
@@ -228,8 +233,9 @@ def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cw
     )
 
 
-#: Seconds a worker waits for the waiter's loop to take a channel notice.
-NOTICE_TIMEOUT_S: float = 30.0
+#: Seconds a worker waits for the waiter's loop to take a channel notice: above the send's own gate bound
+#: (``channel.GATE_WAIT_TIMEOUT_S``, 30 s), so a stalled gate answers first and a held notice is reported as held.
+NOTICE_TIMEOUT_S: float = 35.0
 
 
 def on_loop(loader: AuraLoader, loop: Any) -> Callable[[str | None], None]:

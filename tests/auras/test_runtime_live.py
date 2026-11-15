@@ -200,9 +200,6 @@ def test_3_a_busy_run_path_is_retried_and_is_not_a_strike(repo: Path) -> None:
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
     held = 0
-    for _ in range(supervisor.MAX_WORKERS):
-        assert supervisor._slots.acquire(blocking=False)  # noqa: SLF001
-        held += 1
     waits: list[float] = []
 
     def free_the_slots(seconds: float) -> None:
@@ -213,6 +210,9 @@ def test_3_a_busy_run_path_is_retried_and_is_not_a_strike(repo: Path) -> None:
             held -= 1
 
     try:
+        for _ in range(supervisor.MAX_WORKERS):
+            assert supervisor._slots.acquire(blocking=False)  # noqa: SLF001
+            held += 1
         rt = _runtime(sid, "red_notice", sleep=free_the_slots)
         before = len(_REAL_RUNS)
         rt.offer(_TOPIC, [_row("t1")])
@@ -259,8 +259,8 @@ def test_6_and_glue_the_server_path_loads_fires_and_notifies(repo: Path, tmp_pat
     the aura on, a real ChannelWaiter delivers the row to the aura and not to the agent, the real worker runs, the
     block lands in T2 and the channel notice goes through the waiter's sender. The registry entry is this test
     process's real parent, found by the real walk up the process table. Then a claude -p child: the session's
-    interactive entry is still the parent, but this process registers its own non-interactive entry, as a child
-    claude does, so it is the nearer owner and nothing loads."""
+    interactive entry is still the parent, but this process writes its own registry file, as a child claude does
+    (under its own pid and session id), so it is the nearer owner and nothing loads."""
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
     (repo / ".nexus" / "procedures" / "red.aura.toml").write_text(_aura_text("red", "red_notice"), encoding="utf-8")

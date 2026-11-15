@@ -146,7 +146,8 @@ def resolve_session_entry(
     is *session_id*, read from ``<config>/sessions/<pid>.json`` (fields
     ``sessionId``, ``name``, ``kind``, ``pid``, ``updatedAt``). None for any
     miss: no directory, an unreadable or malformed file, no matching entry,
-    a non-interactive entry (a ``claude -p`` child), a dead pid, or no name.
+    a non-interactive entry (a ``claude -p`` child writes its own entry under its own session id, so it never
+    matches a parent's id; observed 2026-11-15 with kind ``interactive``), a dead pid, or no name.
     Never raises. Several live entries for one id (a resumed session beside
     its old process's file) resolve to the most recently updated, whichever
     file name sorts first.
@@ -563,9 +564,11 @@ class SubscriptionSet:
         if topic in self._board:
             return  # idempotent
         if topic not in self._aura_board and self._delivered_topic_count() >= MAX_BOARD_TOPICS:
+            held = len(self._aura_board.keys() - self._board.keys())
             raise SchemaViolationError(
-                f"at most {MAX_BOARD_TOPICS} board topics may be subscribed at once; "
-                f"refused before adding {topic!r}"
+                f"at most {MAX_BOARD_TOPICS} board topics may be subscribed at once"
+                + (f" ({held} held by auras)" if held else "")
+                + f"; refused before adding {topic!r}"
             )
         self._board[topic] = datetime.now(UTC).isoformat()
         self._bump()
@@ -734,7 +737,8 @@ class SubscriptionSet:
         wait on (:meth:`~nexus.mcp.channel.ChannelWaiter._build_specs`),
         so leaving it out here is what stops push delivery for it."""
         out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
-        for topic, since in self._board.items():
+        # Copies: a tool thread reads this while the loop can add an aura topic.
+        for topic, since in list(self._board.items()):
             entry: dict[str, Any] = {"subspace": topic}
             held = self._aura_board.get(topic)
             if since and held is not None:
@@ -745,7 +749,7 @@ class SubscriptionSet:
             if since:
                 entry["since"] = since
             out.append(entry)
-        for topic, (since, _owners) in self._aura_board.items():
+        for topic, (since, _owners) in list(self._aura_board.items()):
             if topic not in self._board:
                 out.append({"subspace": topic, "since": since, "held_by": "aura"})
         return out

@@ -284,7 +284,8 @@ in the engine, and the procedure can still only read.
      session id resolves to the parent's entry, so the server also walks up
      its own process tree to the nearest process that has a registry entry
      of any kind and loads only when that process is the interactive
-     entry's. A child's own claude registers a non-interactive entry and is
+     entry's. A child's own claude writes a registry file under its own pid
+     and session id (observed 2026-11-15, with kind `interactive`) and is
      nearer. When the walk cannot reach a registered process, it loads none
      and says why.
    - `display.channel = true` also sends a channel notification, which is a
@@ -295,8 +296,9 @@ in the engine, and the procedure can still only read.
      block in your threads entry`. The aura name and the threads value come
      from the aura file, and the subspace and tuple id from the engine row,
      so nothing a tuple writer controls reaches the channel. It is sent
-     whether or not the threads block could be written; a notice the
-     channel does not take is logged.
+     whether or not the threads block could be written. A notice the
+     channel does not take at once is logged; one held for a shut gate goes
+     out when the gate opens.
    - `[limits]` (optional) lowers RDR-242's limits for this aura's fires
      (Technical Design 6); its keys are the limit names, and a value above
      the default or an unknown name refuses the file.

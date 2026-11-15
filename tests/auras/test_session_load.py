@@ -104,7 +104,7 @@ def test_no_aura_turned_on_loads_nothing_and_never_walks_the_process_table() -> 
 
 
 def test_a_claude_p_child_with_the_parents_session_id_loads_none() -> None:
-    """The child's own claude registers a non-interactive entry and is nearer than the session's claude."""
+    """The child's own claude writes its own registry file and is nearer than the session's claude."""
     h = _Harness(owner=_ME + 1)
     with structlog.testing.capture_logs() as logs:
         h.loader.on_resolve("tamsin")
@@ -187,7 +187,7 @@ class TestRegisteredOwner:
         assert registered_owner(_ME, self._registry(tmp_path, _PARENT), ppid_of=parents.get) == _PARENT
 
     def test_a_claude_p_child_started_from_the_session_is_its_own_owner(self, tmp_path: Path) -> None:
-        """mcp -> child claude (registered, -p) -> bash -> session claude (registered, interactive)."""
+        """mcp -> child claude (its own registry file) -> bash -> session claude (the interactive entry)."""
         child_claude, bash = 600, 601
         parents = {_ME: child_claude, child_claude: bash, bash: _PARENT, _PARENT: 1}
         sessions = self._registry(tmp_path, child_claude, _PARENT)
