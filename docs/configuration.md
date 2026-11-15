@@ -422,8 +422,10 @@ run:
    ```
 
    Once the view exists, the engine's `grants-nexus-diag-2` changeset revokes
-   `nexus_diag`'s direct table SELECT on its next boot — the diagnostic role
-   then reads counts by construction, never row content. (This SQL is
+   `nexus_diag`'s direct table SELECT on its next boot, and
+   `grants-nexus-diag-3` grants back only the one column of each table the
+   view reads (content hashes and ids). The diagnostic role then reads the
+   view's counts and those columns, never chunk text or other row content. (This SQL is
    generated from `nexus.db.chash_tables.CHASH_BEARING_TABLES`; a drift test
    pins this rendered copy to the generator.) DBAs who created an earlier
    view generation: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t

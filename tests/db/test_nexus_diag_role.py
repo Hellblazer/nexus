@@ -326,3 +326,43 @@ class TestViewEraChangesetLive:
         r = diag("SELECT chash FROM nexus.diag_probe")
         assert r.returncode != 0
         assert "permission denied" in r.stderr
+
+
+class TestProvisionBestEffortGrantsEra:
+    """nexus-edchb: the provisioning path's best-effort grants (the SQL both
+    ``_create_roles`` and ``_backfill_diag_role`` run) must not hand this
+    BYPASSRLS role table-level SELECT once the counts view exists: the engine
+    grants it only the columns the view reads (grants-nexus-diag-3). The bulk
+    grant stays for the legacy era, when no view exists to read through."""
+
+    def test_bulk_table_grant_only_before_the_view(self, diag_cluster):
+        from nexus.db.pg_provision import _DIAG_BEST_EFFORT_GRANTS_SQL
+
+        su = diag_cluster["su"]
+
+        def can_select() -> str:
+            return su("SELECT has_table_privilege('nexus_diag', 'nexus.diag_probe', 'SELECT')")
+
+        had_view = su(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+        ) == "1"
+        try:
+            su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+               "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+               "FROM nexus.diag_probe WHERE length(chash) <> 32")
+            su("REVOKE SELECT ON nexus.diag_probe FROM nexus_diag")
+            assert can_select() == "f"  # non-vacuity: the grant really is gone first
+            su(_DIAG_BEST_EFFORT_GRANTS_SQL)
+            assert can_select() == "f", "view era: provisioning must not re-grant whole tables"
+
+            su("DROP VIEW nexus.diag_chash_conformance")
+            su(_DIAG_BEST_EFFORT_GRANTS_SQL)
+            assert can_select() == "t", "legacy era: the bulk grant still applies"
+        finally:
+            su("GRANT SELECT ON nexus.diag_probe TO nexus_diag")
+            if had_view:
+                su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+                   "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+                   "FROM nexus.diag_probe WHERE length(chash) <> 32")
+                su("GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag")

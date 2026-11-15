@@ -27,6 +27,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
@@ -150,6 +151,25 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                         + "INVOKING role's own table privileges for each underlying "
                         + "relation, not the view owner's")
                     .isEmpty();
+            }
+
+            // nexus-edchb: the grant is column-level, so this BYPASSRLS role reads the view's one
+            // address column of each table and never a content column of any tenant.
+            var asSu = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(asSu.select(DSL.function("has_table_privilege", Boolean.class,
+                    DSL.inline(DIAG_ROLE), DSL.inline("nexus.chunks"), DSL.inline("SELECT"))).fetchOne(0, Boolean.class))
+                .as("no table-level SELECT on nexus.chunks").isFalse();
+            assertThat(columnPrivilege(asSu, CHUNKS.CHASH.getName()))
+                .as("SELECT on nexus.chunks.chash, which the view reads").isTrue();
+            for (var content : List.of(CHUNKS.CHUNK_TEXT, CHUNKS.METADATA, CHUNKS.COLLECTION)) {
+                assertThat(columnPrivilege(asSu, content.getName()))
+                    .as("no SELECT on nexus.chunks." + content.getName()).isFalse();
+            }
+            try (Connection diag = DriverManager.getConnection(pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(CHUNKS.CHUNK_TEXT).from(CHUNKS).limit(1).fetch())
+                    .as("nexus_diag reading chunk_text is refused")
+                    .hasMessageContaining("permission denied");
             }
         }
     }
@@ -603,6 +623,11 @@ class GrantsNexusDiagViewAccessIntegrationTest {
      * proves the grant is USABLE (see this class's own javadoc), not merely present
      * in the catalog. Schema-agnostic {@code DSL.name(schema, table)}: some callers
      * pass a diag-view / table pair with no jOOQ codegen relevance to this probe. */
+    private static boolean columnPrivilege(org.jooq.DSLContext ctx, String column) {
+        return ctx.select(DSL.function("has_column_privilege", Boolean.class, DSL.inline(DIAG_ROLE),
+                DSL.inline("nexus.chunks"), DSL.inline(column), DSL.inline("SELECT"))).fetchOne(0, Boolean.class);
+    }
+
     private static long countAs(Connection c, String schema, String table) throws Exception {
         return DSL.using(c, SQLDialect.POSTGRES)
             .selectCount()

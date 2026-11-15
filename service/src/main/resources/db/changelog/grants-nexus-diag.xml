@@ -29,9 +29,13 @@
       VIEW era (the superuser provisioning path — pg_provision locally, the
       DBA block in docs/configuration.md for managed — has created the
       counts view): changeset grants-nexus-diag-2 below REVOKES nexus_diag's
-      direct table SELECT, leaving SELECT on the view + the Liquibase
-      journal only. The content boundary is then COUNT-BY-CONSTRUCTION at
-      the DB level; the choke-point lint remains as defense in depth. The
+      direct table SELECT. What remains is SELECT on the view, the
+      Liquibase journal, the one address column of each table the view
+      reads (grants-nexus-diag-3; the view is security_invoker, so the
+      role needs them), and the tables -4 and -5 name. Those address
+      columns hold content hashes and ids, never chunk text (column grants
+      since nexus-edchb; -3 granted whole tables before, chunk_text
+      included); the choke-point lint remains as defense in depth. The
       view must be superuser-owned: under FORCE RLS a view counts
       cross-tenant rows only when its OWNER is RLS-exempt (the nexus-vounk
       lesson, structurally), which is why the changelog (nexus_admin,
@@ -279,8 +283,9 @@ $$;
             file), it is the correct place to make the content-boundary
             grants stick as the final word every boot — re-granting
             exactly what security_invoker=true requires: SELECT on the
-            view itself, PLUS direct SELECT on every table the view reads
-            internally (security_invoker means Postgres checks the
+            view itself, PLUS direct SELECT on every column the view reads
+            internally (column grants since nexus-edchb; table-level before,
+            which let the role read chunk_text across tenants) (security_invoker means Postgres checks the
             INVOKING role's OWN table privileges for the relations the
             view references — nexus_diag's BYPASSRLS exempts it from
             row-level policies, never from ordinary GRANT-based privilege
@@ -335,10 +340,18 @@ BEGIN
         -- Exactly CHASH_BEARING_TABLES (src/nexus/db/chash_tables.py) --
         -- the set diag_conformance_view_ddl() reads. nexus_admin owns
         -- every one of these via forward DDL, so no foreign-owner guard.
-        GRANT SELECT ON nexus.chunks                  TO nexus_diag;
-        GRANT SELECT ON nexus.catalog_document_chunks TO nexus_diag;
-        GRANT SELECT ON nexus.topic_assignments        TO nexus_diag;
-        GRANT SELECT ON nexus.relevance_log            TO nexus_diag;
+        -- COLUMN grants (nexus-edchb): the view reads one column of each
+        -- table (the entry's column), and count(*) needs SELECT on only
+        -- one column. A table-level grant let this BYPASSRLS role read
+        -- every tenant's chunk_text and the other content columns. No
+        -- REVOKE is needed here: grants-nexus-diag-2 revokes the table
+        -- grant every boot in this era, and in PostgreSQL a table-level
+        -- REVOKE also removes the column grants, which this block then
+        -- re-grants.
+        GRANT SELECT (chash)    ON nexus.chunks                  TO nexus_diag;
+        GRANT SELECT (chash)    ON nexus.catalog_document_chunks TO nexus_diag;
+        GRANT SELECT (doc_id)   ON nexus.topic_assignments        TO nexus_diag;
+        GRANT SELECT (chunk_id) ON nexus.relevance_log            TO nexus_diag;
     END IF;
 END
 $$;
