@@ -196,8 +196,9 @@ assumption, with no run. **Code-read** means read from source at the named sha.
 
 ### Approach
 
-No lever is chosen. The decision belongs to Sam (see Open Questions for Sam
-below). The record supports two separate levers, one per gap.
+Sam chose 2026-11-15 (ask `rdr250-lever`, option 2): a budget of 20 as plan 10's
+default now, then Option E (anchor scan over all evidence) with a precision filter.
+The record supports two separate levers, one per gap; this choice is Gap 1's.
 
 The draft's lean, for Sam to accept or reject: for Gap 1, Option E is the
 largest lever in the record, and it changes the coverage boundary's anchor input
@@ -345,7 +346,7 @@ MVV's precision gate is the visible check; the MVV reports precision split by
 
 ### Prerequisites
 
-- [ ] Sam picks the lever or levers (see Open Questions for Sam)
+- [x] Sam picks the lever or levers: option 2, 2026-11-15
 - [ ] Sam gives the go for the paid run
 - [ ] Critical Assumptions verified, or a held-out set chosen
 
@@ -370,7 +371,13 @@ the run counts as changing promotion criteria, so Sam signs them off first.
 
 ### Phase 1: Code Implementation
 
-Not written. Steps follow the lever Sam chooses.
+#### Step 1: Plan 10's `vector_budget_chunks` default from 6 to 20
+
+`conexus/plans/builtin/hybrid-factual-lookup.yml`, no code. Installs get it at their next `nx plan reseed`.
+
+#### Step 2: Option E with a precision filter
+
+Waits for this RDR's gate and acceptance; the Technical Design is written first.
 
 ### Phase 2: Operational Activation
 
@@ -410,10 +417,10 @@ Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
 
 ### Open Questions for Sam
 
-1. Which lever or levers to build. Options E and B need code. Option A is a flag, and it fails the precision gate without a filter. A budget of 20 needs no code and passes the gate on issue5 (measured, one run).
+1. Answered 2026-11-15 (option 2): budget 20 as the default now, then Option E with a precision filter. Which lever or levers to build. Options E and B need code. Option A is a flag, and it fails the precision gate without a filter. A budget of 20 needs no code and passes the gate on issue5 (measured, one run).
 2. Answered 2026-11-15: the paid run was made, for 3.37 USD (Key Discoveries). Another run is needed for the lever chosen, and to bound variance.
 3. Whether the 20 held-out questions in the RDR-147 MVV were used for tuning. If they were, a new held-out set is needed.
-4. Whether changing the plan 10 default is in scope, or only per-call bindings.
+4. Answered 2026-11-15: the plan 10 default changes (option 2).
 
 ## References
 
@@ -428,3 +435,4 @@ Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
 ## Revision History
 
 - 2026-11-15: Draft created from nexus-io7tw and its research record. Not gated, not accepted.
+- 2026-11-15: Sam chose ask `rdr250-lever` option 2; Approach, Phase 1 and Open Questions 1 and 4 record it, and plan 10's default budget moves to 20.

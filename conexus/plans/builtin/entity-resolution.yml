@@ -55,7 +55,8 @@ default_bindings:
   corpus: all
   limit: 40
   depth: 2
-  vector_budget_chunks: 6
+  # 20, as hybrid-factual-lookup (RDR-250; Sam, 2026-11-15, ask rdr250-lever option 2).
+  vector_budget_chunks: 20
   graph_budget_chunks: 4
 # RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
 answer_kind: discovery/listing
