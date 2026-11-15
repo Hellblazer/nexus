@@ -830,6 +830,10 @@ class ChannelWaiter:
     indefinitely.
     """
 
+    #: RDR-249 (nexus-mdbds.11.1): called with a board topic and its kept rows
+    #: before they are announced. It only enqueues (nexus.auras), never blocks.
+    aura_sink: Callable[[str, list[TupleRow]], None] | None = None
+
     def __init__(
         self,
         session_id: str,
@@ -1634,6 +1638,13 @@ class ChannelWaiter:
             kept.append(row)
         if not kept:
             return
+        if self.aura_sink is not None:
+            try:
+                self.aura_sink(subspace, kept)
+            except Exception as e:  # noqa: BLE001 -- an aura never stops delivery
+                _log.warning("aura_sink_failed", subspace=subspace, error=str(e))
+        if self.subs.aura_only(subspace):
+            return  # RDR-249 TD3: a topic only an aura holds is evaluated, not announced
         last = kept[-1]
 
         def delivered() -> None:
