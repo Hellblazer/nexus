@@ -381,3 +381,38 @@ def test_both_provisioning_paths_run_the_era_gated_grants():
         src = inspect.getsource(fn)
         assert "_diag_best_effort_grants_sql()" in src, fn.__name__
         assert "ALL TABLES IN SCHEMA" not in src, fn.__name__
+
+
+def test_view_era_grants_land_on_the_view_input_columns(diag_cluster):
+    """nexus-edchb: in the view era the provisioning grants give nexus_diag
+    SELECT on the view's input column of a chash table and on none of its
+    content columns. A scratch nexus.chunks stands in for the engine's."""
+    from nexus.db.pg_provision import _diag_best_effort_grants_sql
+
+    su = diag_cluster["su"]
+    had_view = su(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+    ) == "1"
+    had_chunks = su("SELECT to_regclass('nexus.chunks') IS NOT NULL") == "t"
+    if had_chunks:
+        pytest.skip("this fixture's cluster already has a nexus.chunks of its own")
+    try:
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.chunks (chash bytea, chunk_text text, metadata jsonb)")
+        su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+           "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+           "FROM nexus.diag_probe WHERE length(chash) <> 32")
+        su(_diag_best_effort_grants_sql())
+
+        def col(c: str) -> str:
+            return su(f"SELECT has_column_privilege('nexus_diag', 'nexus.chunks', '{c}', 'SELECT')")
+
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.chunks', 'SELECT')") == "f"
+        assert col("chash") == "t"
+        assert col("chunk_text") == "f"
+        assert col("metadata") == "f"
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.diag_chash_conformance', 'SELECT')") == "t"
+    finally:
+        su("DROP TABLE IF EXISTS nexus.chunks")
+        if not had_view:
+            su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")

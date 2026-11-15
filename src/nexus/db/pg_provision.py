@@ -2614,6 +2614,10 @@ def _create_roles(
     # this just makes the role usable immediately on re-provision without
     # waiting for an engine restart. Failure here must never abort
     # provisioning (the changeset will cover it).
+    # The view first (nexus-edchb): the grants below read whether it exists, so
+    # a pass that creates it grants the view's input columns, not whole tables.
+    _provision_diag_conformance_view(bins, port, os_user)
+
     try:
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,
@@ -2621,8 +2625,6 @@ def _create_roles(
         )
     except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
         _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
-
-    _provision_diag_conformance_view(bins, port, os_user)
 
     # Unconditional password sync: even if roles were created on a previous
     # run that crashed before writing credentials, this ensures DB state
@@ -3099,6 +3101,10 @@ def _backfill_diag_role(
         bins, port, NEXUS_DB_NAME, os_user,
         f"ALTER ROLE nexus_diag PASSWORD '{diag_pass}'",
     )
+    # The view first (nexus-edchb): the grants below read whether it exists, so
+    # a pass that creates it grants the view's input columns, not whole tables.
+    _provision_diag_conformance_view(bins, port, os_user)
+
     try:
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,
@@ -3106,8 +3112,6 @@ def _backfill_diag_role(
         )
     except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
         _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
-
-    _provision_diag_conformance_view(bins, port, os_user)
     _persist_diag_credentials(creds_path, diag_pass)
 
 
