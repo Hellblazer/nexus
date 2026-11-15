@@ -28,10 +28,10 @@ import java.util.OptionalDouble;
 public final class PciLeafSizeRule {
 
     /**
-     * The multiple of the install reference at or above which the rule fires (RDR-230 Technical Design 3). Named as,
-     * and equal to, {@code PciReindexPolicy.LEAF_SIZE_RATIO} (P2.2), so swapping this for that one is a rename.
+     * The multiple of the install reference at or above which the rule fires (RDR-230 Technical Design 3). It is
+     * {@link PciReindexPolicy#LEAF_SIZE_RATIO}, the one place the number lives.
      */
-    public static final double LEAF_SIZE_RATIO = 1.5;
+    public static final double LEAF_SIZE_RATIO = PciReindexPolicy.LEAF_SIZE_RATIO;
 
     /** What the rule says about one leaf index. */
     public enum Verdict {

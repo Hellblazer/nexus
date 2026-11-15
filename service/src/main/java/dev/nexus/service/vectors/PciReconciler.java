@@ -946,15 +946,6 @@ public final class PciReconciler {
             }
         }
         List<Action> actions = PciReconcilePlanner.plan(leaf, counts, registry, backedOff, inFlight, settings);
-        // TODO(nexus-4lnn1.1.10, trigger LEAF_SIZE): the leaf size rule waits for P2.2's Reindex candidates, which the
-        // reconciler (not plan()) collects after the drops and builds. At that seam, for the leaf's own index on the
-        // model's dimension, `leaf.hnswIndex(dimension)` (valid only), call
-        //   PciLeafSizeRule.evaluate(idx.bytes(), <the leaf's n_live_tup from the leaf stats row>,
-        //                            PciReindexPolicy.installReference(dimension, <built anchors at that dimension>))
-        // FIRE adds a Reindex(idx.name(), null /* collection */, Trigger.LEAF_SIZE, idx.bytes()) candidate; UNANCHORED
-        // is what the status reports for the leaf; QUIET does nothing. Then swap PciLeafSizeRule.LEAF_SIZE_RATIO for
-        // PciReindexPolicy.LEAF_SIZE_RATIO. Pass.reindex/ownsForReindex take a PciCatalog.Index, and a leaf's own index
-        // is a PciCatalog.LeafIndex, so the guard needs the LeafIndex form too (the leaf's own index, never another).
         AnchorReads anchors = readAnchors(tx, leaf, dimension, actions, now);
         // One reading, logged and carried: the pass line's sum and max are over exactly these figures. The per-leaf
         // line stays DEBUG (one per leaf per pass is a lot of lines at 20,000 collections); the pass line is INFO.
@@ -1168,11 +1159,14 @@ public final class PciReconciler {
         for (Leaf leaf : snapshot.leaves()) {
             leaf.indexes().forEach(i -> snapshotIndexes.add(i.name()));
         }
+        // A leaf's own HNSW index keeps its failure backoff like a pci_ index: its name is in the snapshot.
+        for (Leaf leaf : snapshot.leaves()) {
+            leaf.hnswIndexes().forEach(i -> snapshotIndexes.add(i.name()));
+        }
         List<PciReindexPolicy.Candidate> candidates = reindex.candidates(tally.looks, tally.droppedIndexes,
             snapshotIndexes, name -> canary == null ? null : canary.latest(name), now, subjects);
-        List<Reindex> triggered = PciReconcilePlanner.reindexes(candidates, now);
-        // Seam for RDR-230 P2.3: the leaf indexes' LEAF_SIZE REINDEXes are added to `triggered` here, then the list is
-        // sorted with PciReconcilePlanner.BY_SIZE_THEN_NAME, before the per-pass limit is applied.
+        List<Reindex> triggered = withLeafSizeCandidates(pass, tally, PciReconcilePlanner.reindexes(candidates, now),
+            now);
         for (Reindex r : triggered) {
             if (r.trigger() == PciReconcilePlanner.Trigger.BULK_DELETE) {
                 reindex.bulkDeleteOwed(r.name());   // the limit may defer it, and the next check sees no fall
@@ -1196,14 +1190,123 @@ public final class PciReconciler {
     }
 
     /**
-     * HOOK for RDR-230 P2.3 (the leaf-index REINDEX): {@code r} is a {@link PciReconcilePlanner.Trigger#LEAF_SIZE}
-     * REINDEX of a leaf's own HNSW index (its {@code collection} is null). Resolve the {@code PciCatalog.LeafIndex} by
-     * {@code r.name()} from {@code snapshot}, run the leaf form of {@code Pass.reindex}, write the leaf anchor, and count
-     * it with {@link PciReindexState#finished} / {@link PciReindexState#failed} as {@link #reindexOne} does. Nothing
-     * produces one until P2.3 fills this in.
+     * RDR-230 Technical Design 3, the leaf size rule: add the {@link PciReconcilePlanner.Trigger#LEAF_SIZE} REINDEXes
+     * of the leaves' own HNSW indexes to the pci_ ones and sort the lot largest first ({@code BY_SIZE_THEN_NAME}), so
+     * they share the per-pass limit. The leaves' live row counts are {@code pg_stat_user_tables.n_live_tup} (the
+     * statistics row the leaf rule is specified on), read for every counted leaf in ONE typed statement on the pass's
+     * session; the decision is {@link PciLeafReindexRule}. The count of indexes it cannot judge for want of a reference
+     * is reported every pass, so it falls back to 0 once an anchor exists. A failed read leaves the pci_ candidates
+     * as they were and the previous count standing. (This method only runs when {@code NX_SEARCH_PCI_REINDEX} is on,
+     * so with it off nothing is read, no candidate is added, and {@code unanchored} stays 0: the rule is off, not
+     * inactive for want of a reference.)
+     */
+    private List<Reindex> withLeafSizeCandidates(PciBuilderSession.Pass pass, Tally tally, List<Reindex> triggered,
+                                                 Instant now) {
+        if (tally.looks.isEmpty()) {
+            noteLeafUnanchored(0);
+            return triggered;
+        }
+        Set<String> schemas = new HashSet<>();
+        tally.looks.forEach(look -> schemas.add(look.leaf().schema()));
+        Map<String, Long> live;
+        try {
+            live = pass.transaction(tx -> {
+                PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
+                return PciAnchorReads.liveRows(tx, schemas);
+            });
+        } catch (DataAccessException | IllegalStateException e) {
+            log.warn("event=pci_leaf_size_rule_skipped reason=stats_read_failed error=\"{}\"", e.getMessage());
+            return triggered;
+        }
+        PciLeafReindexRule.Scan scan = PciLeafReindexRule.scan(tally.looks, live::get,
+            name -> reindex.backedOff(name, now));
+        noteLeafUnanchored(scan.unanchored());
+        if (scan.candidates().isEmpty()) {
+            return triggered;
+        }
+        List<Reindex> all = new java.util.ArrayList<>(triggered);
+        all.addAll(scan.candidates());
+        all.sort(PciReconcilePlanner.BY_SIZE_THEN_NAME);
+        return List.copyOf(all);
+    }
+
+    /**
+     * A {@link PciReconcilePlanner.Trigger#LEAF_SIZE} REINDEX of a leaf's own HNSW index ({@code r.collection()} is
+     * null). The leaf and index are resolved from {@code snapshot} by name; one that is not there is logged and skipped,
+     * with no statement, as a pci_ target with no subject is. The REINDEX goes through
+     * {@link PciBuilderSession.Pass#reindex(Leaf, PciCatalog.LeafIndex)}, and the outcome is recorded in
+     * {@link PciReindexState} exactly as {@link #reindexOne} does (started/finished, failure backoff, no backoff for a
+     * pass that ended). On DONE the index is anchored through
+     * {@link PciBuilderSession.Pass#anchorAfterLeafReindex}: {@code built_at} is taken before the leaf's live rows are
+     * read, as for a build. There is no canary re-measure (the leaf index serves no one collection) and no VACUUM.
      */
     void reindexLeafIndex(PciBuilderSession.Pass pass, PciCatalog.Snapshot snapshot, Reindex r, Tally tally) {
-        log.warn("event=pci_reindex_skipped reason=leaf_index_not_implemented index={}", r.name());
+        Leaf leaf = null;
+        PciCatalog.LeafIndex own = null;
+        for (Leaf candidate : snapshot.leaves()) {
+            for (PciCatalog.LeafIndex i : candidate.hnswIndexes()) {
+                if (i.name().equals(r.name())) {
+                    leaf = candidate;
+                    own = i;
+                }
+            }
+        }
+        if (leaf == null) {
+            log.warn("event=pci_reindex_skipped reason=no_leaf_index index={}", r.name());
+            return;
+        }
+        String name = r.name();
+        log.info("event=pci_reindex_started leaf={} index={} collection={} trigger={} bytes={}", leafId(leaf), name,
+            r.collection(), r.trigger().label(), r.bytes());
+        reindex.running(name);
+        DdlOutcome outcome;
+        try {
+            outcome = pass.reindex(leaf, own);
+        } finally {
+            reindex.running(null);
+        }
+        switch (outcome) {
+            case DONE -> {
+                reindex.finished(name, r.trigger(), clock.instant());
+                tally.reindexes++;
+                log.info("event=pci_index_reindexed leaf={} index={} collection={} trigger={} bytes_before={}",
+                    leafId(leaf), name, r.collection(), r.trigger().label(), r.bytes());
+                if (pass.live()) {
+                    anchorAfterLeafReindex(pass, leaf, own);
+                }
+            }
+            case FAILED, REJECTED -> {
+                int n = reindex.failed(name, clock.instant());
+                log.warn("event=pci_reindex_failed leaf={} index={} collection={} trigger={} consecutive_failures={} "
+                    + "next_retry_at={}", leafId(leaf), name, r.collection(), r.trigger().label(), n,
+                    reindex.nextRetryAt(name));
+            }
+            default -> log.info("event=pci_reindex_not_done leaf={} index={} outcome={}", leafId(leaf), name, outcome);
+        }
+    }
+
+    /** The leaf index's anchor after its REINDEX; anything that goes wrong leaves it as it was (the index stands). */
+    private void anchorAfterLeafReindex(PciBuilderSession.Pass pass, Leaf leaf, PciCatalog.LeafIndex own) {
+        Instant builtAt = clock.instant();
+        long rows;
+        try {
+            rows = pass.transaction(tx -> {
+                PgSession.setLocal(tx, "statement_timeout", Long.toString(countTimeout.toMillis()));
+                return PciAnchorReads.leafStats(tx, leaf.schema(), leaf.name()).live();
+            });
+        } catch (DataAccessException e) {
+            log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_failed sqlstate={} "
+                + "detail=\"the index stands\"", own.name(), leafId(leaf), e.sqlState());
+            return;
+        }
+        PciBuilderSession.Pass.AnchorOutcome anchored = pass.anchorAfterLeafReindex(leaf, own, rows, builtAt);
+        if (anchored.outcome() == DdlOutcome.DONE) {
+            log.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", own.name(),
+                leafId(leaf), anchored.anchor().rows(), anchored.anchor().bytes());
+        } else {
+            log.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"the index "
+                + "stands\"", own.name(), leafId(leaf), anchored.outcome());
+        }
     }
 
     private void reindexOne(PciBuilderSession.Pass pass, PciReindexState.Subject subject, Reindex r, Tally tally) {

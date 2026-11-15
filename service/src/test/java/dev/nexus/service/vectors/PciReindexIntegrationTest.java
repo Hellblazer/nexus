@@ -386,8 +386,10 @@ class PciReindexIntegrationTest {
         int measuredBefore = canary.triggers.size();
 
         // A restart: the new engine has no previous count, so a bulk delete is not what it sees; the anchor still
-        // says a third of the rows it was built from are gone (deletes since build survives a restart).
-        deleteRows(tenant, coll, rows.subList(0, 100));
+        // says over a quarter of the rows it was built from are gone (deletes since build survives a restart). 80 of
+        // 300, not 100: a third gone puts the leaf's own index at exactly 1.5x the reference a row, which is the
+        // leaf size rule's trigger too (P2.3), and this test is about the one pci_ index.
+        deleteRows(tenant, coll, rows.subList(0, 80));
         r = reconciler(ON, Clock.systemUTC(), canary);
         r.reconcileOnce();
 
@@ -397,7 +399,7 @@ class PciReindexIntegrationTest {
         assertThat(leaf(tenant).indexes()).filteredOn(i -> index(tenant, coll).equals(i.name()))
             .singleElement().satisfies(i -> assertThat(i.valid()).isTrue());
         PciCatalog.Anchor after = anchorOf(tenant, coll);
-        assertThat(after.rows()).as("the fresh anchor counts the rows now").isEqualTo(200);
+        assertThat(after.rows()).as("the fresh anchor counts the rows now").isEqualTo(220);
         assertThat(after.origin()).isEqualTo(PciCatalog.ORIGIN_BUILT);
         assertThat(after.builtAt()).isAfter(before.builtAt());
         assertThat(canary.triggers.subList(measuredBefore, canary.triggers.size()))
@@ -528,7 +530,7 @@ class PciReindexIntegrationTest {
         var clock = new MovingClock();
         var r = reconciler(ON, clock, new ScriptedCanary());
         buildAndSettle(r);
-        deleteRows(tenant, coll, rows.subList(0, 100));
+        deleteRows(tenant, coll, rows.subList(0, 80));   // under the leaf size rule's 1.5x (P2.3): only the pci_ index runs
 
         try (SnapshotHolder snapshot = new SnapshotHolder()) {
             CompletableFuture<?> pass = CompletableFuture.supplyAsync(r::reconcileOnce, async);

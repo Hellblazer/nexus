@@ -90,6 +90,25 @@ final class PciAnchorReads {
     }
 
     /**
+     * {@code n_live_tup} of every table in {@code schemas} that has a {@code pg_stat_user_tables} row, by
+     * {@code schema.table} (the leaf key {@link PciLeafReindexRule#leafId} makes). One statement for all leaves of a
+     * pass: a leaf with no row is absent from the map, and the leaf rule skips it. The count is the statistics'
+     * estimate, which is enough for the size rule's ratio.
+     */
+    static java.util.Map<String, Long> liveRows(DSLContext tx, java.util.Collection<String> schemas) {
+        Field<String> schema = DSL.field(DSL.name("s", "schemaname"), String.class);
+        Field<String> table = DSL.field(DSL.name("s", "relname"), String.class);
+        Field<Long> live = DSL.field(DSL.name("s", "n_live_tup"), SQLDataType.BIGINT);
+        java.util.Map<String, Long> out = new java.util.HashMap<>();
+        for (Record row : tx.select(schema, table, live)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_user_tables")).as("s"))
+                .where(schema.in(schemas)).fetch()) {
+            out.put(row.get(schema) + "." + row.get(table), nz(row.get(live)));
+        }
+        return out;
+    }
+
+    /**
      * Every row of {@code collection} on the leaf of ({@code model}, {@code tenant}), uncapped: rows present in the
      * table, not RDR-192's owned-chunk sense of live. Its cost is an exact scan of the collection's rows (0.3 to 0.6 s
      * at 60k, T2 {@code nexus_rdr/230-gate-latest}).
