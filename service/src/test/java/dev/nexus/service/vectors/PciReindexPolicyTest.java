@@ -83,4 +83,54 @@ class PciReindexPolicyTest {
         assertThat(PciReindexPolicy.bulkFall(OptionalLong.of(0), 0)).isFalse();
         assertThat(PciReindexPolicy.bulkFall(OptionalLong.of(1000), 1500)).as("growth is not a fall").isFalse();
     }
+
+    // -- red_unfixed (nexus-4lnn1.1.10): a red a REINDEX did not cure stops the daily red-canary trigger ----------------
+
+    private static final Instant NOW = Instant.parse("2026-11-20T00:00:00Z");
+    private static final String RING = "aa";
+
+    private static PciCatalog.Anchor unfixed(long rows, long bytes, long relfilenode, long redRelfilenode, String ring) {
+        return new PciCatalog.Anchor(Instant.parse("2026-11-01T00:00:00Z"), rows, bytes, PciCatalog.ORIGIN_BUILT,
+            relfilenode, new PciCatalog.RedUnfixed(Instant.parse("2026-11-01T01:00:00Z"), redRelfilenode, ring));
+    }
+
+    private static PciReindexPolicy.Candidate red(PciCatalog.Anchor anchor, long rows, long bytes, OptionalLong previous,
+                                                  String ringNow) {
+        return new PciReindexPolicy.Candidate("pci_x", "c", 384, anchor, bytes, rows, 0, previous, false,
+            PciCanary.State.RED, 10, null, false, OptionalDouble.empty(), ringNow);
+    }
+
+    @Test
+    void aRedUnfixedAnchor_stopsTheRedCanaryTrigger_whileTheIndexAndTheRingAreTheSame() {
+        var held = red(unfixed(1000, 8_000_000, 7, 7, RING), 1000, 8_000_000, OptionalLong.empty(), RING);
+        var withoutField = red(built(1000, 8_000_000), 1000, 8_000_000, OptionalLong.empty(), RING);
+
+        assertThat(PciReindexPolicy.trigger(withoutField, NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        assertThat(PciReindexPolicy.trigger(held, NOW)).isEmpty();
+    }
+
+    @Test
+    void aRebuildOrANewRing_liftsRedUnfixed_withNoWrite() {
+        // The index has been rebuilt since: the anchor's relfilenode is not the one the field names.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(1000, 8_000_000, 9, 7, RING), 1000, 8_000_000,
+            OptionalLong.empty(), RING), NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        // New queries: a different ring, or none known.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(1000, 8_000_000, 7, 7, RING), 1000, 8_000_000,
+            OptionalLong.empty(), "bb"), NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        assertThat(PciReindexPolicy.trigger(red(unfixed(1000, 8_000_000, 7, 7, RING), 1000, 8_000_000,
+            OptionalLong.empty(), null), NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+    }
+
+    @Test
+    void sizeDeletesAndBulkDeleteStillFire_withRedUnfixedSet_andIgnoreIt() {
+        // Deletes since build: 1000 rows at the anchor, 600 now.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(1000, 8_000_000, 7, 7, RING), 600, 4_800_000,
+            OptionalLong.empty(), RING), NOW)).contains(PciReconcilePlanner.Trigger.DELETES_SINCE_BUILD);
+        // Bulk delete: 20% below the previous count (and 20% deleted, under the deletes fraction).
+        assertThat(PciReindexPolicy.trigger(red(unfixed(1000, 8_000_000, 7, 7, RING), 800, 6_400_000,
+            OptionalLong.of(1000), RING), NOW)).contains(PciReconcilePlanner.Trigger.BULK_DELETE);
+        // Size: 1.5x bytes a row.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(1000, 8_000_000, 7, 7, RING), 1000, 12_000_000,
+            OptionalLong.empty(), RING), NOW)).contains(PciReconcilePlanner.Trigger.SIZE);
+    }
 }

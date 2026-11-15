@@ -173,6 +173,61 @@ final class PciAnchorLedger {
         reads.readings().forEach((name, reading) -> readings.put(new Key(id, name), reading));
     }
 
+    /**
+     * A red-canary REINDEX of {@code indexName} was re-measured still red: write its anchor again with
+     * {@code red_unfixed} (the relfilenode of the fresh storage and {@code ring}), a second COMMENT after the one the
+     * REINDEX wrote. Nothing is written when the engine holds no anchor for the index or the index was rebuilt since.
+     *
+     * @return whether the field was written
+     */
+    boolean markRedUnfixed(PciBuilderSession.Pass pass, Leaf leaf, String indexName, String collection, Instant at,
+                           String ring) {
+        String id = PciReconciler.leafId(leaf);
+        IndexReading r = readings.get(new Key(id, indexName));
+        if (r == null || r.anchor().relfilenode() == null) {
+            return false;   // its fresh anchor is not written (owed): the retry writes it, and the next red marks it
+        }
+        var red = new PciCatalog.RedUnfixed(at, r.anchor().relfilenode(), ring);
+        var written = pass.write(leaf, new Index(indexName, true, collection), r.anchor().withRedUnfixed(red),
+            r.anchor().relfilenode());
+        if (written.outcome() != DdlOutcome.DONE) {
+            log.info("event=pci_red_unfixed_not_written index={} leaf={} outcome={}", indexName, id, written.outcome());
+            return false;
+        }
+        readings.put(new Key(id, indexName), reading(r, written.anchor()));
+        log.info("event=pci_red_unfixed_recorded index={} leaf={} relfilenode={} detail=\"still red after the REINDEX; "
+            + "not rebuilt for a red canary until the index or the query ring changes\"", indexName, id,
+            red.relfilenode());
+        return true;
+    }
+
+    /**
+     * A green canary run ends {@code red_unfixed}: write the anchor again without it (one COMMENT). Refused if the index
+     * was rebuilt since the engine read it; a rebuild lifts the field on its own.
+     *
+     * @return whether the field was cleared
+     */
+    boolean clearRedUnfixed(PciBuilderSession.Pass pass, Leaf leaf, Index index) {
+        String id = PciReconciler.leafId(leaf);
+        IndexReading r = readings.get(new Key(id, index.name()));
+        if (r == null || r.anchor().redUnfixed() == null) {
+            return false;
+        }
+        var written = pass.write(leaf, index, r.anchor().withoutRedUnfixed(), r.anchor().relfilenode());
+        if (written.outcome() != DdlOutcome.DONE) {
+            log.info("event=pci_red_unfixed_not_cleared index={} leaf={} outcome={}", index.name(), id,
+                written.outcome());
+            return false;
+        }
+        readings.put(new Key(id, index.name()), reading(r, written.anchor()));
+        log.info("event=pci_red_unfixed_cleared index={} leaf={} detail=\"a green canary run\"", index.name(), id);
+        return true;
+    }
+
+    private static IndexReading reading(IndexReading r, PciCatalog.Anchor anchor) {
+        return new IndexReading(anchor, r.bytes(), r.rows(), r.writtenSince(), r.countedAt(), r.countedBytes());
+    }
+
     /** The statistics at the last committed look of the leaf with this id, or {@code null}. */
     PciAnchorReads.LeafStats lastStats(String leafId) {
         return lastStats.get(leafId);
@@ -204,8 +259,7 @@ final class PciAnchorLedger {
         switch (w.kind()) {
             case STAMP -> {
                 // The figures are the ones the reading holds; only the relfilenode is new.
-                readings.computeIfPresent(new Key(id, index.name()), (k, r) -> new IndexReading(written.anchor(),
-                    r.bytes(), r.rows(), r.writtenSince(), r.countedAt(), r.countedBytes()));
+                readings.computeIfPresent(new Key(id, index.name()), (k, r) -> reading(r, written.anchor()));
                 log.info("event=pci_anchor_relfilenode_stamped index={} leaf={} relfilenode={}", index.name(), id,
                     written.anchor().relfilenode());
             }

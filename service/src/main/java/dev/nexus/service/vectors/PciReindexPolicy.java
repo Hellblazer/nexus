@@ -103,10 +103,20 @@ final class PciReindexPolicy {
      * @param lastRedReindexAt when the last red-canary REINDEX of the index finished, or null
      * @param backedOff      the index's REINDEX is in its failure backoff
      * @param reference      the install reference (bytes per row) for the index's dimension, for an adopted anchor
+     * @param ringDigest     {@link PciQueryRing#ringDigest} of the queries of the canary's latest run when it was red, or
+     *                       null: what a {@code red_unfixed} in the anchor is compared with
      */
     record Candidate(String name, String collection, int dimension, PciCatalog.Anchor anchor, long bytes, long rows,
                      long writtenSince, OptionalLong previousRows, boolean bulkPending, PciCanary.State canary,
-                     int canaryQueries, Instant lastRedReindexAt, boolean backedOff, OptionalDouble reference) { }
+                     int canaryQueries, Instant lastRedReindexAt, boolean backedOff, OptionalDouble reference,
+                     String ringDigest) {
+        Candidate(String name, String collection, int dimension, PciCatalog.Anchor anchor, long bytes, long rows,
+                  long writtenSince, OptionalLong previousRows, boolean bulkPending, PciCanary.State canary,
+                  int canaryQueries, Instant lastRedReindexAt, boolean backedOff, OptionalDouble reference) {
+            this(name, collection, dimension, anchor, bytes, rows, writtenSince, previousRows, bulkPending, canary,
+                canaryQueries, lastRedReindexAt, backedOff, reference, null);
+        }
+    }
 
     /**
      * The trigger that fires for {@code c} at {@code now}, if any; a pure function of its arguments. When several fire
@@ -157,6 +167,11 @@ final class PciReindexPolicy {
             return false;
         }
         if (now.isBefore(c.anchor().builtAt().plus(RED_REINDEX_MIN_INTERVAL))) {
+            return false;
+        }
+        // A red that a REINDEX did not cure is not rebuilt again while the index and the queries are the same ones:
+        // the anchor says so, so a restart or a change of holder keeps it. A rebuild or a new ring lifts it.
+        if (c.anchor().redUnfixed() != null && c.anchor().redUnfixed().holds(c.anchor(), c.ringDigest())) {
             return false;
         }
         return c.lastRedReindexAt() == null

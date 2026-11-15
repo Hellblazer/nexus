@@ -281,6 +281,25 @@ public final class PciQueryRing {
     }
 
     /**
+     * The digest of a set of query vectors, order-free: the hex SHA-256 of the sorted {@link #digest}s, each as 64 hex
+     * digits, joined by newlines. The same queries give the same text; a different set gives a different one
+     * (nexus-4lnn1.1.10: a red canary that a REINDEX did not cure is held only while its ring is the same).
+     */
+    public static String ringDigest(java.util.Collection<float[]> vectors) {
+        java.util.List<String> digests = new java.util.ArrayList<>();
+        for (float[] v : vectors) {
+            digests.add(java.util.HexFormat.of().formatHex(digest(v)));
+        }
+        java.util.Collections.sort(digests);
+        try {
+            return java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(String.join("\n", digests).getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is a required JDK algorithm", e);
+        }
+    }
+
+    /**
      * The exception's class and a bounded message with every bracketed run of numbers masked: PostgreSQL quotes the
      * offending value in some errors, and the value here would be a vector. When the chain holds a
      * {@link java.sql.SQLException}, the message is its SQLState and its own message, never jOOQ's: jOOQ's opens with

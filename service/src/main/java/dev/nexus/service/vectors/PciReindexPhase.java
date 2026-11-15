@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -35,17 +36,31 @@ final class PciReindexPhase {
         boolean write(PciBuilderSession.Pass pass, Leaf leaf, int dimension, Build build, boolean afterReindex);
     }
 
+    /** Records {@code red_unfixed} in the anchor of an index whose red-canary REINDEX re-measured still red. */
+    @FunctionalInterface
+    interface RedMarker {
+        /** @return whether the field is written */
+        boolean mark(PciBuilderSession.Pass pass, Leaf leaf, String index, String collection, Instant at, String ring);
+    }
+
     private final PciReindexState state;
     private final PciCanarySchedule canary;
     private final Clock clock;
     private final Anchorer anchorer;
+    private final RedMarker redMarker;
 
     /** @param canary the canary's schedule, or null (a reconciler built without one measures nothing) */
     PciReindexPhase(PciReindexState state, PciCanarySchedule canary, Clock clock, Anchorer anchorer) {
+        this(state, canary, clock, anchorer, (pass, leaf, index, collection, at, ring) -> false);
+    }
+
+    PciReindexPhase(PciReindexState state, PciCanarySchedule canary, Clock clock, Anchorer anchorer,
+                    RedMarker redMarker) {
         this.state = Objects.requireNonNull(state, "state");
         this.canary = canary;
         this.clock = Objects.requireNonNull(clock, "clock");
         this.anchorer = Objects.requireNonNull(anchorer, "anchorer");
+        this.redMarker = Objects.requireNonNull(redMarker, "redMarker");
     }
 
     /**
@@ -124,7 +139,7 @@ final class PciReindexPhase {
                 if (r.vacuumAfter() && pass.live()) {
                     vacuumLeaf(pass, leaf);
                 }
-                remeasure(leaf, name, r, wasRed);
+                remeasure(pass, leaf, name, r, wasRed);
                 return true;
             }
             case FAILED, REJECTED -> {
@@ -154,11 +169,13 @@ final class PciReindexPhase {
     /**
      * The canary again on the REINDEXed index, with a red run's own queries when there are some (the same in-memory
      * queries, so before and after are comparable). When the canary was red at the start (on at least ten queries),
-     * whatever the trigger's label, a re-measure that is still red is {@code red_after_reindex}: reported. A later green
-     * run clears that flag; it does not lift the 24 hour floor, which holds the index's next red-canary REINDEX
-     * whatever the canary reads (a REINDEX of a graph under a day old rebuilds essentially the same graph).
+     * whatever the trigger's label, a re-measure that is still red is {@code red_after_reindex}: reported, and recorded in
+     * the index's anchor as {@code red_unfixed} (a second COMMENT, after the fresh anchor the REINDEX wrote), which stops
+     * the daily red-canary trigger while the index and the query ring stay the same. A later green run clears the flag
+     * and the field; the 24 hour floor, which holds the index's next red-canary REINDEX whatever the canary reads (a
+     * REINDEX of a graph under a day old rebuilds essentially the same graph), is independent of both.
      */
-    private void remeasure(Leaf leaf, String name, Reindex r, boolean wasRed) {
+    private void remeasure(PciBuilderSession.Pass pass, Leaf leaf, String name, Reindex r, boolean wasRed) {
         if (canary == null) {
             return;
         }
@@ -173,6 +190,10 @@ final class PciReindexPhase {
                 log.warn("event=pci_red_after_reindex leaf={} index={} collection={} queries={} detail=\"still red "
                     + "after the REINDEX; not rebuilt for a red canary for 24 hours\"", PciReconciler.leafId(leaf), name,
                     r.collection(), after.queries());
+                List<float[]> queries = sample != null ? sample : after.redSample();
+                if (queries != null && pass.live()) {
+                    redMarker.mark(pass, leaf, name, r.collection(), clock.instant(), PciQueryRing.ringDigest(queries));
+                }
             }
         } catch (RuntimeException e) {
             log.warn("event=pci_canary_failed stage=after_reindex index={} error={}", name, PciQueryRing.sanitize(e));

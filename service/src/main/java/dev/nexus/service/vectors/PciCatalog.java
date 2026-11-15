@@ -151,8 +151,11 @@ public final class PciCatalog {
      * @param relfilenode {@code pg_class.relfilenode} of the index the anchor was written against, or {@code null} for
      *                    an anchor written before the field existed (and for one the engine has not yet stamped: the
      *                    writer sets it on the same session, right before the COMMENT)
+     * @param redUnfixed  the optional {@code red_unfixed} field: a red recall canary that a REINDEX did not cure, or
+     *                    {@code null}
      */
-    public record Anchor(Instant builtAt, long rows, long bytes, String origin, Long relfilenode) {
+    public record Anchor(Instant builtAt, long rows, long bytes, String origin, Long relfilenode,
+                         RedUnfixed redUnfixed) {
         public Anchor {
             Objects.requireNonNull(builtAt, "builtAt");
             Objects.requireNonNull(origin, "origin");
@@ -167,12 +170,26 @@ public final class PciCatalog {
 
         /** An anchor with no relfilenode yet (the writer stamps it). */
         public Anchor(Instant builtAt, long rows, long bytes, String origin) {
-            this(builtAt, rows, bytes, origin, null);
+            this(builtAt, rows, bytes, origin, null, null);
         }
 
-        /** This anchor against {@code relfilenode}. */
+        public Anchor(Instant builtAt, long rows, long bytes, String origin, Long relfilenode) {
+            this(builtAt, rows, bytes, origin, relfilenode, null);
+        }
+
+        /** This anchor against {@code relfilenode}; {@code red_unfixed} is carried forward, its own condition lifts it. */
         public Anchor withRelfilenode(long relfilenode) {
-            return new Anchor(builtAt, rows, bytes, origin, relfilenode);
+            return new Anchor(builtAt, rows, bytes, origin, relfilenode, redUnfixed);
+        }
+
+        /** This anchor with {@code red_unfixed} set to {@code red}. */
+        public Anchor withRedUnfixed(RedUnfixed red) {
+            return new Anchor(builtAt, rows, bytes, origin, relfilenode, red);
+        }
+
+        /** This anchor without {@code red_unfixed}. */
+        public Anchor withoutRedUnfixed() {
+            return new Anchor(builtAt, rows, bytes, origin, relfilenode, null);
         }
 
         /**
@@ -215,7 +232,42 @@ public final class PciCatalog {
             String head = "{\"nexus_pci\":" + ANCHOR_VERSION
                 + ",\"built_at\":\"" + builtAt + "\",\"rows\":" + rows + ",\"bytes\":" + bytes + ",\"origin\":\""
                 + origin + "\"";
-            return relfilenode == null ? head + "}" : head + ",\"relfilenode\":" + relfilenode + "}";
+            String rf = relfilenode == null ? "" : ",\"relfilenode\":" + relfilenode;
+            return head + rf + (redUnfixed == null ? "" : ",\"red_unfixed\":" + redUnfixed.toJson()) + "}";
+        }
+    }
+
+    /**
+     * A red recall canary that a REINDEX did not cure (RDR-230 Phase 2, nexus-4lnn1.1.10), kept in the anchor:
+     * {@code "red_unfixed":{"at":"<ISO-8601 Z>","relfilenode":N,"ring":"<hex>"}}. The red-canary trigger skips an
+     * index while the field holds ({@link #holds}): the index has the relfilenode it names and the query ring has the
+     * digest it names. A rebuild or a change of the ring lifts it, with no write.
+     *
+     * @param at          when the still-red re-measure was taken, truncated to microseconds
+     * @param relfilenode the index's relfilenode at the red: the REINDEX's fresh storage
+     * @param ring        {@link PciQueryRing#ringDigest} of the queries the red run used
+     */
+    public record RedUnfixed(Instant at, long relfilenode, String ring) {
+        public RedUnfixed {
+            Objects.requireNonNull(at, "at");
+            Objects.requireNonNull(ring, "ring");
+            if (relfilenode < 0 || ring.isBlank()) {
+                throw new IllegalArgumentException("relfilenode must not be negative and ring must not be blank");
+            }
+            at = at.truncatedTo(ChronoUnit.MICROS);
+        }
+
+        /** The field's value as JSON: numbers, a timestamp and a hex string, so nothing needs escaping. */
+        String toJson() {
+            return "{\"at\":\"" + at + "\",\"relfilenode\":" + relfilenode + ",\"ring\":\"" + ring + "\"}";
+        }
+
+        /**
+         * Whether the field still holds for an index with this anchor now and a red run on {@code currentRing}: the
+         * index's relfilenode is the anchor's and the field's own, and the ring is the same.
+         */
+        public boolean holds(Anchor anchor, String currentRing) {
+            return anchor.relfilenode() != null && anchor.relfilenode() == relfilenode && ring.equals(currentRing);
         }
     }
 
@@ -251,9 +303,28 @@ public final class PciCatalog {
             Long relfilenode = rf != null && rf.isIntegralNumber() && rf.canConvertToLong() && rf.asLong() >= 0
                 ? rf.asLong() : null;
             return Optional.of(new Anchor(Instant.parse(builtAt.asText()), rows.asLong(), bytes.asLong(),
-                origin.asText(), relfilenode));
+                origin.asText(), relfilenode, parseRedUnfixed(n.get("red_unfixed"))));
         } catch (JsonProcessingException | DateTimeParseException e) {
             return Optional.empty();
+        }
+    }
+
+    /** The {@code red_unfixed} field, or {@code null} when it is absent or any part of it is of the wrong type. */
+    private static RedUnfixed parseRedUnfixed(JsonNode n) {
+        if (n == null || !n.isObject()) {
+            return null;
+        }
+        JsonNode at = n.get("at");
+        JsonNode rf = n.get("relfilenode");
+        JsonNode ring = n.get("ring");
+        try {
+            if (at == null || !at.isTextual() || rf == null || !rf.isIntegralNumber() || !rf.canConvertToLong()
+                || rf.asLong() < 0 || ring == null || !ring.isTextual() || ring.asText().isBlank()) {
+                return null;
+            }
+            return new RedUnfixed(Instant.parse(at.asText()), rf.asLong(), ring.asText());
+        } catch (DateTimeParseException e) {
+            return null;
         }
     }
 

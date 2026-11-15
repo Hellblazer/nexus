@@ -566,4 +566,129 @@ class PciAnchorRebuildIntegrationTest {
             && l.contains("index=" + own.name()) && l.contains("old_relfilenode=" + stamped.relfilenode())
             && l.contains("new_relfilenode=" + rebuilt.relfilenode()));
     }
+
+    // -- red_unfixed: a red a REINDEX did not cure stops the daily loop ----------------------------------------
+
+    /** An index with a red canary on ten queries whose red-canary REINDEX re-measured still red: one REINDEX done. */
+    private PciReconciler stillRedAfterItsReindex(String tenant, String coll, MutableClock clock,
+                                                   ScriptedCanary canary) throws Exception {
+        collection(tenant, coll, 300);
+        canary.state = PciCanary.State.RED;
+        PciReconciler r = reindexingReconciler(clock, canary);
+        r.reconcileOnce();   // builds; the canary is red after the build
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();   // the red-canary REINDEX; the re-measure is still red
+        assertThat(r.reindexes()).isEqualTo(1);
+        assertThat(logged("trigger=red_canary")).isGreaterThanOrEqualTo(1);
+        return r;
+    }
+
+    @Test
+    void aRedThatAReindexDidNotCure_isRecordedInTheAnchor_andIsNotRebuiltOnTheNextDays() throws Exception {
+        String tenant = newTenant("unfixed");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+
+        PciCatalog.Anchor anchor = indexOf(tenant, coll).anchor().orElseThrow();
+        Facts facts = factsOf(leaf(tenant).schema(), indexOf(tenant, coll).name());
+        assertThat(anchor.redUnfixed()).isNotNull();
+        assertThat(anchor.redUnfixed().relfilenode()).isEqualTo(Long.parseLong(facts.relfilenode()))
+            .isEqualTo(anchor.relfilenode());
+        assertThat(anchor.redUnfixed().ring()).isEqualTo(PciQueryRing.ringDigest(canary.sample));
+        assertThat(anchor.redUnfixed().at()).isEqualTo(clock.instant());
+        assertThat(facts.comment()).contains("\"red_unfixed\":{");
+        assertThat(logged("event=pci_red_unfixed_recorded")).isEqualTo(1);
+
+        for (int day = 0; day < 3; day++) {
+            clock.advance(Duration.ofHours(25));
+            r.reconcileOnce();
+            r.reconcileOnce();
+        }
+
+        assertThat(r.reindexes()).as("a persistent red is not rebuilt again on the next days").isEqualTo(1);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed()).as("still recorded").isNotNull();
+    }
+
+    @Test
+    void aChangeOfTheQueryRing_liftsIt_soANewCauseIsRebuiltAgain() throws Exception {
+        String tenant = newTenant("unfixed-ring");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+        String oldRing = indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().ring();
+
+        canary.sample = List.of(new float[] {9f, 8f, 7f});
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();   // judged on the old red; the daily run then reads the new queries
+        assertThat(r.reindexes()).isEqualTo(1);
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).as("a new ring can mean a new cause").isEqualTo(2);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed().ring())
+            .as("recorded again, for the new ring").isEqualTo(PciQueryRing.ringDigest(canary.sample))
+            .isNotEqualTo(oldRing);
+    }
+
+    @Test
+    void aHandReindex_liftsIt_andTheRedDayCountsFromTheDetection() throws Exception {
+        String tenant = newTenant("unfixed-hand");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+        handReindex(leaf(tenant).schema(), indexOf(tenant, coll).name());
+
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();   // detects the rebuild: a fresh anchor, with no red_unfixed
+
+        assertThat(logged("event=pci_anchor_rebuilt_detected")).isEqualTo(1);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed()).isNull();
+        assertThat(r.reindexes()).isEqualTo(1);
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
+        assertThat(r.reindexes()).as("a day after the detection the red is judged afresh").isEqualTo(2);
+    }
+
+    @Test
+    void sizeDeletesAndBulkDeleteStillFire_whileRedUnfixedIsSet() throws Exception {
+        String tenant = newTenant("unfixed-bulk");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        PciReconciler r = stillRedAfterItsReindex(tenant, coll, clock, canary);
+        assertThat(indexOf(tenant, coll).anchor().orElseThrow().redUnfixed()).isNotNull();
+
+        deleteRows(tenant, coll, 0, 120);   // 40%
+        clock.advance(Duration.ofMinutes(10));
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).isEqualTo(2);
+        assertThat(logs()).filteredOn(l -> l.contains("event=pci_index_reindexed")).hasSize(2).last()
+            .asString().contains("trigger=bulk_delete");
+        assertThat(logged("event=pci_leaf_vacuumed")).isEqualTo(1);
+    }
+
+    @Test
+    void redUnfixedIsInTheAnchor_notInMemory_soARestartedEngineKeepsHolding() throws Exception {
+        String tenant = newTenant("unfixed-restart");
+        String coll = name("c");
+        MutableClock clock = new MutableClock();
+        ScriptedCanary canary = new ScriptedCanary();
+        stillRedAfterItsReindex(tenant, coll, clock, canary);
+
+        clock.advance(Duration.ofHours(25));
+        PciReconciler restarted = reindexingReconciler(clock, canary);   // no memory of the REINDEX
+        restarted.reconcileOnce();
+        restarted.reconcileOnce();
+        assertThat(restarted.reindexes()).as("the anchor holds it").isZero();
+
+        canary.sample = List.of(new float[] {9f, 8f, 7f});
+        clock.advance(Duration.ofHours(25));
+        restarted.reconcileOnce();
+        restarted.reconcileOnce();
+        assertThat(restarted.reindexes()).as("and a new ring lifts it on the restarted engine too").isEqualTo(1);
+    }
 }

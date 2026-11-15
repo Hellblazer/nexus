@@ -135,7 +135,9 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * {@code Pass#vacuum} of the leaf, then the canary again (with a red run's own queries when there are some). What the
  * rules need between passes ({@link PciReindexState}: the previous row count, the once-a-day limit of a red-canary
  * REINDEX, {@code red_after_reindex}, the failure backoff) is in memory like the build backoff. A failed REINDEX is
- * charged to RDR-227's backoff per index; one cut off by a migration or a lost connection is not. A size change of an
+ * charged to RDR-227's backoff per index; one cut off by a migration or a lost connection is not. A red-canary
+ * REINDEX whose re-measure is still red is written into the anchor as {@code red_unfixed}, which stops the daily
+ * red-canary trigger while the index and the query ring are unchanged. A size change of an
  * index makes the next look recount its rows, because the size rule divides bytes by rows.
  *
  * <p><b>Retry state is in memory, per engine, and is lost on restart.</b> After a failed build of
@@ -360,8 +362,9 @@ public final class PciReconciler {
                   Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
                   PciCanarySchedule canary) {
         this.canary = canary;
-        this.phase = new PciReindexPhase(reindex, canary, Objects.requireNonNull(clock, "clock"), this::writeAnchor);
-        this.ledger = new PciAnchorLedger(clock, reindex::reference, name -> reindex.owedAnchors().containsKey(name));
+        this.ledger = new PciAnchorLedger(Objects.requireNonNull(clock, "clock"), reindex::reference,
+            name -> reindex.owedAnchors().containsKey(name));
+        this.phase = new PciReindexPhase(reindex, canary, clock, this::writeAnchor, ledger::markRedUnfixed);
         this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
@@ -1143,8 +1146,17 @@ public final class PciReconciler {
         // A fresh anchor a REINDEX could not write last pass. This pass's looks still carry the OLD anchor, so an index
         // whose write just landed is judged on the next pass, from its new one.
         Set<String> justAnchored = phase.retryOwedAnchors(pass, snapshotIndexes);
+        java.util.function.Function<String, PciCanary.Result> latest = name -> canary == null ? null : canary.latest(name);
         List<PciReindexPolicy.Candidate> candidates = reindex.candidates(tally.looks, tally.droppedIndexes,
-            snapshotIndexes, justAnchored, name -> canary == null ? null : canary.latest(name), now, subjects);
+            snapshotIndexes, justAnchored, latest, now, subjects);
+        // A green canary run ends a red_unfixed in the anchor (nexus-4lnn1.1.10).
+        for (PciReindexState.Subject s : subjects.values()) {
+            PciCanary.Result r = latest.apply(s.index().name());
+            if (pass.live() && s.reading().anchor().redUnfixed() != null && r != null
+                && r.state() == PciCanary.State.GREEN) {
+                ledger.clearRedUnfixed(pass, s.leaf(), s.index());
+            }
+        }
         List<Reindex> triggered = withLeafSizeCandidates(pass, tally, PciReconcilePlanner.reindexes(candidates, now),
             now);
         for (Reindex r : triggered) {

@@ -313,6 +313,45 @@ class PciCatalogTest {
     }
 
     @Test
+    void anchor_redUnfixed_isAnAdditiveOptionalField_thatRoundTrips_andTheOldRuleStillReadsIt() {
+        var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
+        var red = new PciCatalog.RedUnfixed(java.time.Instant.parse("2026-10-21T09:30:00.123456Z"), 16421L, "ab12");
+        var anchor = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L, red);
+        String text = ANCHOR_WITH_RELFILENODE.replace("}",
+            ",\"red_unfixed\":{\"at\":\"2026-10-21T09:30:00.123456Z\",\"relfilenode\":16421,\"ring\":\"ab12\"}}");
+
+        assertThat(anchor.toJson()).isEqualTo(text);
+        assertThat(PciCatalog.parseAnchor(text)).contains(anchor);
+        assertThat(oldRuleReadsIt(text)).as("an engine that knows only the old fields reads it").isTrue();
+        assertThat(anchor.withoutRedUnfixed().toJson()).isEqualTo(ANCHOR_WITH_RELFILENODE);
+        assertThat(anchor.withRelfilenode(9L).redUnfixed()).as("carried forward by a rewrite").isEqualTo(red);
+        assertThat(anchor.sameFigures(anchor.withoutRedUnfixed())).isTrue();
+        assertThat(red.holds(anchor, "ab12")).isTrue();
+        assertThat(red.holds(anchor, "cd34")).as("another ring").isFalse();
+        assertThat(red.holds(anchor.withRelfilenode(9L), "ab12")).as("another relfilenode").isFalse();
+        for (String bad : new String[] {"1", "\"x\"", "{}", "{\"at\":\"yesterday\",\"relfilenode\":1,\"ring\":\"a\"}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":-1,\"ring\":\"a\"}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"ring\":\"\"}"}) {
+            assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("}", ",\"red_unfixed\":" + bad + "}")))
+                .as(bad).hasValueSatisfying(a -> assertThat(a.redUnfixed()).isNull());
+        }
+    }
+
+    @Test
+    void ringDigest_isTheSameForTheSameQueriesInAnyOrder_andDifferentForADifferentSet() {
+        var a = new float[] {1f, 2f, 3f};
+        var b = new float[] {4f, 5f, 6f};
+        var c = new float[] {7f, 8f, 9f};
+
+        assertThat(PciQueryRing.ringDigest(java.util.List.of(a, b)))
+            .isEqualTo(PciQueryRing.ringDigest(java.util.List.of(b, a))).hasSize(64);
+        assertThat(PciQueryRing.ringDigest(java.util.List.of(a, b)))
+            .isNotEqualTo(PciQueryRing.ringDigest(java.util.List.of(a, c)));
+        assertThat(PciQueryRing.ringDigest(java.util.List.of(a)))
+            .isNotEqualTo(PciQueryRing.ringDigest(java.util.List.of(a, b)));
+    }
+
+    @Test
     void anchor_aTextWeDoNotWrite_isRefusedByTheWriter_andReadableByTheParser() {
         // Phase 2 adds an origin of its own; a reader of today still reads it, and this engine writes only two.
         String future = ANCHOR_TEXT.replace("\"built\"", "\"reindexed\"");

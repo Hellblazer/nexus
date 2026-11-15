@@ -493,13 +493,14 @@ class PciReindexIntegrationTest {
         clock.advance(Duration.ofHours(1));
         assertThat(r.redAfterReindex(index(tenant, coll))).as("red_after_reindex expires after a day").isFalse();
         restarted.reconcileOnce();
-        assertThat(restarted.reindexes()).as("a day on, once more").isEqualTo(1);
+        assertThat(restarted.reindexes()).as("a day on: the anchor holds the same red on the same ring (red_unfixed)")
+            .isZero();
     }
 
-    /** A red_after_reindex clears on a later green run: here the next REINDEX re-measures green. */
+    /** A red_after_reindex, and the red_unfixed in the anchor, clear on a later green run. */
     @Test
     @Timeout(value = 300, unit = TimeUnit.SECONDS)
-    void aReindexThatReMeasuresGreen_clearsRedAfterReindex() throws Exception {
+    void aGreenRun_clearsRedAfterReindexAndTheAnchorsRedUnfixed() throws Exception {
         String tenant = newTenant("redgreen");
         String coll = name("redgreen");
         collection(tenant, coll, 300);
@@ -512,12 +513,15 @@ class PciReindexIntegrationTest {
         r.reconcileOnce();
         assertThat(r.redAfterReindex(index(tenant, coll))).isTrue();
 
+        assertThat(anchorOf(tenant, coll).redUnfixed()).as("recorded in the anchor").isNotNull();
         canary.state = State.GREEN;
         clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();   // the daily run reads green at the end of this pass
         r.reconcileOnce();
 
-        assertThat(r.reindexes()).isEqualTo(2);
-        assertThat(r.redAfterReindex(index(tenant, coll))).as("the re-measure was green").isFalse();
+        assertThat(r.reindexes()).as("the persisted red held the index until the green run").isEqualTo(1);
+        assertThat(anchorOf(tenant, coll).redUnfixed()).as("cleared by the green run").isNull();
+        assertThat(r.redAfterReindex(index(tenant, coll))).as("the green run ended it").isFalse();
         assertThat(r.maintenance().canary().indexes()).singleElement()
             .satisfies(e -> assertThat(e.redAfterReindex()).isFalse());
     }
