@@ -172,10 +172,10 @@ def _case_an_interrupted_export_frees_the_engines_session_slot(tenant: str, tmp_
 
 
 def _roundtrip_compare():
-    """scripts/backup_roundtrip_compare.py, the offline comparison the cloud round trip runs (nexus-csayy.10)."""
+    """tests/e2e/backup_roundtrip_compare.py, the offline comparison the cloud round trip runs (nexus-csayy.10)."""
     import importlib.util  # noqa: PLC0415
 
-    path = Path(__file__).resolve().parents[1] / "scripts" / "backup_roundtrip_compare.py"
+    path = Path(__file__).resolve().parent / "e2e" / "backup_roundtrip_compare.py"
     spec = importlib.util.spec_from_file_location("backup_roundtrip_compare", path)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)

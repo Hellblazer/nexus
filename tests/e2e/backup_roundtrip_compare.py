@@ -15,7 +15,7 @@ Per table, in order:
 
 Tables a restore writes to itself (``catalog_meta``: the restore's marker row) are reported and not judged.
 
-Usage: ``uv run python scripts/backup_roundtrip_compare.py SOURCE.nxtenant RESTORED.nxtenant``. It prints one
+Usage: ``uv run python tests/e2e/backup_roundtrip_compare.py SOURCE.nxtenant RESTORED.nxtenant``. It prints one
 JSON report and exits 0 on PASS, 1 on FAIL, 3 on REVIEW. Verify both files with ``nx backup --check`` first: this
 script assumes they are sound and does not re-check their hashes.
 """

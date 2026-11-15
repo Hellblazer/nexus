@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""scripts/backup_roundtrip_compare.py (nexus-csayy.10): two ``.nxtenant`` files, the source tenant's export and
+"""tests/e2e/backup_roundtrip_compare.py (nexus-csayy.10): two ``.nxtenant`` files, the source tenant's export and
 an export of the tenant it was restored into, compared offline: per-table row counts, then per-column and per-row
 digests over the columns a restore keeps. A restore gives new primary keys and rewrites the references to them, so
 an integer column, or ``tenant_id``, may differ; any other differing column is a finding."""
@@ -16,7 +16,7 @@ import pytest
 from nexus.backup.tenant_file import TenantFileWriter
 from tests.test_tenant_file import copy_page
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "backup_roundtrip_compare.py"
+_SCRIPT = Path(__file__).resolve().parents[1] / "e2e" / "backup_roundtrip_compare.py"
 
 
 def _load():
