@@ -83,11 +83,14 @@ covers, 48,772 of them catalog documents (T2 `nexus/rdr248-cloud-spike-2026-11-1
 
 - Engine: Java 25, Postgres 17 with pgvector; cloud is a self-managed PG 17.11 on arm64 EC2 behind the
   managed service. Schema by Liquibase.
-- RLS: at the schema head (Liquibase `grants-nexus-diag-5`, 572 changesets) 50 parent tables carry
+- RLS: at the schema head of the spike (Liquibase `grants-nexus-diag-5`, 572 changesets) 50 parent tables carry
   `FORCE ROW LEVEL SECURITY`, keyed on `current_setting('nexus.tenant')` (`t1.scratch` on a second
   setting, `nexus.t1_tenant`), plus 40 RLS partition leaves of `nexus.chunks`, which is LIST-partitioned by
   model, then tenant. The global tables outside RLS: `embedding_models`, `install_pings`,
   `request_ledger_tenants`, `service_tokens`, `session_tokens`, `tuple_tenants`, and Liquibase's own.
+  Since `telemetry-019-1` dropped `frecency` (nexus-6pfgb.42, engine 0.1.192) there are 49 parent tables: the
+  shipped registry exports 25 (19 `data`, 6 `derived`) and excludes 24, and lists `frecency` as retired
+  (`TenantExport.java:97`), so a file from an older engine that still carries it is not refused: the import skips that table and reports it.
   (A first count from the changesets said 60; it included tables since dropped.)
 - The engine connects as `nexus_svc`: not superuser, no BYPASSRLS, not the tables' owner. It has SELECT
   and INSERT on all 50 tables and TEMP on the database, USAGE but not UPDATE on their sequences, and it
@@ -191,8 +194,9 @@ The classes, from the spike (one reason each in the spike record):
   catalog_meta, catalog_sensitivity_changes, chunks, embedding_profile, memory, memory_summaries, plans,
   document_aspects, document_highlights, topics, topic_assignments, topic_links, taxonomy_meta,
   claude_assisted_remediation_consents.
-- `derived`: frecency, taxonomy_centroids, search_telemetry, relevance_log, nx_answer_runs,
-  nx_answer_steps, chunk_orphaned_at.
+- `derived`: taxonomy_centroids, search_telemetry, relevance_log, nx_answer_runs,
+  nx_answer_steps, chunk_orphaned_at. (`frecency` was `derived` here until `telemetry-019-1` dropped the
+  table, nexus-6pfgb.42; the registry now lists it as retired.)
 - `excluded`: in-flight work (pdf_pipeline, pdf_pages, pdf_chunks, reembed_jobs, reembed_job_moves),
   coordination state whose ids hash the tenant and whose claims would be stale (tuples, tuple_claim_log,
   tuple_deliveries), session scratch (t1.scratch), and operational logs (agent_dispatches,
@@ -607,7 +611,8 @@ exporter; every new table needs a new exporter.
   time, and the client fails it as a page failure (not a busy wait), naming the budget. Measured shares are in
   Performance Expectations. **Owner and trigger**: a `(tenant_id, id)` Liquibase index on the id-keyed tables is
   Sam's decision, taken when the engine logs `event=export_page_over_budget` for an id-keyed table, the
-  20 s page budget (`TenantExportHandler.java:406`; Activation Step 2 or any later export). Per-page response
+  20 s page budget (`TenantExportHandler.java:412`; the 25 s wall logs `event=export_page_wall_deadline`
+  at :406 instead; Activation Step 2 or any later export). Per-page response
   starts are not logged, so an earlier 5 s trigger could not be read and is retired (Sam, 2026-11-15: "Accept,
   watch the 20 s line").
 
@@ -697,7 +702,7 @@ carries the restore-held fact on `TenantCreationBusyException`, sets the header 
 #### Activation Step 2: A cloud export of a test tenant in an announced window (bob), time and size recorded; after Phase 2, a cloud round trip
 
 The export records, beside time and size: the per-page response start for every page (chunks and the
-id-keyed tables, against the 5 s trigger in Risks), NX_POOL_SIZE and PG max_connections against the export
+id-keyed tables; the 5 s trigger this named was retired on 2026-11-15, see Risks), NX_POOL_SIZE and PG max_connections against the export
 cap, and any over-budget or busy answers. A tenant near nexus's size (about 540,000 chunks) is the target.
 
 Recorded (2026-11-15, both runs on test tenant `gate-xr789`, 116,492 chunks, about a fifth of the target): time,
@@ -959,7 +964,7 @@ longer. The default `NX_IMPORT_LOAD_MAX` is set to 3,960 s, the 2x margin this s
 The first draft's single streamed response contradicted A1 once it was refuted (the cloud edge ends
 every exchange at 60 s); the design was changed to sessions of short requests, and no part of
 the text still assumes one long stream. The first draft's "60 tables" came from a changeset count; the
-live catalog says 50 parent tables plus 40 chunk leaves, and the registry is built from the live catalog.
+live catalog said 50 parent tables plus 40 chunk leaves (49 since `frecency` was dropped), and the registry is built from the live catalog.
 Gate round 1 found the import commit and the changeset rule contradicting the cloud limits; both were
 redesigned (asynchronous commit; a column-compatibility rule, with the changeset count advisory since the
 Phase 2 design). No other
@@ -1039,3 +1044,4 @@ tenants. Nothing to trim.
 - 2026-11-15: Activation Step 2 recorded (nexus-csayy.9, .10): the first cloud export and restore round trip on engine 0.1.192, the per-page hang on 0.1.191 and the edge header fix (conexus PR #710).
 - 2026-11-15: Close critique (T2 `nexus/critique-8a97bb459-nexus-csayy-2026-11-15-r1`) folded in: what Activation Step 2 measured and did not (per-page starts, pool size, import xmin; a tenant a fifth of the target), which tables held rows, the snapshot release wording, the load-bound margin at scale, Gap 2's tuples and the Decision Rationale's "complete" matched to the registry, and "no new authorization code" replaced by the scope checks; the Testing Strategy's per-release cloud run points at engine-release Step 6.2 (Sam: "Add it to the engine release"). Amended under standing grant 3.
 - 2026-11-15: Close critique round 2 (T2 `nexus/critique-2f8879d42-nexus-csayy-2026-11-15-r2`): Sam accepts closing with Activation Step 2 short of its target ("Accept, watch the 20 s line", by dialog in session halcyon), and the Risks index trigger becomes the logged `export_page_over_budget` line at the 20 s budget; the shipped 25 s page wall gets its Failure Modes entry and Test Plan line. Amended under standing grant 3.
+- 2026-11-15: Close critique round 3 (T2 `nexus/critique-dd2cf32ad-nexus-csayy-2026-11-15-r3`): `frecency` is retired, not `derived` (telemetry-019-1, nexus-6pfgb.42, engine 0.1.192), so the shipped registry is 19 data plus 6 derived exported and 24 excluded, of 49 parent tables; the over-budget cite moves to `TenantExportHandler.java:412`; Activation Step 2's 5 s trigger points at its retirement; engine-release Step 6.2 reads the engine log for both page-limit events in the deploy window. Amended under standing grant 3.

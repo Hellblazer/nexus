@@ -439,9 +439,15 @@ header the import routes send. A new import request header must be added to the 
 4. Tear the tenant down, whatever the outcome: the same `gate.throwaway_tenant teardown --slug <slug>` command
    once as a dry run and once with `--confirm`. It passes on `residue_total` 0,
    `engine_leaves.leaves_remaining` 0 and an empty `engine_api.active_token_hashes`.
+5. Read the cloud engine's log over the deploy window for the two page-limit events:
+   `grep -E 'event=export_page_(over_budget|wall_deadline)' <engine log for the window>` (the operator session
+   reads the cloud engine's log). Each hit names the tenant and the table. A hit on an id-keyed table (memory,
+   plans, aspects and the other tables keyed by `id` alone) is the trigger for Sam's `(tenant_id, id)` index
+   decision (RDR-248 Risks; Sam, 2026-11-15: "Accept, watch the 20 s line"). Record the count, zero included.
 
 Record in T2 `conexus/<tag>-backup-roundtrip`, and name it on the cut bead: the export, restore and re-export
-wall times and row counts, the compare verdict and its per-table summary, and the teardown residue. Keep the
+wall times and row counts, the compare verdict and its per-table summary, the teardown residue, and the
+page-limit event count. Keep the
 files at 0600 until recorded, then delete them. The worked run is RDR-248 Activation Step 2 (nexus-csayy.10).
 
 ### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
