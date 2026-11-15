@@ -47,4 +47,13 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/commands/rdr-fix.md`
+  the fix range and fix-check title read the gate record's `blob:` key (nexus-3jjkg)
+- `conexus/skills/rdr-accept-checklist/SKILL.md`
+  accept checks `fix_check:` against the record's `blob:`, `commit:` only for older records (nexus-3jjkg)
+- `conexus/skills/rdr-fix-checklist/SKILL.md`
+  fix-check records are titled by the RDR file's blob after the disposition (nexus-3jjkg)
+- `conexus/skills/rdr-gate-checklist/SKILL.md`
+  the gate record carries `blob:`; `fix_check:` must equal it, or `commit:` for older records (nexus-3jjkg)
+
 ## Deferred to the next client release
