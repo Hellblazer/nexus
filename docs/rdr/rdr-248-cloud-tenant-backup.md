@@ -791,6 +791,15 @@ in all, so a nexus-size file (3.82 GB) needs about 1.1 MB/s sustained, and a slo
 naming it; the load `NX_IMPORT_LOAD_MAX`, default 3,960 s (twice the Step 6 run's 33 minutes for 500,000 chunks, a floor; Sam, 2026-11-14);
 parts of at most 8 MiB. An import holds one of the engine's export/import session slots for up to about three hours and 12 minutes (upload, restore wait, load).
 
+**First cloud round trip (Activation Step 2, nexus-csayy.9, 2026-11-15, engine 0.1.192).** Test tenant
+`gate-xr789`, exported through `api.conexus-nexus.com` by the shipped client: 59.8 s end to end, a 633,145,600-byte
+file, 10.59 MB/s, 25 tables and 233,108 rows (chunks 116,492 rows in 37 pages). `nx backup --check` verified every
+page, table and the file. The export's snapshot transaction was 30 s old at its oldest sample (xmin age 38), and it
+was released before the walk ended; no export transaction was left open. At that rate the `nexus` tenant's 3.82 GB
+takes about 6 minutes, the estimate above. The first attempt, on 0.1.191, hung on the first chunks page: PgJDBC's
+`PGStream.skip` spins on a TLS socket closed mid-skip, which the 0.1.192 page path no longer reaches (T2
+`nexus/csayy9-export-page-hang-diagnosis-2026-11-14`; run evidence T2 `conexus/csayy9-cloud-export-gate-xr789-run2-2026-11-15`).
+
 **Gate N1 scale run (nexus-csayy.4, 2026-11-12, local engine on chas, `tests/e2e/export_scale_run.py`).** One tenant
 of 500,000 bge-768 chunks (distinct vectors, about 1 KB of text each), 500,000 manifest rows over 50,000 documents,
 and 400,000 `memory` rows interleaved by id with nine other tenants (4,000,000 rows in the table), exported through
