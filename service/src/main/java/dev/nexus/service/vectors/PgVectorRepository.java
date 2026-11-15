@@ -1978,7 +1978,7 @@ public final class PgVectorRepository {
         org.jooq.Table<?> fn = plainSearchFn(entry.dimension(), Vector.of(query), colls, planWhere(null), k,
             entry.embeddingModel(), target.tenant());
         return runPlainSearchStatement(target.tenant(), entry.embeddingModel(), fn, entry.dimension(), colls, k,
-            PgSession::startupSearchStatementTimeoutMs, false, phases, exact, null, hook);
+            PciCanaryPolicy.statementTimeoutMs(exact), false, phases, exact, null, hook);
     }
 
     private static List<PciCanary.Hit> canaryHits(Result<? extends Record> result) {
