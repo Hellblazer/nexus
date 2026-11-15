@@ -59,9 +59,17 @@ jobs:
     # a cancelled job skips the cache's post-step save, so the cache never
     # filled and every run timed out. The hub fetch is gone (prime-mineru
     # below restores our own self-hosted, actions/cache-fronted mirror
-    # instead), but 75 stays as margin for the pre-slow steps plus the slow
+    # instead), but 75 stayed as margin for the pre-slow steps plus the slow
     # leg's own model-load + per-page inference time.
-    timeout-minutes: 75
+    #
+    # 90 (2026-11-15): the slow leg is now its own job (`slow` below), and this
+    # job ends at the ungated non-vacuity step. Measured over the nightlies of
+    # 2026-11-02..15: the gate step took 37-63 minutes (not the 35 above) on
+    # the same selection: 1200 tests in 2092 s on 2026-11-13 and 1198 in
+    # 3226 s on 2026-11-15; the engine-free pins step slowed 75 s -> 95 s the
+    # same nights, so the spread is runner speed, not new tests. On
+    # 2026-11-15 this job's steps ended 71 minutes in, 4 under 75.
+    timeout-minutes: 90
     env:
       # Pinned for determinism — MUST match ci.yml's CA-3 job so the cache
       # key resolves the bundle pg-bundle-cache-seed.yml seeds on main.
@@ -332,6 +340,150 @@ jobs:
               sys.exit(1)
           PY
 
+  slow:
+    # nexus-f3yqd.2 follow-on (2026-11-15): the slow-marked leg (nexus-s6dei) is
+    # its own job, not the tail of `gate`. Sharing one 75-minute budget, the
+    # leg was cancelled 4 minutes in on 2026-11-14 and 2026-11-15 (runs
+    # 43580014881, 43698666470): the gate step alone took 63 minutes both
+    # nights. A separate job keeps each bound meaningful instead of hiding the
+    # gate's growth under a bigger shared one. It rebuilds what it needs (dev
+    # jar, PG bundle from the same cache, both model primes); the extra runner
+    # setup is about 5 minutes once a day.
+    name: slow-marked tests (nexus-s6dei)
+    runs-on: ubuntu-latest
+    # Measured: the slow step ran 9.9-13.7 minutes on the green nights of
+    # 2026-11-03..11 and setup before it about 5; 40 is about twice that.
+    timeout-minutes: 40
+    env:
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # Scheduled workflows execute from the DEFAULT branch (main), but the
+          # tree worth gating nightly is develop — the integration branch where
+          # regressions land daily (main only moves at releases, where the
+          # release checklist runs this gate by hand anyway). So schedule
+          # falls back to develop.
+          #
+          # A DISPATCH gets the branch you picked. It did not until
+          # 2026-08-23 (nexus-pc15o): this line read a bare `ref: develop`,
+          # which overrides checkout's triggering-ref default
+          # UNCONDITIONALLY. The comment here used to say "dispatch from a
+          # feature ref if you need a different tree" — advice this very
+          # line made impossible. Run 32659044975 dispatched a pc15o fix
+          # against its own branch, gated develop instead, reported
+          # "573 passed, 51 skipped" byte-identical to the pre-fix run, and
+          # was read as the fix having failed. Pinned by
+          # tests/test_workflow_dispatch_ref_lint.py.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
+          # nexus-f6qzj: the gate's `mandatory_regression_pin` tests need the
+          # REAL tag history (v7.6.1 / engine-service-v0.1.71 for the
+          # release-floor source-ancestry pin) — a shallow clone makes them
+          # skip, and tests/conftest.py's non-vacuity guard (budget 0) then
+          # correctly reds the whole run. Full depth + tags, same as ci.yml.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Cache ChromaDB ONNX model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Set up JDK 25 (dev-jar build)
+        # The gate rebuilds the dev jar; the runner's default JDK 17 cannot run
+        # the jOOQ codegen (class-file 65 = Java 21+). Same toolchain as ci.yml's
+        # write-seam job / service-ci.
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: "25.0.3"
+          distribution: "graalvm"
+
+      - name: Cache Maven local repo (dev-jar build)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('service/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      - name: Install ripgrep
+        # test_doctor_runs_and_reports asserts rg presence. Not apt alone: see the script.
+        run: scripts/ci_install_ripgrep.sh
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Restore compiled PG bundle cache
+        # Same key as ci.yml's CA-3 job / pg-bundle-cache-seed.yml (main-seeded
+        # caches are restorable from every branch). The bundle provides
+        # PG17 + pgvector for the throwaway cluster AND unlocks the CA-3
+        # bundle test family inside the gate run.
+        id: pg-bundle-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+        with:
+          path: bundle
+          key: pg-bundle-linux-amd64-ubuntu-latest-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ env.MANYLINUX_IMAGE }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+
+      - name: Build PG + pgvector bundle from source (cache miss only)
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle"
+          docker run --rm \
+            -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            "$MANYLINUX_IMAGE" /bin/bash -c '
+              set -eux
+              bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
+            '
+
+      - name: Point provisioning + CA-3 tests at the bundle
+        run: |
+          set -euo pipefail
+          if [ ! -x "$GITHUB_WORKSPACE/bundle/bin/initdb" ]; then
+            echo "::error::bundle/bin/initdb missing after cache-restore/build"
+            exit 1
+          fi
+          # NEXUS_PG_BIN: `nx init --service` provisions the throwaway cluster
+          # from the bundle (pgvector included — the runner's system PG lacks it).
+          echo "NEXUS_PG_BIN=$GITHUB_WORKSPACE/bundle/bin" >> "$GITHUB_ENV"
+          # The bundle's binaries carry no RPATH (nexus-iytd3); linux honors
+          # LD_LIBRARY_PATH, so point it at the bundle's libs.
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/bundle/lib" >> "$GITHUB_ENV"
+          # NEXUS_CA3_BUNDLE: unlocks the CA-3 bundle test family in the run.
+          echo "NEXUS_CA3_BUNDLE=$GITHUB_WORKSPACE/bundle" >> "$GITHUB_ENV"
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # The dev jar boots its local ONNX embedder (RDR-160 bge-768) at
+        # startup; without the model the service never binds its port.
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Build the stamped gate jar
+        # In the gate job the local-service gate script builds the dev jar and
+        # the later steps reuse it; this job runs no gate script, so it builds
+        # the same stamped jar the slow tests' engine substrate boots.
+        run: scripts/build-gate-jar.sh
+
       - name: Prime MinerU pipeline models (self-hosted mirror, for the slow leg)
         # nexus-ggonw: test_mineru_path_indexes_table_values_as_text runs in
         # the slow leg below and drives the same MinerU pipeline as the
@@ -350,10 +502,10 @@ jobs:
         # a slow-marked test was operationally deleted (no output, no skip
         # line, nothing to notice its absence), while three docstrings
         # falsely claimed CI or the release shakedown already ran it. This
-        # leg is the fix: it reuses the dev jar + PG bundle + bge-768 ONNX
-        # this job already built/primed above, so it costs nothing beyond
-        # the few extra minutes the tests take (CI-cost discipline: no new
-        # runner, piggyback the existing nightly schedule).
+        # leg is the fix. It first rode the gate job, reusing that job's dev
+        # jar, PG bundle and bge-768 ONNX; since 2026-11-15 it is its own job
+        # on the same nightly schedule, at the cost of one runner's setup
+        # (see the job's comment).
         #
         # test_mineru_path_preserves_formulas is DESELECTED here — DECIDED
         # state, not pending (nexus-jy4hd, 2026-08-18): MinerU's first
