@@ -1117,6 +1117,7 @@ public class TenantKeyedStateGateTest {
             // like the failures map above.
             for (String f : List.of(
                 "PciReconciler.reindexPhaseHook",
+                "PciReconciler.afterLeafReindexHook",
                 "PciReconciler.Tally.looks",
                 "PciLeafReindexRule.Scan.candidates",
                 "PciCatalog.Leaf.hnswIndexes",
