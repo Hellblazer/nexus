@@ -29,7 +29,7 @@ Prose register: `$RDR_DIR/REGISTER.md`, falling back to `${CLAUDE_PLUGIN_ROOT}/r
 
 ## Behavior
 
-1. Run `nx rdr preamble rdr-fix -- <id>`. It prints the latest gate's outcome and round, every Critical and Significant with its `Sites:` list, the diff range and fix commits since the gate, whether a fix-check record exists for the file's current blob (its tip commit, for a record with no `blob:`), the research title the pre-edit entry will get, and the rules below.
+1. Run `nx rdr preamble rdr-fix -- <id>`. It prints the latest gate's outcome and round, every Critical and Significant with its `Sites:` list, the diff range and fix commits since the gate, whether a fix-check record exists for the file's current blob, the research title the pre-edit entry will get, and the rules below.
 2. No gate record: stop; findings from a review go through `/conexus:rdr-research add <id>`. Past the gate (status not draft/open): stop; post-accept edits are not gate fixes.
 3. For each finding, before the edit: read the source and quote it with a tool (`sed -n`, `grep -n`, a T2 read); record the research entry with the `rdr-research` skill's `add` (the `research_add` procedure, read back, `memory_put`). A file:line from a T3 search hit is a lead, not a citation; re-read it from the working tree.
 4. Edit every site in the finding's `Sites:` list; where a finding has none, grep the RDR for the refuted phrasing AND the corrected one. A fact lives in Problem Statement, Research Findings, Technical Design and the Implementation Plan at once.

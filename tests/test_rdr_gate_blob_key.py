@@ -7,6 +7,7 @@ is made unreachable the way a rebase before landing makes it."""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -296,3 +297,24 @@ def test_a_gated_blob_absent_from_the_files_history_is_said(rdr_env, monkeypatch
     out = _preamble("rdr-gate", "--", "204").output
     assert "was not found in this file's history" in out, out
     assert "re-gate" in out, out
+
+
+def test_no_procedure_text_still_titles_a_commit_only_fix_check_by_the_tip_commit():
+    """Round-2 critique of ee9e24429: the fix-check title is the file blob for
+    every record, so no procedure text may still send a commit-only record's
+    fix check to the tip commit, and no text may cite a commit "the critique
+    names" (critique records carry no commit)."""
+    root = Path(__file__).resolve().parents[1]
+    sites = [
+        root / "src" / "nexus" / "commands" / "rdr.py",
+        *sorted((root / "conexus" / "skills").glob("rdr-*-checklist/SKILL.md")),
+        *sorted((root / "conexus" / "commands").glob("rdr-*.md")),
+    ]
+    assert len(sites) >= 4, sites
+    stale = (
+        "tip commit for a record with only",
+        "its tip commit, for a record with no",
+        "the commit the critique names",
+    )
+    hits = [(p.name, s) for p in sites for s in stale if s in p.read_text(encoding="utf-8")]
+    assert hits == []

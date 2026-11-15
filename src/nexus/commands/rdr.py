@@ -27,6 +27,7 @@ import yaml
 from nexus.bounded_subprocess import run_bounded
 from nexus.rdr_gate_key import (
     BLOB_ABBREV,
+    FIX_LOG_CAP,
     GatedKey,
     blob_delta,
     DIRTY_NOTE,
@@ -3051,11 +3052,11 @@ def _blob_fix_commit_lines(repo_root: str, rel: str, key: GatedKey) -> list[str]
         return [f"Fix commits: could not be listed ({found.error}); list them by hand with "
                 f"`git log --format=%h %s -- {rel}`."]
     if not found.found:
-        cap = f" within the last {len(found.commits) or 'few'} commits" if found.capped else ""
+        cap = f" within the last {FIX_LOG_CAP} commits that touch it" if found.capped else ""
         return [
             f"Fix commits: the gated blob `{key.value}` was not found in this file's history{cap}; "
             "it may never have landed (a squash, or a later edit before landing), or the branch that "
-            f"carried it is not in this clone. Read the gated text from the commit the critique names, "
+            f"carried it is not in this clone. Read the gated text from the gate record's `commit:` (possibly orphaned; the reflog or the pre-rebase branch holds it), "
             f"or re-gate. The range above does not depend on it; `git log --format=%h %s -- {rel}` "
             "lists the file's commits."
         ]
@@ -3280,8 +3281,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         f"record with only `commit:` reads `git diff <the record's commit:>..HEAD -- "
         f"{os.path.relpath(str(rdr_file), repo_root)}`) and store the verdict as "
         f"`{t2_key}-fix-check-<sha>` (project `{repo_name}_rdr`), `<sha>` the RDR file's "
-        "blob after the disposition (`git rev-parse --short=12 HEAD:<file>`; its tip "
-        "commit for a record with only `commit:`). A residual dispositioned by a bead id "
+        "blob after the disposition (`git rev-parse --short=12 HEAD:<file>`). A residual dispositioned by a bead id "
         "changed nothing in the file and needs none (nexus-yjf5l.1)."
     )
     print(f"   {FIX_CHECK_CONSENSUS_CLAUSE}")

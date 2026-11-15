@@ -761,7 +761,7 @@ def test_rdr_accept_brief_names_the_disposition_rules(rdr_env):
             # residual disposition rule
             "`residuals:`", "blocks accept",
             # the fix check a sha disposition carries
-            "204-fix-check-<sha>", "docs/rdr/rdr-204-example.md", "tip", "bead id", "needs none",
+            "204-fix-check-<sha>", "docs/rdr/rdr-204-example.md", "blob after the disposition", "bead id", "needs none",
             FIX_CHECK_CONSENSUS_CLAUSE,
             # class-to-disposition rule
             DISCOVER_AT_IMPLEMENTATION, "Implementation Plan phase", BLOCKS_PLANNING,
