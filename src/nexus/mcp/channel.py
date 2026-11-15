@@ -1643,7 +1643,7 @@ class ChannelWaiter:
                 self.aura_sink(subspace, kept)
             except Exception as e:  # noqa: BLE001 -- an aura never stops delivery
                 _log.warning("aura_sink_failed", subspace=subspace, error=str(e))
-        if self.subs.aura_only(subspace):
+        if self.aura_sink is not None and self.subs.aura_only(subspace):
             return  # RDR-249 TD3: a topic only an aura holds is evaluated, not announced
         last = kept[-1]
 

@@ -7,9 +7,11 @@ drives the real worker and the real engine."""
 from __future__ import annotations
 
 import json
+import logging
 import threading
 
 import pytest
+import structlog
 
 from nexus.auras import parse_aura
 from nexus.auras.runtime import AuraRuntime, channel_notice
@@ -135,6 +137,7 @@ def test_when_false_shows_nothing() -> None:
     rt = _runtime(run, writer, notices=notices)
     rt.offer(_TOPIC, [_row("t1")])
     _done(rt)
+    assert len(run.calls) == 1, "the procedure must have run for the when test to mean anything"
     assert writer.calls == [] and notices == []
 
 
@@ -275,3 +278,63 @@ def test_each_aura_has_its_own_queue() -> None:
     rt.offer(_TOPIC, [_row("t1")])
     _done(rt)
     assert set(writer.blocks) == {"develop CI red", "other block"}
+
+
+class _NoEntryWriter(_Writer):
+    def set_block(self, aura: str, threads: str, text: str) -> bool:
+        self.calls.append(("set", aura, threads, text))
+        return False
+
+
+def test_the_notice_goes_out_when_no_threads_entry_could_be_written() -> None:
+    run, writer, notices = _Run({"show": True, "text": "red"}), _NoEntryWriter(), []
+    rt = _runtime(run, writer, notices=notices)
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    assert notices == [channel_notice(_aura(), _TOPIC, "t1")]
+
+
+def test_an_unexpected_exception_in_a_fire_is_a_strike() -> None:
+    run, writer = _Run(RecursionError("deep")), _Writer()
+    rt = _runtime(run, writer)
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    assert writer.blocks["develop CI red"] == "aura error: internal on tuple t1"
+    assert rt.strikes("ci_develop_red") == 1
+
+
+def test_a_clear_straight_after_a_clear_is_dropped() -> None:
+    run, writer = _Run({"show": True, "text": "red"}), _Writer()
+    run.gate = threading.Event()
+    rt = _runtime(run, writer)
+    rt.offer(_TOPIC, [_row("running")])
+    assert run.started.wait(5)
+    rt.offer(_TOPIC, [_row(f"c{i}", outcome="success") for i in range(50)] + [_row("f1"), _row("c50", outcome="success")])
+    assert rt.waiting("ci_develop_red") == [("clear", "c0"), ("fire", "f1"), ("clear", "c50")]
+    run.gate.set()
+    _done(rt)
+
+
+def test_failures_drops_and_busy_drops_are_logged_with_the_aura_and_tuple(monkeypatch) -> None:
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+    with structlog.testing.capture_logs() as logs:
+        rt = _runtime(_Run(ScriptError("lua", "boom")), _Writer())
+        rt.offer(_TOPIC, [_row("t1")])
+        _done(rt)
+        rt = _runtime(_Run(ScriptBusyError("busy")), _Writer())
+        rt.offer(_TOPIC, [_row("t2")])
+        _done(rt)
+        run = _Run({"show": True, "text": "x"})
+        run.gate = threading.Event()
+        rt = _runtime(run, _Writer())
+        rt.offer(_TOPIC, [_row("r")])
+        assert run.started.wait(5)
+        rt.offer(_TOPIC, [_row(f"f{i}") for i in range(21)])
+        run.gate.set()
+        _done(rt)
+    failed = [e for e in logs if e["event"] == "aura_fire_failed"]
+    assert failed and failed[0]["aura"] == "ci_develop_red" and failed[0]["tuple_id"] == "t1"
+    busy = [e for e in logs if e["event"] == "aura_busy_dropped"]
+    assert busy and busy[0]["tuple_id"] == "t2" and busy[0]["retries"] == 12
+    dropped = [e for e in logs if e["event"] == "aura_queue_dropped"]
+    assert dropped and dropped[0]["aura"] == "ci_develop_red" and dropped[0]["dropped"] == 1

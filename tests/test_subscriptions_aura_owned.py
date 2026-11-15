@@ -42,6 +42,7 @@ def test_an_aura_topic_entry_carries_a_start_position() -> None:
     subs.subscribe_aura("ci-red", _TOPIC)
     (entry,) = [e for e in subs.entries() if e["subspace"] == _TOPIC]
     assert entry.get("since")
+    assert entry.get("held_by") == "aura"  # tuple_subscriptions shows the session it is not its own
 
 
 def test_the_session_unsubscribe_does_not_remove_the_aura_ownership() -> None:

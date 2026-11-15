@@ -9,11 +9,12 @@ than :data:`MAX_WAITING` items waiting the oldest fire is dropped and counted; a
 
 A fire builds the procedure's arguments from the row, runs it through ``run_script`` on the worker thread, tests
 ``when.field`` and writes ``text`` as the aura's threads block. ``display.channel`` then sends
-:func:`channel_notice`, a fixed template that carries nothing a tuple writer controls. A clear removes the block
-and runs nothing.
+:func:`channel_notice`, a fixed template that carries nothing a tuple writer controls, whether or not the block
+could be written. A clear removes the block and runs nothing; a clear queued straight after another is dropped,
+since it removes nothing more.
 
 A failure (a ``ScriptRunError`` other than busy, a missing argument source, a missing or mistyped result field,
-or a display error) is logged with the aura name and tuple id and written into the block as one line; three in a
+a display error, or any other exception in the fire) is logged with the aura name and tuple id and written into the block as one line; three in a
 row disable the aura for the session, and the block says so. A success resets the count. ``ScriptBusyError`` is
 not a failure: the run path's workers are shared with ``procedure_run`` and ``nx run``, so the item goes back to
 the head of its queue and is retried after :data:`BUSY_RETRY_S`, up to :data:`BUSY_RETRIES` times, and is then
@@ -170,6 +171,8 @@ class AuraRuntime:
         with self._cond:
             if lane.disabled:
                 return
+            if item.kind == "clear" and lane.queue and lane.queue[-1].kind == "clear":
+                return  # a second clear in a row removes nothing the first does not
             lane.queue.append(item)
             dropped = 0
             while len(lane.queue) > MAX_WAITING:
@@ -211,6 +214,8 @@ class AuraRuntime:
                     lane.queue.appendleft(item)
                 self._sleep(BUSY_RETRY_S)
             except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter or the announcement
+                # Only a clear reaches here (a fire turns every other exception into a strike); its block stays
+                # until the next fire or clear.
                 _log.warning("aura_clear_failed", aura=lane.aura.name, tuple_id=item.row.id, error=str(exc))
 
     def _fire(self, lane: _Lane, item: _Item) -> None:
@@ -242,12 +247,19 @@ class AuraRuntime:
         except _Failure as failure:
             self._strike(lane, row, failure)
             return
+        except ScriptBusyError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- a bug or an OS error in a fire is a failure like any other
+            self._strike(lane, row, _Failure("internal", f"{type(exc).__name__}: {exc}"))
+            return
         lane.strikes = 0
-        if wrote and aura.channel and self._notify is not None:
+        if not wrote:
+            _log.warning("aura_block_not_written", aura=aura.name, tuple_id=row.id)
+        if aura.channel and self._notify is not None:
             try:
                 meta = {"aura": aura.name, "subspace": row.subspace, "tuple_id": row.id}
                 self._notify(channel_notice(aura, row.subspace, row.id), meta)
-            except Exception as exc:  # noqa: BLE001 -- the block is written; a lost notice is only logged
+            except Exception as exc:  # noqa: BLE001 -- a lost notice is logged, never a strike
                 _log.warning("aura_notice_failed", aura=aura.name, tuple_id=row.id, error=str(exc))
 
     def _strike(self, lane: _Lane, row: Any, failure: _Failure) -> None:

@@ -52,6 +52,10 @@ class _NoStore:
         return None
 
 
+def _no_store():
+    raise AssertionError("a board subscribe must not touch the store")
+
+
 def _payload(text: str) -> dict:
     return {
         "session_id": _SID, "hook_event_name": "Stop", "stop_hook_active": False,
@@ -101,7 +105,8 @@ def test_an_aura_held_done_topic_is_not_a_ci_wake(tmp_path: Path, monkeypatch) -
 def test_the_session_subscribing_the_aura_topic_is_counted(tmp_path: Path, monkeypatch) -> None:
     subs = SubscriptionSet(session_id=_SID)
     subs.subscribe_aura("ci-red", _TOPIC)
-    subs._board[_TOPIC] = None  # noqa: SLF001 -- the session's own subscription, without the store
+    # The session's own subscribe, after the aura's hold (a board topic never touches the store).
+    subs.subscribe(_TOPIC, templates=[], store_factory=_no_store, state_dir=None)  # type: ignore[arg-type]
     record, decision = _run_waiter_and_decide(tmp_path, monkeypatch, subs)
     assert record["board_topics"] == [_TOPIC]
     assert not decision.block and decision.reason == "ci-wake-armed", decision

@@ -9754,6 +9754,9 @@ def tuple_unsubscribe(
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         subs.unsubscribe(subspace)
         _subscriptions.persist(t1, subs)
+        if subspace in subs.aura_topics():
+            # RDR-249 TD3: an aura's hold is its own; the session's unsubscribe never removes it.
+            return f"Unsubscribed {subspace}; an aura still holds it, so its posts are evaluated and not announced"
         return f"Unsubscribed {subspace}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("tuple_unsubscribe", e)

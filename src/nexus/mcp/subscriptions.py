@@ -747,7 +747,7 @@ class SubscriptionSet:
             out.append(entry)
         for topic, (since, _owners) in self._aura_board.items():
             if topic not in self._board:
-                out.append({"subspace": topic, "since": since})
+                out.append({"subspace": topic, "since": since, "held_by": "aura"})
         return out
 
     # ── Lease thread lifecycle ───────────────────────────────────────────

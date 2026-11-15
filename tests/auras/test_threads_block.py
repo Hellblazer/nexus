@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import threading
 
+import structlog
+
 import pytest
 
 from nexus.auras.threads_block import ThreadsBlockWriter, sanitize_state
@@ -135,3 +137,25 @@ def test_every_read_modify_write_holds_one_lock() -> None:
     u.join(2)
     content = io.rows["tamsin"]["content"]
     assert "## aura: aura a\nstate: one" in content and "## aura: aura b\nstate: two" in content
+
+
+def test_no_entry_and_two_entries_log_the_aura_and_the_titles() -> None:
+    with structlog.testing.capture_logs() as logs:
+        _writer(_Io([])).set_block("red", "x", "y")
+        _writer(_Io([{"title": "two", "content": _ENTRY, "tags": ""}, {"title": "one", "content": _ENTRY, "tags": ""}])).set_block(
+            "red", "x", "y")
+    (none,) = [e for e in logs if e["event"] == "aura_threads_no_entry"]
+    assert none["aura"] == "red" and none["log_level"] == "warning"
+    (both,) = [e for e in logs if e["event"] == "aura_threads_ambiguous"]
+    assert both["aura"] == "red" and both["titles"] == ["one", "two"]
+
+
+def test_a_clear_keeps_text_an_agent_wrote_after_the_block() -> None:
+    io = _Io([{"title": "tamsin", "content": _ENTRY, "tags": ""}])
+    w = _writer(io)
+    w.set_block("a", "develop CI red", "red")
+    io.rows["tamsin"]["content"] += "an agent's own note under the block\n"
+    assert w.remove_block("a", "develop CI red")
+    content = io.rows["tamsin"]["content"]
+    assert "aura:" not in content and "state: red" not in content
+    assert "an agent's own note under the block" in content and "## Some work\nref: nexus-x" in content

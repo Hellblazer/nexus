@@ -34,8 +34,6 @@ MAX_STATE_CHARS: int = 200
 
 #: One lock for every read-modify-write of a threads entry in this process (rule 21).
 _LOCK = threading.Lock()
-# A heading the board reads (nexus.console.threads._HEADING): it ends an aura's block.
-_HEADING = re.compile(r"^#{1,3}\s+\S")
 _NOT_PRINTABLE = re.compile(r"[^\x20-\x7e]")
 
 ReadEntries = Callable[[], list[Mapping[str, Any]]]
@@ -54,19 +52,22 @@ def _heading(threads_value: str) -> str:
 
 
 def _without_block(lines: list[str], heading: str) -> tuple[list[str], bool]:
-    """*lines* with the block under *heading* taken out (up to the next heading), and whether there was one."""
+    """*lines* with the block under *heading* taken out, and whether there was one. The block is the heading and
+    the ``state:`` line after it; anything else an agent wrote below it stays."""
     out: list[str] = []
     found = False
-    skipping = False
-    for line in lines:
-        if line.strip() == heading:
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == heading:
             found = True
-            skipping = True
+            i += 1
+            if i < len(lines) and lines[i].strip().startswith("state:"):
+                i += 1
+            while out and not out[-1].strip():
+                out.pop()  # the blank line set_block put before the heading
             continue
-        if skipping and _HEADING.match(line.strip()):
-            skipping = False
-        if not skipping:
-            out.append(line)
+        out.append(lines[i])
+        i += 1
     while out and not out[-1].strip():
         out.pop()
     return out, found
@@ -90,7 +91,7 @@ class ThreadsBlockWriter:
             if parse_session(str(row.get("title", "")), str(row.get("content", ""))).session_id == self.session_id
         ]
         if not mine:
-            _log.info("aura_threads_no_entry", aura=aura, session_id=self.session_id)
+            _log.warning("aura_threads_no_entry", aura=aura, session_id=self.session_id)
             return None
         if len(mine) > 1:
             _log.warning(

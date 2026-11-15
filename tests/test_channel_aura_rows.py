@@ -65,3 +65,27 @@ async def test_a_failing_sink_never_stops_the_announcement() -> None:
     waiter.aura_sink = boom
     await waiter.tick()
     assert [m["tuple_id"] for _c, m in sender.calls if m.get("subspace") == "board/ci/x--done"] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_an_aura_held_topic_with_no_sink_attached_is_still_announced() -> None:
+    """A load that subscribed and then failed must never swallow rows: no sink, no suppression."""
+    subs = _subs(str(uuid.uuid4()))
+    subs.subscribe_aura("ci-red", "board/ci/x--done")
+    fake = _FakeTupleStore()
+    fake.seed("board/ci/x--done", "p1", "red")
+    sender = _FakeSender()
+    await channel.ChannelWaiter(subs.session_id, _fake_store_factory(fake), subs, sender=sender).tick()
+    assert [m["tuple_id"] for _c, m in sender.calls if m.get("subspace") == "board/ci/x--done"] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_a_row_on_a_topic_in_neither_set_is_announced_as_before() -> None:
+    session_id = str(uuid.uuid4())
+    subs = _subs(session_id)
+    sender, seen = _FakeSender(), []
+    waiter = _waiter(subs, _FakeTupleStore(), sender, seen)
+    row = _FakeTupleStore().seed("board/gone", "g1", "x")
+    await waiter._deliver_board_rows("board/gone", [row], None)  # noqa: SLF001 -- an unsubscribe raced the wait
+    assert [m["tuple_id"] for _c, m in sender.calls] == ["g1"]
+    assert seen == [("board/gone", ["g1"])]
