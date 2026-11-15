@@ -214,6 +214,43 @@ class CatalogHandlerAppendChunksTest {
         assertThat(embeds.get() - before).as("no embed for a document that does not exist").isZero();
     }
 
+    @Test
+    void append_twoRowsAtOnePosition_withChunks_400NamingThePosition_andNothingIsWritten() throws Exception {
+        registerDoc("aph.dp1");
+        String x = ch("aphdp1-x"), y = ch("aphdp1-y");
+        int before = embeds.get();
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.dp1\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":4,\"chash\":\"" + x + "\"},{\"position\":4,\"chash\":\"" + y + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + x + "\",\"text\":\"dp1 x\"},{\"chash\":\"" + y + "\",\"text\":\"dp1 y\"}]}");
+        handle(handler, ex);
+
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("duplicate 'position' 4");
+        assertThat(embeds.get() - before).as("refused before the embed").isZero();
+        assertThat(repo.getManifest(TENANT, "aph.dp1")).isEmpty();
+    }
+
+    @Test
+    void append_twoRowsAtOnePosition_withoutChunks_400NamingThePosition_andNothingIsWritten() throws Exception {
+        registerDoc("aph.dp2");
+        String c = ch("aphdp2-c");
+        CapturingExchange seed = post("/v1/catalog/manifest/write_many",
+            "{\"collection\":\"" + COLLECTION + "\",\"docs\":[{\"doc_id\":\"aph.dp2\",\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}]}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"dp2 c\"}]}");
+        handle(handler, seed);
+        assertThat(seed.status).isEqualTo(200);
+
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.dp2\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":7,\"chash\":\"" + c + "\"},{\"position\":7,\"chash\":\"" + c + "\"}]}");
+        handle(handler, ex);
+
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("duplicate 'position' 7");
+        assertThat(repo.getManifest(TENANT, "aph.dp2")).as("the seed row only").hasSize(1);
+    }
+
     // ── sweep_chashes (RDR-223 P1.3, bead nexus-z0o2p.4) ────────────────────────
 
     /** Writes a document owning {@code chash}, then empties it (sweep off): {@code chash} is left ownerless. */

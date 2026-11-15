@@ -42,7 +42,7 @@ class OrphanChunkRaceTest extends AtomicWriteTestBase {
      * sweep fails open on gate_timeout. The manifest trigger skips the drop (chunk written within the
      * hour), and the failed sweep records nothing.
      */
-    @Disabled("needs fix 1, ask orphan-drop-record: the manifest DELETE trigger skips a chunk written within the hour")
+    @Disabled("needs fix 1, ask orphan-drop-record: the manifest DELETE trigger skips a chunk written within the hour and the failed sweep records nothing; fix 1 must make every chunk with no own-collection owner row have a chunk_orphaned_at row, or a pending-sweep record if fix 1 queues the sweep (widen unaccounted() then)")
     @Test
     void pathA_insertedChunksDroppedWithinTheHour_sweepGateTimeout_areOwnerlessAndUnrecorded() throws Exception {
         Fx f = fixture("pa");
@@ -103,18 +103,29 @@ class OrphanChunkRaceTest extends AtomicWriteTestBase {
     void pathA_appendManyTwoRowsAtOnePosition_failsThatDocWithNoChunk() throws Exception {
         Fx f = fixture("pe");
         String good = freshDoc("pe-good", f.collection());
-        String x = ch("pe-x"), y = ch("pe-y"), g = ch("pe-g");
+        String seedDoc = freshDoc("pe-seed", f.collection());
+        String x = ch("pe-x"), y = ch("pe-y"), g = ch("pe-g"), old = ch("pe-old");
+        // An existing chunk, aged, that only the refused document lists in this request.
+        svc.writeManyCombined(TENANT, f.collection(),
+            List.of(chunk(old, "pe old")),
+            List.of(doc(seedDoc, List.of(row(0, old)))), null, false, false);
+        OffsetDateTime aged = ageChunks(f.collection(), 2);
+        int embedsBefore = embedder.calls.get();
 
         var response = svc.appendManyCombined(TENANT, f.collection(),
-            List.of(doc(f.docId(), List.of(row(0, x), row(0, y))),
+            List.of(doc(f.docId(), List.of(row(0, x), row(0, y), row(1, old))),
                     doc(good, List.of(row(0, g)))),
-            List.of(chunk(x, "pe x"), chunk(y, "pe y"), chunk(g, "pe g")), false).response();
+            List.of(chunk(x, "pe x"), chunk(y, "pe y"), chunk(g, "pe g"), chunk(old, "pe old")), false).response();
 
         assertThat(failed(response)).containsExactly(f.docId());
         assertThat(chunkExists(f.collection(), x)).isFalse();
         assertThat(chunkExists(f.collection(), y)).isFalse();
         assertThat(chunkExists(f.collection(), g)).isTrue();
         assertThat(manifestChashes(f.docId())).isEmpty();
+        assertThat(response.get("chunks_unreferenced")).as("x, y and old: the refused doc lists them").isEqualTo(3);
+        assertThat(embedder.calls.get() - embedsBefore).as("only g is embedded").isEqualTo(1);
+        assertThat(lastWrittenAt(f.collection(), old))
+            .as("the refused doc's identical-text chunk is not refreshed").isBefore(aged.plusMinutes(30));
         assertThat(unaccounted(f.collection())).isEmpty();
     }
 
@@ -164,6 +175,32 @@ class OrphanChunkRaceTest extends AtomicWriteTestBase {
         assertThat(chunkExists(f.collection(), n2)).isFalse();
         assertThat(chunkExists(f.collection(), n3)).isTrue();
         assertThat(unaccounted(f.collection())).isEmpty();
+    }
+
+    /**
+     * The same hole with the sweep switched off (a multi-batch write's first batch, sweep=false): a
+     * second write drops chunks the first one inserted within the hour. The manifest trigger skips
+     * the drop (written within the hour) and no sweep runs at all, so nothing records it.
+     */
+    @Disabled("needs fix 1, ask orphan-drop-record: the manifest DELETE trigger skips a chunk written within the hour and sweep=false runs no sweep; fix 1 must make every chunk with no own-collection owner row have a chunk_orphaned_at row, or a pending-sweep record if fix 1 queues the sweep (widen unaccounted() then)")
+    @Test
+    void pathA_insertedChunksDroppedWithinTheHour_sweepOff_areOwnerlessAndUnrecorded() throws Exception {
+        Fx f = fixture("pg");
+        String a = ch("pg-a"), n1 = ch("pg-n1");
+        svc.writeManyCombined(TENANT, f.collection(),
+            List.of(chunk(a, "pg a"), chunk(n1, "pg n1")),
+            List.of(doc(f.docId(), List.of(row(0, a), row(1, n1)))),
+            null, false, false);
+        assertThat(unaccounted(f.collection())).as("precondition: every chunk owned").isEmpty();
+
+        svc.writeManyCombined(TENANT, f.collection(),
+            List.of(chunk(a, "pg a")),
+            List.of(doc(f.docId(), List.of(row(0, a)))),
+            null, false, false);
+
+        assertThat(unaccounted(f.collection()))
+            .as("RDR-223: a chunk the engine inserted has an owner row or a chunk_orphaned_at record")
+            .isEmpty();
     }
 
     // ── path B ──────────────────────────────────────────────────────────────────────────────────
@@ -217,7 +254,7 @@ class OrphanChunkRaceTest extends AtomicWriteTestBase {
      * the drop of c by the document that commits is then skipped by the trigger and left unrecorded by
      * the failed sweep. Closing it takes fix 1, in the drop record.
      */
-    @Disabled("needs fix 1, ask orphan-drop-record: a registered-but-failing doc still gets its chunks refreshed")
+    @Disabled("needs fix 1, ask orphan-drop-record: a registered-but-failing doc still gets its chunks refreshed, so its drop is skipped by the trigger; fix 1 must make every chunk with no own-collection owner row have a chunk_orphaned_at row, or a pending-sweep record if fix 1 queues the sweep (widen unaccounted() then)")
     @Test
     void pathB_chunkListedOnlyByARegisteredFailingDoc_isRefreshed_thenFailedSweep_leavesItOwnerlessAndUnrecorded()
             throws Exception {

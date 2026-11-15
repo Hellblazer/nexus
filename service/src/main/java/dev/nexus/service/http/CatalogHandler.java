@@ -1442,6 +1442,9 @@ public final class CatalogHandler implements HttpHandler {
      * silently drops the unknown field). Optional {@code "force_re_embed"} mirrors
      * {@code write_many}. 503 when no {@code CombinedWriteService} is wired. Absent
      * {@code chunks} is byte-for-byte the pre-RDR-223 path and response.
+     *
+     * <p>nexus-z0o2p.29: two rows at one {@code position} are a 400 naming the position, with or
+     * without {@code chunks}, before any chunk is written.
      */
     private void handleManifestAppend(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -1799,6 +1802,11 @@ public final class CatalogHandler implements HttpHandler {
      * from the RDR-181 existence-partition. 503 when no {@link
      * dev.nexus.service.db.CombinedWriteService} is wired (matches {@link
      * VectorHandler}'s absent-backend pattern).
+     *
+     * <p>nexus-z0o2p.29: only the chunks that the rows of a REGISTERED doc of the request list are
+     * embedded or refreshed. An unlisted chunk is left alone (a refresh would reset its {@code
+     * last_written_at}), and the response's {@code chunks_unreferenced} counts the distinct chashes
+     * left out, as on {@code append} and {@code append_many}.
      */
     @SuppressWarnings("unchecked")
     private void handleManifestWriteMany(HttpExchange exchange, String tenant, String method) throws IOException {

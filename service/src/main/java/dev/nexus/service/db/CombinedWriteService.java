@@ -198,7 +198,13 @@ public final class CombinedWriteService {
      * @param forceReEmbed  bypasses the existence-partition entirely (RDR-181
      *                      escape, mirrors {@code PgVectorRepository}'s
      *                      {@code force_re_embed}) — every chash in {@code
-     *                      chunks} is (re-)embedded regardless of stored state.
+     *                      chunks} that is resolved is (re-)embedded regardless of stored state.
+     *
+     * <p>Only chunks the rows of a REGISTERED document of this request reference are resolved
+     * (nexus-z0o2p.29), as on the append routes: an unlisted chunk is neither embedded nor refreshed
+     * (a refresh resets {@code last_written_at}), and the response's {@code chunks_unreferenced}
+     * counts the distinct chashes left out. The engine logs {@code
+     * event=combined_write_unreferenced_chunks} when that count is above zero.
      */
     public CombinedWriteResult writeManyCombined(String tenant, String collection,
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
@@ -233,7 +239,7 @@ public final class CombinedWriteService {
         // append routes. An unreferenced chunk is not inserted (upsertManifestChunkVectors inserts only the
         // chashes a document's own rows list) but its metadata-only refresh WOULD touch an existing chunk,
         // resetting last_written_at on a chunk no committed row of this request lists.
-        Set<String> referenced = chashesReferencedByRegisteredDocs(tenant, docs);
+        Set<String> referenced = chashesReferencedByRegisteredDocs(tenant, docs, false);
         ChunkSplit split = splitReferenced(chunks, referenced);
         ResolvedBatch batch = resolveChunks(tenant, collection, split.relevant(), forceReEmbed, metadataMode);
 
@@ -267,8 +273,11 @@ public final class CombinedWriteService {
         // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
         if (metadataMode.merge()) response.put("metadata_merge", true);
         // Distinct chashes of the request's chunks that no registered document's rows referenced:
-        // neither embedded nor refreshed. Same field as the append routes. Non-zero is a client bug.
+        // neither embedded nor refreshed. Same field as the append routes. Non-zero is usually a client
+        // bug, but a client that pages a request of more than 1000 docs sends page 0 the chunks of
+        // later pages, and those count here too: the later page's write embeds them.
         response.put("chunks_unreferenced", split.unreferenced());
+        logUnreferenced(tenant, collection, "write_many", split.unreferenced());
         return new CombinedWriteResult(response, batch.tokens());
     }
 
@@ -440,6 +449,7 @@ public final class CombinedWriteService {
         // Distinct chashes of the request's chunks that no row referenced: neither embedded nor
         // inserted. Non-zero is a client bug made visible.
         response.put("chunks_unreferenced", split.unreferenced());
+        logUnreferenced(tenant, collection, "append", split.unreferenced());
         outcome.addSweepFieldsTo(response);
         return new CombinedWriteResult(response, batch.tokens());
     }
@@ -494,7 +504,7 @@ public final class CombinedWriteService {
             return new CombinedWriteResult(
                 catalogRepo.appendManifestMany(tenant, collection, docs, null), 0L);
         }
-        ChunkSplit split = splitReferenced(chunks, chashesReferencedByRegisteredDocs(tenant, docs));
+        ChunkSplit split = splitReferenced(chunks, chashesReferencedByRegisteredDocs(tenant, docs, true));
         List<Map<String, Object>> relevant = split.relevant();
         ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed, metadataMode);
         Map<String, Object> response =
@@ -509,7 +519,16 @@ public final class CombinedWriteService {
         // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
         if (metadataMode.merge()) response.put("metadata_merge", true);
         response.put("chunks_unreferenced", split.unreferenced());
+        logUnreferenced(tenant, collection, "append_many", split.unreferenced());
         return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    /** The python write clients ignore {@code chunks_unreferenced}, so the engine says so in its log. */
+    private static void logUnreferenced(String tenant, String collection, String route, int count) {
+        if (count > 0) {
+            log.info("event=combined_write_unreferenced_chunks tenant={} collection={} route={} count={}",
+                     tenant, collection, route, count);
+        }
     }
 
     /**
@@ -517,8 +536,13 @@ public final class CombinedWriteService {
      * A chunk that only an unregistered document references would be embedded for nothing (that document
      * fails in place), so it counts as unreferenced. The per-document in-transaction check stays
      * authoritative. Shared by {@code write_many} and {@code append_many}.
+     *
+     * @param skipRefusedAppends a document whose rows {@link CatalogRepository#requireDistinctPositions}
+     *        refuses (append_many fails it in place) lists nothing: its chunks are not embedded and do
+     *        not refresh an identical stored chunk before the refusal
      */
-    private Set<String> chashesReferencedByRegisteredDocs(String tenant, List<Map<String, Object>> docs) {
+    private Set<String> chashesReferencedByRegisteredDocs(String tenant, List<Map<String, Object>> docs,
+                                                          boolean skipRefusedAppends) {
         if (docs == null) return Set.of();
         List<String> docIds = new ArrayList<>();
         for (Map<String, Object> d : docs) {
@@ -529,12 +553,23 @@ public final class CombinedWriteService {
         for (Map<String, Object> d : docs) {
             if (!(d.get("doc_id") instanceof String id) || !registered.contains(id)) continue;
             if (d.get("rows") instanceof List<?> rows) {
+                if (skipRefusedAppends && refusedForDuplicatePosition(rows)) continue;
                 for (Object r : rows) {
                     if (r instanceof Map<?, ?> m && m.get("chash") instanceof String c) referenced.add(c);
                 }
             }
         }
         return referenced;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static boolean refusedForDuplicatePosition(List<?> rows) {
+        try {
+            CatalogRepository.requireDistinctPositions((List<Map<String, Object>>) rows);
+            return false;
+        } catch (IllegalArgumentException e) {
+            return true;
+        }
     }
 
     /** {@code chunks} split into the ones to resolve and the count of distinct chashes left out. */
