@@ -119,7 +119,9 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  * {@code built_at}; {@code event=pci_anchor_adopted reason=missing|unparsable}); an anchored one is not written
  * again. The uncapped row count and {@code written_since} are taken only when the leaf's deletes or non-HOT updates
  * advanced since this engine last looked, a statistics reset moved them backward, the index's last count is older
- * than {@link #RECOUNT_AFTER}, or the anchor is not the one the last count was taken against. What was read is kept
+ * than {@link #RECOUNT_AFTER}, the anchor is not the one the last count was taken against, or the index's size changed
+ * and its bytes over the stale row count (an upper bound on bytes per row, since ingest only adds rows) reaches the
+ * REINDEX size trigger ({@link PciReindexPolicy#sizeFires}): then a count could change the verdict. What was read is kept
  * in memory ({@link IndexReading}) and, like the retry state, is lost on restart: the first look after a boot counts.
  * A leaf whose pass is skipped keeps its previous readings, and a leaf's baseline moves only when its transaction
  * commits.
@@ -288,6 +290,13 @@ public final class PciReconciler {
     private final Map<LeafKey, IndexReading> readings = new ConcurrentHashMap<>();
     /** RDR-230 Phase 2: what the REINDEX half remembers (previous counts, 24 h limits, backoff, counters). */
     private final PciReindexState reindex = new PciReindexState();
+    /** The REINDEX's execution (statement, anchor and its retry, VACUUM, canary again); built with the canary. */
+    private final PciReindexPhase phase;
+    /**
+     * TEST SEAM: run at the start of the REINDEX phase, inside the guard that keeps a failing phase from failing the
+     * pass. A test sets it to throw, or to take the migration lock at that moment.
+     */
+    volatile Runnable reindexPhaseHook;
     private final AtomicReference<String> building = new AtomicReference<>();
     private final AtomicInteger passes = new AtomicInteger();
     /** nexus-f3yqd.3: the {@code boot_work} entry; null until {@link #bootWork} binds a registry. */
@@ -345,6 +354,7 @@ public final class PciReconciler {
                   Duration period, RandomGenerator random, ToIntFunction<Collection<String>> ringExpiry,
                   PciCanarySchedule canary) {
         this.canary = canary;
+        this.phase = new PciReindexPhase(reindex, canary, Objects.requireNonNull(clock, "clock"), this::writeAnchor);
         this.ringExpiry = Objects.requireNonNull(ringExpiry, "ringExpiry");
         this.random = Objects.requireNonNull(random, "random");
         this.catalog = Objects.requireNonNull(catalog, "catalog");
@@ -421,7 +431,8 @@ public final class PciReconciler {
             IndexReading reading = readings.get(new LeafKey(t.leaf(), t.index()));
             java.util.Optional<String> sweepOrigin = reading != null ? java.util.Optional.empty()
                 : sweep.anchor(t.model(), t.tenant(), t.collection()).map(PciCatalog.Anchor::origin);
-            entries.add(PciMaintenanceStatus.entry(r, reading, sweepOrigin));
+            entries.add(PciMaintenanceStatus.entry(r, reading, sweepOrigin,
+                reindex.redAfterReindex(t.index(), clock.instant())));
         }
         return PciMaintenanceStatus.of(entries, settings.enabled() && settings.reindex(), reindex.reindexing(),
             reindex.lastReindexAt(), reindex.reindexes(), leafUnanchored);
@@ -637,7 +648,12 @@ public final class PciReconciler {
             }
             // After the pass's drops and builds, before the canary: a REINDEX is re-measured by it (RDR-230 TD3).
             if (ranToEnd && settings.reindex()) {
-                runReindexes(pass, snapshot, tally);
+                try {
+                    runReindexes(pass, snapshot, tally);
+                } catch (RuntimeException e) {
+                    // Like the canary below: maintenance never fails the pass, and what it spared still runs.
+                    log.warn("event=pci_reindex_phase_failed error={}", PciQueryRing.sanitize(e));
+                }
             }
             log.info("event=pci_reconcile_pass ran_to_end={} leaves={} processed_leaves={} drops={} builds={} "
                 + "failed_builds={} skipped_leaves={} took_ms={} sum_count_ms={} max_count_ms={} builder_state={} "
@@ -786,7 +802,7 @@ public final class PciReconciler {
         }
     }
 
-    private static String leafId(Leaf leaf) {
+    static String leafId(Leaf leaf) {
         return leaf.schema() + "." + leaf.name();
     }
 
@@ -996,10 +1012,14 @@ public final class PciReconciler {
                 continue;
             }
             IndexReading last = readings.get(new LeafKey(id, index.name()));
-            // A size change with no delete is ingest: the rows moved with it, and the size rule divides bytes by rows
-            // (a stale count would read two-fold ingest as a two-fold bigger index per row).
+            // A size change with no delete is ingest: the true row count is at least the stale one, so bytes over the stale
+            // count is an UPPER bound on bytes per row. The size rule divides bytes by rows, so the count is retaken only
+            // when that bound reaches the trigger: ingest that cannot have made the index a bigger one per row costs no
+            // count, and ingest that might have does (it reads as the index it is, never as two-fold growth).
             boolean count = moved || last == null || !last.anchor().equals(anchor.get())
-                || last.bytes() != facts.bytes()
+                || (last.bytes() != facts.bytes()
+                    && (last.rows() <= 0 || PciReindexPolicy.sizeFires(anchor.get(), facts.bytes(), last.rows(),
+                        reindex.reference(dim))))
                 || Duration.between(last.countedAt(), now).compareTo(RECOUNT_AFTER) > 0;
             if (count) {
                 long rows = PciAnchorReads.countRows(tx, dim, leaf.model(), leaf.tenant(), index.collection());
@@ -1103,6 +1123,19 @@ public final class PciReconciler {
      * leaves the index unanchored, which the next pass adopts; the build itself stands.
      */
     private void anchorAfterBuild(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build) {
+        writeAnchor(pass, leaf, dim, build, false);
+    }
+
+    /**
+     * The anchor write of {@link #anchorAfterBuild}, for a built index (after a build) or a REINDEXed one
+     * ({@code afterReindex}; {@link PciReindexPhase}). After a build a failure leaves the index with no anchor and the
+     * next pass adopts it; after a REINDEX the old anchor is still there, so nothing adopts it, and the phase retries the
+     * write at the start of the next pass and does not judge the index in between.
+     *
+     * @return whether the anchor was written
+     */
+    boolean writeAnchor(PciBuilderSession.Pass pass, Leaf leaf, int dim, Build build, boolean afterReindex) {
+        String next = afterReindex ? "the next pass retries it" : "the next pass adopts it";
         Instant builtAt = clock.instant();
         Index index = new Index(build.name(), true, build.collection());
         long[] figures;
@@ -1122,14 +1155,14 @@ public final class PciReconciler {
             });
         } catch (DataAccessException e) {
             log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_failed sqlstate={} "
-                + "detail=\"the index stands; the next pass adopts it\"", build.name(), leafId(leaf), e.sqlState());
-            return;
+                + "detail=\"the index stands; {}\"", build.name(), leafId(leaf), e.sqlState(), next);
+            return false;
         }
         if (figures == null) {
             log.warn("event=pci_anchor_not_written origin=built index={} leaf={} reason=count_skipped "
-                + "detail=\"the tenant did not bind or the index is gone; the next pass adopts it if it exists\"",
-                build.name(), leafId(leaf));
-            return;
+                + "detail=\"the tenant did not bind or the index is gone; {} if it exists\"", build.name(),
+                leafId(leaf), next);
+            return false;
         }
         var anchor = new PciCatalog.Anchor(builtAt, figures[0], figures[1], PciCatalog.ORIGIN_BUILT);
         DdlOutcome outcome = pass.comment(leaf, index, anchor);
@@ -1139,10 +1172,11 @@ public final class PciReconciler {
             log.info("event=pci_anchor_written origin=built index={} leaf={} rows={} bytes={}", build.name(),
                 leafId(leaf), figures[0], figures[1]);
             refreshSweep("anchor", false);
-        } else {
-            log.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"the next pass "
-                + "adopts it\"", build.name(), leafId(leaf), outcome);
+            return true;
         }
+        log.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"{}\"", build.name(),
+            leafId(leaf), outcome, next);
+        return false;
     }
 
     // -- REINDEX (RDR-230 Technical Design 3 and 4) -----------------------------------------------------------
@@ -1153,6 +1187,10 @@ public final class PciReconciler {
      * {@link PciReconcilePlanner#reindexes} (a pure function); the memory they read is {@link PciReindexState}.
      */
     private void runReindexes(PciBuilderSession.Pass pass, PciCatalog.Snapshot snapshot, Tally tally) {
+        Runnable hook = reindexPhaseHook;
+        if (hook != null) {
+            hook.run();
+        }
         Instant now = clock.instant();
         Map<String, PciReindexState.Subject> subjects = new HashMap<>();
         Set<String> snapshotIndexes = new HashSet<>();
@@ -1163,6 +1201,7 @@ public final class PciReconciler {
         for (Leaf leaf : snapshot.leaves()) {
             leaf.hnswIndexes().forEach(i -> snapshotIndexes.add(i.name()));
         }
+        phase.retryOwedAnchors(pass, snapshotIndexes);   // a fresh anchor a REINDEX could not write last pass
         List<PciReindexPolicy.Candidate> candidates = reindex.candidates(tally.looks, tally.droppedIndexes,
             snapshotIndexes, name -> canary == null ? null : canary.latest(name), now, subjects);
         List<Reindex> triggered = withLeafSizeCandidates(pass, tally, PciReconcilePlanner.reindexes(candidates, now),
@@ -1185,7 +1224,9 @@ public final class PciReconciler {
                 log.warn("event=pci_reindex_skipped reason=no_subject index={}", r.name());
                 continue;
             }
-            reindexOne(pass, subject, r, tally);
+            if (phase.reindexOne(pass, subject, r)) {
+                tally.reindexes++;
+            }
         }
     }
 
@@ -1306,80 +1347,6 @@ public final class PciReconciler {
         } else {
             log.info("event=pci_anchor_not_written origin=built index={} leaf={} outcome={} detail=\"the index "
                 + "stands\"", own.name(), leafId(leaf), anchored.outcome());
-        }
-    }
-
-    private void reindexOne(PciBuilderSession.Pass pass, PciReindexState.Subject subject, Reindex r, Tally tally) {
-        Leaf leaf = subject.leaf();
-        String name = r.name();
-        log.info("event=pci_reindex_started leaf={} index={} collection={} trigger={} bytes={}", leafId(leaf), name,
-            r.collection(), r.trigger().label(), r.bytes());
-        reindex.running(name);
-        DdlOutcome outcome;
-        try {
-            outcome = pass.reindex(leaf, subject.index());
-        } finally {
-            reindex.running(null);
-        }
-        switch (outcome) {
-            case DONE -> {
-                reindex.finished(name, r.trigger(), clock.instant());
-                tally.reindexes++;
-                log.info("event=pci_index_reindexed leaf={} index={} collection={} trigger={} bytes_before={}",
-                    leafId(leaf), name, r.collection(), r.trigger().label(), r.bytes());
-                // A fresh graph, a fresh anchor (built, rows and bytes now); then the leaf's VACUUM after a bulk delete.
-                if (pass.live()) {
-                    anchorAfterBuild(pass, leaf, subject.dimension(), new Build(name, r.collection()));
-                }
-                if (r.vacuumAfter() && pass.live()) {
-                    vacuumLeaf(pass, leaf);
-                }
-                remeasureAfterReindex(leaf, name, r);
-            }
-            case FAILED, REJECTED -> {
-                int n = reindex.failed(name, clock.instant());
-                log.warn("event=pci_reindex_failed leaf={} index={} collection={} trigger={} consecutive_failures={} "
-                    + "next_retry_at={}", leafId(leaf), name, r.collection(), r.trigger().label(), n,
-                    reindex.nextRetryAt(name));
-            }
-            // The pass ended before the statement went out, or the backend was ended under it (a migration walk): not
-            // this index's fault, so no backoff. The invalid copy it may have left is the leftover rule's.
-            default -> log.info("event=pci_reindex_not_done leaf={} index={} outcome={}", leafId(leaf), name, outcome);
-        }
-    }
-
-    private void vacuumLeaf(PciBuilderSession.Pass pass, Leaf leaf) {
-        DdlOutcome outcome = pass.vacuum(leaf);
-        if (outcome == DdlOutcome.DONE) {
-            log.info("event=pci_leaf_vacuumed leaf={}", leafId(leaf));
-        } else {
-            log.info("event=pci_leaf_vacuum_not_done leaf={} outcome={} detail=\"autovacuum reaps it in time\"",
-                leafId(leaf), outcome);
-        }
-    }
-
-    /**
-     * The canary again on the REINDEXed index, with a red run's own queries when there are some (the same in-memory
-     * queries, so before and after are comparable). A red-canary REINDEX whose re-measure is still red is
-     * {@code red_after_reindex}: reported, and not rebuilt until a later green run or a day.
-     */
-    private void remeasureAfterReindex(Leaf leaf, String name, Reindex r) {
-        if (canary == null) {
-            return;
-        }
-        try {
-            PciCanary.Result before = canary.latest(name);
-            List<float[]> sample = before != null && before.state() == PciCanary.State.RED ? before.redSample() : null;
-            var target = new PciCanary.Target(leafId(leaf), leaf.tenant(), leaf.model(), r.collection(), name);
-            PciCanary.Result after = canary.remeasure(target, sample);
-            if (r.trigger() == PciReconcilePlanner.Trigger.RED_CANARY && after.state() == PciCanary.State.RED) {
-                reindex.stillRed(name);
-                log.warn("event=pci_red_after_reindex leaf={} index={} collection={} queries={} detail=\"still red "
-                    + "after the REINDEX; not rebuilt until a green run or a day\"", leafId(leaf), name,
-                    r.collection(), after.queries());
-            }
-        } catch (RuntimeException e) {
-            log.warn("event=pci_canary_failed stage=after_reindex index={} error={}", name, PciQueryRing.sanitize(e));
         }
     }
 

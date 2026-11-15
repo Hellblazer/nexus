@@ -370,10 +370,10 @@ class PciReindexIntegrationTest {
         assertThat(r.maintenance().reindexes()).isZero();
     }
 
-    /** Test 2, on the substrate: a third of the rows deleted is deletes-since-build, even after a restart; the REINDEX writes a fresh anchor. */
+    /** Test 2, on the substrate: 80 of 300 rows deleted is deletes-since-build, even after a restart; the REINDEX writes a fresh anchor. */
     @Test
     @Timeout(value = 300, unit = TimeUnit.SECONDS)
-    void aQuarterOfTheRowsDeleted_reindexesOnce_writesAFreshAnchor_andMeasuresTheCanaryAgain() throws Exception {
+    void overAQuarterOfTheRowsDeleted_reindexesOnce_afterARestart_writesAFreshAnchor_andMeasuresTheCanaryAgain() throws Exception {
         String tenant = newTenant("churn");
         String coll = name("churn");
         List<String> rows = collection(tenant, coll, 300);
@@ -443,7 +443,10 @@ class PciReindexIntegrationTest {
         }, "the leaf's manual VACUUM to show in the statistics");
     }
 
-    /** Test 4, on the substrate: red with ten queries rebuilds once a day; a still-red re-measure is red_after_reindex. */
+    /**
+     * Test 4, on the substrate: red with ten queries rebuilds once a day, a day after the build; a still-red re-measure is
+     * red_after_reindex; a restart forgets the engine's memory but not the anchor, which is what holds the day.
+     */
     @Test
     @Timeout(value = 300, unit = TimeUnit.SECONDS)
     void aRedCanary_reindexesOncePerDay_andAStillRedReMeasureIsReported() throws Exception {
@@ -457,6 +460,9 @@ class PciReindexIntegrationTest {
         r.reconcileOnce();   // builds; the canary runs after the build and is red
 
         r.reconcileOnce();
+        assertThat(r.reindexes()).as("an index built a minute ago waits its day").isZero();
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
 
         assertThat(r.reindexes()).isEqualTo(1);
         assertThat(logged("trigger=red_canary")).isGreaterThanOrEqualTo(1);
@@ -464,15 +470,52 @@ class PciReindexIntegrationTest {
         assertThat(canary.remeasuredWith.get(0)).isSameAs(canary.sample);
         assertThat(r.redAfterReindex(index(tenant, coll))).isTrue();
         assertThat(logged("event=pci_red_after_reindex")).isEqualTo(1);
+        assertThat(r.maintenance().canary().indexes()).as("shown on the operator entry")
+            .singleElement().satisfies(e -> assertThat(e.redAfterReindex()).isTrue());
 
         r.reconcileOnce();
         clock.advance(Duration.ofHours(23));
         r.reconcileOnce();
         assertThat(r.reindexes()).as("not again inside the day").isEqualTo(1);
+        assertThat(r.redAfterReindex(index(tenant, coll))).as("still inside the day").isTrue();
 
-        clock.advance(Duration.ofHours(2));
+        // A restart: the new engine has no memory of the last red-canary REINDEX. Its canary reads red on its first
+        // pass; the anchor, rewritten by the REINDEX, says the index is 23 hours old.
+        var restarted = reconciler(ON, clock, canary);
+        restarted.reconcileOnce();
+        restarted.reconcileOnce();
+        assertThat(restarted.reindexes()).as("a persistent red is not rebuilt on every restart").isZero();
+
+        clock.advance(Duration.ofHours(1));
+        assertThat(r.redAfterReindex(index(tenant, coll))).as("red_after_reindex expires after a day").isFalse();
+        restarted.reconcileOnce();
+        assertThat(restarted.reindexes()).as("a day on, once more").isEqualTo(1);
+    }
+
+    /** A red_after_reindex clears on a later green run: here the next REINDEX re-measures green. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aReindexThatReMeasuresGreen_clearsRedAfterReindex() throws Exception {
+        String tenant = newTenant("redgreen");
+        String coll = name("redgreen");
+        collection(tenant, coll, 300);
+        var canary = new ScriptedCanary();
+        canary.state = State.RED;
+        var clock = new MovingClock();
+        var r = reconciler(ON, clock, canary);
         r.reconcileOnce();
-        assertThat(r.reindexes()).as("a day on, once more").isEqualTo(2);
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
+        assertThat(r.redAfterReindex(index(tenant, coll))).isTrue();
+
+        canary.state = State.GREEN;
+        clock.advance(Duration.ofHours(25));
+        r.reconcileOnce();
+
+        assertThat(r.reindexes()).isEqualTo(2);
+        assertThat(r.redAfterReindex(index(tenant, coll))).as("the re-measure was green").isFalse();
+        assertThat(r.maintenance().canary().indexes()).singleElement()
+            .satisfies(e -> assertThat(e.redAfterReindex()).isFalse());
     }
 
     @Test
@@ -549,5 +592,182 @@ class PciReindexIntegrationTest {
         clock.advance(PciReconciler.FIRST_RETRY.plusMinutes(1));
         r.reconcileOnce();
         assertThat(r.reindexes()).as("after the backoff it runs").isEqualTo(1);
+    }
+
+    // -- fix round 1 (review ecc6621a9): bounds, the phase's guard, outcomes that are not charged, the owed anchor -----
+
+    /** Ingest that cannot have made the index a 1.4x bigger one per row costs no count; ingest that can, does. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void ingestBelowTheSizeBound_isNotRecounted_andIngestPastItIs() throws Exception {
+        String tenant = newTenant("bound");
+        String coll = name("bound");
+        collection(tenant, coll, 300);
+        var r = reconciler(ON, Clock.systemUTC(), new ScriptedCanary());
+        buildAndSettle(r);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        String idx = index(tenant, coll);
+        PciReconciler.IndexReading before = r.reading(leaf, idx);
+        assertThat(before.rows()).isEqualTo(300);
+
+        addRows(tenant, coll, 60);   // about a fifth more bytes: a bound of 1.2, under the trigger
+        r.reconcileOnce();
+
+        PciReconciler.IndexReading small = r.reading(leaf, idx);
+        assertThat(small.bytes()).as("the index grew").isGreaterThan(before.bytes());
+        assertThat(small.rows()).as("the stale count stands: no recount").isEqualTo(300);
+        assertThat(small.countedAt()).isEqualTo(before.countedAt());
+
+        addRows(tenant, coll, 300);   // more than twice the bytes: the bound reaches the trigger, so it counts
+        r.reconcileOnce();
+
+        assertThat(r.reading(leaf, idx).rows()).as("recounted").isEqualTo(660);
+        assertThat(r.reindexes()).as("and read as the index it is, not as a bigger one per row").isZero();
+    }
+
+    /** A REINDEX phase that throws never fails the pass: the canary still runs. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aThrowingReindexPhase_neverFailsThePass_andTheCanaryStillRuns() throws Exception {
+        String tenant = newTenant("throw");
+        collection(tenant, name("throw"), 300);
+        var canary = new ScriptedCanary();
+        var r = reconciler(ON, Clock.systemUTC(), canary);
+        r.reindexPhaseHook = () -> {
+            throw new IllegalStateException("scripted");
+        };
+
+        PciReconciler.PassReport report = r.reconcileOnce();
+
+        assertThat(report.ranToEnd()).isTrue();
+        assertThat(report.builds()).isEqualTo(1);
+        assertThat(logged("event=pci_reindex_phase_failed")).isEqualTo(1);
+        assertThat(canary.triggers).as("the canary ran after the failed phase").contains("after_build");
+    }
+
+    void terminateBuilder() throws Exception {
+        asSuperuser(su -> su.select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN,
+                DSL.field(DSL.name("pid"), Integer.class)))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+            .where(DSL.field(DSL.name("application_name"), String.class)
+                .eq(PciBuilderSession.builderApplicationName(NONCE)))
+            .and(DSL.field(DSL.name("state"), String.class).eq("active"))
+            .fetch());
+    }
+
+    /** The builder's backend ended under a REINDEX (a migration walk does this): the statement is not at fault. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aReindexCutOffByALostConnection_isNotChargedToBackoff() throws Exception {
+        String tenant = newTenant("lost");
+        String coll = name("lost");
+        List<String> rows = collection(tenant, coll, 300);
+        var r = reconciler(ON, Clock.systemUTC(), new ScriptedCanary());
+        buildAndSettle(r);
+        deleteRows(tenant, coll, rows.subList(0, 80));
+
+        try (SnapshotHolder snapshot = new SnapshotHolder()) {
+            CompletableFuture<?> pass = CompletableFuture.supplyAsync(r::reconcileOnce, async);
+            await(() -> leaf(tenant).indexes().stream().anyMatch(i -> !i.valid()), "the REINDEX's invalid copy");
+            terminateBuilder();
+            snapshot.close();
+            pass.get(60, TimeUnit.SECONDS);
+        }
+
+        assertThat(logged("event=pci_reindex_not_done")).isEqualTo(1);
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_reindex_not_done") && l.contains("outcome=CONNECTION_LOST"));
+        assertThat(logged("event=pci_reindex_failed")).as("not charged").isZero();
+        assertThat(r.reindexes()).isZero();
+
+        r.reconcileOnce();   // the same instant: no backoff to wait out; the leftover goes, the REINDEX runs
+        assertThat(r.reindexes()).isEqualTo(1);
+        assertThat(logged("event=pci_reindex_failed")).isZero();
+    }
+
+    /** The migrator holds its lock when the REINDEX is about to go out: the pass ends and nothing is charged. */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aReindexSkippedForAMigration_isNotChargedToBackoff() throws Exception {
+        String tenant = newTenant("migr");
+        String coll = name("migr");
+        List<String> rows = collection(tenant, coll, 300);
+        var r = reconciler(ON, Clock.systemUTC(), new ScriptedCanary());
+        buildAndSettle(r);
+        deleteRows(tenant, coll, rows.subList(0, 80));
+
+        Connection[] held = new Connection[1];
+        r.reindexPhaseHook = () -> {
+            try {
+                held[0] = pg.createConnection("");
+                held[0].setAutoCommit(true);
+                DSL.using(held[0], SQLDialect.POSTGRES).select(DSL.function("pg_advisory_lock", SQLDataType.OTHER,
+                    DSL.val(dev.nexus.service.db.SchemaMigrator.MIGRATION_ADVISORY_LOCK_KEY))).fetch();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            r.reconcileOnce();
+        } finally {
+            r.reindexPhaseHook = null;
+            if (held[0] != null) held[0].close();
+        }
+
+        assertThat(logs()).anyMatch(l -> l.contains("event=pci_reindex_not_done")
+            && l.contains("outcome=SKIPPED_MIGRATION"));
+        assertThat(logged("event=pci_reindex_failed")).as("not charged").isZero();
+        assertThat(r.reindexes()).isZero();
+
+        r.reconcileOnce();   // the migration is over: the same instant, no backoff
+        assertThat(r.reindexes()).isEqualTo(1);
+    }
+
+    /**
+     * A REINDEX whose fresh anchor is not written leaves the old anchor, which would fire the size and deletes rules on
+     * every pass: the index is owed its anchor, is no candidate meanwhile, and the next pass retries the write.
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void aReindexWhoseAnchorIsNotWritten_isOwedIt_andTheNextPassRetries() throws Exception {
+        String tenant = newTenant("owed");
+        String coll = name("owed");
+        collection(tenant, coll, 300);
+        var r = reconciler(ON, Clock.systemUTC(), new ScriptedCanary());
+        buildAndSettle(r);
+        PciCatalog.Leaf leaf = leaf(tenant);
+        PciCatalog.Index idx = leaf.indexes().stream().filter(i -> i.parsed() && i.valid()).findFirst().orElseThrow();
+        PciCatalog.Anchor old = anchorOf(tenant, coll);
+
+        var state = new PciReindexState();
+        boolean[] works = {false};
+        int[] writes = {0};
+        var phase = new PciReindexPhase(state, null, Clock.systemUTC(), (pass, l, dim, build, afterReindex) -> {
+            writes[0]++;
+            assertThat(afterReindex).isTrue();
+            return works[0];
+        });
+        var reindex = new PciReconcilePlanner.Reindex(idx.name(), coll, PciReconcilePlanner.Trigger.DELETES_SINCE_BUILD,
+            1000);
+        var subject = new PciReindexState.Subject(leaf, 384, idx,
+            new PciReconciler.IndexReading(old, 1000, 300, 0, Instant.now()));
+        var builder = new PciBuilderSession(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS, NONCE, ON);
+
+        try (PciBuilderSession.Pass pass = builder.open()) {
+            assertThat(phase.reindexOne(pass, subject, reindex)).as("the REINDEX itself finished").isTrue();
+        }
+        assertThat(state.reindexes()).isEqualTo(1);
+        assertThat(state.owedAnchors()).as("owed its anchor").containsOnlyKeys(idx.name());
+        assertThat(anchorOf(tenant, coll)).as("the old anchor is still on the index").isEqualTo(old);
+
+        try (PciBuilderSession.Pass pass = builder.open()) {
+            phase.retryOwedAnchors(pass, java.util.Set.of(idx.name()));   // the retry fails again
+            assertThat(state.owedAnchors()).containsOnlyKeys(idx.name());
+            works[0] = true;
+            phase.retryOwedAnchors(pass, java.util.Set.of(idx.name()));
+            assertThat(state.owedAnchors()).as("written: no longer owed").isEmpty();
+            phase.retryOwedAnchors(pass, java.util.Set.of(idx.name()));
+        }
+        assertThat(writes[0]).as("one write at the REINDEX, two retries, none once written").isEqualTo(3);
+        assertThat(logged("event=pci_anchor_retried")).isEqualTo(1);
     }
 }

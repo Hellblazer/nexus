@@ -757,7 +757,10 @@ class PciLeafIndexIntegrationTest {
     }
 
     PciReconciler reconciler(PciSettings s, ScriptedCanary canary) {
-        var clock = java.time.Clock.systemUTC();
+        return reconciler(s, canary, java.time.Clock.systemUTC());
+    }
+
+    PciReconciler reconciler(PciSettings s, ScriptedCanary canary, java.time.Clock clock) {
         return new PciReconciler(catalog::read, builderSession(s), PciIndexSweep.create(svcDs, s), s, clock,
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60),
             java.util.random.RandomGenerator.getDefault(), tenantsSeen -> 0,
@@ -946,8 +949,10 @@ class PciLeafIndexIntegrationTest {
         collection(lim, name("keep"), 0);
         addRows(lim, name("keep"), 250);
         dormantCollection(lim, name("bulk"), 2_000);
-        PciReconciler r = reconciler(settings(), canary);
+        var clock = new PciReindexIntegrationTest.MovingClock();   // the real clock, advanced by the test
+        PciReconciler r = reconciler(settings(), canary, clock);
         assertThat(r.reconcileOnce().builds()).isEqualTo(3);
+        clock.advance(Duration.ofHours(25));   // a red canary rebuilds an index a day after its anchor, not before
         deleteCollection(lim, name("bulk"));
         awaitLiveTuples(leaf(lim), 250);
         awaitLiveTuples(leaf(p1), 250);

@@ -134,19 +134,29 @@ final class PciReindexPolicy {
 
     /** {@code rows_now} fell by at least {@link #BULK_DELETE_FRACTION} since the previous check, or one is owed. */
     private static boolean bulkDelete(Candidate c) {
-        if (c.bulkPending()) {
-            return true;
-        }
-        if (c.previousRows().isEmpty() || c.previousRows().getAsLong() <= 0) {
-            return false;
-        }
-        long previous = c.previousRows().getAsLong();
-        return (double) (previous - c.rows()) / previous >= BULK_DELETE_FRACTION;
+        return c.bulkPending() || bulkFall(c.previousRows(), c.rows());
     }
 
-    /** Red on at least {@link #RED_CANARY_MIN_QUERIES} queries, and none of this index's last day's REINDEX was for it. */
+    /** Whether {@code rows} is at least {@link #BULK_DELETE_FRACTION} below the previous check's count (none: false). */
+    static boolean bulkFall(OptionalLong previousRows, long rows) {
+        if (previousRows.isEmpty() || previousRows.getAsLong() <= 0) {
+            return false;
+        }
+        long previous = previousRows.getAsLong();
+        return (double) (previous - rows) / previous >= BULK_DELETE_FRACTION;
+    }
+
+    /**
+     * Red on at least {@link #RED_CANARY_MIN_QUERIES} queries, and not within a day of this index's last REINDEX or
+     * build. The engine's memory of its last red-canary REINDEX ({@code lastRedReindexAt}) is lost on a restart or a change
+     * of holder, so the day is also read from the anchor, which a REINDEX rewrites and which survives both: a persistent
+     * red is not rebuilt on every restart. (An index built or adopted less than a day ago waits the same day.)
+     */
     private static boolean redCanary(Candidate c, Instant now) {
         if (c.canary() != PciCanary.State.RED || c.canaryQueries() < RED_CANARY_MIN_QUERIES) {
+            return false;
+        }
+        if (now.isBefore(c.anchor().builtAt().plus(RED_REINDEX_MIN_INTERVAL))) {
             return false;
         }
         return c.lastRedReindexAt() == null
@@ -159,18 +169,28 @@ final class PciReindexPolicy {
         return (double) dead / c.rows() >= DELETES_SINCE_BUILD_FRACTION;
     }
 
+    private static boolean size(Candidate c) {
+        return c.rows() > 0 && sizeFires(c.anchor(), c.bytes(), c.rows(), c.reference());
+    }
+
     /**
      * Bytes per row is at least {@link #SIZE_RATIO} times the reference: the anchor's own for an index this engine built,
      * the install reference for an adopted one (an adopted anchor is a snapshot of an index of unknown age). With no
-     * reference the rule is off.
+     * reference the rule is off. {@code rows <= 0} is never a size.
+     *
+     * <p>Evaluated with a row count that can only be too small (ingest since the last count), this is an upper bound on
+     * the rule: when it is false the true ratio is below the trigger too, so the count need not be retaken
+     * ({@code PciReconciler#readAnchors}).
      */
-    private static boolean size(Candidate c) {
-        PciCatalog.Anchor a = c.anchor();
+    static boolean sizeFires(PciCatalog.Anchor a, long bytes, long rows, OptionalDouble reference) {
+        if (rows <= 0) {
+            return false;
+        }
         boolean built = PciCatalog.ORIGIN_BUILT.equals(a.origin()) && a.rows() > 0 && a.bytes() > 0;
-        OptionalDouble base = built ? OptionalDouble.of((double) a.bytes() / a.rows()) : c.reference();
+        OptionalDouble base = built ? OptionalDouble.of((double) a.bytes() / a.rows()) : reference;
         if (base.isEmpty() || base.getAsDouble() <= 0) {
             return false;
         }
-        return ((double) c.bytes() / c.rows()) / base.getAsDouble() >= SIZE_RATIO;
+        return ((double) bytes / rows) / base.getAsDouble() >= SIZE_RATIO;
     }
 }

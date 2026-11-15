@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
@@ -45,14 +46,20 @@ final class PciReindexState {
     /** An index a REINDEX may be run on, with what the executor needs to run it. */
     record Subject(Leaf leaf, int dimension, Index index, IndexReading reading) { }
 
+    /** A REINDEX that finished whose fresh anchor was not written: what the retry needs to write it. */
+    record Owed(Leaf leaf, int dimension, String collection) { }
+
     private final Map<String, Long> previousRows = new ConcurrentHashMap<>();
     private final Set<String> bulkOwed = ConcurrentHashMap.newKeySet();
     private final Map<String, Instant> lastRedReindex = new ConcurrentHashMap<>();
     private final Set<String> redAfterReindex = ConcurrentHashMap.newKeySet();
     private final Map<String, Failure> failures = new ConcurrentHashMap<>();
+    private final Map<String, Owed> anchorOwed = new ConcurrentHashMap<>();
     private final AtomicInteger reindexes = new AtomicInteger();
     private final AtomicReference<String> reindexing = new AtomicReference<>();
     private volatile Instant lastReindexAt;
+    /** The install reference per dimension as of the last {@link #candidates}: what a size bound is read against. */
+    private volatile Map<Integer, OptionalDouble> references = Map.of();
 
     /**
      * The candidates of this pass: every valid parsed index the looks read an anchor for that the pass did not drop. The
@@ -78,6 +85,9 @@ final class PciReindexState {
                 anchorsByDimension.computeIfAbsent(look.dimension(), d -> new ArrayList<>()).add(reading.anchor());
             }
         }
+        Map<Integer, OptionalDouble> references = new TreeMap<>();
+        anchorsByDimension.forEach((dim, anchors) -> references.put(dim, PciReindexPolicy.installReference(dim, anchors)));
+        this.references = references;
         List<PciReindexPolicy.Candidate> out = new ArrayList<>();
         for (Subject s : read) {
             String name = s.index().name();
@@ -87,6 +97,17 @@ final class PciReindexState {
                 redAfterReindex.remove(name);   // a later green run ends red_after_reindex
             }
             IndexReading reading = s.reading();
+            // A fall seen while the index is backed off, or owed an anchor, must not be lost with the overwrite below:
+            // it stays owed until its REINDEX has run.
+            if (PciReindexPolicy.bulkFall(previousRows(name), reading.rows())) {
+                bulkOwed.add(name);
+            }
+            if (anchorOwed.containsKey(name)) {
+                // Its REINDEX finished and the fresh anchor is not written: the old anchor would re-fire the size and
+                // deletes rules every pass. Not a candidate until the anchor lands.
+                previousRows.put(name, reading.rows());
+                continue;
+            }
             out.add(new PciReindexPolicy.Candidate(name, s.index().collection(), s.dimension(), reading.anchor(),
                 reading.bytes(), reading.rows(),
                 reading.writtenSince(), previousRows(name), bulkOwed.contains(name),
@@ -106,6 +127,31 @@ final class PciReindexState {
         lastRedReindex.keySet().retainAll(present);
         redAfterReindex.retainAll(present);
         failures.keySet().retainAll(present);
+        anchorOwed.keySet().retainAll(present);
+    }
+
+    /** The REINDEX of {@code index} finished and its fresh anchor was not written: retry it before judging the index. */
+    void anchorOwed(String index, Leaf leaf, int dimension, String collection) {
+        anchorOwed.put(index, new Owed(leaf, dimension, collection));
+    }
+
+    /** The anchors still owed, by index name. */
+    Map<String, Owed> owedAnchors() {
+        return Map.copyOf(anchorOwed);
+    }
+
+    /** The owed anchor of {@code index} was written. */
+    void anchorWritten(String index) {
+        anchorOwed.remove(index);
+    }
+
+    /**
+     * The install reference for {@code dimension} as of the last pass, or the built-in one when none has been taken (a
+     * pass that has not reached its REINDEX phase yet, a boot): {@link PciReindexPolicy#installReference}.
+     */
+    OptionalDouble reference(int dimension) {
+        OptionalDouble known = references.get(dimension);
+        return known != null ? known : PciReindexPolicy.installReference(dimension, List.of());
     }
 
     OptionalLong previousRows(String index) {
@@ -136,11 +182,21 @@ final class PciReindexState {
         return f == null ? null : f.nextRetryAt();
     }
 
-    /** A REINDEX of {@code index} finished for {@code trigger}. */
+    /** A REINDEX of {@code index} finished for {@code trigger}, with no red canary behind it (a leaf index). */
     void finished(String index, Trigger trigger, Instant now) {
+        finished(index, trigger, now, false);
+    }
+
+    /**
+     * A REINDEX of {@code index} finished for {@code trigger}. {@code canaryWasRed}: the canary's latest result for the
+     * index was red when it started, whatever the trigger's label (a bulk delete that fires with a red canary is labelled
+     * bulk delete, and the red's once-a-day limit and {@code red_after_reindex} still apply).
+     */
+    void finished(String index, Trigger trigger, Instant now, boolean canaryWasRed) {
         failures.remove(index);
         bulkOwed.remove(index);
-        if (trigger == Trigger.RED_CANARY) {
+        redAfterReindex.remove(index);   // a new REINDEX is a new measurement; stillRed sets it again
+        if (canaryWasRed || trigger == Trigger.RED_CANARY) {
             lastRedReindex.put(index, now);
         }
         reindexes.incrementAndGet();

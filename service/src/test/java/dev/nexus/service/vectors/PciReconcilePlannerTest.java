@@ -636,6 +636,30 @@ class PciReconcilePlannerTest {
         assertThat(only(new Cand().red(10).lastRed(Duration.ofHours(24)))).isEqualTo(Trigger.RED_CANARY);
     }
 
+    /** The day's limit is also read from the anchor, which survives a restart and a change of holder. */
+    @Test
+    void aRedCanary_waitsADayFromTheAnchor_whateverTheEnginesMemoryOfItsLastRedReindex() {
+        // The memory of the last red-canary REINDEX is gone (a restart): lastRedReindexAt is null. The anchor says the
+        // index was built, adopted or reindexed an hour ago.
+        var fresh = new Cand().anchor(new PciCatalog.Anchor(NOW.minus(Duration.ofHours(1)), 1000, 8_000_000,
+            PciCatalog.ORIGIN_BUILT)).red(10);
+        assertThat(reindexes(fresh)).isEmpty();
+        var almost = new Cand().anchor(new PciCatalog.Anchor(NOW.minus(Duration.ofHours(24)).plusSeconds(1), 1000,
+            8_000_000, PciCatalog.ORIGIN_BUILT)).red(10);
+        assertThat(reindexes(almost)).isEmpty();
+        var aDay = new Cand().anchor(new PciCatalog.Anchor(NOW.minus(Duration.ofHours(24)), 1000, 8_000_000,
+            PciCatalog.ORIGIN_BUILT)).red(10);
+        assertThat(only(aDay)).isEqualTo(Trigger.RED_CANARY);
+        // An adopted anchor's built_at is the adoption time: the same day.
+        var adoptedNow = new Cand().anchor(new PciCatalog.Anchor(NOW.minus(Duration.ofHours(2)), 1000, 8_000_000,
+            PciCatalog.ORIGIN_ADOPTED)).red(10);
+        assertThat(reindexes(adoptedNow)).isEmpty();
+        // The other triggers do not wait on the anchor's age.
+        var deletes = new Cand().anchor(new PciCatalog.Anchor(NOW.minus(Duration.ofHours(1)), 1000, 8_000_000,
+            PciCatalog.ORIGIN_BUILT)).now(8_000_000, 700, 0);
+        assertThat(only(deletes)).isEqualTo(Trigger.DELETES_SINCE_BUILD);
+    }
+
     @Test
     void theSizeRule_comparesAgainstTheAnchor_orForAnAdoptedIndexTheInstallReference() {
         // built at 8000 bytes a row: 1.4x is 11,200.

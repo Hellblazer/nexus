@@ -78,7 +78,7 @@ class ChunksLeavesHandlerBodyTest {
     }
 
     @Test
-    void eachEntryHasExactlyTheTwelveDocumentedKeys_redFirstThenUnmeasuredThenGreen() throws Exception {
+    void eachEntryHasExactlyTheThirteenDocumentedKeys_redFirstThenUnmeasuredThenGreen() throws Exception {
         JsonNode list = render(canaryHistory()).get("canary_indexes");
 
         assertThat(list).hasSize(3);
@@ -87,7 +87,8 @@ class ChunksLeavesHandlerBodyTest {
         assertThat(list.get(2).get("state").asText()).isEqualTo("green");
         for (JsonNode e : list) {
             assertThat(keys(e)).containsExactly("index", "state", "reason", "queries", "min_recall", "mean_recall",
-                "top1_misses", "trigger", "measured_at", "anchor", "size_ratio", "deletes_since_build");
+                "top1_misses", "trigger", "measured_at", "anchor", "size_ratio", "deletes_since_build",
+                "red_after_reindex");
             assertThat(e.get("index").asText()).matches("^pci_[0-9a-f]{24}$");
             assertThat(e.get("measured_at").asText()).as("whole seconds, like the other times")
                 .isEqualTo("2026-10-20T08:01:10Z");
@@ -113,6 +114,22 @@ class ChunksLeavesHandlerBodyTest {
         assertThat(unmeasured.get("mean_recall").isNull()).isTrue();
         assertThat(unmeasured.get("anchor").isNull()).isTrue();
         assertThat(unmeasured.get("size_ratio").isNull()).isTrue();
+    }
+
+    /** Operator-only (RDR-230 Phase 2): a red-canary REINDEX re-measured red, and the index waits for a green run or a day. */
+    @Test
+    void redAfterReindex_isABooleanOnTheEntry_falseUnlessTheReconcilerSaysSo() throws Exception {
+        var plain = entry("pci_" + "d".repeat(24), "red", null, 10, 0.9, 0.95, 1, "after_reindex", "built", 1.0, 0.0);
+        var flagged = new PciMaintenanceStatus.Entry(plain.index(), plain.state(), plain.reason(), plain.queries(),
+            plain.minRecall(), plain.meanRecall(), plain.top1Misses(), plain.trigger(), plain.measuredAt(),
+            plain.anchor(), plain.sizeRatio(), plain.deletesSinceBuild(), true);
+
+        JsonNode list = render(PciMaintenanceStatus.phase1(List.of(plain, flagged))).get("canary_indexes");
+
+        assertThat(list.get(0).get("red_after_reindex").isBoolean()).isTrue();
+        assertThat(list.get(0).get("trigger").asText()).isEqualTo("after_reindex");
+        assertThat(java.util.stream.StreamSupport.stream(list.spliterator(), false)
+            .map(e -> e.get("red_after_reindex").asBoolean()).toList()).containsExactlyInAnyOrder(false, true);
     }
 
     @Test

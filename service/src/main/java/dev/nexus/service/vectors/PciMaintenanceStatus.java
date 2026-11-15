@@ -60,7 +60,7 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      * @param minRecall       null unless measured
      * @param meanRecall      null unless measured
      * @param top1Misses      queries with a top-1 miss; 0 unless measured
-     * @param trigger         {@code after_build}, {@code vacuum} or {@code daily}
+     * @param trigger         {@code after_build}, {@code vacuum}, {@code daily} or {@code after_reindex}
      * @param measuredAt      when the run ended
      * @param anchor          {@code built} or {@code adopted}, or null when the index carries no anchor this engine can
      *                        read
@@ -68,13 +68,24 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      *                        against the install's reference, which Phase 2 builds), without a reading, or at zero rows
      * @param deletesSinceBuild {@code max(0, anchor.rows + written_since - rows_now) / rows_now}, the estimate of RDR-230
      *                        Technical Design 3; null without a reading or at zero rows
+     * @param redAfterReindex the last red-canary REINDEX of the index re-measured red, and neither a later green run nor a
+     *                        day has passed: the index is not rebuilt until one does (operator-only; never on the
+     *                        unauthenticated status route)
      */
     public record Entry(String index, String state, String reason, int queries, Double minRecall, Double meanRecall,
                         int top1Misses, String trigger, Instant measuredAt, String anchor, Double sizeRatio,
-                        Double deletesSinceBuild) {
+                        Double deletesSinceBuild, boolean redAfterReindex) {
+
+        /** An entry that is not {@code red_after_reindex}. */
+        public Entry(String index, String state, String reason, int queries, Double minRecall, Double meanRecall,
+                     int top1Misses, String trigger, Instant measuredAt, String anchor, Double sizeRatio,
+                     Double deletesSinceBuild) {
+            this(index, state, reason, queries, minRecall, meanRecall, top1Misses, trigger, measuredAt, anchor,
+                sizeRatio, deletesSinceBuild, false);
+        }
 
         /**
-         * The entry as the {@code canary_indexes} element of {@code GET /v1/admin/chunks-leaves}: the twelve keys in
+         * The entry as the {@code canary_indexes} element of {@code GET /v1/admin/chunks-leaves}: the thirteen keys in
          * the order of this record's components. Times are whole seconds; recall is rounded to three places, the size
          * ratio to two and the delete fraction to three, as plain decimals; a value that is not finite is null.
          */
@@ -92,6 +103,7 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
             m.put("anchor", anchor);
             m.put("size_ratio", decimal(sizeRatio, 2));
             m.put("deletes_since_build", decimal(deletesSinceBuild, 3));
+            m.put("red_after_reindex", redAfterReindex);
             return m;
         }
     }
@@ -158,13 +170,22 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      *
      * @param reading     what the reconciler last read of this index (its anchor, bytes, and the row counts), or null
      * @param sweepOrigin the origin of the anchor the router's set holds for the index, used when there is no reading
+     * @param redAfterReindex whether the index's last red-canary REINDEX re-measured red and neither a green run nor a day
+     *                    has passed since
      */
     static Entry entry(PciCanary.Result r, PciReconciler.IndexReading reading, Optional<String> sweepOrigin) {
+        return entry(r, reading, sweepOrigin, false);
+    }
+
+    /** As above for an index whose last red-canary REINDEX may have re-measured red. */
+    static Entry entry(PciCanary.Result r, PciReconciler.IndexReading reading, Optional<String> sweepOrigin,
+                       boolean redAfterReindex) {
         String origin = reading != null ? reading.anchor().origin() : sweepOrigin.orElse(null);
         // The word is an operator-writable comment; only the two the engine writes are published.
         String anchor = PciCatalog.ORIGIN_BUILT.equals(origin) || PciCatalog.ORIGIN_ADOPTED.equals(origin) ? origin : null;
         return new Entry(r.target().index(), r.state().wire(), r.reason(), r.queries(), r.minRecall(), r.meanRecall(),
-            r.top1Misses(), r.trigger(), r.at(), anchor, sizeRatio(anchor, reading), deletesSinceBuild(reading));
+            r.top1Misses(), r.trigger(), r.at(), anchor, sizeRatio(anchor, reading), deletesSinceBuild(reading),
+            redAfterReindex);
     }
 
     private static Double sizeRatio(String anchor, PciReconciler.IndexReading reading) {
