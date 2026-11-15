@@ -34,6 +34,8 @@ KINDS: tuple[str, ...] = (
     "bad_summary", "bad_field",
 )
 
+#: The longest ``display.threads`` value: it becomes the heading ``## aura: <value>`` in a threads entry.
+MAX_THREADS_CHARS: int = 80
 #: ``AuraError.key`` for a refusal of the file as a whole.
 FILE_KEY: str = "(file)"
 
@@ -179,8 +181,8 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
     outside the closed set, a missing required key, a wrong type, a name that breaks RDR-242's
     name rule, a subspace that is not one concrete ``board/<topic>`` or ``board/ci/<topic>``, a
     reserved argument mapped, an argument source of an unknown form, ``clear.match`` equal to
-    ``trigger.match``, a threads value that is blank or has a control character, and a limit
-    above its default (RDR-249 Technical Design 6).
+    ``trigger.match``, a threads value that is blank, has a control character, is not ASCII or
+    is over 80 characters, and a limit above its default (RDR-249 Technical Design 6).
     """
     r = _Reader(f"{name}{AURA_SUFFIX}")
     if len(data) >= READ_LIMIT:
@@ -236,10 +238,14 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
         if dict(clear_match) == dict(match):
             raise r.fail("clear_equals_trigger", "clear.match", "equals trigger.match, so a post would both fire and clear")
 
-    if not threads.strip() or not threads.isprintable() or threads != threads.strip():
+    if (
+        not threads.strip() or not threads.isprintable() or not threads.isascii()
+        or threads != threads.strip() or len(threads) > MAX_THREADS_CHARS
+    ):
         raise r.fail(
             "bad_threads", "display.threads",
-            "must be one printable line that is not blank and has no leading or trailing space",
+            f"must be one line of printable ASCII, at most {MAX_THREADS_CHARS} characters, that is not blank "
+            "and has no leading or trailing space",
         )
     if not summary.strip() or not summary.isprintable():
         raise r.fail("bad_summary", "summary", "must be one printable line that is not blank")
