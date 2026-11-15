@@ -606,13 +606,24 @@ exporter; every new table needs a new exporter.
   **Mitigation**: the engine answers such a page `export_page_over_budget` and logs the tenant, table and
   time, and the client fails it as a page failure (not a busy wait), naming the budget. Measured shares are in
   Performance Expectations. **Owner and trigger**: a `(tenant_id, id)` Liquibase index on the id-keyed tables is
-  Sam's decision, taken when any id-keyed page starts its response in more than 5 s (Activation Step 2 or any
-  later export) or the over-budget log line fires.
+  Sam's decision, taken when the engine logs `event=export_page_over_budget` for an id-keyed table, the
+  20 s page budget (`TenantExportHandler.java:406`; Activation Step 2 or any later export). Per-page response
+  starts are not logged, so an earlier 5 s trigger could not be read and is retired (Sam, 2026-11-15: "Accept,
+  watch the 20 s line").
 
 ### Failure Modes
 
 - A page request fails: the client asks again from the same key; after a bounded number of tries it
   closes the session, removes the partial file (`.<name>.partial-<pid>`), and says to run again.
+- A page never returns (a read stuck in the driver, as the 2026-11-14 cloud hang spun in PgJDBC's TLS skip): the
+  engine waits for the page's read at most `PAGE_WALL_MS`, 25,000 ms (`TenantExportSessions.java:510`), then
+  interrupts the reader and releases the session's page gate. The page answers 503 `export_page_over_budget` with
+  `page_budget_ms` 25000, and the engine logs `event=export_page_wall_deadline` (tenant, table, elapsed, wall).
+  A reader that ignores the interrupt is logged `event=export_page_reader_stuck` and keeps its pool connection
+  until it ends; until then the session's next page is refused 503 `export_page_busy` with `Retry-After: 1`. A
+  wall hit before the read's pool borrow returned answers as an exhausted pool instead. The client counts an
+  over-budget page as a failed try (the backoff ladder, five tries), not a busy wait, and when the tries run out
+  it closes the session, removes the partial file and fails naming the limit.
 - The engine restarts mid-session: the dedicated transaction ends, the snapshot is gone; the next page
   request gets a clear "session closed" and the client starts over.
 - An upload part fails in transit: its SHA-256 check refuses it before it touches the transaction, and the client
@@ -694,8 +705,13 @@ size, the snapshot's xmin age, and the absence of over-budget or busy answers (n
 measured: the per-page response start (the client logs only progress every 30 s, so only the mean is known), the
 cloud engine's `NX_POOL_SIZE` and PG `max_connections` (the export sampler counted 30 to 31 backends), and the
 database's oldest-xmin age during the import's hold (the sampler ran for the export only). The id-keyed tables
-held 13 rows (`plans`), one page each, so the 5 s trigger in Risks was not tested at size. Details under
+held 13 rows (`plans`), one page each, so the over-budget trigger in Risks was not tested at size. Details under
 Performance Expectations.
+
+Accepted short of its target (Sam, 2026-11-15, by dialog in session halcyon: "Accept, watch the 20 s line"): the
+RDR closes with Activation Step 2 run on a 116,492-chunk tenant with 13 id-keyed rows and per-page response starts
+unrecorded, not on a near-nexus-size tenant. What is watched instead is the engine's `export_page_over_budget`
+log line, the trigger in Risks.
 
 ### Day 2 Operations
 
@@ -764,6 +780,11 @@ None.
   completes, and its time is recorded for Performance Expectations.
 - **Scenario**: a page request cut mid-transfer — **Verify**: the client resumes from the page's key and
   the file still verifies.
+- **Scenario**: a page read that does not return by the page wall, over TLS and with a reader that ignores the
+  interrupt — **Verify**: the page answers over budget, the gate is released at the wall, and the next page is busy
+  until the stuck reader ends (`TenantExportTlsPageTest.aPageStillReadingAtTheWallAnswersOverBudgetReleasesTheGateAndTheInterruptEndsTheReader`,
+  `TenantExportPageWallTest.aReaderThatIgnoresTheInterruptFreesTheGateAtTheWallAndRefusesTheNextPageAsBusyUntilItEnds`,
+  `TenantExportPageWallTest.aWallHitBeforeThePoolBorrowReturnsAnswersAsAnExhaustedPoolNotOverBudget`).
 - **Scenario**: a write between two page requests — **Verify**: the export does not contain it (one
   snapshot across requests).
 - **Scenario**: a session idle past its bound — **Verify**: the engine closes it and releases the snapshot.
@@ -1017,3 +1038,4 @@ tenants. Nothing to trim.
 - 2026-11-14: Review round 1 of the three asks (T2 `nexus/review-817d75982-nexus-csayy-2026-11-14-r1`, `nexus/critique-817d75982-nexus-csayy-asks-2026-11-14-r1`) folded in: the remembered lease root and the refusal of a token that cannot be told from the supervisor's, the minted token revoked at the end, three mints (not two) stated, the Voyage-only gate and the embedding-profile condition stated, the capacity step's cap and 2x-3x floor stated, and the ledger's load bound corrected to 3,960 s.
 - 2026-11-15: Activation Step 2 recorded (nexus-csayy.9, .10): the first cloud export and restore round trip on engine 0.1.192, the per-page hang on 0.1.191 and the edge header fix (conexus PR #710).
 - 2026-11-15: Close critique (T2 `nexus/critique-8a97bb459-nexus-csayy-2026-11-15-r1`) folded in: what Activation Step 2 measured and did not (per-page starts, pool size, import xmin; a tenant a fifth of the target), which tables held rows, the snapshot release wording, the load-bound margin at scale, Gap 2's tuples and the Decision Rationale's "complete" matched to the registry, and "no new authorization code" replaced by the scope checks; the Testing Strategy's per-release cloud run points at engine-release Step 6.2 (Sam: "Add it to the engine release"). Amended under standing grant 3.
+- 2026-11-15: Close critique round 2 (T2 `nexus/critique-2f8879d42-nexus-csayy-2026-11-15-r2`): Sam accepts closing with Activation Step 2 short of its target ("Accept, watch the 20 s line", by dialog in session halcyon), and the Risks index trigger becomes the logged `export_page_over_budget` line at the 20 s budget; the shipped 25 s page wall gets its Failure Modes entry and Test Plan line. Amended under standing grant 3.
