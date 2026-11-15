@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._tmp_root import child_env_with_tmpdir
 from tests.prose_edit.conftest import ROOT
 
 ACC = ROOT / "tests" / "prose_edit" / "acceptance"
@@ -61,7 +62,7 @@ def run_scenario(tmp_path: Path, name: str, prompt: str, **env: str) -> subproce
     stub = tmp_path / "claude"
     stub.write_text(f"#!/bin/sh\ntouch {marker}\nexit 0\n", encoding="utf-8")
     stub.chmod(0o755)
-    e = {**os.environ, "OUT_DIR": str(tmp_path / "out"), "CLAUDE_BIN": str(stub), "TMPDIR": str(tmp_path)}
+    e = child_env_with_tmpdir({**os.environ, "OUT_DIR": str(tmp_path / "out"), "CLAUDE_BIN": str(stub)}, tmp_path)
     e.pop("PROSE_EDIT_APP_RUNNER", None)
     e.update(env)
     return subprocess.run(["bash", str(ACC / "run-scenario.sh"), name, prompt], capture_output=True, text=True,
