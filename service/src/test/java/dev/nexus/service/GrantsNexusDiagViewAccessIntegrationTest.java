@@ -164,7 +164,7 @@ class GrantsNexusDiagViewAccessIntegrationTest {
             }
             assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus",
                     UNDERLYING_TABLES.stream().map(t -> t.substring(t.indexOf('.') + 1)).toList()))
-                .as("SELECT on only the column of each table the view reads")
+                .as("nexus_diag may read only the column of each table the view reads")
                 .containsExactly("catalog_document_chunks.chash", "chunks.chash",
                     "relevance_log.chunk_id", "topic_assignments.doc_id");
             try (Connection diag = DriverManager.getConnection(pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
