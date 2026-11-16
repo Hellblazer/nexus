@@ -26,6 +26,7 @@ from nexus.upgrade_ladder.protocol import (
 from nexus.upgrade_ladder.registry import (
     RUNG_MANIFEST_SECTION_LABELS,
     RUNG_MANIFEST_SPAN_FILL,
+    RUNG_RETIRE_KEYS_SWEEP,
     RUNG_ORDER,
     RUNG_RDR192_MANIFEST_BACKFILL,
     LadderOrderError,
@@ -245,15 +246,17 @@ def test_with_no_edges_a_deferral_stops_nothing_after_it(store: InMemoryLedger) 
     assert _outcomes(report) == [("deferred", RungOutcome.DEFERRED), ("later", RungOutcome.RECORDED)]
 
 
-def test_the_production_edges_hold_the_manifest_fills_behind_the_backfill_only() -> None:
+def test_the_production_edges_hold_the_manifest_fills_behind_the_backfill_and_the_sweep_behind_them_all() -> None:
     """The section-labels and span-fill rungs fill the rows the RDR-192 backfill adds and then read converged for
-    good, so each waits on the backfill; the other rungs depend on nothing (nexus-dfemn review r1, nexus-l8o33)."""
+    good, so each waits on the backfill; the sweep deletes what the fills copy from, so it waits on all four; the other
+    rungs depend on nothing (nexus-dfemn review r1, nexus-l8o33, nexus-6pfgb.43)."""
     registry = default_registry()
     assert [r.name for r in registry] == list(RUNG_ORDER)
     fills = (RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL)
     for n in fills:
         assert registry.prerequisites(n) == frozenset({RUNG_RDR192_MANIFEST_BACKFILL}), n
-    others = [n for n in RUNG_ORDER if n not in fills]
+    assert registry.prerequisites(RUNG_RETIRE_KEYS_SWEEP) == frozenset(RUNG_ORDER) - {RUNG_RETIRE_KEYS_SWEEP}
+    others = [n for n in RUNG_ORDER if n not in (*fills, RUNG_RETIRE_KEYS_SWEEP)]
     assert all(registry.prerequisites(n) == frozenset() for n in others)
 
 
@@ -265,8 +268,10 @@ def test_a_deferred_backfill_holds_section_labels_and_lets_the_others_run(store:
     assert outcomes[RUNG_RDR192_MANIFEST_BACKFILL] is RungOutcome.DEFERRED
     assert outcomes[RUNG_MANIFEST_SECTION_LABELS] is RungOutcome.NOT_ATTEMPTED
     assert outcomes[RUNG_MANIFEST_SPAN_FILL] is RungOutcome.NOT_ATTEMPTED
+    assert outcomes[RUNG_RETIRE_KEYS_SWEEP] is RungOutcome.NOT_ATTEMPTED, "the sweep waits on the backfill too"
     assert all(outcomes[n] is RungOutcome.RECORDED for n in RUNG_ORDER
-               if n not in (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL))
+               if n not in (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL,
+                            RUNG_RETIRE_KEYS_SWEEP))
 
 
 def test_an_edge_against_the_order_is_refused() -> None:

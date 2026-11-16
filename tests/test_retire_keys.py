@@ -1473,9 +1473,11 @@ def test_the_verb_is_registered_under_t3() -> None:
 
 
 class TestNoAutomaticTrigger:
-    """Slice C of nexus-6pfgb.43 (the upgrade-ladder rung that sweeps every install) ships only after a cloud dry
-    run has been read. Until it does, only the verb may reach the routes: no hook, rung, doctor row or daemon calls
-    them, and the engine mounts them for a request to reach and runs them from no schedule."""
+    """Slice C of nexus-6pfgb.43 (the upgrade-ladder rung that sweeps every install) shipped after the 2026-11-08 cloud
+    dry runs were read. The only callers of the routes are the verb and that one rung (``retire-keys-sweep``), which runs
+    the dry run and the apply at ``nx upgrade`` and never adds or validates a constraint (those stay the verb's, behind
+    the Step 2c engine cut): no hook, doctor row, daemon or other rung calls them, and the engine mounts them for a
+    request to reach and runs them from no schedule."""
 
     #: Where the routes, the client methods and the verb may be named: the client (defines the three methods), the
     #: verb, the group that registers it, the key table's docstring, the engine classes that implement and mount
@@ -1503,6 +1505,14 @@ class TestNoAutomaticTrigger:
         "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
         "service/src/test/java/dev/nexus/service/db/ChunksWriterLastWrittenAtScanTest.java",
         "service/src/test/java/dev/nexus/service/EgressGuardCensus.java",
+        # Slice C (nexus-6pfgb.43): the rung, its registration, and the tests that name it. What it may call is pinned
+        # by test_only_the_verb_and_the_rung_call_the_client_and_the_rung_never_touches_the_constraints below.
+        "src/nexus/upgrade_ladder/rungs/retire_keys_sweep.py",
+        "src/nexus/upgrade_ladder/registry.py",
+        "tests/upgrade/test_retire_keys_sweep_rung.py",
+        "tests/integration/test_retire_keys_sweep_rung_engine.py",
+        "tests/upgrade/test_ladder_registry.py",
+        "tests/test_doctor_ladder_row_production_registry.py",
     }
     #: Tables that list repository paths with a count beside each (the file-size, context-budget and scrub ratchets,
     #: nexus-3ceda.1/.12/.7): one names tests/test_retire_keys.py as a path, which calls nothing. Each is checked to
@@ -1560,6 +1570,31 @@ class TestNoAutomaticTrigger:
             f"a file other than the verb, the engine and their tests names the routes: {sorted(set(seen) - self.NAMING_ALLOWED)}"
         assert {"src/nexus/db/http_vector_client.py", "src/nexus/commands/t3_cmds/retire_keys.py"} <= set(seen), \
             "the scan cannot see the files that define the routes' client: it is not looking where it says"
+
+    def test_only_the_verb_and_the_rung_call_the_client_and_the_rung_never_touches_the_constraints(self) -> None:
+        """Within ``src/``: the sweep's dry run and apply are called by the verb and by the ``retire-keys-sweep`` rung and
+        by nothing else; the two table-wide constraint calls by the verb alone. The rung adds and validates no CHECK
+        (RDR-236 Step 2c is a later engine cut, and a constraint is operator-only)."""
+        root = Path(__file__).resolve().parent.parent / "src" / "nexus"
+        defining = "src/nexus/db/http_vector_client.py"
+        verb = "src/nexus/commands/t3_cmds/retire_keys.py"
+        rung = "src/nexus/upgrade_ladder/rungs/retire_keys_sweep.py"
+        callers: dict[str, set[str]] = {}
+        examined = 0
+        for path in root.rglob("*.py"):
+            examined += 1
+            rel = path.relative_to(root.parent.parent).as_posix()
+            text = path.read_text(encoding="utf-8")
+            for name in ("chunk_keys_sweep", "chunk_keys_dry_run", "chunk_keys_apply", "chunk_keys_add_constraints",
+                         "chunk_keys_validate_constraints"):
+                if name in text and rel != defining:
+                    callers.setdefault(name, set()).add(rel)
+        assert examined > 300, "the scan examined too few files to mean anything"
+        assert callers["chunk_keys_dry_run"] == {verb, rung}
+        assert callers["chunk_keys_apply"] == {verb, rung}
+        assert callers["chunk_keys_sweep"] == {verb}
+        assert callers["chunk_keys_add_constraints"] == {verb}
+        assert callers["chunk_keys_validate_constraints"] == {verb}
 
     def test_the_path_listings_hold_only_path_entries(self) -> None:
         import re  # noqa: PLC0415

@@ -19,9 +19,9 @@ nx upgrade
 ```
 
 It converges a set of PRECONDITIONS and then walks the data ladder.
-`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds four rungs:
+`RUNG_ORDER` (`src/nexus/upgrade_ladder/registry.py`) holds five rungs:
 `rdr192-manifest-backfill`, `note-tags-array`,
-`manifest-section-labels` and `manifest-span-fill`, each described below the table. Everything else in `nx upgrade` is precondition work:
+`manifest-section-labels`, `manifest-span-fill` and `retire-keys-sweep`, each described below the table. Everything else in `nx upgrade` is precondition work:
 
 | Precondition | Converges |
 |---|---|
@@ -395,6 +395,32 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
   or not a number). A 409 from the engine for a request (a superseded collection, which the client raises as
   `SupersededCollectionWriteError`, or any other 409) defers those rows
   (`write_refused_409`) and the run goes on; the rung ends deferred and retries on the next `nx upgrade`.
+
+### The `retire-keys-sweep` rung
+
+RDR-236 Phase 4 Step 3 (nexus-6pfgb.43). The two cloud tenants were swept by an operator on 2026-11-08 with
+`nx t3 retire-keys`; this rung runs the same engine sweep on every install that runs the ladder, local mode chiefly. It
+is a data move at `nx upgrade`, through an engine job, never at engine boot (RDR-246). It runs last: hard edges from the
+RDR-192 backfill, `note-tags-array`, `manifest-section-labels` and `manifest-span-fill`, which clear the sweep's
+preconditions.
+
+- **Detect.** The dry run (a count job in the engine; nothing is written or locked). Converged when no chunk row holds a
+  retired key. An interactive `nx upgrade` with no completion record asks no dry run in detect and makes the one in
+  converge.
+- **Converge.** The dry run, then, when `blocking` is empty, the apply job (`chunk_keys_apply`) with nothing accepted, so
+  the engine itself refuses a residue that grew since the dry run. When a precondition stands in the way the rung DEFERS
+  and writes nothing; its detail names each count and `nx t3 retire-keys --tenant T --apply --accept NAME=N`. The rung
+  never accepts a residue for you: accepting one is the operator's per-residue judgment, with the counts in front of
+  them, and the deferral repeats on every `nx upgrade` until the residue is fixed or accepted through the verb. A call
+  waits at most 10 minutes (less under the `--auto` time limit) for the job and returns RESUMABLE; the job keeps
+  sweeping in the engine and the next call joins it. A sweep that leaves a collection alone (a manifest-less census
+  above zero) or takes no row at all DEFERS, naming it.
+- **Verify.** A dry run that succeeded and counts no retired-key row. An error or an unknown answer is not zero.
+- **A managed service.** The sweep is an operator verb there. `--auto` runs no dry run and no sweep (not applicable
+  without a record, converged from one); an interactive `nx upgrade` does the dry run and applies only when nothing
+  stands in the way.
+- **Not here.** The allow-list CHECK (add-constraint and validate) waits for the Step 2c engine cut (nexus-6pfgb.66,
+  after 2026-11-28) and stays operator-only (`nx t3 retire-keys --add-check`, `--validate`).
 
 ### The retire-keys sweep as an engine job
 
