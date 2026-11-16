@@ -127,7 +127,8 @@ file:line for each site). **Verified** (source read):
   CONCURRENTLY` at a time (`PciReconciler`, `PciBuilderSession`).
   Its cost still grows with chunk volume. When this RDR was drafted, every boot
   ended any build in flight. Since ed34ea26e (2026-11-09) a boot ends builders
-  only when the walk has a schema changeset to run (`SchemaMigrator.migrate`,
+  only when the walk has a schema changeset to run or repairs partition-access
+  drift (reason `partition_access_drift`) (`SchemaMigrator.migrate`,
   the `terminatePciBuilders` call with reason `schema_changesets_pending`,
   around line 568), so an upgrade boot with pending changesets still ends a
   build in flight and the reconciler rebuilds that index from scratch. Its first pass also
@@ -149,8 +150,8 @@ What this means for the design:
 
 - Shipped changesets are not converted here. Liquibase checksums every
   changeset, and an install that already ran one fails validation if its text
-  changes unless the changeset lists the old checksum in `validCheckSum`, a
-  standard Liquibase attribute. This repo uses it once, on a runAlways
+  changes unless the changeset lists the old checksum in a `validCheckSum`
+  element, standard Liquibase. This repo uses it once, on a runAlways
   changeset whose stored checksum the boot does not check
   (grants-nexus-svc.xml lines 305-320, "insurance, not the fix"), so there is
   no in-repo precedent for editing a one-time changeset. Converting a
@@ -430,14 +431,15 @@ Failures are classified by what the move worker can read. *Transient*,
 retried on the next pass with the move `blocked:`: no free slot, or a launch
 that fails (the CALL raises and dml_utils recorded no `migration_error` row for
 the run); a missing install or role; an admin connection that cannot see every
-row; a verification run or `on_complete` that hits `statement_timeout_ms`; a
+row; a verification run or `on_complete` that hits `statement_timeout_ms`, or
+an `on_complete` that hits its `lock_timeout` (SQLSTATE 55P03); a
 lost connection or a stopped engine; and a chunk error dml_utils recorded with
 SQLSTATE 40001 (serialization), 40P01 (deadlock), 55P03 (lock not available) or
 57014 (statement cancelled), which live writers can cause and a re-run of the
 same label clears. *Permanent*, which sets `failed_at` and `failure`: any other
 recorded chunk error (a template or constraint error), a non-empty
 verification, and an `on_complete` that fails for a reason other than its
-timeout. An error the move worker cannot place in either list is permanent,
+statement or lock timeout. An error the move worker cannot place in either list is permanent,
 so nothing loops. A failed move stays reported `failed:` across restarts, is
 not retried, and does not hold up the moves behind it. The fix is a new move
 that supersedes it (Changing a move). A non-empty verification means an
@@ -466,17 +468,25 @@ per-tenant verification run there must therefore filter by `tenant_id`
 itself (the bound tenant in the verification query does this). Any other
 driving table has only the tenant policy (a census of CREATE POLICY in the
 changelogs finds `tenant_isolation` everywhere and the owner-read policy only
-on `nexus.chunks`), so the move's
-registering changeset adds the same owner-read SELECT policy for the
-migrating role (`TO CURRENT_USER`, the vectors-029 pattern) when it creates
-the new shape, with vectors-029's guard: a precondition that skips the policy
-(MARK_RAN) when `nexus_svc`, or any other login role subject to row-level
-security, is or inherits the migrating role, and a post-condition that the
-policy names exactly the migrating role. In the single-role posture (the
-migrating role is `nexus_svc`) the guard skips the policy, so the service role
-never gains a cross-tenant read; the admin connection then cannot see every
-row, and the move is `blocked:` (step 1). The same holds on `nexus.chunks` if
-vectors-029 itself was skipped there.
+on `nexus.chunks`), so the move adds the same owner-read SELECT policy for
+the migrating role (`TO CURRENT_USER`, the vectors-029 pattern) in its own
+changeset, ordered after the registering changeset. That changeset carries
+vectors-029's guard: a precondition that skips it (MARK_RAN) when `nexus_svc`,
+or any other login role subject to row-level security, is or inherits the
+migrating role, and a post-condition that the policy names exactly the
+migrating role. A Liquibase precondition skips its whole changeset, which is
+why the policy is never in the registering changeset: there the guard would
+also skip the new shape and the `nexus.data_moves` INSERT. In the single-role
+posture (the migrating role is `nexus_svc`) the guard skips only the policy:
+the move is registered, the service role never gains a cross-tenant read, the
+admin connection cannot see every row, and the move is `blocked:` (step 1).
+MARK_RAN is decided once, so an install that later moves to two roles keeps
+the move blocked until a new changeset adds the policy. The same holds on
+`nexus.chunks` if vectors-029 itself was skipped there. A membership granted
+after the policy exists is caught at boot: `ChunksIsolationCheck`, which today
+refuses boot when any permissive policy other than `tenant_isolation` on
+`nexus.chunks` or the centroid trees applies to the role serving traffic, is
+extended to every driving table a row in `nexus.data_moves` names.
 
 The tenant list is the set the table-wide retire-keys routes check
 (ChunkKeysAdminHandler.java:97-100 and 116-119): the default tenant, every
@@ -567,18 +577,26 @@ tables (`nexus.chunks`, its leaves, and every table with a foreign key into
 it: `catalog_document_chunks`, `topic_assignments`, `chunk_orphaned_at`) that
 is the only way to finish: a later-release changeset that waits with
 `onFail="CONTINUE"` is refused there by
-`tests/test_changelog_continue_precondition_chunks_lint.py`, because
+`tests/test_changelog_continue_precondition_chunks_lint.py` (which also
+refuses the partition helpers, `partition_...`, and the builder, `pci_...`, in
+such a body), because
 `SchemaMigrator` does not count a self-retrying changeset as schema work
 (`RetryingChangesets.isSelfRetrying`) and keeps the index builders running
 through it, and a DROP or ALTER on those tables takes ACCESS EXCLUSIVE, which
 would queue behind a `CREATE INDEX CONCURRENTLY`. A later finishing step on a
 chunk-family table is therefore a new move whose `on_complete` does it. The
-move worker runs `on_complete` on a chunk-family table the way the migrator
-runs schema work: it first ends the per-collection index builders on that
-table (`SchemaMigrator.terminatePciBuilders`' query, reason
-`data_move_on_complete`), then runs `on_complete` with `SET LOCAL
-lock_timeout` below `statement_timeout_ms`, so a lock it cannot get fails
-fast as a transient `blocked:` and readers never queue behind it. On any other
+move worker runs `on_complete` on a chunk-family table under `SET LOCAL
+lock_timeout` below `statement_timeout_ms`, so a lock it cannot get fails fast
+as a transient `blocked:` (55P03) and readers never queue behind it; that is
+the guarantee. Before it, as a best effort, it ends the per-collection index
+builders (the query behind `SchemaMigrator.terminatePciBuilders`, extracted so
+both callers share it; it selects every builder backend in the database, not
+one table's, and reason `data_move_on_complete` is logged). Unlike the
+migrator, the move worker does not hold the migration lock the builders
+respect, so a builder can start again before `on_complete` takes its lock,
+and `lock_timeout` then turns that into a retry. Ending a build discards
+work that can take tens of minutes, the cost ed34ea26e removed for plain
+restarts, so it happens only for an `on_complete` on a chunk-family table. On any other
 table, a step that comes in a later release may be a changeset that carries a
 Liquibase precondition on `nexus.data_moves.completed_at` for that label with
 `onFail="CONTINUE"`, so it is skipped and retried on each boot until the move
@@ -739,7 +757,10 @@ launcher that upstream does not test.
   supersedes it.
 - **A verification run times out**: transient; the move is `blocked:` and the
   verification runs again on the next pass.
-- **`on_complete` fails**: the move is `failed:` with the error, and its
+- **`on_complete` fails**: on `statement_timeout_ms` or `lock_timeout`
+  (55P03) it is transient, the transaction rolls back with `completed_at`
+  and `failed_at` unset, and the move is `blocked:` and retried on the next
+  pass; on any other error the move is `failed:` with the error, and its
   finishing step is fixed by a superseding move.
 - **A library role is missing or a library changelog fails**: the engine
   skips both libraries, serves, and reports every open move `blocked:`
@@ -855,7 +876,11 @@ data-move test.
   verification in READ ONLY transactions under `statement_timeout_ms`,
   `on_complete`, and the failure classes;
 - for any driving table other than `nexus.chunks`, the owner-read SELECT
-  policy for the migrating role in the move's registering changeset;
+  policy for the migrating role in its own guarded changeset after the
+  registering one, and `ChunksIsolationCheck` extended to every driving table
+  in `nexus.data_moves`;
+- for `on_complete` on a chunk-family table: `SET LOCAL lock_timeout` and the
+  shared, extracted builder-termination query;
 - boot_work entries and the nx doctor line;
 - the engine log events.
 
@@ -925,10 +950,12 @@ from /v1/status on the live engine.
 - **Scenario**: a move registered before the library roles exist (the cloud order); the roles are created later and the engine restarts (the libraries install at boot). **Verify**: the next pass grants `dml_utils_owner` its access on the parent and every leaf, and the move runs and completes.
 - **Scenario**: a launch finds no free background worker slot (all slots held by a test). **Verify**: the move is `blocked:`, not `failed:`, and runs once a slot frees.
 - **Scenario**: after a move over two tenants, the dedicated connection and the admin connection. **Verify**: `current_setting('nexus.tenant', true)` is empty on the admin connection when the table-wide verification runs, and the dedicated connection carries no tenant after the RESET.
-- **Scenario**: a move with an `on_complete` VALIDATE CONSTRAINT, and a later changeset that drops the old column with the completion precondition. **Verify**: the VALIDATE runs only after verification; the later changeset is skipped at each boot until `completed_at` is set, then applies.
+- **Scenario**: a move over a table outside the chunk family with an `on_complete` VALIDATE CONSTRAINT, and a later changeset that drops the old column with the completion precondition. **Verify**: the VALIDATE runs only after verification; the later changeset is skipped at each boot until `completed_at` is set, then applies.
 - **Scenario**: an install provisioned before this change. **Verify**: the storage daemon's grant backfill creates the extension, roles, grants and `liquibase` schema, and the next boot installs the libraries.
 - **Scenario**: the gate over the shipped changelogs. **Verify**: it is green (the frozen list exempts every shipped changeset from every rule), and a new changeset with a validating ADD CONSTRAINT on `nexus.catalog_documents`, or a destructive statement on a registered move's table without the precondition, is red. The template and verification text inside a registering INSERT are not flagged.
 - **Scenario**: a move over a chunk-family table whose `on_complete` drops a column, run while a per-collection index build is in flight on that table. **Verify**: the move worker ends the builder first, `on_complete` takes its lock within `lock_timeout` or reports `blocked:`, and no reader waits behind the move; a later-release CONTINUE changeset doing the same drop is red in the CONTINUE-precondition lint.
+- **Scenario**: `on_complete` on a chunk-family table while another session holds a conflicting lock. **Verify**: it fails with 55P03 within `lock_timeout`, `completed_at` and `failed_at` stay unset, the move reports `blocked:`, and the next pass completes it.
+- **Scenario**: the single-role posture, a move over a table outside the chunk family. **Verify**: the policy changeset is MARK_RAN, the move is registered and `blocked:`, and the service role reads only its tenant's rows; granting a role membership later makes the boot refuse through `ChunksIsolationCheck`.
 - **Scenario**: a new changeset with an UPDATE on chunks. **Verify**: DataMoveChangesetGateTest is red. Registering the same move through nexus.data_moves is green.
 - **Scenario**: an upgrade boot on a copy of a live-like store, measured by f3yqd.1's write gate. **Verify**: no row-move writes occur during the boot.
 
@@ -1019,3 +1046,4 @@ the first registered move.
 - 2026-11-16: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `17045500b1f0`; critique `nexus_rdr/246-gate-critique-2026-11-16-r3`.
 - 2026-11-16: accepted by Sam ("Accept, residuals to beads"; dml_utils with its pg_background launcher kept). Residual dispositions: round 3's five to beads nexus-f3yqd.2.1 (the BLOCKS-PLANNING one, chosen by Sam), nexus-f3yqd.2.2, nexus-f3yqd.2.3, nexus-f3yqd.2.4 and nexus-f3yqd.2.5; the eight carried from round 2 to commit e39d4fb28 (fix check `nexus_rdr/246-fix-check-9ebbce21154d`).
 - 2026-11-16: residual beads nexus-f3yqd.2.1 (chunk-family tables finish only through `on_complete`, with builder termination and `lock_timeout`), .2.2 (gate rules 2 and 3), .2.4 (the four-column change listed as a prerequisite and an assumption) and .2.5 (the PCI-builder and `validCheckSum` citations) fixed in the text.
+- 2026-11-16: nexus-f3yqd.2.1 completed after its review: an `on_complete` lock timeout is transient, the owner-read policy is its own guarded changeset with `ChunksIsolationCheck` extended to driving tables, and builder termination is best effort under `lock_timeout`.
