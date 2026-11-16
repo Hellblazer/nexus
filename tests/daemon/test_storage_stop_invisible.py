@@ -24,8 +24,6 @@ _OURS, _THEIRS = "pid:[4026531836]", "pid:[4026532221]"
 
 @pytest.fixture(autouse=True)
 def _namespaces(monkeypatch: pytest.MonkeyPatch) -> None:
-    import nexus.daemon.service_registry as sr
-
     monkeypatch.setattr(sr, "own_pid_namespace", lambda: _OURS)
 
 

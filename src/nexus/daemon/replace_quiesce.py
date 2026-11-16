@@ -39,7 +39,7 @@ once per upgrade. Only the swap stops anything: a caller wraps just the
 placement, so the download and the extraction run with the service up.
 
 A stop whose result cannot be fully trusted (the process-table sweep did not run,
-or a process could not be placed in any directory) does not block the swap, which
+or a process could not be identified) does not block the swap, which
 would leave a box with no ``ps`` unable to upgrade; it is logged and carried in
 :attr:`QuiesceState.warnings` for the caller to print.
 
@@ -243,8 +243,8 @@ def unverified_stop_warning(outcome: Any) -> str | None:
 
     The stop can finish without having looked everywhere: the process-table sweep
     did not run (``sweep_verified`` False, or ``source == "process_table_unavailable"``)
-    or a candidate process could not be placed in any config directory
-    (``unreadable``). A service started some way the lease does not record may then
+    or a candidate process could not be identified (``unreadable``: a flagless start
+    not placed in any config directory, or a pid whose command line could not be read). A service started some way the lease does not record may then
     still be running on the old files. The replacement is not blocked for it (a box
     without a readable process table could never upgrade), so the caller says so.
     """
@@ -257,8 +257,8 @@ def unverified_stop_warning(outcome: Any) -> str | None:
     if not unverified:
         return None
     detail = (
-        f"pid(s) {', '.join(str(p) for p in unreadable)} could not be placed in any "
-        "config directory" if unreadable else "the process table could not be read"
+        f"pid(s) {', '.join(str(p) for p in unreadable)} could not be identified"
+        if unreadable else "the process table could not be read"
     )
     return (
         f"a running storage service could not be ruled out ({detail}); if one is "

@@ -1608,6 +1608,13 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
                 "No storage service lease found and no matching processes "
                 "— already stopped."
             )
+    elif outcome.source == "process_table_unavailable" and outcome.unreadable:
+        # nexus-dyfsw follow-up: the lease named a pid that could not be identified, so
+        # "assuming already stopped" would be false; the warning below names it.
+        click.echo(
+            "The process table could not be checked (no 'ps' and no /proc), "
+            "and the stop could not be verified."
+        )
     elif outcome.source == "process_table_unavailable":
         lease_clause = (
             "a storage service lease was found but had no usable process info"

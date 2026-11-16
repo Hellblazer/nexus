@@ -4397,6 +4397,9 @@ def _stop_marked_service(
                 # reused. Its group is signalled only when its live command line reads as
                 # this directory's stack. Not signalled otherwise; the stale lease is still
                 # released below, and the sweep after it still stops the real stack.
+                # Releasing differs from stop_tier_holders, which keeps an unreadable
+                # holder's record, on purpose: a running process of this user reads its
+                # own cmdline except mid-execve, so one that stays unreadable is not ours.
                 identity = holder_identity(
                     pid_to_signal, is_ours=storage_service_stack_matcher(config_dir, platform=platform),
                     platform=platform,
@@ -4472,6 +4475,8 @@ def _stop_marked_service(
             config_dir=str(config_dir),
         )
     sweep_verified = not sweep.unreadable
+    # A lease pid the sweep went on to stop, or one that has exited since, is no longer unidentified.
+    lease_unreadable = [p for p in lease_unreadable if p not in sweep.pids and _pid_is_running(p)]
     unreadable = tuple(dict.fromkeys([*lease_unreadable, *sweep.unreadable]))
 
     # Captured BEFORE the sweep extends `signalled`, so the log reason below
