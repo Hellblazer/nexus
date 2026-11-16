@@ -424,6 +424,18 @@ and `paused_by` set only when `paused_at` is; dml_utils stores the chunk size as
 integer (`dml_utils_data.migration_run.chunk_size`), so the column is one
 too.
 
+The registry is global (no tenant column, no row-level security) and is read
+and written only as `nexus_admin`, the migrating role: by the registering
+changesets, by later changesets' completion preconditions and by the move
+worker. `nexus_svc` holds no privilege on it (its changeset revokes the
+default-privilege grant and the runAlways service-grant loop skips it), so
+nothing on the serving pool may read it: boot_work, `/v1/status` and the nx
+doctor line come from the move worker's in-memory state, which it fills on
+the admin connection. In the single-role posture the migrating role is
+`nexus_svc` itself and owns the table. A move's runs are selected with
+`label = '<label>' OR starts_with(label, '<label>/')`, never `LIKE`, since
+`_` and `%` are legal in a label.
+
 A changeset registers a move with one INSERT. A move is *open* while
 `completed_at` and `failed_at` are NULL and no row's `supersedes` names it.
 The move worker works only on open moves, and boot_work and nx doctor list
