@@ -9,7 +9,7 @@ reviewed-by: pending
 created: 2026-11-16
 accepted_date:
 related_issues: []
-related: [RDR-249, RDR-211, RDR-220, RDR-213, RDR-245, RDR-242]
+related: [RDR-249, RDR-211, RDR-220, RDR-213, RDR-245, RDR-242, JDR-002]
 ---
 
 # RDR-252: Groups, Relevance and One Responder
@@ -228,14 +228,33 @@ halcyon), and ad hoc push windows, review pairs and the release crew as
 needed. The restart script's ready check becomes a group operation: "every
 member of group X, report ready".
 
-**Trust.** Only Sam or the group's leader may write the group entry and its
-assignments; only a session may write its own membership. A writer that
-breaks the rule is refused by the board template's writer check, which uses
-the session the engine records for the write. That needs the writer's session
-to be attested; an unattested write (as the CI adapter's are today) is never
-taken as an assignment. The push record is written by the push script under
-the pushing session's identity. Open question 4 asks whether this check is
-enough or needs the engine's attestation work first.
+**Trust and attestation.** Only Sam or the group's leader may write the group
+entry and its assignments; only a session may write its own membership. The
+push record is written by the push script under the pushing session's
+identity. How strongly the engine enforces that is a choice between levels.
+JDR-002 sets the starting point: the tenant (from the bearer token) is the
+security boundary, `from`, claimant and directory names are claims, and the
+engine's `sender_session` stamp (engine-service-v0.1.163) is "a label, never a
+refusal". Any holder of the tenant's data token can mint a session token for
+any session id, so the stamp guards against a confused model, not a hostile
+one. JDR-002 says to revisit this "in an RDR" when trust needs grow; this RDR
+is that revisit for group writes.
+
+| Level | What the engine checks | Guards against | Cost |
+|---|---|---|---|
+| 0 (today) | Nothing on these subspaces; readers see the stamp as a label | Nothing; a reader may notice a mismatch | None |
+| 1 | On `group/*`, refuse a write whose `sender_session` is not the leader (group entry, assignments) or the member itself (membership); an unattested write is never an assignment | A confused or stale session writing the wrong group state | A refusal path on one subspace family, new against JDR-002's "never a refusal" |
+| 2 | Leadership is a claim: the leader holds the claim on the group's own tuple, and an assignment write must carry that `claim_id`, the one capability JDR-002 names (returned only to the claim's winner, withheld from `rd`) | Any session that is not the current leader, including one that set its own stamp | The leader keeps the claim's lease alive; a lost lease is a leader change |
+| 3 | Per-principal identity, host-attested Desktop sessions, binding directory writes to the writer's session (JDR-002's own revisit list) | A second human principal or an agent class the tenant does not trust | Engine and auth work beyond this RDR |
+
+Sam's answer to open question 4 (2026-11-16): the engine's recorded session is
+enough for now, and the attestation work is evaluated and included here. So
+level 1 ships with Phase 1, level 2 is Step 6 below, evaluated before it is
+built, and level 3 is named and not built: it waits for JDR-002's trigger (a
+second human principal or an untrusted agent class). Level 1 is a refusal, and
+JDR-002 says the stamp is never one, so JDR-002 gains a revision entry naming
+`group/*` as the first subspace family where the stamp is enforced; that edit
+to a joint record is Sam's.
 
 **The push record.** On `PUSH_OK`, `git-push-develop.sh` posts to
 `board/push/nexus-develop`:
@@ -309,8 +328,13 @@ Assignments re-shows a changed assignment.
 **Acknowledgement.** The owner writes `kind=ack sha=<sha> session=<id>` to
 `board/ci/nexus-develop--owner` with an ordinary tool. If none arrives by a
 deadline counted from the owner post, the stamper posts a new owner post naming
-the next-up session. The deadline has no basis in the research; it is open
-question 2.
+the next-up session. The deadline defaults to 20 minutes (Sam, 2026-11-16) and
+is set per group in the group entry (`ack_deadline=<minutes>`), with an aura
+able to override it for its own task. The research gives no basis for any
+number, so the default is calibrated: the push records and acknowledgements
+give each red's time to acknowledge, and the default is reviewed against that
+distribution after the first 20 reds (or 30 days), and set to cover most
+acknowledgements without leaving a dead owner unnoticed for long.
 
 **Escalation.** Owner, then next up, then an RDR-245 ask to Sam only if next up
 is also gone. Unvalidated: the research found no protocol to copy.
@@ -330,7 +354,8 @@ carries the decision, and a plain display of it needs no procedure.
 | Read-only procedure runtime | Yes (RDR-242) | Formats the display |
 | Board posts and claims | Yes (RDR-211, 220) | Groups, push record, owner post, acknowledgement |
 | Push script with session identity | Yes | Writes the push record |
-| Writer check by recorded session | Partly (the engine records a session for most writes; not for the CI adapter) | Trust for groups and assignments |
+| `sender_session` stamp | Yes, as a label (JDR-002; engine-service-v0.1.163) | Level 1 enforces it on `group/*` |
+| `claim_id` capability | Yes (JDR-002) | Level 2: leadership as a claim |
 | Groups, members, assignments | No | New board templates |
 | Owner stamper | No | New; engine or one session |
 
@@ -402,8 +427,11 @@ A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
 - **Stamper down**: no owner post, so no member's aura fires. Mitigation: the
   aura also triggers on the raw red after a short wait and shows the plain
   RDR-249 block, naming no owner.
-- **Wrong or forged assignment**: the writer check refuses writes not from Sam
-  or the leader; unattested writes are never assignments.
+- **Wrong or forged assignment**: at level 1 the engine refuses a group write
+  whose recorded session is not the leader's or the member's own, and
+  unattested writes are never assignments. A hostile token holder can still
+  mint a matching session token (JDR-002); level 2 closes that for
+  assignments, and level 3 is out of scope.
 - **Stale membership** (a session's server started before it joined): it loads
   the aura at its next start, unless the re-load hook is added.
 
@@ -439,6 +467,17 @@ B is woken. A group write from C is refused.
 #### Step 4: `[load]` and typed displays in auras; `ci_develop_red` moved onto the owner post
 
 #### Step 5: Acknowledgement, deadline and re-surfacing
+
+The per-group `ack_deadline` with a 20-minute default, the per-aura override,
+and the calibration read (time to acknowledge per red) in Day 2.
+
+#### Step 6: Evaluate and build attestation level 2
+
+Measure what leadership-as-a-claim costs (lease renewal by the leader, leader
+change on a lost lease, the `claim_id` carried on assignment writes), against
+the level-1 refusal alone. Build it if the evaluation holds; record the result
+either way. JDR-002's revision entry for level 1 (Sam's edit) lands with
+Step 1.
 
 ### Phase 2: Operational Activation
 
@@ -490,7 +529,11 @@ Not yet run.
 
 Answered 2026-11-16 by Sam ("your recom look good"): 1 from the record, 3 load
 at server start, 5 the stamper in the engine beside the CI adapter, 6 through
-the leader, 7 the aura stays off until this lands. Open: 2 and 4.
+the leader, 7 the aura stays off until this lands. Then: 2, 20 minutes as the
+default, set per group with a per-aura override, and calibrated from measured
+acknowledgement times; 4, the engine's recorded session is enough for now, and
+the attestation work is evaluated and included (Trust and attestation, levels
+1 to 3; Step 6). All seven are answered.
 
 1. **Owner source.** From the record (the pusher, as designed), or always the
    group's leader?
@@ -530,3 +573,4 @@ the leader, 7 the aura stays off until this lands. Open: 2 and 4.
   wake for "everyone else" (noise); re-surfacing on owner change; a fallback if
   the procedure surface narrows; marginalia's notes on load timing and commit
   order kept.
+- 2026-11-16: Sam's answers to questions 2 and 4 recorded: a per-group acknowledgement deadline (20-minute default, per-aura override, calibrated from measured times); attestation evaluated in four levels against JDR-002, with level 1 in Phase 1, level 2 as Step 6 and level 3 named, not built.
