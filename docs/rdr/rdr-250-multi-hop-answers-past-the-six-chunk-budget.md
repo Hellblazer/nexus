@@ -200,7 +200,7 @@ assumption, with no run. **Code-read** means read from source at the named sha.
 
 - [x] The companies of the top N anchors are the companies the answer names, at N above 6. Status: Verified at N=20 on issue5 (paid run, 2026-11-15); N=40 and above unmeasured. Method: Spike.
 - [x] Generation names exactly the anchor-key companies when N is above 6. Status: Verified at N=20 in 19 of 20 answers over four runs; the one miss did not enter the resolution branch and named ids. Method: Spike.
-- [ ] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Unverified. No LLM filter has been measured. Method: Spike.
+- [ ] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Unverified (250-research-5). No model filter has been measured; the MVV measures the support-verdict filter Technical Design names. Method: Spike.
 - [ ] Option A's gain is not specific to HERB's template overlap. Status: Unverified. This RDR does not claim it generalises. Method: Spike on a second corpus.
 - [ ] Option B assumes entity keys sit in retrievable announcement chunks. Status: Unverified in general; true on HERB. Method: Spike.
 
@@ -212,44 +212,103 @@ Sam chose 2026-11-15 (ask `rdr250-lever`, option 2): a budget of 20 as plan 10's
 default now, then Option E (anchor scan over all evidence) with a precision filter.
 The record supports two separate levers, one per gap; this choice is Gap 1's.
 
-The draft's lean, for Sam to accept or reject: for Gap 1, Option E is the
-largest lever in the record, and it changes the coverage boundary's anchor input
-without touching the generator's budget. It needs a precision filter before it
-can meet the gate, so it cannot ship on the projection alone. A cheaper interim
-step is a budget of 20, which needs no code change: measured at F1 0.764 with
-precision 0.967, inside the gate. Passed per call, it must also pin the plan's
-strategy, or the binding changes which plan matches. For Gap 2, Option A has the
-largest measured F1 inside `nx_answer` (0.866), but its precision (0.853) fails
-the gate without a filter, and its size depends on HERB's template. Option B is
-the cleanest key-based lever, and it needs a new engine filter.
+The budget of 20 shipped as plan 10's default in 4a25a7c5a (Phase 1 Step 1). It
+needed no code: measured at F1 0.764 with precision 0.967, inside the gate
+(250-research-2, 250-research-3).
+
+This RDR's design is Option E with a precision filter (Phase 1 Step 2). For
+Gap 1, Option E is the largest lever in the record: it widens the key scan from
+the generator's 20 inputs to the search step's 40 hits without growing the
+generator's context. Unfiltered it is projected at precision 0.715
+(250-research-4), below the 0.95 gate, so the filter is part of the design, not
+an option, and the switch stays off until the MVV passes.
+
+Gap 2 is not addressed by this RDR. For it, Option A has the largest measured F1
+inside `nx_answer` (0.866), but its precision (0.853) fails the gate without a
+filter, and its size depends on HERB's template. Option B is the cleanest
+key-based lever, and it needs a new engine filter.
 
 ### Technical Design
 
-Not written. If Option E is chosen, the change is to the coverage boundary's
-anchor input: scan the entity-key pattern across the search step's pool (the 40
-search hits and their hydrations) instead of the trailing run's six inputs. The
-generator's context budget stays at 6. The sites are `runner.py` near 4827–4855
-(`_boundary_evidence`, `_read_rest_of_run`) and `coverage_ledger.py`
-`build_anchors` near 743, at sha 1ecf3ca6d.
+Sites are on develop at 01a80c2d1; line numbers are as read on 2026-11-16.
+
+**Today.** The coverage boundary's resolution branch, `_resolve_anchors`
+(`coverage_ledger.py:1257`), scans only `first.ledger.anchors`. `build_anchors`
+(`coverage_ledger.py:743`) makes those anchors from `BoundaryView.evidence_texts`,
+the hydrated inputs of the answer step's closure (`runner.py` `_boundary_evidence`
+at 2280, read through `_read_rest_of_run` at 4341). In plan 10 those inputs are
+step 3's `store_get_many(ids=$step1.ids, limit_per_source=$vector_budget_chunks)`,
+the first 20 of the search step's hits (an integer `limit_per_source` "truncates
+every stream to its first N entries", `mcp/core.py:7277`). The search step returns up to 40 ids
+(`limit: 40`); ids 21 to 40 are never scanned (250-research-1).
+
+**The pool.** The key-scan pool is the search step's ids that are not already
+an anchor. The boundary reads them from `BoundaryView.step_outputs` (the search
+step's `ids`, the same list `$step1.ids` names in plan 10) and fetches their
+texts in one call through `BoundaryView.fetch`, an accounted `sql` step with no
+model call. A pool chunk is scanned with the same `find_key_tokens` call and
+`strip_source_note` rule as an anchor. Pool chunks with no key are dropped at
+once: they are not anchors and never reach the generator. Which step is the
+search step: the first step of the run whose tool is `search` and whose output
+carries `ids`. A plan with no such step has no pool, and the branch behaves
+exactly as today.
+
+**The precision filter.** A key found only in the pool is a candidate. It is
+kept only when the coverage assessment cites its chunk as support. The pool
+chunks that carry a candidate key are packed with the existing `_pack` and sent
+through `BoundaryView.check`, the same assessment call the boundary already
+makes, against the question's facets. A candidate key is kept when its chunk's
+`item_id` appears in the `evidence_ids` of a facet the reply marks `covered`.
+Keys found in the anchors are not filtered, so the measured budget-20 behaviour
+is the floor. The filter adds one assessment call per pack. A distance cutoff
+was rejected: it scored F1 at most 0.825 in simulation, and citation alone caps
+precision near 0.83 (250-research-5). Whether support-citation reaches 0.95 is
+unmeasured, so the MVV measures it.
+
+**Resolution.** Kept candidate keys join the anchors' keys, in anchor-first
+order, before the `max_repair_items` cap (12, `coverage_repair.py:110`). The cap
+does not bind on HERB at 40 (at most 11 keys, 250-research-6). A joined item for
+a pool key uses the pool chunk's text as its anchor text, so it enters the
+generator the way an anchor key's joined item does today. The generator's own
+input of 20 chunks does not change.
+
+**Failure is closed.** If the fetch fails, the filter call fails or returns
+malformed records, or the remaining deadline or USD allowance is below one
+assessment call's mean cost (`assessment_cost_estimate`), no candidate key is
+kept and the branch runs on the anchors alone, as today. The reason is named in
+the report.
+
+**Switch.** `NX_ANSWER_POOL_KEY_SCAN`, default off. Off, the code path is not
+entered and the report carries no pool fields. Turning it on by default is a
+later decision, after the MVV.
+
+**Report.** The resolution fields gain `pool_scanned` (pool chunks fetched),
+`pool_candidate_keys`, `pool_keys_kept` and `pool_keys_rejected` (both by name),
+`pool_filter_calls`, and `pool_reason` when the pool was skipped or closed.
+`anchors_scanned` keeps its meaning (the anchors only), so existing readers of it
+are unchanged.
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Lexical leg for hop 1 (Option A) | `search --lexical`, the engine's FTS and trigram union (shared probe from nexus-bbtc2) | Reuse: a flag exists; its effect inside plans is unmeasured |
-| Per-call anchor budget (interim step) | Plan 10 optional binding `vector_budget_chunks` | Reuse: already a binding |
-| Anchor scan over the search pool (Option E) | `coverage_ledger.py` `build_anchors`, the anchor scan | Extend: change the input from the six inputs to the search pool |
+| Lexical leg for hop 1 (Option A) | `search --lexical`, the engine's FTS and trigram union (shared probe from nexus-bbtc2) | Reuse: a flag exists; inside plan 10 at budget 20 it measured precision 0.853 (250-research-2) |
+| Anchor budget of 20 (Step 1) | Plan 10 binding `vector_budget_chunks` | Reuse: default changed to 20 in 4a25a7c5a |
+| Key scan over the search pool (Option E) | `coverage_ledger.py` `_resolve_anchors`, `find_key_tokens` | Extend: scan the pool's chunks as well as the anchors |
+| Pool chunk texts (Option E) | `BoundaryView.fetch`, the repair's accounted chunk fetch | Reuse |
+| Precision filter (Option E) | `BoundaryView.check` and `_pack`, the coverage assessment call; `FacetFinding.evidence_ids` | Reuse: one more assessment call per pack, over candidate-key chunks only |
 | Key-bearing filter (Option B) | None | New: an engine content-pattern filter |
 | Entity-key pattern | `entity.collections` in config | Reuse for B and E |
 
 ### Decision Rationale
 
 Gap 1 and Gap 2 have separate binding limits, so one lever does not fix both.
-Gap 1 caps `nx_answer` at the six-anchor cut. Gap 2 caps the script, and any
-design that reads the hop-1 pool directly. A lever for Gap 1 therefore does
-not need to improve hop-1 recall, and the reverse also holds. The choice between
-levers depends on the measured precision cost of each, and the record has none
-for a filter.
+Gap 1 caps `nx_answer` at the anchor cut (6 before 4a25a7c5a, 20 since). Gap 2
+caps the script, and any design that reads the hop-1 pool directly. A lever for
+Gap 1 therefore does not need to improve hop-1 recall, and the reverse also
+holds. Option E is chosen because it is the largest Gap 1 lever and it reuses
+the boundary's fetch and assessment calls. Its precision depends on a filter the
+record has not measured, so the switch stays off until the MVV measures it.
 
 ## Alternatives Considered
 
@@ -268,9 +327,12 @@ hits with the vector hits.
 - The gain is partly a product of HERB's template. The triage message and the
   question share phrases such as "affects the <component>", so lexical matching
   favours id-bearing messages (id-bearing slots in the top 20 rise from 24 to 42 of 100).
-- Its effect inside `nx_answer` plans is unmeasured.
+- Inside `nx_answer` at budget 20 it measured precision 0.853, below the 0.95
+  gate: the lexical leg brings other companies' keys into the anchors
+  (250-research-2).
 
-**Why not chosen yet**: Its generality is unproven, and it has no `nx_answer` measurement.
+**Why not chosen**: It addresses Gap 2, not Gap 1, its precision fails the gate
+without a filter, and its generality is unproven.
 
 ### Alternative 2: Option B, a key-bearing leg
 
@@ -305,13 +367,15 @@ pattern (`CUST-\d{4}`), then take the top few.
 - The filter's precision effect is unmeasured. One assessment call per pack adds cost.
 - The RDR-147 coverage re-check cited 35 of 45 joined items as supporting (147-research-10). That measures support, not precision.
 
-**Why not chosen yet**: The filter is the unknown, and it is unmeasured.
+**Why not chosen**: Its filter is taken into Option E (a support verdict from the
+existing assessment call), but its deeper k is not: Option E's pool is the
+search step's 40 hits, so no retrieval setting changes.
 
 ### Alternative 4: Option E, anchor scan over all evidence, decoupled from the generator budget
 
 **Description**: The coverage boundary scans the entity-key pattern across all
-hydrated evidence (the search pool), not only its six terminal inputs. It
-resolves the keys it finds. The generator still gets six chunks.
+search hits (the pool), not only the generator's inputs (6 then, 20 now). It
+resolves the keys it finds. The generator's own input does not grow.
 
 **Pros**:
 
@@ -325,7 +389,8 @@ resolves the keys it finds. The generator still gets six chunks.
 - Changes coverage boundary code, which RDR-232 owns.
 - Assumes the generator names the companies the scan finds.
 
-**Why not chosen yet**: It is the largest projected lever, but the projection rests on the assumptions above, and it has no measured run.
+**Chosen**: Sam, 2026-11-15 (ask `rdr250-lever`, option 2), with the precision
+filter in Technical Design. It has no measured run; the MVV is its first.
 
 ### Briefly Rejected
 
@@ -336,8 +401,8 @@ resolves the keys it finds. The generator still gets six chunks.
 ### Consequences
 
 - Option E changes a coverage boundary RDR-232 owns, and it needs a precision filter to meet the gate.
-- A per-call budget of 20 widens the rank and generate context, and the assessor's packs. The cost is not measured.
-- Changing the plan 10 default changes every `hybrid-factual-lookup` call. A per-call binding changes only one.
+- The budget of 20, now plan 10's default (4a25a7c5a), widens the rank and generate context and the assessor's packs for every `hybrid-factual-lookup` call. Cost per call measured 0.03 to 0.17 USD, not materially above budget 6 (T2 `nexus_rdr/io7tw-paid-mvv-2026-11-15`, Findings).
+- The filter adds one assessment call per pack of candidate-key chunks, only when the switch is on and the pool has candidate keys.
 
 ### Risks and Mitigations
 
@@ -346,13 +411,20 @@ resolves the keys it finds. The generator still gets six chunks.
 - **Risk**: HERB's template overlap inflates the lexical gain.
   **Mitigation**: Report the lexical result on the held-out set and on a second corpus before relying on it.
 - **Risk**: Precision falls below 0.95 past N=20.
-  **Mitigation**: A precision filter, measured before any default changes.
+  **Mitigation**: The precision filter, and the switch stays off until the MVV measures it.
+- **Risk**: The support verdict keeps a non-gold company's key, because cited artifacts also name non-gold companies (citation alone caps precision near 0.83, 250-research-5).
+  **Mitigation**: The MVV reports kept and rejected pool keys by name, so a filter that keeps them shows in the record, not only in the score.
+- **Risk**: The resolution branch is sometimes not entered at all (budget-20 repeat, run d: one question scored 0, 250-research-3). That variance is outside this design, and it would show in the MVV as a lost question.
+  **Mitigation**: The MVV reports `resolution_entered` per row, so a lost question is told apart from a precision loss.
 
 ### Failure Modes
 
 A widened pool with no filter answers more companies and loses precision. The
 MVV's precision gate is the visible check; the MVV reports precision split by
 `generated_on_join`, so a loss shows as a gate failure, not a silent change.
+
+A failed pool fetch or filter call keeps no candidate key, so the answer falls
+back to today's anchors-only behaviour and the report names `pool_reason`.
 
 ## Implementation Plan
 
@@ -364,11 +436,14 @@ MVV's precision gate is the visible check; the MVV reports precision split by
 
 ### Minimum Viable Validation
 
-One paid `nx_answer` run on HERB, with the decoupled anchor scan (Option E) on
-the develop code. It uses the RDR-147 MVV harness: a fresh sandbox, bge-768, k=20,
-and `entity.collections` set to `CUST-\d{4}`. It reports join completeness,
-per-run precision over the answers that name a company, and recall and F1 on
-issue5. Its baseline is the RDR-147 measured F1 0.500 (147-research-17).
+One paid `nx_answer` run on HERB with `NX_ANSWER_POOL_KEY_SCAN` on, on the
+develop code. It uses the RDR-147 MVV harness: a fresh sandbox, bge-768, plan
+10 at its default budget of 20 with search limit 40, and `entity.collections`
+set to `CUST-\d{4}`. It reports join completeness, per-run precision over the
+answers that name a company, recall and F1 on issue5, `resolution_entered` per
+row, and the pool fields (keys kept and rejected by name). Its baselines are
+the budget-20 measurement, F1 0.764 (250-research-2), and the RDR-147 F1 0.500
+(147-research-17).
 
 The same run must include a held-out check beyond the five issue questions.
 The questions are chosen and frozen before the run. They must not be used to
@@ -378,18 +453,35 @@ were used for tuning, so that needs checking before use.
 
 The paid run is spend and it calls the cloud, so it needs Sam's explicit go and
 an announced window. For scale, the two-run RDR-147 MVV cost 1.20 USD
-(147-research-17). Pass criteria are not set in this draft. Changing them after
-the run counts as changing promotion criteria, so Sam signs them off first.
+(147-research-17). Pass criteria are Sam's to set, before the run (Open
+Question 5 carries a proposal). Changing them after the run counts as changing
+promotion criteria.
 
 ### Phase 1: Code Implementation
 
 #### Step 1: Plan 10's `vector_budget_chunks` default from 6 to 20
 
-`conexus/plans/builtin/hybrid-factual-lookup.yml`, no code. Installs get it at their next `nx plan reseed`.
+Shipped as 4a25a7c5a. `conexus/plans/builtin/hybrid-factual-lookup.yml`, no code. Installs get it at their next `nx plan reseed`.
 
-#### Step 2: Option E with a precision filter
+#### Step 2: The pool key scan, behind the switch
 
-Waits for this RDR's gate and acceptance; the Technical Design is written first.
+Waits for this RDR's acceptance. In `_resolve_anchors`: read the search step's
+ids from `step_outputs`, fetch the non-anchor ones through `view.fetch`, scan
+them with `find_key_tokens`, and add the report fields. Behind
+`NX_ANSWER_POOL_KEY_SCAN`, default off. With no filter yet, every candidate key
+is dropped and named in `pool_keys_rejected`, so this step changes no answer.
+
+#### Step 3: The precision filter
+
+Pack the candidate-key chunks with `_pack`, send them through `view.check`
+against the question's facets, keep a key whose chunk is cited in a `covered`
+facet's `evidence_ids`, and join kept keys before the `max_repair_items` cap.
+Fail closed as Technical Design states.
+
+#### Step 4: The MVV
+
+The paid run above, after Sam's go, his sign-off on the pass criteria, and an
+announced window. Turning the switch on by default is a separate decision after it.
 
 ### Phase 2: Operational Activation
 
@@ -397,8 +489,10 @@ Omitted. Nothing is deployed by this RDR.
 
 ### Day 2 Operations
 
-No persistent resource is created by the draft. An Option B filter would be a
-new engine surface, and its Day 2 operations would be written then.
+No persistent resource is created. The one operator control is the
+`NX_ANSWER_POOL_KEY_SCAN` switch; unset, behaviour is today's. An Option B
+filter would be a new engine surface, and its Day 2 operations would be written
+then.
 
 ### New Dependencies
 
@@ -406,15 +500,19 @@ None.
 
 ## Test Plan
 
-- **Scenario**: The coverage boundary's anchors come from the search pool, not the six inputs. **Verify**: On a fixed fixture, the anchor count equals the widened pool's key count, and `anchors_scanned` reports the pool size.
-- **Scenario**: A widened pool with no filter fails the precision gate. **Verify**: On a deliberately noisy pool, the gate fails. This is the non-vacuity check: the gate must be able to fail.
+- **Scenario**: Switch off. **Verify**: On a fixed fixture whose search step returns 40 ids, the resolution fields equal today's and carry no pool field.
+- **Scenario**: Switch on, a pool key the assessment cites. **Verify**: The key is resolved and joined; `pool_scanned` is the non-anchor id count, `pool_keys_kept` names it, and `anchors_scanned` still counts the anchors only.
+- **Scenario**: Switch on, a pool key the assessment does not cite. **Verify**: The key is not resolved and is named in `pool_keys_rejected`. This is the non-vacuity check: the filter must be able to reject.
+- **Scenario**: The filter call fails, returns malformed records, or the allowance is short. **Verify**: No candidate key is kept, the anchors' keys still resolve, and `pool_reason` names the cause.
+- **Scenario**: A plan with no `search` step. **Verify**: No pool, and `pool_reason` says so.
+- **Scenario**: More keys than `max_repair_items`. **Verify**: Anchor keys fill the cap first, and dropped keys are named in `tokens_dropped`.
 
 ## Validation
 
 ### Testing Strategy
 
 1. **Scenario**: The MVV above, on the chosen lever.
-   **Expected**: Join completeness and precision at or above 0.95 on the in-domain answers, with recall and F1 reported beside the 0.500 baseline.
+   **Expected**: The pass criteria Sam signs off before the run (Open Question 5), reported beside the 0.764 and 0.500 baselines.
 2. **Scenario**: The held-out check.
    **Expected**: Results reported on questions chosen before the run, with no tuning on them.
 
@@ -425,7 +523,11 @@ estimated here.
 
 ## Finalization Gate
 
-Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
+- **Contradictions**: The Approach, Technical Design and Implementation Plan name one design (Option E with a support-verdict filter, behind a switch). Option A's earlier "unmeasured" lines were updated to the paid measurement.
+- **Assumptions**: The anchor-key assumption is verified at N=20 (250-research-2, 250-research-3). The Option E projection (250-research-4) and the filter's precision (250-research-5) are recorded as assumed; the MVV is their first measurement, and nothing turns on by default before it.
+- **Scope**: Gap 1 only. Gap 2 (Options A and B) and the resolution branch's entry variance are named and left out.
+- **Cross-cutting**: The change sits in the coverage boundary that RDR-232 owns. It reuses the boundary's fetch and assessment calls, adds no engine surface, and leaves `anchors_scanned` and the switch-off path unchanged.
+- **Proportionality**: One switch, one fetch and one assessment call per pack, no new dependency. The paid MVV is Sam's go.
 
 ### Open Questions for Sam
 
@@ -433,6 +535,8 @@ Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
 2. Answered 2026-11-15: the paid run was made, for 3.37 USD (Key Discoveries). The budget-20 repeat was run the same day (three runs, Key Discoveries).
 3. Whether the 20 held-out questions in the RDR-147 MVV were used for tuning. If they were, a new held-out set is needed.
 4. Answered 2026-11-15: the plan 10 default changes (option 2).
+5. The MVV's pass criteria, set before the run. Proposed: precision at or above 0.95 over the answered issue5 rows, F1 above the budget-20 measurement of 0.764, join completeness 1.0, and the held-out set reported. F1 rather than recall alone, so a widened pool cannot pass by naming more companies.
+6. The resolution branch's entry variance (run d, 250-research-3) has no owner. It is outside this RDR. Whether it gets a bead is Sam's call.
 
 ## References
 
@@ -441,10 +545,13 @@ Not run. This draft does not go to `/conexus:rdr-gate` until Sam picks a lever.
 - `docs/rdr/rdr-147-multihop-entity-resolution-retrieval.md` (R5, R6, the MVV bar).
 - `docs/rdr/rdr-097-hybrid-retrieval-plan-template.md` (RF-6, around lines 81 and 107).
 - `conexus/plans/builtin/hybrid-factual-lookup.yml` (plan 10 defaults and steps).
-- Code at sha 1ecf3ca6d: `runner.py` near 1823 and 4827–4855; `coverage_ledger.py` `build_anchors` near 743 and the anchor scan near 1297; `coverage_repair.py:89`.
+- Code at sha 1ecf3ca6d (the measurements): `runner.py` near 1823 and 4827–4855; `coverage_ledger.py` `build_anchors` near 743 and the anchor scan near 1297; `coverage_repair.py:89`.
+- Code on develop at 01a80c2d1 (the design): `runner.py` `_boundary_evidence` 2280, `_read_rest_of_run` 4341; `coverage_ledger.py` `BoundaryView` 699, `build_anchors` 743, `_resolve_anchors` 1257, `_pack` 1975; `coverage_repair.py:110`; `mcp/core.py:7277`.
+- T2 `nexus_rdr/250-research-1` to `250-research-6`.
 - Bead `nexus-io7tw`, and `nexus-bwct4` (RDR-147).
 
 ## Revision History
 
 - 2026-11-15: Draft created from nexus-io7tw and its research record. Not gated, not accepted.
 - 2026-11-15: Sam chose ask `rdr250-lever` option 2; Approach, Phase 1 and Open Questions 1 and 4 record it, and plan 10's default budget moves to 20. The budget-20 repeat (three runs) is in Key Discoveries.
+- 2026-11-16: Gate preparation (elsinore, with linda): Technical Design for Option E with the support-verdict precision filter; Approach records option 2 and Step 1 as shipped (4a25a7c5a); Finalization Gate written; Open Questions 5 (MVV pass criteria) and 6 (branch-entry variance); research records 250-research-1 to -6.
