@@ -2,7 +2,8 @@
 title: "Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure"
 id: RDR-249
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-16
 priority: medium
 author: Sam
 reviewed-by: self
