@@ -525,8 +525,11 @@ nexus_rdr/246-research-5):
    `dml_utils_owner`, `dml_utils_caller` and `ddl_utils_caller`, all NOLOGIN
    and NOBYPASSRLS, and grants: CREATE on the database and on schema public,
    `ddl_utils_caller` and `pgbackground_role` to `dml_utils_owner`;
-   `dml_utils_owner`, `dml_utils_caller` and `pgbackground_role` to
-   `nexus_admin`. It also creates the `liquibase` schema owned by
+   `dml_utils_owner` to `nexus_admin` WITH INHERIT FALSE, SET TRUE (so
+   `nexus_admin` reaches the owner's privileges, CREATE on public among them,
+   only through `SET ROLE` and never by default); `dml_utils_caller` and
+   `pgbackground_role` to `nexus_admin` WITH INHERIT TRUE (the move runs as
+   `nexus_admin` and calls their functions directly). It also creates the `liquibase` schema owned by
    `dml_utils_owner`, where both libraries keep their tracking tables
    (dml_utils README lines 696-702; ddl_utils README lines 93-95). Roles live
    here, not in a changeset, because the dml_utils walk runs before nexus's
@@ -1091,3 +1094,4 @@ the first registered move.
 - 2026-11-16: residual beads nexus-f3yqd.2.1 (chunk-family tables finish only through `on_complete`, with builder termination and `lock_timeout`), .2.2 (gate rules 2 and 3), .2.4 (the four-column change listed as a prerequisite and an assumption) and .2.5 (the PCI-builder and `validCheckSum` citations) fixed in the text.
 - 2026-11-16: nexus-f3yqd.2.1 completed after its review: an `on_complete` lock timeout is transient, the owner-read policy is its own guarded changeset with `ChunksIsolationCheck` extended to driving tables, and builder termination is best effort under `lock_timeout`.
 - 2026-11-16: Install sequence step 1 scoped to the bundled cluster (BYO via docs/configuration.md, cloud via Activation Step 1), with the bootstrap's handling of a bundle without the library, drifted library roles and a foreign-owned `liquibase` schema; the boot check gains the schema owner (reviews of nexus-f3yqd.2.9).
+- 2026-11-16: the grant of `dml_utils_owner` to `nexus_admin` is WITH INHERIT FALSE, SET TRUE, so the owner's CREATE on public does not leak to the engine's role by default (found by tests/db/test_pg_provision.py TestPublicSchemaGrantIsLoadBearing on nexus-f3yqd.2.9).
