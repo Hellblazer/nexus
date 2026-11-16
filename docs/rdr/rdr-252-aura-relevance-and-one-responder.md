@@ -587,7 +587,44 @@ Load removes the aura from non-members. A fire costs about 50 ms today
 
 ## Finalization Gate
 
-Not yet run.
+### Contradiction Check
+
+The subspace names agree everywhere: memberships under `member/<session>`,
+group entries and assignments under `group/<name>`, push records on
+`board/ci/nexus-develop--push`, owner posts on `board/ci/nexus-develop--owner`.
+The stamper's placement (the engine) is stated once in Technical Design and
+matches open question 5 as refined. Owner, next up and everyone else are the
+same three states in Technical Design, the MVV and the Test Plan.
+
+### Assumption Verification
+
+All three Critical Assumptions are settled: 1 by source and a spike
+(`nexus_rdr/252-research-1` F4, `252-research-2`); 2 and 3 by design choices
+the audit forced (the stamper in the engine; memberships keyed by session).
+Unvalidated by design and said so: escalation and role-to-owner resolution
+(Key Discovery 6) and the 20-minute deadline (calibrated after use).
+
+### Scope Verification
+
+In scope: groups, push records, the stamper, `[load]`, two aura-surface
+additions, acknowledgement, attestation levels 1 and 2. Out: level 3, any
+aura that writes shared state, a re-load hook (named for the gate, not
+built). The MVV exercises every in-scope piece once.
+
+### Cross-Cutting Concerns
+
+Trust: level 1 enforces `sender_session` on `group/*` and `member/*`, a
+first refusal against JDR-002's "never a refusal" that needs Sam's revision
+entry there. Release: Steps 1 and 3 need an engine release, Steps 2, 4 and 5
+a conexus release that pins it. Noise: no wake for everyone else. Data
+lifetime: push and owner records share the CI posts' three-day retention.
+
+### Proportionality
+
+The two new engine templates and one stamper serve every red; the alternative
+of convention only (Alternative 3) was tried today and two late posts misled
+the block in one afternoon. Attestation level 2 is evaluated before it is
+built.
 
 ## Open Questions for Sam
 
