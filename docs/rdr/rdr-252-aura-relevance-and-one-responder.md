@@ -1,5 +1,5 @@
 ---
-title: "Aura Relevance and One Responder: Load Conditions, an Owner Computed from the Record, and Local Actions for Everyone Else"
+title: "Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment"
 id: RDR-252
 type: Architecture
 status: draft
@@ -12,7 +12,7 @@ related_issues: []
 related: [RDR-249, RDR-211, RDR-220, RDR-213, RDR-245, RDR-242]
 ---
 
-# RDR-252: Aura Relevance and One Responder
+# RDR-252: Groups, Relevance and One Responder
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -27,70 +27,82 @@ procedure and show its result in this session". The **board** is a set of
 tuple-space subspaces any session can read; `board/ci/nexus-develop--done`
 carries one post per finished develop CI run (RDR-220). The **push train** is
 the agreed order in which sessions push to `develop`; halcyon, one of the
-sessions, conducts it. A **red** is a develop CI run that failed.
+sessions, conducts it. A **red** is a develop CI run that failed. A **group**
+is this RDR's new term: a named set of sessions with a leader, a roster, typed
+assignments and a lifetime, the counterpart of a raid in World of Warcraft.
 
 Origin. Sam, 2026-11-16, on turning `ci_develop_red` on for every session:
 "why would everyone try to resolve the red if only one or a subset are the
 folk who should respond? ... let's think about what models we want,
 strategically, rather than simply tactically responding to this one signal".
-The models below were checked against the World of Warcraft add-on ecosystem
-that RDR-249 borrowed its aura model from (T3 `agent-orchestration`, "WeakAuras
-and raid coordination models: who an alert is for, who responds", 2026-11-16).
+Then: "do we have the equivalent of a raid? ... while I usually set it up,
+it's not fixed, we can do several sometimes. we can also be part of several
+simultaneously? anyway, they're just group coord mechanics". The models below
+were checked against the World of Warcraft add-on ecosystem that RDR-249
+borrowed its aura model from (T3 `agent-orchestration`, "WeakAuras and raid
+coordination models: who an alert is for, who responds", 2026-11-16; called
+"the research" below).
 
 ## Problem Statement
 
 ### Enumerated gaps to close
 
-#### Gap 1: Every enabled session evaluates every event, relevant to it or not
+#### Gap 1: There is no group, so coordination lives in prose
+
+Sessions already work in groups that form and dissolve. The push train has a
+leader (halcyon, set up by Sam on 2026-11-07) and rules in a T2 memo
+(`nexus/push-train`). There are also push windows (three sessions pushing in
+order), review pairs, a release crew (Sam and halcyon) and RDR co-authors. A
+session is often in several at once. None of these exists in the system:
+membership, leader and assignments live in messages and prose, so no tool and
+no aura can ask "who is in this, who leads it, who owns this task". Some
+raid mechanics already run without the name: the restart script's "ready
+file written" exchange is a ready check, a CI post is a raid-wide warning,
+and halcyon's queue line is an assignment note.
+
+#### Gap 2: Every enabled session evaluates every event, relevant to it or not
 
 RDR-249 took WeakAuras' trigger, conditions, actions and display, and left out
 its **Load** conditions. In WeakAuras, Load decides whether an aura is
 considered at all for this player (class, spec, role, zone, group). An
 unloaded aura "does not exist to WeakAuras" and its triggers are never checked.
 Here, an enabled aura runs its procedure in every session for every matching
-tuple. A fact like "this session never pushes" or "this session pushed nothing
-in the failing range" cannot keep a session out.
+tuple, and wakes each one with a channel notice.
 
-#### Gap 2: Nothing says who responds, so everyone may, or no one does
+#### Gap 3: Nothing says who responds, so everyone may, or no one does
 
 RDR-249 answered "one block per session; no lock tuple" (Sam, 2026-11-13).
-That settled the display and left action open. When `ci_develop_red` fires in
-every session, each one sees the same red, and whether one, several or none of
-them diagnoses it depends on what each happens to be doing. In a raid, the
-boss warning goes to everyone, and only the player the assignment note names
-acts on it. Nothing here names that player.
+That settled the display and left action open. In a raid the boss warning goes
+to everyone, and only the player the assignment names acts on it. Nothing here
+names that player.
 
-#### Gap 3: The record does not say which session pushed a commit
+#### Gap 4: The record does not say which session pushed a commit
 
 The CI post comes from GitHub's webhook adapter. It carries the commit, the
 run and the conclusion, and nothing that names a session: every session pushes
 as the same GitHub account. `scripts/git-push-develop.sh` knows the pushing
 session (its push-lock claimant, `<session>@<host>#<pid>`), but the lock tuple
-lasts only while the push is in flight and is then released. After the push,
-nothing durable maps a commit to the session that pushed it, so no reader can
-work out an owner.
+lasts only while the push is in flight. After the push, nothing durable maps a
+commit to the session that pushed it.
 
-#### Gap 4: The displayed state follows arrival order, not commit order
+#### Gap 5: The displayed state follows arrival order, not commit order
 
 A red can arrive after a newer commit has gone green. On 2026-11-16 the red
 for 3b580d898 posted at 13:58Z, after the newer 22f80cfc7 went green at
-13:55Z, so the block went up while develop's tip was green. The aura's clear
-rule ("any green clears") has the mirror defect: a late green for an old commit
-clears a block that a newer red put up. The block tracks the last post, not
-develop's state.
+13:55Z, so the block went up while develop's tip was green (marginalia). The
+aura's clear rule ("any green clears") has the mirror defect: a late green for
+an old commit clears a block that a newer red put up.
 
 ## Relationship to Prior RDRs
 
-- **RDR-249** (declarative auras, closed): this RDR adds a load stage and an
-  owner computation to its trigger, condition, action and display model. Its
-  answer "one block per session" stands for display; this RDR adds who acts.
-- **RDR-211** (board, queue and lock templates, closed): supplies the claim
-  queue, used here only for work no record assigns (decision 4).
-- **RDR-220** (CI status on the board, closed): the CI post is the trigger
-  tuple; this RDR does not change the GitHub adapter.
-- **RDR-242** (sandboxed Lua runtime): aura procedures are read-only, which
-  this design depends on. Every session computes the owner by reading; no
-  aura writes.
+- **RDR-249** (declarative auras, closed): this RDR adds a load stage keyed on
+  group membership and an owner read from the group's assignments. Its answer
+  "one block per session" stands for display.
+- **RDR-211** (board, queue and lock templates, closed): groups are built from
+  its board and claim shapes; its queue serves work no assignment names.
+- **RDR-220** (CI status on the board, closed): the CI post is the trigger; its
+  GitHub adapter is unchanged.
+- **RDR-242** (sandboxed Lua runtime): aura procedures stay read-only.
 - **RDR-245** (structured asks on the threads board): where an escalation to
   Sam lands.
 
@@ -99,291 +111,342 @@ develop's state.
 ### Background
 
 A raid in World of Warcraft has the same problem: 20 players get the same
-broadcast, and a mechanic needs one or two of them to act. The research
-(T3 entry above) found these working models, with sources:
+broadcast, and a mechanic needs one or two of them to act. What the research
+found, with how sure it is:
 
-- **Load conditions** gate evaluation before any trigger runs. The authors'
-  stated reason is cost; the effect is relevance.
-- **Assignment notes name owners.** Add-ons match the player's own name in a
-  raid note. Parsing free text is brittle: one stray space and the assignment
-  silently matches no one.
-- **KickSync** (interrupt rotation) uses no claims. Every client runs the same
-  calculation on the same shared state and agrees on whose turn it is. It
-  shows three states: "KICK NOW" to the player whose turn it is, "NEXT UP" to
-  the player after, and nothing to everyone else.
-- **Display for all, action for one.** Blizzard's boss warnings show the
-  mechanic and "leave the response to players"; DBM has a warning type that
-  fires only for players named in the note.
-- **Side channels fail when they matter.** Add-on messages are blocked inside
-  raid encounters, so coordination that depends on them breaks in combat.
-- **Platform and user split.** In Midnight (12.0) Blizzard keeps the
-  authoritative signal and its rendering in the game and leaves selection and
-  reaction to user scripts.
-- **Not found:** any backup-owner or escalation protocol. The raid leader
-  calls it live.
+- **Load conditions** gate evaluation before any trigger runs (high: the
+  WeakAuras wiki). The authors' stated reason is cost; the effect is relevance.
+- **Assignment notes name owners**, and add-ons match the player's own name in
+  the note (high for Sniffa). Parsing free text is brittle: one stray space and
+  the assignment silently matches no one.
+- **Who may publish assignments** is controlled: Angry Assignments accepts them
+  from the whole raid, a guild officer, or a listed set of players; edits are
+  sent only at a sync point; a changed assignment re-appears for players who
+  had hidden it (low: search summaries only).
+- **KickSync** uses no claims. Every client runs the same calculation on the
+  same shared state and agrees on whose turn it is, with three states: "KICK
+  NOW" to the player whose turn it is, "NEXT UP" to the next, nothing to
+  everyone else (high).
+- **Private auras**: the game itself renders a debuff only for the affected
+  player; add-ons place an anchor and never see the data (high for the API;
+  the "never see" reading is inferred from its shape). Who an alert is for is
+  decided once, by the platform, not by every client.
+- **Typed warnings**: DBM has five warning types (generic, area, "do this or
+  die", run away, and one that fires only for players named in a note), each
+  with its own flash, sound and repeat settings (high).
+- **Noise**: players asked how to silence DBM's `/say` countdowns (low).
+- **Side channels fail when they matter**: add-on messages are blocked inside
+  raid encounters (high, from Blizzard's secret-values API).
+- **Platform and user split**: in Midnight (12.0) the game keeps the
+  authoritative signal and its rendering and leaves selection and reaction to
+  user scripts; scripts may display some values but not decide on them (high).
+  WeakAuras also reported losing combat-state support under those changes
+  (low): the platform can take a capability away.
+- **Not found**: any backup-owner or escalation protocol, and any source for a
+  resolver that maps a role to an owner. The raid leader calls it live.
 
 ### Technical Environment
 
 - `src/nexus/auras/aura.py` parses aura files (`[trigger]`, `[args]`,
   `[when]`, `[clear]`, `[display]`); `src/nexus/procedures/ci_develop_red.aura.toml`
-  is the one shipped aura.
-- Aura procedures run in the read-only Lua runtime (RDR-242); they can read
-  tuples and T2, and cannot write.
+  is the one shipped aura. Auras and config are read once, when the session's
+  MCP server starts.
+- Aura procedures run in the read-only Lua runtime (RDR-242).
 - `scripts/git-push-develop.sh` claims `lock/ci-develop-push` with a claimant
-  string naming the session, and prints `PUSH_OK n=<count> tip=<sha>`.
+  naming the session, and prints `PUSH_OK n=<count> tip=<sha>`.
 - The CI post on `board/ci/nexus-develop--done` carries `kind=sha`, the sha,
-  `outcome` and the run (RDR-220).
+  `outcome` and the run (RDR-220). Posts are unattested: the engine records no
+  session for the GitHub adapter's writes.
 
 ## Research Findings
 
 ### Investigation
 
-One research pass on 2026-11-16 (T3 entry named above), reading WeakAuras'
+One research pass on 2026-11-16 (the T3 entry named above), reading WeakAuras'
 wiki, Warcraft Wiki's API pages (private auras, secret values), DBM's
-special-warning guide, KickSync, Sniffa and Blizzard's Midnight post. Confidence
-is high for Load, the private-aura API, KickSync and DBM; low for the
-assignment tools read only through search summaries.
+special-warning guide, KickSync, Sniffa and Blizzard's Midnight post.
 
 ### Key Discoveries
 
-1. Load is the missing layer, and it is cheap: deciding relevance once, from
-   facts about the session, removes most evaluations.
-2. Where every session can read the same record, a computed owner beats a
-   claim. A claim adds a race and a lease to lose; a computation gives the
-   same answer everywhere with no messages.
-3. The owner must be a typed field in the record, not text a reader parses.
-4. Three computed states (owner, next up, everyone else) give a fallback
-   without a hand-off protocol.
-5. Escalation has no prior art to copy; it is ours to keep small.
+1. Load is the missing layer, and cheap: decide relevance once, from facts
+   about the session, and most evaluations never happen.
+2. Where every reader shares the same record, an owner computed from it beats
+   a claim. Better still, the platform computes it once and stamps it, as
+   private auras do, so readers cannot disagree.
+3. The owner is a typed field, never text a reader parses.
+4. Who may write an assignment matters as much as the assignment.
+5. Three states (owner, next up, everyone else) give a fallback without a
+   hand-off protocol.
+6. Escalation and role-to-owner resolution have no prior art; they are ours,
+   unvalidated, and kept small.
 
 ### Critical Assumptions
 
 - [ ] The pushing session can be recorded durably at push time without
   slowing the push. **Method**: Source Search of `git-push-develop.sh`, then a
   spike.
-- [ ] A read-only procedure can find the push record for a sha in one or two
-  tuple reads. **Method**: Spike.
-- [ ] Commit order for develop can be read cheaply by a procedure (for
-  example, from the push records' parent links, without a git call).
-  **Method**: Source Search.
+- [ ] One writer can join a CI post with the push records and stamp the owner
+  within seconds of the post. **Method**: Spike.
+- [ ] Group membership can be read at MCP server start in one tuple read.
+  **Method**: Spike.
 
 ## Proposed Solution
 
 ### Approach
 
-Four parts, in the order a red is handled:
-
-1. **Load.** An aura file may carry a `[load]` table of facts about the
-   session, checked once when the session's auras load (and again when a
-   named fact changes). An aura whose load fails is not subscribed.
-2. **A push record.** The push script writes one durable tuple per push.
-3. **A computed owner and three states.** The aura's procedure reads the push
-   records and computes, the same way in every session, who owns the event
-   and who is next. The display differs by state.
-4. **Local actions only.** Each state maps to what this session does to
-   itself: act, stand by, or hold its own pushes. No aura writes shared state.
+1. **Groups.** A group is a board entry with a name, a leader, a roster, typed
+   assignments and a lifetime. Sam or a leader forms and disbands one; a
+   session can be in several.
+2. **A push record.** The push script writes one tuple per push naming the
+   pushing session.
+3. **The owner, stamped once.** One writer joins each red with the push
+   records and the group's assignments and posts the result, owner and next up
+   included. Sessions only read it.
+4. **Load by membership.** An aura file may say which group and role it is
+   for; a session that is not in it never loads the aura.
+5. **Local actions only.** Each state maps to what this session does to
+   itself. No aura writes shared state.
 
 ### Technical Design
 
-**Load.** New optional table in the aura file:
+**Groups.** One board entry per group at `group/<name>`:
 
-```toml
-[load]
-pushes_develop = true      # this session has pushed to develop at least once
-                           # (or is in the push train); a reader-only session
-                           # never loads ci_develop_red
+```
+kind=group  name=push-train  leader=<session id>  purpose="develop push order"
+formed_by=<session id or "sam">  formed_at=<UTC>  ends=<UTC or "open">
 ```
 
-The fact names are a closed vocabulary listed in code, each with how it is
-read. A first set: `pushes_develop`, `repo` (the session's repository), and
-`role` (a role this session holds, such as `push-conductor`, from a role
-tuple). An unknown fact refuses the file at `nx aura check`.
+Membership is one tuple per member, `kind=member group=<name> session=<id>
+roles=[...]`, written by the member when it joins and removed when it leaves
+or its session ends. Assignments are typed tuples, `kind=assign group=<name>
+task=<task> owner=<session id> next=<session id>`, written by the leader. A
+session can hold membership in any number of groups. A disbanded group's
+entry stays as history with `ended_at`.
 
-**The push record.** On `PUSH_OK`, `git-push-develop.sh` writes one tuple to
+First groups, made explicit from what runs today: `push-train` (leader
+halcyon), and ad hoc push windows, review pairs and the release crew as
+needed. The restart script's ready check becomes a group operation: "every
+member of group X, report ready".
+
+**Trust.** Only Sam or the group's leader may write the group entry and its
+assignments; only a session may write its own membership. A writer that
+breaks the rule is refused by the board template's writer check, which uses
+the session the engine records for the write. That needs the writer's session
+to be attested; an unattested write (as the CI adapter's are today) is never
+taken as an assignment. The push record is written by the push script under
+the pushing session's identity. Open question 4 asks whether this check is
+enough or needs the engine's attestation work first.
+
+**The push record.** On `PUSH_OK`, `git-push-develop.sh` posts to
 `board/push/nexus-develop`:
 
 ```
-kind=push  tip=<sha>  base=<sha before the push>  shas=<the pushed shas>
+kind=push  tip=<sha>  base=<develop sha before the push>  shas=<pushed shas>
 session=<session id>  name=<session name>  at=<UTC>
 ```
 
-It is a board post (read by anyone, never claimed). The session id is a typed
-field, so no reader parses a claimant string.
+**Develop's state from commit order.** Commit order comes from the push
+records' `base` and `tip` (each push names the develop sha it built on), never
+from when a CI post arrived. A red counts only if its sha is the newest develop
+commit with a finished run. A late red for an older commit is history, not a
+block; a late green for an older commit does not clear a block a newer red
+raised.
 
-**Develop's state from commit order.** The procedure judges a CI post against
-the push records, not against arrival order. A red counts only if its sha is
-the newest develop commit with a finished run. A late red for an older commit
-shows as history, not as a block. Commit order comes from the push records'
-`base` and `tip` (each push names the develop sha it built on), never from
-when a CI post arrived. A late green for an older commit does not
-clear a block a newer red raised. This closes Gap 4.
+**The owner, stamped once.** One writer, the stamper, watches
+`board/ci/nexus-develop--done` and `board/push/nexus-develop`. For a red that
+counts, it posts once to `board/ci/nexus-develop--owner`:
 
-**Owner, next up, everyone else.** For a red that counts:
+```
+kind=owner  sha=<red sha>  owner=<session id>  next=<session id>  reason=<why>
+```
 
-- **Owner:** the session of the push record whose `shas` contain the first
-  red commit after the last green one. When a red is inherited (a later push
-  went red only because an earlier one did), the owner is the earlier pusher.
-  Example: on 2026-11-16, 4554bd15f went red only because da1c285da had; the
-  owner is da1c285da's pusher.
-- **Next up:** the push conductor (the session holding the `push-conductor`
-  role tuple). If the owner's session is gone (no live session id), next up
-  becomes owner.
-- **Everyone else:** every other loaded session.
+- **Owner**: the session of the push whose `shas` contain the first red commit
+  after the last green one. A red that a later push only inherited belongs to
+  the earlier pusher. Example: on 2026-11-16, 4554bd15f went red only because
+  da1c285da had; the owner is da1c285da's pusher.
+- **Next up**: the `push-train` group's leader. If the owner's session is gone,
+  the leader is owner and `reason` says so.
+- **Unknown pusher** (no push record): the leader is owner, `reason=no_record`.
 
-**Displays and local actions.**
+Where the stamper runs is open question 5: in the engine next to the CI
+adapter (the platform, as with private auras), or as one session's job.
+Alternative 2 below keeps "every session computes" as the fallback design.
 
-| State | Display | Local action |
-|---|---|---|
-| Owner | "Develop is red at <sha>, first red in your push. Diagnose it." | Diagnose; acknowledge on the board |
-| Next up | "Develop is red at <sha>; <owner> owns it. You are next up." | Stand by; take it if the owner has not acknowledged by the deadline |
-| Everyone else | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | Hold its own pushes until green |
+**Load by membership.** New optional table in the aura file:
 
-**Acknowledgement.** The owner acknowledges by writing one tuple
-(`board/push/nexus-develop` `kind=ack sha=<sha> session=<id>`) with an ordinary
-tool, not from the aura. Every session's next evaluation sees it. The
-deadline (a default of 20 minutes) is computed from the CI post's time, so no
-timer message is needed; the next event on the subspace, or the channel
-waiter's periodic re-check, re-evaluates it.
+```toml
+[load]
+group = "push-train"      # loaded only in sessions that are members
+roles = ["pusher", "leader"]
+```
+
+Load is evaluated when the session's MCP server starts, the only time auras
+and config are read today. A session that joins a group later loads the aura at
+its next start, or through one re-load hook (open question 3). Unknown keys are
+refused by `nx aura check`.
+
+**Typed displays and noise.** `ci_develop_red` triggers on the owner post, not
+the raw CI post, and shows one of three states, each with its own urgency, in
+the manner of DBM's typed warnings:
+
+| State | Display | Channel wake | Local action |
+|---|---|---|---|
+| Owner | "Develop is red at <sha>, first red in your push. Diagnose it." | Yes | Diagnose; acknowledge |
+| Next up | "Develop is red at <sha>; <owner> owns it. You are next up." | Yes | Stand by; take it if not acknowledged |
+| Everyone else in the group | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | No (block only) | Hold its own pushes until green |
+
+**Re-surfacing.** When the owner changes (the leader takes over, or a new
+owner post supersedes the old one), each member's block is rewritten, and the
+new owner gets a wake even if it had already seen the red, as Angry
+Assignments re-shows a changed assignment.
+
+**Acknowledgement.** The owner writes `kind=ack sha=<sha> session=<id>` to
+`board/ci/nexus-develop--owner` with an ordinary tool. If none arrives by a
+deadline counted from the owner post, the stamper posts a new owner post naming
+the next-up session. The deadline has no basis in the research; it is open
+question 2.
 
 **Escalation.** Owner, then next up, then an RDR-245 ask to Sam only if next up
-is also gone. No other chain.
+is also gone. Unvalidated: the research found no protocol to copy.
 
-**Claims.** Only for work no record assigns, such as rerunning a flaky shard
-that any session may do. That uses RDR-211's queue as is.
+**Claims.** Only for work no assignment names, such as rerunning a flaky shard;
+RDR-211's queue as is.
+
+**If the platform narrows.** If the read-only procedure surface shrinks (as
+WeakAuras lost combat-state support under Midnight), the owner post still
+carries the decision, and a plain display of it needs no procedure.
 
 ### Existing Infrastructure Audit
 
 | Piece | Exists? | Use |
 |---|---|---|
-| Aura parse, trigger, display | Yes (RDR-249) | Adds `[load]` and state-dependent display text |
-| Read-only procedure runtime | Yes (RDR-242) | Computes owner and state |
-| Board posts | Yes (RDR-211, 220) | Push record and acknowledgement |
+| Aura parse, trigger, display | Yes (RDR-249) | Adds `[load]` and typed displays |
+| Read-only procedure runtime | Yes (RDR-242) | Formats the display |
+| Board posts and claims | Yes (RDR-211, 220) | Groups, push record, owner post, acknowledgement |
 | Push script with session identity | Yes | Writes the push record |
-| Role tuples | No | A minimal `role/<name>` tuple, claimed by its holder |
+| Writer check by recorded session | Partly (the engine records a session for most writes; not for the CI adapter) | Trust for groups and assignments |
+| Groups, members, assignments | No | New board templates |
+| Owner stamper | No | New; engine or one session |
 
 ### Decision Rationale
 
-Computation over claims, because every session can read the same record (the
-KickSync evidence), and claims add a race. Local actions only, because RDR-242
-keeps procedures read-only and the platform and user split in Midnight keeps
-the authoritative record in the platform. Load first, because it is cheap and
-removes most of the noise before any other part runs.
+A stamped owner over every session computing it, because the platform deciding
+once is what private auras do and leaves nothing for sessions to disagree on.
+A computed owner over claims, because the record names the owner and a claim
+only adds a race. Groups as the base, because the push train, windows, review
+pairs and the release crew are already groups, and Load, assignments, leader
+calls and ready checks are all group mechanics. Local actions only, because
+procedures are read-only by design.
 
 ## Alternatives Considered
 
 ### Alternative 1: Claim queue for every red
 
-A red becomes a task on RDR-211's queue, and the first session to claim it
-owns it.
+A red becomes a task on RDR-211's queue, and the first session to claim it owns
+it.
 
-- **Pro:** uses a shipped template; no push record needed.
+- **Pro:** a shipped template; no push record.
 - **Con:** the fastest session wins, not the one with context; a lease can
   expire under a slow diagnosis; it races where a computation would not.
-- **Rejected:** the record can name the owner, so a race buys nothing.
+- **Rejected:** the record can name the owner.
 
-### Alternative 2: Convention only
+### Alternative 2: Every session computes the owner (no stamper)
+
+Each session's aura procedure reads the push records and works out owner and
+next up itself, as KickSync's clients do.
+
+- **Pro:** no new writer; nothing to run in the engine.
+- **Con:** a dozen computations of one answer; a stale read in one session
+  disagrees with the rest; the logic lives in Lua.
+- **Kept** as the fallback if the stamper cannot be placed.
+
+### Alternative 3: Convention only
 
 A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
 
 - **Pro:** no code.
-- **Con:** every session still wakes on every red; the rule lives in prose
-  and drifts; late reds still mislead (Gap 4).
-- **Rejected** as the end state; acceptable as the interim if Sam turns the
-  aura on before this lands.
+- **Con:** every session still wakes on every red; the rule drifts; late reds
+  still mislead.
+- **Rejected** as the end state; the interim if Sam turns the aura on first.
 
-### Alternative 3: Route every red to halcyon
+### Alternative 4: Route every red to halcyon
 
 - **Pro:** one fixed owner.
-- **Con:** halcyon has the least context about a commit it did not write and
-  becomes a bottleneck.
+- **Con:** least context about a commit it did not write; a bottleneck.
 - **Rejected** as the default; kept as next up.
 
 ### Briefly Rejected
 
-- Parsing the pusher out of commit messages or bead ids: brittle, the
-  assignment-note failure mode.
-- Mail between sessions to hand off ownership: a side channel, the failure
-  mode WoW hits in combat.
+- Parsing the pusher out of commit messages or bead ids: the assignment-note
+  failure mode.
+- Mail between sessions to hand off ownership: a side channel.
 
 ## Trade-offs
 
 ### Consequences
 
-- Most sessions see a one-line "hold your pushes" and do nothing else.
-- The push script gains one board write per push.
-- Aura files gain an optional `[load]` table; existing files are unchanged.
+- Most group members see a block that says "hold your pushes" and are not
+  woken.
+- Sessions outside the group never load the aura.
+- The push script gains one board write per push; there is one new writer, the
+  stamper.
 
 ### Risks and Mitigations
 
-- **Push record missing** (the write failed or an old push): the owner is
-  unknown, so next up owns it. The display says why.
-- **Two sessions think they own it** (a stale read): both act; the
-  acknowledgement tuple shows the second one that the first already has it.
-- **Load facts go stale** (a session starts pushing after load). Today auras
-  and config are read only when the session's MCP server starts (marginalia,
-  2026-11-16), so re-reading a fact later is new surface. Options: evaluate
-  load only at server start and accept a restart to change it, or add one
-  re-load hook (for example, when the session takes the push lock). Decided at
-  the gate; the first is the default.
+- **Stamper down**: no owner post, so no member's aura fires. Mitigation: the
+  aura also triggers on the raw red after a short wait and shows the plain
+  RDR-249 block, naming no owner.
+- **Wrong or forged assignment**: the writer check refuses writes not from Sam
+  or the leader; unattested writes are never assignments.
+- **Stale membership** (a session's server started before it joined): it loads
+  the aura at its next start, unless the re-load hook is added.
 
 ### Failure Modes
 
-- The procedure fails or times out: the session falls back to RDR-249's
-  plain display, which says the red exists and names no owner.
+- The procedure fails or times out: the session shows the owner post as text.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] Sam accepts the model (computed owner, three states, local actions).
-- [ ] The role-tuple shape agreed with halcyon (only `push-conductor` at
-  first).
+- [ ] Sam accepts the model (groups, stamped owner, three states, local
+  actions) and answers the open questions.
+- [ ] The `push-train` group's shape agreed with halcyon.
 
 ### Minimum Viable Validation
 
-With `ci_develop_red` on in three test sessions (A pushed commit X, B is
-`push-conductor`, C pushed nothing): a red on X shows "owner" in A, "next
-up" in B and "hold your pushes" in C. A later green on an older commit does
-not clear it. A late red on an older commit does not raise a block. With A's
-session gone, B shows "owner".
+With `ci_develop_red` loaded in three members of a test group (A pushed commit
+X, B leads, C pushed nothing) and one non-member D: a red on X wakes A as owner
+and B as next up, shows C "hold your pushes" with no wake, and does nothing in
+D. A later green on an older commit does not clear it, and a late red on an
+older commit raises nothing. With A's session gone, the owner post names B and
+B is woken. A group write from C is refused.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: Push record
+#### Step 1: Group, member and assignment templates, with the writer check
 
-`git-push-develop.sh` writes the `kind=push` post on `PUSH_OK`, with a test
-that the post carries the session id and the pushed shas.
+#### Step 2: Push record in `git-push-develop.sh`
 
-#### Step 2: `[load]` in the aura file
+#### Step 3: The owner stamper and the owner post
 
-Parse, check against the closed fact vocabulary, evaluate at load; `nx aura
-check` refuses unknown facts; `nx aura list` shows each aura's load result for
-this session.
+#### Step 4: `[load]` and typed displays in auras; `ci_develop_red` moved onto the owner post
 
-#### Step 3: Owner and state in `ci_red_notice`
-
-The procedure reads push records and acknowledgements, computes develop's
-state by commit order, the owner, next up and this session's state, and
-returns state-dependent display text.
-
-#### Step 4: Role tuple and acknowledgement
-
-A minimal `role/push-conductor` tuple; the acknowledgement post; the deadline
-check on re-evaluation.
+#### Step 5: Acknowledgement, deadline and re-surfacing
 
 ### Phase 2: Operational Activation
 
-#### Activation Step 1: Turn it on
+#### Activation Step 1: Form `push-train` and turn the aura on
 
-`nx config set auras.ci_develop_red=on` and a restart round, after the MVV
-passes. Sam's go.
+Sam's go: form the group with halcyon as leader, then `nx config set
+auras.ci_develop_red=on` and a restart round.
 
 ### Day 2 Operations
 
-- `nx aura list` shows, per aura, loaded or not and why.
-- The push records double as an audit of who pushed what, and acknowledgement
-  times give the after-the-fact grading the WoW tools use (time from red to
-  acknowledgement, to fix).
+- `nx aura list` shows, per aura, loaded or not and why (which group).
+- A group listing shows leader, members and open assignments.
+- Push records and acknowledgement times give after-the-fact grading: time
+  from red to acknowledgement and to fix, as WoW tools grade cooldown use.
 
 ### New Dependencies
 
@@ -391,26 +454,27 @@ None.
 
 ## Test Plan
 
-- Owner, next up and everyone-else states from a fixed set of push records.
+- Owner, next up and everyone-else states from fixed push records.
 - Inherited red: the owner is the first red's pusher.
 - Late red and late green, in both orders.
-- Owner session gone: next up owns.
-- Push record missing: next up owns, display says so.
-- `[load]` unknown fact refused; a session with `pushes_develop` false never
-  subscribes.
+- Owner session gone; push record missing: the leader owns, with the reason.
+- Writer check: a non-leader's assignment is refused; an unattested one is
+  ignored.
+- `[load]`: a non-member never subscribes; an unknown key is refused.
+- No channel wake for "everyone else"; a wake on re-surfacing.
+- Stamper down: the plain block after the wait.
 
 ## Validation
 
 ### Testing Strategy
 
-Unit tests on the owner computation with recorded tuples; one live check in
-three sessions (the MVV).
+Unit tests on the stamper with recorded tuples; one live check in a test group
+(the MVV).
 
 ### Performance Expectations
 
-Load removes the aura from sessions that never push. A fire costs about 50 ms
-today (marginalia, 2026-11-16); the owner computation adds one or two tuple
-reads.
+Load removes the aura from non-members. A fire costs about 50 ms today
+(marginalia, 2026-11-16); members read one owner post instead of computing.
 
 ## Finalization Gate
 
@@ -418,11 +482,20 @@ Not yet run.
 
 ## Open Questions for Sam
 
-1. **Owner source.** From the record (the pusher, as designed), or from roles
-   only (always the push conductor)?
-2. **Escalation.** Should a red ever reach Sam without going through halcyon?
-3. **Interim.** Turn `ci_develop_red` on now with a written convention, or
-   keep it off until this lands?
+1. **Owner source.** From the record (the pusher, as designed), or always the
+   group's leader?
+2. **Deadline.** How long before next up takes over? The research gives no
+   basis; 20 minutes is a placeholder.
+3. **Late joiners.** Load only at server start (a restart to join), or one
+   re-load hook when a session joins a group?
+4. **Trust.** Is the engine's recorded session enough for the writer check, or
+   does group trust wait for the attestation work?
+5. **Stamper placement.** In the engine beside the CI adapter, or as one
+   session's job (halcyon's)?
+6. **Escalation.** Should a red ever reach Sam without going through the
+   leader?
+7. **Interim.** Turn `ci_develop_red` on now with a written convention, or keep
+   it off until this lands?
 
 ## References
 
@@ -430,11 +503,20 @@ Not yet run.
 - T3 `agent-orchestration`: "WeakAuras and raid coordination models: who an
   alert is for, who responds" (2026-11-16), with its sources: the WeakAuras
   wiki (Load), Warcraft Wiki (private auras, secret values), DBM's
-  special-warning guide, KickSync, Sniffa, Blizzard's Midnight post.
-- marginalia's live check of `ci_develop_red`, 2026-11-16 (fire, clear, late
-  red).
+  special-warning guide, KickSync, Sniffa, Angry Assignments, Blizzard's
+  Midnight post.
+- T2 `nexus/push-train` (the push train's rules, Sam 2026-11-07).
+- marginalia's live check of `ci_develop_red` and notes on this draft,
+  2026-11-16.
 
 ## Revision History
 
 - 2026-11-16: created (draft), on Sam's request to model aura response
   strategically and validate it against the WeakAuras ecosystem.
+- 2026-11-16: reworked around groups (Sam: "do we have the equivalent of a
+  raid? ... they're just group coord mechanics"); owner stamped once rather
+  than computed in every session (private auras); trust for group writes
+  (Angry Assignments); role routing and the deadline marked unvalidated; no
+  wake for "everyone else" (noise); re-surfacing on owner change; a fallback if
+  the procedure surface narrows; marginalia's notes on load timing and commit
+  order kept.
