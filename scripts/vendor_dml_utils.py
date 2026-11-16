@@ -22,12 +22,19 @@ and is left out.
 only. It never checks out, commits or writes in the clone, and never reads its working tree, so a clone
 sitting on a feature branch with uncommitted edits is safe. A revision that does not resolve, or that
 holds no changelog files, writes nothing.
+
+``--update`` also refuses a re-pin that changes the bytes of a changeset the old pin already carries, unless
+that changeset is ``runOnChange`` (nexus-f3yqd.2.11): the engine applies both libraries at boot and Liquibase
+validates each applied changeset's checksum, so an edited one fails that library's install on every install
+that applied the old pin, and nothing repairs it. A library change is a new changeset appended; the refusal
+names each edited changeset as ``<file>::<id>::<author>``.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import xml.etree.ElementTree as ET
 import os
 import re
 import shutil
@@ -198,6 +205,58 @@ def _write_pins(path: Path, pins: dict[str, str]) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _changesets(files: dict[str, bytes]) -> dict[tuple[str, str, str], tuple[bytes, bool]]:
+    """``(file, id, author)`` -> (canonical bytes of the changeset plus the files its ``path`` attributes read, runOnChange).
+
+    The key is Liquibase's identity of a changeset; the bytes stand for its checksum. A file that is not
+    well-formed XML is skipped: it holds no changeset Liquibase could have applied."""
+    out: dict[tuple[str, str, str], tuple[bytes, bool]] = {}
+    for rel, data in files.items():
+        if not rel.endswith(".xml"):
+            continue
+        try:
+            root = ET.fromstring(data)
+        except ET.ParseError:
+            continue
+        for element in root.iter():
+            if not element.tag.endswith("changeSet"):
+                continue
+            digest = [ET.canonicalize(ET.tostring(element, encoding="unicode")).encode("utf-8")]
+            for sub in element.iter():
+                path = sub.get("path")
+                if path is None:
+                    continue
+                relative = sub.get("relativeToChangelogFile", "false").lower() == "true"
+                target = os.path.normpath(os.path.join(os.path.dirname(rel), path)) if relative else path
+                digest.append(b"\0" + target.encode("utf-8") + b"\0" + files.get(target, b"<missing>"))
+            run_on_change = element.get("runOnChange", "false").lower() == "true"
+            out[(rel, element.get("id", ""), element.get("author", ""))] = (b"".join(digest), run_on_change)
+    return out
+
+
+def edited_applied_changesets(old: dict[str, bytes], new: dict[str, bytes]) -> list[str]:
+    """The changesets present in *old* and *new* whose bytes differ and that are not ``runOnChange`` in *new*, as
+    ``<file>::<id>::<author>``, sorted. Each fails Liquibase's checksum validation on an install that applied *old*."""
+    before = _changesets(old)
+    after = _changesets(new)
+    return sorted(
+        "::".join(key)
+        for key, (data, run_on_change) in after.items()
+        if key in before and not run_on_change and before[key][0] != data
+    )
+
+
+def _read_vendored(directory: Path) -> dict[str, bytes]:
+    """The changelog files of a vendored library directory, keyed as the upstream subtree keys them."""
+    out: dict[str, bytes] = {}
+    if directory.is_dir():
+        for path in sorted(directory.rglob("*")):
+            rel = path.relative_to(directory).as_posix()
+            if path.is_file() and rel not in (MANIFEST_NAME, LICENSE_NAME):
+                out[rel] = path.read_bytes()
+    return out
+
+
 def update(repo_root: Path, revisions: dict[str, str], clones: dict[str, Path] | None = None) -> dict[str, Manifest]:
     """Regenerate the named libraries at the given revisions; the others are left as they are.
 
@@ -221,6 +280,15 @@ def update(repo_root: Path, revisions: dict[str, str], clones: dict[str, Path] |
         planned[name] = (Manifest(sha, tree), contents)
 
     vendor = repo_root / VENDOR_RELDIR
+    edited: list[str] = []
+    for name, (_, contents) in planned.items():
+        edited += [f"{name}: {item}" for item in edited_applied_changesets(_read_vendored(vendor / name), contents)]
+    if edited:
+        raise VendorError(
+            "the re-pin edits changesets the current pin already carries, which are not runOnChange; an install that "
+            "applied them would fail Liquibase's checksum validation on every boot. Append a new changeset upstream "
+            "instead. Edited: " + "; ".join(edited)
+        )
     vendor.mkdir(parents=True, exist_ok=True)
     pins_path = vendor / PINS_NAME
     pins = read_pins(pins_path) if pins_path.is_file() else {}

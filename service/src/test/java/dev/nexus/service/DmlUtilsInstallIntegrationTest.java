@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -64,7 +65,7 @@ class DmlUtilsInstallIntegrationTest {
         cfg.setJdbcUrl(pg.getJdbcUrl());
         cfg.setUsername(ADMIN);
         cfg.setPassword(ADMIN_PASSWORD);
-        cfg.setMaximumPoolSize(2);
+        cfg.setMaximumPoolSize(1); // as Main's migration pool: the session a boot used is the one read back
         adminPool = new HikariDataSource(cfg);
         var installer = new DmlUtilsInstaller(true);
         SchemaMigrator.migrate(adminPool, installer);
@@ -99,6 +100,30 @@ class DmlUtilsInstallIntegrationTest {
 
     private SchemaMigrator.MigrationOutcome bootOutcome(DmlUtilsInstaller installer) {
         return SchemaMigrator.migrate(adminPool, installer);
+    }
+
+    /** {@code current_user} of the pool's one connection, which the last boot's migration used. */
+    private String adminCurrentUser() throws Exception {
+        try (Connection c = adminPool.getConnection()) {
+            return DSL.using(c, SQLDialect.POSTGRES).select(DSL.currentUser()).fetchOne(0, String.class);
+        }
+    }
+
+    private String adminSetting(String name) throws Exception {
+        try (Connection c = adminPool.getConnection()) {
+            return DSL.using(c, SQLDialect.POSTGRES)
+                .select(DSL.function("current_setting", String.class, DSL.val(name))).fetchOne(0, String.class);
+        }
+    }
+
+    /** The {@code locked} column of every row of both libraries' changelog lock tables. */
+    private List<Boolean> libraryLockRows() {
+        List<Boolean> rows = new java.util.ArrayList<>();
+        for (String library : List.of("ddl_utils", "dml_utils")) {
+            rows.addAll(ctx().select(DSL.field(DSL.name("locked"), Boolean.class))
+                .from(table("liquibase", library + "_databasechangeloglock")).fetch(0, Boolean.class));
+        }
+        return rows;
     }
 
     private DSLContext ctx() {
@@ -336,6 +361,8 @@ class DmlUtilsInstallIntegrationTest {
 
         assertThat(trackingRows("ddl_utils")).as("ddl_utils tracking rows after the second boot").isEqualTo(ddlBefore);
         assertThat(trackingRows("dml_utils")).as("dml_utils tracking rows after the second boot").isEqualTo(dmlBefore);
+        assertThat(libraryLockRows()).as("both libraries' changelog lock rows after clean boots (one row each)")
+            .containsExactly(false, false);
     }
 
     /** Under the migration lock a locked library tracking row is stale, as nexus's own is. */
@@ -387,5 +414,105 @@ class DmlUtilsInstallIntegrationTest {
                 .as("pending changesets with the libraries pending (nexus's runAlways re-run plan only)")
                 .isEqualTo(librariesApplied.pendingAtStart());
         }
+    }
+
+    // ── a failure of any kind is skip-and-serve, and the connection leaves the role window as it entered ─────────
+
+    /**
+     * An Error from a library walk (a class that cannot load, a class initializer that fails, a stack that overflows,
+     * the native image's missing-reflection error) is a FAILED install, not a failed boot: the role and lock_timeout
+     * are back, nexus's walk completed, and the libraries that already applied stay applied. An OutOfMemoryError is
+     * not a library failure and still propagates, with the role window closed behind it.
+     */
+    @Test
+    void anErrorInALibraryWalk_isAFailedInstall_theWindowCloses_andTheBootServes() throws Exception {
+        String lockTimeoutBefore = adminSetting("lock_timeout");
+        List<Error> injected = List.of(new NoClassDefFoundError("injected-linkage"),
+            new ExceptionInInitializerError("injected-clinit"), new StackOverflowError("injected-stack"),
+            new Error("injected-native-missing-registration"));
+        for (Error error : injected) {
+            reset();
+            var installer = DmlUtilsInstaller.withHookForTest(true, (conn, library) -> {
+                if (library.equals("dml_utils")) {
+                    throw error;
+                }
+            });
+            assertThat(bootOutcome(installer)).as("%s: the nexus walk completed", error).isNotNull();
+            DmlUtilsInstaller.Status status = installer.status();
+            assertThat(status.state()).as("%s", error).isEqualTo(State.FAILED);
+            assertThat(status.blockedReason()).hasValueSatisfying(r -> assertThat(r)
+                .startsWith("a library changelog failed").contains(error.getMessage()));
+            assertThat(status.sessionRoleAfter()).as("%s: role after", error).isEqualTo(ADMIN);
+            assertThat(adminCurrentUser()).as("%s: the migration session's role", error).isEqualTo(ADMIN);
+            assertThat(adminSetting("lock_timeout")).as("%s: lock_timeout restored", error).isEqualTo(lockTimeoutBefore);
+            assertThat(schemaExists("ddl_utils")).as("ddl_utils, walked before the error, stays applied").isTrue();
+            assertThat(schemaExists("dml_utils")).as("dml_utils was cut off by the error").isFalse();
+        }
+
+        reset();
+        var oom = DmlUtilsInstaller.withHookForTest(true, (conn, library) -> {
+            throw new OutOfMemoryError("injected-oom");
+        });
+        assertThatThrownBy(() -> boot(oom)).isInstanceOf(OutOfMemoryError.class);
+        assertThat(adminCurrentUser()).as("the window was closed behind the OutOfMemoryError").isEqualTo(ADMIN);
+        assertThat(adminSetting("lock_timeout")).isEqualTo(lockTimeoutBefore);
+        assertThat(boot().state()).as("the next boot installs the rest").isEqualTo(State.APPLIED);
+    }
+
+    /**
+     * A library statement queued behind another session's lock ends at the window's lock_timeout (55P03): FAILED and
+     * serving, not a boot that waits on it. An ACCESS EXCLUSIVE lock on dml_utils' history table stands in for the
+     * leftover pg_background worker or long transaction of the field; the walk's read of that table queues behind it.
+     */
+    @Test
+    @Timeout(value = 3, unit = TimeUnit.MINUTES)
+    void aLibraryStatementBlockedBehindALock_endsInLockTimeout_failedAndServing() throws Exception {
+        assertThat(boot().state()).isEqualTo(State.APPLIED);
+        String lockTimeoutBefore = adminSetting("lock_timeout");
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            // An open transaction's ALTER TABLE holds ACCESS EXCLUSIVE on dml_utils' history table, which every walk
+            // reads (changesets pending or not); the holder's close rolls the column back.
+            DSL.using(holder, SQLDialect.POSTGRES).alterTable(table("liquibase", "dml_utils_databasechangelog"))
+                .addColumn(DSL.field(DSL.name("held_by_the_test"), org.jooq.impl.SQLDataType.INTEGER)).execute();
+
+            DmlUtilsInstaller installer = new DmlUtilsInstaller(true);
+            long started = System.nanoTime();
+            assertThat(bootOutcome(installer)).as("the nexus walk completed").isNotNull();
+            long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started);
+
+            assertThat(installer.status().state()).isEqualTo(State.FAILED);
+            assertThat(installer.status().blockedReason())
+                .hasValueSatisfying(r -> assertThat(r).containsIgnoringCase("lock timeout"));
+            assertThat(seconds).as("the boot waited the window's lock_timeout, not for the lock holder").isLessThan(60);
+            assertThat(installer.status().sessionRoleAfter()).isEqualTo(ADMIN);
+            assertThat(adminCurrentUser()).isEqualTo(ADMIN);
+            assertThat(adminSetting("lock_timeout")).as("lock_timeout restored").isEqualTo(lockTimeoutBefore);
+        }
+        assertThat(boot().state()).as("the next boot, the lock gone").isEqualTo(State.APPLIED);
+        assertThat(libraryLockRows()).containsExactly(false, false);
+    }
+
+    /**
+     * A re-pin that edits a changeset an install already applied fails Liquibase's checksum validation: FAILED with a
+     * reason that names the checksum, and the boot serves. (The vendoring script refuses such a re-pin; this is what
+     * happens to an install when one gets through.) Recovery messaging is nexus-f3yqd.2.17's.
+     */
+    @Test
+    void aChangedChecksumInALibraryTrackingTable_isAFailedInstallNamingTheChecksum_andTheBootServes() throws Exception {
+        assertThat(boot().state()).isEqualTo(State.APPLIED);
+        int tampered = ctx().update(table("liquibase", "ddl_utils_databasechangelog"))
+            .set(DSL.field(DSL.name("md5sum"), String.class), "9:00000000000000000000000000000dead")
+            .where(CHANGESET_ID.eq("001-create-schema")).execute();
+        assertThat(tampered).as("non-vacuity: one tracking row was changed").isEqualTo(1);
+
+        DmlUtilsInstaller installer = new DmlUtilsInstaller(true);
+        assertThat(bootOutcome(installer)).as("the nexus walk completed").isNotNull();
+
+        assertThat(installer.status().state()).isEqualTo(State.FAILED);
+        assertThat(installer.status().blockedReason()).hasValueSatisfying(r -> assertThat(r)
+            .containsIgnoringCase("check sum").contains("001-create-schema"));
+        assertThat(installer.status().sessionRoleAfter()).isEqualTo(ADMIN);
+        assertThat(adminCurrentUser()).isEqualTo(ADMIN);
     }
 }

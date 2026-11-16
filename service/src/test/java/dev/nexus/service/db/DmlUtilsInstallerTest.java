@@ -64,6 +64,19 @@ class DmlUtilsInstallerTest {
         assertThat(new DmlUtilsInstaller(true).status().blockedReason()).isPresent();
     }
 
+    /** The rule Main applies (nexus-f3yqd.2.11): libraries only when the admin login is not the service role. */
+    @Test
+    void forEngine_installsOnlyWithASeparateAdminRole() {
+        assertThat(DmlUtilsInstaller.forEngine("nexus_admin", "nexus_svc").hasSeparateAdminRole())
+            .as("NX_DB_ADMIN_USER differs from NX_DB_USER").isTrue();
+        assertThat(DmlUtilsInstaller.forEngine("nexus_svc", "nexus_svc").hasSeparateAdminRole())
+            .as("the admin connection is the service role (NX_DB_ADMIN_* unset resolves to NX_DB_*)").isFalse();
+        assertThat(DmlUtilsInstaller.forEngine("a", "A").hasSeparateAdminRole())
+            .as("role names are case sensitive").isTrue();
+        assertThat(new DmlUtilsInstaller(true).hasSeparateAdminRole()).isTrue();
+        assertThat(new DmlUtilsInstaller(false).hasSeparateAdminRole()).isFalse();
+    }
+
     @Test
     void aReason_isOneBoundedLine() {
         assertThat(DmlUtilsInstaller.bounded("line one\n  line two\t" + "x".repeat(600))).doesNotContain("\n").hasSizeLessThan(520)

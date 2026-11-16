@@ -82,6 +82,22 @@ public final class DmlUtilsInstaller {
 
     private static final int REASON_LIMIT = 500;
 
+    /**
+     * {@code lock_timeout} for the role window: a library statement queued behind another session's lock (a leftover
+     * pg_background worker, a long transaction) ends with 55P03 and the install is FAILED, instead of every boot
+     * hanging on it. The session's own value comes back when the window closes.
+     */
+    static final String LIBRARY_LOCK_TIMEOUT = "5s";
+
+    /**
+     * Test seam: runs just before each library's real walk, on the migration connection, inside the role window.
+     * {@code DmlUtilsInstallIntegrationTest} injects an {@link Error} through it.
+     */
+    @FunctionalInterface
+    public interface LibraryWalkHook {
+        void beforeWalk(Connection conn, String library);
+    }
+
     /** The install states. {@link #NOT_RUN} until a walk reaches the installer. */
     public enum State { NOT_RUN, APPLIED, SKIPPED, FAILED }
 
@@ -103,6 +119,7 @@ public final class DmlUtilsInstaller {
     }
 
     private final boolean separateAdminRole;
+    private final LibraryWalkHook hook;
     private volatile Status status = new Status(State.NOT_RUN, null, null);
 
     /**
@@ -110,7 +127,31 @@ public final class DmlUtilsInstaller {
      *                          role holds no {@code dml_utils_owner} grant, so the libraries are skipped
      */
     public DmlUtilsInstaller(boolean separateAdminRole) {
+        this(separateAdminRole, (conn, library) -> { });
+    }
+
+    private DmlUtilsInstaller(boolean separateAdminRole, LibraryWalkHook hook) {
         this.separateAdminRole = separateAdminRole;
+        this.hook = hook;
+    }
+
+    /**
+     * The installer an engine boots with: the libraries are applied only when the admin connection (the migration
+     * login) is not the role that serves traffic ({@code NX_DB_ADMIN_USER} differs from {@code NX_DB_USER}). One
+     * role holds no {@code dml_utils_owner} grant. The one place that rule lives; {@code Main} calls it.
+     */
+    public static DmlUtilsInstaller forEngine(String adminUser, String serviceUser) {
+        return new DmlUtilsInstaller(!adminUser.equals(serviceUser));
+    }
+
+    /** Test seam: as {@code new DmlUtilsInstaller(separateAdminRole)}, with {@code hook} run before each library walk. */
+    public static DmlUtilsInstaller withHookForTest(boolean separateAdminRole, LibraryWalkHook hook) {
+        return new DmlUtilsInstaller(separateAdminRole, hook);
+    }
+
+    /** Whether this installer was built for an engine with a separate admin role. */
+    public boolean hasSeparateAdminRole() {
+        return separateAdminRole;
     }
 
     /** The outcome of the latest {@link #install}; {@link State#NOT_RUN} before the first. */
@@ -146,20 +187,42 @@ public final class DmlUtilsInstaller {
         }
 
         String failure = null;
+        String roleAfter;
+        String priorLockTimeout = null;
         try {
-            setRole(conn, OWNER_ROLE);
-            createLibrarySchema(ctx, conn);
-            for (Library library : LIBRARIES) {
-                walk(conn, library);
+            try {
+                setRole(conn, OWNER_ROLE);
+                priorLockTimeout = setting(ctx, "lock_timeout");
+                setSetting(conn, "lock_timeout", LIBRARY_LOCK_TIMEOUT);
+                createLibrarySchema(ctx, conn);
+                for (Library library : LIBRARIES) {
+                    hook.beforeWalk(conn, library.name());
+                    walk(conn, library);
+                }
+            } catch (LiquibaseException | SQLException | RuntimeException | StackOverflowError e) {
+                failure = failed(conn, e);
+            } catch (VirtualMachineError e) {
+                throw e; // an OutOfMemoryError or InternalError is not a library failure
+            } catch (Error e) {
+                // LinkageError and ExceptionInInitializerError, and the native image's MissingReflectionRegistrationError:
+                // the vendored changelogs use changeset forms nexus's own do not, so a native-only Error is plausible.
+                failure = failed(conn, e);
             }
-        } catch (LiquibaseException | SQLException | RuntimeException e) {
-            failure = bounded(e.toString());
-            log.error("event=data_move_libraries_failed reason=\"{}\"", failure, e);
-            rollbackQuietly(conn);
+        } finally {
+            // Whatever ended the window, the connection leaves it as it entered: the nexus walk runs as the login.
+            restoreLockTimeout(conn, priorLockTimeout);
+            roleAfter = resetRole(conn, ctx);
         }
-        String roleAfter = resetRole(conn, ctx);
         status = failure == null ? new Status(State.APPLIED, null, roleAfter)
             : new Status(State.FAILED, "a library changelog failed: " + failure, roleAfter);
+    }
+
+    /** Logs a library failure, abandons the open transaction, and returns the one-line reason. */
+    private static String failed(Connection conn, Throwable e) {
+        String reason = bounded(e.toString());
+        log.error("event=data_move_libraries_failed reason=\"{}\"", reason, e);
+        rollbackQuietly(conn);
+        return reason;
     }
 
     /** The first failed prerequisite, as one line, or null when every one holds. */
@@ -266,14 +329,36 @@ public final class DmlUtilsInstaller {
      * a rolled-back transaction would otherwise undo it.
      */
     private static void setRole(Connection conn, String role) throws SQLException {
+        setSetting(conn, "role", role);
+    }
+
+    private static String setting(DSLContext ctx, String name) {
+        return ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val(name))).fetchOne(0, String.class);
+    }
+
+    /** {@code SET <name> = <value>} for the session, as {@code set_config(..., false)}, committed. */
+    private static void setSetting(Connection conn, String name, String value) throws SQLException {
         try {
             DSL.using(conn, SQLDialect.POSTGRES)
-                .select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("role"), DSL.val(role), DSL.val(false)))
+                .select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val(name), DSL.val(value), DSL.val(false)))
                 .fetchOne();
         } catch (DataAccessException e) {
-            throw new SQLException("SET ROLE " + role + " failed: " + e.getMessage(), e);
+            throw new SQLException("setting " + name + " failed: " + e.getMessage(), e);
         }
         commit(conn);
+    }
+
+    /** Puts the session's {@code lock_timeout} back; the value is null when the window never got that far. */
+    private static void restoreLockTimeout(Connection conn, String prior) {
+        if (prior == null) {
+            return;
+        }
+        try {
+            rollbackQuietly(conn);
+            setSetting(conn, "lock_timeout", prior);
+        } catch (SQLException e) {
+            log.warn("event=data_move_libraries_lock_timeout_restore_failed prior={} cause=\"{}\"", prior, e.toString());
+        }
     }
 
     /**

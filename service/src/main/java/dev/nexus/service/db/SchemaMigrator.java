@@ -9,9 +9,6 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
-import liquibase.lockservice.DatabaseChangeLogLock;
-import liquibase.lockservice.LockService;
-import liquibase.lockservice.LockServiceFactory;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.ui.LoggerUIService;
 import org.jooq.DSLContext;
@@ -386,6 +383,9 @@ public final class SchemaMigrator {
      * connection. The HikariCP pool returns it to the pool; subsequent service
      * requests use it normally.
      *
+     * <p>Not the engine's boot entry: that is {@link #migrate(DataSource, DmlUtilsInstaller)}. This one
+     * installs the vendored libraries with an installer nobody reads afterwards.
+     *
      * @param ds migration-capable datasource (schema-owner or superuser rights)
      * @return the walk's real counts — also logged as
      *         {@code event=schema_migration_complete}
@@ -476,9 +476,12 @@ public final class SchemaMigrator {
      * (that constant's classpath string is duplicated test-side rather than
      * widened). A bare constant tolerates duplication; this seam is behavior,
      * not a value, so there is nothing to duplicate — widening visibility is
-     * the smaller change. The single-arg {@link #migrate(DataSource)} stays
-     * the only entry point any real caller (service boot, migration
-     * rehearsals) uses.
+     * the smaller change. The engine boots through {@link #migrate(DataSource,
+     * DmlUtilsInstaller)}, which keeps the installer whose status the data-move
+     * worker reads; this and the single-arg overload build an installer of
+     * their own ({@code new DmlUtilsInstaller(true)}), so they attempt the
+     * vendored library install too when its prerequisites hold (migration
+     * rehearsals, the test suite).
      */
     public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook) {
         return migrate(ds, afterUpdateHook, LocalDiskPreflight::dataDirFreeBytesFromEnv);

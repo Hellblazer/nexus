@@ -422,3 +422,81 @@ class TestCheckedInTree:
         """Git for Windows autocrlf would change every blob id on a checkout."""
         rules = (REPO_ROOT / ".gitattributes").read_text().splitlines()
         assert f"{v.VENDOR_RELDIR}/** -text" in rules
+
+
+_NS = 'xmlns="http://www.liquibase.org/xml/ns/dbchangelog"'
+
+
+def _changes(*sets: str) -> bytes:
+    return f'<databaseChangeLog {_NS}>{"".join(sets)}</databaseChangeLog>'.encode()
+
+
+class TestEditedAppliedChangesets:
+    """nexus-f3yqd.2.11: a re-pin must not edit a changeset an install already applied."""
+
+    OLD = {
+        "changes/changes.xml": _changes(
+            '<changeSet id="001" author="a"><sqlFile path="sql/001.sql" relativeToChangelogFile="true"/></changeSet>',
+            '<changeSet id="002" author="a" runOnChange="true"><sql>select 1</sql></changeSet>',
+            '<changeSet id="003" author="a"><sql>select 3</sql></changeSet>',
+        ),
+        "changes/sql/001.sql": b"create schema a;\n",
+    }
+
+    def test_identical_trees_and_appended_changesets_are_clean(self):
+        new = dict(self.OLD)
+        new["changes/changes.xml"] = self.OLD["changes/changes.xml"].replace(
+            b"</databaseChangeLog>", b'<changeSet id="004" author="a"><sql>select 4</sql></changeSet></databaseChangeLog>')
+        assert v.edited_applied_changesets(self.OLD, self.OLD) == []
+        assert v.edited_applied_changesets(self.OLD, new) == []
+
+    def test_an_edited_body_is_named(self):
+        new = dict(self.OLD)
+        new["changes/changes.xml"] = self.OLD["changes/changes.xml"].replace(b"select 3", b"select 33")
+        assert v.edited_applied_changesets(self.OLD, new) == ["changes/changes.xml::003::a"]
+
+    def test_an_edited_referenced_sql_file_is_named(self):
+        new = dict(self.OLD)
+        new["changes/sql/001.sql"] = b"create schema b;\n"
+        assert v.edited_applied_changesets(self.OLD, new) == ["changes/changes.xml::001::a"]
+
+    def test_a_run_on_change_changeset_may_change(self):
+        new = dict(self.OLD)
+        new["changes/changes.xml"] = self.OLD["changes/changes.xml"].replace(b"select 1", b"select 11")
+        assert v.edited_applied_changesets(self.OLD, new) == []
+
+    def test_each_offender_is_named_and_a_malformed_file_is_skipped(self):
+        new = dict(self.OLD)
+        new["changes/changes.xml"] = self.OLD["changes/changes.xml"].replace(b"select 3", b"select 33")
+        new["changes/sql/001.sql"] = b"changed\n"
+        new["changes/broken.xml"] = b"<master one/>"
+        assert v.edited_applied_changesets(self.OLD, new) == [
+            "changes/changes.xml::001::a", "changes/changes.xml::003::a"]
+
+    def test_update_refuses_an_edited_applied_changeset_names_it_and_writes_nothing(self, repo_root, clones):
+        clone, _ = clones["dml_utils"]
+        base = "dml_utils/src/main/resources/db/changelog"
+        first = _commit(clone, {f"{base}/changes/changes.xml": _changes(
+            '<changeSet id="001" author="a"><sql>select 1</sql></changeSet>')}, "with a changeset")
+        pins = _pins(clones) | {"dml_utils": first}
+        v.update(repo_root, pins, _clone_paths(clones))
+        before = (_vendor(repo_root) / "dml_utils" / "changes" / "changes.xml").read_bytes()
+        second = _commit(clone, {f"{base}/changes/changes.xml": _changes(
+            '<changeSet id="001" author="a"><sql>select 2</sql></changeSet>')}, "edit it")
+        with pytest.raises(v.VendorError) as refused:
+            v.update(repo_root, {"dml_utils": second}, _clone_paths(clones))
+        assert "dml_utils: changes/changes.xml::001::a" in str(refused.value)
+        assert (_vendor(repo_root) / "dml_utils" / "changes" / "changes.xml").read_bytes() == before
+        assert v.read_pins(_vendor(repo_root) / v.PINS_NAME)["dml_utils"] == first
+
+    def test_update_accepts_an_appended_changeset(self, repo_root, clones):
+        clone, _ = clones["dml_utils"]
+        base = "dml_utils/src/main/resources/db/changelog"
+        first = _commit(clone, {f"{base}/changes/changes.xml": _changes(
+            '<changeSet id="001" author="a"><sql>select 1</sql></changeSet>')}, "with a changeset")
+        v.update(repo_root, _pins(clones) | {"dml_utils": first}, _clone_paths(clones))
+        second = _commit(clone, {f"{base}/changes/changes.xml": _changes(
+            '<changeSet id="001" author="a"><sql>select 1</sql></changeSet>',
+            '<changeSet id="002" author="a"><sql>select 2</sql></changeSet>')}, "append")
+        v.update(repo_root, {"dml_utils": second}, _clone_paths(clones))
+        assert v.read_pins(_vendor(repo_root) / v.PINS_NAME)["dml_utils"] == second
