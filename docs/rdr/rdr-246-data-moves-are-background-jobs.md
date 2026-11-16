@@ -244,6 +244,7 @@ ranges:
   FORCE-RLS, list-partitioned (text, text, bytea) table as the engine's role,
   partition-wise and over the parent, with resume after a killed coordinator:
   every row processed exactly once (T2 nexus_rdr/246-research-2) — **Method**: Spike
+- [ ] A plain run on one `nexus.chunks` leaf, CALLed under a per-tenant session as `nexus_admin` on FORCE RLS with the per-leaf grants, processes every row of the leaf exactly once and resumes after a killed coordinator — **Status**: Unverified; the partitioned spike above ran over the parent. — **Method**: Spike, in the DataMoveWorker tests (Step 4)
 - [x] dml_utils needs Sam's ddl_utils installed first, and its install role needs
   ddl_utils_caller: the bytea change adds the first changeset that calls
   ddl_utils' constraint helpers, behind a HALT precondition — **Status**:
@@ -375,7 +376,8 @@ move. In this section a *move worker* is the engine thread, `DataMoveWorker`;
 a *background worker* is a pg_background process in the database.
 
 - `label`, the primary key. The move worker names each dml_utils run
-  `<label>/<tenant>`, or `<label>` alone for a table with no tenant column;
+  `<label>/<tenant>`, `<label>/<tenant>/<leaf>` for a per-leaf run (The move
+  worker, step 2), or `<label>` alone for a table with no tenant column;
   a CHECK (`label !~ '/'`) keeps one move's runs from being read as
   another's;
 - the DML template;
@@ -413,8 +415,9 @@ a *background worker* is a pg_background process in the database.
 The chunk size is bounded to 1 to 1,000,000 rows and `sleep_ms` to 0 to
 60,000 ms by CHECK constraints, and three more CHECKs keep the hand-set
 columns coherent: `transient_retries >= 0`, `last_transient_at` and
-`last_transient` both NULL or both set, and `paused_by` set only when
-`paused_at` is; dml_utils stores the chunk size as an
+`last_transient` both NULL or both set, `transient_retries` zero exactly when
+`last_transient_at` is NULL (so the backoff always has a time and a count),
+and `paused_by` set only when `paused_at` is; dml_utils stores the chunk size as an
 integer (`dml_utils_data.migration_run.chunk_size`), so the column is one
 too.
 
@@ -440,19 +443,29 @@ starts after the HTTP listener and handles one open move at a time, oldest
    runs a session-level `SET nexus.tenant`, CALLs dml_utils' committing entry
    point (added upstream by this RDR; it takes `run_migration_chunks`'
    parameters, with threads 1 and the move's chunk size and `sleep_ms`), then
-   runs `RESET nexus.tenant`. When the driving table is partitioned, as
-   `nexus.chunks` is (by model, then by tenant), the move worker never runs
-   it partition-wise (`i_partition_wise` stays false): it CALLs once per leaf
-   that holds the tenant's rows, with that leaf as the driving table, a plain
-   table that needs only its unique btree index (dml_utils README, the plain
-   table case), and names the run `<label>/<tenant>/<leaf>`. It takes the
-   tenant's leaf list from the catalog for that tenant (`pg_inherits` under
-   the tenant's partitions), never from a scan, and never runs a tenant's
-   session against another tenant's leaf: row-level security on the
-   partitioned parent does not apply when a leaf is named directly, and each
-   `nexus.chunks` leaf holds one tenant's rows, so the leaf scopes the run.
-   A leaf created after the pass started (a new model for the tenant) gets its
-   own run on the next pass; The connection is autocommit, so the coordinator
+   runs `RESET nexus.tenant`. When the driving table is list-partitioned with
+   one tenant per leaf, as `nexus.chunks` is (by model, then by tenant), the
+   move worker never runs it partition-wise (`i_partition_wise` stays false):
+   it CALLs once per leaf of the tenant, with that leaf as the driving table,
+   a plain table chunked by its primary key like any non-partitioned driving
+   table (so the four-column key prerequisite still applies), and names the
+   run `<label>/<tenant>/<leaf>`. That is one run per leaf, tenants times
+   models of them, since a new model partition gets a leaf for every tenant
+   (vectors-030); an empty leaf's run has no chunks. The
+   tenant's leaves are the children of each model partition of the table
+   whose single-value bound is the tenant, read with
+   `nexus.partition_bound_value` (vectors-030), the way
+   `nexus.drop_tenant_partitions` enumerates a tenant's leaves: from the
+   catalog, never from a scan or a name pattern. The move worker never runs a
+   tenant's session against another tenant's leaf. Row-level security on the
+   partitioned parent does not apply when a leaf is named directly, but each
+   leaf carries its own copy of the parent's FORCE RLS and policies
+   (`nexus.partition_copy_access`, vectors-030), and a leaf holds one
+   tenant's rows, so the leaf and its policies both scope the run. A leaf
+   created after registration holds only new-shape rows (Approach, step 5),
+   so it needs no run; old-shape rows in one mean a writer still produces the
+   old shape, and the verification fails the move, as for any such writer. A move over a table partitioned
+   another way runs per tenant over the parent, not partition-wise. The connection is autocommit, so the coordinator
    holds no snapshot between chunks;
 3. once every tenant's run is complete, and after reading the row again (a
    paused move stops here), runs the verification query for each
@@ -471,10 +484,15 @@ retried after the move's backoff with the move `blocked:`: no free slot; a
 missing install or role; an admin connection that cannot see every row; a
 verification run or `on_complete` that hits `statement_timeout_ms`, or an
 `on_complete` that hits its `lock_timeout` (SQLSTATE 55P03); a lost connection
-or a stopped engine; a partition tree that changed under a resumed run (below);
+or a stopped engine;
 a chunk error dml_utils recorded with SQLSTATE 40001 (serialization), 40P01
 (deadlock), 55P03 (lock not available) or 57014 (statement cancelled), which
-live writers cause and a later pass of the same label clears; and an error the
+live writers cause, or in class 53 (insufficient resources) or 57P01, 57P02
+or 57P03 (shutdown and startup), which a busy or restarting host causes; a
+later pass of the same label clears these, because dml_utils re-claims every
+boundary whose `completed_at` and `cancelled_at` are NULL
+(`claim_migration_boundary`) and a failed chunk's boundary is neither
+(README: the call "raises the error, leaving the run to be resumed"); and an error the
 CALL raised that dml_utils did not record as a chunk error, with SQLSTATE in
 class 08 (connection exception) or class 53 (insufficient resources), or
 57P01, 57P02 or 57P03 (shutdown and startup), 40001, 40P01, 55P03, 57014,
@@ -482,15 +500,22 @@ class 08 (connection exception) or class 53 (insufficient resources), or
 (undefined_function: an install that vanished between the check and the
 CALL). A recorded chunk error with any other SQLSTATE is permanent, 42501 and
 42883 included, because there it is the template's own fault (a function it
-names, or a table its role cannot write). *Permanent*, which sets `failed_at`
+names, or a table its role cannot write), and so is a recorded class 08
+error, since a chunk records its own statement's error, not the
+coordinator's connection. dml_utils records a chunk's error on a best-effort
+basis (its recorder swallows its own failure), so a template error it failed
+to record reads as raised; a 42501 or 42883 then retries as transient and
+shows "needs an operator" after the cap rather than `failed:`. That path is
+rare and stays visible. *Permanent*, which sets `failed_at`
 and `failure`: an error with any other SQLSTATE (class 22 data, class 23
 integrity, the rest of class 42, class 3F such as `assert_schema_exists`'s
 3F000 for a missing driving schema, P0 PL/pgSQL, and anything else), a
 non-empty verification, and an `on_complete` that fails for a reason other
 than its statement or lock timeout. The move worker tells a recorded chunk
 error from a raised one by the run's `migration_error` rows: it reads the
-run's highest `error_id` before the CALL, and a row above that mark is this
-pass's chunk error, read with its own `sqlstate`. dml_utils never deletes
+run's highest `error_id` before the CALL (0 when the run does not exist yet,
+since the first CALL creates it), and a row above that mark is this pass's
+chunk error, read with its own `sqlstate`. dml_utils never deletes
 `migration_error` rows on resume (only `delete_archived_migration_runs`
 does), so an older row says nothing about this pass, and an id mark, unlike a
 clock, needs no agreement between the engine and the database. An error the move worker cannot place in either list is permanent,
@@ -529,13 +554,19 @@ always reports how many times it has been retried:
   takes effect at the next of those points: a run already in flight
   continues to its end, because one CALL of the committing entry point runs
   every chunk of that run. A move on a table with no tenant column has one run,
-  so a pause stops it only before that run starts or before its
-  verification. boot_work reports the move `paused:` with `paused_by`; nx
+  so a pause stops it only before that run starts, before its verification
+  or before `on_complete`. boot_work reports the move `paused:` with `paused_by`; nx
   doctor shows it as a note, not red, since an operator chose it. It resumes
   when `paused_at` is set back to NULL. To stop a run in flight sooner, an
-  operator cancels the CALL's backend (`pg_cancel_backend` on the move
-  worker's connection, which boot_work names); chunks already committed stay
-  committed and the run resumes on the next pass after the pause is cleared.
+  operator cancels the CALL's backend with `pg_cancel_backend`, using the pid
+  the engine logs for each CALL (`event=data_move_call`). The CALL raises
+  57014, a transient error that counts a retry; it does not set the run's
+  `cancelled_at` and is not dml_utils' `cancel_migration_run`, so the move
+  does not become `failed:`. Chunks already committed stay committed and the
+  run resumes on the next pass after the pause is cleared. What the cancel
+  does to a chunk worker already launched is not documented by dml_utils (its
+  coordinator drains workers in a `WHEN OTHERS` handler, which does not catch
+  `query_canceled`), and the DataMoveWorker tests (Step 4) establish it.
   `NX_DATA_MOVE_SLEEP_MS` throttles a move; it does not pause one, and the
   move worker clamps it to the registry's bounds (0 to 60,000 ms) before
   applying it.
@@ -543,7 +574,7 @@ always reports how many times it has been retried:
   worker takes the next open move, oldest `registered_at` first and `label`
   as the tiebreak. A move that must follow another is registered by a
   changeset whose precondition waits on the earlier move's `completed_at`
-  (Finishing a move, above); no rule of the gate covers this ordering, so the
+  (Finishing a move, below); no rule of the gate covers this ordering, so the
   review checks it.
 - *Interrupted runs.* A run left incomplete by an engine stop, a lost
   connection or a cancelled CALL resumes: the next pass calls the same label,
@@ -580,8 +611,9 @@ or INSERT sees and changes only the rows of the tenant set on the session,
 and so does `dml_utils_owner`'s boundary scan, which runs as a role with no
 other policy. pg_background workers run as the caller and copy its settings
 (T2 nexus_rdr/246-research-1). A move over a tenant-scoped table therefore
-runs once per tenant, as in step 2. A move over a table with no tenant column
-runs once. It does not run as nexus_svc.
+runs once per tenant, as in step 2 (on a table partitioned one tenant per
+leaf, such as `nexus.chunks`, once per leaf of the tenant, under that
+tenant's setting). A move over a table with no tenant column runs once. It does not run as nexus_svc.
 
 Reads by `nexus_admin` differ by table. On `nexus.chunks`, vectors-029 gives
 the migrating role a permissive SELECT policy, `chunks_gate_probe_owner_read`
@@ -702,7 +734,8 @@ total, unit, safeToStop, onStop, step). `done` and `total` are
 `total_chunks_completed` and `total_chunks` from
 `dml_utils_data.migration_run` (006-create-migration-tables.sql lines 27-28),
 summed over the move's active runs (`archived_at IS NULL`), `unit: "chunks"`. A run with no rows has a total
-of zero. The total grows as each tenant's run is created, so the fraction can
+of zero. The runs summed are those whose name is the label or begins with
+`<label>/`. The total grows as each tenant's or leaf's run is created, so the fraction can
 fall while `done` only rises. `safe_to_stop: true` and `on_stop: "resumes from
 the last committed batch"`. The shape has no state field, so `what` begins
 `blocked:` (no pg_background, a library role or the dml_utils install; an
@@ -892,8 +925,8 @@ launcher that upstream does not test.
   a red line. Nothing falls back to a boot-time move.
 - **A chunk fails** (a constraint, a bad template): dml_utils stops launching
   chunks, lets the ones in flight commit, records the failure in
-  migration_error, and raises. Unless its SQLSTATE is one of the four
-  recorded transient ones (40001, 40P01, 55P03, 57014), the move worker logs
+  migration_error, and raises. Unless its SQLSTATE is a recorded transient
+  one (40001, 40P01, 55P03, 57014, class 53, 57P01-57P03), the move worker logs
   the label and the error, sets `failed_at` and `failure`, and boot_work reports it as `failed:` with
   the error text. A failed move is not retried, at this boot or a later one.
   A fix is a new changeset that registers a new move with a new label
@@ -1036,11 +1069,14 @@ data-move test.
   exists), the install and slot checks, the dedicated per-tenant connection
   with its SET and RESET, the tenant list, the per-tenant and table-wide
   verification in READ ONLY transactions under `statement_timeout_ms`,
-  `on_complete`, and the failure classes (the SQLSTATE lists, a chunk error
-  counted only if recorded since the pass started), the retry counter,
-  backoff and cap, the pause read before each tenant's CALL, the changed-tree
-  archive and re-create, the `cancelled_at` read after each CALL, and the
-  `NX_DATA_MOVE_SLEEP_MS` clamp;
+  `on_complete`, the per-leaf runs on a tenant-partitioned driving table with
+  the leaf list from `nexus.partition_bound_value`, the failure classes (the
+  recorded and raised SQLSTATE lists, told apart by the `error_id` mark taken
+  before each CALL), the retry counter, backoff and cap, the pause read before
+  each pass, each run's CALL, the verification and `on_complete`, the CALL's
+  backend pid in its log event, the `cancelled_at` read from the active run
+  after each CALL, the `NX_DATA_MOVE_SLEEP_MS` clamp, and a test of what
+  `pg_cancel_backend` on the CALL does to a chunk in flight;
 - for any driving table other than `nexus.chunks`, the owner-read SELECT
   policy for the migrating role in its own guarded changeset after the
   registering one, and `ChunksIsolationCheck` extended to every driving table
@@ -1115,8 +1151,8 @@ count after fixing its cause: `UPDATE nexus.data_moves SET transient_retries
 ## Test Plan
 
 - **Scenario**: a move hits a transient error 21 times. **Verify**: the waits follow 30 s doubling to 15 minutes, `blocked:` shows the count and, from the 20th, "needs an operator"; the move is never `failed:`, and once the cause is fixed the next pass runs it and resets the counter.
-- **Scenario**: an operator pauses a move during a tenant's run. **Verify**: that tenant's run finishes, no further tenant's CALL starts, boot_work shows `paused:`, and clearing `paused_at` resumes the move.
-- **Scenario**: a tenant writes its first chunk under a new model, and another tenant's first chunk creates a new leaf, while a `nexus.chunks` move is between passes. **Verify**: no run is disturbed; the new leaf of the moving tenant gets its own run `<label>/<tenant>/<leaf>` on the next pass; the other tenant's leaf is covered by its own tenant's runs; the move completes with an empty verification and `done` equal to `total`.
+- **Scenario**: an operator pauses a move while a run's CALL is in flight. **Verify**: that run finishes, no further CALL starts (for that tenant's other leaves or any other tenant), boot_work shows `paused:`, and clearing `paused_at` resumes the move.
+- **Scenario**: new `nexus.chunks` leaves appear (a new model, which creates a leaf for every tenant, and a new tenant) while a move is between passes. **Verify**: no existing run is disturbed; the new leaves hold only new-shape rows and the move completes with an empty verification and `done` equal to `total`; a new leaf seeded with an old-shape row makes the verification non-empty and the move `failed:`.
 - **Scenario**: a tenant's session runs a move. **Verify**: every leaf it CALLs on is one of that tenant's leaves from the catalog, never another tenant's.
 - **Scenario**: an operator cancels a run with `cancel_migration_run`. **Verify**: the move is `failed:` with "run cancelled at <time>", not completed.
 - **Scenario**: a CALL raises 42501 with no new `migration_error` row, then a chunk records 42883 (a template naming a missing function), on a run that already holds an older 40001 row. **Verify**: the raised 42501 is transient, the recorded 42883 is permanent, and the old row changes neither.
@@ -1125,7 +1161,7 @@ count after fixing its cause: `UPDATE nexus.data_moves SET transient_retries
 - **Scenario**: the engine is killed after some chunks commit. **Verify**: the next boot serves at once and resumes at the next chunk, and the final state equals an uninterrupted run.
 - **Scenario**: pg_background is absent. **Verify**: the engine skips the dml_utils changelogs and serves, the move is reported blocked, and no row changes; after the extension is created, the next boot applies the changelogs and the move runs.
 - **Scenario**: a chunk fails. **Verify**: the move is reported `failed:` with the error, `failed_at` is set, the committed chunks stay, and neither the next pass nor a later boot retries it.
-- **Scenario**: tenants under FORCE RLS. **Verify**: the move runs once per registered tenant, rewrites every tenant's rows, and no run, whether as the move's role or through `dml_utils_owner`'s boundary scan, touches a row of a tenant other than its own; on `nexus.chunks` the per-tenant verification counts only its own tenant's rows although `nexus_admin` can read them all.
+- **Scenario**: tenants under FORCE RLS. **Verify**: the move runs for every registered tenant (once per leaf of the tenant on `nexus.chunks`), rewrites every tenant's rows, and no run, whether as the move's role or through `dml_utils_owner`'s boundary scan, touches a row of a tenant other than its own; on `nexus.chunks` the per-tenant verification counts only its own tenant's rows although `nexus_admin` can read them all.
 - **Scenario**: bloat. A move over 100k rows with autovacuum off, VACUUM run mid-move. **Verify**: the coordinator's backend_xmin is null between chunks and VACUUM reports no dead row "not yet removable" from chunks already committed.
 - **Scenario**: writers during a move: insert new-shape rows (some into chunks not yet run), update and delete existing rows of both shapes while a move runs. **Verify**: every surviving pre-existing row ends in the new shape, every new row keeps the values its writer gave it, and the verification query is empty.
 - **Scenario**: a writer inserts an old-shape row, with a key in a chunk already done, after the move starts. **Verify**: the verification query returns it, the move is reported `failed:` and `completed_at` stays NULL.
@@ -1163,7 +1199,8 @@ Minimum Viable Validation and the Test Plan.
 The spikes overturned one premise, that a pg_background worker inherits no
 setting from its caller. The Row-level security design, the critical
 assumption, Step 3 and the RLS test scenario now all say a move runs once per
-tenant with the tenant set by the move worker. The install-order statements (Technical
+tenant with the tenant set by the move worker (once per leaf of the tenant on
+a table partitioned one tenant per leaf, a 2026-11-16 amendment). The install-order statements (Technical
 Design, Risks, Failure Modes, Activation Step 1, the absent-extension test)
 all say the engine applies dml_utils' changelog only when pg_background and
 the library roles are present. The statements that dml_utils cannot chunk a bytea key predate its
@@ -1236,4 +1273,5 @@ the first registered move.
 - 2026-11-16: Install sequence step 1 scoped to the bundled cluster (BYO via docs/configuration.md, cloud via Activation Step 1), with the bootstrap's handling of a bundle without the library, drifted library roles and a foreign-owned `liquibase` schema; the boot check gains the schema owner (reviews of nexus-f3yqd.2.9).
 - 2026-11-16: the grant of `dml_utils_owner` to `nexus_admin` is WITH INHERIT FALSE, SET TRUE, so the owner's CREATE on public does not leak to the engine's role by default (found by tests/db/test_pg_provision.py TestPublicSchemaGrantIsLoadBearing on nexus-f3yqd.2.9).
 - 2026-11-16: residual nexus-f3yqd.2.3 settled (wren, agreed with linda, who builds DataMoveWorker): the registry gains the transient retry counter, an operator pause and bounds on the chunk size and `sleep_ms`; Technical Design gains "Retries, pause and cancelled runs" (backoff 30 s doubling to 15 min with no end to retries, a cap of 20 that adds "needs an operator", the pause read before each tenant's CALL, resume of an interrupted run, archive and re-create on a changed partition tree, `failed:` only for a run dml_utils records as cancelled, one SQLSTATE list for recorded and raised errors with a chunk error counted only if recorded since the pass started, the order rule); Step 4 and the Test Plan name them; Day 2 Operations gains the pause statement.
-- 2026-11-16: per-leaf runs for partitioned driving tables (wren, with linda; fix check `nexus_rdr/246-fix-check-839e922d1` recorded the earlier text's residuals): `nexus.chunks` moves run one plain-table run per tenant leaf from that tenant's catalog, so no tree check applies and a new leaf cannot restart a run; a changed tree on a partition-wise move is `failed:`, with no archive and re-create; a recorded chunk error is transient only for 40001, 40P01, 55P03 and 57014, and 42501 and 42883 are transient only when raised outside a recorded chunk error, told apart by an `error_id` mark taken before the CALL; the pause is also read before the verification and `on_complete`, and a run in flight is stopped by cancelling its backend; `cancelled_at` is read from the active run; the hand-set columns get CHECKs; progress sums active runs; the Day 2 verify allows older retried-chunk rows.
+- 2026-11-16: per-leaf runs for partitioned driving tables (wren, with linda; fix check `nexus_rdr/246-fix-check-839e922d1` recorded the earlier text's residuals): `nexus.chunks` moves run one plain-table run per tenant leaf from that tenant's catalog, so no tree check applies and a new leaf cannot restart a run; the move worker never runs a move partition-wise and any 55000 is permanent, with no archive and re-create; a recorded chunk error is transient only for 40001, 40P01, 55P03 and 57014, and 42501 and 42883 are transient only when raised outside a recorded chunk error, told apart by an `error_id` mark taken before the CALL; the pause is also read before the verification and `on_complete`, and a run in flight is stopped by cancelling its backend; `cancelled_at` is read from the active run; the hand-set columns get CHECKs; progress sums active runs; the Day 2 verify allows older retried-chunk rows.
+- 2026-11-16: per-leaf fix-check round 1 (wren): the failure list and Step 4 no longer carry the archive-and-re-create design; recorded class 53 and 57P01-57P03 chunk errors are transient (dml_utils re-claims an uncompleted boundary); the leaf list is read with `nexus.partition_bound_value`; the CALL's pid is in its log event and a backend cancel is transient, not `cancel_migration_run`; the per-leaf run is a Critical Assumption to spike.
