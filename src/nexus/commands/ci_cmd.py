@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from typing import NoReturn
 
 import click
 
@@ -59,6 +60,18 @@ def ci_wait_cmd(
     and 5 when the wait could not run (a bad SHA, no tuple store, a refused
     board read, or the board unreachable until the deadline).
     Click's own usage errors (a missing SHA, --timeout out of range) exit 2.
+
+    GitHub-only mode: the board has topics for develop and main only. For any
+    other --branch (a release or feature branch), or when the engine refuses
+    the topic as unknown, the board is skipped and the wait reads SHA's
+    check-runs from GitHub (all events, so a pull_request's CI counts), once
+    a minute and never faster, until every check-run has completed or
+    --timeout passes. The result line says "GitHub only: the board was not
+    used". Exit codes are the same: 0 all passed, 1 any failed, 3 cancelled
+    and none failed, 4 a conclusion this table does not know, 2 timeout
+    (check-runs still running, or none yet), 5 GitHub unreadable until the
+    deadline. --fresh has no meaning without the board and is ignored; SHA may
+    be a prefix, which GitHub resolves.
     """
     if not math.isfinite(timeout_min):
         click.echo(f"{sha} unusable: --timeout must be a number of minutes")
@@ -68,6 +81,8 @@ def ci_wait_cmd(
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
     sha = sha.lower()
     gh = gh_repo or f"Hellblazer/{repo}"
+    if branch not in ci_wait.BOARD_BRANCHES:
+        _github_only(sha, gh, branch, timeout_min)
     subspace = ci_wait.done_subspace(repo, branch)
     try:
         store = _store()
@@ -78,6 +93,8 @@ def ci_wait_cmd(
         row = ci_wait.find_done_row(
             store, subspace, sha, timeout_s=timeout_min * 60, fresh=fresh, park_s=park_s,
         )
+    except ci_wait.BoardSubspaceUnknownError:
+        _github_only(sha, gh, branch, timeout_min)
     except ci_wait.BoardUnreadableError as exc:
         click.echo(f"{sha[:12]} unusable: {subspace} could not be read: {exc}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE) from None
@@ -91,6 +108,13 @@ def ci_wait_cmd(
         click.echo(line)
         raise SystemExit(code)
     line, code = ci_wait.summarize(ci_wait.complete_runs(ci_wait.fill_conclusions(row, gh), gh, branch))
+    click.echo(line)
+    raise SystemExit(code)
+
+
+def _github_only(sha: str, gh_repo: str, branch: str, timeout_min: float) -> NoReturn:
+    """Wait on GitHub's check-runs alone, print the one line and exit."""
+    line, code = ci_wait.wait_on_github(gh_repo, sha, branch, timeout_s=timeout_min * 60)
     click.echo(line)
     raise SystemExit(code)
 

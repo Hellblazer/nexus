@@ -6,7 +6,9 @@ timeout) and the CLI's line and exit code.
 """
 from __future__ import annotations
 
+import functools
 import json
+import subprocess
 
 import pytest
 from click.testing import CliRunner
@@ -522,3 +524,157 @@ class TestCappedRow:
         github = [ci_wait.Run(10, 1, "CI", "success"), ci_wait.Run(11, 1, "Svc", "success")]
         full = ci_wait.complete_runs(done, "o/r", "develop", fetch=lambda *a: github)
         assert [r.run_id for r in full.runs] == [10, 11] and ci_wait.summarize(full)[1] == ci_wait.EXIT_SUCCESS
+
+
+# ── GitHub-only mode: a branch the board does not watch (nexus-x4jok) ────────
+#
+# board/ci/ has topics for develop and main only; a release PR's CI runs on
+# pull_request events. ``gh`` is faked at the ``run_bounded`` seam ci_wait
+# already uses; the recorded output is what ``gh api --paginate --jq
+# '.check_runs[] | [.id, .name, .status, .conclusion]'`` prints, one array per
+# line, for ``repos/Hellblazer/nexus/commits/<sha>/check-runs``.
+
+RELEASE = "release/v8.3.0"
+
+
+def _lines(*checks: tuple[int, str, str, str | None]) -> str:
+    return "".join(json.dumps(list(c)) + "\n" for c in checks)
+
+
+_RUNNING = _lines((1, "lint", "completed", "success"), (2, "pytest (shard 1)", "in_progress", None))
+_GREEN = _lines((1, "lint", "completed", "success"), (2, "pytest (shard 1)", "completed", "success"),
+                (3, "docs", "completed", "skipped"))
+_RED = _lines((1, "lint", "completed", "success"), (2, "pytest (shard 1)", "completed", "failure"))
+_CANCELLED = _lines((1, "lint", "completed", "success"), (2, "pytest (shard 1)", "completed", "cancelled"))
+
+
+class _Gh:
+    """``run_bounded`` stand-in: one recorded stdout per call; the last repeats."""
+
+    def __init__(self, *outputs: str | BaseException) -> None:
+        self.outputs = list(outputs)
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        out = self.outputs[min(len(self.calls), len(self.outputs)) - 1]
+        if isinstance(out, BaseException):
+            raise out
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+
+class TestGithubOnly:
+    @pytest.fixture
+    def clock(self, monkeypatch) -> _Clock:
+        """The CLI's GitHub-only wait driven by a fixed clock; sleeps advance it."""
+        clock = _Clock()
+        self.sleeps: list[float] = []
+
+        def sleep(s: float) -> None:
+            self.sleeps.append(s)
+            clock.now += s
+
+        monkeypatch.setattr(
+            ci_wait, "wait_on_github", functools.partial(ci_wait.wait_on_github, clock=clock, sleep=sleep),
+        )
+        return clock
+
+    @pytest.fixture(autouse=True)
+    def _no_board(self, monkeypatch) -> None:
+        def boom():
+            raise AssertionError("the board was opened for a branch it does not watch")
+        monkeypatch.setattr(ci_cmd, "_store", boom)
+
+    def _wait(self, *extra: str, branch: str = RELEASE, minutes: str = "10"):
+        return CliRunner().invoke(ci_group, ["wait", SHA, "--branch", branch, "--timeout", minutes, *extra])
+
+    def test_a_release_branch_wakes_with_the_pull_request_result(self, monkeypatch, clock) -> None:
+        gh = _Gh(_RUNNING, _GREEN)
+        monkeypatch.setattr(ci_wait, "run_bounded", gh)
+        result = self._wait()
+        assert result.exit_code == 0, result.output
+        line = result.stdout.strip().splitlines()[-1]
+        assert line == (
+            f"{SHA[:12]} success: 3 check-runs, all passed https://github.com/Hellblazer/nexus/commit/{SHA} "
+            f"(GitHub only: the board was not used for {RELEASE})"
+        )
+        # one request per interval, the interval is the documented constant
+        assert len(gh.calls) == 2 and self.sleeps == [ci_wait.GITHUB_POLL_S] == [60.0]
+        assert gh.calls[0][:3] == ["gh", "api", f"repos/Hellblazer/nexus/commits/{SHA}/check-runs?per_page=100"]
+        assert "--paginate" in gh.calls[0]
+
+    def test_a_failed_check_exits_1_and_is_named(self, monkeypatch, clock) -> None:
+        monkeypatch.setattr(ci_wait, "run_bounded", _Gh(_RED))
+        result = self._wait()
+        assert result.exit_code == 1, result.output
+        assert "failure: 2 check-runs, 1 not passed: pytest (shard 1) failure" in result.stdout
+        assert self.sleeps == []
+
+    def test_cancelled_exits_3(self, monkeypatch, clock) -> None:
+        monkeypatch.setattr(ci_wait, "run_bounded", _Gh(_CANCELLED))
+        assert self._wait().exit_code == 3
+
+    def test_a_timeout_is_bounded_and_exits_2(self, monkeypatch, clock) -> None:
+        gh = _Gh(_RUNNING)
+        monkeypatch.setattr(ci_wait, "run_bounded", gh)
+        result = self._wait(minutes="2.5")  # 150 s: reads at 0, 60, 120, 150
+        assert result.exit_code == 2, result.output
+        assert "timeout: 1 of 2 check-runs still running (GitHub only" in result.stdout
+        assert len(gh.calls) == 4 and self.sleeps == [60.0, 60.0, 30.0]
+        assert clock.now == 150.0
+
+    def test_no_check_runs_yet_is_not_complete(self, monkeypatch, clock) -> None:
+        gh = _Gh("", _GREEN)
+        monkeypatch.setattr(ci_wait, "run_bounded", gh)
+        result = self._wait()
+        assert result.exit_code == 0 and len(gh.calls) == 2
+
+    def test_no_check_runs_by_the_deadline_exits_2(self, monkeypatch, clock) -> None:
+        monkeypatch.setattr(ci_wait, "run_bounded", _Gh(""))
+        result = self._wait(minutes="0")
+        assert result.exit_code == 2 and "no check-runs for it yet" in result.stdout
+
+    def test_a_read_that_fails_is_retried_and_the_wait_goes_on(self, monkeypatch, clock) -> None:
+        gh = _Gh(OSError("gh not found"), _GREEN)
+        monkeypatch.setattr(ci_wait, "run_bounded", gh)
+        assert self._wait().exit_code == 0 and len(gh.calls) == 2
+
+    def test_github_unreadable_until_the_deadline_exits_5(self, monkeypatch, clock) -> None:
+        monkeypatch.setattr(ci_wait, "run_bounded", _Gh(OSError("gh not found")))
+        result = self._wait(minutes="2")
+        assert result.exit_code == 5 and "GitHub could not be read until the deadline" in result.stdout
+
+    @pytest.mark.parametrize("bad", ["not json\n", '{"a": 1}\n', '[1, "n", "completed"]\n'])
+    def test_an_output_line_that_is_not_a_check_run_is_unreadable(self, monkeypatch, bad) -> None:
+        monkeypatch.setattr(ci_wait, "run_bounded", _Gh(bad))
+        assert ci_wait.gh_check_runs("o/r", SHA) is None
+
+    def test_a_watched_branch_whose_topic_the_engine_refuses_falls_back(self, monkeypatch, clock) -> None:
+        from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415
+
+        class Refusing:
+            def rd(self, *a, **k):
+                raise UnknownSubspaceError("no template for board/ci/nexus-main--done")
+
+        monkeypatch.setattr(ci_cmd, "_store", lambda: Refusing())
+        monkeypatch.setattr(ci_wait, "run_bounded", _Gh(_GREEN))
+        result = self._wait(branch="main")
+        assert result.exit_code == 0 and "GitHub only: the board was not used for main" in result.stdout
+
+    def test_develop_and_main_still_use_the_board(self, monkeypatch) -> None:
+        for branch in ("develop", "main"):
+            board = _Board(_Clock())
+            board.post(SHA, [[10, 1, "CI", "success"]])
+            board_seen: list[str] = []
+            orig = board.rd
+
+            def rd(subspace, *a, _orig=orig, _branch=branch, **k):
+                board_seen.append(subspace)
+                return _orig("board/ci/nexus-develop--done", *a, **k)
+
+            board.rd = rd  # type: ignore[method-assign]
+            monkeypatch.setattr(ci_cmd, "_store", lambda b=board: b)
+            monkeypatch.setattr(ci_wait, "run_bounded", lambda *a, **k: pytest.fail("gh read on the board path"))
+            result = CliRunner().invoke(ci_group, ["wait", SHA, "--branch", branch, "--timeout", "1"])
+            assert result.exit_code == 0 and "GitHub only" not in result.stdout
+            assert board_seen[0] == f"board/ci/nexus-{branch}--done"
