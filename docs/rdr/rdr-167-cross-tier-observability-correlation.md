@@ -697,3 +697,4 @@ and the JSON appender is not built until something needs it.
   6.0.0 examples taken one by one, Background narrowed to join one of three. S3: header
   renamed `X-Correlation-ID`; the Phase 2 probe tests overwrite and strip as well as
   pass-through. Research `nexus_rdr/167-research-9`.
+- 2026-11-16: Accepted (Sam, by dialog in halcyon's session: "Accept"). Fix check `nexus_rdr/167-fix-check-b5b0e4bbeab4` PASS. Epic nexus-dngtz. Residual dispositions: gate S2 nexus-dngtz.1.9, S4 nexus-dngtz.1.1, S5 nexus-dngtz.1.2; fix-check probe outcomes nexus-dngtz.1.4, exception naming nexus-dngtz.1.6, synthetic 4xx test nexus-dngtz.1.7, path escaping nexus-dngtz.1.8.
