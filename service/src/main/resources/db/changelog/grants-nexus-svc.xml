@@ -137,6 +137,8 @@ BEGIN
         WHERE n.nspname IN ('nexus', 't1')
           AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
           AND pg_get_userbyid(c.relowner) = current_user
+          -- nexus.data_moves (RDR-246, datamoves-001-registry.xml) is admin-connection only: no nexus_svc grant.
+          AND NOT (n.nspname = 'nexus' AND c.relname = 'data_moves')
     LOOP
         IF rel.relkind = 'S' THEN
             EXECUTE format(

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-246 Step 4 (nexus-f3yqd.2.12): nexus.data_moves, the registry of data moves. One row per registered
+    move; a changeset registers a move with one INSERT, and DataMoveWorker (the engine thread) works the open
+    ones. The design of record is RDR-246 Technical Design, "The registry".
+
+    Columns:
+      label                 the primary key. The worker names each dml_utils run <label>/<tenant>,
+                            <label>/<tenant>/<leaf> for a per-leaf run on a table partitioned one tenant per leaf,
+                            or <label> alone for a table with no tenant column; data_moves_label_check refuses a
+                            '/' so one move's runs are never read as another's.
+      template              the DML template the move runs, one chunk at a time.
+      driving_schema        the schema of the table dml_utils cuts into chunks by primary key.
+      driving_table         that table's name.
+      chunk_size            rows per chunk, 1 to 1000000.
+      sleep_ms              the pause after each chunk (dml_utils i_sleep_ms), 0 to 60000; throttles the move
+                            against serving traffic. NX_DATA_MOVE_SLEEP_MS overrides it per environment.
+      statement_timeout_ms  the bound on each verification run and on on_complete; positive.
+      verification          NOT NULL: a SELECT returning the old-shape rows still present, one bind parameter
+                            (the tenant, or NULL for the table-wide run). Runs in a READ ONLY transaction.
+      on_complete           NULL, or the SQL that finishes the new shape once verified (VALIDATE CONSTRAINT,
+                            a column drop, a table swap).
+      changeset_id          the changeset that registered the move.
+      supersedes            NULL, or the label of an earlier move this one replaces. Unique, so one move is
+                            replaced at most once; a foreign key, so it names a registered move.
+      registered_at         when the row was written. The worker takes the oldest open move first.
+      failed_at, failure    set together when the move fails permanently (the error text, or the verification
+                            count); a failed move is not retried. data_moves_failure_pair_check keeps the pair.
+      completed_at          set when the move verified and on_complete ran. A move is open while completed_at
+                            and failed_at are NULL and no row supersedes it; a paused move is still open and
+                            the worker filters it out in its own query.
+      transient_retries     how many consecutive transient failures the worker has retried; the retry counter
+                            and its backoff come from RDR-246's nexus-f3yqd.2.3 amendment (in progress).
+      last_transient_at,    when and what the latest transient failure was; set together (the same .2.3
+      last_transient        amendment). data_moves_transient_retries_stamp_check ties them to the counter: zero
+                            retries means no timestamp, a positive count means one is set, so the backoff always
+                            has both.
+      paused_at, paused_by  set by an operator's SQL UPDATE as nexus_admin to hold a move; paused_by (who or
+                            why, free text) is only allowed once paused_at is set. NULL paused_at means not
+                            paused.
+
+    Access: written and read only as nexus_admin, the migrating role (Liquibase and the worker). Nothing on the
+    serving pool reads it, so nexus_svc gets NO grant. Two things would give it one and both are handled:
+    ALTER DEFAULT PRIVILEGES hands nexus_svc DML on every table nexus_admin creates, so the changeset below
+    REVOKEs it; and the runAlways grants-nexus-svc-1 loop re-grants DML on every nexus_admin-owned table on
+    each boot, so that loop skips nexus.data_moves (an exclusion in its own SELECT, a runAlways body edit that
+    is checksum-safe). nexus_diag gets none either (it is not on NEXUS_DIAG_READABLE_TABLES).
+
+    Global table, no tenant column, so NO row-level security (the posture of service_tokens, embedding_models
+    and install_pings). It holds no tenant data, so it is not in the tenant export registry either (that
+    registry covers the RLS tables).
+
+    Rollback is written verbatim. DDL only, no row DML, so this changeset needs no rehearsal seed.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="datamoves-001-1" author="nexus-f3yqd.2.12">
+        <comment>Create nexus.data_moves, the registry of data moves (RDR-246 Step 4); admin connection only, no nexus_svc grant, no RLS</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE TABLE nexus.data_moves (
+    label                 TEXT        NOT NULL,
+    template              TEXT        NOT NULL,
+    driving_schema        TEXT        NOT NULL,
+    driving_table         TEXT        NOT NULL,
+    chunk_size            INTEGER     NOT NULL,
+    sleep_ms              INTEGER     NOT NULL,
+    statement_timeout_ms  INTEGER     NOT NULL,
+    verification          TEXT        NOT NULL,
+    on_complete           TEXT,
+    changeset_id          TEXT        NOT NULL,
+    supersedes            TEXT,
+    registered_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    failed_at             TIMESTAMPTZ,
+    failure               TEXT,
+    completed_at          TIMESTAMPTZ,
+    transient_retries     INTEGER     NOT NULL DEFAULT 0,
+    last_transient_at     TIMESTAMPTZ,
+    last_transient        TEXT,
+    paused_at             TIMESTAMPTZ,
+    paused_by             TEXT,
+    CONSTRAINT data_moves_pk PRIMARY KEY (label),
+    CONSTRAINT data_moves_label_check CHECK (label !~ '/'),
+    CONSTRAINT data_moves_chunk_size_check CHECK (chunk_size BETWEEN 1 AND 1000000),
+    CONSTRAINT data_moves_sleep_ms_check CHECK (sleep_ms BETWEEN 0 AND 60000),
+    CONSTRAINT data_moves_statement_timeout_ms_check CHECK (statement_timeout_ms > 0),
+    CONSTRAINT data_moves_supersedes_unique UNIQUE (supersedes),
+    CONSTRAINT data_moves_supersedes_fk FOREIGN KEY (supersedes) REFERENCES nexus.data_moves (label),
+    CONSTRAINT data_moves_supersedes_self_check CHECK (supersedes &lt;&gt; label),
+    CONSTRAINT data_moves_terminal_exclusive_check CHECK (failed_at IS NULL OR completed_at IS NULL),
+    CONSTRAINT data_moves_failure_pair_check CHECK ((failed_at IS NULL) = (failure IS NULL)),
+    CONSTRAINT data_moves_transient_retries_check CHECK (transient_retries &gt;= 0),
+    CONSTRAINT data_moves_transient_pair_check CHECK ((last_transient_at IS NULL) = (last_transient IS NULL)),
+    CONSTRAINT data_moves_transient_retries_stamp_check CHECK ((transient_retries = 0) = (last_transient_at IS NULL)),
+    CONSTRAINT data_moves_paused_by_check CHECK (paused_by IS NULL OR paused_at IS NOT NULL)
+);
+
+-- The worker's scan: open moves, oldest first. A paused move is still open; the worker filters it in its query.
+CREATE INDEX data_moves_open_registered_at ON nexus.data_moves (registered_at)
+    WHERE completed_at IS NULL AND failed_at IS NULL;
+
+-- ALTER DEFAULT PRIVILEGES (grants-nexus-svc-1) gave nexus_svc DML on this table the moment it was created.
+-- Skipped when the migrating role is nexus_svc itself (an owner revoking its own rights would only lock out
+-- the one connection that works the registry).
+DO $$
+BEGIN
+    IF current_user &lt;&gt; 'nexus_svc'
+       AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_svc') THEN
+        REVOKE ALL ON TABLE nexus.data_moves FROM nexus_svc;
+    END IF;
+END
+$$;
+        </sql>
+        <rollback>
+            DROP TABLE IF EXISTS nexus.data_moves CASCADE;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

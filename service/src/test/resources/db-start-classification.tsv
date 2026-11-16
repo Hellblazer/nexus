@@ -41,6 +41,7 @@ P225DiskPreflightIntegrationTest	startEmptyDatabase	MIGRATOR	the migrator's disk
 GrantsNexusDiagViewAccessIntegrationTest	startEmptyDatabase	OWNERSHIP	creates the nexus_diag role itself (declared exclusive) and connects as it to prove the grants a full walk gives it
 Taxonomy011ForeignOwnedDiagViewTest	startEmptyDatabase	OWNERSHIP	replays taxonomy-011-1 against a pre-existing foreign-owned view, a state only a database before the walk can hold
 GrantsSvcForeignOwnedRelationTest	startEmptyDatabase	OWNERSHIP	replays the GH 1402 crash loop: an owner walks from scratch, then a superuser-owned view meets the grants changeset
+DataMovesSchemaLiquibaseTest	startEmptyDatabase	OWNERSHIP	a non-superuser owner walks the changelog twice, so the runAlways service-grant loop and the default privileges both meet nexus.data_moves, which must stay without a nexus_svc grant
 TextGateProbeSingleRoleGuardIntegrationTest	startEmptyDatabase	OWNERSHIP	walks the schema as each of several migrator roles (nexus_svc, a superuser, a BYPASSRLS login) and asserts vectors-029's precondition
 TextGateProbeSingleRoleGuardIntegrationTest	startDedicated	CLUSTER_STATE	grants role membership edges on nexus_svc, which would leak into every later class on a shared cluster
 ServiceIntegrationTest	startEmptyDatabase	SKELETON	a hand-made RLS harness with no product schema; pins that /version reports a missing public.databasechangelog, so the database must be unmigrated
