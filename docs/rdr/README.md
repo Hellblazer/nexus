@@ -251,7 +251,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Closed | 2026-10-23 |
 | [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Closed | 2026-10-23 |
 | [RDR-233](rdr-233-channel-free-push-for-sessions-without-the-channel-flag.md) | Channel-Free Push: Wake a Session Launched Without the Channel Flag | Feature | Closed | 2026-10-22 |
-| [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Accepted | 2026-10-26 |
+| [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Closed | 2026-10-26 |
 | [RDR-236](rdr-236-chunk-row-metadata-normalization.md) | Chunk-row metadata normalization: document fields on the catalog document, position fields on the manifest, the chunk row keeps only what its text determines | Architecture | Accepted | 2026-10-26 |
 | [RDR-237](rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md) | MinerU-Only PDF Extraction with a Per-Page Fallback Ladder | Architecture | Closed | 2026-10-27 |
 | [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Accepted | 2026-10-31 |
