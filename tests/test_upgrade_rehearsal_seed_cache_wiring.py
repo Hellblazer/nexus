@@ -125,9 +125,11 @@ def test_a_start_seeded_once_is_restored_the_next_time_and_judged_the_same(
         last_start:
     ]
     # the restored store's own paths name the second run's dir, not the first's
+    run1 = (cached.root / "w1" / f"from-{FROM}").resolve()
     run2 = (cached.root / "w2" / f"from-{FROM}").resolve()
     creds = (run2 / "config" / "pg_credentials").read_text()
-    assert f"PG_DATA={run2}/pgdata" in creds and "w1" not in creds
+    # match the first run's whole dir, never a bare "w1": an xdist tmp path holds "popen-gw1"
+    assert f"PG_DATA={run2}/pgdata" in creds and str(run1) not in creds
     # the restored store has a fresh port, as a seed would have: the credentials say so
     assert f"PG_PORT={NEW_PORT}" in creds and f"127.0.0.1:{NEW_PORT}/" in creds
     assert second["setup"]["prepare"]["pg_port"] == NEW_PORT
