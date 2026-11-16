@@ -180,6 +180,14 @@ def main(ctx: click.Context, verbose: bool) -> None:
     ctx.obj["verbose"] = verbose
     configure_logging("cli", verbose=verbose)
 
+    # RDR-167 (nexus-dngtz.1.1): one correlation id for this invocation. A try/finally here would not cover the
+    # subcommand (click returns from this callback before it runs); call_on_close fires when the context closes,
+    # after the subcommand, and resets by token so nothing stays bound.
+    from nexus.correlation import bind, new_correlation_id, reset  # noqa: PLC0415 — stdlib-only, deferred like the rest of this callback
+
+    _correlation_token = bind(new_correlation_id())
+    ctx.call_on_close(lambda: reset(_correlation_token))
+
     # nexus-75w5d: an UNATTENDED run is one nobody is watching: `nx upgrade --auto`, or any `nx` run with
     # NX_UPGRADE_UNATTENDED=1 in its environment (the lockstep action's detached PLAIN `nx upgrade` carries
     # it; it has no --auto and binds no deadline). The signal goes up FIRST, before the finish pass below

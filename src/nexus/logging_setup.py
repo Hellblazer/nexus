@@ -12,6 +12,8 @@ from typing import IO, Literal
 
 import structlog
 
+from nexus.correlation import add_correlation_id
+
 
 def _config_dir() -> Path:
     """Return the nexus config directory, respecting NEXUS_CONFIG_DIR."""
@@ -175,6 +177,8 @@ def configure_logging(
     #      levelname`` columns.
     structlog.configure(
         processors=[
+            # RDR-167: the correlation id, from its one ContextVar (no structlog contextvars).
+            add_correlation_id,
             structlog.stdlib.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.StackInfoRenderer(),

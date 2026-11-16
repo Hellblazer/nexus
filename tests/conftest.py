@@ -2932,6 +2932,21 @@ def _restore_cwd():
 
 
 @pytest.fixture(autouse=True)
+def _correlation_id_reset():
+    """nexus-dngtz.1.1 (RDR-167): no test sees a correlation id another test bound. The CLI group callback and
+    the MCP tool-call middleware bind one and reset it by token; a test that binds directly, or one that dies
+    between bind and reset, must not leak it to the next test in the worker."""
+    from nexus import correlation  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    token = correlation._CORRELATION_ID.set(None)
+    yield
+    try:
+        correlation._CORRELATION_ID.reset(token)
+    except ValueError:  # the test ran in another Context (an event loop thread); clear instead
+        correlation._CORRELATION_ID.set(None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_version_probe(request, monkeypatch):
     """nexus-jypmj.21: the "Answer-kind extraction" doctor row runs ``claude --version`` when the ``cli`` backend is
     chosen, so any test that reaches ``run_health_checks()`` (the doctor tests, the console health panel) on a box

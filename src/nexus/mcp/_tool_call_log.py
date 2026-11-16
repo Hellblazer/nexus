@@ -71,6 +71,10 @@ from typing import Any
 
 import structlog
 
+from nexus.correlation import bind as bind_correlation_id
+from nexus.correlation import new_correlation_id
+from nexus.correlation import reset as reset_correlation_id
+
 #: Distinct key-sets remembered per process; past it, new ones log at DEBUG.
 _MAX_KEYSETS = 64
 #: Most keys one event lists, and the longest a listed key may be.
@@ -265,31 +269,37 @@ def install_tool_call_log(server: object) -> str:
 
         async def _logged(ctx: Any, call_next: Any) -> Any:
             if ctx.method == "tools/call":
+                # RDR-167 (nexus-dngtz.1.1): one correlation id per tool call, reset by token on every exit.
+                # Each call runs in its own task context, so concurrent calls bind separate ids.
+                token = bind_correlation_id(new_correlation_id())
                 try:
-                    _emit(ctx.params)
-                except Exception:  # noqa: BLE001 — observability must never break a tool call
-                    pass
-                try:
-                    _heal_cwd()
-                except Exception:  # noqa: BLE001 — a failed chdir must never break a tool call
-                    pass
-                try:
-                    _note_next_call(ctx.params)
-                except Exception:  # noqa: BLE001 — observability must never break a tool call
-                    pass
-                try:
-                    result = await call_next(ctx)
-                except Exception:
                     try:
-                        _note_outcome(ctx.params, True)
+                        _emit(ctx.params)
                     except Exception:  # noqa: BLE001 — observability must never break a tool call
                         pass
-                    raise
-                try:
-                    _note_outcome(ctx.params, _is_error(result))
-                except Exception:  # noqa: BLE001 — observability must never break a tool call
-                    pass
-                return result
+                    try:
+                        _heal_cwd()
+                    except Exception:  # noqa: BLE001 — a failed chdir must never break a tool call
+                        pass
+                    try:
+                        _note_next_call(ctx.params)
+                    except Exception:  # noqa: BLE001 — observability must never break a tool call
+                        pass
+                    try:
+                        result = await call_next(ctx)
+                    except Exception:
+                        try:
+                            _note_outcome(ctx.params, True)
+                        except Exception:  # noqa: BLE001 — observability must never break a tool call
+                            pass
+                        raise
+                    try:
+                        _note_outcome(ctx.params, _is_error(result))
+                    except Exception:  # noqa: BLE001 — observability must never break a tool call
+                        pass
+                    return result
+                finally:
+                    reset_correlation_id(token)
             return await call_next(ctx)
 
         _logged._nx_tool_call_log = True  # type: ignore[attr-defined]
