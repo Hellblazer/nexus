@@ -195,10 +195,13 @@ code (research 3); lane D, outside systems (research 4).
 - [x] Every Bash child of a session carries the current session id in
   `CLAUDE_CODE_SESSION_ID`. **Status**: Verified by binary read and observed
   in a subagent's environment (research 2, row 2).
-- [ ] The MCP server can tell a call made by an Agent-tool subagent from one
-  made by its parent. **Method**: Spike. If it cannot, delegation covers
-  `claude -p` children and hooks, and subagent writes stay attributed to the
-  parent seat with an `agent` label (as today).
+- [x] The MCP server can tell a call made by an Agent-tool subagent from one
+  made by its parent. **Status**: Refuted for Claude Code 2.1.325
+  (`nexus_rdr/253-research-6`): of every tool call nexus logged, none carried
+  `claudecode/agentId` in `_meta`, including the research subagents' calls,
+  though the binary defines that key. The fallback applies: delegation covers
+  `claude -p` children; subagent writes stay attributed to the parent seat
+  with an `agent` label, as today. Re-checked on each Claude Code upgrade.
 - [ ] A Claude Desktop session can run the SessionStart hook and bind.
   **Method**: Spike. If it cannot, a Desktop session binds on its first MCP
   call as an ephemeral identity.
@@ -294,9 +297,10 @@ for the fenced subspaces (Sam's edit).
 identity, `kind=delegated parent=<id>`, and passes its token to the child in
 place of the parent's. A delegated identity reads its parent's identity-owned
 state and writes only its own; it ends when the child exits. Agent-tool
-subagents get the same when the MCP server can tell their calls apart
-(Critical Assumption 3); until then they keep today's attribution, the
-parent's seat with an `agent` label. Hooks run under the session's identity
+subagents keep today's attribution, the parent's seat with an `agent` label:
+their MCP calls carry nothing that tells them from the parent's (Critical
+Assumption 3, refuted for 2.1.325). They get delegation once Claude Code sends
+`claudecode/agentId` on tool calls. Hooks run under the session's identity
 through the resolver and never hold a delegated token.
 
 **State owned by the identity (Phase 1).**
@@ -534,17 +538,18 @@ identity-owned subspace families named under Fencing and nowhere else.
 
 ### Assumption Verification
 
-Two of four Critical Assumptions are verified (Bash children carry the
-session id; the clear rebind, by spike). Subagent attribution and Desktop
-binding need spikes; each has a stated fallback.
+Three of four Critical Assumptions are settled: two verified (Bash children
+carry the session id; the clear rebind, by spike) and one refuted with its
+fallback adopted (subagent attribution). Desktop binding needs a spike in a
+Desktop session; its fallback is stated.
 
 ### Scope Verification
 
 In scope: identity, aliases, binding log, resolver, token file, fencing,
 delegation for `claude -p`, and the Phase 1 state moves Sam chose. Out:
 cryptographic signatures, per-principal (human) identity, Agent-tool
-subagent delegation if Critical Assumption 3 fails, and anything outside one
-tenant.
+subagent delegation (Critical Assumption 3 refuted for 2.1.325), and anything
+outside one tenant.
 
 ### Cross-Cutting Concerns
 
@@ -580,3 +585,4 @@ T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-16: created (draft), from the four-lane identity research and Sam's
   four design decisions.
 - 2026-11-16: Critical Assumption 1 verified by a `/clear` and `/resume` spike in a throwaway session (`nexus_rdr/253-research-5`).
+- 2026-11-16: Critical Assumption 3 refuted (no `claudecode/agentId` on MCP calls in 2.1.325, `nexus_rdr/253-research-6`); the stated fallback adopted.
