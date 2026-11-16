@@ -104,9 +104,13 @@ def run_row(events: dict[int, list[Obj]], doc: str | None = None) -> Obj:
     applied = RV.real_apply([*events.get(2, []), *events.get(3, [])])
     if not applied:
         return {"error": "no real apply in turns 2-3"}
-    # the decisions came from the app: turn 2 read list_suggestions, then `decisions --from-file`, then dry-ran (and, when
-    # every suggestion was decided and none held, applied in this turn: turn 3, "Yes, apply.", is then absent)
-    flow_ok, flow_note = RV.app_flow(events.get(2, []), applied=RV.real_apply(events.get(2, [])) is not None)
+    # the decisions came from the app: turn 2 read list_suggestions, then `decisions --from-file`. With nothing held back
+    # it dry-ran and applied in that turn (turn 3, "Yes, apply.", is then absent); when turn 1 rendered a query or a
+    # paragraph proposal, turn 2 asks question 1 and turn 3 is the confirmation that applies (review_verdicts.deferred_flow)
+    if RV.held_question(RV.last(events.get(1, []), "review", "render")):
+        flow_ok, flow_note = RV.deferred_flow(events.get(2, []), events.get(3, []))
+    else:
+        flow_ok, flow_note = RV.app_flow(events.get(2, []), applied=RV.real_apply(events.get(2, [])) is not None)
     if not flow_ok:
         return {"error": f"turn 2 did not take its decisions from the app ({flow_note})"}
     if applied.get("rejections_stored") is not True:

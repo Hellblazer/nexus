@@ -304,13 +304,13 @@ def test_teardown_composes_with_the_guards_trap_lock_copies_and_jobs(box: Box) -
     assert len(_stops(box)) == 2
 
 
-def test_the_hook_runs_after_the_jobs_are_stopped_and_a_failing_stop_is_not_the_runs_failure(box: Box) -> None:
+def test_a_failing_service_stop_still_removes_the_sandbox_and_leaves_the_runs_exit_code(box: Box) -> None:
     box.control("stop_rc", "1")
     proc = drive(box, 'local_engine_start t\nexit 0')
     assert proc.returncode == 0 and box.sandboxes() == []   # `daemon service stop` failed; the run's rc and the removal stand
 
 
-def test_a_run_that_started_no_engine_runs_no_teardown(box: Box) -> None:
+def test_a_run_with_the_local_engine_off_calls_no_nx_at_all(box: Box) -> None:
     proc = drive(box, 'local_engine_start t', PROSE_EDIT_LOCAL_ENGINE="0")
     assert proc.returncode == 0 and box.calls() == []
 

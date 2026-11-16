@@ -76,7 +76,8 @@ DIR=docs/zz-review
 DOC=$DIR/scenario.md
 CDIR=docs/zz-review-control
 CDOC=$CDIR/scenario.md
-mkdir -p "$OUT"
+mkdir -p "$OUT" || exit 1
+OUT="$(cd "$OUT" && pwd)"   # absolute before the cd "$WT" below, as run-cut.sh does
 runner_standin_reset "$OUT"
 echo "$SCENARIOS" > "$OUT/scenarios.txt"
 local_engine_start run-review.sh

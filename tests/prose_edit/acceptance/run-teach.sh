@@ -58,7 +58,8 @@ DIR=docs/zz-teach
 DOC=$DIR/scenario.md
 S6DOC=tests/prose_edit/fixtures/user-entry.md
 MEM=(python3 prose-edit/skills/prose-edit/scripts/memory.py)
-mkdir -p "$OUT"
+mkdir -p "$OUT" || exit 1
+OUT="$(cd "$OUT" && pwd)"   # absolute before the cd "$WT" below, as run-cut.sh does
 runner_standin_reset "$OUT"
 local_engine_start run-teach.sh
 cd "$WT" || exit 1

@@ -280,6 +280,34 @@ def test_the_gate_still_takes_a_confirmation_turn_when_turn_2_only_asked(tmp_pat
     assert pooled["measurable"] == 1 and pooled["R"] == 1 and pooled["errors"] == 0
 
 
+
+def _gate_query_run(answer: list[dict], confirm: list[dict]) -> dict[str, list[dict]]:
+    runs = _gate_run("doc", 1, [{"old": "really quite ", "new": ""}], [{"n": 1, "old": "A fresh edit", "new": "Fresh"}], [])
+    runs["doc-1-1"] += _script("review", "render", "r1", {"counts": {"edits": 1, "queries": 1}})
+    runs["doc-1-2"], runs["doc-1-3"] = answer, confirm
+    return runs
+
+
+REAL_G = {"applied": [], "rejected": [1], "held": [], "rejections_stored": True}
+
+
+def test_with_a_query_the_gate_scores_a_run_that_reads_the_app_then_applies_in_the_confirmation(tmp_path: Path) -> None:
+    gate = _gate()
+    confirm = (_script("review", "apply", "cy", {"dry_run": True}, "--work /w --reject all --dry-run")
+               + _script("review", "apply", "cp", REAL_G, "--work /w --reject all"))
+    _write_runs(tmp_path, _gate_query_run(_read_turn("g1"), confirm))
+    _, pooled = gate.summarize(gate.collect(tmp_path))
+    assert pooled["measurable"] == 1 and pooled["R"] == 1 and pooled["errors"] == 0
+
+
+def test_with_a_query_the_gate_errors_a_run_that_applied_before_question_1(tmp_path: Path) -> None:
+    gate = _gate()
+    early = _read_turn("g1") + _script("review", "apply", "e", REAL_G, "--work /w --reject all")
+    confirm = _script("review", "apply", "cy", {"dry_run": True}, "--work /w --reject all --dry-run")
+    _write_runs(tmp_path, _gate_query_run(early, confirm))
+    _, pooled = gate.summarize(gate.collect(tmp_path))
+    assert pooled["measurable"] == 0 and pooled["errors"] == 1
+
 # ---------------------------------------------------------------------------
 # The runners: the answer text by mode, and the confirmation turn only when the answer turn did not apply
 # ---------------------------------------------------------------------------
