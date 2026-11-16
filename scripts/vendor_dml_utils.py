@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -92,6 +94,9 @@ def _git(clone: Path, *args: str) -> bytes:
 
 
 def resolve_revision(clone: Path, rev: str) -> str:
+    if rev.startswith("-"):
+        # `git rev-parse` would read it as an option.
+        raise VendorError(f"revision {rev!r} starts with '-'; refusing to pass it to git")
     if not clone.is_dir():
         raise VendorError(f"no clone at {clone}")
     try:
@@ -101,6 +106,17 @@ def resolve_revision(clone: Path, rev: str) -> str:
     if not _SHA.match(sha):
         raise VendorError(f"revision {rev} does not resolve in {clone}")
     return sha
+
+
+def validate_relpath(rel: str) -> str:
+    """*rel* is a path under a vendor directory: relative, with no empty, ``.``, ``..`` or ``.git`` component."""
+    parts = rel.split("/")
+    if rel.startswith("/") or "\\" in rel or "\0" in rel or re.match(r"^[A-Za-z]:", rel):
+        raise VendorError(f"refusing path {rel!r}: absolute or not a plain relative path")
+    for part in parts:
+        if part in ("", ".", "..") or part.lower() == ".git":
+            raise VendorError(f"refusing path {rel!r}: it has a {part!r} component")
+    return rel
 
 
 def library_tree(lib: Library, clone: Path, sha: str) -> dict[str, str]:
@@ -120,6 +136,7 @@ def library_tree(lib: Library, clone: Path, sha: str) -> dict[str, str]:
             rel = LICENSE_NAME
         else:
             continue
+        validate_relpath(rel)
         if kind != "blob" or mode == "120000":
             raise VendorError(f"{lib.name}: {path} at {sha} is a {kind} of mode {mode}, not a regular file")
         out[rel] = blob
@@ -157,7 +174,7 @@ def read_manifest(path: Path) -> Manifest:
         m = _MANIFEST_FILE_LINE.match(line)
         if m is None:
             raise VendorError(f"{path}:{n}: not a manifest line: {line!r}")
-        files[m.group(2)] = m.group(1)
+        files[validate_relpath(m.group(2))] = m.group(1)
     return Manifest(revision, files)
 
 
@@ -207,24 +224,58 @@ def update(repo_root: Path, revisions: dict[str, str], clones: dict[str, Path] |
     vendor.mkdir(parents=True, exist_ok=True)
     pins_path = vendor / PINS_NAME
     pins = read_pins(pins_path) if pins_path.is_file() else {}
-    for name, (manifest, contents) in planned.items():
-        lib_dir = vendor / name
-        if lib_dir.exists():
-            _remove_tree(lib_dir)
-        for rel, data in contents.items():
-            target = lib_dir / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-        (lib_dir / MANIFEST_NAME).write_text(render_manifest(LIBRARIES[name], manifest), encoding="utf-8")
-        pins[name] = manifest.revision
-    _write_pins(pins_path, pins)
+    # Stage every library beside its target, then swap: a write that fails leaves the old library whole.
+    staged: dict[str, Path] = {}
+    try:
+        for name, (manifest, contents) in planned.items():
+            stage = vendor / f".{name}.staging"
+            if stage.exists():
+                shutil.rmtree(stage)
+            staged[name] = stage
+            for rel, data in contents.items():
+                target = stage / rel
+                if not target.resolve().is_relative_to(stage.resolve()):
+                    raise VendorError(f"{name}: {rel} would be written outside {stage}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _write_file(target, data)
+            _write_file(stage / MANIFEST_NAME, render_manifest(LIBRARIES[name], manifest).encode("utf-8"))
+            pins[name] = manifest.revision
+        _swap_in(vendor, staged)
+    finally:
+        for stage in staged.values():
+            if stage.exists():
+                shutil.rmtree(stage, ignore_errors=True)
+    tmp_pins = vendor / f".{PINS_NAME}.staging"
+    _write_pins(tmp_pins, pins)
+    os.replace(tmp_pins, pins_path)
     return {name: m for name, (m, _) in planned.items()}
 
 
-def _remove_tree(path: Path) -> None:
-    for child in sorted(path.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        child.unlink() if child.is_file() or child.is_symlink() else child.rmdir()
-    path.rmdir()
+def _write_file(target: Path, data: bytes) -> None:
+    target.write_bytes(data)
+
+
+def _swap_in(vendor: Path, staged: dict[str, Path]) -> None:
+    """Replace each library directory with its staged copy; a failed swap puts the old directories back."""
+    moved: list[tuple[Path, Path]] = []  # (library dir, where the old one went)
+    try:
+        for name, stage in staged.items():
+            lib_dir = vendor / name
+            old = vendor / f".{name}.old"
+            if old.exists():
+                shutil.rmtree(old)
+            if lib_dir.exists():
+                os.replace(lib_dir, old)
+                moved.append((lib_dir, old))
+            os.replace(stage, lib_dir)
+    except BaseException:
+        for lib_dir, old in reversed(moved):
+            if lib_dir.exists():
+                shutil.rmtree(lib_dir)
+            os.replace(old, lib_dir)
+        raise
+    for _, old in moved:
+        shutil.rmtree(old, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #

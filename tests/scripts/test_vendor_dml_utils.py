@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import vendor_dml_utils as v
+from tests._module_seam import setattr_in
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -202,6 +203,132 @@ class TestUpdate:
         _git(clone, "commit", "-q", "-m", "empty")
         with pytest.raises(v.VendorError, match="no changelog files"):
             v.update(repo_root, {"ddl_utils": _git(clone, "rev-parse", "HEAD")}, _clone_paths(clones))
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    """Every entry under the vendor directory, staging leftovers included: it is either whole or untouched."""
+    base = _vendor(root)
+    return {str(p.relative_to(base)): (p.read_bytes() if p.is_file() else b"<dir>") for p in sorted(base.rglob("*"))}
+
+
+def _lib_tree_entry(rel: str) -> bytes:
+    return f"100644 blob {'a' * 40}\t{v.LIBRARIES['ddl_utils'].source_prefix}/{rel}\0".encode()
+
+
+class TestHardening:
+    @pytest.mark.parametrize(
+        "rel",
+        sorted(
+            [
+                "../evil.sql",
+                "changes/../../evil.sql",
+                "changes/.git/hooks/post-checkout",
+                "changes/.GIT/config",
+                "/abs.sql",
+                "changes//double.sql",
+                "changes/./dot.sql",
+                "C:/drive.sql",
+                "back\\slash.sql",
+            ]
+        ),
+    )
+    def test_a_tree_path_that_could_leave_the_vendor_directory_is_refused(self, monkeypatch, clones, rel):
+        clone, sha = clones["ddl_utils"]
+        real = v._git
+
+        def fake(c, *args):
+            return _lib_tree_entry(rel) if args[0] == "ls-tree" else real(c, *args)
+
+        monkeypatch.setattr(v, "_git", fake)
+        with pytest.raises(v.VendorError, match="refusing path"):
+            v.library_tree(v.LIBRARIES["ddl_utils"], clone, sha)
+
+    def test_a_refused_path_writes_nothing_through_update(self, monkeypatch, repo_root, clones):
+        v.update(repo_root, _pins(clones), _clone_paths(clones))
+        before = _snapshot(repo_root)
+        real = v._git
+
+        def fake(c, *args):
+            return _lib_tree_entry("../evil.sql") if args[0] == "ls-tree" else real(c, *args)
+
+        monkeypatch.setattr(v, "_git", fake)
+        with pytest.raises(v.VendorError, match="refusing path"):
+            v.update(repo_root, _pins(clones), _clone_paths(clones))
+        assert _snapshot(repo_root) == before
+        assert not (repo_root / "evil.sql").exists()
+
+    def test_a_manifest_path_that_leaves_the_directory_is_refused(self, tmp_path):
+        m = tmp_path / v.MANIFEST_NAME
+        m.write_text(f"revision {'b' * 40}\n{'a' * 40} ../../outside.sql\n")
+        with pytest.raises(v.VendorError, match="refusing path"):
+            v.read_manifest(m)
+
+    @pytest.mark.parametrize("rev", ["--output=x", "-h", "--end-of-options"])
+    def test_a_revision_that_looks_like_an_option_never_reaches_the_command_line(self, monkeypatch, clones, rev):
+        called: list[tuple[str, ...]] = []
+        monkeypatch.setattr(v, "_git", lambda c, *args: called.append(args) or b"")
+        with pytest.raises(v.VendorError, match="starts with '-'"):
+            v.resolve_revision(clones["dml_utils"][0], rev)
+        assert called == [], "the command ran with an option-shaped revision"
+
+    def test_an_option_shaped_revision_fails_the_command(self, repo_root, clones, capsys):
+        rc = v.main(
+            ["--update", "dml_utils=--exec=x", "--repo-root", str(repo_root)]
+            + [f"--clone={n}={p}" for n, p in _clone_paths(clones).items()]
+        )
+        assert rc == 1
+        assert "starts with '-'" in capsys.readouterr().err
+        assert not _vendor(repo_root).exists()
+
+    def test_a_write_that_fails_midway_leaves_every_library_whole(self, monkeypatch, repo_root, clones):
+        v.update(repo_root, _pins(clones), _clone_paths(clones))
+        before = _snapshot(repo_root)
+        clone, _ = clones["dml_utils"]
+        base = "dml_utils/src/main/resources/db/changelog"
+        new = _commit(clone, {f"{base}/db.changelog-master.xml": b"<master two/>\n"}, "two")
+        real = v._write_file
+        calls = {"n": 0}
+
+        def flaky(target, data):
+            calls["n"] += 1
+            if calls["n"] == 8:  # inside the second library; the first is fully staged by then
+                raise OSError("disk full")
+            real(target, data)
+
+        monkeypatch.setattr(v, "_write_file", flaky)
+        revs = {"ddl_utils": clones["ddl_utils"][1], "dml_utils": new}
+        with pytest.raises(OSError, match="disk full"):
+            v.update(repo_root, revs, _clone_paths(clones))
+        assert calls["n"] == 8, "the fault was not reached; the test proves nothing"
+        assert _snapshot(repo_root) == before, "a failed --update left a half-written vendor tree or a staging directory"
+        assert v.check(repo_root) == []
+
+    def test_a_swap_that_fails_puts_the_old_libraries_back(self, monkeypatch, repo_root, clones):
+        v.update(repo_root, _pins(clones), _clone_paths(clones))
+        before = _snapshot(repo_root)
+        real = v.os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 4:  # the second library's staged copy going in, after the first library was swapped
+                raise OSError("rename failed")
+            real(src, dst)
+
+        setattr_in(monkeypatch, v, "os.replace", flaky)
+        with pytest.raises(OSError, match="rename failed"):
+            v.update(repo_root, _pins(clones), _clone_paths(clones))
+        assert calls["n"] >= 4, "the fault was not reached; the test proves nothing"
+        assert _snapshot(repo_root) == before
+        assert v.check(repo_root) == []
+
+    def test_a_stale_staging_directory_from_a_killed_run_is_replaced(self, repo_root, clones):
+        stale = _vendor(repo_root) / ".dml_utils.staging"
+        stale.mkdir(parents=True)
+        (stale / "junk").write_text("left over\n")
+        v.update(repo_root, _pins(clones), _clone_paths(clones))
+        assert not stale.exists()
+        assert v.check(repo_root) == []
 
 
 class TestCheck:

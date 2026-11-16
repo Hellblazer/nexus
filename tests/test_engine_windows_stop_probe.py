@@ -36,6 +36,19 @@ def test_count_changesets_ignores_xml_comments_and_walks_subdirectories(tmp_path
     assert probe.count_changesets(tmp_path) == 3
 
 
+def test_count_changesets_skips_the_vendored_libraries_changelogs(tmp_path: Path) -> None:
+    """db/vendor holds ddl_utils' and dml_utils' changelogs, which the engine master does not include (nexus-f3yqd.2.10)."""
+    (tmp_path / "vendor" / "dml_utils").mkdir(parents=True)
+    (tmp_path / "vendor" / "dml_utils" / "master.xml").write_text('<databaseChangeLog><changeSet id="v"/></databaseChangeLog>')
+    (tmp_path / "changelog").mkdir()
+    (tmp_path / "changelog" / "a.xml").write_text('<databaseChangeLog><changeSet id="a"/></databaseChangeLog>')
+    assert probe.count_changesets(tmp_path) == 1
+    # only the top-level vendor directory is skipped; a changelog subdirectory that happens to be named so still counts
+    (tmp_path / "changelog" / "vendor").mkdir()
+    (tmp_path / "changelog" / "vendor" / "b.xml").write_text('<databaseChangeLog><changeSet id="b"/></databaseChangeLog>')
+    assert probe.count_changesets(tmp_path) == 2
+
+
 def test_count_changesets_agrees_with_the_smokes_include_following_count_on_the_real_changelog() -> None:
     """Two counters over one changelog: the probe's directory walk and the smoke's include walk. They must agree,
     or one of them is counting something that is not applied."""

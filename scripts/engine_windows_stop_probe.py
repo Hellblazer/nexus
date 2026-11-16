@@ -82,9 +82,15 @@ _NEW_CHANGESETS_RE = re.compile(r"\bnew_changesets=(\d+)")
 
 
 def count_changesets(changelog_dir: Path) -> int:
-    """changeSet elements in every ``*.xml`` under *changelog_dir*, XML comments removed (a tag inside a comment is not a changeset)."""
+    """changeSet elements in every ``*.xml`` under *changelog_dir*, XML comments removed (a tag inside a comment is not a changeset).
+
+    ``db/vendor`` (ddl_utils and dml_utils, vendored by scripts/vendor_dml_utils.py) is skipped: nothing includes those
+    changelogs from the engine master, so their changesets are not part of the master's boot and would skew the
+    mid-changeset stop trigger's midpoint (nexus-f3yqd.2.10)."""
     total = 0
-    for root, _, files in os.walk(changelog_dir):
+    for root, dirs, files in os.walk(changelog_dir):
+        if Path(root) == Path(changelog_dir):
+            dirs[:] = [d for d in dirs if d != "vendor"]
         for name in files:
             if name.endswith(".xml"):
                 text = (Path(root) / name).read_text(encoding="utf-8", errors="replace")
