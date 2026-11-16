@@ -20,16 +20,19 @@ external_ref: conductus RDR-001 OQ-3
 
 ## Problem Statement
 
-A catalog link can point at part of a document, not only the whole of it. The part is named by a
-*span*, a short string stored in the link's `from_span` or `to_span`. Today there are four span
-forms (`src/nexus/catalog/catalog_spans.py`, census in 171-research-3):
+Nexus keeps a *catalog*: one entry per indexed document, each addressed by a *tumbler* (a stable
+dotted id such as `1.2.45`), with *links* between entries. A link can point at part of a document,
+not only the whole of it. The part is named by a *span*, a short string stored in the link's
+`from_span` or `to_span`. Documents are stored for search as *chunks*, pieces of a few hundred words
+each. Today there are four span forms (`src/nexus/catalog/catalog_spans.py`, census in
+171-research-3):
 
 | Form | Meaning | Survives re-chunking? |
 |---|---|---|
 | `""` | the whole document | n/a |
 | `42-57` | lines 42 to 57 of the source file | yes, but line-grained and unstamped |
 | `3:100-250` | characters 100 to 250 of chunk number 3 | no: chunk numbers move |
-| `chash:<hex>[:start-end]` | the chunk whose text hashes to `<hex>`, optionally a character range in it | no: the chunk's text, and so its hash, changes |
+| `chash:<hex>[:start-end]` | the chunk whose text hashes to `<hex>` (a *chunk hash*), optionally a character range in it | no: the chunk's text, and so its hash, changes |
 
 *Re-chunking* means indexing the same document again with a different chunker, chunk size or
 embedding model. The text of the document is unchanged; only the cut points between chunks move.
@@ -45,61 +48,69 @@ carries no stamp that says whether the file has changed since the span was made.
 
 #### Gap 2: A span that has gone wrong is not reported
 
-RDR-053 D5 made an unresolvable span *detectable* through `link_audit`'s stale-span warning. That
-warning no longer exists: it went with the SQLite catalog, and the engine-backed `link_audit` returns
-no stale-span key, while the MCP tool's docstring still promises two (171-research-4). A span whose
-document changed, or whose source disappeared, is today invisible until someone tries to read it,
-and even then an unrecognised span reads as "no passage" with no reason given (171-research-3).
+RDR-053 D5 made an unresolvable span *detectable* through `link_audit`, the catalog's link
+health report. That report no longer lists stale spans: the check went with the old SQLite catalog,
+and today's `link_audit` returns no stale-span key, while the MCP tool's docstring still promises
+two (171-research-4). A span whose document changed, or whose source disappeared, is invisible until
+someone tries to read it, and even then an unrecognised span reads as "no passage" with no reason
+given (171-research-3). This RDR closes the gap for the new form only; the four existing forms stay
+unreported, as they are today.
 
 ## Relationship to Prior RDRs
 
-Searched the RDR index for span, chash, catalog link, content hash and transclusion.
+Searched the RDR index for span, chash, catalog link, content hash and transclusion (showing one
+document's passage inside another).
 
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
-| RDR-053 | Origin | Created `chash:` spans. D5: "When chunking changes, spans degrade to unresolvable (detectable via `link_audit()` stale span warning)." The first half still holds for `chash:`; the detection half no longer exists (Gap 2). This RDR extends D5 with a span that does not degrade on re-chunking, and restores detection for the new form. |
+| RDR-053 | Origin | Created `chash:` spans. D5: "When chunking changes, spans degrade to unresolvable (detectable via `link_audit()` stale span warning)." The first half still holds for `chash:`; the detection half no longer exists (Gap 2). D5 also rests on nexus not storing raw source text; this RDR keeps that: it stores no document text. |
 | RDR-108 | Precedent | Content-addressed chunk ids and the `document_chunks` manifest as the authority on document structure. This RDR leaves both alone and addresses the document instead of the chunk. |
 | RDR-086 | Precedent | The chash span resolution surface (`resolve_span_text_for_entry`). The new form is one more branch there. |
-| RDR-152 | Origin of the June phasing | The SQLite-to-Postgres cutover. The June draft held Phase 2 back until it finished. It has finished (171-research-6), so that hold is removed. |
+| RDR-152 | Origin of the June phasing | The SQLite-to-Postgres cutover. The June draft held its stored-copy phase behind it. The cutover has finished (171-research-6); the stored-copy phase has left this RDR (Decision Rationale). |
 | RDR-180, RDR-236 | Precedent | Full 64-hex chunk hashes (RDR-180), and no document hash on chunk rows (RDR-236). The new span's hash is 64 hex for the same reason and lives on no chunk row. |
 
 ## Context
 
 ### Background
 
-The request came from Conductus (RDR-001 open question 3), which wanted to map Obsidian
-sub-document references to catalog spans and could only approximate them to the containing chunk.
-Conductus's RDR-001 is accepted but its repository has been quiet since 2026-08-28 (171-research-6).
-The driver now is Sam, who asked on 2026-11-16 for RDR-171 to be finished. The design does not depend
-on Conductus: any caller that wants to pin a passage (a citation in a note, a quotation in a review,
-a transclusion) needs the same thing.
+The request came from Conductus, a separate project that connects an Obsidian notes vault to the
+nexus catalog. Its RDR-001 (open question 3) wanted to map Obsidian links to a heading or block of a
+note onto catalog spans, and could only approximate them to the containing chunk. Conductus's
+RDR-001 is accepted but its repository has been quiet since 2026-08-28 (171-research-6). The driver
+now is Sam, who asked on 2026-11-16 for RDR-171 to be finished. The design does not depend on
+Conductus: any caller that wants to pin a passage (a citation in a note, a quotation in a review, a
+transclusion) needs the same thing.
 
 ### Technical Environment
 
-- Catalog links live in the engine's Postgres tables; `from_span` and `to_span` are free strings.
-  No layer checks their grammar on write (171-research-3).
-- The client resolves a span with `resolve_span_text_for_entry(entry, span, catalog=...)` in
+- Catalog links live in Postgres tables owned by the *engine*, the Java service behind every
+  nexus client. `from_span` and `to_span` are free strings; no layer checks their grammar on write
+  (171-research-3).
+- The Python client resolves a span with `resolve_span_text_for_entry(entry, span, catalog=...)` in
   `catalog_spans.py`, given an already-resolved `CatalogEntry`.
-- Every document has a catalog entry with `file_path` and `source_uri`. A document's hash of record
-  is `index_content_hash`, but what it hashes differs by ingest path (171-research-1, -2).
-- New persistent state goes to Postgres through Liquibase changesets run by the engine; SQLite is
-  not a destination (AGENTS.md hot rule).
+- A catalog entry carries `file_path` and `source_uri`. `file_path` is repo-relative for documents
+  indexed from a repository and absolute for single files; `source_uri` is a `file://` URI for a
+  file, an `nx-note://` URI for a note, and empty only on legacy rows (171-research-7). `HttpCatalogClient.resolve_path(tumbler)` turns an entry into an
+  absolute path.
+- A document's hash of record is `index_content_hash`, but what it hashes differs by ingest path
+  (171-research-1, -2).
 
 ## Research Findings
 
 ### Investigation
 
 A code read of every place a document hash is computed, stored or read; every span parser; the link
-write path in the client and the engine; `link_audit`; and where full document text exists after
-indexing. Each finding below carries file and line references, recorded as T2 entries
-`nexus_rdr/171-research-1` to `-6`.
+write path in the client and the engine; `link_audit`; where full document text exists after
+indexing; and, after gate round 1, path resolution, the resolver's error handling and the client's
+write paths. Each finding carries file and line references, recorded as T2 entries
+`nexus_rdr/171-research-1` to `-8`.
 
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| nexus catalog client (`catalog_spans.py`, `http_catalog_client.py`, `types.py`) | Yes | Span forms, resolver, `index_content_hash` on the entry, `link_audit` keys |
-| nexus indexers (`doc_indexer.py`, `prose_indexer.py`, `code_indexer.py`, `indexer.py`, `pipeline_stages.py`, `catalog/store_hook.py`) | Yes | Three different hash bases; PDF text discarded after indexing |
+| nexus catalog client (`catalog_spans.py`, `http_catalog_client.py`, `types.py`) | Yes | Span forms, resolver, `resolve_path`, the three link write paths, `link_audit` keys, file size |
+| nexus indexers (`doc_indexer.py`, `prose_indexer.py`, `code_indexer.py`, `indexer.py`, `pipeline_stages.py`, `catalog/store_hook.py`) | Yes | Three different hash bases; repo-relative `file_path` |
 | engine (`CatalogLinksHandler.java`, `catalog-020`, `catalog-048` changesets) | Yes | Spans stored unvalidated; `index_content_hash` has no backfill |
 
 ### Key Discoveries
@@ -112,37 +123,41 @@ indexing. Each finding below carries file and line references, recorded as T2 en
   meaningful only when `index_state` is `complete`; older rows carry none and nothing backfills them.
   There is no field named `content_hash`; `meta.content_hash` exists on some rows only.
   *Source: 171-research-2.*
-- **✅ Verified** (source search): eleven sites parse or describe spans; none would match a string
+- **✅ Verified** (source search): the sites that parse or describe spans would not match a string
   starting `dchash:`; nothing validates span grammar on write; an unrecognised span resolves to
   `None` silently. *Source: 171-research-3.*
-- **✅ Verified** (source search): the stale-span report RDR-053 D5 relied on is gone from the
-  engine-backed `link_audit`, though the MCP docstring still advertises it. *Source: 171-research-4.*
-- **✅ Verified** (source search): no full-text copy of a PDF or a stored note survives indexing;
-  only chunks remain. *Source: 171-research-5.*
+- **✅ Verified** (source search): the stale-span report RDR-053 D5 relied on is gone from
+  `link_audit`, though the MCP docstring still advertises it. *Source: 171-research-4.*
+- **✅ Verified** (source search): no full-text copy of a PDF survives indexing; only chunks remain.
+  For stored notes no separate body table was found, but the engine schema was not checked.
+  *Source: 171-research-5.*
 - **✅ Verified** (source search): the RDR-152 cutover is complete, and the original consumer is
   dormant. *Source: 171-research-6.*
+- **✅ Verified** (source search): a repo-indexed document's `file_path` is repo-relative;
+  `resolve_path` anchors it on the owner's repository root, and `aspect_readers.file_uri_path`
+  decodes a `file://` URI. *Source: 171-research-7.*
+- **✅ Verified** (source search): the resolver turns every exception in its chash branch into
+  `None`, and `nx catalog show` catches only engine errors around it; links reach the engine through
+  three client methods (`link`, `link_if_absent`, `links_upsert_many`); no class named `Catalog`
+  exists; `http_catalog_client.py` is 4 lines under its size ceiling. *Source: 171-research-8.*
 
 ### Critical Assumptions
 
-- [x] A text-file source re-read later yields the same canonical text when its bytes are unchanged
-  (the canonical form below is a pure function of the bytes). — **Status**: Verified —
-  **Method**: Source Search (Python's strict UTF-8 decode and the normalization below are
-  deterministic).
-- [ ] The PDF pipeline holds the full extracted text, in the order the chunker reads it, at a point
-  before its page buffer is deleted (`pipeline_stages.py:2727`), so Phase 2 can store it. —
-  **Status**: Unverified — **Method**: Source Search at Phase 2 Step 1, before the table is used for
-  PDFs. If the text is never whole, Phase 2 joins the stored pages in page order and defines that join
-  as the PDF's canonical text.
+- [x] A source whose bytes are unchanged yields the same canonical text, and a different document at
+  the same path yields a different hash. The canonical form is a pure function of the bytes, and
+  SHA-256 is collision-resistant, so a span never resolves against text it was not minted on. —
+  **Status**: Verified — **Method**: Source Search (Python's strict UTF-8 decode, the normalization
+  below and `hashlib.sha256` are deterministic).
 
 ## Proposed Solution
 
 ### Approach
 
-Add a fifth span form, **`dchash:<hash>:<start>-<end>`**. Its offsets count characters in the
-document's *canonical text*, the whole document as normalized text, not in a chunk. Chunk
-boundaries play no part, so the span survives any re-chunking of unchanged text. `<hash>` is the
-SHA-256 of that canonical text. It is a stamp: when the document's current canonical text hashes to
-something else, the document changed and the span is stale.
+Add a fifth span form, **`dchash:<hash>:<start>-<end>`** ("document content hash"). Its offsets
+count characters in the document's *canonical text*, the whole document as normalized text, not in
+a chunk. Chunk boundaries play no part, so the span survives any re-chunking of unchanged text.
+`<hash>` is the SHA-256 of that canonical text. It is a stamp: when the document's current canonical
+text hashes to something else, the document changed and the span is stale.
 
 The stamp is **its own hash, not the catalog's `index_content_hash`**. The catalog's hash covers
 three different byte bases, is missing on older rows, and changing it would mark every document as
@@ -150,88 +165,89 @@ changed and force a re-index (171-research-1, -2). The span's hash is computed b
 at mint time and at read time, from the same source, so the two agree whenever the text is the same,
 whatever the indexer hashed.
 
-Phase 1 resolves from the source file and serves text documents. Phase 2 adds a stored copy of the
-canonical text in a new Postgres table, which serves documents with no readable text source (PDFs,
-stored notes) and keeps a pinned passage readable after its source file changes.
+The span serves text documents with a readable source file: markdown, code and plain text. Nexus
+stores no copy of document text for it. PDFs (whose files are binary) and stored notes (which have
+no file) are out of scope, and an edit to a source file makes its spans stale rather than keeping the
+old passage readable. A stored copy of document text that would cover those cases is left to a
+separate RDR when a caller needs it (Sam, 2026-11-16, after gate round 1).
 
 ### Technical Design
+
+All new code lives in a new module, `src/nexus/catalog/catalog_dchash.py`. The client file
+`http_catalog_client.py` is 4 lines under its size ceiling (171-research-8), so it gains only the
+calls into this module.
 
 **Canonical text.** `canonical_text(raw: bytes) -> str`: decode as strict UTF-8 (an undecodable
 source has no canonical text); remove one leading U+FEFF; replace every `\r\n`, then every remaining
 `\r`, with `\n`. Nothing else changes: no Unicode normalization, no trailing-whitespace trimming.
 `text_hash(text: str) -> str` is the lowercase hex SHA-256 of `text.encode("utf-8")`.
 
-**Span grammar.** `^dchash:([0-9a-f]{64}):(\d+)-(\d+)$`. Offsets are Unicode code points (Python
-string indices) into the canonical text, half-open, with `0 <= start < end <= len(text)`. A caller
-working in UTF-16 (JavaScript, Obsidian) converts; the mint helper below returns code-point offsets so
-most callers never count by hand. A string that starts `dchash:` and does not match is malformed.
+**Span grammar.** `^dchash:([0-9a-f]{64}):(\d+)-(\d+)$` with `start < end`. Offsets are Unicode code
+points (Python string indices) into the canonical text, half-open, with `end <= len(text)`. A caller
+working in UTF-16 (JavaScript, Obsidian) converts. A string that starts `dchash:` and fails the
+grammar is malformed. `parse_dchash_span(span) -> tuple[str, int, int]` raises `ValueError` on a
+malformed span; it is called by validation and status, never inside the resolver.
 
-**Minting.** `Catalog.dchash_span(tumbler, start, end) -> str` reads the canonical text (source in
-Phase 1; source or stored copy in Phase 2), checks the range, and returns the span.
-`Catalog.dchash_span_for_passage(tumbler, passage: str) -> str` finds `passage` in the canonical text
-and returns its span; it raises when the passage occurs zero times or more than once. Both are
-exposed as `nx catalog span` subcommands (`--start/--end` or `--passage`).
+**Source lookup.** `dchash_source(entry, catalog) -> Path | None`: `catalog.resolve_path(entry.tumbler)`
+when a catalog is given (it anchors a repo-relative `file_path` on the repository root,
+171-research-7); otherwise the path `aspect_readers.file_uri_path` gives for a `file://`
+`source_uri`; otherwise `None`.
 
-**Resolution.** A new branch in `resolve_span_text_for_entry`, ahead of the final `return None`:
+**Minting.** `dchash_span(catalog, tumbler, start, end) -> str` reads the source's canonical text,
+checks the range, and returns the span. `dchash_span_for_passage(catalog, tumbler, passage: str) ->
+str` finds `passage` in the canonical text and returns its span; it raises when the passage occurs
+zero times or more than once. Both are module functions that take a catalog reader, so the client's
+write whitelist does not change. `nx catalog span <tumbler> --passage TEXT` (or `--start/--end`)
+prints a span.
 
-1. Parse the span; malformed raises `ValueError` (as a malformed `chash:` span already does).
-2. Read the source: `entry.file_path`, else the path of a `file://` `source_uri`. If it reads and its
-   canonical text hashes to the span's hash, return `text[start:end]`.
-3. Phase 2: otherwise look up the stored copy by the span's hash; if found, return its slice.
-4. Otherwise return `None`. The caller learns why from `dchash_status` below.
+**Resolution.** A new branch in `resolve_span_text_for_entry`, before its final `return None`, for a
+span starting `dchash:`. It never raises, like the chash branch above it (171-research-8): it parses,
+reads the source through `dchash_source`, and returns `text[start:end]` when the canonical text hashes
+to the span's hash and the range fits; otherwise `None`.
 
-`dchash_status(entry, span) -> Literal["ok", "stored_copy", "changed", "unreadable", "malformed",
-"out_of_range"]` gives the reason without the text: `ok` resolved from the source; `stored_copy`
-resolved from Phase 2's copy because the source changed or is gone; `changed` the source reads but
-hashes differently and no copy exists; `unreadable` no source and no copy; `out_of_range` the range
-exceeds the text.
+**Status.** `dchash_status(entry, span, catalog) -> str` says why a span does or does not resolve,
+without the text: `ok`; `malformed`; `missing` (no entry for the link's tumbler, or a deleted one);
+`unreadable` (no source path, the file cannot be read, or it is not UTF-8); `changed` (the source
+reads but hashes differently); `out_of_range` (the range exceeds the text).
 
-**Write validation.** `HttpCatalogClient.link` and `link_if_absent` refuse a `from_span` or
-`to_span` that starts `dchash:` and does not match the grammar (a `ValueError` naming the span). Other
-forms are untouched; the engine is unchanged.
+**Write validation.** The client's three link write paths, `link`, `link_if_absent` and
+`links_upsert_many`, refuse a `from_span` or `to_span` that starts `dchash:` and fails the grammar
+(a `ValueError` naming the span). Other forms are untouched; the engine is unchanged, so another
+client could still store a malformed span; the resolver and the report treat it as `malformed`.
 
 **Stale report.** `link_audit` gains `stale_dchash` and `stale_dchash_count`: every link with a
-`dchash:` span whose status is not `ok`, with the status. The MCP `link_audit` docstring loses its two
-keys the code no longer returns (`stale_spans`, `stale_chash`) and names the new one; the
-`nx catalog link-audit` CLI prints the count. `stored_copy` is listed because the source has moved on,
-even though the passage still reads.
-
-**Phase 2 stored copy.** A Liquibase changeset adds `nexus.document_text`:
-`(tenant_id, text_hash bytea(32), body text, char_len int, created_at timestamptz)`, primary key
-`(tenant_id, text_hash)`, row-level security like the other tenant tables, and an engine route to
-put and get by hash. Rows are written:
-
-- at index time for PDFs (the extracted text, canonicalized) and stored notes (the body,
-  canonicalized), the documents with no readable text source;
-- at mint time for a text document (the canonical text the span was minted against), so the passage
-  stays readable after the file changes.
-
-No backfill runs at boot or in the changeset (Sam's 2026-11-10 rule). A PDF or note indexed before
-Phase 2 gains a copy at its next index; minting against one without a copy is refused with a message
-naming the re-index.
+`dchash:` span whose status is not `ok`, with the status. It reads each document once, however many
+spans point into it. The report is local to the machine it runs on, because it reads source files by
+path. The MCP `link_audit` docstring loses the two keys the code no longer returns (`stale_spans`,
+`stale_chash`) and names the new one; `nx catalog link-audit` prints the count.
 
 ```text
 // Illustrative, verify signatures at implementation
-def canonical_text(raw: bytes) -> str          # raises UnicodeDecodeError on non-UTF-8
-def text_hash(text: str) -> str                # 64 lowercase hex
+def canonical_text(raw: bytes) -> str                      # UnicodeDecodeError on non-UTF-8
+def text_hash(text: str) -> str                            # 64 lowercase hex
 def parse_dchash_span(span: str) -> tuple[str, int, int]   # ValueError when malformed
+def dchash_status(entry, span: str, catalog) -> str        # ok | malformed | missing | unreadable | changed | out_of_range
 ```
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| span parse and resolve branch | `catalog_spans.py` (`parse_chash_span`, `resolve_span_text_for_entry`) | Extend: one parser and one branch beside the existing forms |
-| source read | the line-range branch, `catalog_spans.py:606-614` | Reuse its path choice, not its read: the line branch decodes without the canonical normalization |
+| span parse, canonical text, mint, status | none | New module `catalog_dchash.py` (size ceiling, 171-research-8) |
+| resolve branch | `catalog_spans.py` `resolve_span_text_for_entry` | Extend: one branch calling the new module |
+| source lookup | `HttpCatalogClient.resolve_path`, `aspect_readers.file_uri_path` | Reuse both (171-research-7) |
 | document hash | `index_content_hash` (`types.py:210`) | Not used as the stamp (Approach) |
-| stale report | `link_audit`, `http_catalog_client.py:3630` | Extend with `stale_dchash` |
-| stored copy | none (171-research-5) | New Postgres table |
+| stale report | `link_audit`, `http_catalog_client.py:3630` | Extend with `stale_dchash`, computed in the new module |
 
 ### Decision Rationale
 
 Document-relative offsets are the only addressing that ignores chunk boundaries entirely, and a hash
 stamp makes a changed document detectable rather than silently wrong. Owning the hash, instead of
-borrowing the catalog's, avoids touching any indexer and any existing document's identity.
+borrowing the catalog's, touches no indexer and no existing document's identity. Reading the source
+file, and storing no text, keeps RDR-053's position that nexus does not hold raw source, and keeps
+the change client-only. Gate round 1 showed that a stored copy (for PDFs, notes and edited files) is
+its own design, with its own table, writers, clean-up and sensitivity rules; Sam chose to leave it to
+a later RDR.
 
 ## Alternatives Considered
 
@@ -254,7 +270,27 @@ borrowing the catalog's, avoids touching any indexer and any existing document's
 **Reason for rejection**: it fails on most of today's documents, and fixing that costs a re-index of
 the whole corpus for no benefit to search.
 
-### Alternative 2: Author-supplied anchors (`anchor:<doc>#Heading` or `^blockid`)
+### Alternative 2: A stored copy of each document's text
+
+**Description**: The June draft's Phase 2: a Postgres table of canonical text keyed by hash, written
+at index time for PDFs and notes and at mint time for text files, so spans resolve without a source
+and survive edits.
+
+**Pros**:
+
+- Covers PDFs and notes; keeps an edited file's old passage readable.
+
+**Cons**:
+
+- Gate round 1: a table keyed by hash alone cannot find a document's current text or decide which
+  rows are still used; it needs an association table, a clean-up job with a grace period, RDR-243
+  sensitivity handling, a job to fill existing documents, and an engine version check.
+- Reverses RDR-053's position that nexus stores no raw source text.
+
+**Reason for rejection**: deferred, not refused. It is a separate design and becomes its own RDR when
+a caller needs PDFs, notes or edit survival (Sam, 2026-11-16).
+
+### Alternative 3: Author-supplied anchors (`anchor:<doc>#Heading` or `^blockid`)
 
 **Description**: Store Obsidian anchors as span ids and relocate them at each index.
 
@@ -267,8 +303,7 @@ the whole corpus for no benefit to search.
 - Needs anchor extraction at index time and a mapping refreshed on every re-index; only works where
   authors write anchors.
 
-**Reason for rejection**: the bar here is surviving re-chunking. Edit survival is a larger problem and
-can be a later RDR on top of this one.
+**Reason for rejection**: the bar here is surviving re-chunking. Edit survival is a larger problem.
 
 ### Briefly Rejected
 
@@ -280,102 +315,82 @@ can be a later RDR on top of this one.
 
 ### Consequences
 
-- A passage pin survives re-chunking of unchanged text, which is the stated bar.
-- An edit to the document makes the span stale, visibly, in `link_audit`. In Phase 2 a span minted
-  against a text file still reads from its stored copy after the edit.
-- Phase 1 touches no indexer, no schema and no engine code.
-- Phase 2 adds durable state: one row per PDF and note version indexed, and one per minted text
-  version.
+- A passage pin in a text document survives re-chunking of unchanged text, which is the stated bar.
+- An edit to the document makes the span stale, visibly, in `link_audit`.
+- PDFs and stored notes cannot carry a `dchash:` span; minting against one is refused.
+- The change is client-only: no indexer, schema or engine code changes.
 
 ### Risks and Mitigations
 
 - **Risk**: offsets counted in UTF-16 by a JavaScript caller are wrong for text outside the Basic
   Multilingual Plane (emoji, some CJK).
-  **Mitigation**: the grammar says code points; the mint helpers return code-point offsets; a test
+  **Mitigation**: the grammar says code points; `--passage` minting returns code-point offsets; a test
   pins a non-BMP case.
-- **Risk**: `document_text` grows without bound.
-  **Mitigation**: a garbage-collection pass (Day 2) deletes rows that no live document version and no
-  `dchash:` link names.
+- **Risk**: a caller counting offsets in an editor that shows Windows line ends or a byte-order mark
+  is off by those characters, and the wrong passage still fits the range.
+  **Mitigation**: the CLI and docs steer callers to `--passage`, which finds the text itself.
 
 ### Failure Modes
 
-- A malformed `dchash:` span is refused at write and raises at read; it never resolves silently.
-- A source moved without a re-index reads as `unreadable` in Phase 1; `link_audit` lists it.
-- A non-UTF-8 text source has no canonical text: minting refuses it with the decode error; resolving
-  reports `unreadable`.
+- A malformed `dchash:` span is refused by the Python client's three write paths; one stored by
+  another client resolves to `None` and appears in `link_audit` as `malformed`.
+- A source moved or deleted reads as `unreadable`; an edited one as `changed`. Both appear in
+  `link_audit`.
+- A non-UTF-8 source has no canonical text: minting refuses it with the decode error; status reports
+  `unreadable`.
+- `nx catalog show` never crashes on a `dchash:` span, because the resolver never raises.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [x] Critical assumption 1 verified (source search).
-- [ ] Critical assumption 2 verified at Phase 2 Step 1, before PDFs are stored.
+- [x] The critical assumption is verified (source search).
 
 ### Minimum Viable Validation
 
-On a local engine: index a markdown file, mint a `dchash:` span for a sentence in it, link two
-documents with that span, re-index the file with a different chunk size, and read the span back:
-the same sentence. Then edit the file and run `link_audit`: the link is listed with status
-`changed` (Phase 1) or `stored_copy` (Phase 2).
+On a local engine: index a markdown file from a repository (so its `file_path` is repo-relative),
+mint a `dchash:` span with `--passage` for a sentence in it, link two documents with that span from a
+working directory outside the repository, re-index the file with a different chunk size, and read the
+span back: the same sentence. Then edit the file and run `link_audit`: the link is listed with status
+`changed`.
 
-### Phase 1: Source-backed spans and the stale report
+### Phase 1: Code Implementation
 
-#### Step 1: Canonical text, hash and grammar
+#### Step 1: The module, canonical text, hash and grammar
 
-`canonical_text`, `text_hash` and `parse_dchash_span` in `catalog_spans.py`, with tests: BOM, CRLF,
-lone CR, non-UTF-8, non-BMP offsets, every malformed shape.
+Create `catalog_dchash.py` with `canonical_text`, `text_hash` and `parse_dchash_span`. Tests: BOM,
+CRLF, lone CR, non-UTF-8, non-BMP offsets, `start >= end`, every malformed shape.
 
-#### Step 2: Resolution and status
+#### Step 2: Source lookup, resolution and status
 
-The `resolve_span_text_for_entry` branch and `dchash_status`, reading `file_path` or a `file://`
-`source_uri`. Tests: re-chunk survival (same text, different chunks), changed file, missing file,
-out-of-range span.
+`dchash_source`, the `resolve_span_text_for_entry` branch and `dchash_status`. Tests: re-chunk
+survival (same text, different chunks); a repo-relative `file_path` resolved from a working directory
+outside the repository; a `file://` `source_uri` with no catalog; changed, missing, unreadable and
+out-of-range spans; a malformed span returns `None`; `nx catalog show` on a document with a
+malformed `dchash:` link prints the rest of its links.
 
 #### Step 3: Minting
 
-`Catalog.dchash_span` and `Catalog.dchash_span_for_passage`, and `nx catalog span`. Tests: zero and
-multiple passage matches refused; the minted span resolves to the passage.
+`dchash_span`, `dchash_span_for_passage` and `nx catalog span`. Tests: zero and multiple passage
+matches refused; a PDF or a note refused; the minted span resolves to the passage.
 
 #### Step 4: Write validation
 
-`link` and `link_if_absent` refuse a malformed `dchash:` span. Test with a fake engine.
+`link`, `link_if_absent` and `links_upsert_many` refuse a malformed `dchash:` span. Tests against the
+fake link engine, one per write path.
 
 #### Step 5: The stale report
 
-`stale_dchash` and its count in `link_audit`, the MCP docstring corrected, the CLI count. Test each
-status reaches the report.
-
-### Phase 2: The stored copy
-
-#### Step 1: Verify the PDF text point
-
-Read the PDF pipeline to settle critical assumption 2 and write the canonical-text definition for
-PDFs into this RDR (an amendment under grant 3 after review) before any PDF row is written.
-
-#### Step 2: Table and engine route
-
-The Liquibase changeset for `nexus.document_text` with its RLS policy, and an engine route to put and
-get by hash; engine integration tests for tenant isolation and idempotent put.
-
-#### Step 3: Writers
-
-PDF pipeline and note writes store the canonical text; minting stores the text it minted against.
-
-#### Step 4: Resolution fallback
-
-Step 3 of resolution and the `stored_copy` status, with tests for a deleted source and an edited one.
-
-#### Step 5: Garbage collection
-
-A maintenance pass that deletes rows no live document version and no `dchash:` link names, run as a
-visible, resumable job, never at boot.
+`stale_dchash` and its count in `link_audit`, the MCP docstring corrected, the CLI count. Tests:
+each non-`ok` status reaches the report; a document with many spans is read once.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | `dchash:` link spans | `link_audit` | `dchash_status` | ordinary link delete | `link_audit` stale list | with the catalog |
-| `nexus.document_text` (Phase 2) | row count in `nx catalog stats` | get by hash | the GC pass | GC dry run lists what it would delete | with the database |
+
+No other persistent resource is created.
 
 ### New Dependencies
 
@@ -385,23 +400,25 @@ None.
 
 - **Scenario**: same text, re-chunked at a different size — **Verify**: the span returns the same
   passage.
+- **Scenario**: repo-indexed document, span read from a working directory outside the repository —
+  **Verify**: resolves (`resolve_path` anchors the relative path).
 - **Scenario**: file saved with CRLF line ends and a BOM, span minted, file re-saved with LF and no
   BOM — **Verify**: still `ok` (same canonical text).
-- **Scenario**: one character inserted before the passage — **Verify**: `changed` in Phase 1,
-  `stored_copy` in Phase 2.
+- **Scenario**: one character inserted before the passage — **Verify**: `changed`, listed in
+  `link_audit`.
 - **Scenario**: an emoji before the passage — **Verify**: offsets are code points; the slice is
   exact.
-- **Scenario**: `link` with `dchash:abc:1-2` — **Verify**: refused with the span named.
-- **Scenario**: PDF indexed under Phase 2, span minted by passage — **Verify**: resolves with the
-  source file deleted.
+- **Scenario**: `link`, `link_if_absent` or `links_upsert_many` with `dchash:abc:1-2` or
+  `dchash:<64 hex>:7-3` — **Verify**: refused with the span named.
+- **Scenario**: a stored malformed `dchash:` span — **Verify**: `nx catalog show` lists the
+  document's links; `link_audit` reports `malformed`.
 
 ## Validation
 
 ### Testing Strategy
 
 Unit tests for the pure functions; client tests against the fake link engine for write validation
-and the audit; the Minimum Viable Validation on a local engine for each phase; engine integration
-tests for the Phase 2 table.
+and the audit; the Minimum Viable Validation on a local engine before the phase closes.
 
 ### Performance Expectations
 
@@ -413,51 +430,53 @@ per distinct document among `dchash:` links, not once per link.
 ### Contradiction Check
 
 No contradictions found between research findings, design principles, and proposed solution. The
-June draft's stamp (the catalog's file-level hash) contradicted 171-research-1 and -2; the stamp is
-now the span's own hash.
+June draft's stamp (the catalog's file-level hash) contradicted 171-research-1 and -2, and its source
+lookup contradicted 171-research-7; the stamp is now the span's own hash and the lookup goes through
+`resolve_path`.
 
 ### Assumption Verification
 
-Assumption 1 is verified by source search. Assumption 2 is unverified and is the first step of
-Phase 2, before any PDF row is written; Phase 1 does not depend on it.
+The one critical assumption is verified by source search.
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
 | `bytes.decode("utf-8")` strict, `hashlib.sha256` | Python stdlib | Source Search |
-| `resolve_span_text_for_entry`, `link`, `link_if_absent`, `link_audit` | nexus catalog client | Source Search (171-research-3, -4) |
+| `resolve_path`, `link`, `link_if_absent`, `links_upsert_many`, `link_audit` | nexus catalog client | Source Search (171-research-4, -7, -8) |
+| `aspect_readers.file_uri_path` | nexus | Source Search (171-research-7) |
 
 ### Scope Verification
 
-The Minimum Viable Validation is in scope for each phase and runs on a local engine before the phase
-closes.
+The Minimum Viable Validation is in scope and runs on a local engine before the phase closes.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: the span grammar is additive; old clients store a `dchash:` span as a string and
-  resolve it to `None`, as they do any unknown form.
+- **Versioning**: the span grammar is additive; an older client stores a `dchash:` span as a string
+  and resolves it to `None`, as it does any unknown form.
 - **Build tool compatibility**: N/A
 - **Licensing**: N/A
-- **Deployment model**: Phase 1 is client-only. Phase 2 adds one changeset and one engine route,
-  shipped in an engine cut; the client falls back to Phase 1 behaviour against an older engine.
+- **Deployment model**: client-only; no engine cut.
 - **IDE compatibility**: N/A
 - **Incremental adoption**: existing spans are untouched; nothing is rewritten.
 - **Secret/credential lifecycle**: N/A
 - **Memory management**: resolution holds one document's text at a time.
+- **Sensitive documents (RDR-243)**: no text is stored or sent anywhere; a span carries only a hash
+  and two offsets, and resolving one reads a file already on the caller's machine, as the line form
+  does.
 
 ### Proportionality
 
-Right-sized: one span form, one resolver branch, one report key, and one table in Phase 2.
+Right-sized: one span form, one new module, one resolver branch, one report key, no schema.
 
 ## References
 
-- `src/nexus/catalog/catalog_spans.py`, `http_catalog_client.py`, `types.py`
+- `src/nexus/catalog/catalog_spans.py`, `http_catalog_client.py`, `types.py`, `src/nexus/aspect_readers.py`
 - `src/nexus/doc_indexer.py`, `prose_indexer.py`, `code_indexer.py`, `indexer.py`, `pipeline_stages.py`,
-  `catalog/store_hook.py`, `catalog/note_write.py`
+  `catalog/store_hook.py`, `catalog/note_write.py`, `commands/catalog.py`
 - `service/src/main/java/dev/nexus/service/http/CatalogLinksHandler.java`,
   `service/src/main/resources/db/changelog/catalog-020-index-run-fence.xml`, `catalog-048-reconcile.xml`
-- T2 `nexus_rdr/171-research-1` to `-6`
+- T2 `nexus_rdr/171-research-1` to `-8`; `nexus_rdr/171-scope-decision-2026-11-16`
 - Conductus RDR-001 open question 3; design memo T2 `nexus/design-finegrain-author-anchored-spans.md`
 
 ## Revision History
@@ -465,4 +484,7 @@ Right-sized: one span form, one resolver branch, one report key, and one table i
 - 2026-06-26: drafted (source-only Phase 1, stored copy Phase 2 behind the RDR-152 cutover).
 - 2026-11-16: rewritten against the current code (171-research-1 to -6): the stamp is the span's own
   hash over a defined canonical text, not the catalog's file hash; the stale report is new code;
-  Phase 2 is a Postgres table with no cutover dependency; Sam named as the driver.
+  Sam named as the driver.
+- 2026-11-16: Gate round 1 — BLOCKED (3 Critical, 7 Significant, 3 ship-blocker(s)); blob `3b9d78764797`; critique `nexus_rdr/171-gate-critique-2026-11-16-r1`.
+- 2026-11-16: scope narrowed to source-backed text documents; the stored copy left to a later RDR
+  (Sam, `nexus_rdr/171-scope-decision-2026-11-16`).
