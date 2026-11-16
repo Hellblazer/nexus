@@ -780,17 +780,37 @@ the number the spike produces; this RDR states no latency target before it.
 
 ### Contradiction Check
 
-To be written at gate.
+Checked the narrowed text against itself on 2026-11-16. The call-site count
+appears as 28 calls in 19 files (42 grep lines in 23 files) in the Problem
+Statement, Research Findings and the ratchet's starting value, and the
+forecasts (21 after Phase 1, 18 after Phase 2) appear only as forecasts.
+Gap 2 is described in one place, as deferred, and no phase builds it. Gap 3
+names the same two unattended walks (MCP author search, operator dispatch's
+sensitive-path list) wherever it is cited. No contradiction found.
 
 ### Assumption Verification
 
-To be written at gate.
+Research records `nexus_rdr/241-research-1` to `-5`. Three are verified by
+source search: the call-site census, the two unattended walks, and the
+shipped pieces with the existing routes a walk can switch to. Two are
+assumed, each with a named check before the work it gates: the author and
+meta filter speed at 50,000 documents (a spike in Phase 2, before those
+routes ship) and the per-scheme switch in `nx doctor --check-references`
+(a before-and-after fixture diff, before that one Phase 1 switch ships).
+The first gates Phase 2 only. The citation join in `link_generator._all_entries` is unverified
+and outside the plan: that site stays in the ratchet table as AGGREGATE.
 
 ### Scope Verification
 
-To be written at gate. The scope it checks is the narrowed one: the ratchet,
-the unattended walks (Gap 3), and the routes and switches for Gap 1. Gap 2 is
-deferred with a named trigger and is not a gate item.
+The scope is the narrowed one Sam took on 2026-11-16: the ratchet (Gap 4),
+the unattended walks (Gap 3), and the routes and switches for Gap 1. Every
+in-scope gap has a phase: Gap 4 is Phase 1's first step, Gap 3 and the
+Gap 1 switches to existing routes are Phase 1, and the new author, metadata
+and sensitive-locator routes are Phase 2. Gap 2 (tenant-wide jobs) is
+deferred with the trigger "nexus-f3yqd.2's job mechanism is built" and is not
+a gate item. The operator-dispatch walk was found during the revision and is
+inside Gap 3's definition (an unattended path that reaches a walk), so it is
+in scope.
 
 ### Cross-Cutting Concerns
 
@@ -808,7 +828,13 @@ deferred with a named trigger and is not a gate item.
 
 ### Proportionality
 
-To be written at gate.
+Phase 1 is client-only, about hours: a ratchet test over a checked table and
+switches of existing walks to routes the engine already serves. Phase 2 is
+three additive engine routes, a spike, and one engine release, about days,
+and each client switch is gated on the route's `/version` flag. The design
+adds no new storage and no new service. The size matches the problem: the
+walks grew by four files in three days after the census, and nothing stops
+the next one without the ratchet.
 
 ## References
 
