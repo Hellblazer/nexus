@@ -2,7 +2,7 @@
 title: "Unified Tenant-Scoped Telemetry, Observability, and Usage Metering for the Engine Service: One Stats Layer for Local Users and Cloud Tenants"
 id: RDR-177
 type: Architecture
-status: draft
+status: deferred
 priority: high
 author: Hal Hildebrand
 created: 2026-07-01
@@ -11,6 +11,8 @@ related: [RDR-152, RDR-155, RDR-156, RDR-166, RDR-167, RDR-176]
 ---
 
 # RDR-177: Unified Tenant-Scoped Telemetry, Observability, and Usage Metering
+
+> **Deferred 2026-11-16 (Sam, by dialog in halcyon's session, on the draft triage in T2 nexus/draft-rdr-triage-2026-11-16).** Revive when the managed service commits to usage billing or per-tenant quotas, or when Sam asks for `nx stats`. On revival, drop P4 and fold P2 into RDR-167's AuthFilter seam.
 
 ## Problem Statement
 

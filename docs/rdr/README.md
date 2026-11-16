@@ -195,7 +195,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-174](rdr-174-unified-nx-init-service-lifecycle.md) | Unified nx init and Service-Supervisor Lifecycle: Collapse the Install to One Command and Close the Reboot-Persistence Gap | Architecture | Closed | 2026-06-28 |
 | [RDR-175](rdr-175-os-init-single-process-watchdog.md) | OS-Init as the Single Process Watchdog: Retire the In-Process Storage-Supervisor Respawn Layer | Technical Debt | Closed | 2026-06-28 |
 | [RDR-176](rdr-176-survivable-managed-migration-readiness.md) | Survivable Managed-Migration Readiness: Batched ETL, First-Class Downgrade with an Immutable Source, Unified Config-First Auth, Edge Route Coverage, and Migration Observability | Architecture | Closed | 2026-06-30 |
-| [RDR-177](rdr-177-tenant-telemetry-usage-metering.md) | Unified Tenant-Scoped Telemetry, Observability, and Usage Metering for the Engine Service: One Stats Layer for Local Users and Cloud Tenants | Architecture | Draft | 2026-07-01 |
+| [RDR-177](rdr-177-tenant-telemetry-usage-metering.md) | Unified Tenant-Scoped Telemetry, Observability, and Usage Metering for the Engine Service: One Stats Layer for Local Users and Cloud Tenants | Architecture | Deferred | 2026-07-01 |
 | [RDR-178](rdr-178-unattended-migration.md) | Unattended Migration: Industrialize the Store-Migration Path from Babysat to Autonomous | Architecture | Closed | 2026-07-01 |
 | [RDR-179](rdr-179-self-correction-machinery-remediation.md) | Self-Correction Machinery Remediation: Relight Plan-Reuse, Retrieval Benchmarking, Plan-Library Hygiene, and Taxonomy-Aware Recall | Architecture | Closed | 2026-07-04 |
 | [RDR-180](rdr-180-content-address-chash-binary-32byte.md) | Content-Address Chunks by a Canonical 32-Byte Binary chash: One Digest, Stored as Bytes, Hex Only at the Boundary | Architecture | Closed | 2026-07-04 |
@@ -217,7 +217,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-196](rdr-196-cost-aware-nx-answer.md) | Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap | Architecture | Closed | 2026-08-19 |
 | [RDR-197](rdr-197-plugin-only-release-channel.md) | Independent Plugin Release Channel (plugin-vX.Y.Z-n) | Architecture | Superseded by T2 nexus/design-plugin-only-fast-lane.md, the plugin-only fast lane on the client release (nexus-rbmja; Sam, 2026-10-26) | 2026-08-22 |
 | [RDR-198](rdr-198-collapse-duplicated-client-transport.md) | Collapse the Duplicated Client Transport: One Pooled Connection to One Engine | Architecture | Closed | 2026-08-23 |
-| [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Draft | 2026-08-23 |
+| [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Deferred | 2026-08-23 |
 | [RDR-200](rdr-200-nx-answer-continuation-mode.md) | nx_answer Continuation Mode and the Composed-Retrieval Bridge Route | Architecture | Closed | 2026-09-01 |
 | [RDR-201](rdr-201-closed-vocabularies-as-checked-tables.md) | Closed Vocabularies as Checked Tables | Architecture | Closed | 2026-09-01 |
 | [RDR-202](rdr-202-containerize-release-battery.md) | Containerize the Release Battery: Layered Images, a Compose-Expressed Gate DAG, and the macOS-Native Residue | Architecture | Abandoned | 2026-09-04 |
@@ -230,7 +230,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Draft | 2026-09-14 |
 | [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Closed | 2026-09-15 |
 | [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Closed | 2026-09-15 |
-| [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Draft | 2026-09-16 |
+| [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Deferred | 2026-09-16 |
 | [RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md) | Channel Delivery Without a Proof Gate: Notify a Reference, Let the Session Claim | Architecture | Closed | 2026-09-17 |
 | [RDR-214](rdr-214-standing-code-correctness-review.md) | Standing-Code Correctness Review: From Pilot to Decision | Technical Debt | Abandoned | 2026-09-17 |
 | [RDR-215](rdr-215-plugin-hooks-as-nx-verbs.md) | Plugin Hooks as nx Verbs: Retire the Bash Hook Layer | Technical Debt | Closed | 2026-09-18 |
