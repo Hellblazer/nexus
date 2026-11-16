@@ -2,12 +2,12 @@
 title: "No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs"
 id: RDR-241
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-11-02
-accepted_date:
+accepted_date: 2026-11-16
 related_issues: [nexus-mq980, nexus-75w5d, nexus-ohxzu, nexus-ial1f, nexus-0lv0r, nexus-f3yqd.2, nexus-f3yqd.6]
 related_rdrs: [RDR-193, RDR-146, RDR-192, RDR-168, RDR-236, RDR-155, RDR-243, RDR-246, RDR-248]
 ---
