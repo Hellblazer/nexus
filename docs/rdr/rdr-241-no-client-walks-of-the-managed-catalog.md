@@ -871,3 +871,4 @@ the next one without the ratchet.
   author search and, found in this pass, the operator-dispatch read
   (`sensitive_paths.py:261`). Implementation Plan rebuilt as Phase 1 (client
   only, hours) and Phase 2 (engine and client, days). Status stays draft.
+- 2026-11-16: Gate round 1 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `641b2a2bd7fe`; critique `nexus_rdr/241-gate-critique-2026-11-16-r1`.
