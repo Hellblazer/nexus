@@ -183,6 +183,24 @@ public final class PgContainerHelper {
     }
 
     /**
+     * nexus-f3yqd.2.8: {@link #newContainer(DockerImageName)} on {@link PgContainerRecipe#DATA_MOVE_IMAGE}, the
+     * image with pg_background (built by {@link PgBackgroundImage}). Every data-move test boots through here or
+     * {@link #startDataMove()}. It is a container of its own, not a database on the per-fork shared cluster
+     * ({@link SharedCluster} runs {@link #IMAGE}), so a data-move test migrates and cleans up its own cluster.
+     */
+    public static PostgreSQLContainer<?> newDataMoveContainer() {
+        return newContainer(PgBackgroundImage.dockerImageName());
+    }
+
+    /** {@link #newDataMoveContainer()}, started. The caller stops it. */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startDataMove() {
+        PostgreSQLContainer<?> c = newDataMoveContainer();
+        c.start();
+        return c;
+    }
+
+    /**
      * {@link #newContainer()} on another image derived from {@link #IMAGE} (one with an
      * extra extension installed, say). Every test Postgres container is built here, so
      * every one gets the tmpfs data directory and the memory limit
