@@ -336,7 +336,7 @@ If you restore a backup or fork a point-in-time copy to bring up a second
 engine, check `SELECT version()` on the target first. A version that cannot
 be read also refuses.
 
-When you bring your own Postgres, two
+When you bring your own Postgres, these
 prerequisites must be satisfied by a DBA (superuser) before the first migration
 run:
 
@@ -460,6 +460,36 @@ run:
    start until that role re-creates the view without the frecency leg (the
    `CREATE OR REPLACE` above) or drops it. Until re-created, debt counts
    report as unknown, never as clean.
+4. **Background data moves (RDR-246).** Data moves run as `pg_background` jobs
+   through the `dml_utils` library, whose roles and extension only a
+   superuser can create, and whose changelogs the engine applies before its
+   own. Create the extension, the three roles `dml_utils` names (all NOLOGIN
+   NOBYPASSRLS) and their grants, and the `liquibase` schema where both
+   libraries keep their tracking tables, owned by `dml_utils_owner`. The
+   `pg_background` library must be installed on the server (a self-managed
+   host: its package or build, with no `shared_preload_libraries` entry). The
+   local bundle's provisioning does all of this on every service start
+   (`nexus.db.pg_dml_utils_bootstrap`); a bring-your-own-Postgres DBA runs it
+   once, as a superuser, connected to the nexus database:
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS pg_background;
+   CREATE ROLE dml_utils_owner  NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
+   CREATE ROLE dml_utils_caller NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
+   CREATE ROLE ddl_utils_caller NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
+   GRANT CREATE ON DATABASE nexus TO dml_utils_owner;
+   GRANT CREATE ON SCHEMA public TO dml_utils_owner;
+   GRANT ddl_utils_caller, pgbackground_role TO dml_utils_owner;
+   GRANT dml_utils_owner, dml_utils_caller, pgbackground_role TO nexus_admin;
+   CREATE SCHEMA liquibase AUTHORIZATION dml_utils_owner;
+   ```
+
+   Replace `nexus` with your database's name. The roles and the schema are
+   created with plain `CREATE` here because a DBA runs this once; the local
+   bootstrap tolerates a concurrent run and, for a `liquibase` schema that
+   already exists under another owner, takes it only when it is empty. Without
+   this step the engine still starts and serves: it skips the libraries and
+   reports every registered data move as `blocked:`.
 
 ## Tuning Parameters
 

@@ -10,10 +10,20 @@ The "bundle has no pg_background library" cases drive the module's own probe and
 its CREATE EXTENSION step; the shared test bundle always carries the library, so
 the absence is injected at those two seams over a real cluster, and the
 provision() fast path is then run for real to show a start never fails on it.
+
+Non-vacuity (the nexus-moht0 doctrine): every cluster fixture goes through
+``_require_library``. On the pinned engine tag's bundle (``NEXUS_PG_BIN`` unset, which is
+what CI uses) a bundle without the library FAILS the run, so the 12-odd cluster tests cannot
+all skip green. Only an explicit ``NEXUS_PG_BIN`` override (the nightly CA-3 bundle) may skip,
+with the same reason.
 """
 from __future__ import annotations
 
+import contextvars
+import os
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -37,12 +47,30 @@ pytestmark = [
 ]
 
 _ROLES = ("dml_utils_owner", "dml_utils_caller", "ddl_utils_caller")
+#: Read at import, before the autouse fixture below pins NEXUS_PG_BIN to the pinned bundle itself.
+_PG_BIN_OVERRIDDEN = bool(os.environ.get("NEXUS_PG_BIN", "").strip())
+
+
+class _RecordingLog:
+    """Stands in for the module's structlog logger: (level, event, fields) per call."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict]] = []
+
+    def _record(self, level: str):
+        return lambda event, **fields: self.events.append((level, event, fields))
+
+    def __getattr__(self, level: str):
+        if level in ("debug", "info", "warning", "error"):
+            return self._record(level)
+        raise AttributeError(level)
+
+    def named(self, event: str) -> list[tuple[str, dict]]:
+        return [(lvl, f) for lvl, ev, f in self.events if ev == event]
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _pin_discovery_to_the_built_bundle():
-    import os
-
     if os.environ.get("NEXUS_PG_BIN", "").strip():
         yield
         return
@@ -107,6 +135,17 @@ def _provision_failed(config_dir: Path, exc: subprocess.CalledProcessError) -> A
     return AssertionError(f"provision failed: {exc}\nstderr: {exc.stderr!r}\npg.log tail:\n{tail}")
 
 
+def _require_library(box: _Box) -> None:
+    """The bundle under test must carry pg_background: a failure on the pinned bundle, a skip only
+    under an explicit NEXUS_PG_BIN override (see the module docstring)."""
+    if box.q("SELECT count(*) FROM pg_available_extensions WHERE name = 'pg_background'") != "0":
+        return
+    reason = f"the bundle at {box.bins.bin_dir} has no pg_background control file"
+    if _PG_BIN_OVERRIDDEN:
+        pytest.skip(f"{reason} (NEXUS_PG_BIN override)")
+    pytest.fail(f"{reason}: the pinned engine tag's bundle must carry it, so this is a failure, not a skip")
+
+
 @pytest.fixture
 def fresh(bins: pp.PgBinaries):
     """A cluster provision() made with the bootstrap in place."""
@@ -117,7 +156,9 @@ def fresh(bins: pp.PgBinaries):
         except subprocess.CalledProcessError as exc:
             raise _provision_failed(config_dir, exc) from exc
         apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
-        yield _Box(config_dir, bins)
+        box = _Box(config_dir, bins)
+        _require_library(box)
+        yield box
     finally:
         stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)
 
@@ -138,22 +179,21 @@ def legacy(bins: pp.PgBinaries):
             mp.undo()
         apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
         box = _Box(config_dir, bins)
-        if box.q("SELECT count(*) FROM pg_available_extensions WHERE name = 'pg_background'") == "0":
-            pytest.skip(f"the bundle at {bins.bin_dir} has no pg_background (the pinned engine tag's bundle has it)")
+        _require_library(box)
         yield box
     finally:
         stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)
 
 
-def _assert_fully_bootstrapped(box: _Box) -> None:
+def _assert_fully_bootstrapped(box: _Box, *, schema_ours: bool = True) -> None:
     assert box.q("SELECT count(*) FROM pg_extension WHERE extname = 'pg_background'") == "1"
     flags = box.q(
-        "SELECT rolname, rolcanlogin, rolbypassrls, rolsuper FROM pg_roles "
+        "SELECT rolname, rolcanlogin, rolbypassrls, rolsuper, rolcreaterole, rolcreatedb FROM pg_roles "
         "WHERE rolname IN ('dml_utils_owner','dml_utils_caller','ddl_utils_caller') ORDER BY 1"
     ).splitlines()
     assert flags == [
-        "ddl_utils_caller|f|f|f", "dml_utils_caller|f|f|f", "dml_utils_owner|f|f|f",
-    ], "every library role is NOLOGIN, NOBYPASSRLS and not a superuser"
+        "ddl_utils_caller|f|f|f|f|f", "dml_utils_caller|f|f|f|f|f", "dml_utils_owner|f|f|f|f|f",
+    ], "every library role is NOLOGIN, NOBYPASSRLS, not a superuser, and cannot create roles or databases"
     assert box.q("SELECT has_database_privilege('dml_utils_owner', 'nexus', 'CREATE')") == "t"
     assert box.q("SELECT has_schema_privilege('dml_utils_owner', 'public', 'CREATE')") == "t"
     for member, role in (
@@ -162,7 +202,9 @@ def _assert_fully_bootstrapped(box: _Box) -> None:
         ("nexus_admin", "pgbackground_role"),
     ):
         assert box.q(f"SELECT pg_has_role('{member}', '{role}', 'MEMBER')") == "t", f"{member} lacks {role}"
-    assert box.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'") == "dml_utils_owner"
+    if schema_ours:
+        owner = box.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'")
+        assert owner == "dml_utils_owner"
 
 
 class TestFreshProvision:
@@ -172,9 +214,7 @@ class TestFreshProvision:
     def test_the_engine_role_can_become_the_owner_and_create_in_the_schema(self, fresh: _Box) -> None:
         """The point of the grants: nexus_admin runs SET ROLE dml_utils_owner and the objects land owned by it."""
         env_pass = fresh.creds["NX_DB_ADMIN_PASS"]
-        import os
-
-        env = {**os.environ, "PGPASSWORD": env_pass}
+        env ={**os.environ, "PGPASSWORD": env_pass}
         res = subprocess.run(
             [str(fresh.bins.psql), "-X", "-w", "-h", "127.0.0.1", "-p", str(fresh.port), "-U", "nexus_admin",
              "-d", "nexus", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c",
@@ -218,11 +258,65 @@ class TestBackfillOnAnInstallProvisionedBefore:
         pp.provision(legacy.config_dir)
         _assert_fully_bootstrapped(legacy)
 
-    def test_a_liquibase_schema_someone_else_owns_is_left_alone(self, legacy: _Box) -> None:
-        legacy.run("CREATE SCHEMA liquibase")
+    def test_a_library_role_that_became_a_superuser_is_converged(self, legacy: _Box) -> None:
         legacy.bootstrap()
-        owner = legacy.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'")
-        assert owner != "dml_utils_owner", "re-owning a schema we did not create is not the bootstrap's call"
+        legacy.run("ALTER ROLE dml_utils_caller SUPERUSER CREATEROLE CREATEDB")
+        assert legacy.q("SELECT rolsuper FROM pg_roles WHERE rolname = 'dml_utils_caller'") == "t"
+        pp.provision(legacy.config_dir)
+        _assert_fully_bootstrapped(legacy)
+
+    def test_an_empty_liquibase_schema_someone_else_owns_is_taken(self, legacy: _Box) -> None:
+        legacy.run("CREATE SCHEMA liquibase")
+        assert legacy.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'") != "dml_utils_owner"
+        out = legacy.bootstrap()
+        assert out.schema_problem is None and out.blocked_reason is None
+        _assert_fully_bootstrapped(legacy)
+
+    def test_a_non_empty_liquibase_schema_someone_else_owns_is_left_with_a_reason_and_the_rest_still_applies(
+        self, legacy: _Box
+    ) -> None:
+        legacy.run("CREATE SCHEMA liquibase; CREATE TABLE liquibase.theirs (i int)")
+        owner_before = legacy.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'")
+        assert owner_before != "dml_utils_owner"
+        out = legacy.bootstrap()
+        assert out.applied, "the extension, roles and grants are in place, only the schema is a problem"
+        assert out.schema_problem == f"liquibase schema owned by {owner_before} and not empty"
+        assert out.blocked_reason == out.schema_problem, "the line a doctor can show"
+        assert legacy.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'") == owner_before
+        _assert_fully_bootstrapped(legacy, schema_ours=False)
+
+    def test_a_loser_of_the_creation_race_is_not_an_error(self, legacy: _Box, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A provision whose probe ran before a peer's commit sees nothing and tries to create everything:
+        CREATE ROLE and CREATE SCHEMA meet what the winner made. The state stays the winner's."""
+        legacy.bootstrap()
+        before = legacy.snapshot()
+        stale = {"installed": "0", "available": "1", "admin": "1", "schema_owner": "", "roles": "", "relations": "0"}
+        monkeypatch.setattr(boot, "_state", lambda *a, **k: stale)
+        out = legacy.bootstrap()
+        assert out.applied
+        assert legacy.snapshot() == before
+
+    def test_two_provisions_racing_from_an_empty_cluster_both_succeed(
+        self, legacy: _Box, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A barrier after each thread's first probe makes both see the empty cluster and then create."""
+        real, barrier, seen = boot._state, threading.Barrier(2, timeout=60), threading.local()
+
+        def probe_then_meet(*a, **k):
+            state = real(*a, **k)
+            if not getattr(seen, "met", False):
+                seen.met = True
+                barrier.wait()
+            return state
+
+        monkeypatch.setattr(boot, "_state", probe_then_meet)
+        with pp.superuser_auth(legacy.creds["PG_SUPERUSER_PASS"]):
+            args = (legacy.bins, legacy.port, pp.bootstrap_superuser())
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(contextvars.copy_context().run, boot.bootstrap_dml_utils, *args) for _ in range(2)]
+                results = [f.result(timeout=120) for f in futures]
+        assert all(r.applied for r in results)
+        _assert_fully_bootstrapped(legacy)
 
 
 class TestBundleWithoutTheLibrary:
@@ -258,11 +352,21 @@ class TestBundleWithoutTheLibrary:
     def test_provision_fast_path_returns_and_creates_nothing_when_the_library_is_absent(
         self, legacy: _Box, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """A clean skip, not a swallowed exception: the skip event is logged at INFO (it fires on every start
+        of an install whose bundle predates the library) and the failure event, which the best-effort wrapper
+        emits for any exception, is NOT."""
         real = boot._state
         monkeypatch.setattr(boot, "_state", lambda *a, **k: {**real(*a, **k), "available": "0"})
+        log = _RecordingLog()
+        monkeypatch.setattr(boot, "_log", log)
         result = pp.provision(legacy.config_dir)
         assert result.already_provisioned, "daemon start must go on"
         assert legacy.q("SELECT count(*) FROM pg_extension WHERE extname = 'pg_background'") == "0"
+        skipped = log.named("pg_dml_utils_bootstrap_skipped")
+        assert [lvl for lvl, _ in skipped] == ["info"]
+        assert "pg_background" in skipped[0][1]["reason"]
+        assert log.named("pg_dml_utils_bootstrap_failed") == [], "an exception was swallowed as if it were a skip"
+        assert [e for e in log.events if e[0] in ("warning", "error")] == []
 
     def test_a_failure_inside_the_bootstrap_never_fails_the_fast_path(
         self, legacy: _Box, monkeypatch: pytest.MonkeyPatch
@@ -271,6 +375,43 @@ class TestBundleWithoutTheLibrary:
             raise RuntimeError("psql exploded")
 
         monkeypatch.setattr(boot, "bootstrap_dml_utils", boom)
+        log = _RecordingLog()
+        monkeypatch.setattr(boot, "_log", log)
         result = pp.provision(legacy.config_dir)
         assert result.already_provisioned
         assert legacy.q("SELECT count(*) FROM pg_roles WHERE rolname LIKE '%utils%'") == "0"
+        failed = log.named("pg_dml_utils_bootstrap_failed")
+        assert [lvl for lvl, _ in failed] == ["warning"]
+        assert "psql exploded" in failed[0][1]["error"]
+
+
+class TestTheFailureLog:
+    """No cluster: the best-effort wrapper's log line carries psql's stderr, bounded."""
+
+    def test_the_stderr_of_a_failed_psql_is_in_the_line_and_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def boom(*a, **k):
+            raise subprocess.CalledProcessError(2, ["psql", "-c", "..."], stderr=b"ERROR:  permission denied " * 200)
+
+        monkeypatch.setattr(boot, "bootstrap_dml_utils", boom)
+        log = _RecordingLog()
+        monkeypatch.setattr(boot, "_log", log)
+        assert boot.bootstrap_dml_utils_best_effort(None, 0, "u", via="test") is None
+        (_, fields), = log.named("pg_dml_utils_bootstrap_failed")
+        assert "permission denied" in fields["stderr"]
+        assert len(fields["stderr"]) <= 503, "bounded, with the ellipsis"
+        assert fields["via"] == "test"
+
+    def test_a_str_stderr_and_a_missing_one_are_both_handled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for exc in (
+            subprocess.CalledProcessError(1, ["psql"], stderr="ERROR: text mode"),
+            RuntimeError("no stderr attribute"),
+        ):
+            def boom(*a, _e=exc, **k):
+                raise _e
+
+            monkeypatch.setattr(boot, "bootstrap_dml_utils", boom)
+            log = _RecordingLog()
+            monkeypatch.setattr(boot, "_log", log)
+            boot.bootstrap_dml_utils_best_effort(None, 0, "u", via="test")
+            (_, fields), = log.named("pg_dml_utils_bootstrap_failed")
+            assert fields["stderr"] == ("ERROR: text mode" if isinstance(exc, subprocess.CalledProcessError) else "")
