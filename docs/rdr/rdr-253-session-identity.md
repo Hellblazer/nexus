@@ -82,7 +82,9 @@ A `claude -p` child inherits the parent's `NX_SESSION_ID` and is attributed to
 the parent (research 2, G9); a subagent shares the parent's token (JDR-001).
 Incident: a child's session end deleted its parent's entire T1 scope in a
 released version (GH #1454, nexus-65a9k, P0); a nested child rotated the
-parent's token (nexus-5daww, P0).
+parent's token (nexus-5daww, P0). This RDR closes the gap for `claude -p`
+children; Agent-tool subagents stay attributed to the parent by decision,
+until Claude Code identifies their calls (Critical Assumption 3).
 
 #### Gap 4: Liveness and ownership are guessed from pid, name, cwd or git user
 
@@ -109,7 +111,8 @@ all be unstamped (`nexus_rdr/252-fix-check-cee51c460fc1`).
   starting point; this RDR replaces "the session id is the address" with "the
   seat is the address".
 - **JDR-001** (T1 three scopes): T1's session scope stays; this RDR adds
-  identity-scoped durable scratch beside it.
+  identity-scoped durable scratch beside it and extends the handoff marker;
+  JDR-001 gains a revision entry (Sam's edit).
 - **JDR-002** (tuple sender claims): the stamp stays a label everywhere except
   identity-owned subspaces, where a superseded generation is refused (Sam,
   2026-11-16); JDR-002 gains a revision entry, Sam's edit.
@@ -181,7 +184,8 @@ code (research 3); lane D, outside systems (research 4).
 5. Only the MCP server can hold a credential today, and every Bash child
    already carries the current session id in `CLAUDE_CODE_SESSION_ID`
    (research 2). So a resolver can map any process to its identity through
-   the binding log without new environment plumbing.
+   the binding log, with only a token file and two variables added
+   (`NX_SEAT`, `NX_IDENTITY_TOKEN`).
 6. Our threat is a confused model, not a hostile party (JDR-002). Signatures,
    witnesses, quorum admission, failure-detector math and attestation chains
    are out (research 3, 4).
@@ -253,12 +257,13 @@ code (research 3); lane D, outside systems (research 4).
 **Identity records.** New engine templates, all tenant-scoped:
 
 ```
-identity/<id>    dims: kind=seat|ephemeral|delegated  parent=<id or none>  generation=<n>  state=live|lapsed|ended
+identity/<id>    dims: kind=seat|ephemeral|delegated  parent=<id or none>  generation=<n>  state=unheld|live|lapsed|ended
                  body: {"created_by": "<sam|restart|session|dispatch>", "created_at": "<UTC>", "ended_at": null}
 alias/<name>     dims: identity=<id>  state=live|retired
                  body: {"since": "<UTC>", "retired_at": null, "renamed_to": null}
 binding/<id>     dims: event=start|clear|resume|fork|takeover|release|rename|end|lapse|revive  generation=<n>  lease=leased|unleased
-                 body: {"session_id": "<uuid>", "pid": <n>, "proc_start": "<t>", "pane": "<tmux pane or null>",
+                 body: {"session_id": "<uuid>", "host": "<hostname>", "pid": <n>, "started_at": <ms>,
+                        "pane": "<tmux pane or null>", "client_version": "<conexus version>",
                         "prior_session_id": "<uuid or null>", "at": "<UTC>"}
 session/<session id>   dims: identity=<id>  generation=<n>        (the session index)
 member/<id>      dims: group=<name>  role=<leader|member>          (memberships; RDR-252 re-keys onto this)
@@ -272,8 +277,13 @@ identity; names matching `i<digits>` are reserved and cannot be aliases. An
 alias names one live identity at a time.
 
 **A generation is one process holding a seat** (Sam, 2026-11-16, decision 2 as
-amended). A process is one Claude Code process, known by its pid and start
-time. The generation goes up only when a different process takes the seat: a
+amended). A process is one start of a Claude Code process, known by its host,
+its pid and the `startedAt` its registry file records. Claude Code's in-place
+`/restart` can keep the pid, but every start writes a new `startedAt`, which
+is how the restart script already tells a new start (`nexus_rdr/253-research-9`
+(a)). A seat's state is `unheld` when created or released, `live` while its
+holder renews, `lapsed` after 300 seconds without renewal, and `ended` after a
+clean exit. The generation goes up only when a different process takes the seat: a
 launch, a resume in a new process, or an explicit take-over. Inside one
 process the session id can change (`/clear`, `fork`, `/branch`) without
 changing the generation: the binding log appends a row with the new session
@@ -298,51 +308,78 @@ session, not a hostile one, as JDR-002 says.
 
 A seat is named by `NX_SEAT`, or by a `-n` that exactly matches a live seat
 alias; `NX_SEAT` wins when both are given. A `-n` that matches no seat is a
-display name, and the session gets an ephemeral identity with that name,
-which `nx identity promote` can later make a seat (Sam, 2026-11-16). The
+display name, and the session gets an ephemeral identity that shows that
+name but takes no alias: aliases belong to seats, so two launches with one
+display name never collide and no name is consumed. `nx identity promote
+<id> <name>` makes it a seat with that alias (Sam, 2026-11-16). The
 policy, with the result for the session in the last column:
 
 | Hook `source` | Seat state | Result |
 |---|---|---|
-| `startup`, a seat named | unheld, ended or lapsed | bound, new generation, event `start` |
+| `startup`, a seat named | unheld or ended, or its holder no longer exists | bound, new generation, event `start` |
+| `startup`, a seat named | lapsed less than 10 minutes ago, holder still running | ephemeral, as for a live holder |
+| `startup`, `NX_SEAT` naming no seat | n/a | ephemeral; the hook lists the seats |
 | `startup`, a seat named | live in another process | ephemeral; the hook prints the holder and the remedy `nx identity claim <seat> --take-over` |
 | `startup`, no seat named | n/a | ephemeral, event `start` |
-| `resume` | the resumed id's seat is unheld, ended or lapsed | bound, new generation if the process is new, event `resume` |
+| `resume` | the resumed id's seat is unheld or ended, or its holder no longer exists | bound, new generation if the process is new, event `resume` |
 | `resume` | live in this same process | unchanged |
+| `resume` in a process that already holds a different identity | the resumed seat unheld | the process switches: `release` on its current identity, then bound to the resumed seat with a new generation; the handoff marker carries the new identity and token to the MCP server |
+| `resume` in a process that already holds a different identity | the resumed seat live elsewhere | unchanged: the process keeps its identity, and the hook prints the holder |
 | `resume` | live in another process | ephemeral, with the holder and the remedy, as for `startup` |
 | `resume` | the id is in no index (a session from before this RDR) | treated as `startup` with the seat the launch names |
 | `clear`, `fork` | live or lapsed in this process | same generation, new session id, event `clear` or `fork`; a lapsed seat is revived |
 | `compact` | any | unchanged; no binding row |
-| no hook (`/branch`) | live in this process | on its next renewal the MCP server maps the unknown session id through the registry's pid and start time and appends a `fork` row; the resolver never writes |
+| no hook (`/branch`) | live in this process | the process's token file still applies, so its Bash children keep writing; on its next renewal the MCP server maps the unknown session id through the registry's pid and `startedAt` and appends a `fork` row; the resolver never writes |
 
 A `--fork-session` launch is a new process: it binds by the `startup` or
 `resume` rows like any launch. After a `fork`, mail already in the seat's
 `mailbox/<id>` follows the seat into the forked conversation; mail in the old
 `mailbox/<session id>` stays where RDR-208 put it.
 
-**Restart and take-over.** The restart script stops each session's process,
-waits for it to exit, and runs `nx identity release <seat> --pid <old pid>`,
-which appends `release` and leaves the seat unheld; the relaunch, whether
-`--resume`, `/restart` or `--revive`, then binds by the `resume` row. No
-environment variable carries take-over authority, so no child can inherit it.
-`nx identity claim <seat> --take-over` is the only way to supersede a live
-process: a command a person or a session runs once, which binds a new
-generation, writes the token file and the handoff marker below, and names
-the process it superseded. A clean exit appends `end` (the MCP server, on
-shutdown); a crash leaves the seat to lapse.
+**A holder that no longer exists.** Before applying the table, the hook (and
+`bind`) checks the current holder on the same host: if no registry file names
+the holder's pid with the holder's `startedAt`, that process no longer exists
+(it exited, crashed, was replaced by `/restart`, or the machine rebooted;
+`nexus_rdr/253-research-9` (a), (b)), and the seat is treated as `unheld`
+whatever its lease says. This one rule covers every restart mode: an exit
+and relaunch, an in-place `/restart` (a new `startedAt`) and a `--revive`
+after a reboot (no registry files at all) all find the old holder gone and
+bind by the table's `resume` row with a new generation. The restart script
+needs no release step. A holder on another host is judged by its lease alone.
+
+**Take-over.** `nx identity claim <seat> --take-over` supersedes a live
+holder. It runs only from an interactive Claude session (registry `kind`
+interactive, not a `claude -p` child), and it is refused when the holder's
+process is an ancestor of the caller's, so no child can take its parent's
+seat. The hook prints the take-over remedy only into interactive sessions.
+The claim binds the caller's own Claude process (its nearest Claude ancestor,
+`nexus_rdr/253-research-9` (c)) as a new generation, appends `end` to the
+caller's previous ephemeral identity (whose state is then pruned by
+retention), writes the token file, and adds the new identity, generation and
+token to the handoff marker so the caller's MCP server switches identity.
+`nx identity release <seat>` exists for a person to free a seat whose holder
+is known to be gone on another host. A clean exit appends `end` (the MCP
+server, on shutdown, with its expected generation, so a late `end` from a
+superseded process is refused); a crash leaves the seat to lapse.
 
 **Handover to the MCP server.** The hook binds, receives the token and writes
-it to `~/.config/nexus/identity/<session id>.token` (mode 0600). On `clear`,
+it to `~/.config/nexus/identity/<claude pid>.<startedAt>.token` (mode 0600):
+one file per process start, so two processes that resume one session id
+never share a file, and a superseded process's children never read the new
+holder's token. On `clear`,
 `resume` and `fork` it also adds the identity, generation and session id to
 the T1 handoff marker it already writes (`t1_handoff.<mcp pid>`, polled every
 5 seconds; `nexus_rdr/253-research-7` (a)). On `/clear` the generation is
 unchanged, so the MCP server keeps writing with its current token and the
 marker gives it the new session id: no write is refused in between. On
-`startup`, when no marker is written (`nexus_rdr/253-research-8` (b)), the new
-MCP server reads the token file named by its own `CLAUDE_CODE_SESSION_ID`,
-polling once a second for up to 30 seconds, since the hook and the server
-start together; if the file has not appeared it runs unbound and keeps
-checking on its heartbeat.
+every new process start (`startup`, and a `resume`, `/restart` or `--revive`
+in a new process), the new MCP server reads the token file of its own Claude
+process, found by its nearest Claude ancestor's pid and that process's
+registry `startedAt` (`nexus_rdr/253-research-9` (c)), polling once a second
+for up to 30 seconds, since the hook and the server start together; it does
+not rely on the marker, which a new server would discard
+(`nexus_rdr/253-research-8` (b)). If the file has not appeared it runs
+unbound and keeps checking on its heartbeat.
 
 **Renewal, refresh, lapse and sleep.** The MCP server renews the binding every
 60 seconds on its own heartbeat (the thread that also renews
@@ -350,8 +387,7 @@ checking on its heartbeat.
 token lives one hour, the ceiling for a token minted under the data
 credential the MCP server holds (`nexus_rdr/253-research-8` (c)); the server
 refreshes it at half life through `bind` with the same generation (a refresh,
-not a new binding) and rewrites the token file of every session id of its
-generation. A renewal or refresh from a superseded generation is refused, and
+not a new binding) and rewrites its process's one token file. A renewal or refresh from a superseded generation is refused, and
 the server stops writing identity state and says so. The engine marks a seat
 `lapsed`, without changing the generation, when it reads a binding whose last
 renewal is more than 300 seconds old; the next renewal from the same process
@@ -370,7 +406,7 @@ explicit identity token (a delegated child), the hook payload's session id,
 `(identity, generation)`, and an unknown id from a live registry entry
 through pid and start time. If two inputs map to different identities it
 refuses with both, never picks. It only reads. A Bash child's `nx` reads the
-token file named by its `CLAUDE_CODE_SESSION_ID`; on an expired token (HTTP
+token file of its nearest Claude ancestor process; on an expired token (HTTP
 401) it re-reads the file once, and on a superseded generation (HTTP 409
 with error code `generation_superseded`, distinct from the engine's other
 409s) it stops and names the holder. On a fenced family a client never
@@ -380,30 +416,42 @@ retries without a token, which JDR-002's 401 fallback would otherwise do.
 ownership check: the token's identity is the family's owner, or a delegated
 child of the owner for its reads. The generation check: the token's
 generation is the owner's current generation. A write to a fenced family
-with no identity token is refused, with one exception: a seat whose current
-binding is `unleased` (Desktop) accepts writes carrying its session token,
-labelled unattested, since its MCP server cannot hold the identity token.
+with no identity token is refused, with two exceptions. A send (`out`) to a
+mailbox is open to any caller, token or none: `nx ask` answers, the console
+and scripts send without one (`nexus_rdr/253-research-9` (e)). And a write to
+a family whose owner's current binding is `unleased` (a Desktop seat) is
+accepted without an identity token and labelled unattested: the exception is
+keyed on the target, since a Desktop MCP server holds no token at all
+(JDR-002, F17). A person can delete or clean up the fenced state of an
+identity that has ended or been tombstoned with the tenant credential and an
+explicit `--operator` flag, which is logged.
 
 | Family | Store and handler | Who may write | Checked operations | Checks |
 |---|---|---|---|---|
 | Mailbox `mailbox/<id>` | tuple space, `TupleHandler` | any identity may send (`out`) | the owner's `in`, `inp`, `ack`, `nack`, `renew`, `release` | ownership and generation; a send is a label, as today |
-| Membership `member/<id>` | tuple space, `TupleHandler` | the owner only | `out`, removal | ownership and generation |
-| Threads entry | T2 memory, project `threads`, `MemoryHandler` | the owner only | `put` (including `replaces`), `put_or_merge`, `merge`, `import`, `import_batch`, `flag`, `unflag`, `delete`, `restore`, `expire`, `reap`, `flag_stale`, `session/close` on an entry whose stored first line is `identity: <id>` | ownership and generation, read against the stored entry; a write that removes or changes the `identity:` line is refused |
-| Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`, `session/close`, `sweep` | ownership and generation |
+| Membership `member/<id>` | tuple space, `TupleHandler` | the owner only | `out`, and the claim family used to remove one (`in`, `inp`, `ack`, `nack`, `renew`, `release`) | ownership and generation |
+| Threads entry | T2 memory, project `threads`, `MemoryHandler` | the owner only | `put` (including `replaces`), `put_or_merge`, `merge`, `import`, `import_batch`, `delete`, `restore`, `summaries` on an entry carrying an `identity: <id>` line | ownership and generation, read against the stored entry; a new entry may name only the writer's own identity, and a write that removes or changes the line is refused; the tenant-wide sweeps `expire` and `reap` skip such entries |
+| Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`; the scope is never closed by `session/close` and is excluded from `sweep` | ownership and generation |
 
-Every other subspace, project and scope keeps its current rule: the stamp is
-a label (JDR-002), and `ScratchHandler`'s existing refusal of a mismatched
-session on the session scope (`nexus_rdr/253-research-8` (d)) is unchanged.
-JDR-002 gains a revision entry naming these four families (Sam's edit). The
+Reads are not checked. Every other subspace, project and scope keeps its
+current rule: the stamp is a label (JDR-002), and `ScratchHandler`'s existing
+refusal of a mismatched session on the session scope
+(`nexus_rdr/253-research-8` (d)) is unchanged; an identity token carries its
+process's current session id for that check. JDR-002 gains a revision entry
+naming these four families, and JDR-001 one for the identity T1 scope and the
+extended handoff marker (both Sam's edits). The
 board keeps `memory_put` as its write path.
 
 **Delegation.** `nx` operator dispatch (`claude -p`) creates a delegated
 identity, `kind=delegated parent=<id>`, with generation 1 and one `start`
-binding row written by the dispatcher, and passes its token to the child as
-`NX_IDENTITY_TOKEN` in place of the parent's; the child's own SessionStart
+binding row written by the dispatcher, and passes the child, in place of the parent's token,
+`NX_IDENTITY_TOKEN` naming a token file it keeps current; the child's own SessionStart
 hook sees the variable and does not bind, and the resolver takes the
-explicit token first. The dispatcher appends `end` when the child exits; if
-the dispatcher dies, the delegated identity lapses with it. A delegated
+explicit token first. The dispatcher renews the delegated binding while the child runs, refreshes
+its token by rewriting `NX_IDENTITY_TOKEN`'s file (the child reads the token
+from a file the variable names, not from the variable's value), and appends
+`end` when the child exits; if the dispatcher dies, renewal stops and the
+delegated identity lapses. A delegated
 identity reads its parent's identity-owned state and writes only its own.
 Agent-tool subagents keep the parent's seat with an `agent` label: their MCP
 calls carry nothing that tells them from the parent's (Critical Assumption 3;
@@ -412,13 +460,14 @@ Code sends `claudecode/agentId` on tool calls, re-checked on each upgrade.
 
 **Retention.** Seats, their aliases and their identity records are
 permanent. Ephemeral and delegated identities are tombstoned 30 days after
-they end or lapse for good (a crashed session's identity lapses, which
-counts): their binding, session-index, membership, background-work and
-scratch rows are pruned, their mailbox is emptied, their token files are
-deleted, and the counter keeps their numbers. A seat's binding rows are kept
+they end, or 30 days after they lapse (a crashed session's identity lapses,
+which counts): their identity, alias, binding, session-index, membership,
+background-work and scratch rows and their threads entry are pruned, their
+mailbox is emptied, and the counter keeps their numbers. Token files are
+local: the MCP server deletes its own at shutdown, and the hook deletes any
+whose process no longer exists. A seat's binding rows are kept
 for 180 days, never the last one, and its session-index rows as long as the
-binding rows they point to. Token files of ended processes are deleted when
-the MCP server ends or at the next start of the seat.
+binding rows they point to. 
 
 **Aliases and renames.** `nx identity rename <old> <new>` (Sam or the seat)
 retires the old alias, sets `renamed_to`, appends a `rename` binding row, and
@@ -460,6 +509,15 @@ seat's alias differ.
   a label, not a fenced family: a lab run on another host has no token file.
   Watchers and waits are Bash children of the seat's process and write as the
   seat across `/clear`.
+- **Who reads liveness (Gap 4).** `nx identity alive <seat|pid>` answers from
+  the binding and the holder check. Three consumers move onto it in Phase 1:
+  worktree removal (an agent's worktree is removed only when its seat or
+  process is not alive, not when `ps` misses it); the sandbox and tmux cleanup
+  helpers (a server is stopped only when its owning seat's process is gone,
+  never by name pattern); and the restart round's readiness check (a session
+  reports `work/<id>` entries still running). Bead ownership stays out:
+  Sam ruled that beads do not carry session ownership, so beads keep the git
+  user and the board names who works on what.
 
 ### Existing Infrastructure Audit
 
@@ -468,7 +526,7 @@ seat's alias differ.
 | Session token, `sender_session` stamp | Yes (JDR-002) | Becomes an identity token carrying identity and generation |
 | MCP 60-second heartbeat thread | Yes (`subscriptions.py`) | Renews the binding |
 | SessionStart hook with `source` | Yes | Binds per the policy table (start, resume, clear, fork) |
-| Restart script with `-n` | Yes | Sets `NX_SEAT`; releases the old binding after the old process exits |
+| Restart script with `-n` | Yes | Unchanged: the new start finds the old holder gone |
 | Catalog tumbler allocator | Yes (`catalog/tumbler.py`) | Pattern for the never-reused id counter |
 | T1 handoff marker | Yes (`hooks/__init__.py`, `mcp/core.py`) | Carries the binding to the MCP server; kept |
 | Directory lease, session markers, `current_session` | Yes | Fallbacks in Phase 1, retired in Phase 2 |
@@ -544,9 +602,9 @@ Self-certifying identifiers, signed binding events, witnesses.
 - **A launch names a live seat by mistake**: it runs ephemeral and is told the
   holder; only the one-shot `nx identity claim --take-over` supersedes a live
   process.
-- **A crash leaves a seat held** (the process died before its lease lapsed):
-  the relaunch runs ephemeral with the remedy until the lapse, or until
-  `claim --take-over`.
+- **A crash leaves a seat held**: on the same host the relaunch finds the
+  holder's process gone and binds at once; across hosts it waits for the
+  lapse, or for a person's `nx identity release`.
 - **A child takes its parent's seat**: no inherited variable carries
   take-over authority, and a delegated child's hook does not bind.
 - **A token outlives its lifetime**: the MCP server refreshes it at half of
@@ -590,15 +648,19 @@ the holder. A launch with `-n scratch42` gets an ephemeral identity named
 log gains a `clear` row under generation 1, its first write after the
 `/clear` succeeds, and a shell `nx` started before the `/clear` still writes
 as `alpha`. A `claude -p` child it dispatches writes its own records and is
-refused on `alpha`'s scratch. The restart script restarts it: a `release`
-row, then a `resume` row with generation 2. A test process holding generation
+refused on `alpha`'s scratch. The restart script restarts it by `/restart` in place: the
+new start finds the old holder gone and binds a `resume` row with generation
+2. A test process holding generation
 1's token (kept alive for the purpose) is refused on `alpha`'s mailbox claim
 with `generation_superseded`. The laptop sleeps for ten minutes and wakes:
 the seat lapses and revives under generation 2, and a launch naming `alpha`
 during the lapse runs ephemeral. Renaming the alias to `beta` retitles the
 board entry and still delivers mail sent to `alpha`, with a notice. After a
-reboot, `--revive` binds generation 3 to the same identity once the lapse
-passes, or at once after `claim --take-over`.
+reboot, `--revive` finds no registry files, so the old holder is gone, and
+binds generation 3 to the same identity at once. A `/resume` inside `alpha`'s
+session of a conversation that belongs to an unheld seat `gamma` switches the
+session to `gamma`. A `claude -p` child of `alpha` that runs `nx identity
+claim alpha --take-over` is refused.
 
 ### Phase 1: Identity and the state it owns
 
@@ -612,32 +674,39 @@ in a later release.
 The `identity`, `alias`, `binding`, `session`, `member` and `work` templates;
 the `mailbox` template's `identity` address kind; the per-tenant id counter
 with `i<digits>` reserved; the compare-and-set `bind` (start, resume, clear,
-fork, takeover, release, refresh) under the policy table; renewal, lazy
-`lapse` with its 10-minute reservation, and `revive`; the `unleased` lease;
-the rename call that retitles the threads entry; retention and tombstones.
+fork, takeover, release, refresh, end) under the policy table, with the
+holder-no-longer-exists check on host, pid and `startedAt`; the routes `nx
+identity` needs (create, promote, alive, delegated create, session lookup);
+renewal, lazy `lapse` with its 10-minute reservation, and `revive`; the
+`unleased` lease; the rename call that retitles the threads entry; retention
+and tombstones, including threads entries of tombstoned identities; the
+operator override.
 
 #### Step 2: Identity tokens and the four fences
 
 Tokens carrying identity and generation, one-hour lifetime, refreshed through
 `bind`; the ownership and generation checks on every listed operation in
 `TupleHandler`, `MemoryHandler` (project `threads`) and `ScratchHandler` (the
-new identity scope); refusal of tokenless writes except `unleased` seats;
-`generation_superseded` as its own 409 code; T2 identity stamping; the
-JDR-002 revision entry (Sam's edit).
+new identity scope); refusal of tokenless writes except sends and writes to
+`unleased` seats; `expire`, `reap`, `sweep` and `session/close` kept off
+fenced state; `generation_superseded` as its own 409 code; T2 identity
+stamping; the JDR-002 and JDR-001 revision entries (Sam's edits).
 
 #### Step 3: The resolver, hooks and the MCP server
 
 `resolve_identity()`; SessionStart binding per the policy table, with
-`NX_SEAT` and exact seat `-n` matching; the token file; the handoff-marker
-extension; the startup token read; renewal, refresh and the `/branch` fork
-row on the heartbeat; `end` on clean shutdown; the display-name versus alias
-notice.
+`NX_SEAT` and exact seat `-n` matching; the holder check; the per-process
+token file; the handoff-marker extension, including the identity switch on a
+cross-seat `/resume`; the new-process token read; renewal, refresh and the
+`/branch` fork row on the heartbeat; `end` on clean shutdown; the
+display-name versus alias notice.
 
 #### Step 4: Seats, restart and delegation
 
-`nx identity` (create, show, claim, release, rename, promote); the restart
-script's `release` after the old process exits; delegated identities and
-`NX_IDENTITY_TOKEN` for `claude -p` dispatch.
+`nx identity` (create, show, alive, claim, release, rename, promote), with
+take-over refused for non-interactive callers and descendants of the holder;
+delegated identities, their renewal and their token file for `claude -p`
+dispatch.
 
 #### Step 5: Threads entry, mailbox and names
 
@@ -649,15 +718,19 @@ identity-shaped `from` guard.
 #### Step 6: Identity scratch, per-identity T2, memberships and background work
 
 The identity T1 scope in the client; project `identity/<id>`; memberships on
-`member/<id>`; `work/<id>` registration.
+`member/<id>`; `work/<id>` registration; the three liveness consumers (worktree
+removal, sandbox and tmux cleanup, the restart readiness check) moved onto
+`nx identity alive`.
 
 ### Phase 2: Retirement
 
 Remove the four-tier resolver, the `current_session` file, `directory/<name>`
 and `mailbox/<session id>` as addresses, the dual subscription, and the
-`session:` line, once Phase 1 has run for two weeks and `nx identity show
---all` reports no live binding from a pre-Phase-1 client (each binding row
-records the client version).
+`session:` line, once Phase 1 has run for two weeks and no live session is a
+pre-Phase-1 client: every live Claude process on the laptop (registry files)
+has a binding whose `client_version` is a Phase 1 release, checked by `nx
+identity show --all`, which lists live processes without a binding as
+well.
 
 ### Day 2 Operations
 
@@ -680,10 +753,16 @@ None.
   id, `compact`, a lapsed seat on `clear`, and `/branch`.
 - First write after `/clear` succeeds; a Bash child from before the `/clear`
   still writes; a freshly started MCP server reads its token file.
-- The restart script: `release` then `resume`, generation 2, for `--resume`,
-  `/restart` and `--revive`.
-- A child process carrying no `NX_IDENTITY_TOKEN` cannot take its parent's
-  seat.
+- Each restart mode (exit and relaunch, in-place `/restart`, `--revive` after a
+  reboot) finds the old holder gone and binds the next generation, with no
+  release step.
+- A cross-seat `/resume` in a running session switches its identity, and the
+  MCP server follows through the marker.
+- Two processes resuming one session id use separate token files.
+- `claim --take-over` from a `claude -p` child, or from a descendant of the
+  holder, is refused; the hook prints the remedy only interactively.
+- A send without a token (as `nx ask` answers) reaches a seat's mailbox.
+- The operator override deletes an ended identity's board entry.
 - Two simultaneous binds: one wins.
 - Each fence, for every listed operation: a peer's send to a mailbox passes,
   a peer's claim on it is refused; a non-owner's membership, threads-entry
@@ -699,9 +778,10 @@ None.
 - Aliases: rename retitles the board entry; mail to a retired alias within 7
   days with a notice, refused after; a retired name is never reissued;
   `i<digits>` refused as an alias.
-- Retention: an ephemeral identity tombstoned 30 days after it ends, its rows
-  and token files gone, its number never reused; a seat's last binding row
-  never pruned.
+- Retention: an ephemeral identity tombstoned 30 days after it ends or
+  lapses, its rows and board entry gone, its number never reused; token files
+  of dead processes removed by the hook; a seat's last binding row never
+  pruned.
 - Reboot: identity, aliases and bindings survive; `--revive` rebinds.
 
 ## Validation
@@ -793,3 +873,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-16: gate round 1 findings addressed (`nexus_rdr/253-research-7`): a generation counts processes, so `/clear`, `fork` and `/branch` keep it and only a new process or a take-over advances it; the hook-to-MCP handover through the existing handoff marker; a binding policy table with take-over; lapse and revive across sleep; Desktop bindings `unleased`; fencing as an ownership check and a generation check over four named families and their handlers, with the board kept on `memory_put`; the bind caller and credential; token refresh and 401 versus 409; a mixed-fleet mail fallback; alias reuse rules; retention for ephemeral and delegated identities; `claude -p` children not binding in their own hook. Sam accepted the narrowing of decision 3 to `claude -p` children.
 - 2026-11-16: fix check 1 findings addressed (`nexus_rdr/253-fix-check-fca28b6443a1`, `253-research-8`): the restart script releases the old binding, so restarts bind by the `resume` row and no inherited variable carries take-over authority; take-over only by the one-shot `nx identity claim --take-over`; `end` on clean shutdown; a fresh MCP server reads its token file; tokenless writes to the fences refused except `unleased` Desktop seats; every mutating operation listed per fence, read against the stored entry; all engine changes in Steps 1 and 2, Steps 3 and 4 shipped together; the current generation held on the identity record; one-hour tokens refreshed through `bind`; lazy lapse with a 10-minute reservation; `session:` kept beside `identity:` through Phase 1 with its readers moved in Step 5; rename retitles the board entry; names never reissued; a non-seat `-n` ephemeral and decision 2's amendment, both Sam's answers.
 - 2026-11-16: Gate round 2 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `04b6e5eb5d11`; critique `nexus_rdr/253-gate-critique-2026-11-16-r2`.
+- 2026-11-16: after the round-2 pass, Sam chose to fix all ten (the two residuals and the eight Significants; `nexus_rdr/253-research-9`): a holder whose host, pid and `startedAt` match no registry file no longer exists, which covers exit-and-relaunch, in-place `/restart` and `--revive` alike, so the restart script needs no release; the Desktop exception keyed on the target seat being `unleased`; a cross-seat `/resume` switches the process's identity through the marker; token files per process start, not per session id; take-over refused for non-interactive callers and descendants of the holder, its remedy printed only interactively, and the caller's ephemeral identity ended; Gap 4's consumers (worktree removal, sandbox and tmux cleanup, the restart readiness check) on `nx identity alive`, beads out by Sam's earlier ruling; sends exempt from the tokenless refusal; one token file per process refreshed in place; an operator override and retention for ended identities' board entries; JDR-001 revision entry.
