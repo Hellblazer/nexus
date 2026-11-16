@@ -403,7 +403,17 @@ a *background worker* is a pg_background process in the database.
 - `supersedes`, NULL or the label of an earlier move this one replaces, a
   foreign key to `label`, unique, so one move is replaced at most once;
 - `registered_at`, `failed_at` and `failure` (the error text, or the
-  verification count), and `completed_at`.
+  verification count), and `completed_at`;
+- `transient_retries` (NOT NULL, default 0), `last_transient_at` and
+  `last_transient`: the count of consecutive transient passes, when the last
+  one happened and its error (Retries, pause and cancelled runs, below);
+- `paused_at` and `paused_by`: an operator's pause, set by SQL (Day 2
+  Operations).
+
+The chunk size is bounded to 1 to 1,000,000 rows and `sleep_ms` to 0 to
+60,000 ms by CHECK constraints; dml_utils stores the chunk size as an
+integer (`dml_utils_data.migration_run.chunk_size`), so the column is one
+too.
 
 A changeset registers a move with one INSERT. A move is *open* while
 `completed_at` and `failed_at` are NULL and no row's `supersedes` names it.
@@ -456,6 +466,56 @@ not retried, and does not hold up the moves behind it. The fix is a new move
 that supersedes it (Changing a move). A non-empty verification means an
 old-shape row exists: a writer that still produces the old shape, a template
 that missed a case, or a row put back.
+
+**Retries, pause and cancelled runs (nexus-f3yqd.2.3).** Transient failures
+are counted and spaced, so a move cannot retry without bound or report
+nothing:
+
+- *Counter.* A transient pass increments `transient_retries` and sets
+  `last_transient_at` and `last_transient`; a pass that makes progress resets
+  the counter to 0. `blocked:` shows "retry N since <first>", and the counter
+  survives a restart.
+- *Cadence.* A blocked move is not retried before `last_transient_at` plus a
+  backoff of 30 s, doubling per consecutive transient to a ceiling of 15
+  minutes. The backoff is computed from the row, so no timer state is kept.
+- *Cap.* After 20 consecutive transients (about 4.5 hours of backoff) the
+  move stays `blocked:` and nx doctor reports it red as "needs an operator".
+  It is not made `failed:`: a busy slot, a missing grant or a missing install
+  is not the move's fault, and `failed:` would need a superseding move to
+  clear.
+- *Pause.* A move with `paused_at` set is open but not worked: the move
+  worker skips it, and boot_work reports it `paused:` with `paused_by`. It
+  resumes when `paused_at` is set back to NULL. `NX_DATA_MOVE_SLEEP_MS`
+  throttles a move; it does not pause one.
+- *Order.* While the oldest open move is paused or waiting out its backoff,
+  the move worker takes the next open move. A move that must follow another
+  is registered by a changeset whose precondition waits on the earlier
+  move's `completed_at`, so it does not exist until that move completes, and
+  skipping ahead cannot reorder dependent moves.
+- *Interrupted and cancelled runs.* A run left incomplete by an engine stop
+  or a terminated pg_background coordinator resumes: the next pass calls the
+  same label and dml_utils continues at the first unprocessed chunk. Only a
+  run dml_utils records as deliberately cancelled
+  (`dml_utils_data.migration_run.cancelled_at` IS NOT NULL; dml_utils treats
+  such a run as terminal) makes the move `failed:` with the failure "run
+  cancelled at <time>". As for any failure, a move that supersedes it
+  resumes the work.
+- *Errors dml_utils did not record.* A CALL that raises with no
+  `migration_error` row for the run is classified by SQLSTATE. Transient:
+  class 08 (connection), class 53 (insufficient resources), 57P01, 57P02 and
+  57P03 (shutdown), 40001, 40P01, 55P03 and 57014, and three from class 42
+  that a missing grant or a vanished install raises: 42501
+  (insufficient_privilege), 42883 (undefined_function) and 3F000
+  (invalid_schema_name). Permanent: class 22 (data), class 23 (integrity),
+  the rest of class 42 (syntax and access rule), P0 (PL/pgSQL), and anything
+  else, as above. A refusal when dml_utils creates the run is permanent: a
+  template without `<chunking_clause>`, a four-column key before dml_utils
+  supports it, or a partition tree that changed since registration.
+- *A waiting changeset.* When a move is superseded, a changeset whose
+  precondition waits on the old label's `completed_at` must be re-pointed to
+  the new label (DataMoveChangesetGateTest checks this), and a step it
+  re-issues must be idempotent (`IF EXISTS`), since the old move may have
+  completed and its step run before the supersede.
 
 A stopped engine leaves committed chunks committed. The next boot's move
 worker calls the same label, which resumes at the first unprocessed chunk.
@@ -969,6 +1029,13 @@ from /v1/status on the live engine.
 | nexus.data_moves rows | In scope: boot_work, nx doctor | In scope: dml_utils.migration_run_summary | In scope: dml_utils.archive_migration_run and delete_archived_migration_runs once complete | In scope: completed_at set, every tenant's and the table-wide verification query empty, and no migration_error rows | Part of the database backup (pgBackRest in the cloud) |
 | dml_utils schemas | N/A | N/A | N/A (part of the engine schema) | dml_utils' Liquibase tracking table | Part of the database backup |
 
+Pausing a move is an operator's SQL statement as `nexus_admin`, with no CLI
+or HTTP route: `UPDATE nexus.data_moves SET paused_at = now(), paused_by =
+'<who and why>' WHERE label = '<label>';` and, to resume, `UPDATE
+nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label =
+'<label>';`. The move worker reads the row at the start of each pass, so a
+pause takes effect after the chunk in flight.
+
 ### New Dependencies
 
 - dml_utils (Hellblazer/dml_utils, a fork of eyupmiduck/dml_utils), MIT
@@ -1095,3 +1162,4 @@ the first registered move.
 - 2026-11-16: nexus-f3yqd.2.1 completed after its review: an `on_complete` lock timeout is transient, the owner-read policy is its own guarded changeset with `ChunksIsolationCheck` extended to driving tables, and builder termination is best effort under `lock_timeout`.
 - 2026-11-16: Install sequence step 1 scoped to the bundled cluster (BYO via docs/configuration.md, cloud via Activation Step 1), with the bootstrap's handling of a bundle without the library, drifted library roles and a foreign-owned `liquibase` schema; the boot check gains the schema owner (reviews of nexus-f3yqd.2.9).
 - 2026-11-16: the grant of `dml_utils_owner` to `nexus_admin` is WITH INHERIT FALSE, SET TRUE, so the owner's CREATE on public does not leak to the engine's role by default (found by tests/db/test_pg_provision.py TestPublicSchemaGrantIsLoadBearing on nexus-f3yqd.2.9).
+- 2026-11-16: residual nexus-f3yqd.2.3 settled (wren, with linda, owner of DataMoveWorker): the registry gains the transient retry counter, an operator pause and bounds on the chunk size and `sleep_ms`; Technical Design gains "Retries, pause and cancelled runs" (backoff 30 s doubling to 15 min, a cap of 20 that stays blocked and turns nx doctor red, resume of an interrupted run, `failed:` only for a run dml_utils records as cancelled, SQLSTATE classes for raises dml_utils did not record, the re-pointed waiting changeset); Day 2 Operations gains the pause statement.
