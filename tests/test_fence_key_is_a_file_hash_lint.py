@@ -408,7 +408,7 @@ def test_a_key_handed_off_through_copy_context_run_is_followed() -> None:
     _sites, problems = _writer_problems(_fixture(_VIA_CONTEXT_RUN.format(key="_sha256(file_path)")))
     assert problems == [], problems
     _sites, problems = _writer_problems(_fixture(_VIA_CONTEXT_RUN.format(key='"salted"')))
-    assert problems, "a non-hash key handed off through copy_context().run was not caught"
+    assert any("the key is bound to" in p for p in problems), problems
 
 
 def test_a_writer_reached_by_getattr_is_caught() -> None:
