@@ -2,7 +2,8 @@
 title: "A Sandboxed Lua Runtime over the Nexus Surface: Client-Side, Read-Only First"
 id: RDR-242
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-16
 priority: medium
 author: Sam
 reviewed-by: self

@@ -2,7 +2,8 @@
 title: "Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It"
 id: RDR-240
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-16
 priority: medium
 author: Sam
 reviewed-by: self
