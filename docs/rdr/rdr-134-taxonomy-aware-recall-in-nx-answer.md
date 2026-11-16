@@ -2,12 +2,12 @@
 title: "RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has"
 id: RDR-134
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-05-27
-accepted_date:
+accepted_date: 2026-11-16
 related_issues: [nexus-9napz, nexus-n1908]
 related_rdrs: [RDR-070, RDR-075, RDR-156, RDR-179, RDR-191, RDR-193, RDR-227, RDR-229, RDR-232, RDR-243]
 related_tests: []
