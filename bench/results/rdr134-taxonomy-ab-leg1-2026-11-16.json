@@ -1,0 +1,4497 @@
+{
+ "summary": {
+  "n": 26,
+  "S2_collections": 38,
+  "S1": {
+   "OFF": {
+    "ndcg3": 0.590744615120022,
+    "recall10": 0.842948717948718,
+    "s": 1.223545673074953
+   },
+   "band0.03": {
+    "ndcg3": 0.6207711020959081,
+    "recall10": 0.8621794871794872,
+    "s": 2.7846167035123264,
+    "wins": 4,
+    "losses": 2,
+    "d_ndcg3": 0.03002648697588617,
+    "d_recall10": 0.019230769230769273,
+    "topics": 1.2307692307692308
+   },
+   "band0.06": {
+    "ndcg3": 0.6198185787224483,
+    "recall10": 0.8621794871794872,
+    "s": 2.927348549741929,
+    "wins": 3,
+    "losses": 0,
+    "d_ndcg3": 0.02907396360242631,
+    "d_recall10": 0.019230769230769273,
+    "topics": 1.6153846153846154
+   },
+   "cband0.03": {
+    "ndcg3": 0.6207711020959081,
+    "recall10": 0.8621794871794872,
+    "s": 2.780589764458665,
+    "wins": 4,
+    "losses": 2,
+    "d_ndcg3": 0.03002648697588617,
+    "d_recall10": 0.019230769230769273,
+    "topics": 1.2307692307692308
+   },
+   "topk1": {
+    "ndcg3": 0.6117465112108551,
+    "recall10": 0.8621794871794872,
+    "s": 2.6652292885790723,
+    "wins": 4,
+    "losses": 3,
+    "d_ndcg3": 0.02100189609083314,
+    "d_recall10": 0.019230769230769273,
+    "topics": 1
+   }
+  },
+  "S2": {
+   "OFF": {
+    "ndcg3": 0.32196946540179766,
+    "recall10": 0.8108974358974359,
+    "s": 16.40160684307697
+   },
+   "band0.03": {
+    "ndcg3": 0.1401487871824116,
+    "recall10": 0.27884615384615385,
+    "s": 34.169636695439785,
+    "wins": 3,
+    "losses": 9,
+    "d_ndcg3": -0.18182067821938605,
+    "d_recall10": -0.532051282051282,
+    "topics": 2.6153846153846154
+   },
+   "band0.06": {
+    "ndcg3": 0.20528057193692203,
+    "recall10": 0.3557692307692308,
+    "s": 35.32785161203132,
+    "wins": 6,
+    "losses": 7,
+    "d_ndcg3": -0.11668889346487563,
+    "d_recall10": -0.4551282051282051,
+    "topics": 6.1923076923076925
+   },
+   "cband0.03": {
+    "ndcg3": 0.4855661780811228,
+    "recall10": 0.842948717948718,
+    "s": 54.044706689050564,
+    "wins": 10,
+    "losses": 1,
+    "d_ndcg3": 0.16359671267932513,
+    "d_recall10": 0.03205128205128205,
+    "topics": 64.46153846153847
+   },
+   "topk1": {
+    "ndcg3": 0.48833287936463626,
+    "recall10": 0.8301282051282052,
+    "s": 45.10788508159861,
+    "wins": 10,
+    "losses": 0,
+    "d_ndcg3": 0.1663634139628386,
+    "d_recall10": 0.019230769230769273,
+    "topics": 37
+   }
+  }
+ },
+ "sets": {
+  "S1": [
+   "rdr__1-1__voyage-context-3__v1"
+  ],
+  "S2": [
+   "docs__1-15__voyage-context-3__v1",
+   "docs__1-1__voyage-context-3__v1",
+   "docs__1-20__voyage-context-3__v1",
+   "docs__1-27__voyage-context-3__v1",
+   "docs__1-28__voyage-context-3__v1",
+   "docs__1-41__voyage-context-3__v1",
+   "docs__1-46__voyage-context-3__v1",
+   "docs__1-70__voyage-context-3__v1",
+   "docs__1-72__voyage-context-3__v1",
+   "docs__1-75__voyage-context-3__v1",
+   "docs__1-77__voyage-context-3__v1",
+   "docs__1-78__voyage-context-3__v1",
+   "docs__1-79__voyage-context-3__v1",
+   "docs__1-80__voyage-context-3__v1",
+   "docs__1-81__voyage-context-3__v1",
+   "docs__1-83__voyage-context-3__v1",
+   "docs__1-84__voyage-context-3__v1",
+   "docs__1-86__voyage-context-3__v1",
+   "docs__1-87__voyage-context-3__v1",
+   "docs__1-91__voyage-context-3__v1",
+   "docs__1-92__voyage-context-3__v1",
+   "docs__1-93__voyage-context-3__v1",
+   "docs__1-94__voyage-context-3__v1",
+   "docs__1-95__voyage-context-3__v1",
+   "docs__1-9__voyage-context-3__v1",
+   "knowledge__1-1__voyage-context-3__v1",
+   "knowledge__art-papers__voyage-context-3__v1",
+   "knowledge__distributed-systems__voyage-context-3__v1",
+   "knowledge__dt-papers__voyage-context-3__v1",
+   "knowledge__semantic-operators__voyage-context-3__v1",
+   "rdr__1-1__voyage-context-3__v1",
+   "rdr__1-20__voyage-context-3__v1",
+   "rdr__1-27__voyage-context-3__v1",
+   "rdr__1-41__voyage-context-3__v1",
+   "rdr__1-46__voyage-context-3__v1",
+   "rdr__1-78__voyage-context-3__v1",
+   "rdr__1-79__voyage-context-3__v1",
+   "rdr__1-86__voyage-context-3__v1"
+  ]
+ },
+ "results": [
+  {
+   "qid": "Q1-factual-tumblers",
+   "text": "Which RDR introduced catalog tumblers as hierarchical document addresses?",
+   "gt": {
+    "rdr-049-": 3,
+    "rdr-053-": 1
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "s": 1.198373124934733
+    },
+    "band0.03": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.2032515819882974,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.1904024579562247,
+     "n_topics": 3,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.3792897078674287,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.8658228740096092,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 8
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "s": 18.27013545902446
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 33.26302320801187,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "persona-1-pm.md",
+      "010-pyramid-spatial-index.md",
+      "RDR-003-fcc-aligned-spatial-indexing.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI"
+     ],
+     "s": 34.7017634579679,
+     "n_topics": 5,
+     "n_colls": 3
+    },
+    "cband0.03": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 51.40628795803059,
+     "n_topics": 60,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work"
+     ],
+     "s": 44.15261916699819,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 104
+    }
+   }
+  },
+  {
+   "qid": "Q2-factual-chash",
+   "text": "Which RDR added the content-hash chunk index for stable chunk identity?",
+   "gt": {
+    "rdr-086-": 3,
+    "rdr-061-": 1,
+    "rdr-075-": 1
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "180-content-address-chash-binary-32byte.md",
+      "rdr-236-chunk-row-metadata-normalization.md"
+     ],
+     "unresolved": 0,
+     "s": 1.2440312500111759
+    },
+    "band0.03": {
+     "ndcg3": 0.4304550778418234,
+     "recall10": 1.0,
+     "top3": [
+      "180-content-address-chash-binary-32byte.md",
+      "rdr-199-indexing-lifecycle-ref-identity.md",
+      "rdr-086-chash-span-resolution.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.5903672500280663,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "180-content-address-chash-binary-32byte.md",
+      "rdr-236-chunk-row-metadata-normalization.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.026954917004332,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.4304550778418234,
+     "recall10": 1.0,
+     "top3": [
+      "180-content-address-chash-binary-32byte.md",
+      "rdr-199-indexing-lifecycle-ref-identity.md",
+      "rdr-086-chash-span-resolution.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.4464909590315074,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.4304550778418234,
+     "recall10": 1.0,
+     "top3": [
+      "180-content-address-chash-binary-32byte.md",
+      "rdr-199-indexing-lifecycle-ref-identity.md",
+      "rdr-086-chash-span-resolution.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.608253916958347,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 5
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "180-content-address-chash-binary-32byte.md",
+      "rdr-236-chunk-row-metadata-normalization.md"
+     ],
+     "unresolved": 0,
+     "s": 16.872720584040508
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work"
+     ],
+     "s": 32.53351054096129,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "architecture.md",
+      "CHANGELOG.md",
+      "cli-reference.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 34.03499537508469,
+     "n_topics": 3,
+     "n_colls": 2
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "180-content-address-chash-binary-32byte.md",
+      "architecture.md",
+      "rdr-199-indexing-lifecycle-ref-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work"
+     ],
+     "s": 51.998948207939975,
+     "n_topics": 60,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "180-content-address-chash-binary-32byte.md",
+      "architecture.md",
+      "rdr-199-indexing-lifecycle-ref-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work"
+     ],
+     "s": 44.931383249000646,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 101
+    }
+   }
+  },
+  {
+   "qid": "Q3-factual-taxonomy",
+   "text": "Which RDR proposed the BERTopic-based taxonomy with HDBSCAN clustering?",
+   "gt": {
+    "rdr-070-": 3,
+    "rdr-067-": 1
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "rdr-075-cross-collection-topic-projection.md",
+      "rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md"
+     ],
+     "unresolved": 0,
+     "s": 1.1934474169975147
+    },
+    "band0.03": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "rdr-075-cross-collection-topic-projection.md",
+      "rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.3696655839448795,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "rdr-075-cross-collection-topic-projection.md",
+      "rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.141287458012812,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "rdr-075-cross-collection-topic-projection.md",
+      "rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.3548102090135217,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "rdr-075-cross-collection-topic-projection.md",
+      "rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.499775917036459,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "cli-reference.md",
+      "rdr-075-cross-collection-topic-projection.md"
+     ],
+     "unresolved": 0,
+     "s": 15.564185125054792
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "cli-reference.md",
+      "architecture.md",
+      "catalog.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 33.668545916094445,
+     "n_topics": 2,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "cli-reference.md",
+      "architecture.md",
+      "catalog.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 35.637234499910846,
+     "n_topics": 8,
+     "n_colls": 6
+    },
+    "cband0.03": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "cli-reference.md",
+      "rdr-075-cross-collection-topic-projection.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 47.852388666942716,
+     "n_topics": 48,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "cli-reference.md",
+      "rdr-075-cross-collection-topic-projection.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost"
+     ],
+     "s": 44.14874324994162,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 95
+    }
+   }
+  },
+  {
+   "qid": "Q4-comparative-hooks",
+   "text": "Compare the post-store hook chain mechanisms \u2014 single-document vs batch vs document-grain \u2014 and identify which RDR introduced each.",
+   "gt": {
+    "rdr-070-": 3,
+    "rdr-095-": 3,
+    "rdr-089-": 3,
+    "rdr-086-": 1
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "rdr-089-structured-aspect-extraction-at-ingest.md",
+      "rdr-095-post-store-hook-batch-contract.md",
+      "rdr-172-service-mode-aspect-enqueue-silent-failure.md"
+     ],
+     "unresolved": 0,
+     "s": 1.2571578749921173
+    },
+    "band0.03": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "rdr-089-structured-aspect-extraction-at-ingest.md",
+      "rdr-095-post-store-hook-batch-contract.md",
+      "rdr-172-service-mode-aspect-enqueue-silent-failure.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.6416338329436257,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "rdr-089-structured-aspect-extraction-at-ingest.md",
+      "rdr-095-post-store-hook-batch-contract.md",
+      "rdr-172-service-mode-aspect-enqueue-silent-failure.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.283268166007474,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "rdr-089-structured-aspect-extraction-at-ingest.md",
+      "rdr-095-post-store-hook-batch-contract.md",
+      "rdr-172-service-mode-aspect-enqueue-silent-failure.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.5540337919956073,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "rdr-089-structured-aspect-extraction-at-ingest.md",
+      "rdr-095-post-store-hook-batch-contract.md",
+      "rdr-172-service-mode-aspect-enqueue-silent-failure.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7942190408939496,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 5
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ],
+     "unresolved": 0,
+     "s": 16.761387250036933
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 33.874206708977,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 33.731995458947495,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work"
+     ],
+     "s": 59.39312866691034,
+     "n_topics": 76,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work"
+     ],
+     "s": 45.687471583951265,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 115
+    }
+   }
+  },
+  {
+   "qid": "Q5-compositional-retrieval",
+   "text": "Trace the retrieval-layer evolution: how did plan-first dispatch, operator extraction, and plan match scope-awareness develop across the RDR-078 through RDR-095 sequence?",
+   "gt": {
+    "rdr-078-": 3,
+    "rdr-080-": 3,
+    "rdr-088-": 3,
+    "rdr-091-": 3,
+    "rdr-092-": 2,
+    "rdr-079-": 1,
+    "rdr-093-": 1
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ],
+     "unresolved": 0,
+     "s": 1.4108280410291627
+    },
+    "band0.03": {
+     "ndcg3": 0.2960819109658653,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+      "rdr-080-retrieval-layer-consolidation.md",
+      "rdr-200-nx-answer-continuation-mode.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7143277910072356,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.2463125420035794,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.2960819109658653,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+      "rdr-080-retrieval-layer-consolidation.md",
+      "rdr-200-nx-answer-continuation-mode.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.572769333026372,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.2960819109658653,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+      "rdr-080-retrieval-layer-consolidation.md",
+      "rdr-200-nx-answer-continuation-mode.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7270911670057103,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 5
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ],
+     "unresolved": 4,
+     "s": 16.351885625044815
+    },
+    "band0.03": {
+     "ndcg3": 0.2960819109658653,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+      "rdr-080-retrieval-layer-consolidation.md",
+      "rdr-200-nx-answer-continuation-mode.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::Agent-driven RDR research workflow"
+     ],
+     "s": 35.82486950000748,
+     "n_topics": 4,
+     "n_colls": 3
+    },
+    "band0.06": {
+     "ndcg3": 0.2960819109658653,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+      "rdr-080-retrieval-layer-consolidation.md",
+      "rdr-200-nx-answer-continuation-mode.md"
+     ],
+     "unresolved": 5,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::Agent-driven RDR research workflow",
+      "knowledge__1-1__voyage-context-3__v1::RDR plans, skills, MCP surfaces",
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 37.17529608402401,
+     "n_topics": 10,
+     "n_colls": 6
+    },
+    "cband0.03": {
+     "ndcg3": 0.5307212739772436,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+      "rdr-080-retrieval-layer-consolidation.md",
+      "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+     ],
+     "unresolved": 4,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::Agent-driven RDR research workflow"
+     ],
+     "s": 56.21512345899828,
+     "n_topics": 68,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.5307212739772436,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+      "rdr-080-retrieval-layer-consolidation.md",
+      "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+     ],
+     "unresolved": 4,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 46.468389208079316,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 119
+    }
+   }
+  },
+  {
+   "qid": "G04-lookup-min-confidence",
+   "text": "What minimum confidence does plan_match use by default before a plan counts as a hit?",
+   "gt": {
+    "rdr-079-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 0,
+     "s": 1.201703584054485
+    },
+    "band0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.0318243749206886,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.9988760829437524,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.997174499905668,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.2480057909851894,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 7
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 2,
+     "s": 16.229916249983944
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "Open Ontologies- Tool-Augmented Ontology Engineering with Stable Matching Alignment.pdf",
+      "CacheRAG- A Semantic Caching System for Retrieval-Augmented Generation in Knowledge Graph Question Answering.pdf",
+      "Compass- General Filtered Search across Vector and Structured Data.pdf"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Test runs and coverage"
+     ],
+     "s": 34.2453994989628,
+     "n_topics": 3,
+     "n_colls": 3
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "plan-centric-retrieval.md",
+      "plan-authoring-guide.md",
+      "cli-reference.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Test runs and coverage",
+      "knowledge__1-1__voyage-context-3__v1::RDR plans, skills, MCP surfaces",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans",
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost"
+     ],
+     "s": 37.20443145791069,
+     "n_topics": 14,
+     "n_colls": 7
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Test runs and coverage"
+     ],
+     "s": 50.066331291920505,
+     "n_topics": 53,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-079-calibration.md",
+      "rdr-088-agenticscholar-operator-completion.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Test runs and coverage"
+     ],
+     "s": 44.04556795791723,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 107
+    }
+   }
+  },
+  {
+   "qid": "G07-synthesis-rdr155",
+   "text": "Synthesize RDR-155: what the local and cloud storage modes are, what was removed, what the migration path is, and what remains open.",
+   "gt": {
+    "rdr-155-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "s": 1.2052975830156356
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.527903708978556,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.506088708061725,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.305030917050317,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.4424086259678006,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md"
+     ],
+     "unresolved": 0,
+     "s": 16.141174542019144
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 34.82736579095945,
+     "n_topics": 2,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 34.576866000075825,
+     "n_topics": 2,
+     "n_colls": 2
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 55.03977525001392,
+     "n_topics": 65,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-218-windows-platform-support.md",
+      "rdr-152-catalog-git-note.md",
+      "rdr-248-cloud-tenant-backup.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 45.2074823329458,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 106
+    }
+   }
+  },
+  {
+   "qid": "G15-comparison-harnesses",
+   "text": "How do the RDR-090 five-query spike and the RDR-196 operator proxy differ in what they measure?",
+   "gt": {
+    "rdr-090-": 3,
+    "rdr-196-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "results.md",
+      "rdr-179-self-correction-machinery-remediation.md"
+     ],
+     "unresolved": 0,
+     "s": 1.18768991692923
+    },
+    "band0.03": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md",
+      "088-agenticscholar-operator-completion.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.1109514989657328,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md",
+      "088-agenticscholar-operator-completion.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.209016083041206,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md",
+      "088-agenticscholar-operator-completion.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.1276702500181273,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md",
+      "088-agenticscholar-operator-completion.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.1238352499203756,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "benchmarking.md",
+      "cli-reference.md"
+     ],
+     "unresolved": 0,
+     "s": 16.44515366689302
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "propose-prior-art.md",
+      "a1-textliner.md",
+      "a2-widened-predicate-no-new-refusals.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 35.573875957983546,
+     "n_topics": 2,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "consolidation.md",
+      "consolidation.md",
+      "0014-repository-gate-verification-oracle.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans",
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 37.13549766689539,
+     "n_topics": 8,
+     "n_colls": 4
+    },
+    "cband0.03": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md",
+      "088-agenticscholar-operator-completion.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans",
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 56.357365290867165,
+     "n_topics": 66,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "rdr-092-plan-match-text-from-dimensional-identity.md",
+      "088-agenticscholar-operator-completion.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 46.96272291697096,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 113
+    }
+   }
+  },
+  {
+   "qid": "G16-audit-rdr210",
+   "text": "Audit RDR-210 against its implementation: which decisions are implemented, which are still pending, and where does the code diverge?",
+   "gt": {
+    "rdr-210-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md",
+      "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+     ],
+     "unresolved": 0,
+     "s": 1.2123876250116155
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md",
+      "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.501268375082873,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md",
+      "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.9388459579786286,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md",
+      "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.062238874961622,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md",
+      "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7898737920913845,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "persona-2-implementer.md",
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md"
+     ],
+     "unresolved": 0,
+     "s": 15.888921999954619
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "reconcile.md",
+      "absorption-audit.md",
+      "reconcile.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close"
+     ],
+     "s": 33.94349350093398,
+     "n_topics": 4,
+     "n_colls": 3
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "reconcile.md",
+      "consolidation.md",
+      "delta-verdicts.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close",
+      "knowledge__1-1__voyage-context-3__v1::Test runs and coverage"
+     ],
+     "s": 34.82797624997329,
+     "n_topics": 7,
+     "n_colls": 3
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md",
+      "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+     ],
+     "unresolved": 1,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close"
+     ],
+     "s": 52.467598041985184,
+     "n_topics": 62,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "142-migration-completeness-vs-version-row.md",
+      "rdr-179-self-correction-machinery-remediation.md",
+      "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 44.5194516669726,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 110
+    }
+   }
+  },
+  {
+   "qid": "H01",
+   "text": "which rdr added the nx console web ui",
+   "gt": {
+    "rdr-064-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "rdr-119-cockpit-ui-fabric.md",
+      "rdr-228-plugin-installs-the-cli.md"
+     ],
+     "unresolved": 0,
+     "s": 1.3022147919982672
+    },
+    "band0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "rdr-119-cockpit-ui-fabric.md",
+      "rdr-228-plugin-installs-the-cli.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.053982333163731,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "rdr-119-cockpit-ui-fabric.md",
+      "rdr-228-plugin-installs-the-cli.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.2257802510866895,
+     "n_topics": 3,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "rdr-119-cockpit-ui-fabric.md",
+      "rdr-228-plugin-installs-the-cli.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.1021106670377776,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "rdr-119-cockpit-ui-fabric.md",
+      "rdr-228-plugin-installs-the-cli.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.4588887920835987,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 8
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "cli-reference.md",
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "CHANGELOG.md"
+     ],
+     "unresolved": 0,
+     "s": 16.24483116599731
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "re-reads-the-entry.md",
+      "rdr-list.md",
+      "rdr-audit.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 35.091018125996925,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "re-reads-the-entry.md",
+      "rdr-list.md",
+      "rdr-audit.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 35.02820770803373,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "rdr-119-cockpit-ui-fabric.md",
+      "rdr-228-plugin-installs-the-cli.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI",
+      "knowledge__1-1__voyage-context-3__v1::RDR plans, skills, MCP surfaces"
+     ],
+     "s": 57.60300433298107,
+     "n_topics": 73,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-064-nx-console-embedded-web-ui.md",
+      "rdr-119-cockpit-ui-fabric.md",
+      "rdr-228-plugin-installs-the-cli.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 46.0185546670109,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 112
+    }
+   }
+  },
+  {
+   "qid": "H02",
+   "text": "I keep getting turned around on how the tuple space in nexus actually works. There are the Linda style operations, then something about claiming and renewing a tuple and replying in the ack, and then boards and queues and locks built as templates on top. Can you walk me through how those pieces fit together and what problem each of the RDRs was solving?",
+   "gt": {
+    "rdr-205-": 3,
+    "rdr-206-": 3,
+    "rdr-211-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+     ],
+     "unresolved": 0,
+     "s": 1.6111909589963034
+    },
+    "band0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.6822274998994544,
+     "n_topics": 3,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.4381494170520455,
+     "n_topics": 3,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.3775307920295745,
+     "n_topics": 3,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+      "206-tuple-claim-renew-and-reply-in-ack.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.6526039589662105,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 10
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.5307212739772436,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "architecture.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md"
+     ],
+     "unresolved": 0,
+     "s": 17.01896258397028
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine workflow host UI iframe",
+      "knowledge__1-1__voyage-context-3__v1::Daemon RDR and T2 tracking"
+     ],
+     "s": 33.18864833295811,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine workflow host UI iframe",
+      "knowledge__1-1__voyage-context-3__v1::Daemon RDR and T2 tracking",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 35.79685887496453,
+     "n_topics": 6,
+     "n_colls": 3
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+     ],
+     "unresolved": 1,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine workflow host UI iframe",
+      "knowledge__1-1__voyage-context-3__v1::Daemon RDR and T2 tracking"
+     ],
+     "s": 58.53345366602298,
+     "n_topics": 77,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+      "tuple-space.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine workflow host UI iframe"
+     ],
+     "s": 45.2932741669938,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 122
+    }
+   }
+  },
+  {
+   "qid": "H03",
+   "text": "List the RDRs that deal with PDF text extraction.",
+   "gt": {
+    "rdr-012-": 3,
+    "rdr-021-": 3,
+    "rdr-044-": 3,
+    "rdr-046-": 3,
+    "rdr-047-": 3,
+    "rdr-048-": 3,
+    "rdr-148-": 3,
+    "rdr-237-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 1.0,
+     "recall10": 0.75,
+     "top3": [
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md",
+      "rdr-012-pdfplumber-extraction-tier.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "s": 0.9720349999843165
+    },
+    "band0.03": {
+     "ndcg3": 1.0,
+     "recall10": 0.75,
+     "top3": [
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md",
+      "rdr-012-pdfplumber-extraction-tier.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.4865576670272276,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 0.75,
+     "top3": [
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md",
+      "rdr-012-pdfplumber-extraction-tier.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.449912458891049,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 0.75,
+     "top3": [
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md",
+      "rdr-012-pdfplumber-extraction-tier.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.3784345829626545,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 0.75,
+     "top3": [
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md",
+      "rdr-012-pdfplumber-extraction-tier.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.738703958922997,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.25,
+     "top3": [
+      "RDR-016-pdf-text-normalization.md",
+      "RDR-010-pdf-fulltext-indexing.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "s": 15.718938292004168
+    },
+    "band0.03": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.25,
+     "top3": [
+      "RDR-016-pdf-text-normalization.md",
+      "RDR-010-pdf-fulltext-indexing.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI"
+     ],
+     "s": 35.2637937089894,
+     "n_topics": 7,
+     "n_colls": 6
+    },
+    "band0.06": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.25,
+     "top3": [
+      "RDR-016-pdf-text-normalization.md",
+      "RDR-010-pdf-fulltext-indexing.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 36.356371792033315,
+     "n_topics": 12,
+     "n_colls": 9
+    },
+    "cband0.03": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.25,
+     "top3": [
+      "RDR-016-pdf-text-normalization.md",
+      "RDR-010-pdf-fulltext-indexing.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI"
+     ],
+     "s": 50.08564062602818,
+     "n_topics": 53,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.25,
+     "top3": [
+      "RDR-016-pdf-text-normalization.md",
+      "RDR-010-pdf-fulltext-indexing.md",
+      "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 44.40331033396069,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 109
+    }
+   }
+  },
+  {
+   "qid": "H04",
+   "text": "RDR-110 (the semantic tuple space) and RDR-205 (Linda tuple space over Postgres) are both tuple space designs. How do they differ in what they store, how they match, and what each one gives up?",
+   "gt": {
+    "rdr-110-": 3,
+    "rdr-205-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-205-linda-tuple-space-over-postgres.md",
+      "rdr-111-orb-agentic-cockpit-substrate.md",
+      "rdr-110-semantic-tuple-space.md"
+     ],
+     "unresolved": 0,
+     "s": 1.2043647909304127
+    },
+    "band0.03": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-205-linda-tuple-space-over-postgres.md",
+      "rdr-239-tuple-space-dictionary.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.190391584066674,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-205-linda-tuple-space-over-postgres.md",
+      "rdr-110-semantic-tuple-space.md",
+      "rdr-239-tuple-space-dictionary.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.726978874998167,
+     "n_topics": 3,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-205-linda-tuple-space-over-postgres.md",
+      "rdr-239-tuple-space-dictionary.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.126852000015788,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-205-linda-tuple-space-over-postgres.md",
+      "rdr-239-tuple-space-dictionary.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.9026917919982225,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 6
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "linda-in-nexus.md",
+      "agentic-cockpit.md",
+      "rdr-205-linda-tuple-space-over-postgres.md"
+     ],
+     "unresolved": 2,
+     "s": 17.008597041945904
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost",
+      "knowledge__1-1__voyage-context-3__v1::Engine workflow host UI iframe"
+     ],
+     "s": 33.23079741699621,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-205-linda-tuple-space-over-postgres.md",
+      "rdr-239-tuple-space-dictionary.md",
+      "rdr-211-board-queue-and-lock-tuple-templates.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost",
+      "knowledge__1-1__voyage-context-3__v1::Engine workflow host UI iframe",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::Python chunking and catalog RDR work"
+     ],
+     "s": 36.07565374998376,
+     "n_topics": 9,
+     "n_colls": 5
+    },
+    "cband0.03": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "linda-in-nexus.md",
+      "agentic-cockpit.md",
+      "rdr-205-linda-tuple-space-over-postgres.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost",
+      "knowledge__1-1__voyage-context-3__v1::Engine workflow host UI iframe"
+     ],
+     "s": 53.355317584006116,
+     "n_topics": 56,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "linda-in-nexus.md",
+      "agentic-cockpit.md",
+      "rdr-205-linda-tuple-space-over-postgres.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost"
+     ],
+     "s": 44.75839949992951,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 104
+    }
+   }
+  },
+  {
+   "qid": "H05",
+   "text": "aspect queue is stuck, rows never drain and i think the backof ladder is involved?? whats causing it",
+   "gt": {
+    "rdr-163-": 3,
+    "rdr-172-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md",
+      "rdr-200-phase1c-questions.md"
+     ],
+     "unresolved": 0,
+     "s": 1.0468773330794647
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md",
+      "rdr-200-phase1c-questions.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.38479045801796,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md",
+      "rdr-200-phase1c-questions.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.375815875013359,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md",
+      "rdr-200-phase1c-questions.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.4724041250301525,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md",
+      "rdr-200-phase1c-questions.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.4086405830457807,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "configuration.md",
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "CHANGELOG.md"
+     ],
+     "unresolved": 2,
+     "s": 16.910256167058833
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md",
+      "rdr-200-phase1c-questions.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 33.82745087496005,
+     "n_topics": 3,
+     "n_colls": 3
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md",
+      "rdr-200-phase1c-questions.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 36.10297370888293,
+     "n_topics": 12,
+     "n_colls": 6
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "migration-runbook.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md"
+     ],
+     "unresolved": 1,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 57.30731141590513,
+     "n_topics": 74,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+      "migration-runbook.md",
+      "rdr-173-service-mode-aspect-worker-hosting.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes"
+     ],
+     "s": 45.647165249916725,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 126
+    }
+   }
+  },
+  {
+   "qid": "H06",
+   "text": "Audit RDR-201 against the code. It says closed vocabularies live in checked tables under src/nexus/tables. Is that true today, and are there any closed vocabularies still living as prose or as hand-kept lists?",
+   "gt": {
+    "rdr-201-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "rdr-186-client-persistence-closure-no-sqlite.md"
+     ],
+     "unresolved": 0,
+     "s": 1.278755624894984
+    },
+    "band0.03": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "rdr-186-client-persistence-closure-no-sqlite.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.01566370902583,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "rdr-186-client-persistence-closure-no-sqlite.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.16180004295893,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "rdr-186-client-persistence-closure-no-sqlite.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.026322833960876,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "rdr-186-client-persistence-closure-no-sqlite.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.8315537500893697,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "README.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md"
+     ],
+     "unresolved": 0,
+     "s": 16.211639584042132
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 32.23632458294742,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 32.17444737395272,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "rdr-186-client-persistence-closure-no-sqlite.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 53.58465499896556,
+     "n_topics": 64,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "201-closed-vocabularies-as-checked-tables.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "rdr-186-client-persistence-closure-no-sqlite.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 44.503351707942784,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 103
+    }
+   }
+  },
+  {
+   "qid": "H07",
+   "text": "In RDR-188, does the rerank step run in the client or on the server?",
+   "gt": {
+    "rdr-188-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "s": 0.908588416990824
+    },
+    "band0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.9322394990595058,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.8974089990369976,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.9323538740864024,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.1311420830897987,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "wire-contract-pending.md"
+     ],
+     "unresolved": 0,
+     "s": 16.59266691596713
+    },
+    "band0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 33.823106458061375,
+     "n_topics": 3,
+     "n_colls": 3
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 34.88468899903819,
+     "n_topics": 7,
+     "n_colls": 5
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 52.66184362501372,
+     "n_topics": 68,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-188-server-side-rerank.md",
+      "rdr-200-phase1c-questions.md",
+      "rdr-038-local-t3-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 43.32591320795473,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 115
+    }
+   }
+  },
+  {
+   "qid": "H10",
+   "text": "Give me the big picture on why nexus retired the SQLite T2 backend: what was wrong with it, what took its place, and what happened to the client side that still used SQLite.",
+   "gt": {
+    "rdr-158-": 3,
+    "rdr-186-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "rdr-158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md"
+     ],
+     "unresolved": 0,
+     "s": 1.1337613329524174
+    },
+    "band0.03": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md",
+      "rdr-158-retire-sqlite-t2-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.711511040921323,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "rdr-158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.442497708951123,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md",
+      "rdr-158-retire-sqlite-t2-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.48399387486279,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md",
+      "rdr-158-retire-sqlite-t2-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.641530583961867,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 5
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "CHANGELOG.md",
+      "rdr-158-retire-sqlite-t2-backend.md"
+     ],
+     "unresolved": 0,
+     "s": 15.1353917500237
+    },
+    "band0.03": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md",
+      "rdr-158-retire-sqlite-t2-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Daemon RDR and T2 tracking"
+     ],
+     "s": 34.89626666693948,
+     "n_topics": 2,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "rdr-158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Daemon RDR and T2 tracking",
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 36.35032879200298,
+     "n_topics": 6,
+     "n_colls": 2
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md",
+      "CHANGELOG.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Daemon RDR and T2 tracking",
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 53.0886246250011,
+     "n_topics": 63,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "158-retire-sqlite-t2-backend.md",
+      "152-postgres-java-storage-service.md",
+      "rdr-158-retire-sqlite-t2-backend.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Daemon RDR and T2 tracking"
+     ],
+     "s": 46.16917154204566,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 108
+    }
+   }
+  },
+  {
+   "qid": "H14",
+   "text": "Is docs/storage-tiers.md still accurate after RDR-158 and RDR-186? Check what it says about T2 and the client against what those RDRs decided, and list the sentences that have gone stale.",
+   "gt": {
+    "rdr-158-": 3,
+    "rdr-186-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md"
+     ],
+     "unresolved": 0,
+     "s": 1.4098392080049962
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md",
+      "rdr-013-remove-nx-pm-layer.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.1880382080562413,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md",
+      "rdr-013-remove-nx-pm-layer.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.8126217500539497,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md",
+      "rdr-013-remove-nx-pm-layer.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.3028658740222454,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md",
+      "rdr-013-remove-nx-pm-layer.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.160498167038895,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+      "rdr-155-pgvector-t3-consolidation.md",
+      "ROLLBACK.md"
+     ],
+     "unresolved": 0,
+     "s": 15.709596875007264
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "0013-ungated-proof-completion-observation-seam.md",
+      "reconcile.md",
+      "0009-escape-row-shape-conformance-ownership.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 34.74892254197039,
+     "n_topics": 3,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md",
+      "rdr-013-remove-nx-pm-layer.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close"
+     ],
+     "s": 35.656394834048115,
+     "n_topics": 6,
+     "n_colls": 3
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md",
+      "rdr-013-remove-nx-pm-layer.md"
+     ],
+     "unresolved": 1,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 52.02151204296388,
+     "n_topics": 59,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-174-unified-nx-init-service-lifecycle.md",
+      "rdr-013-remove-nx-pm-layer.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 45.74899525102228,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 105
+    }
+   }
+  },
+  {
+   "qid": "H16",
+   "text": "taxonomy and clustered search",
+   "gt": {
+    "rdr-070-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-200-phase1-questions.md",
+      "rdr-134-taxonomy-aware-recall-in-nx-answer.md",
+      "rdr-070-incremental-taxonomy-clustered-search.md"
+     ],
+     "unresolved": 0,
+     "s": 1.1405464999843389
+    },
+    "band0.03": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-200-phase1-questions.md",
+      "rdr-134-taxonomy-aware-recall-in-nx-answer.md",
+      "rdr-070-incremental-taxonomy-clustered-search.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.380445459042676,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-200-phase1-questions.md",
+      "rdr-134-taxonomy-aware-recall-in-nx-answer.md",
+      "rdr-070-incremental-taxonomy-clustered-search.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.07420933409594,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-200-phase1-questions.md",
+      "rdr-134-taxonomy-aware-recall-in-nx-answer.md",
+      "rdr-070-incremental-taxonomy-clustered-search.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.3093220840673894,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-200-phase1-questions.md",
+      "rdr-134-taxonomy-aware-recall-in-nx-answer.md",
+      "rdr-070-incremental-taxonomy-clustered-search.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.308985334006138,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 5
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "rdr-200-phase1-questions.md",
+      "cli-reference.md"
+     ],
+     "unresolved": 0,
+     "s": 16.543795416946523
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+      "Compass- General Filtered Search across Vector and Structured Data.pdf",
+      "ART2 Clustering of Multiple Web Objects for Qualitative Web Prefetching.pdf"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 34.33126304089092,
+     "n_topics": 4,
+     "n_colls": 4
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "architecture.md",
+      "cli-reference.md",
+      "querying-guide.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans",
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI",
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost"
+     ],
+     "s": 35.31329433200881,
+     "n_topics": 8,
+     "n_colls": 6
+    },
+    "cband0.03": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "rdr-200-phase1-questions.md",
+      "cli-reference.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans",
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI",
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost"
+     ],
+     "s": 49.12983762391377,
+     "n_topics": 55,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "rdr-200-phase1-questions.md",
+      "cli-reference.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 44.285894623957574,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 104
+    }
+   }
+  },
+  {
+   "qid": "H17",
+   "text": "Explain end to end how the conexus plugin and the nx CLI stay in step: the version marker hook that checks them at session start, and how it ended up that the plugin installs the CLI itself.",
+   "gt": {
+    "rdr-143-": 3,
+    "rdr-228-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "rdr-143-plugin-cli-version-lockstep.md",
+      "rdr-076-idempotent-upgrade-mechanism.md"
+     ],
+     "unresolved": 0,
+     "s": 1.054477958008647
+    },
+    "band0.03": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "rdr-143-plugin-cli-version-lockstep.md",
+      "rdr-076-idempotent-upgrade-mechanism.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.8219840839738026,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "rdr-143-plugin-cli-version-lockstep.md",
+      "rdr-076-idempotent-upgrade-mechanism.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.845989999943413,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "rdr-143-plugin-cli-version-lockstep.md",
+      "rdr-076-idempotent-upgrade-mechanism.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.9020724169677123,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "rdr-143-plugin-cli-version-lockstep.md",
+      "rdr-076-idempotent-upgrade-mechanism.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.1018892499851063,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 7
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "CHANGELOG.md",
+      "cli-reference.md"
+     ],
+     "unresolved": 0,
+     "s": 16.652051707962528
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Release, engine cut and tagging",
+      "knowledge__1-1__voyage-context-3__v1::nx install and local service"
+     ],
+     "s": 32.634739791974425,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "cli-reference.md",
+      "CHANGELOG.md",
+      "CHANGELOG.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Release, engine cut and tagging",
+      "knowledge__1-1__voyage-context-3__v1::nx install and local service"
+     ],
+     "s": 34.058374624932185,
+     "n_topics": 3,
+     "n_colls": 2
+    },
+    "cband0.03": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "cli-reference.md",
+      "rdr-143-plugin-cli-version-lockstep.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Release, engine cut and tagging",
+      "knowledge__1-1__voyage-context-3__v1::nx install and local service"
+     ],
+     "s": 61.34275658405386,
+     "n_topics": 84,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "143-plugin-cli-version-lockstep.md",
+      "cli-reference.md",
+      "rdr-143-plugin-cli-version-lockstep.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Release, engine cut and tagging"
+     ],
+     "s": 45.1392385000363,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 126
+    }
+   }
+  },
+  {
+   "qid": "H18",
+   "text": "Which docs and RDRs cover running nexus on Windows?",
+   "gt": {
+    "rdr-218-": 3,
+    "rdr-224-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 1.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "rdr-224-native-windows-support.md",
+      "rdr-218-windows-platform-support.md"
+     ],
+     "unresolved": 0,
+     "s": 1.488681499962695
+    },
+    "band0.03": {
+     "ndcg3": 1.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "rdr-224-native-windows-support.md",
+      "rdr-218-windows-platform-support.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.475734833977185,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "rdr-224-native-windows-support.md",
+      "rdr-218-windows-platform-support.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.3119306670268998,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "rdr-224-native-windows-support.md",
+      "rdr-218-windows-platform-support.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.3551415420370176,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 1.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "rdr-224-native-windows-support.md",
+      "rdr-218-windows-platform-support.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.460239375010133,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "windows-install.md",
+      "CHANGELOG.md"
+     ],
+     "unresolved": 0,
+     "s": 15.840709332958795
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "getting-started.md",
+      "configuration.md",
+      "SKILL.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI",
+      "knowledge__1-1__voyage-context-3__v1::nx install and local service"
+     ],
+     "s": 34.4240494169062,
+     "n_topics": 3,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "getting-started.md",
+      "configuration.md",
+      "SKILL.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI",
+      "knowledge__1-1__voyage-context-3__v1::nx install and local service",
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 35.12696699996013,
+     "n_topics": 6,
+     "n_colls": 3
+    },
+    "cband0.03": {
+     "ndcg3": 1.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "rdr-224-native-windows-support.md",
+      "rdr-218-windows-platform-support.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI",
+      "knowledge__1-1__voyage-context-3__v1::nx install and local service"
+     ],
+     "s": 55.10640670894645,
+     "n_topics": 70,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 1.3065735963827292,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-224-native-windows-support.md",
+      "rdr-224-native-windows-support.md",
+      "rdr-218-windows-platform-support.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::nx search and index CLI"
+     ],
+     "s": 43.9648843749892,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 116
+    }
+   }
+  },
+  {
+   "qid": "H21",
+   "text": "Has everything RDR-197 (plugin-only release channel) decided actually been implemented? For each decision say shipped, partial or still open, with the evidence.",
+   "gt": {
+    "rdr-197-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "s": 1.2090492920251563
+    },
+    "band0.03": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7024667490040883,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7712611239403486,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.693993957946077,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.9058842080412433,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "plugin-release-channel.md",
+      "contributing.md"
+     ],
+     "unresolved": 0,
+     "s": 16.63290450000204
+    },
+    "band0.03": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 34.427648291923106,
+     "n_topics": 5,
+     "n_colls": 3
+    },
+    "band0.06": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble",
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 36.57323408301454,
+     "n_topics": 12,
+     "n_colls": 4
+    },
+    "cband0.03": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 52.1445429159794,
+     "n_topics": 63,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "127-substrate-decoupled-surface-rendering.md",
+      "rdr-218-windows-platform-support.md",
+      "rdr-197-plugin-only-release-channel.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR gate, review and close"
+     ],
+     "s": 44.626520665944554,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 117
+    }
+   }
+  },
+  {
+   "qid": "H23",
+   "text": "is the pgvector paper right about HNSW",
+   "gt": {
+    "rdr-227-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md",
+      "rdr-227-per-collection-hnsw-above-the-router-threshold.md",
+      "rdr-056-search-robustness-result-clustering.md"
+     ],
+     "unresolved": 0,
+     "s": 1.3671157089993358
+    },
+    "band0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-227-per-collection-hnsw-above-the-router-threshold.md",
+      "rdr-200-phase1-questions.md",
+      "rdr-230-event-keyed-reindex-and-recall-canary.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7521380831021816,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-227-per-collection-hnsw-above-the-router-threshold.md",
+      "rdr-200-phase1-questions.md",
+      "rdr-230-event-keyed-reindex-and-recall-canary.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.762490416993387,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-227-per-collection-hnsw-above-the-router-threshold.md",
+      "rdr-200-phase1-questions.md",
+      "rdr-230-event-keyed-reindex-and-recall-canary.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.037958123954013,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-227-per-collection-hnsw-above-the-router-threshold.md",
+      "rdr-200-phase1-questions.md",
+      "rdr-230-event-keyed-reindex-and-recall-canary.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.887261457974091,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "beyond-similarity-search-application.md",
+      "rdr-155-pgvector-t3-consolidation.md",
+      "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf"
+     ],
+     "unresolved": 0,
+     "s": 15.927944542025216
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "DESIGN.md",
+      "README.md",
+      "conexus-1az-regate-20260703.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 32.66089045803528,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "DESIGN.md",
+      "README.md",
+      "conexus-1az-regate-20260703.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 32.70891491603106,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "beyond-similarity-search-application.md",
+      "rdr-227-per-collection-hnsw-above-the-router-threshold.md",
+      "the-case-against-pgvector.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost"
+     ],
+     "s": 46.15001658303663,
+     "n_topics": 48,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "beyond-similarity-search-application.md",
+      "rdr-227-per-collection-hnsw-above-the-router-threshold.md",
+      "the-case-against-pgvector.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::arXiv papers on financial cost"
+     ],
+     "s": 43.80210708209779,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 87
+    }
+   }
+  },
+  {
+   "qid": "H26",
+   "text": "Why did the T2 daemon burn a core spinning in its selector loop whenever two writers hit it at once? I want the actual cause, not just that it was fixed.",
+   "gt": {
+    "rdr-151-": 3,
+    "rdr-129-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md",
+      "rdr-140-t2-daemon-supervisor-ownership-model.md"
+     ],
+     "unresolved": 0,
+     "s": 1.1884080830495805
+    },
+    "band0.03": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md",
+      "rdr-140-t2-daemon-supervisor-ownership-model.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.5893629170022905,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md",
+      "rdr-140-t2-daemon-supervisor-ownership-model.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.867198375053704,
+     "n_topics": 2,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md",
+      "rdr-140-t2-daemon-supervisor-ownership-model.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.2677072499645874,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md",
+      "rdr-140-t2-daemon-supervisor-ownership-model.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.2917272920021787,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 5
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md"
+     ],
+     "unresolved": 0,
+     "s": 16.862767833052203
+    },
+    "band0.03": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 34.60111045802478,
+     "n_topics": 3,
+     "n_colls": 3
+    },
+    "band0.06": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes",
+      "knowledge__1-1__voyage-context-3__v1::Claude session hooks and panes"
+     ],
+     "s": 35.91378479101695,
+     "n_topics": 7,
+     "n_colls": 5
+    },
+    "cband0.03": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes",
+      "knowledge__1-1__voyage-context-3__v1::Claude session hooks and panes"
+     ],
+     "s": 54.061117165954784,
+     "n_topics": 63,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+      "151-daemon-event-loop-selector-spin-write-contention.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Engine and catalog bead fixes"
+     ],
+     "s": 45.7957235830836,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 110
+    }
+   }
+  },
+  {
+   "qid": "H28",
+   "text": "Compare RDR-146 (catalog store behind the daemon) with RDR-168 (service mode catalog interface conformance): what did the catalog look like before and after each, and which one changed the contract that callers see?",
+   "gt": {
+    "rdr-146-": 3,
+    "rdr-168-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "rdr-229-collection-name-becomes-a-label.md",
+      "168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "s": 1.270998000050895
+    },
+    "band0.03": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.64387795899529,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.702180542051792,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 3.0204417089698836,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.749267583945766,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "rdr-146-catalog-store-behind-daemon.md",
+      "rdr-229-collection-name-becomes-a-label.md"
+     ],
+     "unresolved": 0,
+     "s": 17.065485083963722
+    },
+    "band0.03": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 37.112190415966325,
+     "n_topics": 3,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 36.92216954100877,
+     "n_topics": 3,
+     "n_colls": 2
+    },
+    "cband0.03": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation",
+      "knowledge__1-1__voyage-context-3__v1::RDR markdown docs and preamble"
+     ],
+     "s": 66.30441874999087,
+     "n_topics": 90,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.9197207891481876,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-146-catalog-store-behind-daemon.md",
+      "168-service-mode-catalog-interface-conformance.md",
+      "rdr-168-service-mode-catalog-interface-conformance.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::RDR phase catalog implementation"
+     ],
+     "s": 49.206889998866245,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 133
+    }
+   }
+  },
+  {
+   "qid": "H30",
+   "text": "mailbox addressing, what do I need to know?",
+   "gt": {
+    "rdr-208-": 3
+   },
+   "S1": {
+    "OFF": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-239-doc-blocks.md",
+      "rdr-208-session-id-mail-addressing.md",
+      "JDR-002-tuple-sender-claims.md"
+     ],
+     "unresolved": 0,
+     "s": 1.1143665830604732
+    },
+    "band0.03": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-239-doc-blocks.md",
+      "rdr-208-session-id-mail-addressing.md",
+      "JDR-002-tuple-sender-claims.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.6974282091250643,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "band0.06": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-239-doc-blocks.md",
+      "rdr-208-session-id-mail-addressing.md",
+      "JDR-002-tuple-sender-claims.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.703784083132632,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "cband0.03": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-239-doc-blocks.md",
+      "rdr-208-session-id-mail-addressing.md",
+      "JDR-002-tuple-sender-claims.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.7063196251401678,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "topk1": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-239-doc-blocks.md",
+      "rdr-208-session-id-mail-addressing.md",
+      "JDR-002-tuple-sender-claims.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [],
+     "s": 2.5651669580256566,
+     "n_topics": 1,
+     "n_colls": 1
+    },
+    "calls": {
+     "search": 1,
+     "embed": 1,
+     "ann": 1,
+     "topic_search": 4
+    }
+   },
+   "S2": {
+    "OFF": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "SKILL.md",
+      "tuple-space.md",
+      "rdr-239-doc-blocks.md"
+     ],
+     "unresolved": 0,
+     "s": 15.839758625021204
+    },
+    "band0.03": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "persistence-catalog.md",
+      "README.md",
+      "persistence-catalog.zh.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 34.15804287500214,
+     "n_topics": 2,
+     "n_colls": 2
+    },
+    "band0.06": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "persistence-catalog.md",
+      "README.md",
+      "persistence-catalog.zh.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 34.45542054111138,
+     "n_topics": 3,
+     "n_colls": 3
+    },
+    "cband0.03": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-239-doc-blocks.md",
+      "rdr-208-session-id-mail-addressing.md",
+      "JDR-002-tuple-sender-claims.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 51.88496783294249,
+     "n_topics": 58,
+     "n_colls": 37
+    },
+    "topk1": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-239-doc-blocks.md",
+      "rdr-208-session-id-mail-addressing.md",
+      "JDR-002-tuple-sender-claims.md"
+     ],
+     "unresolved": 0,
+     "empty_topics": [
+      "knowledge__1-1__voyage-context-3__v1::Argument validation and implementation plans"
+     ],
+     "s": 43.991786333033815,
+     "n_topics": 37,
+     "n_colls": 37
+    },
+    "calls": {
+     "search": 38,
+     "embed": 0,
+     "ann": 38,
+     "topic_search": 100
+    }
+   }
+  }
+ ]
+}
