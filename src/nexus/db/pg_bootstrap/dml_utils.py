@@ -15,8 +15,10 @@ It creates, in the nexus database:
   drifted is converged);
 * CREATE on the database and on schema ``public`` for ``dml_utils_owner``;
   ``ddl_utils_caller`` and ``pgbackground_role`` to ``dml_utils_owner``;
-  ``dml_utils_owner``, ``dml_utils_caller`` and ``pgbackground_role`` to
-  ``nexus_admin`` (so the engine can ``SET ROLE dml_utils_owner``);
+  ``dml_utils_owner`` to ``nexus_admin`` WITH INHERIT FALSE (the engine reaches it
+  by ``SET ROLE dml_utils_owner`` and holds none of its privileges otherwise);
+  ``dml_utils_caller`` and ``pgbackground_role`` to ``nexus_admin`` WITH INHERIT TRUE
+  (the move runs as ``nexus_admin`` and calls their functions directly);
 * the ``liquibase`` schema owned by ``dml_utils_owner``, where both libraries
   keep their tracking tables. A ``liquibase`` schema that already exists under another
   owner is re-owned when it holds no relations; otherwise it is left, and the result's
@@ -187,8 +189,16 @@ def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBo
         f"GRANT {_sql_ident(DDL_CALLER_ROLE)}, {_sql_ident(BACKGROUND_ROLE)} TO {owner}",
     ]
     if state["admin"] != "0":
+        # The owner role is reached only by SET ROLE: with the default INHERIT, nexus_admin would hold
+        # everything the owner holds (CREATE on the database and on public) in every session, and
+        # nexus_admin's own CREATE on public would stop being load-bearing. The two caller roles are
+        # used the other way: the move runs as nexus_admin and calls dml_utils' functions and
+        # pg_background's directly, so their privileges must be inherited. Re-issuing a GRANT updates
+        # the options of an existing membership (PG 16+; the engine's floor is 17), so this converges.
+        statements.append(f"GRANT {owner} TO nexus_admin WITH INHERIT FALSE, SET TRUE")
         statements.append(
-            f"GRANT {owner}, {_sql_ident(DML_CALLER_ROLE)}, {_sql_ident(BACKGROUND_ROLE)} TO nexus_admin"
+            f"GRANT {_sql_ident(DML_CALLER_ROLE)}, {_sql_ident(BACKGROUND_ROLE)} "
+            "TO nexus_admin WITH INHERIT TRUE, SET TRUE"
         )
     else:
         _log.warning("pg_dml_utils_no_nexus_admin", note="grants to nexus_admin skipped")

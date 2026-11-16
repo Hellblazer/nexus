@@ -480,11 +480,17 @@ run:
    GRANT CREATE ON DATABASE nexus TO dml_utils_owner;
    GRANT CREATE ON SCHEMA public TO dml_utils_owner;
    GRANT ddl_utils_caller, pgbackground_role TO dml_utils_owner;
-   GRANT dml_utils_owner, dml_utils_caller, pgbackground_role TO nexus_admin;
+   GRANT dml_utils_owner TO nexus_admin WITH INHERIT FALSE, SET TRUE;
+   GRANT dml_utils_caller, pgbackground_role TO nexus_admin WITH INHERIT TRUE, SET TRUE;
    CREATE SCHEMA liquibase AUTHORIZATION dml_utils_owner;
    ```
 
-   Replace `nexus` with your database's name. The roles and the schema are
+   Replace `nexus` with your database's name. `nexus_admin` holds
+   `dml_utils_owner` WITH INHERIT FALSE on purpose: it reaches that role only
+   by `SET ROLE dml_utils_owner`, so the owner's CREATE on the database and on
+   `public` is not ambient in every `nexus_admin` session; it inherits the two
+   caller roles, because the move runs as `nexus_admin` and calls their
+   functions directly. The roles and the schema are
    created with plain `CREATE` here because a DBA runs this once; the local
    bootstrap tolerates a concurrent run and, for a `liquibase` schema that
    already exists under another owner, takes it only when it is empty. Without

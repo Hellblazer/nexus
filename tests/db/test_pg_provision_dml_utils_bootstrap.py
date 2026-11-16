@@ -108,6 +108,15 @@ class _Box:
         with pp.superuser_auth(self.creds["PG_SUPERUSER_PASS"]):
             return boot.bootstrap_dml_utils(self.bins, self.port, pp.bootstrap_superuser())
 
+    def as_admin(self, sql: str) -> subprocess.CompletedProcess:
+        """*sql* in one psql session as nexus_admin (the engine's migrating role), with its own password."""
+        env = {**os.environ, "PGPASSWORD": self.creds["NX_DB_ADMIN_PASS"]}
+        return subprocess.run(
+            [str(self.bins.psql), "-X", "-w", "-h", "127.0.0.1", "-p", str(self.port), "-U", "nexus_admin",
+             "-d", "nexus", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c", sql],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+
     def snapshot(self) -> str:
         """Everything the bootstrap can touch, with identities, so a no-op shows as equal."""
         return self.q(
@@ -196,12 +205,20 @@ def _assert_fully_bootstrapped(box: _Box, *, schema_ours: bool = True) -> None:
     ], "every library role is NOLOGIN, NOBYPASSRLS, not a superuser, and cannot create roles or databases"
     assert box.q("SELECT has_database_privilege('dml_utils_owner', 'nexus', 'CREATE')") == "t"
     assert box.q("SELECT has_schema_privilege('dml_utils_owner', 'public', 'CREATE')") == "t"
-    for member, role in (
-        ("dml_utils_owner", "ddl_utils_caller"), ("dml_utils_owner", "pgbackground_role"),
-        ("nexus_admin", "dml_utils_owner"), ("nexus_admin", "dml_utils_caller"),
-        ("nexus_admin", "pgbackground_role"),
+    # (member, role, inherits its privileges, may SET ROLE to it)
+    for member, role, usage, can_set in (
+        ("dml_utils_owner", "ddl_utils_caller", True, True), ("dml_utils_owner", "pgbackground_role", True, True),
+        ("nexus_admin", "dml_utils_owner", False, True),
+        ("nexus_admin", "dml_utils_caller", True, True), ("nexus_admin", "pgbackground_role", True, True),
     ):
-        assert box.q(f"SELECT pg_has_role('{member}', '{role}', 'MEMBER')") == "t", f"{member} lacks {role}"
+        got = (
+            box.q(f"SELECT pg_has_role('{member}', '{role}', 'MEMBER')"),
+            box.q(f"SELECT pg_has_role('{member}', '{role}', 'USAGE')"),
+            box.q(f"SELECT pg_has_role('{member}', '{role}', 'SET')"),
+        )
+        assert got == ("t", "t" if usage else "f", "t" if can_set else "f"), (
+            f"{member} -> {role}: (member, inherits, set) = {got}"
+        )
     if schema_ours:
         owner = box.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'")
         assert owner == "dml_utils_owner"
@@ -213,17 +230,34 @@ class TestFreshProvision:
 
     def test_the_engine_role_can_become_the_owner_and_create_in_the_schema(self, fresh: _Box) -> None:
         """The point of the grants: nexus_admin runs SET ROLE dml_utils_owner and the objects land owned by it."""
-        env_pass = fresh.creds["NX_DB_ADMIN_PASS"]
-        env ={**os.environ, "PGPASSWORD": env_pass}
-        res = subprocess.run(
-            [str(fresh.bins.psql), "-X", "-w", "-h", "127.0.0.1", "-p", str(fresh.port), "-U", "nexus_admin",
-             "-d", "nexus", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-c",
-             "SET ROLE dml_utils_owner; CREATE TABLE liquibase.probe(i int); "
-             "SELECT tableowner FROM pg_tables WHERE tablename = 'probe'; DROP TABLE liquibase.probe"],
-            capture_output=True, text=True, env=env, timeout=60,
+        res = fresh.as_admin(
+            "SET ROLE dml_utils_owner; CREATE TABLE liquibase.probe(i int); "
+            "SELECT tableowner FROM pg_tables WHERE tablename = 'probe'; DROP TABLE liquibase.probe"
         )
         assert res.returncode == 0, res.stderr
         assert "dml_utils_owner" in res.stdout
+
+    def test_the_engine_role_holds_nothing_of_the_owner_until_it_sets_role(self, fresh: _Box) -> None:
+        """INHERIT FALSE on dml_utils_owner: the owner's CREATE on the database and on public must not be
+        ambient in a plain nexus_admin session, or nexus_admin's own CREATE on public stops being load-bearing
+        (tests/db/test_pg_provision.py::TestPublicSchemaGrantIsLoadBearing) and it silently gains every
+        privilege the owner has."""
+        fresh.run("REVOKE CREATE ON SCHEMA public FROM nexus_admin")
+        for target in ("public.leak_probe", "liquibase.leak_probe"):
+            plain = fresh.as_admin(f"CREATE TABLE {target}(i int)")
+            assert plain.returncode != 0 and "permission denied" in plain.stderr, (
+                f"nexus_admin created {target} without SET ROLE: {plain.stdout!r} {plain.stderr!r}"
+            )
+        assert fresh.q("SELECT has_schema_privilege('nexus_admin', 'public', 'CREATE')") == "f"
+        assert fresh.q("SELECT has_schema_privilege('nexus_admin', 'liquibase', 'CREATE')") == "f"
+        owned = fresh.as_admin("SET ROLE dml_utils_owner; CREATE TABLE public.leak_probe(i int); DROP TABLE public.leak_probe")
+        assert owned.returncode == 0, "after SET ROLE the owner's own CREATE on public applies: " + owned.stderr
+
+    def test_the_engine_role_calls_the_library_functions_without_set_role(self, fresh: _Box) -> None:
+        """The move runs as nexus_admin: pg_background's functions (pgbackground_role) must be callable as it is."""
+        probe = "SELECT has_function_privilege('{role}', 'pg_background_list()', 'EXECUTE')"
+        assert fresh.q(probe.format(role="nexus_admin")) == "t"
+        assert fresh.q(probe.format(role="nexus_svc")) == "f", "control: the privilege comes from the role, not from PUBLIC"
 
 
 class TestBackfillOnAnInstallProvisionedBefore:
@@ -255,6 +289,14 @@ class TestBackfillOnAnInstallProvisionedBefore:
     def test_a_drifted_role_is_converged_back_to_nologin_nobypassrls(self, legacy: _Box) -> None:
         legacy.bootstrap()
         legacy.run("ALTER ROLE dml_utils_caller LOGIN BYPASSRLS")
+        pp.provision(legacy.config_dir)
+        _assert_fully_bootstrapped(legacy)
+
+    def test_an_inheriting_owner_membership_is_converged_to_set_only(self, legacy: _Box) -> None:
+        """The first shape of this step granted dml_utils_owner to nexus_admin with the default INHERIT TRUE."""
+        legacy.bootstrap()
+        legacy.run("GRANT dml_utils_owner TO nexus_admin WITH INHERIT TRUE, SET TRUE")
+        assert legacy.q("SELECT pg_has_role('nexus_admin', 'dml_utils_owner', 'USAGE')") == "t"
         pp.provision(legacy.config_dir)
         _assert_fully_bootstrapped(legacy)
 
