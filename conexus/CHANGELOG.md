@@ -5,7 +5,7 @@
 Plugin version aligned with conexus 8.3.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
 
 - `conexus/commands/rdr-fix.md`, `conexus/skills/rdr-accept-checklist/SKILL.md`, `conexus/skills/rdr-fix-checklist/SKILL.md`, `conexus/skills/rdr-gate-checklist/SKILL.md`: nexus-3jjkg: the gate record carries `blob:`, and fix-check titles and the accept check key on the RDR file's blob, so a rebase before landing no longer orphans a gate record.
-- `prose-edit/skills/prose-edit/SKILL.md`, `markup-route.md`, `scripts/brief.py`, `scripts/memory.py`, `scripts/review.py`, `scripts/suggest.py`: nexus-scmcs, nexus-h72g3: a path run reviews its edits as suggestions in the MarkupEditor app; the setup run is a guided wizard and checks for the MarkupEditor `propose_edits` tool; the Typora viewer is gone.
+- `prose-edit/skills/prose-edit/SKILL.md`, `markup-route.md`, `scripts/brief.py`, `scripts/memory.py`, `scripts/review.py`, `scripts/suggest.py`: nexus-scmcs, nexus-h72g3: a path run reviews its edits as suggestions in the MarkupEditor app; the setup run is a guided wizard and checks for the MarkupEditor `propose_edits` tool; the Typora viewer is gone; the `viewer` verb and its record shape are removed (a `prose/viewer` record already in T2 is left alone and nothing reads it).
 
 ## [8.2.3] - 2026-11-13
 

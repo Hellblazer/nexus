@@ -84,6 +84,9 @@ def test_no_script_doc_or_ledger_line_still_speaks_of_a_review_copy_or_a_removed
         assert "review copy" not in text and "marked-up copy" not in text, script.name
     for doc in (ROOT / "tests" / "prose_edit" / "acceptance" / "README.md", ROOT / "tests" / "prose_edit" / "test_review.py"):
         assert "marked-up copy" not in doc.read_text(encoding="utf-8"), doc.name
+    # The note lives in the pending-release ledger until a release empties it, then in the
+    # plugin changelog's section for that release, so read both (8.3.0 cut emptied the ledger).
     ledger = (ROOT / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
-    assert "its T2 record are removed" not in ledger
-    assert "the `viewer` verb and its record shape are removed" in ledger
+    shipped = (ROOT / "conexus" / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "its T2 record are removed" not in ledger + shipped
+    assert "the `viewer` verb and its record shape are removed" in ledger + shipped
