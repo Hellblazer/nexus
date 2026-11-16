@@ -78,24 +78,24 @@ def _matches(pairs: Sequence[tuple[str, str]] | None, dims: Mapping[str, str]) -
     return pairs is not None and all(dims.get(k) == v for k, v in pairs)
 
 
-def _arg(source: ArgSource, row: Any, name: str) -> Any:
-    if source.kind == "id":
+def _arg(spec: ArgSource, row: Any, name: str) -> Any:
+    if spec.kind == "id":
         return row.id
-    if source.kind == "subspace":
+    if spec.kind == "subspace":
         return row.subspace
-    if source.kind == "literal":
-        return source.value
-    if source.kind == "dims":
-        if source.value not in row.dims:
-            raise _Failure("args", f"{name}: the tuple has no dims.{source.value}")
-        return row.dims[source.value]
+    if spec.kind == "literal":
+        return spec.value
+    if spec.kind == "dims":
+        if spec.value not in row.dims:
+            raise _Failure("args", f"{name}: the tuple has no dims.{spec.value}")
+        return row.dims[spec.value]
     try:
         body = json.loads(row.body) if row.body else None
     except ValueError:
         body = None
-    if not isinstance(body, dict) or source.value not in body:
-        raise _Failure("args", f"{name}: the tuple body has no top-level {source.value!r}")
-    return body[source.value]
+    if not isinstance(body, dict) or spec.value not in body:
+        raise _Failure("args", f"{name}: the tuple body has no top-level {spec.value!r}")
+    return body[spec.value]
 
 
 def _error_kind(exc: ScriptRunError) -> str:
@@ -221,7 +221,7 @@ class AuraRuntime:
     def _fire(self, lane: _Lane, item: _Item) -> None:
         aura, row = lane.aura, item.row
         try:
-            args = {name: _arg(source, row, name) for name, source in aura.args}
+            args = {name: _arg(spec, row, name) for name, spec in aura.args}
             try:
                 result = self._run(aura.procedure, args, dataclasses.asdict(aura.limits))
             except ScriptBusyError:
