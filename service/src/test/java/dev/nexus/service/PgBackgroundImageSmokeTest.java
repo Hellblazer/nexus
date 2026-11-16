@@ -5,6 +5,9 @@ package dev.nexus.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -18,11 +21,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
 import java.time.Duration;
-import java.util.List;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -31,6 +32,10 @@ import java.util.regex.Pattern;
  * nexus-f3yqd.2.8 (RDR-246 Phase 1 Step 3c): the data-move test image carries pg_background at the commit the
  * PG bundle pins, a background worker really runs in it, and pgvector still creates. Every later data-move Java
  * test starts its container through {@link PgContainerHelper#startDataMove()}.
+ *
+ * <p>No SQL text lives here (nexus-zrcj7): reads are typed jOOQ, the extensions are installed by
+ * {@link PgContainerHelper#createDataMoveExtensions} and the worker launches live in the probe functions of
+ * {@link PgContainerHelper#installPgBackgroundSmokeProbe}, both test changelogs.
  */
 class PgBackgroundImageSmokeTest {
 
@@ -39,8 +44,13 @@ class PgBackgroundImageSmokeTest {
     static PostgreSQLContainer<?> pg;
 
     @BeforeAll
-    static void start() {
+    static void start() throws Exception {
         pg = PgContainerHelper.startDataMove();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.createDataMoveExtensions(su);
+            PgContainerHelper.installPgBackgroundSmokeProbe(su);
+        }
     }
 
     @AfterAll
@@ -48,22 +58,31 @@ class PgBackgroundImageSmokeTest {
         if (pg != null) pg.stop();
     }
 
-    private static String scalar(Statement st, String sql) throws Exception {
-        try (ResultSet rs = st.executeQuery(sql)) {
-            assertThat(rs.next()).as(sql).isTrue();
-            return rs.getString(1);
-        }
+    private static DSLContext dsl(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES);
+    }
+
+    private static String setting(DSLContext ctx, String name) {
+        return ctx.select(DSL.function("current_setting", String.class, DSL.inline(name))).fetchOne(0, String.class);
+    }
+
+    private static String extensionVersion(DSLContext ctx, String extension) {
+        return ctx.select(DSL.field(DSL.name("extversion"), String.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_extension")))
+            .where(DSL.field(DSL.name("extname"), String.class).eq(extension))
+            .fetchOne(0, String.class);
     }
 
     @Test
     void theServer_isPostgres17_andPgvector_isAtLeast08() throws Exception {
-        try (Connection c = pg.createConnection(""); Statement st = c.createStatement()) {
-            int num = Integer.parseInt(scalar(st, "SHOW server_version_num"));
-            st.execute("CREATE EXTENSION IF NOT EXISTS vector");
-            String vector = scalar(st, "SELECT extversion FROM pg_extension WHERE extname = 'vector'");
-            System.out.println("PG_BACKGROUND_IMAGE server " + scalar(st, "SHOW server_version") + " (minor " + (num % 100)
+        try (Connection c = pg.createConnection("")) {
+            DSLContext ctx = dsl(c);
+            int num = Integer.parseInt(setting(ctx, "server_version_num"));
+            String vector = extensionVersion(ctx, "vector");
+            System.out.println("PG_BACKGROUND_IMAGE server " + setting(ctx, "server_version") + " (minor " + (num % 100)
                 + "), pgvector " + vector + ", image " + PgBackgroundImage.imageName());
             assertThat(num / 10000).as("server major version (server_version_num %s)", num).isEqualTo(17);
+            assertThat(vector).as("the vector extension is created in the image").isNotNull();
             Matcher m = Pattern.compile("^(\\d+)\\.(\\d+)").matcher(vector);
             assertThat(m.find()).as("pgvector extversion %s", vector).isTrue();
             int major = Integer.parseInt(m.group(1));
@@ -74,35 +93,28 @@ class PgBackgroundImageSmokeTest {
 
     @Test
     void createExtension_pgBackground_atThePinnedVersion() throws Exception {
-        try (Connection c = pg.createConnection(""); Statement st = c.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS pg_background");
-            assertThat(scalar(st, "SELECT extversion FROM pg_extension WHERE extname = 'pg_background'"))
-                .isEqualTo(PgBackgroundImage.PG_BACKGROUND_EXTVERSION);
+        try (Connection c = pg.createConnection("")) {
+            assertThat(extensionVersion(dsl(c), "pg_background")).isEqualTo(PgBackgroundImage.PG_BACKGROUND_EXTVERSION);
         }
     }
 
     @Test
     void aBackgroundWorker_runsASelectAndReturnsItsResult_inAnotherBackend() throws Exception {
-        try (Connection c = pg.createConnection(""); Statement st = c.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS pg_background");
-            String mine = scalar(st, "SELECT pg_backend_pid()");
-            assertThat(scalar(st,
-                "SELECT r.v FROM pg_background_launch('SELECT 6 * 7') h, "
-                    + "LATERAL pg_background_result(h.pid, h.cookie) AS r(v int)"))
-                .isEqualTo("42");
+        try (Connection c = pg.createConnection("")) {
+            DSLContext ctx = dsl(c);
+            // nx_pgbg_smoke_value() launches a worker for a SELECT of 6 * 7 and reads its result back.
+            assertThat(ctx.select(DSL.function("nx_pgbg_smoke_value", Integer.class)).fetchOne(0, Integer.class)).isEqualTo(42);
             // The worker is a backend of its own: the pid it reports is not this session's.
-            String worker = scalar(st,
-                "SELECT r.v FROM pg_background_launch('SELECT pg_backend_pid()') h, "
-                    + "LATERAL pg_background_result(h.pid, h.cookie) AS r(v int)");
-            assertThat(worker).isNotEqualTo(mine);
+            Integer mine = ctx.select(DSL.function("pg_backend_pid", Integer.class)).fetchOne(0, Integer.class);
+            Integer worker = ctx.select(DSL.function("nx_pgbg_smoke_worker_pid", Integer.class)).fetchOne(0, Integer.class);
+            assertThat(worker).isNotNull().isNotEqualTo(mine);
         }
     }
 
     @Test
     void theVectorExtension_stillCreates() throws Exception {
-        try (Connection c = pg.createConnection(""); Statement st = c.createStatement()) {
-            st.execute("CREATE EXTENSION IF NOT EXISTS vector");
-            assertThat(scalar(st, "SELECT extversion FROM pg_extension WHERE extname = 'vector'")).isNotBlank();
+        try (Connection c = pg.createConnection("")) {
+            assertThat(extensionVersion(dsl(c), "vector")).isNotBlank();
         }
     }
 
@@ -110,16 +122,17 @@ class PgBackgroundImageSmokeTest {
     @Test
     void startDataMove_withServerArgs_startsTheClusterWithThem() throws Exception {
         PostgreSQLContainer<?> c = PgContainerHelper.startDataMove(List.of("-c", "max_worker_processes=4"));
-        try (Connection conn = c.createConnection(""); Statement st = conn.createStatement()) {
-            assertThat(scalar(st, "SHOW max_worker_processes")).isEqualTo("4");
+        try (Connection conn = c.createConnection("")) {
+            DSLContext ctx = dsl(conn);
+            assertThat(setting(ctx, "max_worker_processes")).isEqualTo("4");
             // The recipe's own flags are still there, in front of the appended ones.
-            assertThat(scalar(st, "SHOW fsync")).isEqualTo("off");
+            assertThat(setting(ctx, "fsync")).isEqualTo("off");
         } finally {
             c.stop();
         }
         // Non-vacuity: the plain container does not run with 4, so the assertion above reads the argument.
-        try (Connection conn = pg.createConnection(""); Statement st = conn.createStatement()) {
-            assertThat(scalar(st, "SHOW max_worker_processes")).isNotEqualTo("4");
+        try (Connection conn = pg.createConnection("")) {
+            assertThat(setting(dsl(conn), "max_worker_processes")).isNotEqualTo("4");
         }
     }
 

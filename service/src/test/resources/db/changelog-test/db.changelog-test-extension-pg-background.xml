@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.8 (RDR-246 Phase 1 Step 3c; Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included):
+    CREATE EXTENSION pg_background and vector in the data-move test image. jOOQ has no CREATE EXTENSION.
+    PgBackgroundImageSmokeTest installs them on its superuser connection in a container built from the image that
+    ships pg_background (PgBackgroundImage). Names are fixed. Run through PgContainerHelper#createDataMoveExtensions;
+    runAlways, bookkeeping in its own table. The vector one proves the image still carries pgvector; the product's own
+    bootstrap is vectors-001-1 and is not touched.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="extension-pg-background" author="nexus-f3yqd.2.8" runAlways="true">
+        <sql>CREATE EXTENSION IF NOT EXISTS pg_background</sql>
+    </changeSet>
+
+    <changeSet id="extension-vector-in-the-data-move-image" author="nexus-f3yqd.2.8" runAlways="true">
+        <sql>CREATE EXTENSION IF NOT EXISTS vector</sql>
+    </changeSet>
+</databaseChangeLog>

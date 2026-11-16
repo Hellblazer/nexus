@@ -1652,6 +1652,26 @@ public final class PgContainerHelper {
             "databasechangelog_test_ext_plpgsql_check", Map.of());
     }
 
+    /**
+     * {@code CREATE EXTENSION pg_background} and {@code vector} (nexus-f3yqd.2.8), through
+     * {@code db.changelog-test-extension-pg-background.xml}, on a superuser connection to a container of
+     * {@link #newDataMoveContainer()}. Idempotent.
+     */
+    public static void createDataMoveExtensions(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-extension-pg-background.xml",
+            "databasechangelog_test_ext_pg_background", Map.of());
+    }
+
+    /**
+     * Two functions that each launch a pg_background worker and read its result ({@code nx_pgbg_smoke_value()} is 42,
+     * {@code nx_pgbg_smoke_worker_pid()} the worker's own backend pid), through
+     * {@code db.changelog-test-pg-background-smoke.xml}. After {@link #createDataMoveExtensions}.
+     */
+    public static void installPgBackgroundSmokeProbe(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-pg-background-smoke.xml",
+            "databasechangelog_test_pg_background_smoke", Map.of());
+    }
+
     /** The bookkeeping table the concurrent-index helpers share, so one lock clear covers them all. */
     private static final String CONCURRENT_INDEX_BOOKKEEPING = "databasechangelog_test_concurrent_index";
 

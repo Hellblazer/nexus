@@ -105,9 +105,18 @@ class ExtensionBootstrapSiteConformanceTest {
      * PgContainerHelper#createPlpgsqlCheckExtension} after the walk, in a container built from an image that
      * ships the extension. A third-party analysis extension, not vector or pg_trgm, so no relocation applies.
      * It used to be a Java string passed to the deleted string-DDL helper.
+     *
+     * <p><b>db.changelog-test-extension-pg-background.xml</b> (nexus-f3yqd.2.8): {@code CREATE EXTENSION IF NOT EXISTS
+     * pg_background} and {@code vector} for {@code PgBackgroundImageSmokeTest}, run on its superuser connection through
+     * {@code PgContainerHelper#createDataMoveExtensions} in a container of the image that ships pg_background (a bare
+     * {@code startDataMove()} container has neither extension, since the product walk that creates {@code vector} does
+     * not run there). The same shape as the plpgsql_check entry above: a test-only changelog on a different image, never a
+     * product changeset and never part of a production walk. Every later data-move test that needs the extension calls the
+     * same helper.
      */
     private static final Set<String> SANCTIONED_TEST_CHANGELOGS =
-        Set.of("db.changelog-test-nonsuper-owner.xml", "db.changelog-test-extension-plpgsql-check.xml");
+        Set.of("db.changelog-test-nonsuper-owner.xml", "db.changelog-test-extension-plpgsql-check.xml",
+            "db.changelog-test-extension-pg-background.xml");
 
     /**
      * (filename) Java test fixtures sanctioned to carry a literal {@code
