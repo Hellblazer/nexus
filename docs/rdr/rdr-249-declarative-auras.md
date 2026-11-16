@@ -521,7 +521,7 @@ dead-`[clear]` and shared-threads refusals; the on and off resolver of
 Technical Design 3, which `nx aura list` shows. Tests against a real
 engine's registry (self-provisioned).
 
-### Phase 2: Evaluation
+### Phase 2 (CLOSED, 2026-11-16): Evaluation
 
 #### Step 1: Waiter path
 
