@@ -1,0 +1,15 @@
+[i] Reference staleness: worst case for this run (sample=50, concurrency=8) is ~570s if every sampled document is https:// and every one exhausts its retries
+[✗] Reference staleness: 8 reference-only document(s) sampled (of 8 candidate(s)), sample 50, seed 1; 3 fresh, 2 stale, 1 dangling, 2 unknown, 0 not stattable
+      c: fresh=0 stale=0 dangling=0 unknown=1 error=0
+      chroma: fresh=0 stale=0 dangling=0 unknown=1 error=0
+      https: fresh=1 stale=1 dangling=0 unknown=0 error=0
+      nx-note: fresh=1 stale=0 dangling=0 unknown=0 error=0
+      nx-scratch: fresh=1 stale=0 dangling=0 unknown=0 error=0
+      obsidian: fresh=0 stale=1 dangling=0 unknown=0 error=0
+      x-devonthink-item: fresh=0 stale=0 dangling=1 unknown=0 error=0
+      Stale (2):
+        1.1.1          [obsidian] Obsidian note  obsidian://open?vault=v&file=a.md
+        1.1.8          [https] Upper-case web page  HTTPS://example.org/x
+      Dangling (1):
+        1.1.2          [x-devonthink-item] DEVONthink item  x-devonthink-item://UUID-1
+exit code: 1
