@@ -79,6 +79,7 @@ SHA_ALLOWLIST: dict[str, str] = {
     "b934d3325": "rdr-233: gate round 1 fix commit before the 2026-10-30 squash and rebase onto develop; the fix-check range in T2 runs through it",
     "56e6bd046": "rdr-233: gate round 2 commit before the 2026-10-30 squash and rebase onto develop; the gate record, critique and fix check in T2 are keyed to it, so the citation keeps the gated sha",
     "a1b2c3d4e5f6": "docs/catalog.md: chash placeholder in a usage example",
+    "5f088e2": "rdr-246: a commit in Hellblazer/ddl_utils, the commit nexus pins, not a commit here",
     "a6cd544": "rdr-246: a commit in Hellblazer/dml_utils (PR #1, bytea keys), the commit nexus pins, not a commit here",
     "328b6b68": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-dl queries-corpus, not a commit here",
     "3c26def7": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-dl qrels, not a commit here",
