@@ -184,11 +184,18 @@ special-warning guide, KickSync, Sniffa and Blizzard's Midnight post.
 
 - [ ] The pushing session can be recorded durably at push time without
   slowing the push. **Method**: Source Search of `git-push-develop.sh`, then a
-  spike.
-- [ ] One writer can join a CI post with the push records and stamp the owner
-  within seconds of the post. **Method**: Spike.
-- [ ] Group membership can be read at MCP server start in one tuple read.
-  **Method**: Spike.
+  spike. Source half done (`nexus_rdr/252-research-1` F4): the script already
+  resolves the session id and writes tuples for its push lock, so the record
+  is one more `nx tuple out`; the spike times it on a local engine.
+- [x] One writer can join a CI post with the push records and stamp the owner
+  within seconds of the post. **Status**: met by design. The stamper runs in
+  the engine on the write of the CI post (Sam, 2026-11-16), so the join is a
+  read of the engine's own rows inside that write, not a second process.
+- [x] Group membership can be read at MCP server start in one tuple read.
+  **Status**: met by design. Memberships live under the member's own subspace,
+  `member/<session id>` (Technical Design, Groups), so "my groups" is one read
+  of one subspace. Under `group/<name>` it would have been one read per group
+  (`nexus_rdr/252-research-1` F7).
 
 ## Proposed Solution
 
@@ -216,10 +223,17 @@ kind=group  name=push-train  leader=<session id>  purpose="develop push order"
 formed_by=<session id or "sam">  formed_at=<UTC>  ends=<UTC or "open">
 ```
 
-Membership is one tuple per member, `kind=member group=<name> session=<id>
+Membership is one tuple per group the session belongs to, under the
+session's own subspace `member/<session id>`: `kind=member group=<name>
 roles=[...]`, written by the member when it joins and removed when it leaves
-or its session ends. Assignments are typed tuples, `kind=assign group=<name>
-task=<task> owner=<session id> next=<session id>`, written by the leader. A
+or its session ends. Keying it by session makes "which groups am I in" one
+read at server start; a group's roster is a read of `member/*` filtered by
+`group`, done only by the stamper and a group listing, never at load. A
+session id fits the engine's address-segment pattern
+(`[A-Za-z0-9][A-Za-z0-9._-]*`). Assignments are typed tuples under `group/<name>`, `kind=assign
+task=<task> owner=<session id> next=<session id>`, written by the leader.
+Two new engine templates carry these: `group/<name>` (the group entry and its
+assignments) and `member/<session>` (memberships). A
 session can hold membership in any number of groups. A disbanded group's
 entry stays as history with `ended_at`.
 
@@ -257,12 +271,21 @@ JDR-002 says the stamp is never one, so JDR-002 gains a revision entry naming
 to a joint record is Sam's.
 
 **The push record.** On `PUSH_OK`, `git-push-develop.sh` posts to
-`board/push/nexus-develop`:
+`board/ci/nexus-develop--push`, on the existing `board/ci/<topic>` template
+(5000 live rows, three days' retention, the same lifetime as the CI posts it
+is joined with). No template matches the draft's `board/push/nexus-develop`
+(`nexus_rdr/252-research-1` F3). The template's dimensions already fit:
 
 ```
-kind=push  tip=<sha>  base=<develop sha before the push>  shas=<pushed shas>
-session=<session id>  name=<session name>  at=<UTC>
+dims:  from=<session id>  kind=push  sha=<tip>
+body:  {"base": "<develop sha before the push>", "n": <commits>, "name": "<session name>"}
 ```
+
+The record carries no list of pushed shas: develop CI runs once per pushed
+tip, so every red is a push's `tip`, and the base-to-tip chain orders the
+pushes. The writer is the pushing session with its ordinary tenant token, not
+the adapter's `board-ci` credential, so the template's doc block gains it as a
+writer.
 
 **Develop's state from commit order.** Commit order comes from the push
 records' `base` and `tip` (each push names the develop sha it built on), never
@@ -272,24 +295,30 @@ block; a late green for an older commit does not clear a block a newer red
 raised.
 
 **The owner, stamped once.** One writer, the stamper, watches
-`board/ci/nexus-develop--done` and `board/push/nexus-develop`. For a red that
+`board/ci/nexus-develop--done` and `board/ci/nexus-develop--push`. For a red that
 counts, it posts once to `board/ci/nexus-develop--owner`:
 
 ```
 kind=owner  sha=<red sha>  owner=<session id>  next=<session id>  reason=<why>
 ```
 
-- **Owner**: the session of the push whose `shas` contain the first red commit
-  after the last green one. A red that a later push only inherited belongs to
+- **Owner**: the session of the push whose `tip` is the first red tip after
+  the last green tip, in the order the push records' `base`-to-`tip` chain
+  gives. A red that a later push only inherited belongs to
   the earlier pusher. Example: on 2026-11-16, 4554bd15f went red only because
   da1c285da had; the owner is da1c285da's pusher.
 - **Next up**: the `push-train` group's leader. If the owner's session is gone,
   the leader is owner and `reason` says so.
 - **Unknown pusher** (no push record): the leader is owner, `reason=no_record`.
 
-Where the stamper runs is open question 5: in the engine next to the CI
-adapter (the platform, as with private auras), or as one session's job.
-Alternative 2 below keeps "every session computes" as the fallback design.
+The stamper runs in the engine (Sam, 2026-11-16, refining answer 5 once
+`nexus_rdr/252-research-1` F5 showed the CI adapter is an AWS Lambda in the
+conexus repository, not part of the engine): Java logic run when a
+`board/ci/nexus-develop--done` row is written, reading the push records and
+the group's assignments from the engine's own tables and writing the owner
+row. The Lambda adapter is unchanged and keeps its write-only `board-ci`
+scope. It ships in an engine release. Alternative 2 below keeps "every
+session computes" as the fallback design.
 
 **Load by membership.** New optional table in the aura file:
 
@@ -319,6 +348,21 @@ the manner of DBM's typed warnings:
 | Owner | "Develop is red at <sha>, first red in your push. Diagnose it." | Yes | Diagnose; acknowledge |
 | Next up | "Develop is red at <sha>; <owner> owns it. You are next up." | Yes | Stand by; take it if not acknowledged |
 | Everyone else in the group | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | No (block only) | Hold its own pushes until green |
+
+**Two additions to the aura surface** (`nexus_rdr/252-research-1` F1, F2).
+An aura cannot tell which state it is in without knowing its own session,
+and today an argument can come only from the tuple or a literal. So:
+
+- A new argument source, `self.session`, filled by the host with the
+  session id the waiter resolved at load (`[args] me = "self.session"`). The
+  procedure compares it with the owner post's `owner` and `next` fields. It
+  is a source, not a reserved argument name, so RDR-242's header grammar is
+  unchanged; `nx aura check` accepts it for any declared string argument.
+- `display.channel` accepts, besides `true` and `false`, the name of a
+  boolean field of the procedure's result (`channel = "wake"`). The host
+  sends the fixed-template notice only when that field is `true`, so the
+  owner and next up are woken and everyone else gets the block alone. The
+  notice stays the fixed template of RDR-249; only whether it is sent varies.
 
 **Re-surfacing.** When the owner changes (the leader takes over, or a new
 owner post supersedes the old one), each member's block is rewritten, and the
@@ -458,13 +502,30 @@ B is woken. A group write from C is refused.
 
 ### Phase 1: Code Implementation
 
+Steps 1 and 3 are engine work and ship in one engine release, which Sam
+cuts; Steps 2, 4 and 5 are client work and ship in a conexus release that
+pins that engine.
+
 #### Step 1: Group, member and assignment templates, with the writer check
+
+Engine: templates `group/<name>` and `member/<session>`, and the level-1
+writer check on them (`nexus_rdr/252-research-1` F6).
 
 #### Step 2: Push record in `git-push-develop.sh`
 
+Client: one `nx tuple out` to `board/ci/nexus-develop--push` after
+`PUSH_OK`, never failing the push; the `board/ci/<topic>` doc block names the
+new writer.
+
 #### Step 3: The owner stamper and the owner post
 
+Engine: on a `--done` row's write, compute the owner from the push records
+and the assignments, and write the owner row.
+
 #### Step 4: `[load]` and typed displays in auras; `ci_develop_red` moved onto the owner post
+
+Client: `[load]` read from `member/<session>` at server start; the
+`self.session` argument source; `display.channel` naming a result field.
 
 #### Step 5: Acknowledgement, deadline and re-surfacing
 
@@ -528,7 +589,9 @@ Not yet run.
 ## Open Questions for Sam
 
 Answered 2026-11-16 by Sam ("your recom look good"): 1 from the record, 3 load
-at server start, 5 the stamper in the engine beside the CI adapter, 6 through
+at server start, 5 the stamper in the engine beside the CI adapter (refined the same day:
+in the engine, since the adapter is a Lambda outside it; T2
+`nexus_rdr/252-decision-stamper-2026-11-16`), 6 through
 the leader, 7 the aura stays off until this lands. Then: 2, 20 minutes as the
 default, set per group with a per-aura override, and calibrated from measured
 acknowledgement times; 4, the engine's recorded session is enough for now, and
@@ -574,3 +637,4 @@ the attestation work is evaluated and included (Trust and attestation, levels
   the procedure surface narrows; marginalia's notes on load timing and commit
   order kept.
 - 2026-11-16: Sam's answers to questions 2 and 4 recorded: a per-group acknowledgement deadline (20-minute default, per-aura override, calibrated from measured times); attestation evaluated in four levels against JDR-002, with level 1 in Phase 1, level 2 as Step 6 and level 3 named, not built.
+- 2026-11-16: ownership moved from wren to marginalia. Gaps from the source audit (`nexus_rdr/252-research-1`) closed in the design: memberships under `member/<session>` (one read at load); push records on `board/ci/nexus-develop--push` with the existing template, ordered by base and tip; the stamper in the engine (Sam's refined answer 5); the `self.session` argument source and `display.channel` naming a result field; Phase 1 split into engine and client steps. Assumptions 2 and 3 met by design; assumption 1's timing spike still to run.
