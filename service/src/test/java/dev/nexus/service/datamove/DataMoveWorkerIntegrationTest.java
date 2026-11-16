@@ -52,7 +52,7 @@ import java.util.concurrent.TimeoutException;
 class DataMoveWorkerIntegrationTest {
 
     private static final String ADMIN = DmlUtilsTestFixtures.ADMIN;
-    private static final String ADMIN_PASSWORD = "nexus_admin_dmlutils_pw";
+    private static final String ADMIN_PASSWORD = DmlUtilsTestFixtures.ADMIN_PASSWORD;
     private static final String CALL_APPLICATION_NAME = "nexus-data-move-test-call";
 
     private static final Field<Integer> N = DSL.field(DSL.name("n"), Integer.class);
@@ -70,7 +70,7 @@ class DataMoveWorkerIntegrationTest {
         pg = PgContainerHelper.startDataMove();
         su = pg.createConnection("");
         su.setAutoCommit(true);
-        PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASSWORD);
+        DmlUtilsTestFixtures.createAdmin(su);
         PgContainerHelper.createDataMoveExtensions(su);
         DmlUtilsTestFixtures.bootstrapDmlUtils(su);
         var cfg = new HikariConfig();

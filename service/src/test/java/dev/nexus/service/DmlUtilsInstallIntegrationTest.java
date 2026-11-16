@@ -45,7 +45,7 @@ class DmlUtilsInstallIntegrationTest {
 
     /** The engine's migration role (production's nexus_admin); a name no other test class uses. */
     static final String ADMIN = DmlUtilsTestFixtures.ADMIN;
-    static final String ADMIN_PASSWORD = "nexus_admin_dmlutils_pw";
+    static final String ADMIN_PASSWORD = DmlUtilsTestFixtures.ADMIN_PASSWORD;
 
     private PostgreSQLContainer<?> pg;
     private HikariDataSource adminPool;
@@ -58,7 +58,7 @@ class DmlUtilsInstallIntegrationTest {
         pg = PgContainerHelper.startDataMove();
         su = pg.createConnection("");
         su.setAutoCommit(true);
-        PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASSWORD);
+        DmlUtilsTestFixtures.createAdmin(su);
         PgContainerHelper.createDataMoveExtensions(su);
         DmlUtilsTestFixtures.bootstrapDmlUtils(su);
         var cfg = new HikariConfig();

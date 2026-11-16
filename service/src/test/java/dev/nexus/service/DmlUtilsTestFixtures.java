@@ -16,6 +16,15 @@ public final class DmlUtilsTestFixtures {
 
     /** The migration role the changelogs name (a fixed name: a placeholder would need RawSqlGateTest's lists). */
     public static final String ADMIN = "nexus_admin_dmlutils";
+    public static final String ADMIN_PASSWORD = "nexus_admin_dmlutils_pw";
+
+    /**
+     * Creates {@link #ADMIN}, a non-superuser owner as production's nexus_admin is. The one place the role is made: both
+     * data-move test classes use it, and the role census wants a fixed name created by exactly one class.
+     */
+    public static void createAdmin(Connection su) throws Exception {
+        PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN, ADMIN_PASSWORD);
+    }
 
     /**
      * The three library roles, their grants and the {@code liquibase} schema owned by {@code dml_utils_owner}, as
