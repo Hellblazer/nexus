@@ -1,7 +1,7 @@
 # nexus-f3yqd.2.8 (RDR-246 Phase 1 Step 3c): the product's test Postgres image plus pg_background, built from the
 # same pinned commit as the bundle (scripts/build_pg_bundle.sh pg_background_pinned_commit, and
 # scripts/build_pg_bundle_windows.py). Built at test time by dev.nexus.service.PgBackgroundImage, never pushed.
-# BASE and PG_BACKGROUND_COMMIT come from dev.nexus.build.PgContainerRecipe (IMAGE, PG_BACKGROUND_COMMIT).
+# BASE and PG_BACKGROUND_COMMIT come from PgContainerRecipe.IMAGE and PgBackgroundImage.PG_BACKGROUND_COMMIT.
 ARG BASE
 FROM ${BASE} AS build
 ARG PG_BACKGROUND_COMMIT

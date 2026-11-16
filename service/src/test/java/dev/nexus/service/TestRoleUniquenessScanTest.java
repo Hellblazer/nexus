@@ -392,7 +392,7 @@ class TestRoleUniquenessScanTest {
     private static final Pattern ROLE_METHOD_REF = Pattern.compile("::\\s*(" + HELPER_NAMES + ")\\b");
     private static final Pattern START_EMPTY = Pattern.compile("\\bstartEmptyDatabase\\s*\\(");
     private static final Pattern DEDICATED = Pattern.compile(
-        "\\bPgContainerHelper\\s*(?:\\.|::)\\s*(?:startDedicated|newContainer)\\b");
+        "\\bPgContainerHelper\\s*(?:\\.|::)\\s*(?:startDedicated|newContainer|startDataMove|newDataMoveContainer)\\b");
     /** A parameter declaration such as {@code String role}: the call-shaped text is a method declaration. */
     private static final Pattern DECLARATION =
         Pattern.compile("(?:final\\s+)?[A-Za-z_][\\w.<>?\\[\\]]*\\s+([A-Za-z_]\\w*)");

@@ -35,29 +35,6 @@ public final class PgContainerRecipe {
     /** Image used for every throwaway Postgres container of the service module. */
     public static final String IMAGE = "pgvector/pgvector:pg17";
 
-    /**
-     * nexus-f3yqd.2.8 (RDR-246 Phase 1 Step 3c): the image the data-move tests run on, {@link #IMAGE} plus
-     * pg_background. It is built at test time (nothing is pushed or pulled) from
-     * {@code service/src/test/resources/docker/pg-background.Dockerfile} by {@code dev.nexus.service.PgBackgroundImage}
-     * and tagged with this name, so the rest of the suite keeps {@link #IMAGE}. The tag carries the release and the
-     * commit it is built at; moving the pin is a change to {@link #PG_BACKGROUND_VERSION},
-     * {@link #PG_BACKGROUND_COMMIT} and this tag together.
-     */
-    public static final String DATA_MOVE_IMAGE = "nexus-test/pg17-pg-background:2.0.4-c1db2540";
-
-    /** The pg_background release the bundle ships (scripts/build_pg_bundle.sh {@code PG_BACKGROUND_VERSION}). */
-    public static final String PG_BACKGROUND_VERSION = "v2.0.4";
-
-    /**
-     * The commit {@link #PG_BACKGROUND_VERSION} resolves to: the pin of {@code pg_background_pinned_commit} in
-     * scripts/build_pg_bundle.sh and of {@code PG_BACKGROUND_COMMITS} in scripts/build_pg_bundle_windows.py. The
-     * Dockerfile fetches this commit and refuses any other.
-     */
-    public static final String PG_BACKGROUND_COMMIT = "c1db2540408ce4626ea21bc97572ff43b1a19ff3";
-
-    /** What {@code pg_extension.extversion} reads after {@code CREATE EXTENSION pg_background} at that commit (its control file's default_version). */
-    public static final String PG_BACKGROUND_EXTVERSION = "2.0";
-
     /** Superuser database name (matches io.zonky default). */
     public static final String DATABASE = "postgres";
 

@@ -183,8 +183,8 @@ public final class PgContainerHelper {
     }
 
     /**
-     * nexus-f3yqd.2.8: {@link #newContainer(DockerImageName)} on {@link PgContainerRecipe#DATA_MOVE_IMAGE}, the
-     * image with pg_background (built by {@link PgBackgroundImage}). Every data-move test boots through here or
+     * nexus-f3yqd.2.8: {@link #newContainer(DockerImageName)} on the image with pg_background
+     * ({@link PgBackgroundImage} builds it). Every data-move test boots through here or
      * {@link #startDataMove()}. It is a container of its own, not a database on the per-fork shared cluster
      * ({@link SharedCluster} runs {@link #IMAGE}), so a data-move test migrates and cleans up its own cluster.
      */
@@ -196,6 +196,21 @@ public final class PgContainerHelper {
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> startDataMove() {
         PostgreSQLContainer<?> c = newDataMoveContainer();
+        c.start();
+        return c;
+    }
+
+    /**
+     * {@link #startDataMove()} with server settings the cluster must START with, appended after the recipe's own
+     * ({@code "-c", "name=value"} pairs), as {@link #startDedicated(List)} does: a postmaster setting such as
+     * {@code max_worker_processes} cannot be applied to a running tmpfs container.
+     */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startDataMove(List<String> serverArgs) {
+        PostgreSQLContainer<?> c = newDataMoveContainer();
+        List<String> command = new ArrayList<>(List.of(c.getCommandParts()));
+        command.addAll(serverArgs);
+        c.setCommand(command.toArray(new String[0]));
         c.start();
         return c;
     }
