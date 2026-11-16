@@ -441,7 +441,8 @@ develop code. It uses the RDR-147 MVV harness: a fresh sandbox, bge-768, plan
 10 at its default budget of 20 with search limit 40, and `entity.collections`
 set to `CUST-\d{4}`. It reports join completeness, per-run precision over the
 answers that name a company, recall and F1 on issue5, `resolution_entered` per
-row, and the pool fields (keys kept and rejected by name). Its baselines are
+row, the pool fields (keys kept and rejected by name), and the filter's added
+cost per question (`pool_filter_calls` times the mean assessment-call cost). Its baselines are
 the budget-20 measurement, F1 0.764 (250-research-2), and the RDR-147 F1 0.500
 (147-research-17).
 
