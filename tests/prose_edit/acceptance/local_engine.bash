@@ -81,11 +81,12 @@ local_engine_start() {
   mkdir -p "$base" || exit 1
   sandbox="$(mktemp -d "$base/prose-engine-XXXXXX")" || { echo "$name: cannot make a sandbox under $base" >&2; exit 1; }
   LOCAL_ENGINE_DIR="$sandbox"
-  LOCAL_ENGINE_CONFIG="$sandbox/home/.config/nexus"
+  sandbox_home="$sandbox/home"
+  LOCAL_ENGINE_CONFIG="$sandbox_home/.config/nexus"
   runner_at_exit local_engine_stop   # before anything can fail, so a half-built sandbox is removed too
-  mkdir -p "$sandbox/home" || exit 1
+  mkdir -p "$sandbox_home" || exit 1
   LOCAL_ENGINE_ENV=(env -i
-    "HOME=$sandbox/home"
+    "HOME=$sandbox_home"
     "NEXUS_CONFIG_DIR=$LOCAL_ENGINE_CONFIG"
     "PATH=$WT/.venv/bin:/usr/bin:/bin"
     "TERM=${TERM:-dumb}"
@@ -101,7 +102,7 @@ local_engine_start() {
   LOCAL_ENGINE_ENV+=("$nxbin")
   cache="${PROSE_EDIT_ENGINE_CACHE:-}"
   if [ -n "$cache" ] && [ -d "$cache/nexus" ]; then
-    mkdir -p "$sandbox/home/.cache" && cp -R "$cache/nexus" "$sandbox/home/.cache/nexus"
+    mkdir -p "$sandbox_home/.cache" && cp -R "$cache/nexus" "$sandbox_home/.cache/nexus"
     echo "local engine: seeded the model cache from $cache" >&2
   fi
   log="$OUT/local-engine-init.log"
@@ -122,8 +123,8 @@ local_engine_start() {
     echo "$name: the sandbox config $LOCAL_ENGINE_CONFIG/config.yml names a service_url that is not loopback; refusing to write T2 through it." >&2
     exit 1
   fi
-  if [ -n "$cache" ] && [ -d "$sandbox/home/.cache/nexus" ] && [ ! -d "$cache/nexus" ]; then
-    mkdir -p "$cache" && cp -R "$sandbox/home/.cache/nexus" "$cache/nexus" 2>/dev/null
+  if [ -n "$cache" ] && [ -d "$sandbox_home/.cache/nexus" ] && [ ! -d "$cache/nexus" ]; then
+    mkdir -p "$cache" && cp -R "$sandbox_home/.cache/nexus" "$cache/nexus" 2>/dev/null
   fi
   PROSE_EDIT_NX="$(printf '%q ' "${LOCAL_ENGINE_ENV[@]}")"
   export PROSE_EDIT_NX
