@@ -133,3 +133,15 @@ def test_the_cli_seam_reads_the_real_registry_with_the_boot_bearer(
     got, why = aura_cmd._templates()
     assert why == "", why
     assert got and resolve_tuple_template(got, "board/ci/nexus-develop--done") is not None
+
+
+def test_the_shipped_ci_develop_red_passes_every_check_against_the_real_registry(
+    templates: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file as it ships in the package root (nexus-mdbds.12.1), not a planted copy."""
+    monkeypatch.delenv(library.REPO_ROOT_ENV, raising=False)
+    assert resolve_tuple_template(templates, "board/ci/nexus-develop--done") is not None  # non-vacuity
+    entries = [e for e in enumerate_auras(cwd=None) if e.name == "ci_develop_red"]
+    assert [e.root for e in entries] == ["shipped"], entries
+    [check] = check_auras(entries, cwd=None, templates=templates)
+    assert not check.findings and not check.skipped, (check.findings, check.skipped)
