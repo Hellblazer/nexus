@@ -757,7 +757,9 @@ public final class Main {
                 dev.nexus.service.datamove.DataMoveWorker.Settings.fromEnv(System::getenv), engineApplicationName);
             worker.start();
             return worker;
-        } catch (Exception e) {
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {   // a LinkageError or an initializer failure is the worker's, not the engine's
             log.error("event=data_move_worker_not_started cause=\"{}\"", e.toString(), e);
             return null;
         }

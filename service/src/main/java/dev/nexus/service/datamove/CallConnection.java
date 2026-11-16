@@ -5,17 +5,23 @@ package dev.nexus.service.datamove;
 import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
+import org.jooq.ExecuteContext;
 import org.jooq.SQLDialect;
+import org.jooq.conf.RenderQuotedNames;
+import org.jooq.conf.Settings;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
+import org.jooq.impl.DefaultConfiguration;
+import org.jooq.impl.DefaultExecuteListener;
+import org.jooq.impl.DefaultExecuteListenerProvider;
 import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.CallableStatement;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.sql.Types;
+import java.sql.Statement;
 import java.util.Properties;
 
 /**
@@ -26,12 +32,11 @@ import java.util.Properties;
  * tenant's rows under FORCE row-level security), and the setting is cleared again when the run ends.
  *
  * <p>There is no socket read timeout: one CALL runs every chunk of a run, which can take hours. TCP keep-alive and the
- * driver's cancel are the only bounds.
+ * cancel are the bounds. {@link #cancel} is what the engine's stop uses: it sets a flag no later statement passes, and it
+ * cancels the statement in flight, with {@code cancelSignalTimeout} 2 s (as {@code AdminDdlSession} does) so the driver's
+ * cancel connection cannot hold a stop for its default ten seconds.
  *
- * <p><b>The one SQL text.</b> The CALL goes through JDBC's escape syntax as a {@code CallableStatement}, with
- * {@code escapeSyntaxCallMode=callIfNoReturn} so the driver sends {@code CALL} and not {@code SELECT}; every value is a bind
- * parameter. No jOOQ form exists for a procedure CALL, and a {@code DSL.query} template here would be a new entry in
- * {@code RawSqlGateTest}'s exemption registry, which is at its ceiling.
+ * <p>The CALL is the typed routine {@link CommittingProcedure}, run on a jOOQ context over this connection.
  */
 final class CallConnection implements AutoCloseable {
 
@@ -39,21 +44,25 @@ final class CallConnection implements AutoCloseable {
 
     private static final int CONNECT_TIMEOUT_SECONDS = 10;
     private static final int LOGIN_TIMEOUT_SECONDS = 30;
-
-    /** The committing entry point, with its first six parameters positional and {@code i_sleep_ms} by name. */
-    private static final String CALL = "{call dml_utils.run_migration_chunks_committing("
-        + "?::text, ?::text, ?::text, ?::text, ?::integer, ?::integer, i_sleep_ms => ?::integer)}";
+    private static final String QUERY_CANCELED = "57014";
 
     private final Connection conn;
     private final DSLContext ctx;
+    /** The context the CALL runs on: the DEFAULT dialect makes the routine a callable statement, see CommittingProcedure. */
+    private final org.jooq.Configuration callConfiguration;
     private final int backendPid;
     /** The statement in flight, for {@link #cancel} from another thread; null between runs. */
-    private volatile CallableStatement running;
+    private volatile Statement running;
+    /** Set first by {@link #cancel}: a statement about to start sees it and does not start. */
+    private volatile boolean cancelled;
     private volatile boolean closed;
 
     private CallConnection(Connection conn, int backendPid) {
         this.conn = conn;
         this.ctx = DSL.using(conn, SQLDialect.POSTGRES);
+        this.callConfiguration = new DefaultConfiguration().set(conn).set(SQLDialect.DEFAULT)
+            .set(new Settings().withRenderQuotedNames(RenderQuotedNames.NEVER))
+            .set(new DefaultExecuteListenerProvider(new CancelTracker()));
         this.backendPid = backendPid;
     }
 
@@ -66,7 +75,11 @@ final class CallConnection implements AutoCloseable {
         props.setProperty("connectTimeout", Integer.toString(CONNECT_TIMEOUT_SECONDS));
         props.setProperty("loginTimeout", Integer.toString(LOGIN_TIMEOUT_SECONDS));
         props.setProperty("tcpKeepAlive", "true");
+        props.setProperty("cancelSignalTimeout", "2");
+        // the driver sends a JDBC call escape as CALL, not SELECT
         props.setProperty("escapeSyntaxCallMode", "callIfNoReturn");
+        // a text bind reaches the procedure's domain and enum parameters untyped, and the server resolves it
+        props.setProperty("stringtype", "unspecified");
         Connection c = DriverManager.getConnection(admin.url(), props);
         try {
             c.setAutoCommit(true);
@@ -115,43 +128,39 @@ final class CallConnection implements AutoCloseable {
      * CALLs the committing entry point for one run, threads 1, and returns when the run has done every chunk (or
      * was cancelled in dml_utils, which returns without raising).
      *
-     * @throws SQLException what the CALL raised; the caller classifies it
+     * @throws SQLException what the CALL raised; the caller classifies it. SQLSTATE 57014 when the connection was
+     *                      cancelled or closed before the CALL started
      */
     void call(String sqlText, String drivingSchema, String drivingTable, String runLabel, int chunkSize, int sleepMs)
             throws SQLException {
-        try (CallableStatement cs = conn.prepareCall(CALL)) {
-            cs.setString(1, sqlText);
-            cs.setString(2, drivingSchema);
-            cs.setString(3, drivingTable);
-            cs.setString(4, runLabel);
-            cs.setInt(5, chunkSize);
-            cs.setInt(6, 1);
-            cs.setObject(7, sleepMs, Types.INTEGER);
-            running = cs;
-            if (closed) {
-                throw new SQLException("the call connection was closed before the CALL started", "57014");
-            }
-            cs.execute();
-        } finally {
-            running = null;
+        try {
+            new CommittingProcedure(sqlText, drivingSchema, drivingTable, runLabel, chunkSize, sleepMs)
+                .execute(callConfiguration);
+        } catch (DataAccessException e) {
+            SQLException cause = e.getCause(SQLException.class);
+            throw cause != null ? cause : new SQLException(e.getMessage(), e.sqlState(), e);
         }
     }
 
     /** True while the connection can still run a statement. */
     boolean usable() {
         try {
-            return !closed && !conn.isClosed() && conn.isValid(5);
+            return !closed && !cancelled && !conn.isClosed() && conn.isValid(5);
         } catch (SQLException e) {
             return false;
         }
     }
 
-    /** Asks the server to stop the CALL in flight, if any (the driver's cancel). Safe from any thread. */
+    /**
+     * Stops this connection: no statement starts after it, and the one in flight, if any, is cancelled (the driver's cancel,
+     * bounded by {@code cancelSignalTimeout}). Safe from any thread. The connection is not used again.
+     */
     void cancel() {
-        CallableStatement cs = running;
-        if (cs != null) {
+        cancelled = true;
+        Statement st = running;
+        if (st != null) {
             try {
-                cs.cancel();
+                st.cancel();
             } catch (SQLException e) {
                 log.debug("event=data_move_call_cancel_failed cause=\"{}\"", e.toString());
             }
@@ -165,6 +174,29 @@ final class CallConnection implements AutoCloseable {
             conn.close();
         } catch (SQLException e) {
             log.debug("event=data_move_call_close_failed cause=\"{}\"", e.toString());
+        }
+    }
+
+    /**
+     * Publishes the statement a CALL has in flight so {@link #cancel} can reach it, and refuses to start one after a cancel
+     * or a close (the partner of {@link #cancel}: it publishes, then reads the flag; cancel sets the flag, then reads the
+     * statement, so either the cancel sees the statement or this sees the cancel).
+     */
+    private final class CancelTracker extends DefaultExecuteListener {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public void executeStart(ExecuteContext c) {
+            running = c.statement();
+            if (cancelled || closed) {
+                throw new DataAccessException("the call connection was cancelled before the CALL started",
+                    new SQLException("the call connection was cancelled before the CALL started", QUERY_CANCELED));
+            }
+        }
+
+        @Override
+        public void end(ExecuteContext c) {
+            running = null;
         }
     }
 }

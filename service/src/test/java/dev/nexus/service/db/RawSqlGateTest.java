@@ -211,7 +211,7 @@ class RawSqlGateTest {
         + "|\\.fetchAny\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.fetchValue\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.resultQuery\\(\\s*(\"|sql|SQL|new StringBuilder)"
-        + "|\\.prepareStatement\\(\\s*(\"|sql|SQL|new StringBuilder)"
+        + "|\\.prepare(Statement|Call)\\(\\s*(\"|sql|SQL|new StringBuilder)"   // prepareCall: nexus-f3yqd.2.13, the CALL sink counted too
         + "|\\.where\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.and\\(\\s*(\"|sql|SQL|new StringBuilder)"
         + "|\\.or\\(\\s*(\"|sql|SQL|new StringBuilder)"

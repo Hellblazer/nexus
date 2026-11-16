@@ -72,8 +72,17 @@ class DataMoveWorkerSettingsTest {
         assertThat(states.state("a").orElseThrow().since()).isEqualTo(clock.now);
 
         states.working(move("b"));
-        states.retainOnly(Set.of("b"));
+        states.retainOnly(Set.of("b"), Set.of());
         assertThat(states.state("a")).isEmpty();
         assertThat(states.snapshot()).extracting(MoveStates.State::label).containsExactly("b");
+
+        // a failed move stays until a move supersedes it; a paused or blocked one that is no longer open goes
+        states.failed(move("f"), "bad");
+        states.blocked(move("g"), "waiting");
+        states.retainOnly(Set.of("b"), Set.of());
+        assertThat(states.state("f")).isPresent();
+        assertThat(states.state("g")).isEmpty();
+        states.retainOnly(Set.of("b"), Set.of("f"));
+        assertThat(states.state("f")).isEmpty();
     }
 }

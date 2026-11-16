@@ -5,54 +5,80 @@ package dev.nexus.service.datamove;
 import org.jooq.DSLContext;
 
 import java.sql.SQLException;
-import java.time.OffsetDateTime;
 
 /**
- * Where a failed or cancelled run is decided. This bead's pass stops the move on either and reports it
- * {@code blocked:} with the reason ({@link #BLOCK_ALWAYS}); the failure-class bead (nexus-f3yqd.2.15) supplies the
- * implementation that tells a transient error from a permanent one by the SQLSTATE lists and the {@code error_id} mark,
- * counts retries, and sets {@code failed_at}.
+ * Where every failure of a pass is decided. Each way a pass can stop, whatever the stage, comes here as one {@link Failure}
+ * and goes back as one {@link Disposition}; the worker never reports a move blocked or failed on its own. This bead's
+ * handler ({@link #BLOCK_ALWAYS}) reports every failure {@code blocked:} with the reason; the failure-class bead
+ * (nexus-f3yqd.2.15) supplies the one that tells a transient error from a permanent one by the SQLSTATE lists and the
+ * {@code error_id} mark, counts retries and sets {@code failed_at}.
  */
 public interface FailureHandler {
 
-    /** What the worker does with the move after a failure. */
-    enum Kind { BLOCKED }
+    /** Where in a pass the failure arose. */
+    enum Stage {
+        /** Step 1: the library install, a grant, the installed entry point, the admin view or a worker slot. */
+        PREFLIGHT,
+        /** The tenant list or the catalog could not be read. */
+        PROBE,
+        /** The dedicated connection could not be opened. */
+        CONNECTION,
+        /** A CALL raised; {@link Failure#raised} is what it raised. */
+        CALL,
+        /** A CALL returned and the run's active row has {@code cancelled_at} set; {@link Failure#detail} says when. */
+        CANCELLED,
+        /** A CALL returned and the run is neither complete nor cancelled. */
+        INCOMPLETE,
+        /** Anything else the pass did not expect (a surprise from a query, say). */
+        PASS
+    }
 
-    /** The decision: the move's pass ends and the move is reported with {@code reason}. */
+    /** What the worker does with the move after a failure. */
+    enum Kind {
+        /** The pass ends and the move is retried after its wait. */
+        BLOCKED,
+        /** The pass ends and the move is not retried by this process. The handler is the one that sets {@code failed_at}. */
+        FAILED
+    }
+
+    /** The decision: the move is reported with {@code reason}, as {@code blocked:} or {@code failed:}. */
     record Disposition(Kind kind, String reason) {
         public static Disposition blocked(String reason) {
             return new Disposition(Kind.BLOCKED, reason);
         }
+
+        public static Disposition failed(String reason) {
+            return new Disposition(Kind.FAILED, reason);
+        }
     }
 
     /**
-     * A CALL raised.
+     * One failure, with everything the worker knows of where it arose.
      *
-     * @param move      the move
-     * @param runLabel  the dml_utils run the CALL named
-     * @param errorMark the run's highest {@code error_id} held before the CALL; an error row above it is this pass's
-     * @param raised    what the CALL raised
-     * @param admin     the admin connection, to read {@code migration_error} with
+     * @param move          the move
+     * @param stage         where the pass stopped
+     * @param runLabel      the dml_utils run the pass was at; null before any run
+     * @param drivingSchema the relation the run's CALL named as its driving table (a leaf, for a per-leaf run); the move's
+     *                      driving schema otherwise
+     * @param drivingTable  that relation's name
+     * @param tenant        the tenant whose session the run used; null for a table with no tenant scope
+     * @param errorMark     the run's highest {@code error_id} held before the CALL (0 outside a CALL); an error row above
+     *                      it is this pass's recorded chunk error
+     * @param raised        what the CALL raised; null for any other stage
+     * @param detail        the worker's own account of the failure, one line
+     * @param admin         the admin connection of the pass, to read {@code migration_error} with; null when the pass
+     *                      could not open one
      */
-    Disposition onCallRaised(DataMove move, String runLabel, long errorMark, SQLException raised, DSLContext admin);
+    record Failure(DataMove move, Stage stage, String runLabel, String drivingSchema, String drivingTable,
+                   String tenant, long errorMark, SQLException raised, String detail, DSLContext admin) { }
 
-    /** A CALL returned, and the run's active row has {@code cancelled_at} set (dml_utils' {@code cancel_migration_run}). */
-    Disposition onRunCancelled(DataMove move, String runLabel, OffsetDateTime cancelledAt);
+    Disposition onFailure(Failure failure);
 
-    /** Reports every failure as {@code blocked:} with the error text; nothing is retried differently or made permanent. */
-    FailureHandler BLOCK_ALWAYS = new FailureHandler() {
-        @Override
-        public Disposition onCallRaised(DataMove move, String runLabel, long errorMark, SQLException raised,
-                                        DSLContext admin) {
-            return Disposition.blocked("run " + runLabel + " raised sqlstate=" + raised.getSQLState() + ": "
-                + oneLine(raised.getMessage()));
-        }
-
-        @Override
-        public Disposition onRunCancelled(DataMove move, String runLabel, OffsetDateTime cancelledAt) {
-            return Disposition.blocked("run " + runLabel + " cancelled at " + cancelledAt);
-        }
-    };
+    /** Reports every failure as {@code blocked:} with the error text; nothing is made permanent. */
+    FailureHandler BLOCK_ALWAYS = failure -> failure.stage() == Stage.CALL
+        ? Disposition.blocked("run " + failure.runLabel() + " raised sqlstate=" + failure.raised().getSQLState() + ": "
+            + oneLine(failure.raised().getMessage()))
+        : Disposition.blocked(failure.detail());
 
     /** The first line of an error text, bounded, for a reason. */
     static String oneLine(String text) {

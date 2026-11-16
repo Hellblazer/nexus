@@ -67,14 +67,30 @@ final class DataMoveTestFixtures {
 
     /** Registers a move over {@code dm_test.<table>} with the stamping template, as a changeset's one INSERT does. */
     static void register(DSLContext ctx, String label, String table, int chunkSize, int sleepMs) {
+        register(ctx, label, table, chunkSize, sleepMs, null, "stamp-template.sql");
+    }
+
+    /** As the shorter form, naming the move it supersedes (or none) and the template resource. */
+    static void register(DSLContext ctx, String label, String table, int chunkSize, int sleepMs, String supersedes,
+                         String templateResource) {
         ctx.insertInto(DSL.table(DSL.name("nexus", "data_moves")))
             .columns(DSL.field(DSL.name("label"), String.class), DSL.field(DSL.name("template"), String.class),
                 DSL.field(DSL.name("driving_schema"), String.class), DSL.field(DSL.name("driving_table"), String.class),
                 DSL.field(DSL.name("chunk_size"), Integer.class), DSL.field(DSL.name("sleep_ms"), Integer.class),
                 DSL.field(DSL.name("statement_timeout_ms"), Integer.class),
-                DSL.field(DSL.name("verification"), String.class), DSL.field(DSL.name("changeset_id"), String.class))
-            .values(label, resource("stamp-template.sql"), "dm_test", table, chunkSize, sleepMs, 60_000,
-                resource("verification.sql"), "test-" + label)
+                DSL.field(DSL.name("verification"), String.class), DSL.field(DSL.name("changeset_id"), String.class),
+                DSL.field(DSL.name("supersedes"), String.class))
+            .values(label, resource(templateResource), "dm_test", table, chunkSize, sleepMs, 60_000,
+                resource("verification.sql"), "test-" + label, supersedes)
             .execute();
+    }
+
+    /** Sets or clears an operator's pause on a move, as the SQL an operator runs does. */
+    static void pause(DSLContext ctx, String label, boolean paused) {
+        ctx.update(DSL.table(DSL.name("nexus", "data_moves")))
+            .set(DSL.field(DSL.name("paused_at"), java.time.OffsetDateTime.class),
+                paused ? java.time.OffsetDateTime.now() : null)
+            .set(DSL.field(DSL.name("paused_by"), String.class), paused ? "test" : null)
+            .where(DSL.field(DSL.name("label"), String.class).eq(label)).execute();
     }
 }

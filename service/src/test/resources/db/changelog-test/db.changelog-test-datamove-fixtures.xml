@@ -7,13 +7,15 @@
 
       plain_rows    (a text, b text, c bytea) key, 100000 rows, no tenant column, autovacuum off (the bloat scenario)
       tenant_rows   FORCE row-level security keyed on nexus.tenant, plus nexus.chunks' owner-read shape (a permissive SELECT
-                    policy USING (true) for the migrating role); tenants default, acme, globex and orphan, 200 rows each
+                    policy USING (true) for the migrating role); tenants default, acme, globex, orphan and sl/ash (an id with a slash), 200 rows each
       leafed        LIST (model) then LIST (tenant_id), the shape of nexus.chunks with a three-column key; models m1 and m2,
                     tenants default, acme and globex, 150 rows per leaf; every leaf carries its own copy of the policies
                     (nexus.partition_copy_access does that for chunks)
 
     Each table also has n (the move's counter: a row moved exactly once ends at 1) and touched_by (the tenant setting of
-    the session that moved it).
+    the session that moved it). tenant_plain, forced_noread, unforced_foreign and unforced_owned are the small tables of the
+    row-security scenarios: tenant_id with no row security, FORCE with no policy for the migrating role, row security on and
+    not forced and owned by someone else, and the same owned by the migrating role.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -47,7 +49,7 @@ CREATE POLICY tenant_isolation ON dm_test.tenant_rows
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 CREATE POLICY owner_read ON dm_test.tenant_rows FOR SELECT TO nexus_admin_dmlutils USING (true);
 INSERT INTO dm_test.tenant_rows (tenant_id, id, payload)
-SELECT t, g, 'p' || g FROM unnest(ARRAY['default', 'acme', 'globex', 'orphan']) t, generate_series(1, 200) g;
+SELECT t, g, 'p' || g FROM unnest(ARRAY['default', 'acme', 'globex', 'orphan', 'sl/ash']) t, generate_series(1, 200) g;
 
 CREATE TABLE dm_test.leafed (
     model text NOT NULL, tenant_id text NOT NULL, id bigint NOT NULL, payload text,
@@ -79,11 +81,61 @@ CREATE POLICY tenant_isolation ON dm_test.leafed
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 CREATE POLICY owner_read ON dm_test.leafed FOR SELECT TO nexus_admin_dmlutils USING (true);
 
+-- tenant_id, and no row-level security at all: one run reads every row, a run per tenant would read them N times
+CREATE TABLE dm_test.tenant_plain (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+INSERT INTO dm_test.tenant_plain (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['default', 'acme', 'globex']) t, generate_series(1, 50) g;
+
+-- FORCE row-level security and no policy for the migrating role: the admin session reads no tenant's rows
+CREATE TABLE dm_test.forced_noread (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+ALTER TABLE dm_test.forced_noread ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dm_test.forced_noread FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.forced_noread
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+INSERT INTO dm_test.forced_noread (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['acme', 'globex']) t, generate_series(1, 20) g;
+
+-- row-level security on, not forced, owned by someone else (the superuser): the migrating role is subject to the policy
+CREATE TABLE dm_test.unforced_foreign (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+ALTER TABLE dm_test.unforced_foreign ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.unforced_foreign
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+INSERT INTO dm_test.unforced_foreign (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['acme', 'globex']) t, generate_series(1, 20) g;
+GRANT SELECT, UPDATE ON dm_test.unforced_foreign TO nexus_admin_dmlutils WITH GRANT OPTION;
+
+-- row-level security on, not forced, owned by the migrating role: the owner is exempt and reads every row
+CREATE TABLE dm_test.unforced_owned (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+ALTER TABLE dm_test.unforced_owned ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.unforced_owned
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+INSERT INTO dm_test.unforced_owned (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['acme', 'globex']) t, generate_series(1, 20) g;
+
 DO $$
 DECLARE r record;
 BEGIN
     FOR r IN SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-              WHERE n.nspname = 'dm_test' AND c.relkind IN ('r', 'p') LOOP
+              WHERE n.nspname = 'dm_test' AND c.relkind IN ('r', 'p') AND c.relname &lt;&gt; 'unforced_foreign' LOOP
         EXECUTE format('ALTER TABLE dm_test.%I OWNER TO nexus_admin_dmlutils', r.relname);
     END LOOP;
 END $$;

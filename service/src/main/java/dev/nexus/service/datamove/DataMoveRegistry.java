@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.datamove;
 
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Table;
@@ -10,10 +11,11 @@ import org.jooq.impl.SQLDataType;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 
 /**
- * Reads {@code nexus.data_moves}, on the admin connection only: {@code nexus_svc} holds no grant on it, so nothing on
- * the serving pool may call this. The table is addressed by name (the generated schema does not carry what a later
+ * Reads {@code nexus.data_moves}, on the admin connection only: {@code nexus_svc} holds no grant on it, so nothing on the
+ * serving pool may call this. The table is addressed by name (the generated schema does not carry what a later
  * changeset adds, and the move worker must not depend on which release generated it).
  */
 final class DataMoveRegistry {
@@ -40,6 +42,25 @@ final class DataMoveRegistry {
      * caller decides not to work it.
      */
     static List<DataMove> openMoves(DSLContext admin) {
+        return openMoves(admin, DSL.noCondition());
+    }
+
+    /**
+     * The move as it is now, if it is still open. Read at the start of a move's turn and before each CALL, so a pause, a
+     * superseding row, a failure or a completion set while the worker was busy with another move or another run takes
+     * effect at the next of those points.
+     */
+    static Optional<DataMove> reload(DSLContext admin, String label) {
+        return openMoves(admin, text("m", "label").eq(label)).stream().findFirst();
+    }
+
+    /** The labels some row's {@code supersedes} names: moves that are replaced and no longer reported. */
+    static List<String> supersededLabels(DSLContext admin) {
+        Field<String> supersedes = DSL.field(DSL.name("supersedes"), String.class);
+        return admin.selectDistinct(supersedes).from(MOVES).where(supersedes.isNotNull()).fetch(supersedes);
+    }
+
+    private static List<DataMove> openMoves(DSLContext admin, Condition extra) {
         var m = MOVES.as("m");
         var s = MOVES.as("s");
         return admin.select(
@@ -52,6 +73,7 @@ final class DataMoveRegistry {
             .where(stamp("m", "completed_at").isNull())
             .and(stamp("m", "failed_at").isNull())
             .and(DSL.notExists(DSL.selectOne().from(s).where(text("s", "supersedes").eq(text("m", "label")))))
+            .and(extra)
             .orderBy(stamp("m", "registered_at"), text("m", "label"))
             .fetch(r -> new DataMove(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(), r.value6(),
                 r.value7(), r.value8(), r.value9(), r.value10(), r.value11(), r.value12(), r.value13(), r.value14(),

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.datamove;
 
+import dev.nexus.service.db.AdminConnection;
 import org.jooq.DSLContext;
 
 import java.util.List;
@@ -14,31 +15,46 @@ import java.util.List;
 public interface MoveFinisher {
 
     /**
-     * The result of {@link #finish}. {@code closed} is true when the move has left the open set (completed or failed in
-     * the registry); a move that is not closed and carries no {@code blockedReason} is left alone for the rest of this
-     * process, since its runs are done and there is nothing more for the pass to do.
+     * What the finisher is given: the move, the tenants the pass ran it for (empty for a table with no tenant scope), the
+     * admin connection of the pass, and the admin values, so it can open the dedicated per-tenant connections the
+     * verification runs on and the separate table-wide one ({@link CallConnection#open}).
      */
-    record Result(boolean closed, String blockedReason) {
+    record Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
+                   String applicationName) { }
+
+    /** How the finish ended. */
+    enum Outcome {
+        /** The move is complete in the registry ({@code completed_at} set). */
+        COMPLETED,
+        /** The move failed for good: a non-empty verification, or an {@code on_complete} that failed for another reason. */
+        FAILED,
+        /** Not now: a timeout or a lock; the move is retried after its wait. */
+        BLOCKED,
+        /** The runs are done and there is nothing more for this pass to do; the move is left alone for this process. */
+        LEFT_OPEN
+    }
+
+    /** The outcome and, for {@link Outcome#FAILED} and {@link Outcome#BLOCKED}, the reason an operator reads. */
+    record Result(Outcome outcome, String reason) {
         public static Result completed() {
-            return new Result(true, null);
+            return new Result(Outcome.COMPLETED, null);
+        }
+
+        public static Result failed(String reason) {
+            return new Result(Outcome.FAILED, reason);
         }
 
         public static Result blocked(String reason) {
-            return new Result(false, reason);
+            return new Result(Outcome.BLOCKED, reason);
         }
 
         public static Result leftOpen() {
-            return new Result(false, null);
+            return new Result(Outcome.LEFT_OPEN, null);
         }
     }
 
-    /**
-     * @param move    the move whose runs are all complete
-     * @param tenants the tenant list this pass ran the move for (empty for a table with no tenant column)
-     * @param admin   the admin connection
-     */
-    Result finish(DataMove move, List<String> tenants, DSLContext admin);
+    Result finish(Context context);
 
     /** Does nothing: the runs are done and the move stays open. */
-    MoveFinisher RUNS_ONLY = (move, tenants, admin) -> Result.leftOpen();
+    MoveFinisher RUNS_ONLY = context -> Result.leftOpen();
 }

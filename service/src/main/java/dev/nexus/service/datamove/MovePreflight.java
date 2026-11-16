@@ -54,7 +54,7 @@ final class MovePreflight {
             if (!committingEntryPointInstalled(ctx)) {
                 return Optional.of("dml_utils.run_migration_chunks_committing is not installed");
             }
-            if (rowSecurityNarrowsAdmin(ctx, move)) {
+            if (rowSecurity(ctx, move).narrowsAdmin()) {
                 try {
                     session.requireUnrestrictedView(VIEW_POINT_AT);
                 } catch (AdminDdlSession.Refused refused) {
@@ -103,14 +103,27 @@ final class MovePreflight {
         }
     }
 
+    /** What row-level security does to the driving table: whether it is on, and whether the admin session is subject to it. */
+    record RowSecurity(boolean enabled, boolean narrowsAdmin) { }
+
     /**
-     * Whether row-level security can hide rows from the admin session. A table without row security, or one the session
-     * owns that is not FORCE, is read whole by its owner; only then is {@code requireUnrestrictedView}'s test for a
-     * permissive true-qual policy, a superuser or BYPASSRLS the one that applies. (That method asks for one of the three
+     * Row-level security on the driving table: two questions with two different answers.
+     *
+     * <p>{@code narrowsAdmin}: can it hide rows from the admin session? A table without row security, or one the session
+     * owns that is not FORCE, is read whole by its owner; only otherwise is {@code requireUnrestrictedView}'s test (a
+     * permissive true-qual policy, a superuser or BYPASSRLS) the one that applies. (That method asks for one of the three
      * whatever the table's state, which is right for {@code nexus.chunks}, always FORCE, and would block every move over a
-     * table with no row security.) A table that does not exist is treated as narrowing, so the check says why it fails.
+     * table with no row security.)
+     *
+     * <p>{@code enabled}: does it filter the run? Whatever the admin session sees, the boundary scan that cuts the table
+     * into chunks is SECURITY DEFINER and runs as {@code dml_utils_owner}, which does not own the table, so with row
+     * security on it sees only the rows of the session's tenant setting (none, with none set): a table the admin owns and
+     * that is not FORCE still needs a run per tenant. With row security off, one run reads every row, and a run per tenant
+     * would read them all N times.
+     *
+     * <p>A table that does not exist is treated as narrowing, so the check says why it fails.
      */
-    static boolean rowSecurityNarrowsAdmin(DSLContext ctx, DataMove move) {
+    static RowSecurity rowSecurity(DSLContext ctx, DataMove move) {
         var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
         var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
         var row = ctx.select(DSL.field(DSL.name("c", "relrowsecurity"), Boolean.class),
@@ -122,12 +135,12 @@ final class MovePreflight {
             .and(DSL.field(DSL.name("c", "relname"), String.class).eq(move.drivingTable()))
             .fetchOne();
         if (row == null) {
-            return true;
+            return new RowSecurity(true, true);
         }
         boolean enabled = Boolean.TRUE.equals(row.value1());
         boolean forced = Boolean.TRUE.equals(row.value2());
         boolean owned = Boolean.TRUE.equals(row.value3());
-        return enabled && (forced || !owned);
+        return new RowSecurity(enabled, enabled && (forced || !owned));
     }
 
     static boolean committingEntryPointInstalled(DSLContext ctx) {

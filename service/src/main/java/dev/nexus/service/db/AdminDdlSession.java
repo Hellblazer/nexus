@@ -487,6 +487,9 @@ public final class AdminDdlSession implements AutoCloseable {
     // CONSTRAINT ... NOT VALID and VALIDATE CONSTRAINT have no typed jOOQ form that takes a rendered CHECK expression.
     // The text is rendered by PostgreSQL's format() with %I and %L (ddl), so no identifier, key or prefix is
     // concatenated in Java. Plain JDBC Statement.execute, as PciBuilderSession does. Single-homed: ddl.
+    // Also, nexus-f3yqd.2.13 (RDR-246): the data-move worker's per-pass GRANT USAGE ON SCHEMA and GRANT SELECT ON TABLE to
+    // dml_utils_owner (MovePreflight.grant). jOOQ renders no GRANT ON SCHEMA, and the statement is built the same way, by
+    // format() with %I, from a literal template.
     private void runDdl(String sql) throws SQLException {
         try (Statement st = conn.createStatement()) {
             running = st;

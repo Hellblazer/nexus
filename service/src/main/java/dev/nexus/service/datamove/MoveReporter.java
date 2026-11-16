@@ -3,10 +3,10 @@
 package dev.nexus.service.datamove;
 
 /**
- * What the move worker says about each open move as it works. The in-memory {@link MoveStates} is the one
- * implementation: boot_work and the nx doctor line (nexus-f3yqd.2.17) read it, never {@code nexus.data_moves} on the
- * serving pool, since {@code nexus_svc} holds no grant there. {@code blocked} is the only way a pass that cannot proceed
- * reports it, with the reason an operator reads after {@code blocked:}.
+ * What the move worker says about each move as it works. The in-memory {@link MoveStates} is the one implementation:
+ * boot_work and the nx doctor line (nexus-f3yqd.2.17) read it, never {@code nexus.data_moves} on the serving pool, since
+ * {@code nexus_svc} holds no grant there. {@code blocked} and {@code failed} carry the reason an operator reads after
+ * {@code blocked:} or {@code failed:}.
  */
 public interface MoveReporter {
 
@@ -16,9 +16,15 @@ public interface MoveReporter {
     /** The pass stopped for a reason an operator reads; the move is retried after its wait. */
     void blocked(DataMove move, String reason);
 
+    /** The move failed for good; it stays reported until a move supersedes it. */
+    void failed(DataMove move, String reason);
+
     /** The move is paused ({@code paused_at} set): open, and not worked. */
     void paused(DataMove move);
 
     /** Every run of every listed tenant is complete; verification and {@code on_complete} are the finisher's. */
     void runsComplete(DataMove move);
+
+    /** The move is no longer open (completed, or superseded) and nothing more is to be said of it. */
+    void forget(String label);
 }

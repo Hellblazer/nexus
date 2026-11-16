@@ -4,226 +4,43 @@ package dev.nexus.service.datamove;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.DmlUtilsTestFixtures;
 import dev.nexus.service.PgContainerHelper;
-import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.DmlUtilsInstaller;
-import dev.nexus.service.db.SchemaMigrator;
-import org.jooq.Condition;
-import org.jooq.DSLContext;
-import org.jooq.Field;
-import org.jooq.SQLDialect;
-import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestInstance;
-import org.junit.jupiter.api.Timeout;
-import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.sql.Connection;
-import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeSet;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 /**
- * nexus-f3yqd.2.13 (RDR-246 Step 4, The move worker steps 1 and 2) on the pg_background image: the worker's passes over
- * real dml_utils runs. One container, migrated once by a non-superuser admin role exactly as production's
- * {@code nexus_admin} is, and {@code dm_test} rebuilt from nothing before each scenario (the fixture changelogs hold the
- * tables; no SQL text lives here). Each scenario registers its own label, so runs of an earlier scenario never meet it.
+ * nexus-f3yqd.2.13 (RDR-246 Step 4, The move worker steps 1 and 2): the acceptance scenarios on real dml_utils runs. The
+ * worker's other behaviour (row-security modes, pause and supersede, stop, orphans, the failure and finisher seams) is
+ * {@link DataMoveWorkerBehaviourIntegrationTest}.
  *
  * <p>Out of scope here, with their own beads: the nexus.chunks four-column key (nexus-f3yqd.2.21, dml_utils PR #3),
  * verification and {@code on_complete} (.14), the failure classes, backoff and pause (.15).
  */
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
-@Timeout(value = 20, unit = TimeUnit.MINUTES)
-class DataMoveWorkerIntegrationTest {
-
-    private static final String ADMIN = DmlUtilsTestFixtures.ADMIN;
-    private static final String ADMIN_PASSWORD = DmlUtilsTestFixtures.ADMIN_PASSWORD;
-    private static final String CALL_APPLICATION_NAME = "nexus-data-move-test-call";
-
-    private static final Field<Integer> N = DSL.field(DSL.name("n"), Integer.class);
-    private static final Field<String> TOUCHED_BY = DSL.field(DSL.name("touched_by"), String.class);
-    private static final Field<String> TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
-
-    private PostgreSQLContainer<?> pg;
-    private HikariDataSource adminPool;
-    private Connection su;
-    private AdminConnection adminConnection;
-    private final List<DataMoveWorker> workers = new ArrayList<>();
-
-    @BeforeAll
-    void start() throws Exception {
-        pg = PgContainerHelper.startDataMove();
-        su = pg.createConnection("");
-        su.setAutoCommit(true);
-        DmlUtilsTestFixtures.createAdmin(su);
-        PgContainerHelper.createDataMoveExtensions(su);
-        DmlUtilsTestFixtures.bootstrapDmlUtils(su);
-        var cfg = new HikariConfig();
-        cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername(ADMIN);
-        cfg.setPassword(ADMIN_PASSWORD);
-        cfg.setMaximumPoolSize(1);
-        adminPool = new HikariDataSource(cfg);
-        adminConnection = new AdminConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD);
-        installed();
-    }
-
-    @AfterAll
-    void stop() throws Exception {
-        if (adminPool != null) adminPool.close();
-        if (su != null) su.close();
-        if (pg != null) pg.stop();
-    }
-
-    @BeforeEach
-    void reset() throws Exception {
-        DataMoveTestFixtures.releaseWorkerSlots(su);
-        DmlUtilsTestFixtures.bootstrapDmlUtils(su);   // a scenario that dropped the roles left them gone
-        installed();                                   // and the libraries with them
-        DataMoveTestFixtures.rebuild(su);
-        ctx().deleteFrom(table("nexus", "data_moves")).execute();   // no earlier scenario's move is open
-    }
-
-    @AfterEach
-    void closeWorkers() {
-        workers.forEach(DataMoveWorker::close);
-        workers.clear();
-    }
-
-    // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────────
-
-    /** A boot: the libraries are applied (or skipped) by the migration, and the installer keeps which. */
-    private DmlUtilsInstaller installed() {
-        var installer = new DmlUtilsInstaller(true);
-        SchemaMigrator.migrate(adminPool, installer);
-        return installer;
-    }
-
-    private DataMoveWorker worker(DmlUtilsInstaller installer, Integer sleepOverrideMs) {
-        var w = new DataMoveWorker(adminConnection, installer,
-            new DataMoveWorker.Settings(Duration.ofMillis(50), Duration.ofMillis(10), sleepOverrideMs),
-            "nexus-data-move-test", Clock.systemUTC(), new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS,
-            MoveFinisher.RUNS_ONLY);
-        workers.add(w);
-        return w;
-    }
-
-    private DSLContext ctx() {
-        return DSL.using(su, SQLDialect.POSTGRES);
-    }
-
-    private static Table<?> table(String schema, String name) {
-        return DSL.table(DSL.name(schema, name));
-    }
-
-    private void register(String label, String table, int chunkSize, int sleepMs) {
-        DataMoveTestFixtures.register(ctx(), label, table, chunkSize, sleepMs);
-    }
-
-    private int countWhere(String table, Condition where) {
-        return ctx().fetchCount(table("dm_test", table), where);
-    }
-
-    /** Every row of {@code dm_test.<table>} was moved exactly once. */
-    private void assertEveryRowMovedOnce(String table, int expectedRows) {
-        assertThat(countWhere(table, N.eq(1))).as("rows of %s moved once", table).isEqualTo(expectedRows);
-        assertThat(countWhere(table, N.ne(1))).as("rows of %s moved zero or several times", table).isZero();
-    }
-
-    /** Every row of a tenant-keyed table was stamped by a session carrying its own tenant, and no other. */
-    private void assertEachRowTouchedByItsOwnTenant(String table) {
-        assertThat(countWhere(table, TOUCHED_BY.isNull().or(TOUCHED_BY.ne(TENANT_ID)))).isZero();
-    }
-
-    private TreeSet<String> activeRuns(String label) {
-        return new TreeSet<>(DataMoveRuns.activeRunLabels(ctx(), label));
-    }
-
-    private int partitionWiseRuns(String label) {
-        return ctx().fetchCount(table("dml_utils_data", "migration_run"),
-            DataMoveRuns.belongsTo(label).and(DSL.field(DSL.name("partition_wise"), Boolean.class).isTrue()));
-    }
-
-    private DataMoveRuns.Progress progress(String label) {
-        return DataMoveRuns.progress(ctx(), label);
-    }
-
-    /** The worker's CALL backend: the session named {@link #CALL_APPLICATION_NAME}, or -1. */
-    private int callPid() {
-        Integer pid = ctx().select(DSL.field(DSL.name("pid"), Integer.class))
-            .from(table("pg_catalog", "pg_stat_activity"))
-            .where(DSL.field(DSL.name("application_name"), String.class).eq(CALL_APPLICATION_NAME + ""))
-            .fetchOne(0, Integer.class);
-        return pid == null ? -1 : pid;
-    }
-
-    private static <T> CompletableFuture<T> async(java.util.concurrent.Callable<T> work) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                return work.call();
-            } catch (Exception e) {
-                throw new IllegalStateException(e);
-            }
-        });
-    }
-
-    /** Samples the move's progress every 20 ms until {@code cycle} ends. */
-    private List<DataMoveRuns.Progress> sampleUntilDone(CompletableFuture<Integer> cycle, String label)
-            throws InterruptedException, ExecutionException, TimeoutException {
-        List<DataMoveRuns.Progress> samples = new ArrayList<>();
-        long deadline = System.nanoTime() + Duration.ofMinutes(5).toNanos();
-        while (!cycle.isDone()) {
-            samples.add(progress(label));
-            Thread.sleep(20);
-            if (System.nanoTime() > deadline) {
-                throw new TimeoutException("the cycle did not end");
-            }
-        }
-        cycle.get();
-        samples.add(progress(label));
-        return samples;
-    }
-
-    private static void assertDoneNeverFalls(List<DataMoveRuns.Progress> samples) {
-        long previous = 0;
-        for (var s : samples) {
-            assertThat(s.done()).as("done fell from %d", previous).isGreaterThanOrEqualTo(previous);
-            previous = s.done();
-        }
-    }
-
-    private void awaitProgress(String label, long chunks) throws InterruptedException {
-        long deadline = System.nanoTime() + Duration.ofMinutes(2).toNanos();
-        while (progress(label).done() < chunks) {
-            assertThat(System.nanoTime()).as("progress never reached %d chunks", chunks).isLessThan(deadline);
-            Thread.sleep(20);
-        }
-    }
+class DataMoveWorkerIntegrationTest extends DataMoveIntegrationBase {
 
     // ── scenario 1: (text, text, bytea) key, 100k rows ───────────────────────────────────────────────────────
 
     @Test
-    void hundredThousandRows_everyRowOnce_doneNeverFallsAndEqualsTotal() throws Exception {
+    void hundredThousandRows_everyRowOnce_doneNeverFallsAndEqualsTotal_andChunksCommitWhileTheCallRuns()
+            throws Exception {
         register("m-plain", "plain_rows", 5_000, 20);
         var cycle = async(worker(installed(), null)::runCycle);
         var samples = sampleUntilDone(cycle, "m-plain");
 
         assertDoneNeverFalls(samples);
+        // the procedure's own COMMITs: another session reads chunks as done while the CALL, one statement on a connection
+        // that never commits for it, is still running. A CALL held in one transaction shows none until it returns.
+        assertThat(samples.stream().anyMatch(s -> s.done() > 0 && s.done() < s.total()))
+            .as("chunks seen committed mid-CALL").isTrue();
         var end = progress("m-plain");
         assertThat(end.total()).isEqualTo(20);
         assertThat(end.done()).isEqualTo(end.total());
@@ -269,30 +86,33 @@ class DataMoveWorkerIntegrationTest {
         assertEveryRowMovedOnce("plain_rows", 100_000);
     }
 
-    // ── tenants under FORCE RLS; a tenant with rows and no token ─────────────────────────────────────────────
+    // ── tenants under FORCE RLS; a tenant with rows and no token; a tenant id with a slash ──────────────────
 
     @Test
-    void forceRls_oneRunPerTenant_noCrossTenantTouch_andATenantWithoutATokenIsMoved() throws Exception {
+    void forceRls_oneRunPerTenant_noCrossTenantTouch_aTenantWithoutATokenIsMoved_andASlashInATenantIsKept()
+            throws Exception {
         PgContainerHelper.seedServiceToken(ctx(), "tok-acme", "acme", "t");
         PgContainerHelper.seedServiceToken(ctx(), "tok-globex", "globex", "t");
         register("m-rls", "tenant_rows", 50, 0);
 
         assertThat(MoveTenants.hasTenantColumn(ctx(), "dm_test", "tenant_rows")).isTrue();
-        assertThat(MoveTenants.tenants(ctx(), "dm_test", "tenant_rows"))
-            .as("the default tenant, then every other: tokens and the probe").containsExactly("default", "acme", "globex", "orphan");
+        assertThat(MoveTenants.byProbe(ctx(), "dm_test", "tenant_rows"))
+            .as("the default tenant, then every other: tokens and the probe")
+            .containsExactly("default", "acme", "globex", "orphan", "sl/ash");
         assertThat(ctx().fetchCount(table("nexus", "service_tokens"), TENANT_ID.eq("orphan"))).isZero();
 
         assertThat(worker(installed(), null).runCycle()).isEqualTo(1);
 
-        assertThat(activeRuns("m-rls")).containsExactly("m-rls/acme", "m-rls/default", "m-rls/globex", "m-rls/orphan");
-        assertEveryRowMovedOnce("tenant_rows", 800);
+        assertThat(activeRuns("m-rls")).containsExactly("m-rls/acme", "m-rls/default", "m-rls/globex", "m-rls/orphan",
+            "m-rls/sl/ash");
+        assertEveryRowMovedOnce("tenant_rows", 1000);
         assertEachRowTouchedByItsOwnTenant("tenant_rows");
         // dml_utils_owner's boundary scan runs under the tenant's setting too: 200 rows of one tenant is four chunks of 50
         for (String run : activeRuns("m-rls")) {
             assertThat(DataMoveRuns.activeRun(ctx(), run).total()).as(run).isEqualTo(4);
         }
         var end = progress("m-rls");
-        assertThat(end.done()).isEqualTo(end.total()).isEqualTo(16);
+        assertThat(end.done()).isEqualTo(end.total()).isEqualTo(20);
     }
 
     // ── a list-partitioned (model, tenant) table: one run per leaf of the tenant ─────────────────────────────
@@ -356,12 +176,13 @@ class DataMoveWorkerIntegrationTest {
     // ── bloat, end to end ────────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    void bloat_vacuumMidMoveReclaimsChunksAlreadyCommitted_andTheCoordinatorHoldsNoSnapshotBetweenChunks()
+    void bloat_vacuumMidMoveReclaimsChunksAlreadyCommitted_andTheCoordinatorHoldsNoSnapshotAcrossChunks()
             throws Exception {
         register("m-bloat", "plain_rows", 1_000, 30);
         long initial = relationSize("dm_test.plain_rows");
         var cycle = async(worker(installed(), null)::runCycle);
-        int nullXminSamples = 0;
+        List<Integer> xminAges = new ArrayList<>();
+        int samples = 0;
         boolean vacuumedAtThird = false;
         boolean vacuumedAtTwoThirds = false;
         long deadline = System.nanoTime() + Duration.ofMinutes(5).toNanos();
@@ -375,25 +196,30 @@ class DataMoveWorkerIntegrationTest {
                 vacuumedAtTwoThirds = true;
             }
             int pid = callPid();
-            if (pid > 0 && ctx().fetchCount(table("pg_catalog", "pg_stat_activity"),
-                    DSL.field(DSL.name("pid"), Integer.class).eq(pid).and(DSL.field(DSL.name("backend_xmin")).isNull())) == 1) {
-                nullXminSamples++;
+            if (pid > 0) {
+                var age = ctx().select(DSL.function("age", Integer.class, DSL.field(DSL.name("backend_xmin"))))
+                    .from(table("pg_catalog", "pg_stat_activity"))
+                    .where(DSL.field(DSL.name("pid"), Integer.class).eq(pid)).fetchOne(0, Integer.class);
+                samples++;
+                if (age != null) {
+                    xminAges.add(age);
+                }
             }
-            Thread.sleep(10);
+            Thread.sleep(5);
         }
         cycle.get();
         assertThat(vacuumedAtThird && vacuumedAtTwoThirds).as("both vacuums ran mid-move").isTrue();
-        assertThat(nullXminSamples).as("the coordinator's backend_xmin is null between chunks").isPositive();
+        assertThat(progress("m-bloat").done()).isEqualTo(100);
+        // A coordinator holding one snapshot across the move would show a backend_xmin older and older, by every
+        // transaction the 100 chunk workers commit. Sampled through the run, it stays within a few transactions of now (a
+        // null is the best case and is not counted against it).
+        assertThat(samples).as("samples of the CALL backend").isGreaterThanOrEqualTo(20);
+        assertThat(xminAges).as("age of the coordinator's backend_xmin, in transactions").allMatch(a -> a <= 40);
         long end = relationSize("dm_test.plain_rows");
         // each of the 100000 rows is rewritten once. A coordinator holding one snapshot across the move keeps every dead
         // version "not yet removable", so the heap doubles; vacuums that reclaim committed chunks keep it well below that
         assertThat(end).as("heap after %d initial bytes", initial).isLessThan(initial * 175 / 100);
         assertEveryRowMovedOnce("plain_rows", 100_000);
-    }
-
-    private long relationSize(String relation) {
-        return ctx().select(DSL.function("pg_relation_size", SQLDataType.BIGINT,
-            DSL.function("to_regclass", Object.class, DSL.val(relation)))).fetchOne(0, Long.class);
     }
 
     // ── installs and slots ───────────────────────────────────────────────────────────────────────────────────
@@ -449,15 +275,6 @@ class DataMoveWorkerIntegrationTest {
         }
         Thread.sleep(50);   // the blocked move waits out its retry (10 ms in this test)
         assertThat(w.runCycle()).isEqualTo(1);
-        assertEveryRowMovedOnce("tenant_rows", 800);
-    }
-
-    @Test
-    void aTableWithRowSecurityOffIsReadByItsOwner_soItsMoveIsNotBlockedOnTheView() throws Exception {
-        // plain_rows has no row security: requireUnrestrictedView alone would refuse its owner, which reads every row
-        register("m-view", "plain_rows", 50_000, 0);
-        var w = worker(installed(), null);
-        assertThat(w.runCycle()).isEqualTo(1);
-        assertThat(w.states().state("m-view").orElseThrow().kind()).isEqualTo(MoveStates.Kind.RUNS_COMPLETE);
+        assertEveryRowMovedOnce("tenant_rows", 1000);
     }
 }

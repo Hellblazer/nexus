@@ -165,6 +165,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("CallConnection.running", DATA_MOVE_CALL);
         notKeyed.put("LeafCatalog.TenantLeaf.tenant", PRINCIPAL);
         notKeyed.put("MoveTenants.TENANT_ID", JOOQ_COLUMN);
+        notKeyed.put("FailureHandler.Failure.tenant", PRINCIPAL);
+        notKeyed.put("MoveFinisher.Context.tenants", PRINCIPAL);
         notKeyed.put("PdfStubMetadataReads.CollectionStubs.examples", RESULT);   // nexus-f3yqd: one collection's example names in that answer
         notKeyed.put("ChashConformanceConstraints.Report.constraints", RESULT);   // nexus-f3yqd: one chash-conformance call's entries (no tenant data: pg_catalog)
         notKeyed.put("ManifestForeignCollectionReads.Page.documents", RESULT);   // GH #1611: one foreign-collection call's documents
