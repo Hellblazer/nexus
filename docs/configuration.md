@@ -469,7 +469,7 @@ run:
    `pg_background` library must be installed on the server (a self-managed
    host: its package or build, with no `shared_preload_libraries` entry). The
    local bundle's provisioning does all of this on every service start
-   (`nexus.db.pg_dml_utils_bootstrap`); a bring-your-own-Postgres DBA runs it
+   (`nexus.db.pg_bootstrap.dml_utils`); a bring-your-own-Postgres DBA runs it
    once, as a superuser, connected to the nexus database:
 
    ```sql

@@ -3542,7 +3542,7 @@ def _provision_impl(
                     # their grants and the liquibase schema, for an install that
                     # predates them. Best-effort inside: a bundle without the
                     # library or any failure is logged and leaves moves blocked.
-                    from nexus.db.pg_dml_utils_bootstrap import (  # noqa: PLC0415 — deferred: that module imports this one
+                    from nexus.db.pg_bootstrap.dml_utils import (  # noqa: PLC0415 — deferred: that module imports this one
                         bootstrap_dml_utils_best_effort,
                     )
 
@@ -3694,7 +3694,7 @@ def _provision_impl(
 
     # ── dml_utils prerequisites (RDR-246 Phase 1 Step 4) ───────────────────────
     # After _create_roles: the grants to nexus_admin need it. Best-effort.
-    from nexus.db.pg_dml_utils_bootstrap import (  # noqa: PLC0415 — deferred: that module imports this one
+    from nexus.db.pg_bootstrap.dml_utils import (  # noqa: PLC0415 — deferred: that module imports this one
         bootstrap_dml_utils_best_effort,
     )
 

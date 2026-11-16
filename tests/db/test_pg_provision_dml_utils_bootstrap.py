@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db import pg_dml_utils_bootstrap as boot
+from nexus.db.pg_bootstrap import dml_utils as boot
 from nexus.db import pg_provision as pp
 from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._service_fixture import pg_bin_dir
