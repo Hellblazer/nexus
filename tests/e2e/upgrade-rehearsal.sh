@@ -38,11 +38,13 @@
 # Seed cache (preparation only): the prepared store of each start is kept on the run host under
 # ~/.cache/lab-remote/upgrade-rehearsal-seeds/ ($NEXUS_UPGRADE_REHEARSAL_SEED_CACHE moves it; never the work
 # dir above) and restored in place of the seeder when the key matches: the previous release, the engine tag it
-# pins, the platform, the prepare command and the sha256 of the seeder scripts. One entry per start. The cache
-# changes no criterion: a corrupt, partial or mismatched entry, or a row count under the floor or different from
-# the manifest, seeds in full. Each start's table has a "prepare (setup)" row that says "store restored from cache
-# <key>" or "seeded (cache miss, saved <key>)". The cache is on by default and does not make a run non-default;
-# --no-seed-cache does.
+# pins, the platform, the prepare command and the sha256 of the seeder scripts. One entry per start and prepare
+# family (real or --standin); one unused for 30 days is removed. The cache changes no criterion: a corrupt,
+# partial or mismatched entry, a dirty destination, a failing read of the restored store, or a row count under the
+# floor or different from the manifest, seeds in full (a defective entry is deleted). A hit gives the store a fresh
+# PG port and rewrites the old run dir to the new one in text files and the catalog's path columns. Each start's
+# table has a "prepare (setup)" row that says "store restored from cache <key> (saved <date>)" or "seeded (cache
+# miss, saved <key>)". The cache is on by default and does not make a run non-default; --no-seed-cache does.
 #
 # Heavy: run it on a lab host, e.g.
 #   lab-remote -c lab-m -- tests/e2e/upgrade-rehearsal.sh

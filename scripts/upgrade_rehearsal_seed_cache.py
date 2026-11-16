@@ -4,8 +4,9 @@
 Preparing a start's old store (``upgrade_boot_writes.py --prepare-only``) takes about 13 minutes for the
 86,000-row start and about 20 for the five-collection 7.76.0 start, and the result is the same bytes every
 time for the same inputs. This module keeps that prepared state on the run host and puts it back in place
-of the seeder. It changes nothing that is judged: a restored store is the one the seeder would have left,
-every judged step runs on it as before, and any doubt about an entry falls back to a full seed.
+of the seeder. It changes no criterion: every judged step runs on the restored store as on a seeded one, and
+any doubt about an entry falls back to a full seed. It is not a byte-for-byte copy of a seed, and says so:
+see "What a hit changes" below.
 
 What the prepared state is: whatever the seeder wrote under the start's run dir, except the install-prev
 client (``home/.local/bin``, ``home/.local/share/uv``) and uv's cache (``home/.cache/uv``), the step logs
@@ -15,30 +16,48 @@ and the scratch cwd. In practice that is ``config/`` (the engine binary, the PG 
 Entry layout, under the cache root (default ``~/.cache/lab-remote/upgrade-rehearsal-seeds``, or
 ``$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE``)::
 
-    <from_version>-<16 hex of the key>/manifest.json
-    <from_version>-<16 hex of the key>/payload/<the state, under its run-dir relative paths>
+    <from_version>-<kind>-<16 hex of the key>/manifest.json
+    <from_version>-<kind>-<16 hex of the key>/payload/<the state, under its run-dir relative paths>
 
-The key covers the previous release, the engine tag that release pins, the platform, the Python of the
-install, the prepare command template in use and its collection arguments, and the sha256 of every file
-the seeder reads. At most one entry per ``from_version`` is kept; saving a new key evicts the old one.
+``kind`` is ``real`` or ``standin`` (the prepare template family), so a stand-in run never replaces the
+real entry. The key covers the previous release, the engine tag that release pins, the platform, the Python
+of the install, the prepare command template in use and its collection arguments, and the sha256 of every
+file the seeder reads. At most one entry per (``from_version``, ``kind``) is kept: saving a new key evicts
+the old one. An entry not used for ``MAX_AGE_S`` (30 days) is evicted by the next save or restore, which
+bounds the entries of releases that are no longer cut. A rejection that may be passing (a lock that was not
+free, a full disk, the ceiling) never evicts; one that names a defect in the entry does.
 
 Safety rules, each tested in ``tests/test_upgrade_rehearsal_seed_cache.py``:
 
 * an entry is written to a temp dir and renamed into place, so a reader never sees a partial one;
-* a restore verifies the entry's inventory (paths, sizes, a sha256 of every small file) against its
-  manifest, copies it, rewrites the old run dir in the copy's small text files and symlinks (and fails when
-  any trace is left in a file it scans), checks the PG port is free and the cluster was cleanly shut down,
-  then starts PG alone, counts the store's rows and requires the count to meet the floor and equal the
-  manifest's; every failure scrubs what was restored and reports a reason, so the caller seeds in full;
+* a restore verifies the entry's inventory (every path, size and the sha256 of every file) against its
+  manifest, refuses a destination that is not empty (or a file that differs), copies, rewrites the old run
+  dir in the copy's small text files and symlinks (and fails when any trace is left in a file it scans),
+  gives the store a PG port that is free on this host, checks the cluster was cleanly shut down, then starts
+  PG alone with ``-o "-p <port>"``, counts the store's rows, requires the count to meet the floor and equal
+  the manifest's, and rewrites the catalog's filesystem paths to the new run dir (see below);
+* every restore failure scrubs exactly what the restore created and reports a reason, so the caller seeds in
+  full; no exception escapes ``restore`` or ``save`` except a signal;
 * a save requires the cluster to be cleanly shut down before and after its own row count, and a count at or
-  above the floor; otherwise nothing is saved.
+  above the floor; otherwise nothing is saved;
+* a copy or an inventory that runs past ``ceiling_s`` stops and falls back.
 
-Not covered: the data pages of the PG store can hold the old run dir as text (the synthetic repo's catalog
-``source_uri``); they are not rewritten.
+What a hit changes, against a seed:
+
+* the PG port is a fresh free one (as a seed gets), written to ``pg_credentials`` (``PG_PORT`` and the
+  ``NX_DB_*URL`` lines) and the ``port =`` line of ``postgresql*.conf``; a file under ``config`` (not a log)
+  that still names the old port is a refusal;
+* the run dir in text files and symlinks is the new one;
+* in the store, every row of a ``repo_root``, ``source_uri``, ``file_path`` or ``repo_path`` text column of
+  the ``nexus`` schema that names the saved run dir is rewritten by SQL (PG started alone), the row counts
+  per column must equal those recorded at save, and none may name the old run dir afterwards. Chunk
+  titles, chunk metadata and the engine and PG logs keep the old run dir as text; nothing judged reads them;
+* the store is as old as its entry (the table label says when it was saved).
 """
 
 from __future__ import annotations
 
+import calendar
 import contextlib
 import dataclasses
 import fcntl
@@ -56,12 +75,12 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
-SCHEMA: int = 1
+SCHEMA: int = 2
 CACHE_ENV: str = "NEXUS_UPGRADE_REHEARSAL_SEED_CACHE"
 LOCK_NAME: str = ".lock"
 MANIFEST: str = "manifest.json"
 PAYLOAD: str = "payload"
-#: Files up to this size are hashed in the inventory and scanned for the old run dir on restore.
+#: Files up to this size are scanned for the old run dir and the old PG port on restore.
 SMALL_FILE_BYTES: int = 1 << 20
 #: Under the PG data dir these hold relation files and WAL: never text, never scanned.
 PG_BULK_DIRS: tuple[str, ...] = ("base", "pg_wal")
@@ -72,13 +91,26 @@ HOME_EXCLUDED: frozenset[str] = frozenset(
     {".local/bin", ".local/share/uv", ".cache/uv"}
 )
 STALE_TMP_S: float = 6 * 3600.0
+#: An entry unused this long is evicted by the next save or restore.
+MAX_AGE_S: float = 30 * 86400.0
 LOCK_TIMEOUT_S: float = 120.0
+#: The longest a restore or a save may spend inventorying and copying before it gives up (a seed takes
+#: 13 to 20 minutes; a copy of 2.6 GB takes a small fraction of that).
+CEILING_S: float = 900.0
+#: Text columns of the ``nexus`` schema the rehearsal reads as filesystem paths (doctor's dead-owner check,
+#: the catalog reconcile rungs). ``file_path`` is relative in a seed and is listed so a surprise shows.
+PATH_COLUMNS: tuple[str, ...] = ("repo_root", "source_uri", "file_path", "repo_path")
+TS_FORMAT: str = "%Y-%m-%dT%H:%M:%SZ"
 
 Log = Callable[[str], None]
 
 
 class SeedCacheError(Exception):
     """A cache operation failed; the caller falls back to a full seed."""
+
+
+class TransientError(SeedCacheError):
+    """A failure that says nothing about the entry (the ceiling, a lock): the entry is not evicted."""
 
 
 class RelocationError(SeedCacheError):
@@ -105,7 +137,7 @@ def default_cache_root(
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
+        for block in iter(lambda: f.read(4 << 20), b""):
             h.update(block)
     return h.hexdigest()
 
@@ -119,9 +151,18 @@ def platform_tag() -> str:
     return f"{sys.platform}-{platform.machine()}"
 
 
+def _iso(t: float) -> str:
+    return time.strftime(TS_FORMAT, time.gmtime(t))
+
+
+def _parse_iso(text: str) -> float:
+    return float(calendar.timegm(time.strptime(text, TS_FORMAT)))
+
+
 @dataclasses.dataclass(frozen=True)
 class KeyInputs:
     from_version: str
+    kind: str  # the prepare template family: "real" or "standin"
     engine_pin: str  # the engine tag the previous release pins, "0.1.156"
     python: str
     prepare_template: str  # the command template in use, placeholders unexpanded
@@ -142,8 +183,28 @@ class KeyInputs:
         ).hexdigest()
 
     @property
+    def group(self) -> str:
+        """What one entry is kept per: the start and the template family."""
+        return f"{self.from_version}-{self.kind}"
+
+    @property
     def name(self) -> str:
-        return f"{self.from_version}-{self.digest()[:16]}"
+        return f"{self.group}-{self.digest()[:16]}"
+
+
+class _Deadline:
+    """The ceiling on an inventory plus a copy: checked per file, so a slow disk stops it."""
+
+    def __init__(self, ceiling_s: float, what: str) -> None:
+        self.ceiling_s = ceiling_s
+        self.what = what
+        self.at = time.monotonic() + ceiling_s
+
+    def check(self) -> None:
+        if time.monotonic() >= self.at:
+            raise TransientError(
+                f"{self.what} ran past its ceiling of {self.ceiling_s:g} s"
+            )
 
 
 # --- what the prepared state is ----------------------------------------------------------------
@@ -181,9 +242,11 @@ class Inventory:
     bytes: int
 
 
-def inventory(root: Path, relpaths: Sequence[str]) -> Inventory:
-    """A digest of the tree: every path, its kind, size, and a sha256 of each small file. Sizes catch a
-    truncated or missing large file; the hashes catch a changed config or credentials file."""
+def inventory(
+    root: Path, relpaths: Sequence[str], deadline: _Deadline | None = None
+) -> Inventory:
+    """A digest of the tree: every path, its kind, size and the sha256 of every file. The hashes catch a
+    same-size corruption of a relation file or the engine binary as well as a truncated or missing one."""
     h = hashlib.sha256()
     files = total = 0
 
@@ -192,6 +255,8 @@ def inventory(root: Path, relpaths: Sequence[str]) -> Inventory:
 
     def walk(p: Path, rel: str) -> None:
         nonlocal files, total
+        if deadline is not None:
+            deadline.check()
         if p.is_symlink():
             line(rel, "L", os.readlink(p))
         elif p.is_dir():
@@ -202,9 +267,7 @@ def inventory(root: Path, relpaths: Sequence[str]) -> Inventory:
             size = p.stat().st_size
             files += 1
             total += size
-            line(
-                rel, "F", str(size), sha256_file(p) if size <= SMALL_FILE_BYTES else "-"
-            )
+            line(rel, "F", str(size), sha256_file(p))
 
     for rel in sorted(relpaths):
         p = root / rel
@@ -230,8 +293,8 @@ def relocate(
     skip_dirs: Sequence[Path] = (),
 ) -> Relocated:
     """Replace each old run-dir string by the new one in the small files and symlinks under ``paths``,
-    then scan again: any file that still names an old run dir, or a binary file that would need a
-    different length, is a RelocationError. ``skip_dirs`` (the PG relation and WAL dirs) are not scanned."""
+    then scan again: any file that still names an old run dir, or a binary file that names one (whatever
+    the lengths), is a RelocationError. ``skip_dirs`` (the PG relation and WAL dirs) are not scanned."""
     pairs = sorted({p for p in pairs if p[0] != p[1]}, key=lambda p: -len(p[0]))
     skips = {d.resolve() if d.exists() else d for d in skip_dirs}
     files = links = 0
@@ -245,13 +308,12 @@ def relocate(
             new = new.replace(old.encode(), repl.encode())
         if new == data:
             return False
-        if any(len(o) != len(r) for o, r in pairs):
-            try:
-                data.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise RelocationError(
-                    f"{p} is binary and names the old run dir with a different length: {exc}"
-                ) from exc
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RelocationError(
+                f"{p} is binary and names the old run dir: only a text file is rewritten ({exc})"
+            ) from exc
         st = p.stat()
         tmp = p.with_name(f".{p.name}.reloc")
         tmp.write_bytes(new)
@@ -307,6 +369,60 @@ def relocate(
     for p in paths:
         scan(p)
     return Relocated(files, links)
+
+
+# --- the PG port ---------------------------------------------------------------------------------
+
+
+def free_port() -> int:
+    """A port nothing holds right now, from the kernel (as the provisioner picks one)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def rewrite_port(config: Path, pgdata: Path, old: int, new: int) -> None:
+    """Give the restored store a new PG port: ``PG_PORT`` and the host:port of the ``NX_DB_*URL`` lines of
+    ``pg_credentials``, and the ``port =`` line of ``postgresql*.conf``. The seeded state records the port
+    nowhere else (``pg_provision`` writes those two); a file under ``config`` that is not a log and still
+    names the old port as ``127.0.0.1:<port>``, ``localhost:<port>``, ``PG_PORT=<port>`` or ``port = <port>``
+    is a SeedCacheError, so a place this list missed refuses the restore instead of splitting the store
+    from its port."""
+    if old == new:
+        return
+    creds_path = config / "pg_credentials"
+    text = creds_path.read_text(encoding="utf-8")
+    text = re.sub(rf"(?m)^(PG_PORT\s*=\s*){old}\s*$", rf"\g<1>{new}", text)
+    text = re.sub(rf"(127\.0\.0\.1:|localhost:){old}\b", rf"\g<1>{new}", text)
+    mode = creds_path.stat().st_mode & 0o7777
+    creds_path.write_text(text, encoding="utf-8")
+    os.chmod(creds_path, mode)
+    if parse_credentials(text).get("PG_PORT") != str(new):
+        raise SeedCacheError(
+            f"pg_credentials does not carry PG_PORT={new} after the rewrite"
+        )
+    for conf in sorted(pgdata.glob("postgresql*.conf")):
+        body = conf.read_text(encoding="utf-8")
+        fixed = re.sub(rf"(?m)^(\s*port\s*=\s*){old}\b", rf"\g<1>{new}", body)
+        if fixed != body:
+            conf_mode = conf.stat().st_mode & 0o7777
+            conf.write_text(fixed, encoding="utf-8")
+            os.chmod(conf, conf_mode)
+    leftover = re.compile(
+        rf"(?:127\.0\.0\.1|localhost):{old}\b|PG_PORT\s*=\s*{old}\b|(?m:^\s*port\s*=\s*{old}\b)"
+    )
+    bulk = {pgdata / d for d in PG_BULK_DIRS}
+    for dirpath, dirnames, filenames in os.walk(config):
+        here = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if (here / d) not in bulk and d != "logs"]
+        for name in filenames:
+            p = here / name
+            if name.endswith(".log") or p.is_symlink():
+                continue
+            if p.stat().st_size <= SMALL_FILE_BYTES and leftover.search(
+                p.read_text(encoding="utf-8", errors="ignore")
+            ):
+                raise SeedCacheError(f"{p} still names the old PG port {old}")
 
 
 # --- the PG cluster, stopped ---------------------------------------------------------------------
@@ -377,38 +493,72 @@ def stopped_clean(config: Path) -> str | None:
     )
 
 
-def port_free(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        try:
-            s.bind(("127.0.0.1", port))
-        except OSError:
-            return False
-    return True
-
-
-def rows_with_pg_up(config: Path, count: Callable[[], int]) -> int:
-    """Start the cluster alone, ``count()`` its rows, stop it with a fast shutdown and require the cluster
-    to read 'shut down' again: the count of a store that is not otherwise started."""
+def rows_with_pg_up(config: Path, work: Callable[[], object]):
+    """Start the cluster alone (as the engine does, ``-o "-p <PG_PORT>"``), run ``work()`` against it, stop
+    it with a fast shutdown and require the cluster to read 'shut down' again. A start that fails or times
+    out is followed by a forced stop, so a postmaster is never left over a data dir the caller scrubs."""
     creds = read_credentials(config)
     pgdata = Path(creds["PG_DATA"])
+    try:
+        port = int(creds["PG_PORT"])
+    except (KeyError, ValueError) as exc:
+        raise SeedCacheError("pg_credentials has no usable PG_PORT") from exc
     pg_ctl = str(_bundle(config) / "bin" / "pg_ctl")
     env = _pg_env(config)
+
+    def force_stop() -> None:
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                [
+                    pg_ctl,
+                    "-D",
+                    str(pgdata),
+                    "-m",
+                    "immediate",
+                    "-w",
+                    "-t",
+                    "60",
+                    "stop",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
     fd, logpath = tempfile.mkstemp(prefix="seed-cache-pg-", suffix=".log")
     os.close(fd)
     try:
-        r = subprocess.run(
-            [pg_ctl, "-D", str(pgdata), "-w", "-t", "300", "-l", logpath, "start"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=330,
-        )
+        try:
+            r = subprocess.run(
+                [
+                    pg_ctl,
+                    "-D",
+                    str(pgdata),
+                    "-w",
+                    "-t",
+                    "300",
+                    "-l",
+                    logpath,
+                    "-o",
+                    f"-p {port}",
+                    "start",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=330,
+            )
+        except BaseException:
+            force_stop()
+            raise
         if r.returncode != 0:
+            force_stop()
             raise SeedCacheError(
                 f"pg_ctl start failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()[:300]}"
             )
         try:
-            rows = count()
+            result = work()
         finally:
             s = subprocess.run(
                 [pg_ctl, "-D", str(pgdata), "-m", "fast", "-w", "-t", "300", "stop"],
@@ -418,33 +568,101 @@ def rows_with_pg_up(config: Path, count: Callable[[], int]) -> int:
                 timeout=330,
             )
             if s.returncode != 0:
-                subprocess.run(
-                    [
-                        pg_ctl,
-                        "-D",
-                        str(pgdata),
-                        "-m",
-                        "immediate",
-                        "-w",
-                        "-t",
-                        "60",
-                        "stop",
-                    ],
-                    env=env,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
+                force_stop()
                 raise SeedCacheError(
                     f"pg_ctl stop failed (exit {s.returncode}): {(s.stderr or s.stdout).strip()[:300]}"
                 )
         why = stopped_clean(config)
         if why:
             raise SeedCacheError(f"after the row count: {why}")
-        return rows
+        return result
     finally:
         with contextlib.suppress(OSError):
             os.unlink(logpath)
+
+
+# --- the store, through the install's own PG ---------------------------------------------------------
+
+SqlFn = Callable[[str], "list[list[str]]"]
+
+
+@dataclasses.dataclass(frozen=True)
+class StoreRead:
+    rows: int  # nexus.chunks
+    path_rows: dict[
+        str, int
+    ]  # "<table>.<column>" -> rows whose value names a saved run dir
+
+
+@dataclasses.dataclass(frozen=True)
+class StoreRewrite:
+    rows: int
+    before: dict[
+        str, int
+    ]  # rows naming an old run dir, per path column, before the rewrite
+    after: dict[str, int]  # the same afterwards: every value must be 0
+
+
+def _lit(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _ident(name: str) -> str:
+    if '"' in name:
+        raise SeedCacheError(f"unusable identifier {name!r}")
+    return f'"{name}"'
+
+
+def _rows_of(sql: SqlFn) -> int:
+    out = sql("select count(*)::bigint from nexus.chunks")
+    return int(out[0][0])
+
+
+def path_columns(sql: SqlFn) -> list[tuple[str, str]]:
+    cols = ", ".join(_lit(c) for c in PATH_COLUMNS)
+    out = sql(
+        "select table_name, column_name from information_schema.columns "
+        "where table_schema = 'nexus' and data_type in ('text', 'character varying') "
+        f"and column_name in ({cols}) order by 1, 2"
+    )
+    return [(r[0], r[1]) for r in out]
+
+
+def _naming(sql: SqlFn, table: str, column: str, olds: Sequence[str]) -> int:
+    cond = " or ".join(f"position({_lit(o)} in {_ident(column)}) > 0" for o in olds)
+    out = sql(f"select count(*)::bigint from nexus.{_ident(table)} where {cond}")
+    return int(out[0][0])
+
+
+def read_store(sql: SqlFn, olds: Sequence[str]) -> StoreRead:
+    """The rows and, per path column, how many values name ``olds`` (the run dir the store was seeded in)."""
+    return StoreRead(
+        _rows_of(sql),
+        {f"{t}.{c}": _naming(sql, t, c, olds) for t, c in path_columns(sql)},
+    )
+
+
+def rewrite_store(sql: SqlFn, pairs: Sequence[tuple[str, str]]) -> StoreRewrite:
+    """Replace each old run dir by the new one in every path column that names one, counting before and
+    after. Longest old string first, as the file rewrite does."""
+    all_olds = sorted({p[0] for p in pairs})
+    changing = sorted({p for p in pairs if p[0] != p[1]}, key=lambda p: -len(p[0]))
+    olds = [p[0] for p in changing]
+    cols = path_columns(sql)
+    before = (
+        {f"{t}.{c}": _naming(sql, t, c, all_olds) for t, c in cols} if all_olds else {}
+    )
+    for t, c in cols:
+        if not before.get(f"{t}.{c}"):
+            continue
+        for old, new in changing:
+            sql(
+                f"update nexus.{_ident(t)} set {_ident(c)} = replace({_ident(c)}, {_lit(old)}, {_lit(new)}) "
+                f"where position({_lit(old)} in {_ident(c)}) > 0"
+            )
+    # a reused run dir names itself: nothing to rewrite and nothing left that should not be there
+    after = {f"{t}.{c}": (_naming(sql, t, c, olds) if olds else 0) for t, c in cols}
+    return StoreRewrite(_rows_of(sql), before, after)
 
 
 # --- the cache -----------------------------------------------------------------------------------
@@ -461,14 +679,15 @@ def _locked(root: Path, *, exclusive: bool, timeout_s: float) -> Iterator[bool]:
         while True:
             try:
                 fcntl.flock(
-                    fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+                    fd,
+                    (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB,
                 )
                 got = True
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     break
-                time.sleep(0.2)
+                time.sleep(0.05)
         yield got
     finally:
         if got:
@@ -476,12 +695,17 @@ def _locked(root: Path, *, exclusive: bool, timeout_s: float) -> Iterator[bool]:
         os.close(fd)
 
 
-def _copy_tree(src: Path, dst: Path) -> None:
+def _copy_tree(src: Path, dst: Path, deadline: _Deadline | None = None) -> None:
+    if deadline is not None:
+        deadline.check()
     if src.is_symlink():
         dst.parent.mkdir(parents=True, exist_ok=True)
         os.symlink(os.readlink(src), dst)
     elif src.is_dir():
-        shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+        dst.mkdir(parents=True, exist_ok=True)
+        for c in sorted(src.iterdir()):
+            _copy_tree(c, dst / c.name, deadline)
+        shutil.copystat(src, dst)
     else:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -494,6 +718,32 @@ def _remove(p: Path) -> None:
         shutil.rmtree(p, ignore_errors=True)
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    if a.is_symlink() or b.is_symlink():
+        return a.is_symlink() and b.is_symlink() and os.readlink(a) == os.readlink(b)
+    if a.is_dir() or b.is_dir():
+        return False
+    return sha256_file(a) == sha256_file(b)
+
+
+@dataclasses.dataclass
+class _Undo:
+    """What a restore created, and so all a failed restore may remove."""
+
+    created: list[Path] = dataclasses.field(default_factory=list)
+    emptied: list[Path] = dataclasses.field(
+        default_factory=list
+    )  # empty dirs the run had; children are ours
+
+    def scrub(self) -> None:
+        for p in self.created:
+            _remove(p)
+        for d in self.emptied:
+            if d.is_dir() and not d.is_symlink():
+                for c in d.iterdir():
+                    _remove(c)
+
+
 @dataclasses.dataclass
 class Restore:
     ok: bool
@@ -501,7 +751,15 @@ class Restore:
     prepare: dict | None = None
     rows: int | None = None
     relocated: Relocated | None = None
+    saved_at: str = ""  # when the entry was saved, ISO UTC
+    path_rows: dict[str, int] = dataclasses.field(
+        default_factory=dict
+    )  # rows rewritten, per column
+    port: int | None = None  # the PG port the restored store now has
     seconds: float = 0.0
+    transient: bool = (
+        False  # the rejection says nothing about the entry: it is not evicted
+    )
 
 
 @dataclasses.dataclass
@@ -514,25 +772,36 @@ class Save:
 
 
 class SeedCache:
-    """The entries under ``root``. ``rows_fn(config)`` counts the store's rows with its PG started alone
-    (``rows_with_pg_up`` in production); ``log`` reports each decision."""
+    """The entries under ``root``.
+
+    ``read_fn(config, olds)`` returns a ``StoreRead`` and ``rewrite_fn(config, pairs)`` a ``StoreRewrite``,
+    each with the store's PG started alone (``rows_with_pg_up`` around ``read_store`` / ``rewrite_store`` in
+    production). ``pick_port()`` gives the restored store its PG port; ``clock`` is the time source for the
+    manifest's ``saved_at`` and ``last_used_at`` and for the 30-day eviction.
+    """
 
     def __init__(
         self,
         root: Path,
         *,
-        rows_fn: Callable[[Path], int],
+        read_fn: Callable[[Path, Sequence[str]], StoreRead],
+        rewrite_fn: Callable[[Path, Sequence[tuple[str, str]]], StoreRewrite],
         log: Log = lambda _m: None,
-        is_port_free: Callable[[int], bool] = port_free,
+        pick_port: Callable[[], int] = free_port,
         clean_check: Callable[[Path], str | None] = stopped_clean,
         lock_timeout_s: float = LOCK_TIMEOUT_S,
+        ceiling_s: float = CEILING_S,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.root = Path(root)
-        self.rows_fn = rows_fn
+        self.read_fn = read_fn
+        self.rewrite_fn = rewrite_fn
         self.log = log
-        self.is_port_free = is_port_free
+        self.pick_port = pick_port
         self.clean_check = clean_check
         self.lock_timeout_s = lock_timeout_s
+        self.ceiling_s = ceiling_s
+        self.clock = clock
 
     def entry(self, inputs: KeyInputs) -> Path:
         return self.root / inputs.name
@@ -540,28 +809,35 @@ class SeedCache:
     # -- hit ---------------------------------------------------------------------------------
 
     def restore(self, inputs: KeyInputs, run_dir: Path, *, floor: int) -> Restore:
+        """Put the entry's prepared state under ``run_dir``. Never raises (a signal apart): any failure
+        scrubs what was restored and returns ``ok=False`` with a reason; an entry that is defective, as
+        opposed to a restore that could not finish (a lock, a full disk, the ceiling), is evicted."""
         t0 = time.monotonic()
         entry = self.entry(inputs)
         if not entry.is_dir():
             return Restore(False, "no entry", seconds=time.monotonic() - t0)
-        restored: list[Path] = []
+        ident = (entry.stat().st_ino, entry.stat().st_mtime_ns)
+        undo = _Undo()
         try:
             with _locked(
                 self.root, exclusive=False, timeout_s=self.lock_timeout_s
             ) as got:
                 if not got:
-                    return Restore(False, "the cache lock was not free in time")
-                res = self._restore_locked(inputs, entry, run_dir, floor, restored)
-        except (
-            SeedCacheError,
-            OSError,
-            ValueError,
-            KeyError,
-            subprocess.SubprocessError,
-        ) as exc:
+                    res = Restore(
+                        False, "the cache lock was not free in time", transient=True
+                    )
+                else:
+                    res = self._restore_locked(inputs, entry, run_dir, floor, undo)
+        except (TransientError, OSError) as exc:
+            res = Restore(False, f"{type(exc).__name__}: {exc}", transient=True)
+        except Exception as exc:  # noqa: BLE001 - ProbeError and every other failure of the PG phase
             res = Restore(False, f"{type(exc).__name__}: {exc}")
         if not res.ok:
-            self._scrub(run_dir, restored)
+            undo.scrub()
+            if not res.transient:
+                self._evict_entry(entry, ident)
+        else:
+            self._sweep(keep=entry.name)
         res.seconds = time.monotonic() - t0
         return res
 
@@ -571,8 +847,9 @@ class SeedCache:
         entry: Path,
         run_dir: Path,
         floor: int,
-        restored: list[Path],
+        undo: _Undo,
     ) -> Restore:
+        deadline = _Deadline(self.ceiling_s, "the restore")
         try:
             man = json.loads((entry / MANIFEST).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
@@ -591,8 +868,10 @@ class SeedCache:
         if not isinstance(relpaths, list) or not relpaths or not payload.is_dir():
             return Restore(False, "the entry has no payload")
         try:
-            inv = inventory(payload, relpaths)
-        except (SeedCacheError, OSError) as exc:
+            inv = inventory(payload, relpaths, deadline)
+        except SeedCacheError as exc:
+            if isinstance(exc, TransientError):
+                raise
             return Restore(False, f"payload unreadable or incomplete: {exc}")
         if (inv.digest, inv.files, inv.bytes) != (
             man.get("inventory_sha256"),
@@ -608,23 +887,49 @@ class SeedCache:
             return Restore(False, f"prepare.json unreadable: {exc}")
         if prepare.get("verdict") != "prepared":
             return Restore(False, f"prepare.json verdict is {prepare.get('verdict')!r}")
-        port = man.get("pg_port")
-        if not isinstance(port, int) or not self.is_port_free(port):
-            return Restore(
-                False, f"the store's PG port {port!r} is in use on this host"
-            )
+        old_port = man.get("pg_port")
+        if not isinstance(old_port, int):
+            return Restore(False, f"the manifest's PG port is {old_port!r}")
 
-        # copy, and make every path that names the old run dir name this one. What is not there yet is
-        # what a failed restore removes again; a dir the run already made (config) stays, emptied of
-        # the payload's children.
+        # The destination must be what the seeder starts from: absent, or an empty dir, or a file that
+        # is already what the payload holds (install-prev writes a few). Nothing else is merged into.
+        skip: set[str] = set()
         for rel in relpaths:
-            dst = run_dir / rel
+            dst, src = run_dir / rel, payload / rel
             if not (dst.exists() or dst.is_symlink()):
-                restored.append(dst)
-            elif dst.is_dir() and (payload / rel).is_dir():
-                restored.extend(dst / c.name for c in (payload / rel).iterdir())
+                top = dst
+                while (
+                    not (top.parent.exists() or top.parent.is_symlink())
+                    and top.parent != run_dir
+                ):
+                    top = top.parent
+                undo.created.append(top)
+            elif dst.is_dir() and not dst.is_symlink():
+                if not src.is_dir() or src.is_symlink():
+                    return Restore(
+                        False,
+                        f"{dst} is a dir the payload holds as a file",
+                        transient=True,
+                    )
+                if any(dst.iterdir()):
+                    return Restore(
+                        False,
+                        f"{dst} is not empty: a restore is not merged into an existing tree",
+                        transient=True,
+                    )
+                undo.emptied.append(dst)
+            elif _same_file(dst, src):
+                skip.add(rel)
+            else:
+                return Restore(
+                    False,
+                    f"{dst} already exists and is not what the entry holds",
+                    transient=True,
+                )
+
         for rel in relpaths:
-            _copy_tree(payload / rel, run_dir / rel)
+            if rel not in skip:
+                _copy_tree(payload / rel, run_dir / rel, deadline)
         pairs = [
             (str(man["source_run_dir"]), str(run_dir)),
             (str(man["source_run_dir_resolved"]), str(run_dir.resolve())),
@@ -642,23 +947,46 @@ class SeedCache:
                 False,
                 f"PG_DATA is {creds.get('PG_DATA')!r} after relocation, not {pgdata}",
             )
+        if creds.get("PG_PORT") != str(old_port):
+            return Restore(
+                False,
+                f"PG_PORT is {creds.get('PG_PORT')!r}, the manifest says {old_port}",
+            )
+        new_port = self.pick_port()
+        rewrite_port(config, pgdata, old_port, new_port)
         why = self.clean_check(config)
         if why:
             return Restore(
                 False, f"the restored cluster is not cleanly shut down: {why}"
             )
-        rows = self.rows_fn(config)
-        if rows < floor:
+        try:
+            got = self.rewrite_fn(config, pairs)
+        except Exception as exc:  # noqa: BLE001 - psql, ProbeError, pg_ctl: the store could not be read
             return Restore(
                 False,
-                f"the restored store holds {rows} rows, below the floor of {floor}",
-                rows=rows,
+                f"the store could not be read with its PG started alone: {type(exc).__name__}: {exc}",
             )
-        if rows != man.get("rows"):
+        if got.rows < floor:
             return Restore(
                 False,
-                f"the restored store holds {rows} rows, the manifest says {man.get('rows')}",
-                rows=rows,
+                f"the restored store holds {got.rows} rows, below the floor of {floor}",
+                rows=got.rows,
+            )
+        if got.rows != man.get("rows"):
+            return Restore(
+                False,
+                f"the restored store holds {got.rows} rows, the manifest says {man.get('rows')}",
+                rows=got.rows,
+            )
+        if got.before != man.get("path_rows"):
+            return Restore(
+                False,
+                f"the path columns name the saved run dir in {got.before}, the manifest says {man.get('path_rows')}",
+            )
+        left = {k: v for k, v in got.after.items() if v}
+        if left:
+            return Restore(
+                False, f"rows still name the saved run dir after the rewrite: {left}"
             )
         why = self.clean_check(config)
         if why:
@@ -666,40 +994,41 @@ class SeedCache:
                 False,
                 f"the restored cluster is not cleanly shut down after the count: {why}",
             )
-        return Restore(True, prepare=prepare, rows=rows, relocated=relocated)
+        self._touch(entry, man)
+        return Restore(
+            True,
+            prepare=prepare,
+            rows=got.rows,
+            relocated=relocated,
+            saved_at=str(man.get("saved_at", "")),
+            path_rows=dict(got.before),
+            port=new_port,
+        )
 
-    def _scrub(self, run_dir: Path, restored: Sequence[Path]) -> None:
-        """Remove what a failed restore put under the run dir, so the seeder starts from the state it
-        always starts from (``config`` an empty dir)."""
-        for p in restored:
-            _remove(p)
-        (run_dir / "config").mkdir(parents=True, exist_ok=True)
+    def _touch(self, entry: Path, man: dict) -> None:
+        """Record this use, atomically, so the 30-day eviction counts from it."""
+        man = dict(man, last_used_at=_iso(self.clock()))
+        tmp = entry / f".{MANIFEST}.tmp"
+        with contextlib.suppress(OSError):
+            tmp.write_text(json.dumps(man, indent=1) + "\n", encoding="utf-8")
+            os.replace(tmp, entry / MANIFEST)
 
     # -- miss --------------------------------------------------------------------------------
 
-    def save(
-        self, inputs: KeyInputs, run_dir: Path, *, floor: int, replace: bool = False
-    ) -> Save:
-        """Copy the prepared state in ``run_dir`` into the cache. Never raises: a state that cannot be
-        saved is reported and the run goes on with the store it has."""
+    def save(self, inputs: KeyInputs, run_dir: Path, *, floor: int) -> Save:
+        """Copy the prepared state in ``run_dir`` into the cache. Never raises (a signal apart): a state
+        that cannot be saved is reported and the run goes on with the store it has."""
         t0 = time.monotonic()
         try:
-            res = self._save(inputs, run_dir, floor, replace)
-        except (
-            SeedCacheError,
-            OSError,
-            ValueError,
-            KeyError,
-            subprocess.SubprocessError,
-        ) as exc:
+            res = self._save(inputs, run_dir, floor)
+        except Exception as exc:  # noqa: BLE001 - a failed save must never fail a seeded run
             res = Save(False, f"{type(exc).__name__}: {exc}", name=inputs.name)
         res.seconds = time.monotonic() - t0
         return res
 
-    def _save(
-        self, inputs: KeyInputs, run_dir: Path, floor: int, replace: bool
-    ) -> Save:
+    def _save(self, inputs: KeyInputs, run_dir: Path, floor: int) -> Save:
         name = inputs.name
+        deadline = _Deadline(self.ceiling_s, "the save")
         config = run_dir / "config"
         creds = read_credentials(config)
         pgdata = Path(creds["PG_DATA"]).resolve()
@@ -720,13 +1049,14 @@ class SeedCache:
             return Save(
                 False, f"prepare verdict is {prepare.get('verdict')!r}", name=name
             )
-        rows = self.rows_fn(config)
-        if rows < floor:
+        olds = sorted({str(run_dir), str(run_dir.resolve())})
+        read = self.read_fn(config, olds)
+        if read.rows < floor:
             return Save(
                 False,
-                f"the store holds {rows} rows, below the floor of {floor}",
+                f"the store holds {read.rows} rows, below the floor of {floor}",
                 name=name,
-                rows=rows,
+                rows=read.rows,
             )
         relpaths = payload_relpaths(run_dir)
         if "prepare.json" not in relpaths or "config" not in relpaths:
@@ -742,26 +1072,28 @@ class SeedCache:
                 f"the PG data dir {pg_rel} is not in the prepared state",
                 name=name,
             )
-        src_inv = inventory(run_dir, relpaths)
+        src_inv = inventory(run_dir, relpaths, deadline)
 
         self.root.mkdir(parents=True, exist_ok=True)
         self._drop_stale_tmp()
-        tmp = Path(tempfile.mkdtemp(prefix=f".tmp-{name}-", dir=self.root))
+        tmp: Path | None = Path(tempfile.mkdtemp(prefix=f".tmp-{name}-", dir=self.root))
         try:
             payload = tmp / PAYLOAD
             payload.mkdir()
             for rel in relpaths:
-                _copy_tree(run_dir / rel, payload / rel)
-            copy_inv = inventory(payload, relpaths)
+                _copy_tree(run_dir / rel, payload / rel, deadline)
+            copy_inv = inventory(payload, relpaths, deadline)
             if copy_inv != src_inv:
                 return Save(
                     False,
                     "the copy does not match the source (the run dir changed while copying)",
                     name=name,
                 )
+            now = _iso(self.clock())
             manifest = {
                 "schema": SCHEMA,
                 "key": name,
+                "kind": inputs.kind,
                 "key_inputs": inputs.as_dict(),
                 "inputs_digest": inputs.digest(),
                 "source_run_dir": str(run_dir),
@@ -769,12 +1101,14 @@ class SeedCache:
                 "paths": relpaths,
                 "pg_data_rel": pg_rel,
                 "pg_port": pg_port,
-                "rows": rows,
+                "rows": read.rows,
+                "path_rows": read.path_rows,
                 "collections": prepare.get("collections") or {},
                 "inventory_sha256": copy_inv.digest,
                 "files": copy_inv.files,
                 "bytes": copy_inv.bytes,
-                "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "saved_at": now,
+                "last_used_at": now,
             }
             (tmp / MANIFEST).write_text(
                 json.dumps(manifest, indent=1) + "\n", encoding="utf-8"
@@ -787,25 +1121,24 @@ class SeedCache:
                         False,
                         "the cache lock was not free in time",
                         name=name,
-                        rows=rows,
+                        rows=read.rows,
                     )
                 final = self.root / name
                 if final.exists():
-                    if not replace:
-                        return Save(
-                            False,
-                            "another run saved this key first; kept its entry",
-                            name=name,
-                            rows=rows,
-                        )
-                    self._evict(final)
+                    return Save(
+                        False,
+                        "another run saved this key first; kept its entry",
+                        name=name,
+                        rows=read.rows,
+                    )
                 os.rename(tmp, final)
-                tmp = None  # type: ignore[assignment]
-                self._evict_others(inputs.from_version, name)
+                tmp = None
+                self._evict_others(inputs.group, name)
+                self._evict_stale(keep=name)
         finally:
             if tmp is not None:
                 shutil.rmtree(tmp, ignore_errors=True)
-        return Save(True, name=name, rows=rows)
+        return Save(True, name=name, rows=read.rows)
 
     # -- bounded size --------------------------------------------------------------------------
 
@@ -814,9 +1147,27 @@ class SeedCache:
         os.rename(d, gone)
         shutil.rmtree(gone, ignore_errors=True)
 
-    def _evict_others(self, from_version: str, keep: str) -> list[str]:
-        """At most one entry per ``from_version``: remove every other key's. Caller holds the exclusive lock."""
-        pat = re.compile(rf"^{re.escape(from_version)}-[0-9a-f]{{16}}$")
+    def _evict_entry(self, entry: Path, ident: tuple[int, int]) -> None:
+        """Remove a defective entry, unless it was replaced since this run read it. Best effort: a lock
+        that is not free leaves it for the next run to reject again."""
+        try:
+            with _locked(
+                self.root, exclusive=True, timeout_s=min(self.lock_timeout_s, 30.0)
+            ) as got:
+                if not got or not entry.is_dir():
+                    return
+                st = entry.stat()
+                if (st.st_ino, st.st_mtime_ns) != ident:
+                    return
+                self._evict(entry)
+                self.log(f"seed cache: evicted {entry.name} (rejected as defective)")
+        except OSError:
+            return
+
+    def _evict_others(self, group: str, keep: str) -> list[str]:
+        """At most one entry per start and template family: remove every other key's. Caller holds the
+        exclusive lock."""
+        pat = re.compile(rf"^{re.escape(group)}-[0-9a-f]{{16}}$")
         gone: list[str] = []
         for d in sorted(self.root.iterdir()):
             if d.is_dir() and d.name != keep and pat.match(d.name):
@@ -824,6 +1175,33 @@ class SeedCache:
                 gone.append(d.name)
                 self.log(f"seed cache: evicted {d.name} (one entry per start)")
         return gone
+
+    def _last_used(self, d: Path) -> float:
+        try:
+            man = json.loads((d / MANIFEST).read_text(encoding="utf-8"))
+            return _parse_iso(str(man.get("last_used_at") or man["saved_at"]))
+        except (OSError, ValueError, KeyError):
+            return d.stat().st_mtime
+
+    def _evict_stale(self, *, keep: str) -> list[str]:
+        """Remove every entry unused for ``MAX_AGE_S``. Caller holds the exclusive lock."""
+        gone: list[str] = []
+        now = self.clock()
+        for d in sorted(self.root.iterdir()):
+            if not d.is_dir() or d.name.startswith(".") or d.name == keep:
+                continue
+            if now - self._last_used(d) > MAX_AGE_S:
+                self._evict(d)
+                gone.append(d.name)
+                self.log(f"seed cache: evicted {d.name} (unused for 30 days)")
+        return gone
+
+    def _sweep(self, *, keep: str) -> None:
+        """The age eviction for a run that only restores: when no other run holds the cache."""
+        with contextlib.suppress(OSError):
+            with _locked(self.root, exclusive=True, timeout_s=0.0) as got:
+                if got:
+                    self._evict_stale(keep=keep)
 
     def _drop_stale_tmp(self) -> None:
         now = time.time()

@@ -3,14 +3,17 @@
 
 A fake run dir stands in for what the seeder leaves: ``config/`` with ``pg_credentials``, a PG data dir
 with a big relation file, a bundle, ``prepare.json`` and a synthetic repo, plus the install-prev client
-under ``home/``. Nothing here starts a real PG: the row count is injected, and the PG start/stop path is
-exercised against fake ``pg_ctl`` and ``pg_controldata`` scripts.
+under ``home/``. Nothing here starts a real PG: the store's reads and path rewrites are injected (a JSON
+file inside the fake relation dir stands for the catalog's path columns), the PG start/stop path is
+exercised against fake ``pg_ctl`` and ``pg_controldata`` scripts, and the SQL helpers against a fake psql.
 
-What is pinned: the key and each input that changes it; a save then a restore into a different run dir
-with every path that named the old one rewritten; a corrupt, partial or mismatched entry, a row count
-under the floor or different from the manifest, and a busy PG port each fall back (a reason, the restored
-paths scrubbed); nothing is saved from an unclean or too-small store; one entry per start is kept;
-and a save is atomic.
+What is pinned: the key and each input that changes it; a save then a restore into a different run dir with
+every path that named the old one rewritten, the PG port replaced and the catalog's path columns moved to
+the new run dir; a corrupt (also same-size), partial, mismatched or unreadable entry, a row count under the
+floor or different from the manifest, a failing PG read (the production ``ProbeError``) each fall back with
+the restored paths scrubbed and the defective entry evicted, while a transient failure (a lock, the
+ceiling, a dirty destination) never evicts; nothing is saved from an unclean or too-small store, and a save
+never raises; one entry per start and template family is kept, and an unused one expires.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import socket
 import stat
 import sys
@@ -47,9 +51,17 @@ sc = _load()
 
 ROWS = 86_000
 FLOOR = 50_000
+OLD_PORT = 54999
+NEW_PORT = 55123
 
 
-def make_run(base: Path, name: str, *, rows: int = ROWS) -> Path:
+class ProbeError(Exception):
+    """Stands for the driver's ``ProbeError``: a plain Exception no cache handler names."""
+
+
+def make_run(
+    base: Path, name: str, *, rows: int = ROWS, home_config: bool = True
+) -> Path:
     """What the seeder leaves under ``<base>/<name>``, with every absolute path naming that dir."""
     run = base / name
     config = run / "config"
@@ -71,25 +83,46 @@ def make_run(base: Path, name: str, *, rows: int = ROWS) -> Path:
     )
     (run / "home" / ".local" / "share" / "other" / "state").write_text("kept")
     (run / "home" / ".cache" / "uv" / "wheel").write_text("uv cache")
+    if home_config:
+        (run / "home" / ".config" / "tool").mkdir(parents=True)
+        (run / "home" / ".config" / "tool" / "settings").write_text("x=1\n")
     (run / "logs" / "install-prev.log").write_text("log")
     (run / "synthetic-repo" / "src" / "module_0.py").write_text(
         "def handler_0(x):\n    return x\n"
     )
     (config / "pg_credentials").write_text(
-        f"# nexus-managed\nPG_DATA={pgdata}\nPG_PORT=54999\nNX_DB_URL=jdbc:postgresql://127.0.0.1:54999/nexus\n"
+        f"# nexus-managed\nPG_DATA={pgdata}\nPG_PORT={OLD_PORT}\n"
+        f"NX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:{OLD_PORT}/nexus\n"
+        f"NX_DB_URL=jdbc:postgresql://127.0.0.1:{OLD_PORT}/nexus\n"
         "PG_SUPERUSER_PASS=hunter2\n"
     )
     (config / "config.yml").write_text(f"repo: {run}/synthetic-repo\n")
-    (config / "logs" / "storage_service_native.log").write_text(f"data at {pgdata}\n")
+    (config / "logs" / "storage_service_native.log").write_text(
+        f"data at {pgdata}, listening on 127.0.0.1:{OLD_PORT}\n"
+    )
     (pgdata / "PG_VERSION").write_text("17\n")
     (pgdata / "postgresql.conf").write_text(
-        "port = 54999\nlisten_addresses = '127.0.0.1'\n"
+        f"# managed\nport = {OLD_PORT}\nlisten_addresses = '127.0.0.1'\n"
     )
     (pgdata / "postmaster.opts").write_text(f"/bundle/bin/postgres -D {pgdata}\n")
     (pgdata / "base" / "1" / "16384").write_bytes(
         os.urandom(3 << 20)
-    )  # a relation file: not scanned
+    )  # a relation file: not scanned, now hashed
     (pgdata / "pg_wal" / "000000010000000000000001").write_bytes(b"\0" * (2 << 20))
+    # the catalog's path columns, as the fake store holds them (inside the relation dir: never rewritten
+    # as a file, only by the injected store functions)
+    (pgdata / "base" / "1" / "pathcols.json").write_text(
+        json.dumps(
+            {
+                "catalog_owners.repo_root": [f"{run}/synthetic-repo", "/elsewhere"],
+                "catalog_documents.source_uri": [
+                    f"file://{run}/synthetic-repo/src/module_0.py",
+                    f"file://{run}/synthetic-repo/docs/guide_0.md",
+                    "file:///elsewhere/a.md",
+                ],
+            }
+        )
+    )
     os.symlink(str(run / "synthetic-repo"), config / "repo-link")
     (run / "prepare.json").write_text(
         json.dumps(
@@ -108,6 +141,33 @@ def rows_of(config: Path) -> int:
     return int((config / "rows").read_text())
 
 
+def _cols(config: Path) -> tuple[Path, dict]:
+    pg = Path(sc.read_credentials(config)["PG_DATA"]) / "base" / "1" / "pathcols.json"
+    return pg, json.loads(pg.read_text())
+
+
+def read_fn(config: Path, olds) -> object:
+    _, data = _cols(config)
+    return sc.StoreRead(
+        rows_of(config),
+        {k: sum(any(o in v for o in olds) for v in vs) for k, vs in data.items()},
+    )
+
+
+def rewrite_fn(config: Path, pairs) -> object:
+    path, data = _cols(config)
+    olds = [p[0] for p in pairs]
+    before = {k: sum(any(o in v for o in olds) for v in vs) for k, vs in data.items()}
+    for k, vs in data.items():
+        for i, v in enumerate(vs):
+            for old, new in sorted(pairs, key=lambda p: -len(p[0])):
+                v = v.replace(old, new)
+            vs[i] = v
+    path.write_text(json.dumps(data))
+    after = {k: sum(any(o in v for o in olds) for v in vs) for k, vs in data.items()}
+    return sc.StoreRewrite(rows_of(config), before, after)
+
+
 def clean(_config: Path) -> str | None:
     return None
 
@@ -115,6 +175,7 @@ def clean(_config: Path) -> str | None:
 def key(**over) -> object:
     base = dict(
         from_version="8.0.0",
+        kind="real",
         engine_pin="0.1.186",
         python="3.12",
         prepare_template="{uv} run python scripts/upgrade_boot_writes.py --prepare-only --work {work}",
@@ -126,10 +187,19 @@ def key(**over) -> object:
     return sc.KeyInputs(**base)
 
 
+class Clock:
+    def __init__(self, t: float = 1_794_840_000.0) -> None:  # 2026-11-16T14:40:00Z
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
 def cache(tmp_path: Path, **kw) -> object:
-    kw.setdefault("rows_fn", rows_of)
+    kw.setdefault("read_fn", read_fn)
+    kw.setdefault("rewrite_fn", rewrite_fn)
     kw.setdefault("clean_check", clean)
-    kw.setdefault("is_port_free", lambda _p: True)
+    kw.setdefault("pick_port", lambda: NEW_PORT)
     return sc.SeedCache(tmp_path / "cache", **kw)
 
 
@@ -154,21 +224,35 @@ def new_run(tmp_path: Path) -> Path:
     return run
 
 
+def _entry(tmp_path: Path, k) -> Path:
+    return tmp_path / "cache" / k.name
+
+
+def _live(tmp_path: Path) -> list[str]:
+    root = tmp_path / "cache"
+    return (
+        sorted(
+            p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
+        )
+        if root.is_dir()
+        else []
+    )
+
+
 # --- the key --------------------------------------------------------------------------------------
 
 
-def test_the_key_is_stable_and_names_its_start() -> None:
+def test_the_key_is_stable_and_names_its_start_and_family() -> None:
     assert key().digest() == key().digest()
-    assert (
-        key().name == f"8.0.0-{key().digest()[:16]}"
-        and len(key().name) == len("8.0.0-") + 16
-    )
+    assert key().name == f"8.0.0-real-{key().digest()[:16]}"
+    assert key(kind="standin").name.startswith("8.0.0-standin-")
 
 
 @pytest.mark.parametrize(
     "over",
     [
         {"from_version": "7.99.0"},
+        {"kind": "standin"},
         {"engine_pin": "0.1.187"},
         {"python": "3.13"},
         {
@@ -223,6 +307,7 @@ def test_the_prepared_state_leaves_out_the_client_the_uv_cache_the_logs_and_the_
     run = make_run(tmp_path, "r")
     assert sc.payload_relpaths(run) == [
         "config",
+        "home/.config",
         "home/.local/share/other",
         "prepare.json",
         "synthetic-repo",
@@ -235,21 +320,20 @@ def test_the_prepared_state_leaves_out_the_client_the_uv_cache_the_logs_and_the_
 def test_a_saved_state_restores_into_a_different_run_dir_with_every_path_rewritten(
     tmp_path: Path,
 ) -> None:
-    c, k, src = seeded_cache(tmp_path)
+    clock = Clock()
+    c, k, src = seeded_cache(tmp_path, clock=clock)
     dst = new_run(tmp_path)
     res = c.restore(k, dst, floor=FLOOR)
     assert res.ok, res.reason
     assert res.rows == ROWS and res.prepare["verdict"] == "prepared"
+    assert res.saved_at == "2026-11-16T14:40:00Z"
     config, pgdata = dst / "config", dst / "config" / "postgres"
     creds = sc.parse_credentials((config / "pg_credentials").read_text())
-    assert creds["PG_DATA"] == str(pgdata) and creds["PG_PORT"] == "54999"
+    assert creds["PG_DATA"] == str(pgdata)
     assert (config / "config.yml").read_text() == f"repo: {dst}/synthetic-repo\n"
     assert (
         pgdata / "postmaster.opts"
     ).read_text() == f"/bundle/bin/postgres -D {pgdata}\n"
-    assert (
-        config / "logs" / "storage_service_native.log"
-    ).read_text() == f"data at {pgdata}\n"
     assert os.readlink(config / "repo-link") == str(dst / "synthetic-repo")
     # nothing small still names the source run dir
     for p in dst.rglob("*"):
@@ -257,6 +341,7 @@ def test_a_saved_state_restores_into_a_different_run_dir_with_every_path_rewritt
             p.is_file()
             and not p.is_symlink()
             and p.stat().st_size <= sc.SMALL_FILE_BYTES
+            and "pathcols" not in p.name
         ):
             assert str(src).encode() not in p.read_bytes(), p
     assert res.relocated.files >= 4 and res.relocated.links == 1
@@ -268,16 +353,58 @@ def test_a_saved_state_restores_into_a_different_run_dir_with_every_path_rewritt
     assert stat.S_IMODE((pgdata).stat().st_mode) == stat.S_IMODE(
         (src / "config" / "postgres").stat().st_mode
     )
-    assert (
-        (dst / "synthetic-repo" / "src" / "module_0.py")
-        .read_text()
-        .startswith("def handler_0")
-    )
     assert (dst / "prepare.json").is_file()
     # the install-prev client the run made is untouched, and the seeder's other home state came back
     assert "fresh client" in (dst / "home" / ".local" / "bin" / "nx").read_text()
     assert (dst / "home" / ".local" / "share" / "other" / "state").read_text() == "kept"
+    assert (dst / "home" / ".config" / "tool" / "settings").read_text() == "x=1\n"
     assert not (dst / "home" / ".cache").exists()
+
+
+def test_a_restored_store_gets_a_fresh_pg_port_everywhere_the_state_records_it(
+    tmp_path: Path,
+) -> None:
+    c, k, _ = seeded_cache(tmp_path)
+    dst = new_run(tmp_path)
+    res = c.restore(k, dst, floor=FLOOR)
+    assert res.ok, res.reason
+    assert res.port == NEW_PORT
+    config, pgdata = dst / "config", dst / "config" / "postgres"
+    creds = (config / "pg_credentials").read_text()
+    assert sc.parse_credentials(creds)["PG_PORT"] == str(NEW_PORT)
+    assert (
+        creds.count(f"127.0.0.1:{NEW_PORT}/nexus") == 2 and str(OLD_PORT) not in creds
+    )
+    assert f"port = {NEW_PORT}" in (pgdata / "postgresql.conf").read_text()
+    assert str(OLD_PORT) not in (pgdata / "postgresql.conf").read_text()
+    # a log keeps the port it was written under: it is history, not state
+    assert (
+        f"127.0.0.1:{OLD_PORT}"
+        in (config / "logs" / "storage_service_native.log").read_text()
+    )
+    assert stat.S_IMODE((config / "pg_credentials").stat().st_mode) == stat.S_IMODE(
+        (tmp_path / "seed-a" / "config" / "pg_credentials").stat().st_mode
+    )
+
+
+def test_a_restored_store_has_its_catalog_paths_on_the_new_run_dir(
+    tmp_path: Path,
+) -> None:
+    c, k, src = seeded_cache(tmp_path)
+    dst = new_run(tmp_path)
+    res = c.restore(k, dst, floor=FLOOR)
+    assert res.ok, res.reason
+    _, data = _cols(dst / "config")
+    assert data["catalog_owners.repo_root"] == [f"{dst}/synthetic-repo", "/elsewhere"]
+    assert data["catalog_documents.source_uri"][0] == (
+        f"file://{dst}/synthetic-repo/src/module_0.py"
+    )
+    assert data["catalog_documents.source_uri"][2] == "file:///elsewhere/a.md"
+    assert not any(str(src) in v for vs in data.values() for v in vs)
+    assert res.path_rows == {
+        "catalog_owners.repo_root": 1,
+        "catalog_documents.source_uri": 2,
+    }
 
 
 def test_the_source_run_dir_is_unchanged_by_a_save(tmp_path: Path) -> None:
@@ -298,30 +425,41 @@ def test_a_restore_with_no_entry_is_a_plain_miss_and_creates_nothing(
 
 
 def test_an_entry_is_one_dir_named_for_its_key_with_a_manifest(tmp_path: Path) -> None:
-    c, k, src = seeded_cache(tmp_path)
-    entry = tmp_path / "cache" / k.name
+    c, k, src = seeded_cache(tmp_path, clock=Clock())
+    entry = _entry(tmp_path, k)
     man = json.loads((entry / "manifest.json").read_text())
     assert (
         man["key_inputs"] == k.as_dict()
         and man["rows"] == ROWS
-        and man["pg_port"] == 54999
+        and man["pg_port"] == OLD_PORT
     )
     assert man["collections"] == {"bootw-a": ROWS} and man["source_run_dir"] == str(src)
+    assert man["saved_at"] == man["last_used_at"] == "2026-11-16T14:40:00Z"
+    assert man["path_rows"] == {
+        "catalog_owners.repo_root": 1,
+        "catalog_documents.source_uri": 2,
+    }
     assert man["paths"] == [
         "config",
+        "home/.config",
         "home/.local/share/other",
         "prepare.json",
         "synthetic-repo",
     ]
-    assert sorted(
-        p.name for p in (tmp_path / "cache").iterdir() if not p.name.startswith(".")
-    ) == [k.name]
-    assert (
-        sorted(
-            p.name for p in (tmp_path / "cache").iterdir() if p.name.startswith(".tmp")
-        )
-        == []
-    ), "no temp dir left"
+    assert _live(tmp_path) == [k.name]
+    assert not [
+        p for p in (tmp_path / "cache").iterdir() if p.name.startswith(".tmp")
+    ], "no temp dir left"
+
+
+def test_a_hit_records_its_use(tmp_path: Path) -> None:
+    clock = Clock()
+    c, k, _ = seeded_cache(tmp_path, clock=clock)
+    clock.t += 3 * 86400
+    assert c.restore(k, new_run(tmp_path), floor=FLOOR).ok
+    man = json.loads((_entry(tmp_path, k) / "manifest.json").read_text())
+    assert man["saved_at"] == "2026-11-16T14:40:00Z"
+    assert man["last_used_at"] == "2026-11-19T14:40:00Z"
 
 
 # --- relocation ---------------------------------------------------------------------------------------
@@ -360,16 +498,81 @@ def test_relocation_keeps_file_modes(tmp_path: Path) -> None:
     )
 
 
-def test_a_binary_file_naming_the_old_dir_is_rewritten_only_at_the_same_length(
-    tmp_path: Path,
+@pytest.mark.parametrize("new", ["/new/run", "/new/run/longer"])
+def test_a_binary_file_naming_the_old_dir_is_refused_whatever_the_lengths(
+    tmp_path: Path, new: str
 ) -> None:
     f = tmp_path / "blob"
     f.write_bytes(b"\xff\xfe/old/run\x00\x01")
-    sc.relocate([tmp_path], [("/old/run", "/new/run")])
-    assert f.read_bytes() == b"\xff\xfe/new/run\x00\x01"
-    f.write_bytes(b"\xff\xfe/old/run\x00\x01")
     with pytest.raises(sc.RelocationError, match="binary"):
-        sc.relocate([tmp_path], [("/old/run", "/new/run/longer")])
+        sc.relocate([tmp_path], [("/old/run", new)])
+    assert f.read_bytes() == b"\xff\xfe/old/run\x00\x01", "nothing was half rewritten"
+
+
+# --- the PG port ---------------------------------------------------------------------------------------
+
+
+def _port_tree(tmp_path: Path) -> tuple[Path, Path]:
+    config = tmp_path / "pt" / "config"
+    pgdata = config / "postgres"
+    (pgdata / "base").mkdir(parents=True)
+    (config / "logs").mkdir()
+    (config / "pg_credentials").write_text(
+        f"PG_DATA={pgdata}\nPG_PORT=5000\nNX_DB_ADMIN_URL=jdbc:postgresql://127.0.0.1:5000/nexus\n"
+        "NX_DB_URL=jdbc:postgresql://127.0.0.1:5000/nexus\n"
+    )
+    (pgdata / "postgresql.conf").write_text("port = 5000\n")
+    (pgdata / "postgresql.auto.conf").write_text("# nothing\n")
+    (pgdata / "base" / "rel").write_text("PG_PORT=5000 in a relation file\n")
+    (config / "logs" / "e.log").write_text("127.0.0.1:5000\n")
+    return config, pgdata
+
+
+def test_the_port_is_rewritten_in_the_credentials_and_the_conf_and_nowhere_else(
+    tmp_path: Path,
+) -> None:
+    config, pgdata = _port_tree(tmp_path)
+    sc.rewrite_port(config, pgdata, 5000, 6000)
+    creds = (config / "pg_credentials").read_text()
+    assert "PG_PORT=6000" in creds and creds.count("127.0.0.1:6000/nexus") == 2
+    assert ":5000/" not in creds and "PG_PORT=5000" not in creds
+    assert (pgdata / "postgresql.conf").read_text() == "port = 6000\n"
+    assert (config / "logs" / "e.log").read_text() == "127.0.0.1:5000\n"
+    assert "5000" in (pgdata / "base" / "rel").read_text()
+
+
+def test_a_place_the_rewrite_missed_refuses_the_restore(tmp_path: Path) -> None:
+    config, pgdata = _port_tree(tmp_path)
+    (config / "other.yml").write_text("db: localhost:5000/nexus\n")
+    with pytest.raises(
+        sc.SeedCacheError, match="other.yml still names the old PG port"
+    ):
+        sc.rewrite_port(config, pgdata, 5000, 6000)
+
+
+def test_the_same_port_is_left_alone(tmp_path: Path) -> None:
+    config, pgdata = _port_tree(tmp_path)
+    before = (config / "pg_credentials").read_text()
+    sc.rewrite_port(config, pgdata, 5000, 5000)
+    assert (config / "pg_credentials").read_text() == before
+
+
+def test_free_port_is_one_nothing_holds() -> None:
+    port = sc.free_port()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", port))
+
+
+def test_an_unrewritable_port_falls_back_and_evicts(tmp_path: Path) -> None:
+    c = cache(tmp_path)
+    k = key()
+    src = make_run(tmp_path, "seed-a")
+    (src / "config" / "extra.yml").write_text(f"db: localhost:{OLD_PORT}/nexus\n")
+    assert c.save(k, src, floor=FLOOR).saved
+    dst = new_run(tmp_path)
+    res = c.restore(k, dst, floor=FLOOR)
+    _assert_fell_back(res, dst, "still names the old PG port")
+    assert _live(tmp_path) == []
 
 
 # --- a corrupt, partial or mismatched entry falls back ----------------------------------------------------
@@ -381,11 +584,10 @@ def _assert_fell_back(res, dst: Path, reason_has: str) -> None:
     assert list((dst / "config").iterdir()) == [], (
         "the run's own config dir is left empty for the seeder"
     )
+    assert not (dst / "home" / ".config").exists(), (
+        "a parent the restore made is removed too"
+    )
     assert "fresh client" in (dst / "home" / ".local" / "bin" / "nx").read_text()
-
-
-def _entry(tmp_path: Path, k) -> Path:
-    return tmp_path / "cache" / k.name
 
 
 def test_a_truncated_relation_file_is_a_corrupt_entry(tmp_path: Path) -> None:
@@ -396,6 +598,23 @@ def test_a_truncated_relation_file_is_a_corrupt_entry(tmp_path: Path) -> None:
     rel.write_bytes(rel.read_bytes()[: 1 << 20])
     dst = new_run(tmp_path)
     _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "corrupt or partial")
+    assert _live(tmp_path) == [], "the defective entry is evicted"
+
+
+def test_a_same_size_corruption_of_a_file_over_1_mib_is_a_corrupt_entry(
+    tmp_path: Path,
+) -> None:
+    c, k, _ = seeded_cache(tmp_path)
+    rel = (
+        _entry(tmp_path, k) / "payload" / "config" / "postgres" / "base" / "1" / "16384"
+    )
+    data = bytearray(rel.read_bytes())
+    assert len(data) > sc.SMALL_FILE_BYTES
+    data[len(data) // 2] ^= 0xFF
+    rel.write_bytes(bytes(data))  # one flipped bit-pattern, the same length
+    dst = new_run(tmp_path)
+    _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "corrupt or partial")
+    assert _live(tmp_path) == []
 
 
 def test_a_missing_file_is_a_partial_entry(tmp_path: Path) -> None:
@@ -415,7 +634,7 @@ def test_a_missing_file_is_a_partial_entry(tmp_path: Path) -> None:
 def test_a_changed_credentials_file_is_a_corrupt_entry(tmp_path: Path) -> None:
     c, k, _ = seeded_cache(tmp_path)
     creds = _entry(tmp_path, k) / "payload" / "config" / "pg_credentials"
-    creds.write_text(creds.read_text().replace("54999", "54998"))
+    creds.write_text(creds.read_text().replace(str(OLD_PORT), "54998"))
     dst = new_run(tmp_path)
     _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "corrupt or partial")
 
@@ -428,8 +647,7 @@ def test_an_entry_with_no_manifest_or_an_unreadable_one_is_not_used(
     man.write_text("{not json")
     dst = new_run(tmp_path)
     _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "manifest unreadable")
-    man.unlink()
-    _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "manifest unreadable")
+    assert _live(tmp_path) == []
 
 
 def test_a_payload_missing_its_prepare_json_is_not_used(tmp_path: Path) -> None:
@@ -476,10 +694,30 @@ def test_a_restored_store_under_the_floor_falls_back_even_when_it_matches_the_ma
     )
 
 
-def test_a_busy_pg_port_falls_back(tmp_path: Path) -> None:
-    c, k, _ = seeded_cache(tmp_path, is_port_free=lambda p: p != 54999)
+def test_path_rows_that_differ_from_the_manifest_fall_back(tmp_path: Path) -> None:
+    c, k, _ = seeded_cache(tmp_path)
+    man_path = _entry(tmp_path, k) / "manifest.json"
+    man = json.loads(man_path.read_text())
+    man["path_rows"]["catalog_owners.repo_root"] = 0
+    man_path.write_text(json.dumps(man))
     dst = new_run(tmp_path)
-    _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "port 54999 is in use")
+    _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "the manifest says")
+
+
+def test_rows_that_still_name_the_saved_run_dir_after_the_rewrite_fall_back(
+    tmp_path: Path,
+) -> None:
+    def half(config: Path, pairs) -> object:
+        got = rewrite_fn(config, pairs)
+        return sc.StoreRewrite(
+            got.rows, got.before, {**got.after, "catalog_owners.repo_root": 1}
+        )
+
+    c, k, _ = seeded_cache(tmp_path, rewrite_fn=half)
+    dst = new_run(tmp_path)
+    _assert_fell_back(
+        c.restore(k, dst, floor=FLOOR), dst, "still name the saved run dir"
+    )
 
 
 def test_a_restored_cluster_that_is_not_cleanly_shut_down_falls_back(
@@ -491,16 +729,37 @@ def test_a_restored_cluster_that_is_not_cleanly_shut_down_falls_back(
     _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "not cleanly shut down")
 
 
-def test_a_row_counter_that_fails_falls_back_rather_than_raising(
+def test_a_failing_pg_read_with_the_production_exception_type_falls_back_scrubs_and_evicts(
     tmp_path: Path,
 ) -> None:
-    def broken(_config: Path) -> int:
-        raise sc.SeedCacheError("pg_ctl start failed (exit 1): bad")
+    def boom(_config: Path, _pairs) -> object:
+        raise ProbeError(
+            "psql failed: invalid page in block 7 of relation base/16384/2619"
+        )
 
     c, k, _ = seeded_cache(tmp_path)
-    c.rows_fn = broken
+    c.rewrite_fn = boom
     dst = new_run(tmp_path)
-    _assert_fell_back(c.restore(k, dst, floor=FLOOR), dst, "pg_ctl start failed")
+    res = c.restore(k, dst, floor=FLOOR)
+    _assert_fell_back(res, dst, "ProbeError: psql failed: invalid page")
+    assert _live(tmp_path) == [], (
+        "the rejected entry is evicted, so a rerun seeds and saves"
+    )
+    assert not res.transient
+
+
+def test_a_pg_read_that_raises_something_unforeseen_still_falls_back(
+    tmp_path: Path,
+) -> None:
+    def boom(_config: Path, _pairs) -> object:
+        raise RuntimeError("anything at all")
+
+    c, k, _ = seeded_cache(tmp_path)
+    c.rewrite_fn = boom
+    dst = new_run(tmp_path)
+    _assert_fell_back(
+        c.restore(k, dst, floor=FLOOR), dst, "RuntimeError: anything at all"
+    )
 
 
 def test_a_relocation_that_cannot_be_made_falls_back(tmp_path: Path) -> None:
@@ -520,268 +779,118 @@ def test_a_relocation_that_cannot_be_made_falls_back(tmp_path: Path) -> None:
     )
 
 
-def test_a_failed_restore_leaves_files_the_run_already_had(tmp_path: Path) -> None:
+# --- a restore never merges into, or removes, what the run had -------------------------------------------------
+
+
+def test_a_destination_with_stale_pg_files_is_refused_and_left_alone(
+    tmp_path: Path,
+) -> None:
     c, k, _ = seeded_cache(tmp_path)
-    c.rows_fn = lambda _c: 1
     dst = new_run(tmp_path)
-    (dst / "home" / ".local" / "share" / "other").mkdir(parents=True)
-    (dst / "home" / ".local" / "share" / "other" / "mine").write_text("keep me")
-    assert not c.restore(k, dst, floor=FLOOR).ok
+    stale_wal = dst / "config" / "postgres" / "pg_wal" / "000000010000000000000009"
+    stale_rel = dst / "config" / "postgres" / "base" / "1" / "99999"
+    stale_wal.parent.mkdir(parents=True)
+    stale_rel.parent.mkdir(parents=True)
+    stale_wal.write_text("stale wal")
+    stale_rel.write_text("stale relation")
+    res = c.restore(k, dst, floor=FLOOR)
+    assert not res.ok and "is not empty" in res.reason, res.reason
     assert (
-        dst / "home" / ".local" / "share" / "other" / "mine"
-    ).read_text() == "keep me"
-    assert not (dst / "home" / ".local" / "share" / "other" / "state").exists()
-
-
-# --- a save never keeps a state it should not ----------------------------------------------------------------
-
-
-def test_a_store_that_was_not_cleanly_stopped_is_not_saved(tmp_path: Path) -> None:
-    c = cache(tmp_path, clean_check=lambda _c: "postmaster.pid exists")
-    res = c.save(key(), make_run(tmp_path, "seed-a"), floor=FLOOR)
-    assert not res.saved and "not cleanly shut down" in res.reason
-    assert not (tmp_path / "cache").exists() or not any(
-        (tmp_path / "cache").glob("8.0.0-*")
+        stale_wal.read_text() == "stale wal"
+        and stale_rel.read_text() == "stale relation"
     )
-
-
-def test_a_store_under_the_floor_is_not_saved(tmp_path: Path) -> None:
-    res = cache(tmp_path).save(
-        key(), make_run(tmp_path, "seed-a", rows=10), floor=FLOOR
+    assert not (dst / "prepare.json").exists() and not (dst / "synthetic-repo").exists()
+    assert _live(tmp_path) == [k.name], (
+        "a dirty destination says nothing about the entry"
     )
-    assert not res.saved and f"10 rows, below the floor of {FLOOR}" in res.reason
+    assert res.transient
 
 
-def test_a_prepare_that_did_not_prepare_is_not_saved(tmp_path: Path) -> None:
-    run = make_run(tmp_path, "seed-a")
-    (run / "prepare.json").write_text(
-        json.dumps({"verdict": "error", "collections": {}})
+def test_a_file_the_run_already_has_must_be_what_the_entry_holds(
+    tmp_path: Path,
+) -> None:
+    c, k, _ = seeded_cache(tmp_path)
+    dst = new_run(tmp_path)
+    (dst / "prepare.json").write_text("{}")
+    res = c.restore(k, dst, floor=FLOOR)
+    assert not res.ok and "already exists and is not what the entry holds" in res.reason
+    assert (dst / "prepare.json").read_text() == "{}" and _live(tmp_path) == [k.name]
+
+
+def test_an_empty_dir_the_run_made_is_filled_and_emptied_again_by_a_failed_restore(
+    tmp_path: Path,
+) -> None:
+    def boom(_config: Path, _pairs) -> object:
+        raise ProbeError("x")
+
+    c, k, _ = seeded_cache(tmp_path)
+    dst = new_run(tmp_path)
+    existing = dst / "home" / ".local" / "share" / "other"
+    existing.mkdir(parents=True)
+    c.rewrite_fn = boom
+    assert not c.restore(k, dst, floor=FLOOR).ok
+    assert existing.is_dir() and list(existing.iterdir()) == []
+    assert (dst / "home" / ".local" / "bin" / "nx").is_file()
+
+
+def test_an_identical_file_the_run_already_has_is_kept_by_a_good_restore_and_a_failed_one(
+    tmp_path: Path,
+) -> None:
+    c, k, src = seeded_cache(tmp_path)
+    dst = new_run(tmp_path)
+    (dst / "prepare.json").write_bytes((src / "prepare.json").read_bytes())
+    mtime = (dst / "prepare.json").stat().st_mtime_ns
+    assert c.restore(k, dst, floor=FLOOR).ok
+    assert (dst / "prepare.json").stat().st_mtime_ns == mtime, "not copied over"
+    bad = new_run(tmp_path.parent / (tmp_path.name + "-b"))
+    (bad / "prepare.json").write_bytes((src / "prepare.json").read_bytes())
+    c.rewrite_fn = lambda _c, _p: sc.StoreRewrite(1, {}, {})
+    assert not c.restore(k, bad, floor=FLOOR).ok
+    assert (bad / "prepare.json").is_file(), "a file the run had is never scrubbed"
+
+
+def test_a_restore_copies_nothing_when_the_ceiling_is_already_spent_and_keeps_the_entry(
+    tmp_path: Path,
+) -> None:
+    c, k, _ = seeded_cache(tmp_path)
+    c.ceiling_s = 0.0
+    dst = new_run(tmp_path)
+    res = c.restore(k, dst, floor=FLOOR)
+    assert not res.ok and "ceiling" in res.reason and res.transient
+    assert (
+        list((dst / "config").iterdir()) == [] and not (dst / "prepare.json").exists()
     )
-    res = cache(tmp_path).save(key(), run, floor=FLOOR)
-    assert not res.saved and "prepare verdict" in res.reason
+    assert _live(tmp_path) == [k.name], "the ceiling says nothing about the entry"
 
 
-def test_a_store_outside_the_run_dir_is_not_saved(tmp_path: Path) -> None:
-    run = make_run(tmp_path, "seed-a")
-    elsewhere = tmp_path / "elsewhere-pg"
-    elsewhere.mkdir()
-    creds = run / "config" / "pg_credentials"
-    creds.write_text(
-        creds.read_text().replace(str(run / "config" / "postgres"), str(elsewhere))
-    )
-    res = cache(tmp_path).save(key(), run, floor=FLOOR)
-    assert not res.saved and "outside" in res.reason
+def test_a_restore_that_cannot_get_the_lock_falls_back_and_keeps_the_entry(
+    tmp_path: Path,
+) -> None:
+    c, k, _ = seeded_cache(tmp_path, lock_timeout_s=0.3)
+    dst = new_run(tmp_path)
+    with sc._locked(tmp_path / "cache", exclusive=True, timeout_s=1) as got:
+        assert got
+        res = c.restore(k, dst, floor=FLOOR)
+    assert not res.ok and "lock was not free" in res.reason and res.transient
+    assert _live(tmp_path) == [k.name]
+    assert not (dst / "prepare.json").exists()
 
 
-def test_a_save_that_fails_midway_leaves_no_entry_and_no_temp_dir(
+def test_a_disk_error_while_copying_falls_back_and_keeps_the_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    c, k, _ = seeded_cache(tmp_path)
     real = sc._copy_tree
     calls = {"n": 0}
 
-    def flaky(src: Path, dst: Path) -> None:
+    def flaky(src: Path, dst: Path, deadline=None) -> None:
         calls["n"] += 1
         if calls["n"] == 2:
             raise OSError(28, "No space left on device")
-        real(src, dst)
+        real(src, dst, deadline)
 
     monkeypatch.setattr(sc, "_copy_tree", flaky)
-    res = cache(tmp_path).save(key(), make_run(tmp_path, "seed-a"), floor=FLOOR)
-    assert not res.saved and "No space left" in res.reason
-    assert [
-        p.name for p in (tmp_path / "cache").iterdir() if p.name != sc.LOCK_NAME
-    ] == []
-
-
-def test_a_save_over_a_rejected_entry_replaces_it_and_otherwise_keeps_the_first(
-    tmp_path: Path,
-) -> None:
-    c, k, _ = seeded_cache(tmp_path)
-    first = json.loads((_entry(tmp_path, k) / "manifest.json").read_text())["created"]
-    again = make_run(tmp_path, "seed-b")
-    kept = c.save(k, again, floor=FLOOR)
-    assert not kept.saved and "kept its entry" in kept.reason
-    (_entry(tmp_path, k) / "payload" / "prepare.json").unlink()
-    assert c.save(k, again, floor=FLOOR, replace=True).saved
     dst = new_run(tmp_path)
-    assert c.restore(k, dst, floor=FLOOR).ok
-    assert json.loads((_entry(tmp_path, k) / "manifest.json").read_text())[
-        "source_run_dir"
-    ] == str(again), first
-
-
-def test_a_save_waits_for_a_restore_in_progress_and_gives_up_when_it_does_not_end(
-    tmp_path: Path,
-) -> None:
-    c = cache(tmp_path, lock_timeout_s=0.5)
-    (tmp_path / "cache").mkdir()
-    with sc._locked(tmp_path / "cache", exclusive=False, timeout_s=1) as got:
-        assert got
-        res = c.save(key(), make_run(tmp_path, "seed-a"), floor=FLOOR)
-    assert not res.saved and "lock was not free" in res.reason
-    assert [
-        p.name for p in (tmp_path / "cache").iterdir() if p.name != sc.LOCK_NAME
-    ] == [], "no entry, no temp dir"
-
-
-# --- bounded size ----------------------------------------------------------------------------------------------
-
-
-def test_saving_a_new_key_evicts_the_old_one_of_the_same_start_and_no_other(
-    tmp_path: Path,
-) -> None:
-    logged: list[str] = []
-    c = cache(tmp_path, log=logged.append)
-    k_old, k_new = key(), key(seeder=(("upgrade_boot_writes.py", "new"),))
-    k_other = key(from_version="7.99.0")
-    for i, k in enumerate((k_old, k_other, k_new)):
-        assert c.save(k, make_run(tmp_path, f"seed-{i}"), floor=FLOOR).saved
-    names = sorted(
-        p.name for p in (tmp_path / "cache").iterdir() if not p.name.startswith(".")
-    )
-    assert names == sorted([k_new.name, k_other.name]), names
-    assert any(k_old.name in m and "evicted" in m for m in logged)
-    assert not [
-        p for p in (tmp_path / "cache").iterdir() if p.name.startswith(".evict")
-    ]
-
-
-def test_a_start_whose_version_prefixes_another_is_not_evicted_by_it(
-    tmp_path: Path,
-) -> None:
-    c = cache(tmp_path)
-    assert c.save(
-        key(from_version="8.0.0.post1"), make_run(tmp_path, "a"), floor=FLOOR
-    ).saved
-    assert c.save(key(from_version="8.0.0"), make_run(tmp_path, "b"), floor=FLOOR).saved
-    assert (
-        len([p for p in (tmp_path / "cache").iterdir() if not p.name.startswith(".")])
-        == 2
-    )
-
-
-def test_a_stale_temp_dir_from_a_killed_save_is_removed_on_the_next_save(
-    tmp_path: Path,
-) -> None:
-    c = cache(tmp_path)
-    stale, fresh = tmp_path / "cache" / ".tmp-old-x", tmp_path / "cache" / ".tmp-new-y"
-    stale.mkdir(parents=True)
-    fresh.mkdir()
-    old = stale.stat().st_mtime - 2 * sc.STALE_TMP_S
-    os.utime(stale, (old, old))
-    assert c.save(key(), make_run(tmp_path, "seed-a"), floor=FLOOR).saved
-    assert not stale.exists() and fresh.exists(), (
-        "another run's save in flight is left alone"
-    )
-
-
-# --- the PG cluster, stopped: against a fake bundle -----------------------------------------------------------------
-
-PG_CTL = """#!/bin/sh
-echo "pg_ctl $*" >> "@LOG@"
-case "$*" in
-  *" start") touch "@PGDATA@/postmaster.pid"; [ -e "@STATE@/start_fails" ] && { rm "@PGDATA@/postmaster.pid"; echo "no" >&2; exit 1; }; exit 0 ;;
-  *"-m fast"*) [ -e "@STATE@/stop_fails" ] && exit 1; rm -f "@PGDATA@/postmaster.pid"; echo "shut down" > "@STATE@/cluster"; exit 0 ;;
-  *"-m immediate"*) rm -f "@PGDATA@/postmaster.pid"; exit 0 ;;
-esac
-"""
-
-PG_CONTROLDATA = """#!/bin/sh
-echo "pg_controldata $*" >> "@LOG@"
-echo "Database cluster state:               $(cat "@STATE@/cluster")"
-"""
-
-
-@pytest.fixture
-def fake_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    run = make_run(tmp_path, "pgrun")
-    config, state = run / "config", tmp_path / "state"
-    state.mkdir()
-    (state / "cluster").write_text("shut down")
-    # the scripts run under the helper's own scrubbed environment, so the paths are written into them
-    subs = {
-        "@LOG@": str(state / "calls.log"),
-        "@STATE@": str(state),
-        "@PGDATA@": str(config / "postgres"),
-    }
-    for name, body in (("pg_ctl", PG_CTL), ("pg_controldata", PG_CONTROLDATA)):
-        for k, v in subs.items():
-            body = body.replace(k, v)
-        f = config / "pg-bundle" / "bundle" / "bin" / name
-        f.write_text(body)
-        f.chmod(0o755)
-    (state / "calls.log").write_text("")
-    return config, state
-
-
-def _calls(state: Path) -> list[str]:
-    return (state / "calls.log").read_text().splitlines()
-
-
-def test_a_cleanly_stopped_cluster_reads_as_clean(fake_bundle) -> None:
-    config, state = fake_bundle
-    assert sc.stopped_clean(config) is None
-    (state / "cluster").write_text("in production")
-    assert "'in production'" in sc.stopped_clean(config)
-    (state / "cluster").write_text("shut down")
-    (config / "postgres" / "postmaster.pid").write_text("1")
-    assert "postmaster.pid" in sc.stopped_clean(config)
-
-
-def test_counting_rows_starts_pg_alone_counts_and_stops_it_cleanly(fake_bundle) -> None:
-    config, state = fake_bundle
-    seen: list[bool] = []
-    rows = sc.rows_with_pg_up(
-        config,
-        lambda: (
-            seen.append((config / "postgres" / "postmaster.pid").exists()) or 86_000
-        ),
-    )
-    assert rows == 86_000 and seen == [True], "the count ran while PG was up"
-    calls = _calls(state)
-    assert [c.split()[0] for c in calls] == ["pg_ctl", "pg_ctl", "pg_controldata"]
-    assert calls[0].endswith(" start") and "-m fast" in calls[1]
-    assert not (config / "postgres" / "postmaster.pid").exists()
-
-
-def test_a_count_that_fails_still_stops_pg(fake_bundle) -> None:
-    config, _ = fake_bundle
-
-    def boom() -> int:
-        raise RuntimeError("psql failed")
-
-    with pytest.raises(RuntimeError):
-        sc.rows_with_pg_up(config, boom)
-    assert not (config / "postgres" / "postmaster.pid").exists()
-
-
-def test_a_pg_that_does_not_start_or_does_not_stop_is_an_error(fake_bundle) -> None:
-    config, state = fake_bundle
-    (state / "start_fails").write_text("1")
-    with pytest.raises(sc.SeedCacheError, match="pg_ctl start failed"):
-        sc.rows_with_pg_up(config, lambda: 1)
-    (state / "start_fails").unlink()
-    (state / "stop_fails").write_text("1")
-    with pytest.raises(sc.SeedCacheError, match="pg_ctl stop failed"):
-        sc.rows_with_pg_up(config, lambda: 1)
-    assert any("-m immediate" in c for c in _calls(state)), (
-        "a stop that failed is forced"
-    )
-
-
-def test_a_cluster_that_reads_unclean_after_the_count_is_an_error(fake_bundle) -> None:
-    config, state = fake_bundle
-    stop = config / "pg-bundle" / "bundle" / "bin" / "pg_ctl"
-    stop.write_text(
-        stop.read_text().replace('echo "shut down" >', 'echo "in crash recovery" >')
-    )
-    with pytest.raises(sc.SeedCacheError, match="after the row count"):
-        sc.rows_with_pg_up(config, lambda: 1)
-
-
-def test_port_free_sees_a_bound_port() -> None:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-        assert sc.port_free(port) is False
-    assert sc.port_free(port) is True
+    res = c.restore(k, dst, floor=FLOOR)
+    assert not res.ok and "No space left" in res.reason and res.transient
+    assert _live(tmp_path) == [k.name] and list((dst / "config").iterdir()) == []

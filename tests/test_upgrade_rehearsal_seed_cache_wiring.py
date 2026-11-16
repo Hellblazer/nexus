@@ -14,7 +14,9 @@ driver wires it so that it changes only the preparation:
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import re
 import signal
 from pathlib import Path
 
@@ -34,6 +36,8 @@ echo "REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 156)" > "$d/engine_
 """
 
 FROM = "8.0.0"
+NEW_PORT = 55123
+SAVED = r" \(saved \d{4}-\d{2}-\d{2}\)"
 
 
 @pytest.fixture
@@ -42,10 +46,8 @@ def cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     w = World(tmp_path, monkeypatch)
     _script(w.fakebin / "uv", UV + PIN_LINES, w.state)
     monkeypatch.setattr(ur.seed_cache, "stopped_clean", lambda _config: None)
-    monkeypatch.setattr(ur.seed_cache, "port_free", lambda _port: True)
-    monkeypatch.setattr(
-        ur.seed_cache, "rows_with_pg_up", lambda _config, count: count()
-    )
+    monkeypatch.setattr(ur.seed_cache, "free_port", lambda: NEW_PORT)
+    monkeypatch.setattr(ur.seed_cache, "rows_with_pg_up", lambda _config, work: work())
     (tmp_path / "seeder.py").write_text("# the seeder\n")
     return w
 
@@ -88,7 +90,9 @@ def test_a_start_seeded_once_is_restored_the_next_time_and_judged_the_same(
 
     second = ur.rehearse(FROM, cfg(cached, "w2"))
     assert seeded_runs(cached) == 1, "the second start did not run the seeder"
-    assert label(second) == f"store restored from cache {entry.name}"
+    assert re.fullmatch(
+        re.escape(f"store restored from cache {entry.name}") + SAVED, label(second)
+    ), label(second)
     assert (
         second["setup"]["prepare"]["source"] == "cache"
         and second["setup"]["prepare"]["rows"] == 60000
@@ -124,6 +128,9 @@ def test_a_start_seeded_once_is_restored_the_next_time_and_judged_the_same(
     run2 = (cached.root / "w2" / f"from-{FROM}").resolve()
     creds = (run2 / "config" / "pg_credentials").read_text()
     assert f"PG_DATA={run2}/pgdata" in creds and "w1" not in creds
+    # the restored store has a fresh port, as a seed would have: the credentials say so
+    assert f"PG_PORT={NEW_PORT}" in creds and f"127.0.0.1:{NEW_PORT}/" in creds
+    assert second["setup"]["prepare"]["pg_port"] == NEW_PORT
 
 
 def test_the_step_table_and_verdict_file_say_how_the_store_was_prepared(
@@ -193,14 +200,14 @@ def test_a_row_count_that_differs_from_the_manifest_seeds_in_full(
 ) -> None:
     ur.rehearse(FROM, cfg(cached, "w1"))
     monkeypatch.setattr(
-        ur.seed_cache, "rows_with_pg_up", lambda _config, _count: 59_999
+        ur.seed_cache,
+        "rows_with_pg_up",
+        lambda _config, work: dataclasses.replace(work(), rows=59_999),
     )
     v = ur.rehearse(FROM, cfg(cached, "w2"))
     assert seeded_runs(cached) == 2
     assert "holds 59999 rows, the manifest says 60000" in label(v)
-    assert (
-        v["state"] == "FAILED" or v["state"] == "PASSED"
-    )  # judged on the seeded store alone
+    assert v["state"] == "PASSED"  # judged on the seeded store alone
     assert v["store_rows"] == {"before": 60000, "after": 60000}, (
         "the judged reads are PG's, not the cache's"
     )
@@ -369,3 +376,95 @@ def test_a_custom_prepare_command_is_not_cached(tmp_path: Path, main_env: list) 
     _main(tmp_path, "--prepare-cmd", "true {work} {json}")
     c = main_env[0]
     assert c.seed_cache_dir is None and "custom --prepare-cmd" in c.seed_cache_off
+
+
+# --- the production failure types, the label's age, the families -----------------------------------------------------
+
+
+def _probe_that_fails_for_the_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real PgProbe, except that the cache's own catalog query fails the way a bad page does."""
+    real = ur.PgProbe.sql
+
+    def sql(self, query: str):
+        if "information_schema" in query:
+            raise ur.ProbeError(
+                "psql failed: invalid page in block 7 of relation base/16384/2619"
+            )
+        return real(self, query)
+
+    monkeypatch.setattr(ur.PgProbe, "sql", sql)
+
+
+def test_a_probe_error_while_reading_a_restored_store_seeds_in_full_and_evicts_the_entry(
+    cached: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ur.rehearse(FROM, cfg(cached, "w1"))
+    assert len(entries(cached)) == 1
+    _probe_that_fails_for_the_cache(monkeypatch)
+    v = ur.rehearse(FROM, cfg(cached, "w2"))  # no exception reaches here
+    assert seeded_runs(cached) == 2, "the seeder ran"
+    assert label(v).startswith("seeded (cache miss, rejected: ")
+    assert "ProbeError: psql failed: invalid page" in label(v)
+    assert v["state"] == "PASSED" and v["findings"] == []
+    assert "not saved" in label(v), (
+        "the same failure at save time is reported, not raised"
+    )
+    assert entries(cached) == [], (
+        "the rejected entry is gone, so a rerun seeds and saves"
+    )
+    monkeypatch.undo()
+
+
+def test_a_probe_error_at_save_time_does_not_fail_a_seeded_start(
+    cached: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _probe_that_fails_for_the_cache(monkeypatch)
+    v = ur.rehearse(FROM, cfg(cached, "w1"))
+    assert v["state"] == "PASSED" and v["findings"] == []
+    assert "not saved: " in label(v) and "ProbeError: psql failed" in label(v)
+    assert entries(cached) == []
+
+
+def test_the_driver_turns_a_probe_error_into_a_cache_error(
+    cached: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _probe_that_fails_for_the_cache(monkeypatch)
+    config = cached.root / "cfgdir"
+    config.mkdir()
+    with pytest.raises(ur.seed_cache.SeedCacheError, match="ProbeError"):
+        ur._offline_read(config, ["/x"])
+    with pytest.raises(ur.seed_cache.SeedCacheError, match="ProbeError"):
+        ur._offline_rewrite(config, [("/x", "/y")])
+
+
+def test_a_pg_that_is_not_accepting_connections_is_a_cache_error(
+    cached: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ur.PgProbe, "sql", lambda self, query: None)
+    with pytest.raises(ur.seed_cache.SeedCacheError, match="not accepting"):
+        ur._offline_read(cached.root, ["/x"])
+
+
+def test_the_label_of_a_hit_says_when_the_store_was_saved(cached: World) -> None:
+    ur.rehearse(FROM, cfg(cached, "w1"))
+    (entry,) = entries(cached)
+    man_path = entry / "manifest.json"
+    man = json.loads(man_path.read_text())
+    man["saved_at"] = "2026-11-02T08:00:00Z"
+    man_path.write_text(json.dumps(man))
+    v = ur.rehearse(FROM, cfg(cached, "w2"))
+    assert label(v) == f"store restored from cache {entry.name} (saved 2026-11-02)"
+    assert any(
+        ln.startswith("prepare (setup)") and ln.endswith("(saved 2026-11-02)")
+        for ln in ur.format_table(v).splitlines()
+    )
+
+
+def test_a_standin_run_does_not_evict_or_use_the_real_entry(cached: World) -> None:
+    ur.rehearse(FROM, cfg(cached, "w1"))
+    (real,) = entries(cached)
+    v = ur.rehearse(FROM, cfg(cached, "w2", standin=True))
+    assert label(v).startswith("seeded (cache miss, saved "), label(v)
+    names = [e.name for e in entries(cached)]
+    assert real.name in names and len(names) == 2
+    assert any("-standin-" in n for n in names) and any("-real-" in n for n in names)

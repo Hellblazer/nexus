@@ -638,29 +638,40 @@ about 13 minutes for each 86,000-row start and about 20 minutes for the five-col
 7.76.0; the PCI end wait adds up to 900 s; installs and the wheel build come on top.
 
 Seed cache (preparation only; no criterion, ceiling, limit, judgment or exit code
-changes). The cache touches the preparation in item 1 above and nothing else. Once a
-start's store is prepared, the driver saves it on the run host under
-`~/.cache/lab-remote/upgrade-rehearsal-seeds/` (`$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE`
-moves the root; it is never the work dir or the repo), keyed on the previous release, the
-engine tag that release pins, the platform, the Python, the prepare command and its
-collection arguments, and the sha256 of the seeder scripts. A later run with the same key
-restores that store, its PG cleanly stopped, in place of running the seeder, and goes on
-to start-old as before. One entry per start is kept, so the host holds at most three
-stores of about 2.4 to 2.6 GB. An entry is used only when it matches its manifest (paths,
-sizes, a hash of every small file), its PG port is free, its cluster reads as cleanly shut
+changes). The cache touches the preparation in item 1 above and nothing else, and the
+wall-time sentence above describes a cache miss (a hit replaces the preparation with a copy,
+a PG start and stop, and a catalog rewrite). Once a start's store is prepared, the driver
+saves it on the run host under `~/.cache/lab-remote/upgrade-rehearsal-seeds/`
+(`$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE` moves the root; it is never the work dir or the repo),
+keyed on the previous release, the engine tag that release pins, the platform, the Python, the
+prepare command and its collection arguments, and the sha256 of the seeder scripts. A later
+run with the same key restores that store, its PG cleanly stopped, in place of running the
+seeder, and goes on to start-old as before. One entry is kept per start and per prepare
+family (real or `--standin`), and an entry unused for 30 days is removed by the next run, so
+the host holds the starts of the releases cut in the last 30 days, about 2.4 to 2.6 GB each
+(three starts a release). An entry is used only when its destination is empty, it matches its
+manifest (every path, size and the sha256 of every file), its cluster reads as cleanly shut
 down, and a row count taken with PG started alone meets the 50,000-row floor and equals the
-manifest's. Any doubt (a corrupt, partial or mismatched entry, a count that differs)
-seeds in full and the table says why. The restored copy has the old run dir rewritten in
-its small text files and symlinks, and the restore is refused if any trace of it is left
-in one. The judged steps cannot tell a restore from a seed: the row counts before and
-after `nx upgrade` are still PG's own read of the store that step ran on. The prepare row
-of each table is a setup row, not a step, and reads `store restored from cache <key>` on a
-hit and `seeded (cache miss, saved <key>)` on a miss; say which in the relay. The cache is
-on by default, so a run that uses it is still the release gate. `--no-seed-cache` seeds
-every start in full and, like any option set to other than its default, makes a pass NOT
-THE RELEASE GATE; a custom `--prepare-cmd` bypasses the cache. The data pages of a
-restored PG store can still hold the old run dir as text (the synthetic repo's catalog
-`source_uri`); those pages are not rewritten.
+manifest's. Any doubt (a corrupt, partial or mismatched entry, a failing read, a count that
+differs) seeds in full, the table says why, and an entry found defective is deleted; a
+restore that merely could not finish (a lock, a full disk, the 15-minute ceiling) leaves the
+entry alone.
+
+What a hit shows the judged steps, against a seed. The store is as old as its entry, and the
+table says when it was saved. The PG port is a fresh free one, written to `pg_credentials` and
+`postgresql.conf`, as a seed gets. The old run dir is rewritten to the new one in the small
+text files and symlinks of the copy, and in every `repo_root`, `source_uri`, `file_path` and
+`repo_path` text column of the `nexus` schema, by SQL with PG started alone, so `nx doctor`
+sees no dead catalog owner; the restore is refused unless the rows naming the old dir match
+the count recorded at save and none are left. Chunk titles, chunk metadata and the old
+engine and PG logs still hold the seeding run's dir as text; nothing judged reads them (the
+search step matches the sentinel note's text). The row counts before and after `nx upgrade`
+are PG's own read of the store that step ran on, as for a seed. The prepare row of each table
+is a setup row, not a step, and reads `store restored from cache <key> (saved <date>)` on a
+hit and `seeded (cache miss, saved <key>)` on a miss; say which in the relay. The cache is on
+by default, so a run that uses it is still the release gate. `--no-seed-cache` seeds every
+start in full and, like any option set to other than its default, makes a pass NOT THE RELEASE
+GATE; a custom `--prepare-cmd` bypasses the cache.
 
 The plugin-only fast lane does not run it: the wheel and engine that lane ships are the
 base tag's, apart from the version, so there is nothing new to rehearse.

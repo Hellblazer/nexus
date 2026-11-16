@@ -219,7 +219,12 @@ def test_the_step_states_the_hang_guard_and_holds_a_pending_not_run_for_sams_cal
 def test_the_step_documents_the_seed_cache_as_preparation_only() -> None:
     step = _step()
     assert "Seed cache (preparation only; no criterion, ceiling, limit, judgment or exit code" in step
-    assert "`store restored from cache <key>`" in step
+    assert "`store restored from cache <key> (saved <date>)`" in step
+    assert "describes a cache miss" in step, "the wall-time sentence is for a miss"
+    assert "What a hit shows the judged steps, against a seed" in step
+    assert "judged steps cannot tell a restore from a seed" not in step
+    assert "30 days" in step and "three starts a release" in step
+    assert "sees no dead catalog owner" in step
     assert "`seeded (cache miss, saved <key>)`" in step
     assert "`--no-seed-cache`" in step and "makes a pass NOT THE RELEASE GATE" in step
     assert "`$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE`" in step

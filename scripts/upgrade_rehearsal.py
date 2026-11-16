@@ -76,10 +76,11 @@ engine before its tag).
 Seed cache (``upgrade_rehearsal_seed_cache.py``, preparation only). Each start's prepared store is kept on
 the run host (``~/.cache/lab-remote/upgrade-rehearsal-seeds/``, ``$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE``) and
 restored in place of the seeder when the key matches (previous release, its engine pin, platform, prepare
-template and the sha256 of the seeder files). A restore is checked (manifest inventory, free PG port, clean
-shutdown, a PG-alone row count at or above the floor and equal to the manifest's) and any doubt seeds in full.
-The cache is never a judged step: the prepare row of the table is a setup row, ``store restored from cache
-<key>`` or ``seeded (cache miss, saved <key>)``. ``--no-seed-cache`` is a non-default setting; a custom
+template and the sha256 of the seeder files). A restore is checked (an empty destination, a manifest inventory
+that hashes every file, clean shutdown, a PG-alone row count at or above the floor and equal to the manifest's)
+and any doubt seeds in full. A hit gives the store a fresh PG port and moves the old run dir to the new one in
+text files and the catalog's path columns. The cache is never a judged step: the prepare row of the table is a
+setup row, ``store restored from cache <key> (saved <date>)`` or ``seeded (cache miss, saved <key>)``. ``--no-seed-cache`` is a non-default setting; a custom
 ``--prepare-cmd`` bypasses the cache.
 
 The last line is ``UPGRADE REHEARSAL GATE: <word> ...`` (the per-start lines say ``UPGRADE REHEARSAL START``)
@@ -2110,10 +2111,36 @@ def installed_engine_pin(home: Path) -> str | None:
     return None
 
 
-def _offline_rows(config: Path) -> int:
-    """The store's rows (``nexus.chunks``), with its PG started alone and stopped again."""
+def _store_sql(config: Path):
+    """psql against the install's own PG, as the cache's SQL helpers want it: a failure is a
+    ``SeedCacheError`` (not a ``ProbeError``, which no cache handler names) and a PG that is not
+    accepting connections is one too, since the cache starts it and waits for it."""
     probe = PgProbe(config)
-    return seed_cache.rows_with_pg_up(config, lambda: count_rows(probe.sql))
+
+    def sql(query: str) -> list[list[str]]:
+        try:
+            rows = probe.sql(query)
+        except ProbeError as exc:
+            raise seed_cache.SeedCacheError(f"ProbeError: {exc}") from exc
+        if rows is None:
+            raise seed_cache.SeedCacheError("PG is not accepting connections")
+        return rows
+
+    return sql
+
+
+def _offline_read(config: Path, olds):
+    """The store's rows and path-column hits, with its PG started alone and stopped again."""
+    return seed_cache.rows_with_pg_up(
+        config, lambda: seed_cache.read_store(_store_sql(config), olds)
+    )
+
+
+def _offline_rewrite(config: Path, pairs):
+    """The same, rewriting the saved run dir to this one in the path columns."""
+    return seed_cache.rows_with_pg_up(
+        config, lambda: seed_cache.rewrite_store(_store_sql(config), pairs)
+    )
 
 
 def seed_plan(cfg: Config, from_version: str, home: Path, log: Callable[[str], None]):
@@ -2131,6 +2158,7 @@ def seed_plan(cfg: Config, from_version: str, home: Path, log: Callable[[str], N
         return f"the seeder's files cannot be read: {exc}"
     inputs = seed_cache.KeyInputs(
         from_version=from_version,
+        kind="standin" if cfg.standin else "real",
         engine_pin=pin,
         python=cfg.python,
         prepare_template=prepare_template_for(
@@ -2142,9 +2170,10 @@ def seed_plan(cfg: Config, from_version: str, home: Path, log: Callable[[str], N
     )
     cache = seed_cache.SeedCache(
         cfg.seed_cache_dir,
-        rows_fn=_offline_rows,
+        read_fn=_offline_read,
+        rewrite_fn=_offline_rewrite,
         log=log,
-        is_port_free=seed_cache.port_free,
+        pick_port=seed_cache.free_port,
         clean_check=seed_cache.stopped_clean,
     )
     return cache, inputs
@@ -2300,7 +2329,13 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     setup_prepare = {
                         "source": "cache",
                         "key": key_.name,
-                        "label": f"store restored from cache {key_.name}",
+                        "label": (
+                            f"store restored from cache {key_.name}"
+                            + (f" (saved {res.saved_at[:10]})" if res.saved_at else "")
+                        ),
+                        "saved_at": res.saved_at,
+                        "pg_port": res.port,
+                        "path_rows_rewritten": res.path_rows,
                         "seconds": round(res.seconds, 1),
                         "rows": res.rows,
                         "relocated_files": res.relocated.files,
@@ -2366,9 +2401,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     }
                 elif not stop and prepare is not None:
                     cache_, key_ = plan
-                    saved = cache_.save(
-                        key_, run_dir, floor=cfg.rows_floor, replace=rejected is not None
-                    )
+                    saved = cache_.save(key_, run_dir, floor=cfg.rows_floor)
                     why = f"rejected: {rejected}; " if rejected is not None else ""
                     label = (
                         f"seeded (cache miss, {why}saved {key_.name})"
