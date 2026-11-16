@@ -1790,6 +1790,14 @@ def test_the_new_guard_runs_in_shadow_like_the_matrix() -> None:
     assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_unrecorded": 1}
 
 
+@pytest.mark.parametrize(("row", "request_kind"), [(GROWN_LOOKUP, L), (GROWN_DISCOVERY, D)], ids=["lookup", "listing"])
+def test_the_untrusted_label_refusal_runs_in_shadow_like_the_matrix(row, request_kind: K) -> None:
+    out, filt = _match([row], [(row["id"], 0.05)], request_kind, enforce=False)
+    assert _ids(out) == [row["id"]], "shadow keeps the candidate"
+    assert filt.to_wire()["branches"]["cosine"]["reasons"] == {"grown_route_untrusted_label": 1}
+    assert filt.enforced_excluded_total == 0
+
+
 def test_the_new_reasons_are_in_the_closed_vocabulary() -> None:
     assert {"grown_route_unrecorded", "grown_route_not_discovery", "grown_route_untrusted_label"} <= el.REASONS
 

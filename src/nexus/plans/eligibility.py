@@ -42,8 +42,8 @@ what it retrieved) cannot claim lookup, synthesis, comparison, audit or debug (`
 ``answer_kind.SHAPE_VETOED_KINDS``). Reasons: ``kind_mismatch``, ``saved_unknown_plan``, ``saved_other_project``,
 ``saved_retrieval_only``; the ``unknown`` request keeps ``unknown_request_untrusted_plan``.
 
-The ``unknown`` kind in the ``lookup`` and ``discovery/listing`` rows means a curated or a grown plan of unknown
-kind; a plan with no answer-kind declaration (``unattested``) is eligible for neither of those two rows, nor for
+The ``unknown`` kind in the ``lookup`` and ``discovery/listing`` rows means a curated plan of unknown kind (the
+matrix also lets a grown one in, and ``_judge`` refuses it, nexus-a4g2a, below); a plan with no answer-kind declaration (``unattested``) is eligible for neither of those two rows, nor for
 any other (Sam, 2026-11-03, nexus-rflvp; see the provenance rules below).
 
 A ``lookup`` request admits no synthesis plan (Sam, 2026-10-30, nexus-jypmj.11): a synthesis plan outscored the
@@ -67,8 +67,8 @@ otherwise ``nx_answer`` plans inline.
 
 ``unknown`` plan kinds are limited by provenance, as the RDR says: a curated (reviewed builtin) unknown
 plan is eligible as the table reads; a grown unknown plan (grown with no recorded route, or whose recorded
-route is not trusted) is eligible only for ``lookup`` and ``discovery/listing`` requests, and ``_judge``
-narrows that further (nexus-indyo, nexus-a4g2a, below): only when it recorded the request's own kind; an
+route is not trusted) is eligible in the matrix only for ``lookup`` and ``discovery/listing`` requests, and ``_judge``
+refuses it for both (nexus-indyo, nexus-a4g2a, below), so it serves no request kind until its route is trusted; an
 unattested plan,
 one that declares nothing, is eligible for neither (Sam, 2026-11-03, nexus-rflvp: user-saved plans, which
 declare nothing, won 31 of 77 lookups since the gate was enabled, one of them another project's plan through
@@ -433,8 +433,9 @@ class PlanStanding:
     ``route`` is the recorded route of a grown plan's declared kind (``explicit``, ``heuristic``,
     ``model-assisted``), whether or not it was honoured; ``None`` when the row records none. ``kind`` is the
     EFFECTIVE kind: ``unknown`` when the declared one was discounted. ``recorded_kind`` is the kind a grown plan
-    recorded when that kind was discounted (``unreviewed_route``); it never widens eligibility, it only narrows
-    it (the lookup rule, nexus-indyo; the listing rule, nexus-a4g2a). ``None`` everywhere else.
+    recorded when that kind was discounted (``unreviewed_route``); it never widens eligibility. It names the
+    reason a lookup or listing refuses the plan (the lookup rule, nexus-indyo; the listing rule and the untrusted
+    label, nexus-a4g2a) and is counted per kind. ``None`` everywhere else.
     """
 
     kind: PlanAnswerKind
@@ -706,8 +707,9 @@ def _judge(
     ):
         # nexus-a4g2a (halcyon, 2026-11-11, rule 6): a guard, not a measured effect. A grown plan that recorded no
         # kind serves no lookup or listing (its steps were planned for a request nothing classified), and a
-        # listing takes only a grown plan that recorded discovery, as the matrix gives listings listing plans.
-        # It only narrows: the worst case is an inline replan. Counted by reason (and recorded kind) to show
+        # listing refuses a grown plan that recorded another kind, as the matrix gives listings listing plans; the
+        # else branch (case 2, 2026-11-16) refuses the plan that recorded the request's own kind as well.
+        # It only narrows: the worst case is another eligible plan or an inline replan. Counted by reason (and recorded kind) to show
         # its cost as grown plans accrue. Only an unknown-kind grown plan: one on a trusted route keeps its
         # known kind and goes by the matrix. A grown-read curated claim (untrusted_curated_claim) records no
         # kind either, so it is refused here under its own flag.
@@ -804,8 +806,8 @@ class EligibilityFilter:
         self._judged: dict[int, tuple[PlanStanding, Verdict]] = {}
         self._excluded_ids: list[int] = []
         self._enforced_excluded = 0
-        #: nexus-q7dpt, nexus-a4g2a: per recorded kind, the ``grown_route_not_lookup`` and
-        #: ``grown_route_not_discovery`` exclusions (counted like ``excluded``).
+        #: nexus-q7dpt, nexus-a4g2a: per recorded kind, the ``grown_route_not_lookup``,
+        #: ``grown_route_not_discovery`` and ``grown_route_untrusted_label`` exclusions (counted like ``excluded``).
         self._refused_recorded_kinds: dict[str, int] = {}
         self._returned: dict[str, int] | None = None
         self._selected: dict[str, Any] | None = None
