@@ -220,7 +220,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Draft | 2026-08-23 |
 | [RDR-200](rdr-200-nx-answer-continuation-mode.md) | nx_answer Continuation Mode and the Composed-Retrieval Bridge Route | Architecture | Closed | 2026-09-01 |
 | [RDR-201](rdr-201-closed-vocabularies-as-checked-tables.md) | Closed Vocabularies as Checked Tables | Architecture | Closed | 2026-09-01 |
-| [RDR-202](rdr-202-containerize-release-battery.md) | Containerize the Release Battery: Layered Images, a Compose-Expressed Gate DAG, and the macOS-Native Residue | Architecture | Draft | 2026-09-04 |
+| [RDR-202](rdr-202-containerize-release-battery.md) | Containerize the Release Battery: Layered Images, a Compose-Expressed Gate DAG, and the macOS-Native Residue | Architecture | Abandoned | 2026-09-04 |
 | [RDR-203](rdr-203-composite-nx-answer-run-record.md) | One Composite Run Record: Collapse nx_answer's Three Telemetry Writes into a Single Engine Operation | Architecture | Closed | 2026-09-05 |
 | [RDR-204](rdr-204-embedding-profile-and-collection-authority.md) | Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority | Architecture | Closed | 2026-09-06 |
 | [RDR-205](rdr-205-linda-tuple-space-over-postgres.md) | Linda Tuple Space over Postgres: A Coordination Primitive for Agents and Instances | Architecture | Closed | 2026-09-09 |
