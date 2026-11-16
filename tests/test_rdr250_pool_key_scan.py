@@ -268,6 +268,30 @@ async def test_scenario_3_a_pool_key_the_assessment_does_not_cite_is_rejected_by
     assert kept.pool_keys_kept == (_tok(7),) and kept.pool_keys_rejected == (_tok(8),)
 
 
+def _contradicts_cited_supports_uncited(items: str, instruction: str) -> Any:
+    """On the pool's call: the CUST-0008 chunk supports f1 (so f1 is covered) and the CUST-0007 chunk only contradicts it."""
+    payload = json.loads(items)
+    if not any(i["id"].startswith("p") for i in payload):
+        return CHECK(items, instruction)
+    by_key = {t: i["id"] for i in payload for t in (_tok(7), _tok(8)) if t in i["text"]}
+    return {"ok": True, "evidence": [
+        {"item_id": by_key[_tok(8)], "quote": "[f1] supports it", "role": "supports"},
+        {"item_id": by_key[_tok(7)], "quote": "[f1] says the opposite", "role": "contradicts"},
+    ]}
+
+
+@pytest.mark.asyncio
+async def test_a_pool_chunk_cited_only_as_contradicting_is_rejected_though_its_facet_is_covered() -> None:
+    """The precision hole: a covered facet's ``evidence_ids`` holds its contradicting ids too, so reading them would keep a
+    key whose chunk argues against the facet. Only a ``supports`` record keeps a key."""
+    d = _fixture(check=_contradicts_cited_supports_uncited)
+    r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
+    assert r.pool_reason == "" and r.pool_filter_calls == 1
+    assert r.pool_candidate_keys == (_tok(7), _tok(8))
+    assert r.pool_keys_kept == (_tok(8),) and r.pool_keys_rejected == (_tok(7),), "the supporter is kept, the contradicter is not"
+    assert d.resolve_calls() == [[_tok(1), _tok(2), _tok(8)]]
+
+
 @pytest.mark.asyncio
 async def test_a_pool_with_no_key_makes_no_filter_call() -> None:
     d = PoolDispatcher([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [KEYLESS, _cited(9, _tok(2))])

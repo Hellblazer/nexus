@@ -12,10 +12,11 @@ accounted ``sql`` step, no model call) and scanned with the same ``find_key_toke
 anchor. A chunk with no key is dropped. A key found only in the pool is a *candidate*. Which step is the search step: the
 first step of the run whose tool is ``search`` and whose output carries ``ids``; a plan with none has no pool.
 
-**The precision filter** keeps a candidate key only when the coverage assessment cites its chunk. The chunks that carry a
+**The precision filter** keeps a candidate key only when the coverage assessment cites its chunk as support. The chunks that carry a
 candidate key go through the boundary's own assessment (``CoverageBoundary._assess``: its instruction, its facet groups,
 its packing by ``_pack``, its reply parsing, its budget and deadline checks), against the request's facets, and a key is
-kept when its chunk's item id is in the ``evidence_ids`` of a facet the assessment marks ``covered``. Keys the anchors
+kept when a ``supports`` record cites its chunk's item id. A facet is covered exactly when some record supports it, so this
+is the design's "cited in a covered facet", minus the contradicting ids a covered facet's ``evidence_ids`` also holds. Keys the anchors
 name are not filtered. Without the filter a pool key is projected at precision 0.715, below the 0.95 gate (250-research-4),
 so the filter is part of the design and the switch stays off until the MVV measures it.
 
@@ -154,8 +155,9 @@ async def scan_pool(
         return closed("filter_skipped_deadline")
     carriers = [a for a, keys in pool if any(k in candidates for k in keys)]
     budget = max(MIN_REPAIR_QUERY_S, (resolve_until - time.monotonic()) * FILTER_TIME_SHARE)
+    supported: set[str] = set()  # item ids a ``supports`` record cites: not a covered facet's contradicting ids too
     try:
-        findings, report = await asyncio.wait_for(assess(list(facets), carriers, view, 0.0), timeout=budget)
+        _findings, report = await asyncio.wait_for(assess(list(facets), carriers, view, 0.0, supported), timeout=budget)
     except TimeoutError:
         _log.warning("nx_answer_pool_filter_timeout", budget_s=round(budget, 1))
         return closed("filter_timeout")
@@ -166,8 +168,7 @@ async def scan_pool(
         reason = {"skipped_budget": "filter_skipped_budget", "skipped_deadline": "filter_skipped_deadline",
                   "partial_failure": "filter_partial_failure"}.get(report.outcome, "filter_failed")
         return closed(reason, report.calls)
-    cited = {i for f in findings.values() if f.state == "covered" for i in f.evidence_ids}
-    kept_chunks = [(a, keys) for a, keys in pool if a.item_id in cited]
+    kept_chunks = [(a, keys) for a, keys in pool if a.item_id in supported]
     kept_keys = {k for _, keys in kept_chunks for k in keys}
     kept = tuple(k for k in candidates if k in kept_keys)
     pairs = tuple((a, k) for a, keys in kept_chunks for k in keys if k in kept)

@@ -1674,6 +1674,7 @@ class CoverageBoundary:
 
     async def _assess(
         self, facets: Sequence[Facet], anchors: Sequence[EvidenceAnchor], view: BoundaryView, reserve: float | None = None,
+        support_ids: set[str] | None = None,
     ) -> tuple[dict[str, FacetFinding], AssessmentReport]:
         """One concurrent assessment pass (nexus-jypmj.17). *reserve* is the seconds of deadline the stage must leave
         untouched (see :meth:`_stage_reserve`; ``None``: no deadline), so every call draws its timeout from what is
@@ -1690,7 +1691,10 @@ class CoverageBoundary:
         is above zero, one at a time. One
         call that raises or replies unusably affects only its own facets; the others still count. The replies are
         read after all calls finish, in plan order, so the ledger, the call log and every count are the same
-        whatever order the calls finish in."""
+        whatever order the calls finish in.
+
+        *support_ids*, when given, is filled with the item ids a ``supports`` record cites for any facet (RDR-250's pool
+        filter: ``FacetFinding.evidence_ids`` of a covered facet also holds its contradicting ids)."""
         cap = max(1, self.max_facets_per_call)
         groups = [tuple(facets[i:i + cap]) for i in range(0, len(facets), cap)]
         by_stream = {s: [a for a in anchors if a.stream == s] for s in STREAM_ORDER}
@@ -1894,6 +1898,8 @@ class CoverageBoundary:
             detail = raise_detail
         elif unusable_n and outcome == "ok":
             outcome = "failed" if completed == 0 else "partial_failure"
+        if support_ids is not None:
+            support_ids.update(i for sup_of_facet in supports.values() for i in sup_of_facet)
         findings: dict[str, FacetFinding] = {}
         for f in facets:
             sup, con = supports[f.id], contradicts[f.id]
