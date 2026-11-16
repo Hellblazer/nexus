@@ -39,7 +39,7 @@ NAMING_ALLOWED = {
     "service/src/test/java/dev/nexus/service/db/ManifestLabelsCheckAdminIntegrationTest.java",
     "service/src/test/java/dev/nexus/service/db/ManifestCheckLiteralsTest.java",
     "service/src/test/java/dev/nexus/service/ManifestLabelsCheckWritersTest.java",
-    "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
+    "service/src/test/java/dev/nexus/service/db/TenantKeyedStateTables.java",
     "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
     "tests/test_manifest_check_no_trigger.py",
     # the catalog TTL step's scan lists these classes among the ones that name its own

@@ -26,7 +26,7 @@ NAMING_ALLOWED = {
     "service/src/main/java/dev/nexus/service/Main.java",
     "service/src/test/java/dev/nexus/service/CatalogTtlCheckRoutesIntegrationTest.java",
     "service/src/test/java/dev/nexus/service/db/CatalogTtlCheckAdminIntegrationTest.java",
-    "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
+    "service/src/test/java/dev/nexus/service/db/TenantKeyedStateTables.java",
     "tests/test_catalog_ttl_check_no_trigger.py",
     # the sibling manifest CHECK step (nexus-6pfgb.42) names this step's classes in its javadoc and borrows
     # its run-lock key in a test; it is reached by no automatic caller either (its own no-trigger test)

@@ -1502,7 +1502,7 @@ class TestNoAutomaticTrigger:
         "service/src/test/java/dev/nexus/service/ChunkKeySweepRootTargetIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/ChunkConstraintRoutesIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
-        "service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java",
+        "service/src/test/java/dev/nexus/service/db/TenantKeyedStateTables.java",
         "service/src/test/java/dev/nexus/service/db/ChunksWriterLastWrittenAtScanTest.java",
         "service/src/test/java/dev/nexus/service/EgressGuardCensus.java",
         # Slice C (nexus-6pfgb.43): the rung, its registration, and the tests that name it. What it may call is pinned
