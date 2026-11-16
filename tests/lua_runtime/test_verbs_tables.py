@@ -82,9 +82,16 @@ def test_the_param_matches_the_rdr_signature() -> None:
     assert _SPEC.params == (ParamSpec("name", "string"),)
 
 
-#: A shipped table deliberately NOT reachable from a script. Empty today: a new
-#: .toml must be mapped in TABLE_FILES or named here, so it cannot be forgotten.
-_EXCLUDED_TABLE_FILES: frozenset[str] = frozenset()
+#: A shipped table deliberately NOT reachable from a script. A new .toml must be
+#: mapped in TABLE_FILES or named here, so it cannot be forgotten.
+_EXCLUDED_TABLE_FILES: frozenset[str] = frozenset(
+    {
+        # RDR-241's walk-site ratchet (nexus-uwggq.1.1): a lint table of source
+        # functions that walk the catalog, read by tests/test_walk_site_ratchet.py.
+        # It is not a vocabulary a procedure decides with.
+        "walk-sites.toml",
+    }
+)
 
 
 def test_every_shipped_table_is_mapped_or_explicitly_excluded() -> None:
