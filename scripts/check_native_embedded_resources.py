@@ -25,6 +25,9 @@ Fails on:
   * any ``ai/onnxruntime/native/<dir>/`` or ``native/lib/<dir>/`` path whose
     <dir> is not the build platform's (per library);
   * any ``.pdb`` or ``.dSYM`` path (debug symbols);
+  * a vendored changelog resource the report does not name (nexus-f3yqd.2.11: the engine applies db/vendor/ddl_utils
+    and db/vendor/dml_utils at boot, and a native binary without the master, the changes file, the .sql files or the
+    LICENSE cannot, so every library needs all four, on every platform);
   * a library the platform must carry that the report does not name
     (``Platform.required``: losing libonnxruntime4j_jni or libtokenizers
     ships a binary that cannot embed text, with every forbidden-resource
@@ -140,6 +143,26 @@ PLATFORMS = {
     ),
 }
 
+# The vendored libraries the engine applies at boot (service/src/main/resources/db/vendor/; resource-config.json
+# carries the matching db/vendor/.* patterns). The resource path is frozen: it is part of each applied changeset's
+# identity in the libraries' tracking tables.
+VENDORED_LIBRARIES = ("ddl_utils", "dml_utils")
+
+
+def vendored_resource_problems(names: set[str]) -> list[str]:
+    """One problem per vendored resource the report lacks: each library's master, its changes file, a .sql file
+    under changes/ and its LICENSE."""
+    problems: list[str] = []
+    for library in VENDORED_LIBRARIES:
+        root = f"db/vendor/{library}/"
+        for required in (f"{root}db.changelog-master.xml", f"{root}changes/changes.xml", f"{root}LICENSE"):
+            if required not in names:
+                problems.append(f"vendored changelog resource not embedded: {required}")
+        if not any(n.startswith(f"{root}changes/") and n.endswith(".sql") for n in names):
+            problems.append(f"no vendored .sql resource embedded under {root}changes/")
+    return problems
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # Maven prints `[INFO] --- jar:3.4.1:jar (default-jar) @ nexus-service ---`
 # (older Maven: maven-jar-plugin:3.4.1:jar). Anchoring on the goal name keeps
@@ -210,6 +233,7 @@ def check_report(report: object, platform: Platform) -> list[str]:
     for required in platform.required:
         if required not in names:
             problems.append(f"required native library not embedded: {required}")
+    problems += vendored_resource_problems(names)
     return problems
 
 

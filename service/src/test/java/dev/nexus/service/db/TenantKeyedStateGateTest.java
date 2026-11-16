@@ -610,6 +610,9 @@ public class TenantKeyedStateGateTest {
                     + "three example chashes of a refused table that the step above copies), built in that run and dropped "
                     + "with it; nothing keeps it between runs and it is not a tenant's state");
             }
+            notKeyed.put("DmlUtilsInstaller.status", "the latest data-move library install outcome (nexus-f3yqd.2.11): one "
+                + "last-result slot for the engine's one database, written by the boot migration and read by the move worker; "
+                + "it holds no tenant's data");
             notKeyed.put("ChashConstraintValidator.knownTenants", "a supplier of the known tenant names (TokenStore#"
                 + "listKnownTenants), read on the failure path of a VALIDATE; it caches nothing");
             notKeyed.put("ChashConstraintValidator.TENANT_COUNT_BUDGET_PROPERTY", CONSTANT);

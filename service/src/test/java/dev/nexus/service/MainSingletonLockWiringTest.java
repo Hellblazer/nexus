@@ -31,7 +31,7 @@ class MainSingletonLockWiringTest {
         String src = code();
         int validation = src.indexOf("event=pg_session_env_invalid");
         int lock = src.indexOf("bootSingletonLock(ds, dbUrl, dbUser, dbPass, applicationName);");
-        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs)");
+        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller)");
 
         assertThat(validation).isPositive();
         assertThat(lock).as("the lock is taken in main").isGreaterThan(validation);

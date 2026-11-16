@@ -24,12 +24,20 @@ def _res(name: str, *origins: str) -> dict:
     return {"name": name, "entries": [{"origin": o or ORIGIN, "size": 1} for o in (origins or ("",))]}
 
 
+# nexus-f3yqd.2.11: the vendored changelogs the engine applies at boot, one of each kind per library.
+VENDORED = [
+    _res(f"db/vendor/{lib}/{rest}")
+    for lib in ("ddl_utils", "dml_utils")
+    for rest in ("db.changelog-master.xml", "changes/changes.xml", "changes/sql_changes/001-create-schema.sql", "LICENSE")
+]
+
 CLEAN = [
     _res("ai/onnxruntime/native/linux-x64/libonnxruntime.so"),
     _res("ai/onnxruntime/native/linux-x64/libonnxruntime4j_jni.so"),
     _res("native/lib/linux-x86_64/cpu/libtokenizers.so"),
     _res("native/lib/tokenizers.properties"),
     _res("db/changelog/aspects-001-baseline.xml"),
+    *VENDORED,
     # JNA ships every platform itself and is explicitly out of scope.
     _res("com/sun/jna/darwin-aarch64/libjnidispatch.jnilib"),
     _res("com/sun/jna/win32-x86-64/jnidispatch.dll", "a.jar", "b.jar"),
@@ -132,7 +140,7 @@ def test_losing_any_one_required_library_fails_on_every_platform(platform_name: 
     platform carries (libonnxruntime4j_jni, libtokenizers, a Windows MinGW
     runtime DLL) must fail even though every forbidden-resource check is green."""
     platform = chk.PLATFORMS[platform_name]
-    full = [_res(path) for path in platform.required]
+    full = [_res(path) for path in platform.required] + VENDORED
     assert chk.check_report(full, platform) == [], "the required list itself must be a clean report"
     for missing in platform.required:
         report = [r for r in full if r["name"] != missing]
@@ -201,7 +209,7 @@ def test_foreign_suffix_fails_per_platform(platform_name: str, name: str):
 )
 def test_own_suffix_elsewhere_passes(platform_name: str, name: str):
     platform = chk.PLATFORMS[platform_name]
-    clean = [_res(path) for path in platform.required]
+    clean = [_res(path) for path in platform.required] + VENDORED
     assert chk.check_report(clean + [_res(name)], platform) == []
 
 
@@ -302,7 +310,7 @@ def test_cli_passes_on_clean_inputs(tmp_path, capsys):
 
 @pytest.mark.parametrize("platform_name", sorted(chk.PLATFORMS))
 def test_cli_passes_each_platforms_own_required_set(tmp_path, platform_name: str):
-    report = [_res(path) for path in chk.PLATFORMS[platform_name].required]
+    report = [_res(path) for path in chk.PLATFORMS[platform_name].required] + VENDORED
     assert _cli(tmp_path, report, GOOD_LOG, platform_name) == 0
 
 
@@ -336,3 +344,43 @@ def test_cli_invalid_json_fails(tmp_path, capsys):
     log_path.write_text(GOOD_LOG)
     rc = chk.main(["--report", str(report_path), "--build-log", str(log_path), "--platform", "linux-amd64"])
     assert rc == 1 and "not valid JSON" in capsys.readouterr().err
+
+
+# ── the vendored changelogs (nexus-f3yqd.2.11) ──────────────────────────────
+
+@pytest.mark.parametrize("platform_name", sorted(chk.PLATFORMS))
+def test_losing_any_vendored_resource_kind_fails_on_every_platform(platform_name: str):
+    """The engine applies db/vendor/<library> at boot; a native binary without a library's master, changes file,
+    .sql files or LICENSE cannot, whatever the native-library checks say."""
+    platform = chk.PLATFORMS[platform_name]
+    full = [_res(path) for path in platform.required] + VENDORED
+    assert chk.check_report(full, platform) == [], "the full set must be a clean report"
+    for lost in VENDORED:
+        name = lost["name"]
+        problems = chk.check_report([r for r in full if r["name"] != name], platform)
+        assert problems, name
+        assert any(name in p or "no vendored .sql resource" in p for p in problems), (name, problems)
+
+
+def test_a_report_with_no_vendored_resource_names_every_missing_one():
+    native_only = [r for r in CLEAN if not r["name"].startswith("db/vendor/")]
+    problems = chk.check_report(native_only, LINUX)
+    assert len(problems) == 2 * 4, problems
+    assert sum("no vendored .sql resource" in p for p in problems) == 2
+
+
+def test_the_resource_config_names_the_vendored_patterns():
+    """resource-config.json is what puts the vendored files in the native binary at all."""
+    config = json.loads((Path(__file__).parents[2] / "service/src/main/resources/META-INF/native-image/"
+                         "resource-config.json").read_text())
+    patterns = {entry["pattern"] for entry in config["resources"]["includes"]}
+    assert {r"db/vendor/.*\.xml", r"db/vendor/.*\.sql", "db/vendor/.*/LICENSE"} <= patterns
+    import re
+
+    on_disk = sorted(p.relative_to(Path(__file__).parents[2] / "service/src/main/resources").as_posix()
+                     for p in (Path(__file__).parents[2] / "service/src/main/resources/db/vendor").rglob("*")
+                     if p.is_file() and p.suffix in {".xml", ".sql"} or p.name == "LICENSE")
+    assert len(on_disk) > 100, "non-vacuity: the vendored trees were examined"
+    vendor_patterns = sorted(pat for pat in patterns if pat.startswith("db/vendor/"))
+    uncovered = [n for n in on_disk if not any(re.fullmatch(pat, n) for pat in vendor_patterns)]
+    assert uncovered == [], f"vendored runtime files no resource-config pattern includes: {uncovered[:5]}"

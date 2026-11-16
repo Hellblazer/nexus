@@ -27,7 +27,7 @@ class MainServiceRoleCheckWiringTest {
     @Test
     void theRoleIsCheckedOnTheServicePool_afterTheMigrationAndTheIsolationCheck_andARefusalExitsOne() throws Exception {
         String src = code();
-        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs)");
+        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller)");
         int isolation = src.indexOf("ChunksIsolationCheck.verifyAtStartup(ds);");
         int check = src.indexOf("ServiceRoleBypassRlsCheck.verifyAtStartup(ds);");
         int tokenSeed = src.indexOf("new dev.nexus.service.db.TokenStore(ds,");

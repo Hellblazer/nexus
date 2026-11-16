@@ -419,6 +419,25 @@ def test_the_hash_covers_every_changelog_root_the_execution_reads(exec_id: str) 
 
 
 @pytest.mark.parametrize("exec_id", [MAIN, TEST])
+def test_the_vendored_library_changelogs_stay_inside_the_hash_by_decision(exec_id: str) -> None:
+    """nexus-f3yqd.2.11, decision: db/vendor/** (the ddl_utils/dml_utils changelogs the engine applies at boot) is NOT
+    excluded from the jOOQ input hash. Codegen replays db/changelog/db.changelog-master.xml only, so a re-pin does not
+    change the generated trees; hashing it costs one regeneration per re-pin (a rare, hand-made event) and buys that no
+    exclusion has to be kept in step with the day codegen starts to apply the libraries, which would otherwise ship
+    stale generated sources. This pins both halves: the hash stays db/**, and codegen does not reach vendor."""
+    root = _pom()
+    text = _target_text(_hash_execution(root))
+    kind = "main" if exec_id == MAIN else "test"
+    fileset = re.search(r'<fileset id="nexus\.jooq\.' + kind + r'\.inputs".*?</fileset>', text, re.DOTALL)
+    assert fileset, f"no input fileset for {kind}"
+    assert "<exclude" not in fileset.group(), f"{exec_id}: the hash excludes something under db/; see this test"
+    assert "src/main/resources/db/**" in fileset.group()
+    assert "vendor" not in _master_changelog(_codegen_config(root)[exec_id]), (
+        f"{exec_id}: codegen now reads the vendored libraries; the decision above (hash them) still holds, "
+        "but this test and the engine's install order must be revisited together")
+
+
+@pytest.mark.parametrize("exec_id", [MAIN, TEST])
 def test_the_stamp_is_written_after_the_generation_it_vouches_for(exec_id: str) -> None:
     root = _pom()
     codegen_phase = LIFECYCLE.index(_phase(_codegen_config(root)[exec_id]))

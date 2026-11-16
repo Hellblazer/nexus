@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.11 (RDR-246 Step 4): put a migrated data-move test database back to "libraries not installed":
+    drop the five library schemas and the liquibase schema (both libraries' tracking tables) with everything in
+    them. The roles, their grants and the pg_background extension stay. DmlUtilsInstallIntegrationTest runs it
+    before each scenario so every scenario starts from the same state on one migrated container. Superuser, runAlways.
+    Run through DmlUtilsTestFixtures#uninstallDmlUtils.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-dml-utils-uninstall-1" author="nexus-f3yqd.2.11" runAlways="true">
+        <sql>
+DROP SCHEMA IF EXISTS ddl_utils, ddl_utils_lib, dml_utils, dml_utils_data, dml_utils_lib CASCADE;
+DROP SCHEMA IF EXISTS liquibase CASCADE;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

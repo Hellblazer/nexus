@@ -3,6 +3,9 @@
     "includes": [
       {"pattern": "\\Qlogback.xml\\E"},
       {"pattern": "db/changelog/.*\\.xml"},
+      {"pattern": "db/vendor/.*\\.xml"},
+      {"pattern": "db/vendor/.*\\.sql"},
+      {"pattern": "db/vendor/.*/LICENSE"},
       {"pattern": "www.liquibase.org/xml/ns/dbchangelog/.*\\.xsd"},
       {"pattern": "liquibase.build.properties"},
       {"pattern": "liquibase/.*\\.xml"},

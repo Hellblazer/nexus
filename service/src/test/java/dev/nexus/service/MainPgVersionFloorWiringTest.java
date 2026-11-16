@@ -30,7 +30,7 @@ class MainPgVersionFloorWiringTest {
         int pool = src.indexOf("var ds = new HikariDataSource(hikari);");
         int check = src.indexOf("PgVersionFloor.verifyAtBoot(ds);");
         int lock = src.indexOf("bootSingletonLock(ds, dbUrl, dbUser, dbPass, applicationName);");
-        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs)");
+        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller)");
 
         assertThat(pool).isPositive();
         assertThat(check).as("the floor check is in main").isGreaterThan(pool);

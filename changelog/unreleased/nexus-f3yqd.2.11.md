@@ -1,0 +1,3 @@
+### Added
+
+- **The engine installs the data-move libraries at boot (RDR-246).** Before the nexus schema walk, an engine with a separate admin role (`NX_DB_ADMIN_*`) applies the vendored `ddl_utils` and `dml_utils` changelogs as `dml_utils_owner`, then walks nexus's own changelog as `nexus_admin`. It needs the `pg_background` extension, the three library roles, a `liquibase` schema that is absent or owned by `dml_utils_owner`, and `SET ROLE dml_utils_owner` for the admin role; when any is missing, or a library changeset fails, the engine logs the reason (`event=data_move_libraries_skipped` or `data_move_libraries_failed`), runs the nexus walk and serves. A library install never fails a boot and never ends a running index build.

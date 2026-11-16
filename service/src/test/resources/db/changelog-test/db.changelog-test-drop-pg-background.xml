@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.11 (RDR-246 Step 4): DROP EXTENSION pg_background, the "pg_background is absent" state of the
+    install scenarios on the data-move image. CREATE EXTENSION comes back through
+    PgContainerHelper#createDataMoveExtensions. Superuser, runAlways. Run through DmlUtilsTestFixtures#dropPgBackground.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-drop-pg-background-1" author="nexus-f3yqd.2.11" runAlways="true">
+        <sql>DROP EXTENSION IF EXISTS pg_background</sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

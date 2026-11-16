@@ -68,5 +68,85 @@
         "size": 4821
       }
     ]
+  },
+  {
+    "name": "/db/vendor/ddl_utils/db.changelog-master.xml",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 391
+      }
+    ]
+  },
+  {
+    "name": "/db/vendor/ddl_utils/changes/changes.xml",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 9000
+      }
+    ]
+  },
+  {
+    "name": "/db/vendor/ddl_utils/changes/sql_changes/001-create-schema.sql",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 300
+      }
+    ]
+  },
+  {
+    "name": "/db/vendor/ddl_utils/LICENSE",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 34523
+      }
+    ]
+  },
+  {
+    "name": "/db/vendor/dml_utils/db.changelog-master.xml",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 391
+      }
+    ]
+  },
+  {
+    "name": "/db/vendor/dml_utils/changes/changes.xml",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 9000
+      }
+    ]
+  },
+  {
+    "name": "/db/vendor/dml_utils/changes/sql_changes/001-create-schema.sql",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 300
+      }
+    ]
+  },
+  {
+    "name": "/db/vendor/dml_utils/LICENSE",
+    "entries": [
+      {
+        "origin": "file:///C:/build/f9bgu8/src/service/target/nexus-service-1.0-SNAPSHOT.jar",
+        "registration_origin": "META-INF/native-image/dev.nexus/nexus-service/resource-config.json",
+        "size": 34523
+      }
+    ]
   }
 ]

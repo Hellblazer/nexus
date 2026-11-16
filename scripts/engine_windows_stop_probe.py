@@ -74,6 +74,8 @@ EVENT_KEYS: tuple[str, ...] = (
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _CHANGESET_RE = re.compile(r"<changeSet\b")
 _NEW_CHANGESETS_RE = re.compile(r"\bnew_changesets=(\d+)")
+# Liquibase's UI line names the changeset's file; the nexus master's are all under db/changelog/, the vendored libraries' under db/vendor/.
+_RUNNING_NEXUS_CHANGESET_RE = re.compile(r"Running Changeset: db/changelog/")
 
 
 # --------------------------------------------------------------------------- #
@@ -84,9 +86,12 @@ _NEW_CHANGESETS_RE = re.compile(r"\bnew_changesets=(\d+)")
 def count_changesets(changelog_dir: Path) -> int:
     """changeSet elements in every ``*.xml`` under *changelog_dir*, XML comments removed (a tag inside a comment is not a changeset).
 
-    ``db/vendor`` (ddl_utils and dml_utils, vendored by scripts/vendor_dml_utils.py) is skipped: nothing includes those
-    changelogs from the engine master, so their changesets are not part of the master's boot and would skew the
-    mid-changeset stop trigger's midpoint (nexus-f3yqd.2.10)."""
+    ``db/vendor`` (ddl_utils and dml_utils, vendored by scripts/vendor_dml_utils.py) is skipped, and the stop trigger
+    counts the same set from the other side (:func:`running_nexus_changesets`). The counting rule (nexus-f3yqd.2.11):
+    the midpoint is half of the NEXUS master's changesets. Since the engine applies the vendored libraries at boot,
+    before the nexus walk, its log carries their "Running Changeset: db/vendor/..." lines too; those are neither in
+    this count nor in the trigger's, so the stop lands in the middle of the nexus walk whether the libraries were
+    applied (a bundle with pg_background) or skipped."""
     total = 0
     for root, dirs, files in os.walk(changelog_dir):
         if Path(root) == Path(changelog_dir):
@@ -96,6 +101,11 @@ def count_changesets(changelog_dir: Path) -> int:
                 text = (Path(root) / name).read_text(encoding="utf-8", errors="replace")
                 total += len(_CHANGESET_RE.findall(_COMMENT_RE.sub("", text)))
     return total
+
+
+def running_nexus_changesets(text: str) -> int:
+    """The nexus master's changesets the engine log shows running; the vendored libraries' lines are not counted."""
+    return len(_RUNNING_NEXUS_CHANGESET_RE.findall(text))
 
 
 def event_lines(text: str, keys: Sequence[str] = EVENT_KEYS, limit: int = 18) -> list[str]:
@@ -353,8 +363,8 @@ def boot(cfg: Config, cl: Cluster, tag: str, trigger: str | None = None, do_brea
         if trigger == "pending" and "event=schema_migration_pending" in txt:
             seen = "migration_pending" if "schema_migration_complete" not in txt else "missed"
             break
-        if trigger and trigger.startswith("midchangeset:") and txt.count("Running Changeset") >= int(trigger.split(":")[1]):
-            seen = f"changesets_running={txt.count('Running Changeset')}" if "schema_migration_complete" not in txt else "missed"
+        if trigger and trigger.startswith("midchangeset:") and running_nexus_changesets(txt) >= int(trigger.split(":")[1]):
+            seen = f"changesets_running={running_nexus_changesets(txt)}" if "schema_migration_complete" not in txt else "missed"
             break
         if trigger == "onnx_model_root" and "onnx_model_root" in txt:
             seen = "onnx_model_root"

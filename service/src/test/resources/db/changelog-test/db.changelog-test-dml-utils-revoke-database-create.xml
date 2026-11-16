@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.11 (RDR-246 Step 4): REVOKE CREATE ON DATABASE FROM dml_utils_owner, so the first library changeset
+    (CREATE SCHEMA ddl_utils) fails for real, as it does on a cluster whose DBA skipped that grant. Superuser, runAlways.
+    db.changelog-test-dml-utils-roles.xml grants it back. Run through DmlUtilsTestFixtures#revokeDmlUtilsOwnerDatabaseCreate.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-dml-utils-revoke-create-1" author="nexus-f3yqd.2.11" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+DO $$ BEGIN
+    EXECUTE format('REVOKE CREATE ON DATABASE %I FROM dml_utils_owner', current_database());
+END $$;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

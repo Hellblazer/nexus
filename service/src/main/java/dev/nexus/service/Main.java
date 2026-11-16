@@ -255,8 +255,11 @@ public final class Main {
         // RDR-227: the resolved admin values stay in scope for the per-collection index builder.
         var adminConnection = dev.nexus.service.db.AdminConnection.resolve(System::getenv, dbUrl, dbUser, dbPass);
         var migrationDs = buildMigrationDataSource(adminConnection);
+        // nexus-f3yqd.2.11 (RDR-246): the vendored ddl_utils and dml_utils changelogs apply first, as dml_utils_owner,
+        // when the engine has a separate admin role; the installer keeps why they did not, for the data-move worker.
+        final var dmlUtilsInstaller = new dev.nexus.service.db.DmlUtilsInstaller(!adminConnection.user().equals(dbUser));
         try {
-            SchemaMigrator.migrate(migrationDs);
+            SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller);
         } catch (SchemaMigrator.MigrationException e) {
             // Close the migration pool BEFORE System.exit: exit does not run finally blocks,
             // so explicit close here avoids leaking the pool on the error path.
