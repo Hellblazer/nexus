@@ -6561,7 +6561,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   library_check, builtins_checked, undeclared_builtins, undeclared_builtin_names, branches,
   excluded_total, excluded_plan_ids, returned, selected, fallback_reason, enforced_reasons,
   enforced_excluded_total, refused_recorded_kinds}`. `refused_recorded_kinds` maps each kind a
-  grown plan recorded to the number of its `grown_route_not_lookup` and `grown_route_not_discovery` exclusions, counted like
+  grown plan recorded to the number of its `grown_route_not_lookup`, `grown_route_not_discovery` and
+  `grown_route_untrusted_label` exclusions, counted like
   `excluded` (one plan found by two branches counts twice); `{}` when there were none.
   `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
   `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
@@ -6577,7 +6578,10 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   recorded kind never widens eligibility but does narrow it, nexus-indyo), `grown_route_not_discovery`
   (a discovery/listing request refusing a grown plan that recorded another kind, nexus-a4g2a),
   `grown_route_unrecorded` (a lookup or discovery/listing request refusing a grown plan that recorded no kind;
-  a curated claim without the builtin tag is refused there under `untrusted_curated_claim`, nexus-a4g2a), `unattested_plan`
+  a curated claim without the builtin tag is refused there under `untrusted_curated_claim`, nexus-a4g2a),
+  `grown_route_untrusted_label` (a lookup or discovery/listing request refusing a grown plan that recorded the
+  request's own kind: that kind is the growing request's label, not a check of the plan's steps, so a grown plan
+  on an untrusted route serves no request kind until a reviewed decision names its route, nexus-a4g2a), `unattested_plan`
   (a lookup or discovery/listing request refusing a plan that declares no answer kind, such as a
   user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp),
   `saved_unknown_plan` (a saved plan of unknown kind serves no request), `saved_other_project` (a saved

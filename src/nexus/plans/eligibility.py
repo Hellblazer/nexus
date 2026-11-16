@@ -109,8 +109,9 @@ Provenance is decided from the STORED row, failing closed (the rule ``answer_kin
   (``grown_route_not_discovery``). Neither was measured (5 grown plans, none accruing); both only narrow, so
   the worst case is an inline replan, and a good hit can be lost (grown plan 585 served discovery run 794
   well, unless 585 recorded discovery: its row is gone and its recorded kind unknown). A grown plan that
-  recorded lookup still serves lookups, and one that recorded discovery serves listings, whether or not the
-  request that grew it was labelled correctly (the label is the request's guess; open in nexus-a4g2a);
+  recorded the request's own kind is refused too (``grown_route_untrusted_label``, nexus-a4g2a case 2, halcyon
+  2026-11-16): that kind is the label of the request that grew it, not a check of its steps, so until a reviewed
+  decision trusts its route a grown plan serves no request kind;
 * ``unattested``: nothing valid was declared. It is neither curated nor grown, its kind is ``unknown``, and
   every request kind refuses it (nexus-rflvp: ``unattested_plan`` for ``lookup`` and ``discovery/listing``,
   the reasons it always had for the others). A builtin seeded before nexus-jypmj.2.1 is this until
@@ -361,6 +362,7 @@ REASONS: frozenset[str] = frozenset({
     "grown_route_not_lookup",
     "grown_route_unrecorded",
     "grown_route_not_discovery",
+    "grown_route_untrusted_label",
     "unattested_plan",
     "saved_unknown_plan",
     "saved_other_project",
@@ -405,13 +407,13 @@ SINGLE_SOURCE_EXCLUDED_STRATEGIES: frozenset[str] = frozenset({"citation-travers
 _SINGLE_SOURCE_REQUESTS = frozenset({_S, _U})
 
 #: Request kinds the matrix lets a GROWN unknown-kind plan serve. An unattested plan serves none (nexus-rflvp).
-#: ``_judge`` narrows these further (nexus-a4g2a): only a grown plan that recorded the request's own kind, or
-#: recorded lookup for a lookup, is admitted.
+#: ``_judge`` refuses every such plan (nexus-a4g2a): one that recorded no kind, another kind, or the request's own
+#: kind (``grown_route_untrusted_label``), so an untrusted-route grown plan serves no request kind at all.
 _UNKNOWN_PLAN_REQUESTS = frozenset({_L, _D})
 
 #: The refusals a grown plan's recorded kind caused, counted per recorded kind (``refused_recorded_kinds``):
-#: the lookup narrowing (nexus-indyo, nexus-q7dpt) and the listing narrowing (nexus-a4g2a).
-_RECORDED_KIND_REASONS = frozenset({"grown_route_not_lookup", "grown_route_not_discovery"})
+#: the lookup narrowing (nexus-indyo, nexus-q7dpt), the listing narrowing and the untrusted label (nexus-a4g2a).
+_RECORDED_KIND_REASONS = frozenset({"grown_route_not_lookup", "grown_route_not_discovery", "grown_route_untrusted_label"})
 
 
 def coerce_kind(raw: object) -> PlanAnswerKind:
@@ -713,6 +715,13 @@ def _judge(
             verdict = Verdict(False, standing.flag or "grown_route_unrecorded")
         elif request_kind is _D and standing.recorded_kind is not _D:
             verdict = Verdict(False, "grown_route_not_discovery")
+        else:
+            # nexus-a4g2a case 2 (halcyon, 2026-11-16, rule 6): the recorded lookup or discovery is the label of
+            # the request that grew the plan, not a check of its steps (run 897 recorded lookup on a 6-step
+            # synthesis-shaped plan), and RDR-232 reads no kind from steps. So the label admits nothing either:
+            # with this branch an untrusted-route grown plan serves no request kind until a reviewed decision
+            # names its route in TRUSTED_ROUTES. Counted per recorded kind, like the two narrowings above.
+            verdict = Verdict(False, "grown_route_untrusted_label")
     return standing, verdict
 
 
