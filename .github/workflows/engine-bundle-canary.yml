@@ -5,27 +5,36 @@ name: Engine Bundle Canary
 # WHY. develop CI exercises only the PG bundle of REQUIRED_ENGINE_VERSION, which moves at a client release,
 # so a new engine tag's bundle is first tested by the release PR's CI. conexus 8.3.0's PR went red that way:
 # engine-service-v0.1.194 bundles pgvector 0.8.7, whose CREATE EXTENSION runs 147 more DDL statements, and
-# tests/ddl_ceiling.toml [python_unit] migration_ddl_per_worker read 2578 against 2431. scripts/engine_bundle_canary.py
-# fetches the tag's bundle, runs the scoped substrate tests on it, and compares the `ddl: migration=N` line with
-# the ceiling. A red here means: raise the ceiling with the measured reason in the release that bumps
-# REQUIRED_ENGINE_VERSION (docs/agents/engine-service-release.md, "Engine-bundle canary").
+# tests/ddl_ceiling.toml [python_unit] migration_ddl_per_worker read 2578 against 2431.
+# scripts/engine_bundle_canary.py measures BOTH the pinned bundle and the tag's bundle (the scoped substrate
+# tests plus the journey file, `ddl: migration=N`). It fails when the pinned count differs from the ceiling
+# (develop drifted), when tests are red, or when nothing was measured. When the tag's count differs from the
+# pinned one it exits 0 with a warning and a summary line: the client release that pins the tag moves the
+# ceiling to the tag's count with the reason (docs/agents/engine-service-release.md, "Engine-bundle canary").
 #
-# TRIGGERS, deliberately two (CI cost discipline: one run per engine tag, never per push or PR):
-#   - release published, engine-service-v* tags only (the job-level `if` below; a conexus v* release also fires
-#     this event and reports the jobs skipped);
+# TRIGGERS. Once per engine tag, never per push or PR (CI cost discipline):
+#   - workflow_call from engine-service-release.yml's `bundle-canary` job, after promote-release publishes. A
+#     publish made with GITHUB_TOKEN raises no `release` event, and a called workflow resolves at the calling
+#     tag's commit, so this works before main has the file;
+#   - release published, engine-service-v* tags only (a human publishing the draft by hand; the job-level `if`
+#     skips a conexus v* release);
 #   - workflow_dispatch with the tag to test.
-# A release that engine-service-release.yml's promote-release publishes with GITHUB_TOKEN does NOT raise a
-# `release` event (GitHub does not start workflows from events GITHUB_TOKEN creates), so promote-release also
-# dispatches this workflow by name; a human who publishes the draft by hand raises the event.
 #
 # RUNNER. The pytest shards' pool class (lab-6c18g, 6 cores, 18 GB), the same runs-on shape as ci.yml's `test`
 # job minus the fork-PR clause (no pull_request trigger here); repo variable NX_CI_POOL=off sends it to
 # ubuntu-latest. The jar is built on ubuntu-latest the way ci.yml's service-jar job does (jOOQ codegen needs
-# Docker, which the pool's pytest class is not probed for).
+# Docker, which the pool's pytest class is not probed for). Both jobs check out ONE develop sha, resolved by
+# the first, so the jar and the tests are the same tree.
 
 on:
   release:
     types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Engine tag to test, engine-service-vX.Y.Z"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -43,11 +52,13 @@ concurrency:
 jobs:
   service-jar:
     name: service jar (canary substrate)
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'engine-service-v') }}
+    if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'engine-service-v') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       NX_JOOQ_CACHE: "off"
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -55,6 +66,10 @@ jobs:
           # branch tests that branch (tests/test_workflow_dispatch_ref_lint.py).
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
           persist-credentials: false
+
+      - name: Resolve the one sha both jobs test
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up GraalVM 25.0.3
         uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
@@ -78,7 +93,7 @@ jobs:
   canary:
     name: engine bundle canary
     needs: service-jar
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'engine-service-v') }}
+    if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'engine-service-v') }}
     runs-on: ${{ vars.NX_CI_POOL == 'off' && 'ubuntu-latest' || 'lab-6c18g' }}
     timeout-minutes: 45
     env:
@@ -102,7 +117,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
+          ref: ${{ needs.service-jar.outputs.sha }}
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
