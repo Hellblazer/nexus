@@ -1,0 +1,192 @@
+# RDR-241 Phase 1 Step 1 (nexus-uwggq.1.1): the walk-site table, the checked form of the
+# RDR's section "The ratchet". Ships inside the package (src/nexus/tables/) like
+# chunk-metadata-keys.toml; load it through nexus.tables.walk_sites.
+#
+# One row per function in src/nexus that calls all_documents, keyed
+# "<path under src/nexus>::<qualified function>" (no line number: it moves on every edit).
+# This is a RATCHET and its direction is down: tests/test_walk_site_ratchet.py parses
+# src/nexus with ast and holds the source and this table to an exact match. A call in a
+# function not listed here is a finding, a row whose function has no call is a finding, and a
+# `calls` value that differs from the scan, up or down, is a finding. So a walk is added by
+# editing this table where a reviewer sees it, and the commit that switches a walk to a route
+# lowers or deletes its row. Never add a row to make the lint pass: read the rows from a route.
+#
+# emit fields
+#   class   why the call exists (closed set, see nexus.tables.walk_sites.CLASSES):
+#             AGGREGATE  the caller wants a derived answer; a route should give it.
+#             BULK JOB   the caller must visit every document; stays a walk.
+#             BOUNDED    one bounded page, or only a bounded mode of the call.
+#   calls   how many all_documents calls the function holds (the scan counts ast.Call nodes
+#           whose callee is an attribute or a name `all_documents`; enumerate_all_documents is
+#           another name and is not counted).
+#   reason  one sentence: what the function does with the rows. The four wrappers
+#           (enumerate_all_documents, _all_entries, _entries_of_type, reference_only_candidates)
+#           are ordinary rows and name their callers here, because a new caller of a wrapper
+#           escapes the scan.
+#   next    optional: the bead that removes or lowers the row.
+#
+# Frozen on 2e09b8cfc: 25 sites, 28 calls, 19 files. Forecast (RDR-241): 21 calls after
+# Phase 1, 18 after Phase 2.
+#
+# KIND. A total lookup, site -> row, with no guard dimension: "state-machine" is the checker's
+# kind without the guard obligation (the same choice chunk-metadata-keys.toml makes). What the
+# checker proves is match totality (every listed site is named by a row) and no overlap.
+
+[table]
+id = "walk-sites"
+kind = "state-machine"
+version = 1
+
+[dimensions.site]
+domain = [
+  "catalog/link_generator.py::_all_entries",
+  "catalog/link_generator.py::_entries_of_type",
+  "catalog/meta_backfill.py::backfill_meta",
+  "catalog/recovery_bundle.py::enumerate_all_documents",
+  "catalog/sensitivity_doctor.py::_walk_sensitive",
+  "commands/catalog.py::list_cmd",
+  "commands/catalog.py::reconcile_cmd",
+  "commands/catalog_cmds/backfill.py::backfill_source_uri_cmd",
+  "commands/catalog_cmds/backfill.py::backfill_etags_cmd",
+  "commands/catalog_cmds/doctor.py::_run_store_put_integrity",
+  "commands/catalog_cmds/integrity.py::_audit_membership_all",
+  "commands/catalog_cmds/integrity.py::_verify_full",
+  "commands/catalog_cmds/maintenance.py::gc_cmd",
+  "commands/catalog_cmds/reconcile_fences.py::reconcile_fences",
+  "commands/catalog_cmds/reconcile_stale.py::_classify",
+  "commands/catalog_cmds/remediation.py::prune_stale_cmd",
+  "commands/catalog_cmds/remediation.py::remediate_paths_cmd",
+  "commands/catalog_cmds/sensitivity.py::_targets",
+  "commands/enrich.py::_aspect_bearing_collections",
+  "doctor_references.py::reference_only_candidates",
+  "mcp/catalog.py::catalog_list",
+  "mcp/catalog.py::catalog_search",
+  "operators/sensitive_paths.py::file_tool_restriction",
+  "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan",
+  "upgrade_ladder/rungs/manifest_span_fill.py::ManifestSpanFillRung._scan",
+]
+
+[[row]]
+id = "catalog/link_generator.py::_all_entries"
+match = { site = "catalog/link_generator.py::_all_entries" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Citation join over bib ids; the wrapper's one caller is generate_citation_links (link_generator.py:324), no route is designed and it stays." }
+
+[[row]]
+id = "catalog/link_generator.py::_entries_of_type"
+match = { site = "catalog/link_generator.py::_entries_of_type" }
+emit = { class = "BULK JOB", calls = 1, reason = "The nx catalog generate-links full pass (RDR-193 Step 7); the wrapper's callers are _entry_docs (link_generator.py:110) and prune_stale_same_as_links (link_generator.py:1025), and it stays." }
+
+[[row]]
+id = "catalog/meta_backfill.py::backfill_meta"
+match = { site = "catalog/meta_backfill.py::backfill_meta" }
+emit = { class = "BULK JOB", calls = 1, reason = "Writes meta on every document, so it must visit each one; stays." }
+
+[[row]]
+id = "catalog/recovery_bundle.py::enumerate_all_documents"
+match = { site = "catalog/recovery_bundle.py::enumerate_all_documents" }
+emit = { class = "BULK JOB", calls = 1, reason = "The nx catalog recovery export walk; the wrapper's one caller is export_bundle (recovery_bundle.py:491), and it stays." }
+
+[[row]]
+id = "catalog/sensitivity_doctor.py::_walk_sensitive"
+match = { site = "catalog/sensitivity_doctor.py::_walk_sensitive" }
+emit = { class = "AGGREGATE", calls = 1, reason = "The fallback when /sensitive is unavailable or capped; Phase 1 reports 'not checked' instead of walking, so the call leaves the table.", next = "nexus-uwggq.1.8" }
+
+[[row]]
+id = "commands/catalog.py::list_cmd"
+match = { site = "commands/catalog.py::list_cmd" }
+emit = { class = "AGGREGATE", calls = 1, reason = "The --meta and --sensitive modes read every document of a type; Phase 1 sends --sensitive through /sensitive and resolve_many, Phase 2 sends --meta through the metadata route, and the row then becomes BOUNDED.", next = "nexus-uwggq.1.7, nexus-uwggq.2.14" }
+
+[[row]]
+id = "commands/catalog.py::reconcile_cmd"
+match = { site = "commands/catalog.py::reconcile_cmd" }
+emit = { class = "BULK JOB", calls = 1, reason = "Heals manifest gaps for every document; stays." }
+
+[[row]]
+id = "commands/catalog_cmds/backfill.py::backfill_source_uri_cmd"
+match = { site = "commands/catalog_cmds/backfill.py::backfill_source_uri_cmd" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Wants only the chroma:// rows; Phase 1 reads them with list_scoped(source_uri_prefix=\"chroma://\").", next = "nexus-uwggq.1.3" }
+
+[[row]]
+id = "commands/catalog_cmds/backfill.py::backfill_etags_cmd"
+match = { site = "commands/catalog_cmds/backfill.py::backfill_etags_cmd" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Wants only the https:// rows when no owner is given; Phase 1 reads them with list_scoped(source_uri_prefix=\"https://\").", next = "nexus-uwggq.1.3" }
+
+[[row]]
+id = "commands/catalog_cmds/doctor.py::_run_store_put_integrity"
+match = { site = "commands/catalog_cmds/doctor.py::_run_store_put_integrity" }
+emit = { class = "BULK JOB", calls = 1, reason = "Reads each note's manifest and T3 chunks (doctor.py:1309-1345); stays." }
+
+[[row]]
+id = "commands/catalog_cmds/integrity.py::_audit_membership_all"
+match = { site = "commands/catalog_cmds/integrity.py::_audit_membership_all" }
+emit = { class = "BULK JOB", calls = 1, reason = "Checks per-row collection membership for every document; stays." }
+
+[[row]]
+id = "commands/catalog_cmds/integrity.py::_verify_full"
+match = { site = "commands/catalog_cmds/integrity.py::_verify_full" }
+emit = { class = "BULK JOB", calls = 1, reason = "Verifies every row, and the ghost rows feed the manifest attribution; stays." }
+
+[[row]]
+id = "commands/catalog_cmds/maintenance.py::gc_cmd"
+match = { site = "commands/catalog_cmds/maintenance.py::gc_cmd" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Wants only documents with miss_count >= 2; Phase 2 reads them through the metadata route with an integer lower bound.", next = "nexus-uwggq.2.15" }
+
+[[row]]
+id = "commands/catalog_cmds/reconcile_fences.py::reconcile_fences"
+match = { site = "commands/catalog_cmds/reconcile_fences.py::reconcile_fences" }
+emit = { class = "BULK JOB", calls = 1, reason = "Checks the manifest and stamps each candidate document; stays." }
+
+[[row]]
+id = "commands/catalog_cmds/reconcile_stale.py::_classify"
+match = { site = "commands/catalog_cmds/reconcile_stale.py::_classify" }
+emit = { class = "BULK JOB", calls = 1, reason = "Checks T3 presence for every row; stays." }
+
+[[row]]
+id = "commands/catalog_cmds/remediation.py::prune_stale_cmd"
+match = { site = "commands/catalog_cmds/remediation.py::prune_stale_cmd" }
+emit = { class = "BULK JOB", calls = 2, reason = "Tests file existence on disk for each row; Phase 1 reads the --collection branch with list_by_collection, which takes calls from 2 to 1.", next = "nexus-uwggq.1.6" }
+
+[[row]]
+id = "commands/catalog_cmds/remediation.py::remediate_paths_cmd"
+match = { site = "commands/catalog_cmds/remediation.py::remediate_paths_cmd" }
+emit = { class = "BULK JOB", calls = 2, reason = "Resolves the path of each row; Phase 1 reads the --collection branch with list_by_collection, which takes calls from 2 to 1.", next = "nexus-uwggq.1.6" }
+
+[[row]]
+id = "commands/catalog_cmds/sensitivity.py::_targets"
+match = { site = "commands/catalog_cmds/sensitivity.py::_targets" }
+emit = { class = "BULK JOB", calls = 1, reason = "Serves nx catalog sensitive with no tumbler, --collection or --owner; stays." }
+
+[[row]]
+id = "commands/enrich.py::_aspect_bearing_collections"
+match = { site = "commands/enrich.py::_aspect_bearing_collections" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Builds a set of collection names; Phase 1 reads distinct_doc_collections() instead.", next = "nexus-uwggq.1.2" }
+
+[[row]]
+id = "doctor_references.py::reference_only_candidates"
+match = { site = "doctor_references.py::reference_only_candidates" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Wants the non-file:// rows; the wrapper's one caller is run_check_references (doctor_references.py:288), and Phase 1 makes one list_scoped read per registered scheme.", next = "nexus-uwggq.1.5" }
+
+[[row]]
+id = "mcp/catalog.py::catalog_list"
+match = { site = "mcp/catalog.py::catalog_list" }
+emit = { class = "BOUNDED", calls = 2, reason = "Reads one page of limit + 1 documents; stays." }
+
+[[row]]
+id = "mcp/catalog.py::catalog_search"
+match = { site = "mcp/catalog.py::catalog_search" }
+emit = { class = "AGGREGATE", calls = 1, reason = "The author-alone branch, unattended (Gap 3); Phase 2 reads it through the author route.", next = "nexus-uwggq.2.12" }
+
+[[row]]
+id = "operators/sensitive_paths.py::file_tool_restriction"
+match = { site = "operators/sensitive_paths.py::file_tool_restriction" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Runs per operator dispatch, unattended (Gap 3); Phase 2 reads it through the locator route.", next = "nexus-uwggq.2.13" }
+
+[[row]]
+id = "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan"
+match = { site = "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan" }
+emit = { class = "BULK JOB", calls = 1, reason = "Gap 2, deferred; guarded unattended on a managed service." }
+
+[[row]]
+id = "upgrade_ladder/rungs/manifest_span_fill.py::ManifestSpanFillRung._scan"
+match = { site = "upgrade_ladder/rungs/manifest_span_fill.py::ManifestSpanFillRung._scan" }
+emit = { class = "BULK JOB", calls = 1, reason = "Gap 2, deferred; guarded the same way (manifest_span_fill.py:599, :639, :712)." }
