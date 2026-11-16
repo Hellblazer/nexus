@@ -202,9 +202,15 @@ code (research 3); lane D, outside systems (research 4).
   though the binary defines that key. The fallback applies: delegation covers
   `claude -p` children; subagent writes stay attributed to the parent seat
   with an `agent` label, as today. Re-checked on each Claude Code upgrade.
-- [ ] A Claude Desktop session can run the SessionStart hook and bind.
-  **Method**: Spike. If it cannot, a Desktop session binds on its first MCP
-  call as an ephemeral identity.
+- [x] A Claude Desktop session can run the SessionStart hook and bind.
+  **Status**: Verified in part, from records. The hook runs on Desktop: the
+  2026-11-03 compaction audit saw SessionStart hooks fire after all 16
+  Desktop compactions (T2 `nexus/compaction-restore-audit-2026-11-03`), and
+  the hook receives the session id on stdin. But the Desktop-spawned MCP
+  server never sees the session id (JDR-002, F17, nexus-wkjqm), so it cannot
+  pick up the identity token. A Desktop seat therefore binds through its
+  hook, and its MCP-side writes stay unattested labels, never fenced, until a
+  bridge carries the session id to that server.
 
 ## Proposed Solution
 
@@ -410,8 +416,10 @@ Self-certifying identifiers, signed binding events, witnesses.
 - **Fencing refuses a legitimate write** (a long-running background job from
   before a `/clear`): the job re-reads its token through the resolver before
   each write; a refusal names the current holder.
-- **Desktop cannot bind** (Critical Assumption 4 fails): Desktop sessions run
-  as ephemeral identities until promoted.
+- **Desktop MCP writes are unattested** (Critical Assumption 4): a Desktop
+  seat binds through its hook, but its MCP server cannot hold the identity
+  token, so its writes to identity-owned state are labels the engine cannot
+  fence. Desktop seats are named as such in `nx identity show`.
 
 ### Failure Modes
 
@@ -429,7 +437,7 @@ Self-certifying identifiers, signed binding events, witnesses.
 
 - [x] Sam's design decisions (2026-11-16; T2
   `nexus_rdr/253-decisions-2026-11-16`).
-- [ ] Spikes for Critical Assumptions 1, 3 and 4.
+- [x] Critical Assumptions 1, 3 and 4 settled (`nexus_rdr/253-research-5`, `-6`; the compaction audit and JDR-002 for 4).
 
 ### Minimum Viable Validation
 
@@ -538,10 +546,10 @@ identity-owned subspace families named under Fencing and nowhere else.
 
 ### Assumption Verification
 
-Three of four Critical Assumptions are settled: two verified (Bash children
-carry the session id; the clear rebind, by spike) and one refuted with its
-fallback adopted (subagent attribution). Desktop binding needs a spike in a
-Desktop session; its fallback is stated.
+All four Critical Assumptions are settled: two verified (Bash children carry
+the session id; the clear rebind, by spike), one refuted with its fallback
+adopted (subagent attribution), and one verified in part from records
+(Desktop binds through its hook, but its MCP writes stay unattested).
 
 ### Scope Verification
 
@@ -586,3 +594,4 @@ T2 `nexus_rdr/253-decisions-2026-11-16`.
   four design decisions.
 - 2026-11-16: Critical Assumption 1 verified by a `/clear` and `/resume` spike in a throwaway session (`nexus_rdr/253-research-5`).
 - 2026-11-16: Critical Assumption 3 refuted (no `claudecode/agentId` on MCP calls in 2.1.325, `nexus_rdr/253-research-6`); the stated fallback adopted.
+- 2026-11-16: Critical Assumption 4 settled in part from records: Desktop runs the hook but its MCP server never sees the session id.
