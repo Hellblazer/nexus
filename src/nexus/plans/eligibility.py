@@ -712,7 +712,8 @@ def _judge(
         # It only narrows: the worst case is another eligible plan or an inline replan. Counted by reason (and recorded kind) to show
         # its cost as grown plans accrue. Only an unknown-kind grown plan: one on a trusted route keeps its
         # known kind and goes by the matrix. A grown-read curated claim (untrusted_curated_claim) records no
-        # kind either, so it is refused here under its own flag.
+        # kind either, so it is refused here under its own flag. Every path below refuses; the branches only name
+        # the reason, and the per-reason counts are why they stay separate.
         if standing.recorded_kind is None:
             verdict = Verdict(False, standing.flag or "grown_route_unrecorded")
         elif request_kind is _D and standing.recorded_kind is not _D:
