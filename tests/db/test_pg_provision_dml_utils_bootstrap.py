@@ -100,21 +100,11 @@ def bins() -> pp.PgBinaries:
     return pp.discover_pg_binaries()
 
 
-def _provision(config_dir: Path, bins: pp.PgBinaries, *, skip_bootstrap: bool) -> None:
-    """provision() a fresh cluster; with ``skip_bootstrap`` it is what an install from before this step looks like."""
-    mp = pytest.MonkeyPatch()
-    if skip_bootstrap:
-        mp.setattr(boot, "bootstrap_dml_utils_best_effort", lambda *a, **k: None)
-    try:
-        try:
-            pp.provision(config_dir, force_new_port=True)
-        except subprocess.CalledProcessError as exc:
-            pg_log = config_dir / "postgres" / "pg.log"
-            tail = pg_log.read_text()[-2000:] if pg_log.exists() else "(no pg.log)"
-            raise AssertionError(f"provision failed: {exc}\nstderr: {exc.stderr!r}\npg.log tail:\n{tail}") from exc
-    finally:
-        mp.undo()
-    apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
+def _provision_failed(config_dir: Path, exc: subprocess.CalledProcessError) -> AssertionError:
+    # CalledProcessError's str() omits stderr, which is the part that says why.
+    pg_log = config_dir / "postgres" / "pg.log"
+    tail = pg_log.read_text()[-2000:] if pg_log.exists() else "(no pg.log)"
+    return AssertionError(f"provision failed: {exc}\nstderr: {exc.stderr!r}\npg.log tail:\n{tail}")
 
 
 @pytest.fixture
@@ -122,7 +112,11 @@ def fresh(bins: pp.PgBinaries):
     """A cluster provision() made with the bootstrap in place."""
     config_dir = Path(pg_data_tempdir("nexus_dmlutils_pg_"))
     try:
-        _provision(config_dir, bins, skip_bootstrap=False)
+        try:
+            pp.provision(config_dir, force_new_port=True)
+        except subprocess.CalledProcessError as exc:
+            raise _provision_failed(config_dir, exc) from exc
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
         yield _Box(config_dir, bins)
     finally:
         stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)
@@ -130,13 +124,22 @@ def fresh(bins: pp.PgBinaries):
 
 @pytest.fixture
 def legacy(bins: pp.PgBinaries):
-    """A cluster provisioned before the bootstrap existed: nothing of it is there."""
+    """A cluster provisioned before the bootstrap existed: the dml_utils step is stubbed out for the
+    first provision(), so nothing of it is there."""
     config_dir = Path(pg_data_tempdir("nexus_dmlutils_legacy_pg_"))
+    mp = pytest.MonkeyPatch()
     try:
-        _provision(config_dir, bins, skip_bootstrap=True)
+        mp.setattr(boot, "bootstrap_dml_utils_best_effort", lambda *a, **k: None)
+        try:
+            pp.provision(config_dir, force_new_port=True)
+        except subprocess.CalledProcessError as exc:
+            raise _provision_failed(config_dir, exc) from exc
+        finally:
+            mp.undo()
+        apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)
         box = _Box(config_dir, bins)
         if box.q("SELECT count(*) FROM pg_available_extensions WHERE name = 'pg_background'") == "0":
-            pytest.skip(f"the bundle at {bins.bin_dir} has no pg_background (pinned engine tag's bundle has it)")
+            pytest.skip(f"the bundle at {bins.bin_dir} has no pg_background (the pinned engine tag's bundle has it)")
         yield box
     finally:
         stop_and_remove_cluster(bins.pg_ctl, config_dir / "postgres", remove_dir=config_dir)

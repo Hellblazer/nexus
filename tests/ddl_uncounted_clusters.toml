@@ -74,6 +74,7 @@ sites = ["tests/_engine_substrate.py::_boot::pg_ctl_start"]
 "tests/db/test_pg_provision.py::<module>::initdb" = 1
 "tests/db/test_pg_provision_binary_discovery.py::test_bundle_under_config_dir_resolved_without_nexus_pg_bin::initdb" = 1
 "tests/db/test_pg_provision_ca3_bundle.py::_bundle_root::initdb" = 1
+"tests/db/test_pg_provision_dml_utils_bootstrap.py::<module>::initdb" = 1
 "tests/db/test_pg_scram_auth.py::<module>::initdb" = 1
 "tests/db/test_recovery_bundle_integration.py::<module>::initdb" = 1
 "tests/db/test_recovery_bundle_integration.py::pg_instance::pg_ctl_start" = 1
