@@ -14,7 +14,7 @@ import pytest
 
 import nexus.daemon.service_registry as sr
 import nexus.daemon.storage_service_daemon as ssd
-from nexus.daemon.service_registry import ServiceRegistry, service_identity, ttl_for_tier
+from nexus.daemon.service_registry import ProcessSweepResult, ServiceRegistry, service_identity, ttl_for_tier
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups and pid probes")
 
@@ -133,3 +133,19 @@ def test_a_live_local_pid_with_the_containers_number_is_not_signalled(tmp_path: 
     finally:
         bystander.kill()
         bystander.wait(timeout=10)
+
+
+def test_a_lease_pid_the_sweep_then_stopped_is_not_reported_unreadable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lease check read the endpoint pid empty; the sweep then matched and stopped it.
+    The stop reports it as stopped, not also as unidentified and maybe still running."""
+    registry = _registry(tmp_path)
+    registry.publish(service_identity(), endpoint={"pid": 4242, "port": 1}, version="t", owner_token="tok")
+    monkeypatch.setattr(sr, "process_command", lambda _pid, *, platform=None: "")
+    monkeypatch.setattr(ssd, "_pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(
+        sr, "sweep_matching_processes",
+        lambda *_a, **_k: ProcessSweepResult(available=True, error=None, found=((4242, "nexus-service"),), stubborn=()),
+    )
+    outcome = ssd.stop_storage_service(config_dir=tmp_path)
+    assert outcome.pids == (4242,)
+    assert outcome.unreadable == ()
