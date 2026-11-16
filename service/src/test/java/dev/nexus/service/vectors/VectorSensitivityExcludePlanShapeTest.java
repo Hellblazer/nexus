@@ -741,7 +741,8 @@ class VectorSensitivityExcludePlanShapeTest {
 
     private static final List<String> FAMILIES = List.of("plain_search", "hybrid_search", "manifest_search",
         "text_gated_search_allowed", "text_gated_search_by_chash", "text_gated_search_hnsw_first",
-        "search_metadata_scoped", "search_aspect_scoped", "search_graph_hop", "search_topic_scoped");
+        "search_metadata_scoped", "search_aspect_scoped", "search_graph_hop", "search_topic_scoped",
+        "search_topic_set");
 
     static Stream<org.junit.jupiter.params.provider.Arguments> familyByDim() {
         List<org.junit.jupiter.params.provider.Arguments> out = new ArrayList<>();
@@ -811,6 +812,9 @@ class VectorSensitivityExcludePlanShapeTest {
             case "search_graph_hop" -> List.of(vec(dim), textArray("seed"), colls, DSL.val("cites"), DSL.val(1),
                 DSL.val("out"), nullJsonb(), nullJsonb(), nullText(), n, m, t);
             case "search_topic_scoped" -> List.of(vec(dim), DSL.val("topic"), DSL.val(collectionOf(dim)), n, m, t);
+            // nexus-7fku2.1.1: the topic-set variant, one topic id as a one-element bigint[]
+            case "search_topic_set" -> List.of(vec(dim), DSL.val(new Long[] {1L}, SQLDataType.BIGINT.array()),
+                DSL.val(collectionOf(dim)), n, m, t);
             default -> throw new IllegalArgumentException(fn);
         };
         List<Field<?>> all = new ArrayList<>(a);

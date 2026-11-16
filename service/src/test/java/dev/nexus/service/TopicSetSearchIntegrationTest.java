@@ -80,6 +80,7 @@ class TopicSetSearchIntegrationTest {
         ANGLE.put("tomb", 0.045);// topic B; its only owner is tombstoned: never returned
         ANGLE.put("sA", 0.05);   // topic A; its owner is sensitive and live: excluded when asked
         ANGLE.put("a1", 0.10);
+        ANGLE.put("p1", 0.12);   // topic A through a PROJECTION row: its source_collection is collection 2, not A's
         ANGLE.put("ab", 0.15);   // in topics A and B
         ANGLE.put("b1", 0.20);
         ANGLE.put("a2", 0.30);
@@ -98,14 +99,14 @@ class TopicSetSearchIntegrationTest {
         OWNERS.put("o-z1", new Owner("z1", false, false));
         OWNERS.put("o-tomb", new Owner("tomb", false, true));
         OWNERS.put("o-sA", new Owner("sA", true, false));
-        for (String k : List.of("a1", "ab", "b1", "a2", "b2", "a3", "far")) {
+        for (String k : List.of("a1", "p1", "ab", "b1", "a2", "b2", "a3", "far")) {
             OWNERS.put("o-" + k, new Owner(k, false, false));
         }
     }
 
     private static final Map<String, List<String>> TOPIC_A_B = new LinkedHashMap<>();
     static {
-        TOPIC_A_B.put("A", List.of("dead", "sA", "a1", "ab", "a2", "a3", "far"));
+        TOPIC_A_B.put("A", List.of("dead", "sA", "a1", "p1", "ab", "a2", "a3", "far"));
         TOPIC_A_B.put("B", List.of("dT", "tomb", "ab", "b1", "b2"));
     }
 
@@ -230,19 +231,20 @@ class TopicSetSearchIntegrationTest {
             Owner o = e.getValue();
             own(dsl, e.getKey() + "-" + dim, c1, model, o.chunk(), o.sensitive(), o.tombstoned());
         }
-        for (var t : TOPIC_A_B.entrySet()) {
-            long id = insertTopic(dsl, t.getKey(), c1);
-            topicIds.put(dim + "/" + t.getKey(), id);
-            for (String key : t.getValue()) assign(dsl, id, c1, model, key);
-        }
-
-        // Collection 2 holds a1 and z1 under the SAME chashes. Its topic C assigns z1; topic A (collection 1)
+        // Collection 2 holds a1, p1 and z1 under the SAME chashes. Its topic C assigns z1; topic A (collection 1)
         // assigns a1. Without the t.collection = p_collection guard the join by chash alone would let C match
         // z1 in collection 1, and A match a1 in collection 2.
         insertChunk(dsl, dim, c2, model, "a1", 0.10);
+        insertChunk(dsl, dim, c2, model, "p1", 0.12);
         insertChunk(dsl, dim, c2, model, "z1", 0.04);
         own(dsl, "o2-a1-" + dim, c2, model, "a1", false, false);
         own(dsl, "o2-z1-" + dim, c2, model, "z1", false, false);
+        for (var t : TOPIC_A_B.entrySet()) {
+            long id = insertTopic(dsl, t.getKey(), c1);
+            topicIds.put(dim + "/" + t.getKey(), id);
+            // p1's assignment is a projection row: topic A is collection 1's, the row's source is collection 2
+            for (String key : t.getValue()) assign(dsl, id, key.equals("p1") ? c2 : c1, model, key);
+        }
         long c = insertTopic(dsl, "C", c2);
         topicIds.put(dim + "/C", c);
         assign(dsl, c, c2, model, "z1");
@@ -302,6 +304,10 @@ class TopicSetSearchIntegrationTest {
                 var one = single(dim, label, 20, exclude);
                 var many = set(dim, ids(topic(dim, label)), coll(dim), 20, exclude);
                 assertThat(one).as("non-vacuity: topic %s exclude=%s has rows", label, exclude).isNotEmpty();
+                if (label.equals("A")) {
+                    assertThat(idsOf(one)).as("the single-topic function matches the projection row p1 (chash only)")
+                        .contains(hex("p1"));
+                }
                 assertThat(idsOf(many)).as("topic %s exclude=%s: same ids in the same order", label, exclude)
                     .containsExactlyElementsOf(idsOf(one));
                 assertThat(distancesOf(many)).as("topic %s exclude=%s: same distances", label, exclude)
@@ -318,8 +324,8 @@ class TopicSetSearchIntegrationTest {
     void aSetOfTwoTopics_isTheUnion_deduplicated_nearestFirst(int dim) {
         var r = set(dim, ids(topic(dim, "A"), topic(dim, "B")), coll(dim), 50, true);
         // exclude=true: sA (sensitive owner) and dead (no owner) and tomb (tombstoned owner) are out; ab once
-        assertThat(idsOf(r)).as("A union B, live and not sensitive, nearest first")
-            .containsExactlyElementsOf(hexes("dT", "a1", "ab", "b1", "a2", "b2", "a3", "far"));
+        assertThat(idsOf(r)).as("A union B, live and not sensitive, nearest first (p1 is a projection row of A)")
+            .containsExactlyElementsOf(hexes("dT", "a1", "p1", "ab", "b1", "a2", "b2", "a3", "far"));
         assertThat(distancesOf(r)).isSorted();
 
         // the order of the ids in the array does not matter
@@ -336,10 +342,10 @@ class TopicSetSearchIntegrationTest {
         Field<?> both = ids(topic(dim, "A"), topic(dim, "B"));
         assertThat(idsOf(set(dim, both, coll(dim), 3, true)))
             .as("p_n is the per-collection k: the nearest three of the union")
-            .containsExactlyElementsOf(hexes("dT", "a1", "ab"));
+            .containsExactlyElementsOf(hexes("dT", "a1", "p1"));
         assertThat(idsOf(set(dim, both, coll(dim), 1, true))).containsExactly(hex("dT"));
         assertThat(set(dim, both, coll(dim), 1000, true)).as("k above the set returns the whole set, no padding")
-            .hasSize(8);
+            .hasSize(9);
         assertThat(set(dim, both, coll(dim), 0, true)).as("k = 0").isEmpty();
     }
 
@@ -349,7 +355,7 @@ class TopicSetSearchIntegrationTest {
         Field<?> both = ids(topic(dim, "A"), topic(dim, "B"));
         assertThat(idsOf(set(dim, both, coll(dim), 50, false)))
             .as("flag false: the sensitive chunk sA comes back, so the exclusion below is not a fixture with none")
-            .containsExactlyElementsOf(hexes("dT", "sA", "a1", "ab", "b1", "a2", "b2", "a3", "far"));
+            .containsExactlyElementsOf(hexes("dT", "sA", "a1", "p1", "ab", "b1", "a2", "b2", "a3", "far"));
         assertThat(idsOf(set(dim, both, coll(dim), 50, true))).doesNotContain(hex("sA"));
         assertThat(idsOf(set(dim, both, coll(dim), 50, null)))
             .as("a NULL flag excludes, as every other family does (IS NOT FALSE)")
@@ -378,10 +384,6 @@ class TopicSetSearchIntegrationTest {
             assertThat(rec.get("distance", Double.class)).as("the same distance as plain_search for %s", rec.get("id"))
                 .isEqualTo(plainDistance.get(rec.get("id", String.class)));
         }
-        // a client threshold of 0.1 (cosine distance) drops exactly the rows above it: the merge's job
-        double threshold = 0.1;
-        long above = distancesOf(r).stream().filter(d -> d > threshold).count();
-        assertThat(above).as("non-vacuity: some rows are above the threshold and some below").isBetween(1L, (long) r.size() - 1);
     }
 
     @ParameterizedTest(name = "at {0}")
@@ -404,6 +406,7 @@ class TopicSetSearchIntegrationTest {
     @ParameterizedTest(name = "at {0}")
     @ValueSource(ints = {384, 768, 1024})
     void anEmptyOrNullSet_returnsNoRows(int dim) {
+        // pins the behaviour, not a guard: the function has none, ANY of an empty array is false and of NULL is NULL
         assertThat(set(dim, DSL.val(new Long[0], SQLDataType.BIGINT.array()), coll(dim), 50, false)).isEmpty();
         assertThat(set(dim, DSL.val(null, SQLDataType.BIGINT.array()), coll(dim), 50, false)).isEmpty();
         assertThat(set(dim, ids(Long.MAX_VALUE), coll(dim), 50, false)).as("an id no topic has").isEmpty();

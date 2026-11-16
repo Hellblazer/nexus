@@ -150,6 +150,12 @@ class VectorSensitivityExcludeIntegrationTest {
     private static final List<String> SENSITIVE_HEX = hexes(S1, S2, X);
     /** dimension to the embedding model its collection is registered under (set by the seed). */
     private static final Map<Integer, String> MODELS = new java.util.concurrent.ConcurrentHashMap<>();
+    /** dimension to the id of the fixture's one topic (the topic-set family takes ids, not a label). */
+    private static final Map<Integer, Long> TOPIC_IDS = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static long topicIdOf(int dim) {
+        return TOPIC_IDS.get(dim);
+    }
 
     @BeforeAll
     void startAll() throws Exception {
@@ -202,6 +208,7 @@ class VectorSensitivityExcludeIntegrationTest {
             .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, TOPIC).set(TOPICS.COLLECTION, collection)
             .set(TOPICS.CREATED_AT, SEED_TS)
             .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
+        TOPIC_IDS.put(dim, topic);
         for (var e : ANGLE.entrySet()) {
             byte[] chash = HexFormat.of().parseHex(hex(e.getKey()));
             double theta = e.getValue();
@@ -315,7 +322,8 @@ class VectorSensitivityExcludeIntegrationTest {
         new Family("search_metadata_scoped", true, true),
         new Family("search_aspect_scoped", true, true),
         new Family("search_graph_hop", true, true),
-        new Family("search_topic_scoped", true, true));
+        new Family("search_topic_scoped", true, true),
+        new Family("search_topic_set", true, true));
 
     static Stream<org.junit.jupiter.params.provider.Arguments> familyByDim() {
         List<org.junit.jupiter.params.provider.Arguments> out = new ArrayList<>();
@@ -368,7 +376,7 @@ class VectorSensitivityExcludeIntegrationTest {
 
     /**
      * {@link #run} over a chosen {@code p_collections} and chash allow-list ({@code exclude} may be null: the flag is
-     * passed as a SQL NULL). search_topic_scoped takes one collection, not an array, so it always searches
+     * passed as a SQL NULL). the topic families take one collection, not an array, so they always search
      * {@code coll(dim)}.
      */
     private List<String> runIn(Family family, int dim, Boolean exclude, int n, Field<?> colls, List<String> all) {
@@ -412,6 +420,10 @@ class VectorSensitivityExcludeIntegrationTest {
             }
             case "search_topic_scoped" ->
                 r = call("search_topic_scoped", dim, exclude, vec(dim), DSL.val(TOPIC), DSL.val(c), DSL.val(n), m, t);
+            case "search_topic_set" ->
+                // nexus-7fku2.1.1: the one topic of the fixture, as a one-element bigint[] of its id
+                r = call("search_topic_set", dim, exclude, vec(dim),
+                         DSL.val(new Long[] {topicIdOf(dim)}, SQLDataType.BIGINT.array()), DSL.val(c), DSL.val(n), m, t);
             default -> throw new IllegalArgumentException(family.fn());
         }
         List<String> out = new ArrayList<>();
@@ -540,9 +552,9 @@ class VectorSensitivityExcludeIntegrationTest {
         }
     }
 
-    /** Every family that takes an array of collections (search_topic_scoped takes one). */
+    /** Every family that takes an array of collections (the two topic families take one collection). */
     static Stream<org.junit.jupiter.params.provider.Arguments> arrayFamilyByDim() {
-        return familyByDim().filter(a -> !"search_topic_scoped".equals(((Family) a.get()[0]).fn()));
+        return familyByDim().filter(a -> !((Family) a.get()[0]).fn().startsWith("search_topic_"));
     }
 
     @ParameterizedTest(name = "{0} at {1}")

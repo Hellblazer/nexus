@@ -13,15 +13,16 @@
       1. p_topic_ids bigint[] replaces p_topic_label text. Topic membership is an EXISTS over topic_assignments joined to
          topics (t.collection = p_collection, ta.topic_id = ANY(p_topic_ids)), not a join, so a chunk assigned to two
          topics of the set comes back ONCE, and a repeated id repeats nothing. An empty or NULL array returns no rows
-         (the cardinality guard says so out loud; ANY of an empty array is false and of NULL is NULL, and both give the
-         same answer). A topic that belongs to another collection never matches: c.collection and t.collection both
+         (no explicit guard: ANY of an empty array is false and of NULL is NULL, so the EXISTS never holds; the test pins the
+         behaviour). A topic that belongs to another collection never matches: c.collection and t.collection both
          equal p_collection, and the join between a chunk and its assignment is by chash alone (as in the single-topic
          function), so the t.collection guard is the one that stops a same-chash chunk of the searched collection.
       2. The matching count functions of Step 2 share this predicate shape; keep the EXISTS and its three conjuncts
          together when either changes.
     A topic_assignments row whose source_collection is not the topic's collection (a projection row) still matches a
     chunk of the searched collection with the same chash. That is the single-topic function's behaviour and is kept, so
-    a set of one topic returns exactly what search_topic_scoped returns for its label (the test pins it); Step 2's
+    a set of one topic returns exactly what search_topic_scoped returns for its label (the test seeds a projection row
+    and pins it); Step 2's
     coverage ratio is the place that excludes projection rows from "assigned".
 
     DECISION 1, THE THRESHOLD: it stays in Java. The plain search has no threshold in SQL either: plain_search_<dim>
@@ -34,21 +35,26 @@
     cosine distances, the same values plain_search returns (TopicSetSearchIntegrationTest pins both: no threshold
     parameter, equal distances, a row above any threshold comes back).
 
-    DECISION 2, THE ROUTER (RDR-227): the functions are called directly, as search_topic_scoped is
+    DECISION 2, THE ROUTER (RDR-227): the functions mirror search_topic_scoped and are called directly
     (PgVectorRepository.runCombinedQuery, via the generated SEARCH_TOPIC_SET_<dim> table functions), not through
-    runPlainSearchStatement. That router decides on the UNFILTERED collection: a cardinality probe against
-    searchExactMaxRows picks an exact scan or HNSW, pciIndexes.hasValidIndex picks the per-collection pci_ index, and a
-    one-collection statement with no index walks at the widest ef_search. A topic set is already a selective predicate,
-    so a probe over the whole collection answers the wrong question, and a pci_ HNSW index scan that applies the topic
-    EXISTS after the walk returns SHORT rows when the set is small against the index (the RDR's Risks section). The
-    call keeps the same session discipline as the single-topic call: statement timeout, hnsw.iterative_scan =
-    relaxed_order, ef_search from the request k, the scan budget, a custom plan per execution. How often a routed
-    collection comes back short against an exact scan is Step 5a's measurement; this changeset changes no index and
-    no GUC. If a later step routes these functions through the router, its probe must count the topic-filtered set,
-    not the whole collection.
+    runPlainSearchStatement. The router does NOT choose the pci_ index: the planner does, from the arm's
+    collection = ANY(p_collections) predicate under a custom plan (PciPlanCheck); the router's hasValidIndex only
+    sets walkWide, the widest ef_search for a one-collection statement with no index. A direct call goes through
+    runCombinedQuery, which also forces a custom plan, so the planner can still walk a collection's pci_ index here.
+    So the short-row exposure of these functions equals the single-topic function's, and Step 5a measures it. What a
+    direct call forgoes is the router's other three levers: the exact-scan route for a small selected set (the
+    cardinality probe against searchExactMaxRows, which is complete and needs no repair), the widest ef_search when no
+    pci_ index exists, and the empty-result exact re-run (exactOnUnderReturn). Step 3 decides whether the topic arm
+    needs any of them; the RDR's zero-row fallback to the unscoped search already covers the empty case. Step 3 also
+    needs its own arm method: runCombinedQuery returns flat maps under a fixed statement timeout, not the
+    FanoutMerger candidates under the arm bound that searchPerCollection merges. The call keeps the single-topic
+    call's session discipline (statement timeout, hnsw.iterative_scan = relaxed_order, ef_search from the request k,
+    the scan budget, a custom plan per execution). This changeset changes no index and no GUC. If a later step routes
+    these functions through the router, its probe must count the topic-filtered set, not the whole collection.
 
-    GRANTS. EXECUTE revoked from PUBLIC and granted to nexus_svc on each, the posture vectors-060 gave the functions it
-    added (the older search functions were left to the schema default). 9 DDL statements: 3 CREATE FUNCTION, 3 REVOKE,
+    GRANTS. EXECUTE granted to nexus_svc on each, and revoked from PUBLIC as defence in depth (vectors-060 revokes only in
+    its SECURITY DEFINER branch, and the older search functions were left to the schema default; these are SECURITY
+    INVOKER, so row-level security is the access control and the revoke narrows who may call). 9 DDL statements: 3 CREATE FUNCTION, 3 REVOKE,
     3 GRANT; no table, so the runAlways grants loop adds none.
 
     No DATA EFFECT: function definitions only. Placed after vectors-061, before the grants-nexus-svc.xml runAlways
@@ -76,8 +82,7 @@ AS $function$
            (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
            c.retention
       FROM nexus.chunks c
-     WHERE COALESCE(cardinality(p_topic_ids), 0) > 0
-       AND c.embedding_model = p_embedding_model
+     WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
        AND c.collection = p_collection
        AND c.embedding_384 IS NOT NULL
@@ -122,8 +127,7 @@ AS $function$
            (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
            c.retention
       FROM nexus.chunks c
-     WHERE COALESCE(cardinality(p_topic_ids), 0) > 0
-       AND c.embedding_model = p_embedding_model
+     WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
        AND c.collection = p_collection
        AND c.embedding_768 IS NOT NULL
@@ -168,8 +172,7 @@ AS $function$
            (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
            c.retention
       FROM nexus.chunks c
-     WHERE COALESCE(cardinality(p_topic_ids), 0) > 0
-       AND c.embedding_model = p_embedding_model
+     WHERE c.embedding_model = p_embedding_model
        AND c.tenant_id = p_tenant
        AND c.collection = p_collection
        AND c.embedding_1024 IS NOT NULL
