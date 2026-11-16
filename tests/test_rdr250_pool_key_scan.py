@@ -1,0 +1,416 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""RDR-250 Phase 1 Steps 2 and 3 (nexus-io7tw): the pool key scan and its precision filter, behind ``NX_ANSWER_POOL_KEY_SCAN``.
+
+Tenant-free, in the fixture style of ``tests/test_rdr147_resolution_repair.py``: ``plan_run`` is driven with a stub
+dispatcher, the model call (``operator_check``) is stubbed at the dispatcher, and ``resolve`` answers with the real
+``resolve_keys`` over a small in-memory catalog. The plan's own ``store_get_many`` carries ``limit_per_source``, so the
+generator reads the first ``ANCHORS`` ids of the search step and the rest of its ids are the pool (plan 10's shape, in
+miniature: it reads 20 of 40).
+
+The Test Plan of RDR-250 is the six scenarios below. The non-vacuity pins are the cited-versus-uncited pair: the same
+pool through a check that cites its chunk and through one that does not, which must differ.
+"""
+from __future__ import annotations
+
+import ast
+import asyncio
+import json
+import os
+import re
+import time
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+from nexus import config as _config
+from nexus.plans import coverage_pool, switches
+from nexus.plans.coverage_ledger import BoundaryView, CoverageBoundary
+from nexus.plans.coverage_repair import WIRE_KEY_LIST_CAP, RepairReport
+from nexus.plans.repair_stream import SupplementItem
+from nexus.plans.reserved_stream import strip_source_note
+from tests.test_rdr147_resolution_repair import (
+    CHECK,
+    JOINED_SEP,
+    PATTERN,
+    RECORD_COLL,
+    FakeCatalog,
+    ResolveDispatcher,
+    _record_text,
+    _tok,
+)
+from tests.test_rdr232_coverage_ledger import RDR_COLL, _cov, _request, _structured
+from tests.test_rdr232_coverage_repair import _h, _run, by_topic
+
+#: Anchors the generator reads: the first two ids of the search step. Everything after them is the pool.
+ANCHORS = 2
+POOL_PLAN = {"steps": [
+    {"tool": "search", "args": {"query": "q", "corpus": "rdr", "limit": 40}},
+    {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "rdr", "limit_per_source": ANCHORS}},
+    {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}},
+]}
+#: The query-tool twin of the plan above: no ``search`` step, so no pool.
+NO_SEARCH_PLAN = {"steps": [
+    {"tool": "query", "args": {"question": "q", "corpus": "rdr"}},
+    {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "rdr", "limit_per_source": ANCHORS}},
+    {"tool": "generate", "args": {"context": "$step2.contents", "question": "q"}},
+]}
+
+
+def _anchor(n: int, token: str) -> str:
+    return f"decision message {n} raised by {token} in the channel"
+
+
+def _cited(n: int, token: str) -> str:
+    """A pool chunk the stub's check cites: it holds the topic word of f1 and f2."""
+    return f"decision message {n} also raised by {token} in the channel"
+
+
+def _uncited(n: int, token: str) -> str:
+    """A pool chunk with a key and no topic word: the stub's check answers it with a neutral record."""
+    return f"lunch order {n} for {token} and the usual table"
+
+
+KEYLESS = "a decision note with no customer in it at all"
+
+
+class PoolDispatcher(ResolveDispatcher):
+    """The resolution tests' stub, with a search step of ``ANCHORS`` anchor texts followed by the pool texts, a plan
+    ``store_get_many`` that honours ``limit_per_source`` (as the real one does), and a pool fetch that can fail."""
+
+    def __init__(self, anchor_texts: list[str], pool_texts: list[str], check=CHECK, *, fail_pool_fetch: bool = False, **kw: Any) -> None:
+        tokens = sorted({t for text in (*anchor_texts, *pool_texts) for t in _tokens_of(text)})
+        super().__init__(anchor_texts, FakeCatalog(tokens), check, **kw)
+        self.pool_texts = pool_texts
+        self.pool_hashes = {_h(strip_source_note(t)) for t in pool_texts}
+        self.by_hash |= {_h(strip_source_note(t)): t for t in pool_texts}
+        self.fail_pool_fetch = fail_pool_fetch
+
+    async def __call__(self, tool: str, args: dict) -> dict:
+        if tool in ("search", "query") and not self.is_repair_search(args):
+            self.calls.append((tool, dict(args)))
+            return _structured([strip_source_note(t) for t in (*self.anchor_texts, *self.pool_texts)], RDR_COLL)
+        if tool == "store_get_many" and args.get("ids") and {str(i) for i in args["ids"]} <= set(self.by_hash):
+            self.calls.append((tool, dict(args)))
+            ids = [str(i) for i in args["ids"]]
+            if "limit_per_source" in args:
+                ids = ids[: int(args["limit_per_source"])]
+            elif self.fail_pool_fetch and set(ids) & self.pool_hashes:
+                raise RuntimeError("pool fetch backend down")
+            return {"contents": [self.by_hash[i] for i in ids]}
+        return await super().__call__(tool, args)
+
+    def pool_fetches(self) -> list[dict]:
+        return [a for t, a in self.calls if t == "store_get_many" and "limit_per_source" not in a
+                and {str(i) for i in a["ids"]} & self.pool_hashes]
+
+
+async def _view_and_first(d: PoolDispatcher):
+    """A boundary view over a finished run of ``POOL_PLAN`` (so its search step carries the pool) with the repair hooks
+    the runner would hand it, and the first ledger: what ``_resolve_anchors`` is called with, for the tests that set the
+    allowance themselves."""
+    first_result = await _run(d, CoverageBoundary(request=_request(3), max_repair_queries=0), plan=POOL_PLAN)
+    first = _cov(first_result)
+
+    async def check(args: dict, *, timeout: float) -> dict:  # noqa: ARG001
+        return await d("operator_check", args)
+
+    async def retrieve(tool: str, args: dict, *, timeout: float) -> dict:  # noqa: ARG001
+        return await d(tool, args)
+
+    async def fetch(hits: list[Any], *, timeout: float) -> list[Any]:  # noqa: ARG001
+        return [SupplementItem(text=d.by_hash[h.id], chash=h.id, collection=h.collection, tumbler=h.tumbler) for h in hits]
+
+    view = BoundaryView(
+        evidence_texts=[a.content for a in first.ledger.anchors], observed=True, step_outputs=list(first_result.steps),
+        tools=["search", "store_get_many", "generate"], scope_diagnostics=[], resolved_args=[],
+        check=check, remaining_usd=lambda: None, remaining_seconds=lambda: None, retrieve=retrieve, fetch=fetch,
+        install_supplement=lambda items: None, rehydrate=lambda: ([a.content for a in first.ledger.anchors], True),
+    )
+    return view, first
+
+
+def _soon(seconds: float = 30.0) -> float:
+    return time.monotonic() + seconds
+
+
+def _tokens_of(text: str) -> list[str]:
+    return re.findall(PATTERN, text)
+
+
+@pytest.fixture(autouse=True)
+def _no_catalog_lookup():
+    with patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _entity_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    real = _config.load_config
+
+    def with_entity(*a: Any, **k: Any) -> dict:
+        return {**real(*a, **k), "entity": {"collections": {"rdr__*": PATTERN}}}
+
+    monkeypatch.setattr(_config, "load_config", with_entity)
+
+
+def pool_on(**kw: Any) -> CoverageBoundary:
+    return CoverageBoundary(request=_request(3), resolution_repair=True, pool_key_scan=True, **kw)
+
+
+def pool_off(**kw: Any) -> CoverageBoundary:
+    return CoverageBoundary(request=_request(3), resolution_repair=True, **kw)
+
+
+def _fixture(*, check=CHECK, **kw: Any) -> PoolDispatcher:
+    """Anchors name CUST-0001 and CUST-0002. The pool: a keyless chunk, a chunk naming CUST-0007 that the check
+    cites, a chunk naming CUST-0008 that it does not, and a chunk naming CUST-0001 again (an anchor key, so no candidate)."""
+    return PoolDispatcher(
+        [_anchor(1, _tok(1)), _anchor(2, _tok(2))],
+        [KEYLESS, _cited(7, _tok(7)), _uncited(8, _tok(8)), _cited(9, _tok(1))],
+        check, **kw)
+
+
+# ── the switch ────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_the_switch_is_off_by_default_and_a_bare_boundary_does_not_scan_the_pool() -> None:
+    assert switches.ANSWER_POOL_KEY_SCAN_ENABLED is False
+    assert switches.pool_key_scan_enabled({}) is False
+    assert CoverageBoundary(request=None).pool_key_scan is False
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("1", True), ("true", True), ("YES", True), (" on ", True),
+    ("", False), ("  ", False), ("0", False), ("off", False), ("NO", False), ("garbage", False),
+])
+def test_the_switch_reads_an_on_value_as_on_and_unset_off_or_unrecognised_as_off(raw: str, expected: bool) -> None:
+    switches.reset_warned()
+    assert switches.pool_key_scan_enabled({switches.ANSWER_POOL_KEY_SCAN_ENV: raw}) is expected
+
+
+def test_the_suite_clears_the_switch_for_every_test() -> None:
+    """The conftest must ``delenv`` the switch before every test, so a developer's export cannot leak in."""
+    tree = ast.parse((Path(__file__).parent / "conftest.py").read_text(encoding="utf-8"))
+    cleared = {
+        call.args[0].value
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "delenv"
+        and call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str)
+    }
+    assert switches.ANSWER_POOL_KEY_SCAN_ENV in cleared, "the conftest no longer clears the switch for every test"
+    assert switches.ANSWER_POOL_KEY_SCAN_ENV not in os.environ
+
+
+# ── scenario 1: the switch off ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scenario_1_with_the_switch_off_the_pool_is_not_read_and_the_report_has_no_pool_field() -> None:
+    d = _fixture()
+    cov = _cov(await _run(d, pool_off(), plan=POOL_PLAN))
+    r = cov.repair
+    assert r.resolution_entered and r.anchor_key_ids == (_tok(1), _tok(2))
+    assert d.resolve_calls() == [[_tok(1), _tok(2)]], "the anchors' keys only"
+    assert d.pool_fetches() == [], "the code path is not entered: the pool chunks are never fetched"
+    wire = r.to_wire()
+    assert not [k for k in wire if k.startswith("pool_")], "off is the wire of today"
+    assert r.pool_key_scan is False and r.pool_scanned == 0 and r.pool_reason == ""
+    # the same run with the switch spelled out False is the same wire
+    d2 = _fixture()
+    again = _cov(await _run(d2, pool_off(pool_key_scan=False), plan=POOL_PLAN)).repair
+    assert {k: v for k, v in again.to_wire().items() if k != "latency_ms"} == {k: v for k, v in wire.items() if k != "latency_ms"}
+    assert d.tools == d2.tools
+
+
+# ── scenario 2 and 3: a cited key is kept, an uncited key is rejected ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scenario_2_a_pool_key_the_assessment_cites_is_resolved_and_joined_to_its_pool_chunk() -> None:
+    d = _fixture()
+    cov = _cov(await _run(d, pool_on(), plan=POOL_PLAN))
+    r = cov.repair
+    assert r.pool_key_scan is True and r.pool_reason == ""
+    assert r.pool_scanned == 4, "the non-anchor ids of the search step, fetched once"
+    assert len(d.pool_fetches()) == 1 and len(d.pool_fetches()[0]["ids"]) == 4
+    assert r.pool_candidate_keys == (_tok(7), _tok(8)), "keys found only in the pool; the repeat of an anchor key is no candidate"
+    assert r.pool_keys_kept == (_tok(7),) and r.pool_keys_rejected == (_tok(8),) and r.pool_filter_calls == 1
+    assert r.anchors_scanned == ANCHORS, "anchors_scanned keeps its meaning: the anchors only"
+    assert d.resolve_calls() == [[_tok(1), _tok(2), _tok(7)]], "anchor keys first, then the kept pool key"
+    assert r.resolved == (_tok(1), _tok(2), _tok(7)) and r.joined_added == 3
+    # the joined item for the pool key carries the pool chunk's own text as its anchor text
+    joined = _cited(7, _tok(7)) + JOINED_SEP + f"{_tok(7)}: {_record_text(_tok(7))}"
+    assert joined in [a.content for a in cov.ledger.anchors]
+    assert cov.ledger.finding("f3").state == "covered" and cov.state == "complete"
+    # the filter is the boundary's own assessment: its instruction names the request's facets, over the pool chunks only
+    filter_call = next(a for a in d.args_of("operator_check") if any(i["id"].startswith("p") for i in json.loads(a["items"])))
+    assert {i["text"] for i in json.loads(filter_call["items"])} == {_cited(7, _tok(7)), _uncited(8, _tok(8))}
+    assert all(f"[f{n}]" in filter_call["check_instruction"] for n in (1, 2, 3))
+    wire = r.to_wire()
+    assert wire["pool_keys_kept"] == [_tok(7)] and wire["pool_keys_rejected"] == [_tok(8)] and wire["pool_filter_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_scenario_3_a_pool_key_the_assessment_does_not_cite_is_rejected_by_name_and_never_resolved() -> None:
+    """Non-vacuity: the filter must be able to reject. The same pool, with a check that cites nothing, keeps nothing."""
+    d = _fixture(check=by_topic(never=("f1", "f2", "f3")))
+    cov = _cov(await _run(d, pool_on(), plan=POOL_PLAN))
+    r = cov.repair
+    assert r.pool_candidate_keys == (_tok(7), _tok(8)) and r.pool_keys_kept == ()
+    assert r.pool_keys_rejected == (_tok(7), _tok(8)), "named, and a rejection is not a failure"
+    assert r.pool_reason == "" and r.pool_filter_calls == 1
+    assert d.resolve_calls() == [[_tok(1), _tok(2)]], "neither pool key reached resolve"
+    # and the cited run of the same pool differs: the filter, not the scan, decides
+    kept = _cov(await _run(_fixture(), pool_on(), plan=POOL_PLAN)).repair
+    assert kept.pool_keys_kept == (_tok(7),) and kept.pool_keys_rejected == (_tok(8),)
+
+
+@pytest.mark.asyncio
+async def test_a_pool_with_no_key_makes_no_filter_call() -> None:
+    d = PoolDispatcher([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [KEYLESS, _cited(9, _tok(2))])
+    r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
+    assert (r.pool_scanned, r.pool_candidate_keys, r.pool_filter_calls, r.pool_reason) == (2, (), 0, "")
+    assert d.resolve_calls() == [[_tok(1), _tok(2)]]
+    assert len(d.args_of("operator_check")) == 2, "the first round's one vector call and the re-check; no filter"
+
+
+# ── scenario 4: the filter fails closed ───────────────────────────────────────────────────────────────────
+
+
+def _on_pool(inner):
+    """A check that misbehaves on the pool's call only (its items are ``p<n>``), and is *inner* on every other."""
+    def check(items: str, instruction: str) -> Any:
+        if any(i["id"].startswith("p") for i in json.loads(items)):
+            return inner(items, instruction)
+        return CHECK(items, instruction)
+    return check
+
+
+def _raise(items: str, instruction: str) -> Any:  # noqa: ARG001
+    return RuntimeError("check backend down")
+
+
+def _malformed(items: str, instruction: str) -> dict:  # noqa: ARG001
+    return {"ok": True}  # no evidence list: not the check shape
+
+
+def _no_records(items: str, instruction: str) -> dict:  # noqa: ARG001
+    return {"ok": False, "evidence": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("inner", "reason"), [
+    (_raise, "filter_failed"), (_malformed, "filter_failed"), (_no_records, "filter_failed"),
+])
+async def test_scenario_4_a_filter_that_fails_or_replies_unusably_keeps_no_pool_key_and_the_anchors_still_resolve(inner, reason: str) -> None:
+    d = _fixture(check=_on_pool(inner))
+    cov = _cov(await _run(d, pool_on(), plan=POOL_PLAN))
+    r = cov.repair
+    assert r.pool_reason == reason and r.pool_keys_kept == ()
+    assert r.pool_keys_rejected == (_tok(7), _tok(8)), "fail closed: every candidate is named as not kept"
+    assert d.resolve_calls() == [[_tok(1), _tok(2)]]
+    assert r.resolution_entered and r.resolved == (_tok(1), _tok(2)) and r.outcome == "completed", "the anchors' keys resolve as today"
+
+
+@pytest.mark.asyncio
+async def test_scenario_4_a_failed_pool_fetch_keeps_no_pool_key_and_the_anchors_still_resolve() -> None:
+    d = _fixture(fail_pool_fetch=True)
+    r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
+    assert r.pool_reason == "fetch_failed" and r.pool_scanned == 0 and r.pool_candidate_keys == () and r.pool_filter_calls == 0
+    assert d.resolve_calls() == [[_tok(1), _tok(2)]] and r.resolution_entered and r.resolved == (_tok(1), _tok(2))
+
+
+@pytest.mark.asyncio
+async def test_scenario_4_a_filter_that_outlives_its_slice_of_the_allowance_keeps_no_pool_key() -> None:
+    class Slow(PoolDispatcher):
+        async def __call__(self, tool: str, args: dict) -> dict:
+            if tool == "operator_check" and any(i["id"].startswith("p") for i in json.loads(args["items"])):
+                await asyncio.sleep(30)
+            return await super().__call__(tool, args)
+
+    d = Slow([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [_cited(7, _tok(7))])
+    view, first = await _view_and_first(d)
+    started = time.monotonic()
+    res = await pool_on()._resolve_anchors(view, first, resolve_until=started + 2.0, fetch_until=started + 2.0)
+    assert res.fields["pool_reason"] == "filter_timeout" and res.fields["pool_keys_kept"] == ()
+    assert time.monotonic() - started < 5, "the filter was cut at its slice, not left to run"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("usd", "seconds", "estimate", "reason", "calls"), [
+    (0.001, None, 0.01, "filter_skipped_budget", 0),    # what is left is below one call's mean cost
+    (0.0, None, None, "filter_skipped_budget", 0),      # spent
+    (0.5, None, 0.01, "", 1),                           # affordable: the filter runs
+    (None, None, 0.01, "", 1),                          # no USD limit
+    (0.001, None, None, "", 1),                         # cost unknown: proceed
+    (None, 1.0, None, "filter_skipped_deadline", 0),    # under the boundary's minimum call time
+])
+async def test_scenario_4_a_short_allowance_keeps_no_pool_key_and_an_unknown_cost_proceeds(usd, seconds, estimate, reason, calls) -> None:
+    d = _fixture()
+    view, first = await _view_and_first(d)
+    view = replace(view, remaining_usd=lambda: usd, remaining_seconds=lambda: seconds, assessment_cost_estimate=lambda: estimate)
+    res = await pool_on()._resolve_anchors(view, first, resolve_until=_soon(), fetch_until=_soon())
+    assert res.fields["pool_reason"] == reason and res.fields["pool_filter_calls"] == calls
+    if reason:
+        assert res.fields["pool_keys_kept"] == () and res.fields["pool_keys_rejected"] == (_tok(7), _tok(8))
+    else:
+        assert res.fields["pool_keys_kept"] == (_tok(7),)
+
+
+@pytest.mark.asyncio
+async def test_scenario_4_a_request_with_no_facet_has_nothing_to_filter_by() -> None:
+    d = _fixture()
+    view, first = await _view_and_first(d)
+    res = await replace(pool_on(), request=None)._resolve_anchors(view, first, resolve_until=_soon(), fetch_until=_soon())
+    assert res.fields["pool_reason"] == "no_facets" and res.fields["pool_keys_kept"] == () and res.fields["pool_filter_calls"] == 0
+
+
+# ── scenario 5: no search step ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scenario_5_a_plan_with_no_search_step_has_no_pool_and_says_so() -> None:
+    d = _fixture()
+    r = _cov(await _run(d, pool_on(), plan=NO_SEARCH_PLAN)).repair
+    assert r.pool_key_scan is True and r.pool_reason == "no_search_step"
+    assert (r.pool_scanned, r.pool_candidate_keys, r.pool_keys_kept, r.pool_filter_calls) == (0, (), (), 0)
+    assert d.pool_fetches() == [] and d.resolve_calls() == [[_tok(1), _tok(2)]], "the branch behaves exactly as today"
+
+
+# ── scenario 6: the cap ───────────────────────────────────────────────────────────────────────────────────
+
+
+def _crowded() -> PoolDispatcher:
+    return PoolDispatcher(
+        [_anchor(1, _tok(1)), _anchor(2, _tok(2))],
+        [_cited(7, _tok(7)), _cited(8, _tok(8)), _cited(9, _tok(9))])
+
+
+@pytest.mark.asyncio
+async def test_scenario_6_anchor_keys_fill_the_cap_first_and_the_overflow_is_named_in_tokens_dropped() -> None:
+    d = _crowded()
+    r = _cov(await _run(d, pool_on(max_repair_items=3), plan=POOL_PLAN)).repair
+    assert r.pool_keys_kept == (_tok(7), _tok(8), _tok(9)), "all three passed the filter"
+    assert d.resolve_calls() == [[_tok(1), _tok(2), _tok(7)]], "the two anchor keys, then the first pool key"
+    assert r.tokens_dropped == (_tok(8), _tok(9)) and r.resolution_tokens == 3
+    tight = _crowded()
+    r2 = _cov(await _run(tight, pool_on(max_repair_items=2), plan=POOL_PLAN)).repair
+    assert tight.resolve_calls() == [[_tok(1), _tok(2)]], "a cap the anchors fill leaves the pool keys no slot"
+    assert r2.tokens_dropped == (_tok(7), _tok(8), _tok(9))
+
+
+def test_the_wire_cuts_a_long_pool_list_at_the_shared_cap_and_counts_what_it_left_out() -> None:
+    names = tuple(f"CUST-{n:04d}" for n in range(WIRE_KEY_LIST_CAP + 3))
+    wire = RepairReport(
+        resolution_entered=True, pool_key_scan=True, pool_candidate_keys=names, pool_keys_rejected=names).to_wire()
+    assert len(wire["pool_candidate_keys"]) == WIRE_KEY_LIST_CAP and wire["pool_candidate_keys_truncated"] == 3
+    assert wire["pool_keys_kept"] == [] and wire["pool_keys_kept_truncated"] == 0
+
+
+def test_the_pool_reasons_are_a_closed_list() -> None:
+    assert "no_search_step" in coverage_pool.POOL_REASONS and "filter_failed" in coverage_pool.POOL_REASONS
+    assert len(set(coverage_pool.POOL_REASONS)) == len(coverage_pool.POOL_REASONS)
+    assert RECORD_COLL  # the catalog fixture's collection is the one the resolved records live in

@@ -15524,6 +15524,7 @@ async def nx_answer(
     # never gets here (no reduction).
     from nexus.plans.switches import (  # noqa: PLC0415 — deferred; matches this module's convention
         coverage_enabled as _coverage_enabled,
+        pool_key_scan_enabled as _pool_key_scan_enabled,
         resolution_repair_enabled as _resolution_repair_enabled,
     )
 
@@ -15538,6 +15539,8 @@ async def nx_answer(
             confinement=_document_confinement,
             # RDR-147 Step 4 (nexus-qpimy): the exact-key resolution branch of the one repair; on unless set to an off value (Phase 2, nexus-bwct4.2).
             resolution_repair=_resolution_repair_enabled(_os.environ),
+            # RDR-250 (nexus-io7tw): the key scan of the search step's pool inside that branch; off unless set to an on value.
+            pool_key_scan=_pool_key_scan_enabled(_os.environ),
         )
     if deadline is not None:
         _plan_run_kwargs["deadline"] = deadline

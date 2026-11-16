@@ -325,6 +325,19 @@ class RepairReport:
     #: RDR-232's skip rule). ``CoverageBoundary.run`` sets it and nothing else does.
     joined_keys: tuple[str, ...] = ()
     generated_on_join: bool = False
+    #: RDR-250 (nexus-io7tw), the pool key scan (:mod:`nexus.plans.coverage_pool`); all of these are unset while
+    #: ``NX_ANSWER_POOL_KEY_SCAN`` is off, and the wire then carries none of them. ``pool_key_scan`` says the scan was
+    #: considered. ``pool_scanned`` is the pool chunks fetched; ``pool_candidate_keys`` the keys found only in the pool;
+    #: ``pool_keys_kept`` and ``pool_keys_rejected`` split them by the precision filter (a closed filter rejects all);
+    #: ``pool_filter_calls`` the assessment calls the filter made; ``pool_reason`` why the pool was skipped or closed
+    #: (:data:`nexus.plans.coverage_pool.POOL_REASONS`; empty when it ran through).
+    pool_key_scan: bool = False
+    pool_scanned: int = 0
+    pool_candidate_keys: tuple[str, ...] = ()
+    pool_keys_kept: tuple[str, ...] = ()
+    pool_keys_rejected: tuple[str, ...] = ()
+    pool_filter_calls: int = 0
+    pool_reason: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -346,6 +359,13 @@ class RepairReport:
                 values: tuple[str, ...] = getattr(self, name)
                 wire[name] = list(values[:WIRE_KEY_LIST_CAP])
                 wire[f"{name}_truncated"] = max(0, len(values) - WIRE_KEY_LIST_CAP)
+        if self.pool_key_scan:
+            # Additive, and only with the pool switch on: with it off the wire is what it was.
+            wire.update({"pool_scanned": self.pool_scanned, "pool_filter_calls": self.pool_filter_calls, "pool_reason": self.pool_reason})
+            for name in ("pool_candidate_keys", "pool_keys_kept", "pool_keys_rejected"):
+                pool_values: tuple[str, ...] = getattr(self, name)
+                wire[name] = list(pool_values[:WIRE_KEY_LIST_CAP])
+                wire[f"{name}_truncated"] = max(0, len(pool_values) - WIRE_KEY_LIST_CAP)
         if self.generated_on_join:
             # Only on a run that generated on an uncovered ledger (option 1): any other run keeps the wire form it had.
             wire["generated_on_join"] = True

@@ -930,6 +930,10 @@ class CoverageBoundary:
     #: RDR-147 Step 4 (nexus-qpimy): the repair may take the exact-key resolution branch. False on a bare boundary; the runner
     #: caller sets it from ``NX_ANSWER_RESOLUTION_REPAIR`` (:func:`nexus.plans.switches.resolution_repair_enabled`).
     resolution_repair: bool = False
+    #: RDR-250 (nexus-io7tw): the resolution branch also scans the search step's pool for keys and keeps those the assessment
+    #: cites (:mod:`nexus.plans.coverage_pool`). False on a bare boundary; the runner caller sets it from
+    #: ``NX_ANSWER_POOL_KEY_SCAN`` (:func:`nexus.plans.switches.pool_key_scan_enabled`, default off).
+    pool_key_scan: bool = False
 
     def stage_allowance(self, remaining: float | None) -> float | None:
         """Seconds the whole assessment stage may use out of *remaining* deadline seconds: ``stage_share`` of
@@ -1309,8 +1313,22 @@ class CoverageBoundary:
         except EntityConfigError as exc:
             _log.warning("nx_answer_coverage_resolution_config_invalid", error=str(exc)[:200])
             return _Resolution({"resolution_reason": "entity_config_error"})
-        scan: dict[str, Any] = {"anchors_scanned": scanned, "anchors_without_pattern": without_pattern}
-        if scanned and without_pattern == scanned:
+        pool_fields: dict[str, Any] = {}
+        if self.pool_key_scan:  # RDR-250: off, none of this is entered and the report has no pool field
+            from nexus.plans.coverage_pool import scan_pool  # noqa: PLC0415 — deferred, as above
+
+            try:
+                pool = await scan_pool(
+                    view, anchors=first.ledger.anchors, anchor_keys=frozenset(t for _, t in pairs), config=config,
+                    facets=self.request.facets if self.request else (), hits_of=_hits, in_scope=self._hit_in_scope,
+                    assess=self._assess, call_timeout=self.call_timeout, resolve_until=resolve_until, fetch_until=fetch_until)
+            except EntityConfigError as exc:
+                _log.warning("nx_answer_coverage_resolution_config_invalid", error=str(exc)[:200])
+                return _Resolution({"resolution_reason": "entity_config_error"})
+            pairs += list(pool.pairs)  # the anchors' pairs first: the cap below fills with their keys before any pool key
+            pool_fields = pool.fields
+        scan: dict[str, Any] = {"anchors_scanned": scanned, "anchors_without_pattern": without_pattern, **pool_fields}
+        if scanned and without_pattern == scanned and not pairs:
             return _Resolution({**scan, "resolution_reason": "no_pattern_for_anchor_collections"})
         key_ids = tuple(dict.fromkeys(t for _, t in pairs))
         if not key_ids:
