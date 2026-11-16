@@ -20,6 +20,7 @@ fail an upgrade or a doctor run.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -63,6 +64,9 @@ def doctor_row() -> Any:
             detail="not applicable: the retired-key sweep has not measured this install (nx upgrade runs it)",
         )
     when = _text(note.get("measured_at", "an unknown time"), 40) if note else None
+    if note is not None and recorded is not None and _newer(recorded, note.get("measured_at")):
+        # The SWEPT save can fail silently: a verified record newer than a BLOCKED/RESIDUE measurement is the later fact.
+        note = None
     if note is not None and note.get("outcome") in (BLOCKED, RESIDUE):
         rows = note.get("retired_key_rows")
         detail = (
@@ -86,8 +90,42 @@ def doctor_row() -> Any:
     return HealthResult(label=label, ok=True, detail=f"no chunk row carried a retired key when last measured ({when})")
 
 
-def _recorded_at() -> str | None:
+def _newer(record_time: object, measured_time: object) -> bool:
+    """True when both are timestamps and the record is at or after the measurement. An unparsable time never wins."""
+    try:
+        return datetime.fromisoformat(str(record_time).replace("Z", "+00:00")) >= datetime.fromisoformat(
+            str(measured_time).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+
+
+def _recorded_at(record_fn: Callable[[], object | None] | None = None) -> str | None:
+    """When the sweep rung's completion was verified (its record's ``verified_at``), else ``None``; *record_fn* defaults to
+    this tenant's ledger. An unreadable ledger is not a record."""
     from nexus.upgrade_ladder.auto_guard import completion_recorded_at, default_completion_record  # noqa: PLC0415
     from nexus.upgrade_ladder.registry import RUNG_RETIRE_KEYS_SWEEP  # noqa: PLC0415
 
-    return completion_recorded_at(lambda: default_completion_record(RUNG_RETIRE_KEYS_SWEEP), RUNG_RETIRE_KEYS_SWEEP)
+    fn = record_fn or (lambda: default_completion_record(RUNG_RETIRE_KEYS_SWEEP))
+    return completion_recorded_at(fn, RUNG_RETIRE_KEYS_SWEEP)
+
+
+def swept_pin_reason(
+    sweep_record_fn: Callable[[], object | None] | None = None, *, ledger_default: bool = True,
+) -> str | None:
+    """Why the RDR-192 backfill rung does not run: the retire-keys sweep completed on this install and removed the chunk-row
+    ``doc_id`` and ``catalog_doc_id`` the backfill attributes a chunk by (RDR-236 pin, nexus-6pfgb.43). ``None`` when no
+    sweep record is on file. With no injected *sweep_record_fn*, the ledger is read only when *ledger_default* says the
+    backfill rung itself reads it (a test that injects its own record reaches no ledger through this).
+
+    A zero-retired-row dry run is NOT a sweep record: a fresh install has none and still needs the backfill's census (the
+    reaper reads its record), and a swept tenant's census cannot defer it, because the sweep leaves a chunk with no
+    ``doc_id`` in the non-blocking ``no-owner`` bucket."""
+    if sweep_record_fn is None and not ledger_default:
+        return None
+    when = _recorded_at(sweep_record_fn)
+    if when is None:
+        return None
+    return (
+        f"the retired-key sweep completed on this install ({when}) and removed the chunk-row doc_id and "
+        "catalog_doc_id this backfill attributes a chunk by, so it does not run (nexus-6pfgb.43)"
+    )

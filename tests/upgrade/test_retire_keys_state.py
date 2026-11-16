@@ -70,6 +70,21 @@ def test_a_clean_measurement_or_a_record_is_ok_and_the_record_says_it_is_not_a_l
     assert only_record.ok and not only_record.skipped
 
 
+def test_a_later_record_beats_an_older_blocked_note_and_a_later_note_beats_an_older_record(row_with) -> None:
+    """The SWEPT save can fail silently, so a note still saying BLOCKED may be older than the sweep that verified."""
+    older_note = {"outcome": "blocked", "retired_key_rows": 9, "measured_at": "2026-11-16T01:00:00+00:00", "detail": "held"}
+    swept = row_with(older_note, recorded="2026-11-16T02:00:00Z")
+    assert swept.ok and not swept.warn and "verified zero retired-key rows" in swept.detail
+    residue = row_with({**older_note, "outcome": "residue"}, recorded="2026-11-16T02:00:00Z")
+    assert residue.ok and not residue.warn
+    newer_note = row_with({**older_note, "measured_at": "2026-11-16T03:00:00+00:00"}, recorded="2026-11-16T02:00:00Z")
+    assert newer_note.warn and not newer_note.ok, "a measurement after the record says rows came back"
+    unparsable = row_with({**older_note, "measured_at": "yesterday"}, recorded="2026-11-16T02:00:00Z")
+    assert unparsable.warn, "a time that cannot be compared never hides a blocked measurement"
+    same_instant = row_with({**older_note, "measured_at": "2026-11-16T02:00:00+00:00"}, recorded="2026-11-16T02:00:00Z")
+    assert same_instant.ok, "the sweep that verified at the instant it measured wins"
+
+
 def test_an_unreadable_note_or_ledger_is_never_a_crash_and_reads_as_not_measured(row_with) -> None:
     assert row_with(RuntimeError("t2 down")).skipped
     assert row_with(None, recorded=RuntimeError("ledger down")).skipped

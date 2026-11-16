@@ -411,8 +411,8 @@ defers it instead of letting it write a residue nobody judged.
   `nx init` set up usually holds a mint or data credential, which the route refuses: the rung then reads as not
   applicable (detect) or deferred (converge), never failed, and the sweep stays the operator's verb. The same holds for a
   409 `sweep_job_running` (a job another request started: the operator verb, a dry run) and a 503 `sweep_jobs_busy`:
-  converge defers naming the verb and the job id. A 5xx otherwise, or an answer the rung cannot read, still fails the
-  rung.
+  converge defers naming the verb and the job id. A 5xx otherwise, an engine answer the rung does not recognise (such as a 400 or
+  422), or an answer it cannot read, still fails the rung.
 - **Detect.** Converged from the completion record (as `manifest-span-fill` does), so a steady-state `nx upgrade` makes
   no dry run. `nx doctor`'s `Retired chunk keys` row says a record is not a live count: an older client can write a retired
   key back before the Step 2c engine check. With no record: an interactive `nx upgrade` asks no dry run in detect and

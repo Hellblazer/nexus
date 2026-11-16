@@ -145,7 +145,8 @@ class Reading:
     """What one dry run said, reduced to what the rung decides on."""
 
     tenant: str
-    retired_key_rows: int
+    #: ``None`` when no count is known (an apply the engine refused on a path that never took a dry run).
+    retired_key_rows: int | None
     sweepable_rows: int
     blocked_rows: int
     wrong_width_rows: int
@@ -256,8 +257,9 @@ def _blocking_detail(reading: Reading) -> str:
             clauses.append(f"{name}={count}: the engine does not accept this residue, so it has to be fixed")
         else:
             clauses.append(f"{name}={count}: {_operator(reading.tenant)} says whether it can be accepted")
+    rows = "chunk rows hold" if reading.retired_key_rows is None else f"{reading.retired_key_rows} chunk row(s) hold"
     return (
-        f"{reading.retired_key_rows} chunk row(s) hold retired metadata keys and the sweep is not run, because "
+        f"{rows} retired metadata keys and the sweep is not run, because "
         + "; ".join(clauses)
         + f". The sweep keeps no copy of a key it removes. This rung never accepts a residue: decide each with the "
         f"counts from {_operator(reading.tenant)}, then apply with `nx t3 retire-keys --tenant "
@@ -525,9 +527,11 @@ class RetireKeysSweepRung:
                 rep = body.get("report") or {}
                 pre = rep.get("preconditions") or {}
                 acceptable = rep.get("acceptable_residues") or (reading.acceptable if reading else ())
+                refused_total = (rep.get("totals") or {}).get("retired_key_rows") if isinstance(rep, dict) else None
                 residue = Reading(
                     tenant=str(rep.get("tenant") or tenant),
-                    retired_key_rows=reading.retired_key_rows if reading else 0,
+                    retired_key_rows=reading.retired_key_rows if reading else (
+                        refused_total if isinstance(refused_total, int) and not isinstance(refused_total, bool) else None),
                     sweepable_rows=0, blocked_rows=0, wrong_width_rows=0,
                     blocking=tuple(str(n) for n in body.get("blocking") or []),
                     preconditions={str(k): v for k, v in pre.items() if isinstance(v, int)},

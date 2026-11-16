@@ -29,6 +29,7 @@ from nexus.db.http_vector_client import VectorServiceError
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import LadderRegistry, default_registry
+from nexus.upgrade_ladder.retire_keys_state import swept_pin_reason
 from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
     RUNG_NAME,
     RETRY_ENV,
@@ -248,6 +249,20 @@ def test_once_the_retire_keys_sweep_has_completed_the_backfill_is_not_applicable
     result = rung.converge(_Reporter())
     assert result.outcome is ConvergeOutcome.DEFERRED and "does not run" in result.detail
     assert tenant.censuses == 0 and tenant.backfilled == []
+
+
+def test_the_sweep_pin_reads_the_sweep_record_only_and_a_zero_retired_row_install_still_runs_the_backfill() -> None:
+    """A fresh install has zero retired-key rows and still needs the backfill's census (the reaper reads its record), so
+    the pin is the sweep rung's RECORD, never a zero-row dry run. And a swept tenant cannot defer the census forever: the
+    sweep removes the chunk-row doc ids, which moves a manifest-less chunk to the non-blocking no-owner bucket."""
+    assert swept_pin_reason(lambda: None) is None
+    assert swept_pin_reason(None, ledger_default=False) is None, "no injected record and no ledger: nothing is read"
+    assert "retired-key sweep completed" in swept_pin_reason(_swept)
+    swept_tenant = CensusReading(collections=(
+        CollectionReading("knowledge__a", legacy_unmanifested=0, unclassified=0, no_owner=12, dead_owner=3),))
+    assert swept_tenant.clean, "chunks the sweep left ownerless do not block the census"
+    fresh = FakeTenant({"knowledge__a": 7})
+    assert fresh.rung(sweep_record_fn=lambda: None).detect().pending
 
 
 def test_a_backfill_recorded_at_the_installed_version_stays_converged_after_the_sweep_and_without_one_it_runs() -> None:

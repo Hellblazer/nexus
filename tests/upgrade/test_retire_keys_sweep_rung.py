@@ -423,6 +423,27 @@ def test_a_residue_that_grew_since_the_dry_run_is_refused_by_the_engine_and_defe
     assert notes.note["outcome"] == "blocked"
 
 
+def test_a_residue_refused_on_the_join_path_states_the_refused_reports_total_or_no_count_never_zero() -> None:
+    """The dry run found another request's apply running, so there is no reading: the count in the text is the refused
+    report's total when it carries one, and absent when it does not, never 'zero chunk rows'."""
+    running = refusal(409, "sweep_job_running", kind="apply", job_id="j8")
+
+    def refused(totals):
+        body = {"tenant": TENANT, "preconditions": {"keyless_notes": 4}, "acceptable_residues": ACCEPTABLE}
+        if totals is not None:
+            body["totals"] = totals
+        return refusal(409, "sweep_preconditions_not_met", blocking=["keyless_notes"], report=body)
+
+    notes = Notes()
+    with_total = rung(T3(running, applies=[refused({"retired_key_rows": 12})]), notes=notes).converge(Reporter())
+    assert "12 chunk row(s) hold retired metadata keys" in with_total.detail and "0 chunk row" not in with_total.detail
+    assert notes.note["retired_key_rows"] == 12
+    notes = Notes()
+    no_total = rung(T3(running, applies=[refused(None)]), notes=notes).converge(Reporter())
+    assert no_total.detail.startswith("chunk rows hold retired metadata keys") and "0 chunk row" not in no_total.detail
+    assert notes.note["retired_key_rows"] is None and "keyless_notes=4" in no_total.detail
+
+
 # ── converge: conditions of the engine defer, failures raise ─────────────────
 
 
