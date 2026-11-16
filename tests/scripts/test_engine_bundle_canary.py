@@ -84,14 +84,14 @@ class TestCeiling:
         with pytest.raises((KeyError, ValueError)):
             canary.read_ceiling(f)
 
-    @pytest.mark.parametrize(("measured", "ok"), [(2578, True), (2579, False), (2577, False)])
-    def test_zero_tolerance_is_exact_in_both_directions(self, measured: int, ok: bool) -> None:
-        assert canary.within_ceiling(measured, EXACT) is ok
+    @pytest.mark.parametrize(("measured", "above"), [(2578, False), (2579, True), (2577, False)])
+    def test_the_gate_is_one_sided_like_ddl_ratchet(self, measured: int, above: bool) -> None:
+        assert canary.above_ceiling(measured, EXACT) is above
 
-    def test_a_fractional_tolerance_widens_the_band(self) -> None:
+    def test_a_fractional_tolerance_widens_the_band_upward(self) -> None:
         wide = canary.Ceiling(1000, 0.01)
-        assert canary.within_ceiling(1010, wide) and canary.within_ceiling(990, wide)
-        assert not canary.within_ceiling(1011, wide)
+        assert not canary.above_ceiling(1010, wide)
+        assert canary.above_ceiling(1011, wide)
 
 
 class TestVerdict:
@@ -108,18 +108,24 @@ class TestVerdict:
         assert f"{TAG}'s bundle changes migration DDL from 2578 to {tag_count}" in warning
         assert f"the client release that pins it {word} tests/ddl_ceiling.toml migration_ddl_per_worker to {tag_count} with this reason" in warning
         assert "pgvector 0.8.2 to 0.8.7" in warning and "postgres 17.5 to 17.6" in warning
-        assert any(warning in line for line in v.summary), "the warning is also a job summary line"
+        assert not any(warning in line for line in v.summary), "the warning is written once, by _report"
 
     def test_the_summary_names_each_bundles_postgres_and_pgvector(self) -> None:
         text = "\n".join(_evaluate(2725).summary)
         assert "postgres 17.5, pgvector 0.8.2" in text and "postgres 17.6, pgvector 0.8.7" in text
 
-    @pytest.mark.parametrize("pinned_count", [2579, 2577])
-    def test_a_pinned_bundle_off_the_ceiling_is_a_red_naming_develop(self, pinned_count: int) -> None:
-        v = _evaluate(pinned_count, pinned_count)
+    def test_a_pinned_bundle_above_the_ceiling_is_a_red_naming_develop(self) -> None:
+        v = _evaluate(2579, 2579)
         assert v.code == canary.EXIT_MISMATCH
-        assert "DEVELOP DRIFTED" in v.errors[0] and f"ddl: migration={pinned_count}" in v.errors[0]
+        assert "DEVELOP DRIFTED PAST ITS CEILING" in v.errors[0] and "ddl: migration=2579" in v.errors[0]
         assert "migration_ddl_per_worker=2578" in v.errors[0]
+
+    def test_a_pinned_bundle_below_the_ceiling_is_a_warning_naming_the_number_to_lower_it_to(self) -> None:
+        v = _evaluate(2577, 2577)
+        assert v.code == canary.EXIT_OK and not v.errors
+        (warning,) = v.warnings
+        assert "below tests/ddl_ceiling.toml migration_ddl_per_worker=2578" in warning
+        assert "lower the ceiling to 2577" in warning
 
     def test_a_pinned_drift_is_red_even_when_the_tag_agrees_with_it(self) -> None:
         assert _evaluate(2600, 2600).code == canary.EXIT_MISMATCH
@@ -190,6 +196,41 @@ class TestSeams:
         assert canary._TAG.fullmatch(TAG)
         assert not canary._TAG.fullmatch(TAG + "\n")
         assert not canary._TAG.fullmatch("v8.3.0")
+
+
+class TestReport:
+    def test_a_warning_is_emitted_as_a_workflow_command_and_appended_to_the_step_summary_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        summary = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+        verdict = _evaluate(2725)
+        canary._report(verdict)
+        (warning,) = verdict.warnings
+        assert f"::warning::{warning}" in capsys.readouterr().out
+        text = summary.read_text(encoding="utf-8")
+        assert text.count(warning) == 1, "the warning is in the summary once"
+        assert f"\n\n**Warning:** {warning}.\n" in text, "a blank line before the bold line"
+        assert text.startswith("### Engine bundle canary\n\nCeiling migration_ddl_per_worker=2578.\n\n- ")
+        assert "postgres 17.5, pgvector 0.8.2" in text and "postgres 17.6, pgvector 0.8.7" in text
+
+    def test_outside_actions_a_warning_is_plain_text_and_an_error_goes_to_stderr(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+        canary._report(_evaluate(2725))
+        canary._report(_evaluate(2579, 2579))
+        captured = capsys.readouterr()
+        assert "WARNING: " in captured.out and "::warning::" not in captured.out
+        assert "ERROR: DEVELOP DRIFTED PAST ITS CEILING" in captured.err
+
+    def test_a_clean_run_writes_no_warning_to_the_summary(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        summary = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+        canary._report(_evaluate(2578))
+        assert "Warning" not in summary.read_text(encoding="utf-8")
 
 
 class TestMain:
@@ -269,9 +310,13 @@ class TestWorkflowPins:
         # 'workflow_dispatch' would skip every call.
         assert "workflow_dispatch" not in expected
 
-    def test_the_concurrency_group_is_per_tag_and_cancels_a_superseded_run(self) -> None:
+    def test_the_concurrency_group_is_per_tag_and_per_path_and_cancels_a_superseded_run(self) -> None:
         concurrency = _workflow()["concurrency"]
-        assert concurrency["group"] == "engine-bundle-canary-${{ github.event.release.tag_name || inputs.tag }}"
+        group = concurrency["group"]
+        assert group == "engine-bundle-canary-${{ github.event_name }}-${{ github.event.release.tag_name || inputs.tag }}"
+        # In a called workflow event_name is the caller's (push), so the call, a dispatch and a hand-published
+        # release land in three groups per tag: a hand dispatch can never cancel the in-flight call.
+        assert "github.event_name" in group
         assert concurrency["cancel-in-progress"] is True
 
     def test_the_canary_runs_on_the_pytest_pool_class_with_the_off_switch(self) -> None:

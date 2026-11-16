@@ -15,9 +15,10 @@ WHAT. Two measurements in one job, each a scoped substrate run (the one test the
 the journey file as the engine-backed smoke subset) with ``NEXUS_PG_BIN`` at a bundle fetched through the
 product's verified seam (``install_pg_bundle``: sha256 plus sigstore, then ``ensure_pg_bundle``):
 
-* the PINNED bundle (``REQUIRED_ENGINE_VERSION``'s tag): its ``ddl: migration=N`` must equal the ceiling.
-  When it does not, develop itself has drifted from its own ceiling, and that is a failure whatever the new
-  tag does. It is the control that makes the second measurement mean something.
+* the PINNED bundle (``REQUIRED_ENGINE_VERSION``'s tag): its ``ddl: migration=N`` must not be ABOVE the
+  ceiling (one-sided, as ``scripts/ddl_ratchet.py`` is). Above it, develop itself has drifted past its own
+  ceiling, a failure whatever the new tag does: the control that makes the second measurement mean
+  something. Below it is a warning naming the number to lower the ceiling to.
 * the TAG's bundle: when its count differs from the pinned bundle's, the tag changes what a fresh migration
   costs. That is NOT a failure: the job exits 0 with a ``::warning::`` and a summary line naming the remedy
   (the client release that pins the tag moves the ceiling), so it can never recur as a red.
@@ -25,8 +26,9 @@ product's verified seam (``install_pg_bundle``: sha256 plus sigstore, then ``ens
 Each bundle's PostgreSQL and pgvector (``vector.control`` default_version) versions go in the summary.
 
 EXIT CODES (the first that applies wins, and every problem is printed):
-    0  both runs measured and passed, pinned count equals the ceiling (a tag delta is a warning)
-    1  the pinned bundle's count differs from the ceiling (develop drifted)
+    0  both runs measured and passed, pinned count not above the ceiling (a tag delta, or a pinned count
+       below the ceiling, is a warning)
+    1  the pinned bundle's count is above the ceiling (develop drifted)
     2  a run measured nothing: no ``ddl: migration=`` line, or no test passed
     3  a pytest run failed
     4  a bundle could not be provisioned, or the arguments are wrong
@@ -118,9 +120,13 @@ def read_ceiling(path: Path = CEILING_FILE) -> Ceiling:
     return Ceiling(value, tolerance)
 
 
-def within_ceiling(measured: int, ceiling: Ceiling) -> bool:
-    """True when *measured* is within the tolerance band of the ceiling, in either direction."""
-    return abs(measured - ceiling.migration_ddl_per_worker) <= int(ceiling.migration_ddl_per_worker * ceiling.tolerance)
+def above_ceiling(measured: int, ceiling: Ceiling) -> bool:
+    """True when *measured* is above the ceiling plus its tolerance band.
+
+    The gate is one-sided, as ``scripts/ddl_ratchet.py`` is: a count above the ceiling fails, a count below it
+    passes (and is a reason to lower the ceiling).
+    """
+    return measured > ceiling.migration_ddl_per_worker + int(ceiling.migration_ddl_per_worker * ceiling.tolerance)
 
 
 def _describe(m: Measurement) -> str:
@@ -150,32 +156,36 @@ def evaluate(*, tag: Measurement, pinned: Measurement | None, ceiling: Ceiling) 
             ))
     control = tag if pinned is None else pinned
     ceil = ceiling.migration_ddl_per_worker
-    if control.measured is not None and not within_ceiling(control.measured, ceiling):
+    warnings: list[str] = []
+    if control.measured is not None and above_ceiling(control.measured, ceiling):
         problems.append((
             EXIT_MISMATCH,
-            f"DEVELOP DRIFTED FROM ITS CEILING: the pinned bundle {control.tag} measured ddl: migration={control.measured}, "
-            f"tests/ddl_ceiling.toml [python_unit] migration_ddl_per_worker={ceil} (tolerance {ceiling.tolerance}). "
+            f"DEVELOP DRIFTED PAST ITS CEILING: the pinned bundle {control.tag} measured ddl: migration={control.measured}, "
+            f"above tests/ddl_ceiling.toml [python_unit] migration_ddl_per_worker={ceil} (tolerance {ceiling.tolerance}). "
             "This is not the new tag's doing: a changeset or a bundle change landed without its ceiling bump. "
             "Fix the ceiling (with the measured reason) on develop.",
         ))
+    elif control.measured is not None and control.measured < ceil:
+        warnings.append(
+            f"the pinned bundle {control.tag} measured ddl: migration={control.measured}, below tests/ddl_ceiling.toml "
+            f"migration_ddl_per_worker={ceil}: lower the ceiling to {control.measured} with the reason "
+            "(a ceiling above the count lets a regression through)"
+        )
     summary = [f"Ceiling migration_ddl_per_worker={ceil}."]
     summary += [f"- {_describe(run)}" for run in runs]
     if problems:
-        return Verdict(min(code for code, _ in problems), tuple(text for _, text in problems), (), tuple(summary))
+        return Verdict(min(code for code, _ in problems), tuple(text for _, text in problems), tuple(warnings), tuple(summary))
 
-    warnings: list[str] = []
     if pinned is not None and tag.measured != pinned.measured:
         assert tag.measured is not None and pinned.measured is not None
         word = "raises" if tag.measured > pinned.measured else "lowers"
-        line = (
+        warnings.append(
             f"{tag.tag}'s bundle changes migration DDL from {pinned.measured} to {tag.measured} "
             f"(postgres {pinned.postgres} to {tag.postgres}, pgvector {pinned.pgvector} to {tag.pgvector}): "
             f"the client release that pins it {word} tests/ddl_ceiling.toml migration_ddl_per_worker to "
             f"{tag.measured} with this reason"
         )
-        warnings.append(line)
-        summary.append(f"**{line}.**")
-    else:
+    elif not warnings:
         summary.append(f"{tag.tag}'s bundle leaves migration DDL at {tag.measured}: nothing to change in the ceiling.")
     return Verdict(EXIT_OK, (), tuple(warnings), tuple(summary))
 
@@ -291,9 +301,12 @@ def _report(verdict: Verdict) -> None:
     target = os.environ.get("GITHUB_STEP_SUMMARY")
     if target:
         with open(target, "a", encoding="utf-8") as fh:
-            fh.write("### Engine bundle canary\n\n" + "\n".join(verdict.summary) + "\n")
-            for line in (*verdict.errors, *verdict.warnings):
-                fh.write(f"\n{line}\n")
+            head, *rest = verdict.summary
+            fh.write("### Engine bundle canary\n\n" + head + "\n\n" + "\n".join(rest) + "\n")
+            for line in verdict.warnings:
+                fh.write(f"\n**Warning:** {line}.\n")
+            for line in verdict.errors:
+                fh.write(f"\n**Error:** {line}\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -46,7 +46,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: engine-bundle-canary-${{ github.event.release.tag_name || inputs.tag }}
+  # event_name is the CALLER's in a called workflow (push, for the engine release's tag run), so the call, a hand
+  # dispatch and a hand-published release each get their own group per tag: a hand dispatch can never cancel the
+  # in-flight call.
+  group: engine-bundle-canary-${{ github.event_name }}-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: true
 
 jobs:
