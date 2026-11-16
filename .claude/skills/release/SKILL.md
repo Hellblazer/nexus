@@ -669,7 +669,8 @@ search step matches the sentinel note's text). The row counts before and after `
 are PG's own read of the store that step ran on, as for a seed. The prepare row of each table
 is a setup row, not a step, and reads `store restored from cache <key> (saved <date>)` on a
 hit and `seeded (cache miss, saved <key>)` on a miss; say which in the relay. The cache is on
-by default, so a run that uses it is still the release gate. `--no-seed-cache` seeds every
+by default, so a run that uses it is still the release gate (Sam, 2026-11-16, by dialog in
+halcyon's session: "On by default, counts as the gate"). `--no-seed-cache` seeds every
 start in full and, like any option set to other than its default, makes a pass NOT THE RELEASE
 GATE; a custom `--prepare-cmd` bypasses the cache.
 
