@@ -276,6 +276,14 @@ release, which carries the bytea key support. At boot, before nexus's own
 changelog runs, it applies dml_utils' bundled changelog. That changelog keeps
 its own tracking tables in the `liquibase` schema, separate from nexus's.
 Installing it is schema only and costs the same whatever the data size.
+It does need pg_background at boot, not just when a move first runs:
+dml_utils' plpgsql functions declare variables of pg_background's types
+(`pg_background_handle`, `pg_background_run_result`), and with
+`check_function_bodies` on (the default) creating them resolves those types,
+so the changelog fails on a database without the extension (inferred from
+the source, not yet run; Phase 1 Step 3 confirms it). The engine release
+that first carries dml_utils therefore requires pg_background on every
+database it boots against, the cloud host included.
 
 **The registry.** One table, `nexus.data_moves`, has one row per registered
 move:
@@ -389,7 +397,9 @@ launcher that upstream does not test.
   when none are free.
 - **Risk**: the cloud host lacks pg_background until its image is rebuilt.
   **Mitigation**: Phase 2 Activation installs it on the host (conexus, on
-  Sam's go) before an engine that registers a move is deployed. The engine
+  Sam's go) before the engine release that carries dml_utils' changelog is
+  deployed; that changelog cannot be created without the extension, so this
+  precedes the first engine with dml_utils, not the first registered move. The engine
   refuses to start a move when the extension is missing, and reports that in
   boot_work. It does not fall back to a boot-time move.
 
@@ -480,7 +490,8 @@ pg_background package goes into the db-host golden image or db-configure,
 because the host has no general egress. Then `CREATE EXTENSION pg_background`
 runs as superuser in the nexus and conexus databases. The package version must
 match the bundle's pinned version. This step lands before any engine release
-that registers a move.
+that carries dml_utils' changelog (see Technical Design), whether or not it
+registers a move.
 
 #### Activation Step 2: the first registered move
 
