@@ -213,7 +213,9 @@ field, so no reader parses a claimant string.
 **Develop's state from commit order.** The procedure judges a CI post against
 the push records, not against arrival order. A red counts only if its sha is
 the newest develop commit with a finished run. A late red for an older commit
-shows as history, not as a block. A late green for an older commit does not
+shows as history, not as a block. Commit order comes from the push records'
+`base` and `tip` (each push names the develop sha it built on), never from
+when a CI post arrived. A late green for an older commit does not
 clear a block a newer red raised. This closes Gap 4.
 
 **Owner, next up, everyone else.** For a red that counts:
@@ -317,8 +319,12 @@ A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
   unknown, so next up owns it. The display says why.
 - **Two sessions think they own it** (a stale read): both act; the
   acknowledgement tuple shows the second one that the first already has it.
-- **Load facts go stale** (a session starts pushing after load): `pushes_develop`
-  is re-read when the session takes the push lock.
+- **Load facts go stale** (a session starts pushing after load). Today auras
+  and config are read only when the session's MCP server starts (marginalia,
+  2026-11-16), so re-reading a fact later is new surface. Options: evaluate
+  load only at server start and accept a restart to change it, or add one
+  re-load hook (for example, when the session takes the push lock). Decided at
+  the gate; the first is the default.
 
 ### Failure Modes
 
