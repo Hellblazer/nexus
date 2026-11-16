@@ -6,7 +6,8 @@ its next user prompt, so a session waiting on CI with nobody at the keyboard
 never wakes. Run as a background command, this parks on the CI board's
 ``--done`` topic (``board/ci/<repo>-<branch>--done``) for the sha and exits
 when its row arrives: the exit is the wake, and the one printed line is the
-result. It reads the tuple space only; it never polls GitHub for the wait.
+result. On develop and main it reads the tuple space only; for any other branch,
+or a topic the engine refuses, it waits on GitHub check-runs instead (GitHub-only mode, below).
 
 The ``--done`` row (conexus adapter, conexus-5wjs; nexus-1d6pz.11.1) has the
 body ``{state, sha, runs, url}``. Since .11.1 each ``runs`` entry is

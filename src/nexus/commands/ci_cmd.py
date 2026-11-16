@@ -41,7 +41,8 @@ def ci_group() -> None:
                    "(a release or feature branch) is waited on through GitHub's check-runs, not the board.")
 @click.option("--gh-repo", default=None,
               help="owner/name for the GitHub reads (a row with no conclusions, a row capped by the "
-                   "board's size limit, and the one read at the deadline) [default: Hellblazer/<repo>].")
+                   "board's size limit, the one read at the deadline, and every read in GitHub-only mode) "
+                   "[default: Hellblazer/<repo>].")
 @click.option("--park-s", type=click.IntRange(1, ci_wait.PARK_CAP_S), default=ci_wait.PARK_CAP_S,
               hidden=True, help="Seconds per park (tests).")
 def ci_wait_cmd(
@@ -76,7 +77,7 @@ def ci_wait_cmd(
     completed or --timeout passes. A finished set that includes a failure is
     reported at once; any other is reported only when two consecutive reads
     (60 s apart) list the same completed check-runs, so a workflow that
-    registers late is not missed. The timeout counts from the start of the
+    registers within one read interval is not missed. The timeout counts from the start of the
     command, a board wait that fell back included. The result line says
     "GitHub only: the board was not used". Exit codes are the same: 0 all
     passed, 1 any failed, 3 cancelled and none failed, 4 a conclusion this
