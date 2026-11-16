@@ -255,11 +255,14 @@ ranges:
   role's name is fixed by the library (its default-privilege changeset names
   `dml_utils_owner`). Applied with psql in Liquibase order, not through
   Liquibase — **Method**: Spike
-- [ ] dml_utils, once it takes a four-column primary key, drives
-  nexus.chunks itself: four key columns, and two levels of list partitioning
-  (embedding model, then tenant, vectors-030 lines 530 and 675) — **Status**:
-  Unverified; the spikes used a three-column, one-level stand-in —
-  **Method**: Spike with the four-column change (bead nexus-f3yqd.2.21)
+- [ ] dml_utils, once it takes a four-column primary key, drives one
+  `nexus.chunks` leaf as a plain table: four key columns, the leaf being one
+  (embedding model, tenant) partition of the two-level list partitioning
+  (vectors-030 lines 530 and 675), never the parent and never partition-wise
+  (The move worker, step 2) — **Status**: Unverified; the spikes used a
+  three-column, one-level stand-in over the parent — **Method**: Spike with the
+  four-column change (bead nexus-f3yqd.2.21), together with the per-leaf run
+  assumption above
 - [x] Liquibase applies the vendored ddl_utils and dml_utils changelogs as
   `nexus_admin` with the session role `dml_utils_owner` — **Status**:
   Verified 2026-11-16 (T2 nexus_rdr/246-research-7): Liquibase 4.29.0, the
@@ -413,7 +416,7 @@ a *background worker* is a pg_background process in the database.
   Operations).
 
 The chunk size is bounded to 1 to 1,000,000 rows and `sleep_ms` to 0 to
-60,000 ms by CHECK constraints, and three more CHECKs keep the hand-set
+60,000 ms by CHECK constraints, and four more CHECKs keep the retry and pause
 columns coherent: `transient_retries >= 0`, `last_transient_at` and
 `last_transient` both NULL or both set, `transient_retries` zero exactly when
 `last_transient_at` is NULL (so the backoff always has a time and a count),
@@ -454,7 +457,9 @@ starts after the HTTP listener and handles one open move at a time, oldest
    (vectors-030); an empty leaf's run has no chunks. The
    tenant's leaves are the children of each model partition of the table
    whose single-value bound is the tenant, read with
-   `nexus.partition_bound_value` (vectors-030), the way
+   `nexus.partition_bound_value` (vectors-030; EXECUTE is revoked from
+   PUBLIC, so the move worker reads the list as `nexus_admin`, its owner),
+   once per tenant at the start of that tenant's runs in each pass, the way
    `nexus.drop_tenant_partitions` enumerates a tenant's leaves: from the
    catalog, never from a scan or a name pattern. The move worker never runs a
    tenant's session against another tenant's leaf. Row-level security on the
@@ -514,7 +519,7 @@ non-empty verification, and an `on_complete` that fails for a reason other
 than its statement or lock timeout. The move worker tells a recorded chunk
 error from a raised one by the run's `migration_error` rows: it reads the
 run's highest `error_id` before the CALL (0 when the run does not exist yet,
-since the first CALL creates it), and a row above that mark is this pass's
+since the first CALL creates it, and when it has no error rows), and a row above that mark is this pass's
 chunk error, read with its own `sqlstate`. dml_utils never deletes
 `migration_error` rows on resume (only `delete_archived_migration_runs`
 does), so an older row says nothing about this pass, and an id mark, unlike a
@@ -1152,7 +1157,7 @@ count after fixing its cause: `UPDATE nexus.data_moves SET transient_retries
 
 - **Scenario**: a move hits a transient error 21 times. **Verify**: the waits follow 30 s doubling to 15 minutes, `blocked:` shows the count and, from the 20th, "needs an operator"; the move is never `failed:`, and once the cause is fixed the next pass runs it and resets the counter.
 - **Scenario**: an operator pauses a move while a run's CALL is in flight. **Verify**: that run finishes, no further CALL starts (for that tenant's other leaves or any other tenant), boot_work shows `paused:`, and clearing `paused_at` resumes the move.
-- **Scenario**: new `nexus.chunks` leaves appear (a new model, which creates a leaf for every tenant, and a new tenant) while a move is between passes. **Verify**: no existing run is disturbed; the new leaves hold only new-shape rows and the move completes with an empty verification and `done` equal to `total`; a new leaf seeded with an old-shape row makes the verification non-empty and the move `failed:`.
+- **Scenario**: new `nexus.chunks` leaves appear (a new model, which creates a leaf for every tenant, and a new tenant) while a move is between passes. **Verify**: no existing run is disturbed; the new leaves hold only new-shape rows and the move completes with an empty verification and `done` equal to `total`; a leaf that exists when the tenant's leaf list is read is run, including one seeded with an old-shape row; a leaf created and seeded with an old-shape row after that read, within the same pass, makes the verification non-empty and the move `failed:`.
 - **Scenario**: a tenant's session runs a move. **Verify**: every leaf it CALLs on is one of that tenant's leaves from the catalog, never another tenant's.
 - **Scenario**: an operator cancels a run with `cancel_migration_run`. **Verify**: the move is `failed:` with "run cancelled at <time>", not completed.
 - **Scenario**: a CALL raises 42501 with no new `migration_error` row, then a chunk records 42883 (a template naming a missing function), on a run that already holds an older 40001 row. **Verify**: the raised 42501 is transient, the recorded 42883 is permanent, and the old row changes neither.
@@ -1213,8 +1218,10 @@ tenant on `nexus.chunks` through vectors-029's policy.
 
 ### Assumption Verification
 
-Seven of the nine critical assumptions are verified by spike or by the
-extension's own control file. The cloud host's pg_background is checked and
+Seven of the ten critical assumptions are verified by spike or by the
+extension's own control file. Three are open: the per-leaf run under a tenant
+session on FORCE RLS, the four-column key on a leaf (both spiked in Step 4 and
+nexus-f3yqd.2.21), and the cloud host's pg_background, which is checked and
 absent; installing it is Activation Step 1, on Sam's ruling of 2026-11-15.
 That Liquibase, not only psql, applies the libraries with the session role
 set was verified in Phase 1 Step 3b (T2 nexus_rdr/246-research-7).
@@ -1275,3 +1282,4 @@ the first registered move.
 - 2026-11-16: residual nexus-f3yqd.2.3 settled (wren, agreed with linda, who builds DataMoveWorker): the registry gains the transient retry counter, an operator pause and bounds on the chunk size and `sleep_ms`; Technical Design gains "Retries, pause and cancelled runs" (backoff 30 s doubling to 15 min with no end to retries, a cap of 20 that adds "needs an operator", the pause read before each tenant's CALL, resume of an interrupted run, archive and re-create on a changed partition tree, `failed:` only for a run dml_utils records as cancelled, one SQLSTATE list for recorded and raised errors with a chunk error counted only if recorded since the pass started, the order rule); Step 4 and the Test Plan name them; Day 2 Operations gains the pause statement.
 - 2026-11-16: per-leaf runs for partitioned driving tables (wren, with linda; fix check `nexus_rdr/246-fix-check-839e922d1` recorded the earlier text's residuals): `nexus.chunks` moves run one plain-table run per tenant leaf from that tenant's catalog, so no tree check applies and a new leaf cannot restart a run; the move worker never runs a move partition-wise and any 55000 is permanent, with no archive and re-create; a recorded chunk error is transient only for 40001, 40P01, 55P03 and 57014, and 42501 and 42883 are transient only when raised outside a recorded chunk error, told apart by an `error_id` mark taken before the CALL; the pause is also read before the verification and `on_complete`, and a run in flight is stopped by cancelling its backend; `cancelled_at` is read from the active run; the hand-set columns get CHECKs; progress sums active runs; the Day 2 verify allows older retried-chunk rows.
 - 2026-11-16: per-leaf fix-check round 1 (wren): the failure list and Step 4 no longer carry the archive-and-re-create design; recorded class 53 and 57P01-57P03 chunk errors are transient (dml_utils re-claims an uncompleted boundary); the leaf list is read with `nexus.partition_bound_value`; the CALL's pid is in its log event and a backend cancel is transient, not `cancel_migration_run`; the per-leaf run is a Critical Assumption to spike.
+- 2026-11-16: per-leaf fix check passed (round 2: two of three critics PASS, no counted defect); its findings applied: the four-column Critical Assumption retargeted to a plain leaf, the assumption count (seven of ten, three open), the CHECK count, the `error_id` mark on a run with no error rows, the leaf list read as `nexus_admin` once per tenant per pass, and the new-leaf test scenario.
