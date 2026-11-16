@@ -713,8 +713,13 @@ nexus_rdr/246-research-5):
    no relations, and otherwise left alone with a reason the engine reports as
    `blocked: liquibase schema owned by <role>`.
 2. At boot the engine checks that the extension and the three roles exist,
-   and that the `liquibase` schema is absent or owned by `dml_utils_owner`.
-   If they do, it applies ddl_utils' then dml_utils' changelog on its
+   that the `liquibase` schema is absent or owned by `dml_utils_owner`, and
+   that the migrating login may `SET ROLE dml_utils_owner`
+   (`pg_has_role(current_user, 'dml_utils_owner', 'SET')`). The install runs
+   inside `SchemaMigrator.migrate`, under the migration advisory lock and its
+   stale-lock handling, after the index-builder decision and before nexus's
+   walk, so library changesets never count as pending nexus schema work and
+   never end an index build. If the checks pass, it applies ddl_utils' then dml_utils' changelog on its
    migration connection as `nexus_admin`, after a `SET ROLE dml_utils_owner`
    statement, so the objects are owned by `dml_utils_owner` and no second
    login credential exists; then `SET ROLE NONE`, and nexus's changelog runs as
@@ -726,11 +731,16 @@ nexus_rdr/246-research-5):
    Liquibase's order, applies the libraries this way is verified (Phase 1
    Step 3b, T2 nexus_rdr/246-research-7). The libraries' `Liquibase` objects
    share the one migration connection, so none may be closed before the walk
-   that follows it: `Liquibase.close()` closes the connection.
+   that follows it: `Liquibase.close()` closes the connection. Each library
+   walk gets its own Liquibase `Database` (Liquibase compares databases by
+   connection, so a shared one would reuse nexus's changelog lock service).
+   The role window sets a bounded `lock_timeout`, and a `finally` restores it
+   and resets the role on every path.
 3. If the extension or a role is missing, or either library's changelog
-   fails, the engine skips the libraries, serves, and reports every
-   registered move `blocked:` with the reason. No library install failure
-   fails a boot (Test Plan).
+   fails (a lock timeout, a checksum that a re-pin changed, or an `Error`
+   such as a class the native image cannot load), the engine skips the
+   libraries, serves, and reports every registered move `blocked:` with the
+   reason. No library install failure fails a boot (Test Plan).
 
 **Roles and grants.** The move runs as `nexus_admin`, which holds
 `dml_utils_caller` and `pgbackground_role` (step 1). `dml_utils_owner` needs
@@ -1296,3 +1306,4 @@ the first registered move.
 - 2026-11-16: per-leaf fix-check round 1 (wren): the failure list and Step 4 no longer carry the archive-and-re-create design; recorded class 53 and 57P01-57P03 chunk errors are transient (dml_utils re-claims an uncompleted boundary); the leaf list is read with `nexus.partition_bound_value`; the CALL's pid is in its log event and a backend cancel is transient, not `cancel_migration_run`; the per-leaf run is a Critical Assumption to spike.
 - 2026-11-16: per-leaf fix check passed (round 2: two of three critics PASS, no counted defect); its findings applied: the four-column Critical Assumption retargeted to a plain leaf, the assumption count (seven of ten, three open), the CHECK count, the `error_id` mark on a run with no error rows, the leaf list read as `nexus_admin` once per tenant per pass, and the new-leaf test scenario.
 - 2026-11-16: Sam approved the amendment (the retry, pause and cancelled-run rule; recorded and raised SQLSTATE classes; per-leaf runs on `nexus.chunks`; the registry access contract) into the accepted RDR, "Approve as written", asked in wren's session after halcyon's check that grant 3 does not cover new design.
+- 2026-11-16: Install sequence step 2 names where the install runs (inside SchemaMigrator.migrate, under the migration lock, after the index-builder decision), the SET-ROLE precondition, the per-walk Database, the lock_timeout and the finally; step 3 lists the failure kinds. Wording matched to the reviewed code of nexus-f3yqd.2.11.
