@@ -76,10 +76,21 @@ def _name_of(func: ast.expr) -> str | None:
     return None
 
 
+def _is_context_run(expr: ast.expr) -> bool:
+    """``copy_context().run``: the hand-off that carries the correlation id (nexus-dngtz.1.2)."""
+    return (isinstance(expr, ast.Attribute) and expr.attr == "run" and isinstance(expr.value, ast.Call)
+            and _name_of(expr.value.func) == "copy_context")
+
+
 def _callee(call: ast.Call) -> tuple[str | None, list[ast.expr]]:
-    """The called function's name and its positional arguments; ``X.submit(fn, *args)`` reads as ``fn(*args)``."""
+    """The called function's name and its positional arguments; ``X.submit(fn, *args)`` reads as ``fn(*args)``, and
+    so do ``X.submit(copy_context().run, fn, *args)`` and ``copy_context().run(fn, *args)``."""
     name = _name_of(call.func)
     if name in _SUBMITS and call.args:
+        if _is_context_run(call.args[0]) and len(call.args) > 1:
+            return _name_of(call.args[1]), call.args[2:]
+        return _name_of(call.args[0]), call.args[1:]
+    if _is_context_run(call.func) and call.args:
         return _name_of(call.args[0]), call.args[1:]
     return name, list(call.args)
 
@@ -225,7 +236,8 @@ class _Walk:
         return reached
 
     def indirect_references(self, names: set[str]) -> list[str]:
-        """References to *names* that are not a direct call nor ``submit``'s first argument, and ``getattr``
+        """References to *names* that are not a direct call nor ``submit``'s first argument (or its second, after
+        ``copy_context().run``), and ``getattr``
         of one by its string name."""
         out: list[str] = []
         for path, tree in self.modules:
@@ -234,6 +246,10 @@ class _Walk:
                 if isinstance(call, ast.Call):
                     allowed.add(id(call.func))
                     if _name_of(call.func) in _SUBMITS and call.args:
+                        allowed.add(id(call.args[0]))
+                        if _is_context_run(call.args[0]) and len(call.args) > 1:
+                            allowed.add(id(call.args[1]))
+                    if _is_context_run(call.func) and call.args:
                         allowed.add(id(call.args[0]))
             for node in ast.walk(tree):
                 name = (node.id if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
@@ -373,6 +389,26 @@ def test_the_clean_fixture_passes_every_check() -> None:
     assert (sites, problems) == (1, [])
     assert _sha256_strays(modules) == []
     assert _stamp_callers(modules) == set()
+
+
+_VIA_CONTEXT_RUN = '''
+def _index_document(file_path):
+    key = {key}
+    pool.submit(copy_context().run, upload, key)
+
+
+def upload(content_hash):
+    _write_chunks_with_owner_rows(1, 2, content_hash)
+'''
+
+
+def test_a_key_handed_off_through_copy_context_run_is_followed() -> None:
+    """nexus-dngtz.1.2 wraps pool submits in ``copy_context().run``; the walk reads the function after it as the
+    callee, so a file-hash key passes and a salted one is still caught."""
+    _sites, problems = _writer_problems(_fixture(_VIA_CONTEXT_RUN.format(key="_sha256(file_path)")))
+    assert problems == [], problems
+    _sites, problems = _writer_problems(_fixture(_VIA_CONTEXT_RUN.format(key='"salted"')))
+    assert problems, "a non-hash key handed off through copy_context().run was not caught"
 
 
 def test_a_writer_reached_by_getattr_is_caught() -> None:
