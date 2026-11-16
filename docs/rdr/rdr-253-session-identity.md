@@ -183,10 +183,15 @@ code (research 3); lane D, outside systems (research 4).
 
 ### Critical Assumptions
 
-- [ ] On `/clear`, the SessionStart hook can tie the new session id to the
+- [x] On `/clear`, the SessionStart hook can tie the new session id to the
   prior binding by process continuity (the same Claude pid and process start
-  time as the current binding). **Method**: Spike (a `/clear` in a live
-  session; read the hook payload and the registry file).
+  time as the current binding). **Status**: Verified by spike
+  (`nexus_rdr/253-research-5`): the `clear` hook ran under the same Claude
+  pid and start time, its payload carried the new id with `source: clear`,
+  and the registry file already held the new id with pid, `procStart`, pane
+  and name unchanged. A `/resume` in a new process kept the session id
+  (`source: resume`) and restored the name; name drift on resume comes from
+  a shell wrapper passing a fresh `-n`, not from Claude Code.
 - [x] Every Bash child of a session carries the current session id in
   `CLAUDE_CODE_SESSION_ID`. **Status**: Verified by binary read and observed
   in a subagent's environment (research 2, row 2).
@@ -529,9 +534,9 @@ identity-owned subspace families named under Fencing and nowhere else.
 
 ### Assumption Verification
 
-One of four Critical Assumptions is verified (Bash children carry the
-session id). The clear rebind, subagent attribution and Desktop binding need
-spikes; each has a stated fallback.
+Two of four Critical Assumptions are verified (Bash children carry the
+session id; the clear rebind, by spike). Subagent attribution and Desktop
+binding need spikes; each has a stated fallback.
 
 ### Scope Verification
 
@@ -574,3 +579,4 @@ T2 `nexus_rdr/253-decisions-2026-11-16`.
 
 - 2026-11-16: created (draft), from the four-lane identity research and Sam's
   four design decisions.
+- 2026-11-16: Critical Assumption 1 verified by a `/clear` and `/resume` spike in a throwaway session (`nexus_rdr/253-research-5`).
