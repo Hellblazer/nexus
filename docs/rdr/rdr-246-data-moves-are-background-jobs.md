@@ -530,15 +530,27 @@ nexus_rdr/246-research-5):
    `dml_utils_owner`, where both libraries keep their tracking tables
    (dml_utils README lines 696-702; ddl_utils README lines 93-95). Roles live
    here, not in a changeset, because the dml_utils walk runs before nexus's
-   changelog. An existing local install gets this step from the fast path
-   `pg_provision.provision()` takes on a cluster it already provisioned, which
-   the storage daemon runs before it starts the engine
-   (`_backfill_provision_grants`, storage_service_daemon.py) and which already
-   backfills the diag role; it is extended to create the extension, roles,
-   grants and schema when they are missing. In production the engine does not
-   run as a superuser, so it cannot do this itself. Until it has
-   run, moves report `blocked:`.
-2. At boot the engine checks that the extension and the three roles exist.
+   changelog. An existing install on the bundled cluster gets this step from
+   the fast path `pg_provision.provision()` takes on a cluster it already
+   provisioned, which the storage daemon runs before it starts the engine
+   (`_backfill_provision_grants`, storage_service_daemon.py; it runs only when
+   the credentials name the bundled cluster's data directory) and which
+   already backfills the diag role; it is extended to create the extension,
+   roles, grants and schema when they are missing. A BYO or `--no-pg-bundle`
+   PostgreSQL gets it from its DBA, as SQL in docs/configuration.md's
+   prerequisites, and the cloud from Activation Step 1. In production the
+   engine does not run as a superuser, so it cannot do this itself. Until the
+   step has run, moves report `blocked:`. Three cases the bootstrap handles
+   (nexus-f3yqd.2.9): a bundle with no pg_background library makes it log the
+   reason and create nothing, roles and schema included, and the next start
+   with a bundle that has it does all of it; an existing library role is
+   converged to NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEROLE NOCREATEDB, so a
+   hand-made role cannot bypass the tenant policies; an existing `liquibase`
+   schema owned by another role is handed to `dml_utils_owner` when it holds
+   no relations, and otherwise left alone with a reason the engine reports as
+   `blocked: liquibase schema owned by <role>`.
+2. At boot the engine checks that the extension and the three roles exist,
+   and that the `liquibase` schema is absent or owned by `dml_utils_owner`.
    If they do, it applies ddl_utils' then dml_utils' changelog on its
    migration connection as `nexus_admin`, after a `SET ROLE dml_utils_owner`
    statement, so the objects are owned by `dml_utils_owner` and no second
@@ -1078,3 +1090,4 @@ the first registered move.
 - 2026-11-16: accepted by Sam ("Accept, residuals to beads"; dml_utils with its pg_background launcher kept). Residual dispositions: round 3's five to beads nexus-f3yqd.2.1 (the BLOCKS-PLANNING one, chosen by Sam), nexus-f3yqd.2.2, nexus-f3yqd.2.3, nexus-f3yqd.2.4 and nexus-f3yqd.2.5; the eight carried from round 2 to commit e39d4fb28 (fix check `nexus_rdr/246-fix-check-9ebbce21154d`).
 - 2026-11-16: residual beads nexus-f3yqd.2.1 (chunk-family tables finish only through `on_complete`, with builder termination and `lock_timeout`), .2.2 (gate rules 2 and 3), .2.4 (the four-column change listed as a prerequisite and an assumption) and .2.5 (the PCI-builder and `validCheckSum` citations) fixed in the text.
 - 2026-11-16: nexus-f3yqd.2.1 completed after its review: an `on_complete` lock timeout is transient, the owner-read policy is its own guarded changeset with `ChunksIsolationCheck` extended to driving tables, and builder termination is best effort under `lock_timeout`.
+- 2026-11-16: Install sequence step 1 scoped to the bundled cluster (BYO via docs/configuration.md, cloud via Activation Step 1), with the bootstrap's handling of a bundle without the library, drifted library roles and a foreign-owned `liquibase` schema; the boot check gains the schema owner (reviews of nexus-f3yqd.2.9).
