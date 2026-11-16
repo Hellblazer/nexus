@@ -4160,11 +4160,11 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
 
 
 def _aspect_bearing_collections(db) -> list[str]:
-    """Collection names that hold at least one aspect row.
+    """Collection names the catalog's documents live in, sorted.
 
-    Derived from the catalog's collection projection rather than a distinct
-    scan of ``document_aspects``: the store exposes no such verb, and a
-    per-collection list is what the planner consumes anyway.
+    One engine request (``GET /v1/catalog/docs/distinct-collections``), not a walk
+    of every document: the planner consumes a per-collection list, and the catalog
+    already holds the distinct physical collections. RDR-241.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
@@ -4173,8 +4173,4 @@ def _aspect_bearing_collections(db) -> list[str]:
         raise click.ClickException(
             "Catalog is empty. Index or store documents first."
         )
-    names = {
-        d.physical_collection for d in cat.all_documents()
-        if getattr(d, "physical_collection", "")
-    }
-    return sorted(names)
+    return sorted(cat.distinct_doc_collections() or [])
