@@ -209,11 +209,13 @@ run leaves with no manifest, so that decision starts from a number.
 **Count (taken at close, 2026-11-16, on Sam's answer "Measure Gap 3"):** 0. A
 cold full `nx index repo` of develop 9b4618611 against a local engine on chas
 registered 5328 documents (4542 code, 411 prose, 375 rdr), and none had
-`chunk_count` 0 or lacked a manifest. The run used the same reduced tree as the
-Minimum Viable Validation run below: each text file cut to its first 1 KB
+`chunk_count` 0 or lacked a manifest. The run used the same reduction as the
+Minimum Viable Validation run below, on a later tree: each text file cut to its first 1 KB
 (none of them had a whitespace-only first 1 KB with content after it, so the
 cut made no phantom) and the 7 PDFs dropped, so a PDF that extracts to nothing
-is not covered. The pre-registration guard skipped the 17 zero-byte files.
+is not covered. Tracked files with no document at all (dot-directories,
+symlinks, zero-byte files and file types the indexer does not register) have
+no catalog row, so they cannot be phantoms.
 On this repository, at this tree, the reorder has no measured case to fix.
 
 #### Gap 4: Index-time link generation lists whole content types across the tenant to link one repository's new files
@@ -634,7 +636,7 @@ These figures are "the baseline" cited below.
 - [x] A set-based commit can reproduce the client's change predicate,
   miss-count machine, rename rule, register-time metadata rules and the
   engine invariants of the methods it replaces, row for row and link for
-  link. **Status**: Unverified. The rules are read from source
+  link. **Status**: Verified at Step 2 (below). The rules are read from source
   (research-25 to research-31), which says what parity means; it does not
   show that one plpgsql function achieves it. Gated at Step 2 by the parity
   fixtures (old path and commit on one seeded fixture, every column of
@@ -653,7 +655,7 @@ These figures are "the baseline" cited below.
   acceptance and is not claimed by its Done). **Method**: Spike (at
   implementation)
 - [x] A 20,000-row commit finishes under 30 s on the test substrate.
-  **Status**: Unverified, gated at Step 2 (Phase 1).
+  **Status**: Verified, gated at Step 2 (Phase 1).
   **Method**: Spike (at implementation). **Result**: passed at Step 2,
   8.5 s insert and 9.2 s update (nexus-u5m5g.3).
 
@@ -1445,8 +1447,9 @@ real PDF.
 
 #### Step 0: Measure the live catalog (read-only, before Step 2's tests)
 
-Three counts decide details of the identity and path-resolution rules, and
-none is in hand. They are taken once against the managed tenant, read-only,
+Three counts decide details of the identity and path-resolution rules (two
+more, counts 0 and 4, were added at the run: nested active roots and
+stale-owner RDR sources), and none was in hand before the run. They are taken once against the managed tenant, read-only,
 after the run is announced to conexus on the bus with its expected load.
 
 1. Live documents with an empty `source_uri`, by owner, and how many of
@@ -1558,10 +1561,13 @@ pre-deploy gate) and 6.1 (the client-path gate through the edge). The
 
 As shipped (engine-service-v0.1.185, live 2026-11-09): gate 5b.1, the
 `--package-upgrade` rehearsal, was deferred at the cut to the client release
-that raised the pin to 0.1.185, and Step 9 raised no pin (below). Sam
+that raised the pin to 0.1.185. That release was conexus 8.1.0, which raised
+the pin from 0.1.184 to 0.1.186, and the rehearsal was not run then. Sam
 recorded it on 2026-11-16 as covered, not waived: conexus 8.3.0's release
-battery ran the package-upgrade leg, and its 6e walk took 7.76.0, 7.99.0 and
-8.2.3 installs to engine 0.1.194, which carries `catalog-048`.
+battery ran its 6e walk, which the engine-release skill names as the
+replacement for the `--package-upgrade` leg of 5b.1, taking 7.76.0, 7.99.0 and
+8.2.3 installs to engine 0.1.194, which carries `catalog-048`, and it also ran
+the battery's package-upgrade leg.
 
 ### Phase 2 (CLOSED, 2026-11-10): Client half of Parts A, A4 and B1 (B1 held)
 
@@ -1575,7 +1581,8 @@ caller rebuilt from the outcome; a service-mode test through
 `ensure_engine`. Measurement for Gap 3 (no code change in this RDR): after
 a full run of this repository, count the documents created in that run
 that have `chunk_count 0` and no manifest, and record the count in a bead
-for the reorder decision (filed then, if none exists).
+for the reorder decision (filed then, if none exists). As done: the count
+was taken at close and recorded under Gap 3 (0), so no bead was filed.
 
 #### Step 7: Linking client
 
@@ -1597,10 +1604,12 @@ with a sensitive document.
 
 #### Step 9: Floor bump and release
 
-As shipped: no pin change for engine cut 1. Step 6 shipped in conexus 8.1.0
-and 8.1.1, which already required 0.1.186, past engine cut 1 (0.1.185), so
-raising the pin "to engine cut 1" would have lowered it. Step 7's link
-generator shipped in 8.1.2, which pinned 0.1.187 (nexus-u5m5g.10). Step 8 is held with Part B and
+As shipped: conexus 8.1.0, which shipped Step 6, raised the pin from 0.1.184
+to 0.1.186 in its release commit, past engine cut 1 (0.1.185), so the floor
+bump this step asks for came with that release. By the time Step 9's bead ran,
+raising the pin "to engine cut 1" would have lowered it, so the step changed
+nothing (nexus-u5m5g.10). Step 7's link generator shipped in 8.1.2, which
+pinned 0.1.187. Step 8 is held with Part B and
 takes its floor bump in the release that ships Part B.
 
 ### Phase 3: Part B2 engine (engine cut 2; held)
@@ -1839,7 +1848,8 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
      figures are an August estimate with no felt cost behind them.
    - **Answer (Sam, 2026-11-08): (b).** Parts A and A4 are accepted, each on
      its own case, and land together as planned (one changeset, engine cut 1,
-     the Step 9 release). Part B is held.
+     the Step 9 release, which in the end was conexus 8.1.0's pin raise). Part
+     B is held.
 
 ## References
 
@@ -1920,4 +1930,4 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
 - 2026-11-08: Accepted by Sam (Parts A and A4; Part B held). Residual dispositions: the two BLOCKS-PLANNING residuals by c8a4921eb and 6d05bc01e (fix check `nexus_rdr/193-fix-check-6d05bc01e`, after `-c8a4921eb` failed once); the three round-3 DISCOVER-AT-IMPLEMENTATION residuals and the five carried from fix check 962a93b3c by nexus-blbd3 (two of those five held with Part B).
 - 2026-11-10: held-scope wording amended to the reviewed Phase 2 code (standing grant 3; residual 8, nexus-u5m5g.9): Gaps closed by this acceptance are 1 and 4; one engine cut; the Java HDBSCAN check, the Step 10 gate, discover egress and both discover Test Plan scenarios marked held with Part B; Done stated as Steps 0-3, 5-7 and 9; the Minimum Viable Validation restated (residual 5) against the parity fixture's rules; factory line reference 417 to 429. Step 9 is not reworded here: its re-scope (no pin change; 0.1.186 already pinned) is recorded on nexus-u5m5g.10.
 - 2026-11-11: Assumption Verification amended to the measured results (standing grant 3; nexus-blbd3): the two Step 2 claims passed (parity fixture 31 cases, 0 differences; 20,000-row commit 8.5 s insert and 9.2 s update against the 30 s bar, nexus-u5m5g.3), HDBSCAN parity marked held with Part B, and the Step 0 counts given their record. The held Part B carry-list moved from nexus-blbd3 to epic nexus-u5m5g, named at Phase 3.
-- 2026-11-16: Closed, Implemented for Parts A and A4 (Sam, "Close A, move Part B out", relayed by halcyon; the close critique's partial verdict overridden on his word, T2 `nexus_rdr/193-close-override-2026-11-16`). Part B moved to RDR-251. Amended to the shipped record (standing grant 3): Step 0's five counts and the open-question-2 outcome (103 cross-repository links dropped), the stale-owner estimate (count 4 = 0), Step 5's gate 5b.1 (covered by conexus 8.3.0's package-upgrade and 6e runs, Sam), Step 9 (no pin change), the Minimum Viable Validation as run (reduced tree), Step 7's measurement (row counts only), the warm-run Test Plan scenario (frecency still writes), and the Gap 3 count (0 of 5328, taken at close). Post-mortem: `post-mortem/rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md`.
+- 2026-11-16: Closed, Implemented for Parts A and A4 (Sam, "Close A, move Part B out", relayed by halcyon; the close critique's partial verdict overridden on his word, T2 `nexus_rdr/193-close-override-2026-11-16`). Part B moved to RDR-251. Amended to the shipped record (standing grant 3): Step 0's five counts and the open-question-2 outcome (103 cross-repository links dropped), the stale-owner estimate (count 4 = 0), Step 5's gate 5b.1 (covered by conexus 8.3.0's package-upgrade and 6e runs, Sam), Step 9 (its floor bump came with 8.1.0's release commit, 0.1.184 to 0.1.186), the Minimum Viable Validation as run (reduced tree), Step 7's measurement (row counts only), the warm-run Test Plan scenario (frecency still writes), and the Gap 3 count (0 of 5328, taken at close). Post-mortem: `post-mortem/rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md`.

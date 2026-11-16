@@ -46,12 +46,14 @@ repository (below).
   so the 103 links are not re-created on re-index.
 - **The stale-owner population was not there**: the design sized the second RDR read arm for
   "about 150 RDRs under a stale owner". Step 0 count 4 found 0 under its definition.
-- **Step 9 raised no pin**: Step 6 shipped in 8.1.0 and 8.1.1, which already required an engine
-  past cut 1. Raising the pin "to cut 1" as written would have lowered it.
-- **Gate 5b.1 deferred, then covered**: the package-upgrade rehearsal for `catalog-048` was
-  deferred at the cut to a pin bump that never came in that form. Sam recorded it as covered by
-  conexus 8.3.0's battery: the package-upgrade leg, and the 6e walk from 7.76.0, 7.99.0 and
-  8.2.3 to engine 0.1.194.
+- **Step 9 had nothing left to do**: conexus 8.1.0, which shipped Step 6, raised the pin from
+  0.1.184 to 0.1.186 in its release commit, past cut 1. By the time Step 9's bead ran, raising
+  the pin "to cut 1" as written would have lowered it.
+- **Gate 5b.1 deferred, not run, then covered**: the package-upgrade rehearsal for
+  `catalog-048` was deferred at the cut to the client release that raised the pin to 0.1.185.
+  That release came (8.1.0 raised it to 0.1.186), but nobody ran the rehearsal with it. Sam
+  recorded it as covered by conexus 8.3.0's battery: the 6e walk from 7.76.0, 7.99.0 and 8.2.3
+  to engine 0.1.194, and the package-upgrade leg.
 - **The MVV ran on a reduced tree**: text files were cut to 1 KB and the 7 PDFs dropped
   (N=5010), because a full cold run takes 5+ hours of embedding. Sam accepted the run as it
   was. No real PDF went through a delta.
@@ -62,8 +64,8 @@ repository (below).
   but the frecency stamp still writes every row through `update_many`.
 - **The Gap 3 count was dropped, then taken at close**: Step 6 was to count the documents a full
   run leaves with no manifest. It was carried to the Phase 2 gate and not taken there. At close
-  it was measured on a local engine: 0 of 5328 documents (develop 9b4618611, the same reduced
-  tree as the MVV, PDFs not covered).
+  it was measured on a local engine: 0 of 5328 documents (develop 9b4618611, the same reduction
+  as the MVV on a later tree, PDFs not covered).
 - **Part B moved out**: held at accept on Sam's answer to open question 3, and moved to RDR-251
   at close.
 
@@ -85,7 +87,7 @@ repository (below).
 | **Unvalidated assumption** | 2 | "about 150 stale-owner RDRs" (measured 0); Step 7's time split assumed measurable against a managed baseline | Yes, by running the Step 0 count before sizing the read arm |
 | **Framework API detail** | 0 | | |
 | **Missing failure mode** | 0 | | |
-| **Missing Day 2 operation** | 1 | gate 5b.1 deferred to a release event that the plan's own Step 9 then removed | Yes, by naming a fallback owner for a deferred gate |
+| **Missing Day 2 operation** | 1 | gate 5b.1 deferred to the release that raised the pin; that release (8.1.0) came and the rehearsal was not run with it | Yes, by making the deferred gate a checklist item of the release it moved to |
 | **Deferred critical constraint** | 1 | Gap 3's count, the input to the reorder decision, slipped from Step 6 to close | Yes, by giving the measurement its own bead or checklist line |
 | **Over-specified code** | 0 | | |
 | **Under-specified architecture** | 0 | | |
@@ -100,7 +102,7 @@ repository (below).
 ### What the RDR Got Right
 
 - It put the correctness defect (Gap 4) first and held the cost-only work (Part B). The
-  accepted scope shipped in about a week.
+  accepted scope shipped in five days (accepted 2026-11-08, v8.2.0 tagged 2026-11-12).
 - Its contract tests were stated as request shapes (one commit, `ceil(N/1000)` stage pages,
   zero single writes). Those still held when the MVV tree had to be cut down, because the
   counts do not depend on file size.
@@ -124,8 +126,9 @@ repository (below).
 1. **Write release steps against the pin they find, not a fixed value**: say "the pin is at
    least engine cut N", so a later release that already passed it does not read as a
    lowering.
-2. **Give a deferred gate a named fallback**: when a gate moves to "the release that does X",
-   say who runs it if X never happens.
+2. **Put a deferred gate on the checklist of the release it moves to**: when a gate moves to
+   "the release that does X", add it to that release's gates by name, so the release that does
+   X runs it. 8.1.0 raised the pin and the deferred 5b.1 rehearsal did not ride with it.
 3. **Track a measurement the next decision depends on as its own item**: Gap 3's count rode
    inside a step's prose and slipped through two gates.
 4. **Measure a population before sizing a mechanism for it**: the stale-owner read arm was

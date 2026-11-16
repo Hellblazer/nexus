@@ -97,7 +97,9 @@ k-means or HDBSCAN primitive (IVFFlat's build-time k-means is internal).
 
 RDR-193 Part A gave the engine a shared job registry (`EngineJobs`, with a poll
 that checks the tenant) and landing tables for staged client input. Part B was
-designed to reuse both. It was held at accept because Parts A and A4 fixed a
+designed to reuse the registry, with a `discoverJobs` instance; its discover job
+reads chunk and embedding rows from `nexus.chunks` and does not use the landing
+tables, which hold catalog rows only. It was held at accept because Parts A and A4 fixed a
 correctness defect (RDR-193 Gap 4), while Part B fixed a cost that nothing yet
 felt.
 
