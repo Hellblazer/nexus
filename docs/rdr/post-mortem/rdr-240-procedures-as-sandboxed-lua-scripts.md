@@ -16,7 +16,7 @@ Implemented. Epic nexus-qo7ie.2 is closed. The shipped library holds
 nexus repo's `.nexus/procedures/`. The four memory files went from 15 to
 36 KB to 3 to 6 KB each. Both close critiques returned `partial` with 0
 Critical findings and 0 ship-blockers; every finding was RDR text that the
-code had overtaken, amended in 3baa60593 (T2
+code had overtaken, amended in the commit before this close (T2
 `nexus/critique-9b4618611-nexus-qo7ie.2-2026-11-16` and `-r2`). Sam closed
 it as Implemented with that override recorded (T2
 `nexus_rdr/240-close-override-2026-11-16`).

@@ -17,7 +17,7 @@ the read verbs (`memory.get`, `memory.list`, `memory.search`, `tables.get`,
 `git.diff_names`, `git.diff_stat`, `transcripts.sessions`) are in
 `src/nexus/lua_runtime/`. Native Windows was verified on qwent. Both close
 critiques returned `partial` with 0 Critical findings and 0 ship-blockers;
-the findings were stale text and one test-guard gap, all fixed in 3baa60593
+the findings were stale text and one test-guard gap, all fixed in the commit before this close
 (T2 `nexus/critique-d76add41d-nexus-mdbds.1-2026-11-16`,
 `nexus/critique-d1c26b643-nexus-mdbds.1-2026-11-16-r2`). Sam closed it as
 Implemented with that override recorded (T2
