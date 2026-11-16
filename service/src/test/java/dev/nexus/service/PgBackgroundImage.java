@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
@@ -41,8 +42,11 @@ import java.util.HexFormat;
  * Debian mirror cannot build on a cold cache, as it cannot pull {@link PgContainerRecipe#IMAGE}, and the data-move
  * tests fail there, not skip.
  *
- * <p><b>Lifecycle:</b> after a build, the older tags of this repository are removed ({@link #removeOlderTags}), so a
- * moved pin does not leave the previous image on the host's disk.
+ * <p><b>Lifecycle:</b> older tags are left in place, on purpose. The final stage is the base image plus the one
+ * shared object and its SQL scripts, so a tag costs the host a few hundred kilobytes over layers it already holds,
+ * while removing "older" tags would let two worktrees at different pins (or two users of one Docker daemon) delete
+ * each other's tag on every run, and the daemon records no tag time to tell a stale tag from a live one. The
+ * build-stage layers (the compiler) are in the daemon's build cache, which the pool's weekly prune reclaims.
  */
 public final class PgBackgroundImage {
 
@@ -65,7 +69,17 @@ public final class PgBackgroundImage {
     /** Classpath location of the Dockerfile. */
     static final String DOCKERFILE_RESOURCE = "docker/pg-background.Dockerfile";
 
-    private static final Path LOCK_FILE = Path.of(System.getProperty("java.io.tmpdir"), "nexus-pg-background-image.lock");
+    /**
+     * One lock file per OS user: in a sticky world-writable directory (/tmp) with {@code fs.protected_regular=2} a
+     * second user cannot open another user's lock file with O_CREAT, so a shared name fails on the pool hosts that
+     * have two test users. Users sharing one Docker daemon each lock their own file; the exists-check inside the lock
+     * and the daemon's build cache make a simultaneous build by two users a duplicate, not a conflict.
+     */
+    static final Path LOCK_FILE = Path.of(System.getProperty("java.io.tmpdir"),
+        "nexus-pg-background-image-" + System.getProperty("user.name", "user").replaceAll("[^A-Za-z0-9_.-]", "_") + ".lock");
+
+    /** How long a build waits for the lock a peer JVM holds: a cold build is about two minutes. */
+    static final Duration LOCK_WAIT = Duration.ofMinutes(15);
 
     private static DockerImageName built;
 
@@ -99,7 +113,7 @@ public final class PgBackgroundImage {
         }
         String name = imageName();
         try (FileChannel ch = FileChannel.open(LOCK_FILE, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-             FileLock ignored = ch.lock()) {
+             FileLock ignored = lock(ch, LOCK_WAIT)) {
             if (!exists(name)) {
                 new ImageFromDockerfile(name, false)
                     .withFileFromClasspath("Dockerfile", DOCKERFILE_RESOURCE)
@@ -107,12 +121,36 @@ public final class PgBackgroundImage {
                     .withBuildArg("PG_BACKGROUND_COMMIT", PG_BACKGROUND_COMMIT)
                     .get();
             }
-            removeOlderTags(name);
         } catch (IOException e) {
             throw new IllegalStateException("could not lock " + LOCK_FILE, e);
         }
         built = DockerImageName.parse(name);
         return built;
+    }
+
+    /** An exclusive lock on {@code ch}, polled until {@code wait} is spent; a peer that holds it that long is a failure, not a wait. */
+    static FileLock lock(FileChannel ch, Duration wait) throws IOException {
+        long deadline = System.nanoTime() + wait.toNanos();
+        while (true) {
+            try {
+                FileLock l = ch.tryLock();
+                if (l != null) {
+                    return l;
+                }
+            } catch (java.nio.channels.OverlappingFileLockException e) {
+                // held by another thread of this JVM; dockerImageName() is synchronized, so only a direct caller gets here
+            }
+            if (System.nanoTime() - deadline >= 0) {
+                throw new IllegalStateException("another process has held " + LOCK_FILE + " for " + wait
+                    + " (building the pg_background image?); the data-move tests cannot continue");
+            }
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted waiting for " + LOCK_FILE, e);
+            }
+        }
     }
 
     private static boolean exists(String name) {
@@ -121,29 +159,6 @@ public final class PgBackgroundImage {
             return true;
         } catch (com.github.dockerjava.api.exception.NotFoundException e) {
             return false;
-        }
-    }
-
-    /**
-     * Remove this repository's tags other than {@code keep}. Best effort: a tag in use by a running container is
-     * refused by the daemon and stays; nothing here can fail a test.
-     */
-    static void removeOlderTags(String keep) {
-        try {
-            var docker = DockerClientFactory.instance().client();
-            for (var img : docker.listImagesCmd().withReferenceFilter(REPOSITORY).exec()) {
-                for (String tag : img.getRepoTags() == null ? new String[0] : img.getRepoTags()) {
-                    if (tag.startsWith(REPOSITORY + ":") && !tag.equals(keep)) {
-                        try {
-                            docker.removeImageCmd(tag).exec();
-                        } catch (RuntimeException e) {
-                            System.out.println("PG_BACKGROUND_IMAGE kept older image " + tag + ": " + e.getMessage());
-                        }
-                    }
-                }
-            }
-        } catch (RuntimeException e) {
-            System.out.println("PG_BACKGROUND_IMAGE could not list older images: " + e.getMessage());
         }
     }
 }

@@ -914,6 +914,14 @@ class TestRoleUniquenessScanTest {
         assertThat(roles(fixture("A", bare))).singleElement().asString().contains("nexus_diag").contains("exclusive");
         assertThat(roles(fixture("A", declared))).isEmpty();
         assertThat(roles(fixture("A", dedicated))).isEmpty();
+        // nexus-f3yqd.2.8: the data-move container is a container of its own too, so a creator of a reserved role on it
+        // needs no declaration. Reverting the DEDICATED pattern's startDataMove / newDataMoveContainer terms turns these red.
+        for (String boot : List.of("startDataMove()", "startDataMove(List.of(\"-c\", \"max_worker_processes=4\"))",
+                "newDataMoveContainer()")) {
+            String dataMove = "class A { void f() { PgContainerHelper." + boot + ";"
+                + " PgContainerHelper.createLoginRole(su, \"nexus_diag\", \"pw\", true); } }";
+            assertThat(roles(fixture("A", dataMove))).as(boot).isEmpty();
+        }
     }
 
     @Test

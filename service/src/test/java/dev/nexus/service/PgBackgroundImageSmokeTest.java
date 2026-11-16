@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -10,12 +11,17 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.time.Duration;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -97,6 +103,52 @@ class PgBackgroundImageSmokeTest {
         try (Connection c = pg.createConnection(""); Statement st = c.createStatement()) {
             st.execute("CREATE EXTENSION IF NOT EXISTS vector");
             assertThat(scalar(st, "SELECT extversion FROM pg_extension WHERE extname = 'vector'")).isNotBlank();
+        }
+    }
+
+    /** startDataMove(List) appends postmaster settings after the recipe's own: the slot-exhaustion tests set max_worker_processes. */
+    @Test
+    void startDataMove_withServerArgs_startsTheClusterWithThem() throws Exception {
+        PostgreSQLContainer<?> c = PgContainerHelper.startDataMove(List.of("-c", "max_worker_processes=4"));
+        try (Connection conn = c.createConnection(""); Statement st = conn.createStatement()) {
+            assertThat(scalar(st, "SHOW max_worker_processes")).isEqualTo("4");
+            // The recipe's own flags are still there, in front of the appended ones.
+            assertThat(scalar(st, "SHOW fsync")).isEqualTo("off");
+        } finally {
+            c.stop();
+        }
+        // Non-vacuity: the plain container does not run with 4, so the assertion above reads the argument.
+        try (Connection conn = pg.createConnection(""); Statement st = conn.createStatement()) {
+            assertThat(scalar(st, "SHOW max_worker_processes")).isNotEqualTo("4");
+        }
+    }
+
+    // ── the build lock ──────────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void theLockFile_isPerUser_andABusyLockFailsLoudAfterTheDeadline() throws Exception {
+        assertThat(PgBackgroundImage.LOCK_FILE.getFileName().toString())
+            .contains(System.getProperty("user.name").replaceAll("[^A-Za-z0-9_.-]", "_"))
+            .startsWith("nexus-pg-background-image-").endsWith(".lock");
+        Path f = Files.createTempFile("pgbg-lock", ".lock");
+        try (FileChannel holder = FileChannel.open(f, StandardOpenOption.WRITE);
+             FileLock held = holder.lock();
+             FileChannel waiter = FileChannel.open(f, StandardOpenOption.WRITE)) {
+            assertThat(held.isValid()).isTrue();
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> PgBackgroundImage.lock(waiter, Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("has held");
+            assertThat(Duration.ofNanos(System.nanoTime() - t0)).as("it waited the deadline, not less").isGreaterThanOrEqualTo(Duration.ofSeconds(1));
+        } finally {
+            Files.deleteIfExists(f);
+        }
+        // A free lock is taken at once.
+        Path g = Files.createTempFile("pgbg-lock", ".lock");
+        try (FileChannel ch = FileChannel.open(g, StandardOpenOption.WRITE);
+             FileLock l = PgBackgroundImage.lock(ch, Duration.ofSeconds(1))) {
+            assertThat(l.isValid()).isTrue();
+        } finally {
+            Files.deleteIfExists(g);
         }
     }
 
