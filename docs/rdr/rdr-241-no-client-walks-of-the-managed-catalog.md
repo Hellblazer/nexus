@@ -309,8 +309,9 @@ draft's claims point at.
 - **Verified (source):** the stat registry `nx doctor --check-references` uses
   covers five non-file schemes: `obsidian`, `x-devonthink-item`, `nx-scratch`,
   `nx-note`, `https` (`aspect_readers.py:2120-2127`). The check today also
-  lists a document whose scheme is registered nowhere (for example `chroma://`)
-  and reports it as not stattable.
+  lists a document whose scheme is registered nowhere (for example `chroma://`,
+  or a Windows drive path read as scheme `c`) and reports it as unknown, which
+  never sets the check's exit code (the golden test of nexus-uwggq.1.4).
 - **Documented:** catalog size 22k (2026-08-02) to 43.7k (2026-11-02). No repo
   document states a growth rate.
 
@@ -326,8 +327,11 @@ draft's claims point at.
   **Method**: Source Search
 - [ ] Dropping documents with an unregistered `source_uri` scheme from
   `nx doctor --check-references` is acceptable — **Status**: Assumed. Those rows
-  can only ever report "not stattable", and `nx catalog backfill source-uri`
-  exists to rewrite the `chroma://` ones. Checked before the switch ships by
+  can only ever report "unknown", which never sets the check's exit code, and
+  `nx catalog backfill source-uri` exists to rewrite the `chroma://` ones. A
+  registered scheme spelled in capitals (`HTTPS://`) is counted under its
+  scheme today; a case-sensitive per-scheme read would drop it, which is
+  outside this assumption (nexus-uwggq.1.5 stops for Sam if its diff shows it). Checked before the switch ships by
   running the check on one fixture before and after and diffing the reports
   — **Method**: Test
 - [ ] An engine filter on `author` or on a `meta` key answers in one statement
@@ -742,8 +746,9 @@ None.
   **Verify**: the HTTP client counts the route's request and no unfiltered
   `GET /list`, and the rows equal the walk's rows on the same fixture.
 - **Scenario**: `nx doctor --check-references` on one fixture with a row of each
-  registered scheme and one `chroma://` row, before and after the switch —
-  **Verify**: the reports differ only by the unregistered row.
+  registered scheme, a `chroma://` row and a drive-path row, before and after
+  the switch — **Verify**: the reports differ only by the two unregistered
+  rows.
 - **Scenario**: `nx doctor` sensitive rows when `/sensitive` is unavailable, and
   when it answers capped — **Verify**: both read "not checked" with the cause,
   and no walk is made.
@@ -872,3 +877,4 @@ the next one without the ratchet.
   (`sensitive_paths.py:261`). Implementation Plan rebuilt as Phase 1 (client
   only, hours) and Phase 2 (engine and client, days). Status stays draft.
 - 2026-11-16: Gate round 1 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `641b2a2bd7fe`; critique `nexus_rdr/241-gate-critique-2026-11-16-r1`.
+- 2026-11-16: The acknowledged assumption on `nx doctor --check-references` corrected to match the code (standing grant 3; nexus-uwggq.1.4 golden test and its critique T2 `nexus/critique-0d91dac32-nexus-uwggq.1.4-2026-11-16-r1`): unregistered-scheme rows report "unknown", not "not stattable", and never set the exit code; the fixture holds two such rows; an upper-case registered scheme is outside the assumption.
