@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -132,5 +133,15 @@ def test_check_references_report_matches_golden(
     report = render_report(monkeypatch, capsys)
     if os.environ.get(_REGEN_ENV) == "1":
         GOLDEN.write_text(report, encoding="utf-8")
+        # A regen run never reports green: it compared nothing, so it fails on purpose.
+        pytest.fail(f"golden regenerated at {GOLDEN}; unset {_REGEN_ENV}, review the diff and rerun")
     assert GOLDEN.read_text(encoding="utf-8") == report
 
+
+
+def test_the_fixture_has_a_row_for_every_registered_non_file_scheme() -> None:
+    """The golden pins each registered scheme only if the fixture holds a row of it. A scheme added to
+    the stat registry without a row here would leave the golden green and that scheme unpinned."""
+    covered = {urlparse(e.source_uri).scheme for e in fixture_entries()}
+    registered = set(aspect_readers._STAT_HANDLERS) - {"file"}  # file:// rows are not reference-only
+    assert registered <= covered, f"registered schemes with no fixture row: {sorted(registered - covered)}"
