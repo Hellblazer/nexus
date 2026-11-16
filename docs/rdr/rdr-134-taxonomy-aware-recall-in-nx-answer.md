@@ -115,8 +115,8 @@ remove hits, never reach chunks the unscoped search missed.
 - RDR-227 (closed) plans small collections as exact scans and large ones on
   per-collection HNSW indexes (`pci_`). That router serves the plain-search
   path; the topic-scoped functions are called directly, not through it
-  (`PgVectorRepository.java:5205`). Step 1 decides whether the new topic-set
-  functions go through the router; see Risks.
+  (`PgVectorRepository.java:5205`). Step 1 calls the new topic-set functions
+  directly too (vectors-062); see Step 1 and Risks.
 - RDR-232 (closed) narrows `nx_answer` by owner, corpus and subtree before
   search, and can confine a search with `chash_allow`. Routing runs inside
   the collections that narrowing leaves; a confined search is not routed.
@@ -457,8 +457,10 @@ collection.
   Step 5a's check of the threshold. Accepted as a residual risk.
 - **Risk**: a filtered search under an approximate index returns fewer rows
   than asked: the centroid ANN filters one shared HNSW index by collection,
-  and the topic join may run on a `pci_` index if Step 1 routes it through
-  RDR-227's router. **Mitigation**: short rows did not change any score in
+  and the topic search may walk a collection's `pci_` index. The planner,
+  not RDR-227's router, chooses that index (`PciPlanCheck`), and the direct
+  call forces a custom plan as the router does, so the exposure is the same
+  as `search_topic_scoped`'s (Step 1). **Mitigation**: short rows did not change any score in
   the measurement (F0 equals Fk, `-13`); the zero-row fallback covers the
   empty case; Step 5a reports how often routed collections come back short
   against an exact scan.
@@ -501,6 +503,20 @@ search's per-collection k, threshold and sensitivity exclusion, and a
 recorded decision on whether they go through RDR-227's router. One
 Liquibase changeset (the engine's schema-migration format). Tests on the
 substrate (the real engine with PostgreSQL) first.
+
+Decided at implementation (nexus-7fku2.1.1, changeset vectors-062, reviewed):
+`search_topic_set_<dim>` takes `p_topic_ids bigint[]`, and an empty or NULL
+set returns no rows. The threshold is not in SQL: the per-collection merge
+applies it after the arm's top-k, as for the plain search, so `rawCount`,
+`dropped` and Step 3's zero-row fallback share one basis. The functions are
+called directly, as `search_topic_scoped` is, not through RDR-227's router.
+The router does not choose the `pci_` index; the planner does. So the
+short-row exposure equals the single-topic function's, and Step 5a measures
+it. A direct call forgoes the router's exact-scan route for small sets, the
+widest `ef_search` when a collection has no `pci_` index, and the
+empty-result exact re-run. Step 3 decides whether the topic arm needs any of
+them, and needs its own arm method, since the existing direct call
+(`runCombinedQuery`) is not a fan-out arm.
 
 #### Step 2: Coverage
 
