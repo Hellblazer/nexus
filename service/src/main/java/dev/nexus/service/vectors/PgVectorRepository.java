@@ -2845,6 +2845,11 @@ public final class PgVectorRepository {
         }
     }
 
+    /** The {@code probe_workers=} word of the lexical log line: the setting a shared probe ran with, else {@code none}. */
+    private static String probeWorkersWord(SharedLexicalProbe share, int probeWorkers) {
+        return share == null || share.kind() == SharedLexicalProbe.Kind.PENDING ? "none" : Integer.toString(probeWorkers);
+    }
+
     /**
      * Environment switch for {@link FanoutSettings#sharedLexicalProbe} (nexus-bbtc2): {@code 0}, {@code off} or
      * {@code false} makes every lexical arm run its own text-gate probe, as before the shared probe existed. Anything
@@ -3358,12 +3363,16 @@ public final class PgVectorRepository {
             // probe's answer (an arm that waited 3 s for it shows 3 s here, however fast its own rank was).
             // shared_probe is off (not shared), not_started (shared, but the probe task never ran), per_collection or
             // fallback; shared_dense is the number of collections the probe found dense (HNSW-first).
+            // probe_workers is the max_parallel_workers_per_gather the shared probe's statement ran with (0 is serial),
+            // or none when no shared probe ran (sharing off, one collection, chash_allow, or the probe task never ran).
             log.info("event=search_per_collection_lexical arms={} lexical_rows={} extra_rows={} errors={} "
-                     + "slowest_arm_ms={} sum_arm_ms={} shared_probe={} shared_probe_ms={} shared_dense={}",
+                     + "slowest_arm_ms={} sum_arm_ms={} shared_probe={} shared_probe_ms={} shared_dense={} "
+                     + "probe_workers={}",
                      runnable.size(), lexicalStats.stream().mapToInt(LexicalStat::count).sum(), lexicalRows.size(),
                      lexicalStats.stream().filter(s -> s.error() != null).count(), slowestLexicalMs, sumLexicalMs,
                      share == null ? "off" : share.label(),
-                     share == null ? 0L : share.probeMillis(), share == null ? 0 : share.denseCount());
+                     share == null ? 0L : share.probeMillis(), share == null ? 0 : share.denseCount(),
+                     probeWorkersWord(share, settings.probeWorkers()));
         }
         return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained(),
                                        includeEmbeddings ? queryDim : 0, lexicalRows, lexicalStats,
