@@ -314,7 +314,9 @@ class JooqRecordReflectionFeatureTest {
     // Record type (DataMovesRecord), +1.
     // 135 -> 138: nexus-7fku2.1.1 (RDR-134 Step 1), vectors-062-topic-set-search.xml added nexus.search_topic_set_384/768/1024,
     // three RETURNS TABLE functions, three generated Record types (SearchTopicSet384Record, ...768Record, ...1024Record), +3.
-    private static final int EXPECTED_RECORD_TYPES = 138;
+    // 138 -> 141: nexus-7fku2.1.2 (RDR-134 Step 2), taxonomy-022-coverage-counts.xml added nexus.taxonomy_coverage_counts_384/768/1024,
+    // three RETURNS TABLE functions, three generated Record types (TaxonomyCoverageCounts384Record, ...768Record, ...1024Record), +3.
+    private static final int EXPECTED_RECORD_TYPES = 141;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

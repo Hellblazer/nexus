@@ -699,6 +699,7 @@ public final class NexusService {
         var telemetryRepo = new TelemetryRepository(tenantScope);
         this.scratchRepo  = new ScratchRepository(tenantScope);
         var taxonomyRepo  = new TaxonomyRepository(tenantScope);
+        var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2, shared by 3 handlers
         var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
@@ -807,7 +808,7 @@ public final class NexusService {
         t1Ctx.getFilters().addAll(authFilter);
 
         // /v1/taxonomy/* — taxonomy endpoints (bead nexus-gmiaf.14)
-        var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo, taxonomyCentroidRepo));
+        var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage));
         taxonomyCtx.getFilters().addAll(authFilter);
 
         // /v1/aspects/* — aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15)
@@ -846,7 +847,7 @@ public final class NexusService {
             ? new dev.nexus.service.db.CombinedWriteService(tenantScope, catalogRepo, docEmbedderRouter)
             : null;
         var catalogCtx = server.createContext("/v1/catalog",
-                new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs, chunkKeyAllowlistCheck, manifestFillJobs));
+                new CatalogHandler(catalogRepo, combinedWriteService, reconcileJobs, chunkKeyAllowlistCheck, manifestFillJobs, taxonomyCoverage));
         catalogCtx.getFilters().addAll(authFilter);
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).
@@ -879,7 +880,7 @@ public final class NexusService {
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
         this.vectorHandler = new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker,
-                ownerlessWritePolicy, requestLedger, chunkKeyAllowlistCheck);
+                ownerlessWritePolicy, requestLedger, chunkKeyAllowlistCheck, taxonomyCoverage);
         var vectorCtx = server.createContext("/v1/vectors", this.vectorHandler);
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
@@ -2237,7 +2238,6 @@ public final class NexusService {
         return dataSweepFailuresByTenant.getOrDefault(tenant, 0);
     }
 
-
     /** Stop the HTTP server, TTL sweep scheduler, and purge-trash VACUUM
      *  executor immediately. */
     public void stop() {
@@ -2271,6 +2271,7 @@ public final class NexusService {
     public dev.nexus.service.vectors.OwnerlessWritePolicy ownerlessWritePolicy() {
         return ownerlessWritePolicy;
     }
+    public dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage() { return vectorHandler.taxonomyCoverage(); } // RDR-134 Step 2: shared by the vector, taxonomy and catalog handlers
 
     /**
      * Actual bound port. Useful when constructed with port 0.

@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-7fku2.1.2 (RDR-134 Step 2): nexus.taxonomy_coverage_counts_384, _768 and _1024. One row per call,
+    (has_taxonomy boolean, chunks bigint, unassigned bigint), from which the engine computes a collection's topic
+    coverage, 1 - unassigned / chunks. The routed per-collection search (Step 3) routes a collection only when it has
+    centroids, has chunks, and the coverage is at least 0.9.
+
+    WHY A NEW FUNCTION. taxonomy_unassigned_chashes_<dim> (taxonomy-019) cannot give the ratio as written: it returns
+    pages of chashes capped at 1000 (MAX_UNASSIGNED_CHASHES) with no count and no denominator, and walking its pages
+    to count a 500k-chunk collection is 500 round trips for a number. These functions count in one statement. That
+    makes the RDR's new SQL functions more than the three of Step 1; the Proportionality section is amended when the
+    step closes.
+
+    ONE PREDICATE FOR NUMERATOR AND DENOMINATOR. Both are counted over the same CTE, "live": the chunks of
+    p_collection with a non-null embedding at the collection's dimension and a LIVE OWNER, chunk_live_owners(tenant,
+    collection, chash), the live-chunk filter the plain search and search_topic_set_<dim> apply (a manifest row whose
+    document is not tombstoned). The numerator then adds NOT EXISTS an assignment to a topic of this collection. With
+    two predicates the ratio drifts: counting the roughly 55k manifest-less ghost chunks of the production collection in
+    the denominator alone would read as a coverage gap that no assignment can close.
+
+    DIVERGENCE FROM taxonomy-019, ON PURPOSE. taxonomy-019 asks only that SOME manifest row names the chash, with no
+    tombstone check (nexus-wbfpw.37), so a chunk owned only by a deleted document still counts as unassigned there.
+    This function uses the live-owner filter instead, because the question differs: 019 lists chunks a drain should
+    taxonomize, and the ratio asks what share of the chunks a search can return is reachable by a routed search. A
+    tombstoned chunk is returned by neither search, so counting it would lower the coverage of a collection whose
+    deleted documents were never purged. The numbers therefore differ from taxonomy_unassigned_chashes_<dim> by the
+    tombstoned-owner chunks, and only by those.
+
+    "ASSIGNED" IS THE ROUTED SEARCH'S MEMBERSHIP TEST. A live chunk is assigned when a topic_assignments row has its
+    chash and a topic whose collection is p_collection: the EXISTS of search_topic_set_<dim> (vectors-062), with its
+    three conjuncts, minus the topic-id set. So the ratio measures what the routed search can reach. A projection row
+    (a chunk projected onto ANOTHER collection's topic) does not count: that topic's collection is not p_collection.
+    The assignment row's source_collection is not read, as in taxonomy-019 and search_topic_set: a chunk of this
+    collection that shares its chash with a chunk of another collection, projected onto this collection's topic, is
+    returned by the routed search, so it is counted reachable. If search_topic_set's membership changes, change this.
+
+    has_taxonomy is true when the collection has a centroid at the dimension (taxonomy_centroids, as in 019). When it
+    is false the function does not scan the chunks: chunks and unassigned come back 0, and mean "not measured", not
+    "empty". A caller reads has_taxonomy first.
+
+    One row always (aggregates over no rows still return one), so an empty collection reads (has_taxonomy, 0, 0) and
+    the caller never routes it: coverage over zero chunks is undefined, not 1.
+
+    SHAPE. LANGUAGE sql STABLE SECURITY INVOKER, like 019: row-level security scopes every table read to the tenant, so
+    there is no tenant predicate beyond the one chunk_live_owners takes as an argument (c.tenant_id, the row's own).
+    The live set is materialized once and read twice (count, then the anti-join), so the chunk scan runs once.
+    The function takes no limit and no cursor, so the caller bounds it: TaxonomyCoverage sets the taxonomy statement
+    and lock timeouts and treats a timeout as "no coverage" (the collection is searched unscoped).
+
+    GRANTS. EXECUTE revoked from PUBLIC (defence in depth, as vectors-062: these are SECURITY INVOKER, row-level
+    security is the access control) and granted to nexus_svc. 9 DDL statements: 3 CREATE FUNCTION, 3 REVOKE, 3 GRANT;
+    no table, so the runAlways grants loop adds none.
+
+    No DATA EFFECT: function definitions only. Placed after vectors-062, before the grants-nexus-svc.xml runAlways
+    block.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-022-1" author="nexus-7fku2.1.2">
+        <comment>nexus-7fku2.1.2 (RDR-134 Step 2): nexus.taxonomy_coverage_counts_384/768/1024(p_collection) return one row (has_taxonomy, chunks, unassigned): the collection's live chunks (a live owner, a non-null embedding at the dimension) and how many of them carry no assignment to a topic of this collection. Numerator and denominator share one predicate. SECURITY INVOKER, EXECUTE revoked from PUBLIC and granted to nexus_svc. No data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+-- ---- taxonomy_coverage_counts_384
+CREATE FUNCTION nexus.taxonomy_coverage_counts_384(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+        ) AS v
+    ),
+    live AS MATERIALIZED (
+        SELECT c.tenant_id, c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_384 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+    ),
+    total AS (
+        SELECT count(*) AS n FROM live
+    ),
+    unassigned_live AS (
+        SELECT count(*) AS n
+          FROM live l
+         WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM nexus.topic_assignments ta
+                     JOIN nexus.topics t
+                       ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                    WHERE ta.tenant_id = l.tenant_id
+                      AND ta.doc_id = l.chash
+                      AND t.collection = p_collection)
+    )
+    SELECT (SELECT v FROM has_tax),
+           (SELECT n FROM total),
+           (SELECT n FROM unassigned_live)
+$function$;
+
+REVOKE EXECUTE ON FUNCTION nexus.taxonomy_coverage_counts_384(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.taxonomy_coverage_counts_384(text) TO nexus_svc;
+
+-- ---- taxonomy_coverage_counts_768
+CREATE FUNCTION nexus.taxonomy_coverage_counts_768(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+        ) AS v
+    ),
+    live AS MATERIALIZED (
+        SELECT c.tenant_id, c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_768 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+    ),
+    total AS (
+        SELECT count(*) AS n FROM live
+    ),
+    unassigned_live AS (
+        SELECT count(*) AS n
+          FROM live l
+         WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM nexus.topic_assignments ta
+                     JOIN nexus.topics t
+                       ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                    WHERE ta.tenant_id = l.tenant_id
+                      AND ta.doc_id = l.chash
+                      AND t.collection = p_collection)
+    )
+    SELECT (SELECT v FROM has_tax),
+           (SELECT n FROM total),
+           (SELECT n FROM unassigned_live)
+$function$;
+
+REVOKE EXECUTE ON FUNCTION nexus.taxonomy_coverage_counts_768(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.taxonomy_coverage_counts_768(text) TO nexus_svc;
+
+-- ---- taxonomy_coverage_counts_1024
+CREATE FUNCTION nexus.taxonomy_coverage_counts_1024(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+        ) AS v
+    ),
+    live AS MATERIALIZED (
+        SELECT c.tenant_id, c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_1024 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+    ),
+    total AS (
+        SELECT count(*) AS n FROM live
+    ),
+    unassigned_live AS (
+        SELECT count(*) AS n
+          FROM live l
+         WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM nexus.topic_assignments ta
+                     JOIN nexus.topics t
+                       ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                    WHERE ta.tenant_id = l.tenant_id
+                      AND ta.doc_id = l.chash
+                      AND t.collection = p_collection)
+    )
+    SELECT (SELECT v FROM has_tax),
+           (SELECT n FROM total),
+           (SELECT n FROM unassigned_live)
+$function$;
+
+REVOKE EXECUTE ON FUNCTION nexus.taxonomy_coverage_counts_1024(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.taxonomy_coverage_counts_1024(text) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.taxonomy_coverage_counts_384(text);
+DROP FUNCTION IF EXISTS nexus.taxonomy_coverage_counts_768(text);
+DROP FUNCTION IF EXISTS nexus.taxonomy_coverage_counts_1024(text);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

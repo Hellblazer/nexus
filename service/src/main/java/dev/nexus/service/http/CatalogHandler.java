@@ -151,6 +151,15 @@ public final class CatalogHandler implements HttpHandler {
     private final CatalogManifestFillRoutes manifestFill;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
     private final java.time.Duration reconcileStatementTimeout;
+    /** RDR-134 Step 2 (nexus-7fku2.1.2): drops the cached topic coverage of what a write to the routes below changed. */
+    private final CoverageInvalidation coverage;
+    /** The routes that change which chunks are live: a manifest row, a document's tombstone or collection, a collection move. */
+    private static final java.util.Set<String> COVERAGE_OPS = java.util.Set.of(
+        "/register", "/doc/register_many", "/update", "/update_many", "/merge", "/delete", "/delete_many", "/restore",
+        "/purge-trash", "/ghost-sweep", "/manifest/write", "/manifest/append", "/manifest/append_many",
+        "/manifest/write_many", "/manifest/purge", "/manifest/resync", "/manifest/null_collection", "/manifest/fill",
+        "/collections/delete", "/collections/rename", "/collections/rehome", "/collections/supersede",
+        "/import/document", "/import/chunk", "/import/collection", "/reconcile/commit");
 
     /**
      * The statement timeout production runs a reconcile commit under: the reconcile registry's per-job cap, because
@@ -228,6 +237,25 @@ public final class CatalogHandler implements HttpHandler {
                    dev.nexus.service.db.CombinedWriteService combinedWriteService,
                    EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout,
                    ChunkKeyAllowlistCheck chunkKeyCheck, EngineJobs<ManifestFillJobs.Progress> manifestFillJobs) {
+        this(repo, combinedWriteService, reconcileJobs, reconcileStatementTimeout, chunkKeyCheck, manifestFillJobs, null);
+    }
+
+    /** Full wiring plus the topic-coverage cache NexusService also hands the vector and taxonomy handlers (RDR-134 Step 2). */
+    public CatalogHandler(CatalogRepository repo,
+                          dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                          EngineJobs<Void> reconcileJobs, ChunkKeyAllowlistCheck chunkKeyCheck,
+                          EngineJobs<ManifestFillJobs.Progress> manifestFillJobs,
+                          dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage) {
+        this(repo, combinedWriteService, reconcileJobs, RECONCILE_STATEMENT_TIMEOUT, chunkKeyCheck, manifestFillJobs,
+            taxonomyCoverage);
+    }
+
+    CatalogHandler(CatalogRepository repo,
+                   dev.nexus.service.db.CombinedWriteService combinedWriteService,
+                   EngineJobs<Void> reconcileJobs, java.time.Duration reconcileStatementTimeout,
+                   ChunkKeyAllowlistCheck chunkKeyCheck, EngineJobs<ManifestFillJobs.Progress> manifestFillJobs,
+                   dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage) {
+        this.coverage = new CoverageInvalidation(taxonomyCoverage, COVERAGE_OPS);
         if (reconcileStatementTimeout == null || reconcileStatementTimeout.isZero() || reconcileStatementTimeout.isNegative()
                 || reconcileStatementTimeout.compareTo(java.time.Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
             throw new IllegalArgumentException("the reconcile statement timeout must be positive and at most "
@@ -265,6 +293,7 @@ public final class CatalogHandler implements HttpHandler {
         String path   = exchange.getRequestURI().getPath();
         String op     = path.replaceFirst("^/v1/catalog", "");
         String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
+        final boolean armed = coverage.arm(exchange, op, tenant);
 
         try {
             switch (op) {
@@ -546,6 +575,8 @@ public final class CatalogHandler implements HttpHandler {
                 log.error("event=catalog_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
                 HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
             }
+        } finally {
+            coverage.finish(exchange, tenant, armed);
         }
     }
 
@@ -3937,7 +3968,9 @@ public final class CatalogHandler implements HttpHandler {
         try (InputStream in = exchange.getRequestBody()) {
             byte[] bytes = in.readAllBytes();
             if (bytes.length == 0) return Map.of();
-            return MAPPER.readValue(bytes, MAP_TYPE);
+            Map<String, Object> body = MAPPER.readValue(bytes, MAP_TYPE);
+            coverage.noteBody(exchange, body);
+            return body;
         }
     }
 

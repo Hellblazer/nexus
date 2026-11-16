@@ -159,6 +159,11 @@ public final class VectorHandler implements HttpHandler {
     /** RDR-222 Phase 1: null when the handler is built without a ledger; a keyed request is then refused. */
     private final KeyedSweep keyedSweep;
     /**
+     * RDR-134 Step 2 (nexus-7fku2.1.2): the topic-coverage cache; an upsert invalidates its collection after the
+     * write commits ({@link #coverageChanged}). Null when the handler is built without one (nothing is cached to invalidate).
+     */
+    private final dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage;
+    /**
      * nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Bound late by {@link #queryRing}, because the ring
      * needs the router's valid-index set, which Main builds after the service; {@code null} (a handler built without
      * one, or before the bind) admits nothing.
@@ -225,6 +230,20 @@ public final class VectorHandler implements HttpHandler {
                          OwnerlessWritePolicy ownerlessWritePolicy,
                          dev.nexus.service.db.RequestLedger requestLedger,
                          ChunkKeyAllowlistCheck chunkKeyCheck) {
+        this(embedderRouter, pgRepo, reranker, ownerlessWritePolicy, requestLedger, chunkKeyCheck, null);
+    }
+
+    /**
+     * Full wiring plus the topic-coverage cache (RDR-134 Step 2, nexus-7fku2.1.2). {@code NexusService} passes the one
+     * instance it also hands the taxonomy and catalog handlers, so a write on any of the three invalidates the same cache.
+     */
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
+                         dev.nexus.service.vectors.Reranker reranker,
+                         OwnerlessWritePolicy ownerlessWritePolicy,
+                         dev.nexus.service.db.RequestLedger requestLedger,
+                         ChunkKeyAllowlistCheck chunkKeyCheck,
+                         dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage) {
+        this.taxonomyCoverage = taxonomyCoverage;
         this.chunkKeyCheck = java.util.Objects.requireNonNull(chunkKeyCheck, "chunkKeyCheck");
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
@@ -239,6 +258,18 @@ public final class VectorHandler implements HttpHandler {
      */
     public void queryRing(PciQueryRing ring) {
         this.queryRing = ring;
+    }
+
+    /** The coverage cache this handler invalidates on a write; null when built without one. */
+    public dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage() {
+        return taxonomyCoverage;
+    }
+
+    /** A write to {@code collection} has returned (committed or failed): drop its cached coverage. */
+    private void coverageChanged(String tenant, String collection) {
+        if (taxonomyCoverage != null) {
+            taxonomyCoverage.invalidate(tenant, collection);
+        }
     }
 
     /**
@@ -614,29 +645,37 @@ public final class VectorHandler implements HttpHandler {
         }
 
         observeChunkKeys(ex, tenant, collection, "upsert-chunks", metadatas, ids.size());
-        if (embeddings != null) {
-            // Same-model vector PASSTHROUGH (nexus-hxry2): store the supplied vectors
-            // verbatim, no embedder call (token usage 0). Dimension is validated
-            // against the dispatched table inside the repository (fail loud).
-            // force_re_embed is irrelevant here (see javadoc above) — never threaded
-            // into upsertChunksWithVectors, which has no such parameter.
-            if (embeddings.size() != ids.size()) {
-                throw new IllegalArgumentException(
-                        "embeddings length " + embeddings.size() + " != ids length " + ids.size());
+        // RDR-134 Step 2: the store has committed (or failed) when either repository call returns, so the collection's
+        // cached topic coverage is dropped then, before the response is sent, on both branches and on a failure.
+        try {
+            if (embeddings != null) {
+                // Same-model vector PASSTHROUGH (nexus-hxry2): store the supplied vectors
+                // verbatim, no embedder call (token usage 0). Dimension is validated
+                // against the dispatched table inside the repository (fail loud).
+                // force_re_embed is irrelevant here (see javadoc above) — never threaded
+                // into upsertChunksWithVectors, which has no such parameter.
+                if (embeddings.size() != ids.size()) {
+                    throw new IllegalArgumentException(
+                            "embeddings length " + embeddings.size() + " != ids length " + ids.size());
+                }
+                repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas,
+                        deleteKeys, ownershipGuard(ex, "upsert-chunks"));
+                coverageChanged(tenant, collection);
+                emitTokenUsage(ex, 0L);
+                HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
+                return;
             }
-            repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas,
-                    deleteKeys, ownershipGuard(ex, "upsert-chunks"));
-            emitTokenUsage(ex, 0L);
-            HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
-            return;
-        }
 
-        var upsertResult = repo.upsertChunksWithTokens(
-                tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys,
-                ownershipGuard(ex, "upsert-chunks"));
-        // Emit token count from the doc-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, upsertResult.tokens());
-        HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
+            var upsertResult = repo.upsertChunksWithTokens(
+                    tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys,
+                    ownershipGuard(ex, "upsert-chunks"));
+            coverageChanged(tenant, collection);
+            // Emit token count from the doc-embedding call (bead nexus-ehc4q).
+            emitTokenUsage(ex, upsertResult.tokens());
+            HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
+        } finally {
+            coverageChanged(tenant, collection);
+        }
     }
 
     /**
