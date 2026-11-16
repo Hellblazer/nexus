@@ -209,7 +209,7 @@ The Phase 0 census was run on 2026-09-14 by conexus-e9 against the live
 hosted store (tenant `nexus`, read-only, 14:37Z); its queries and full tables
 are in T2 `nexus_rdr/209-research-1`. The current-code claims below were
 re-read from the working tree at commit 2e09b8cfc on 2026-11-16 and are
-recorded in T2 `nexus_rdr/209-research-4` to `-8`, one entry per group of
+recorded in T2 `nexus_rdr/209-research-4` to `-11`, one entry per group of
 claims, each written before the sentences that rest on it.
 
 #### Dependency Source Verification
@@ -219,9 +219,9 @@ claims, each written before the sentences that rest on it.
 | `MemoryRepository.search` and `/v1/memory/search` | Yes (research-4) | fetches every match with no limit and stamps all of them (`MemoryRepository.java:393-429`); the handler reads no `limit` (`MemoryHandler.java:309-331`) |
 | MCP `memory_search`, CLI `nx memory search` | Yes (research-4) | the MCP tool slices client-side (`mcp/core.py:8252-8258`); the CLI prints every match (`commands/memory.py:169-187`) |
 | engine-side narrowing precedents | Yes (research-5) | `title_kinds` on `/v1/memory/all` (`MemoryRepository.java:592-634`, `http_memory_store.py:735-767`) and `limit` with `matching_total` on `/v1/memory/list` (`MemoryHandler.java:337-361`) |
-| `expire`, upsert, promote | Yes (research-6) | the TTL formula reads `access_count` (`MemoryRepository.java:697`); upsert keeps `access_count`, restarts the age clock, clears the quarantine stamps (`:1444-1485`); no route sets only a TTL (`MemoryHandler.java:27-47`) |
-| Phase 3 state | Yes (research-7) | Steps 1 to 3 are not built; no whole-tag list filter exists (`MemoryRepository.java:556-567`, `:453-467`, `:592-634`) |
-| readers of RDR gate rows | Yes (research-8) | `*-gate-latest` rows are read by the rdr hook and the plans lifecycle stream (`hooks/rdr_verb.py:539-562`, `plans/lifecycle_stream.py:93`, `:396-406`) |
+| `expire`, upsert, promote | Yes (research-6) | the TTL formula reads `access_count` (`MemoryRepository.java:697`); put keeps `access_count`, restarts the age clock, clears the quarantine stamps and overwrites agent and session (`:1444-1485`); the import route copies every field as sent (`:1393-1442`, research-10); no route sets only a TTL (`MemoryHandler.java:27-47`) |
+| Phase 3 state | Yes (research-7, -11) | Steps 1 to 3 are not built; no whole-tag list filter exists in the engine (`MemoryRepository.java:556-567`, `:453-467`, `:592-634`); the census lists tagged rows with `get_all` and `split_tags` (`memory_curate/__init__.py:560`, `:600`) |
+| readers of RDR gate rows | Yes (research-8, -9) | `*-gate-latest` rows are read by the rdr hook and the plans lifecycle stream (`hooks/rdr_verb.py:539-562`, `plans/lifecycle_stream.py:93`, `:396-406`); critique and fix-check rows by the accept guard, the re-gate preamble and the loop-health count (`commands/rdr.py:1011-1020`, `:2176-2193`, `:3895-3924`) |
 
 ### Key Discoveries
 
@@ -267,15 +267,22 @@ claims, each written before the sentences that rest on it.
   been accessed, and nearly nine in ten of those are older than thirty days.
   Only thirty-nine rows carried a TTL after the 2026-09-12 sweep.
   *Source: T2 `nexus_rdr/209-research-1`, queries q1 and q6.*
-- **Verified** (research-6) The engine has no route that sets only a row's
-  TTL. Giving an existing row a TTL means writing it again with the same
-  content. That write keeps `access_count`, restarts the row's age clock, and
-  clears any quarantine stamps. The expiry formula then lets a row live
+- **Verified** (research-6, -10) The engine has no route that sets only a row's
+  TTL. Giving an existing row a TTL means writing it again. A write through
+  `put` replaces a missing agent or session with the writer's own, restarts the
+  row's age clock and clears any quarantine stamps; a write through the
+  verbatim import route (`/v1/memory/import`) stores content, tags, agent,
+  session, TTL, timestamp, `access_count` and `last_accessed` as sent, and
+  also clears the quarantine stamps. The expiry formula lets a row live
   `ttl_days * (1 + ln(access_count + 1))` days, so a gate record with a 30-day
   TTL that was counted 50 times lives about 147 days.
-- **Verified** (research-8) The RDR gate flow's `{id}-gate-latest` rows are
-  read by live code for every RDR in a project, closed ones included. A TTL
-  on them would remove a row those readers look up.
+- **Verified** (research-8, -9) The RDR gate flow's rows in `<repo>_rdr` are
+  read by live code for every RDR in the project, closed ones included: the
+  `{id}-gate-latest` rows by the rdr hook and the plans lifecycle stream, the
+  fix-check row a gate-latest names by the accept guard and the re-gate
+  preamble, and every critique row by the re-gate preamble and by the
+  loop-health count, which walks all gate-latest rows with no filter on the
+  RDR's status. A TTL on any of them would remove a row a reader looks up.
 - **Documented** The source paper's formula divides the lower tier's TTL by
   the heat term after graduation. Whether that rule fits a store whose T2 rows
   are mostly permanent (the 2026-09-12 sweep) is not obvious: dividing a NULL
@@ -302,24 +309,23 @@ claims, each written before the sentences that rest on it.
   (`MemoryHandler.java:317-331`), the same reason the plan-search
   `any_lexeme` field was additive (wire ledger, nexus-vi8fp). The client
   therefore must cut the page itself when it gets a list back.
-- [ ] A7: an engine filter that matches one whole tag selects exactly the rows
-  the client's `split_tags` (`src/nexus/tables/audit_tags.py:89`, which splits
-  on commas and trims spaces) calls tagged. **Status**: Unverified. The
-  existing SQL pattern in `searchByTag` (`(',' || tags || ',') LIKE
-  '%,tag,%'`, `MemoryRepository.java:565`) does not trim spaces, so it would
-  differ on a stored value such as `kind:gate, bead:x`. **Method**: a test
-  seeds that exact row and pins both sides to the same answer; the engine
-  pattern allows optional spaces around the tag.
 - [x] A8: the loss check can resolve every listed title without stamping
   access. **Status**: Verified by source search: `getAll` never calls the
   tracking helpers (`MemoryRepository.java:623-634`), so a check built on
   `get_all` leaves `access_count` alone, where a `get` per title would add one
   to each record.
-- [x] A9: a TTL set by writing the record again changes nothing but the
-  timestamp and TTL. **Status**: Verified by source search (research-6):
-  content, tags, session and agent come back as the caller sends them, so the
-  caller must send every stored field unchanged. The write is checked by
-  reading the row back.
+- [x] A9: a TTL set through the verbatim import route changes the TTL and
+  the timestamp the step chooses, and nothing else. **Status**: Reopened
+  2026-11-16 and restated. The first revision's claim was about `put` and was
+  false for a row with a null agent or session: `put` fills them from the
+  writer's environment and the engine stores that (research-10). For the
+  import route it is Verified by source search (research-10): content, tags,
+  agent, session, TTL, timestamp, `access_count` and `last_accessed` are stored
+  as sent, and an agent or session that is not sent stays NULL. The route also
+  clears `quarantined_at` and `rolled_up_at`, which is harmless for a row read
+  live, because `get_all` hides quarantined rows. The null-attribution seed in
+  Step 3's tests pins it. How many gate records have a null agent or session:
+  not measured.
 - [ ] A2: a promoted row can carry a mark on T2 (`promoted_at`,
   `promoted_to`) without changing any read path. **Status**: Unverified,
   deferred with Phase 1. **Method**: Source Search against `MemoryRepository`
@@ -421,36 +427,39 @@ the ledger lint requires the entry; the engine deploys before the client tag.
 
 #### Phase 3: a pointer record, a loss check, a TTL
 
-**Step 1 part (a), the whole-tag list filter.** `GET /v1/memory/all` gains an
-optional `tags` parameter, a comma-separated list of whole tags that a row must
-all carry. It follows the `title_kinds` precedent (`MemoryRepository.java:592-634`,
-`http_memory_store.py:735-767`): the engine filters, the response carries
-full rows including `tags`, and the client re-cuts the result so that an engine
-that ignores the parameter (or answers 400) still yields exactly the matching
-rows. The match is on one whole tag, with optional spaces around it, so
-`bead:nexus-1` does not match `bead:nexus-12` and an untagged record that
-mentions `kind:gate` in its body is not returned (A7). The tag is escaped as
-`searchByTag` escapes it (`:559-562`). Quarantined rows stay hidden. The
-change is additive in the wire ledger's sense: an old client never sends
-`tags`; a new client on an old engine gets every row and cuts it.
+**Step 1, the command and the pointer record.** `nx memory gate-rollup --rdr N
+(--phase P --beads b1,b2,... | --all) [--project REPO] [--dry-run]`. The bead
+list for a phase comes from the `phase-review-gate` close step, which already
+writes `Item N = <bead-id>` for every item; the command does not call `bd`,
+because bead-to-phase membership lives in the issue tracker, not in T2.
 
-**Step 1 part (b), the command and the pointer record.** `nx memory
-gate-rollup --rdr N (--phase P --beads b1,b2,... | --all) [--project REPO]
-[--include-titled] [--dry-run]`. The bead list for a phase comes from the
-`phase-review-gate` close step, which already writes `Item N = <bead-id>` for
-every item; the command does not call `bd`, because bead-to-phase membership
-lives in the issue tracker, not in T2.
-
-- *Which records.* For each listed bead, `get_all(<repo>, tags=[kind:gate,
-  bead:<id>])`. With `--all` (used at `rdr-close`), `tags=[kind:gate,rdr:<NNN>]`
-  instead. Older records carry no tags; `--include-titled` adds one unfiltered
-  `get_all` of the project and matches them by a listed bead id in their
-  title, the 72% the title mapping reaches (research-2). Records that map to
-  no listed bead are not touched. The RDR gate flow's own rows in
-  `<repo>_rdr` (tags `rdr,gate,...`, titled by RDR number) are per RDR, not per
-  phase, so only an `--all` run lists them, read by project and the `gate` tag
-  and mapped to the RDR by the number leading the title. That skill is not
-  retagged.
+- *Which records.* One `get_all` of `<repo>`, the read `nx memory curate --t2`
+  already makes (`memory_curate/__init__.py:560`), split on the client by
+  `split_tags` (`:600`; `src/nexus/tables/audit_tags.py:89-93`, which splits
+  on commas, trims and drops empties). A record is a gate record when its whole
+  tags include `kind:gate`; it belongs to a listed bead when they include
+  `bead:<id>`, or, with `--all` (used at `rdr-close`), when they include
+  `rdr:<NNN>`. That match is exact by construction (research-11), so the
+  engine needs no tag filter and Phase 3 adds no wire change. An
+  untagged record whose body mentions `kind:gate` is never matched, because
+  only the tags are read. Older records carry no tags; the same read lets the
+  command match them by a listed bead id in their title, the 72% the title
+  mapping reaches (research-2). Records that map to no listed bead are not
+  touched. A record with no bead, whether a `kind:gate` record with no
+  `bead:` tag or a title that names none, is listed under "unmapped" in the
+  pointer and takes no part in Step 2.3 or Step 3, because both work per bead.
+  The cost is one read of the whole project per run, as the census pays; the
+  nexus project held 3,158 rows on 2026-09-14 (research-1), and its size today
+  is not measured.
+- *Which project.* `<repo>` only. The RDR gate flow's rows in `<repo>_rdr`
+  (`{id}-gate-latest`, `{id}-gate-critique-*`, `{id}-fix-check-*`) are left
+  alone: no listing in the pointer and no TTL. Live code reads all three kinds
+  for every RDR, closed ones included, and keys on the RDR number alone
+  (research-8, -9). Exempting only some of them would mean tracking which
+  fix-check row each kept gate-latest names and which critique rows the
+  loop-health count reads, so the command does not touch the family. This
+  narrows Amendment A1, which put those rows in scope; the cost is that they
+  stay permanent, as they are today.
 - *The pointer record.* One T3 record per phase (per RDR for `--all`), in the
   existing knowledge subject `nexus-rdr-research` (`docs/collections.md`
   Rule 1: reuse a subject, and RDR postmortems already live in a subject under a
@@ -478,7 +487,8 @@ the cause if any of these fail:
 3. For each listed bead, its newest record (by header date, then round) has
    the verdict `justified`. A bead whose newest record is `partial` or
    `not-justified` stops the TTL step and is named, unless the run names it
-   with `--accept-open <bead>`, which the pointer records.
+   with `--accept-open <bead>`, which the pointer records. A record with no
+   bead has no chain to check; it is "unmapped" and gets no TTL.
 
 This is narrower than Amendment A1's wording, "each ship-blocker named in a
 gate record is either fixed by a listed sha or names its bead". A ship-blocker
@@ -488,31 +498,52 @@ non-justified record for a person to read. The reviewer stays accountable for
 what the text says.
 
 **Step 3, the TTL.** For each listed record that passed Step 2 and has no TTL,
-write it again with `ttl=30` and every other stored field (project, title,
-content, tags, agent, session) unchanged, then read it back and compare. A
-mismatch is reported and the record is left as it is.
+write it through the verbatim import route (`HttpMemoryStore.import_entry`,
+`POST /v1/memory/import`; research-10) with `ttl=30` and every other field as
+`get_all` returned it: project, title, content, tags, agent, session,
+`access_count`, `last_accessed` and timestamp. A null agent or session is sent
+as absent, so it stays NULL, and a `last_accessed` of `""` is sent as `None`.
+Then read the row back through `get_all` and compare every field. A mismatch is
+reported with the title and the field, and the original row's values are
+printed so a person can write them back; the command does not undo it.
 
-- *Why a write and not a TTL route.* The engine has no TTL-only route
-  (research-6). Adding one would be a second wire change; the write is
-  client-only and gives the side effect we want: the 30 days start at the
-  rollup, not at the record's creation, so a person who looks for a record
-  has 30 days after the pointer exists.
+- *Why import and not put.* A `put` fills a missing agent or session from the
+  writer's environment and the engine stores that, so it would give a record
+  with null attribution the runner's name (research-10). The import route
+  stores what it is sent, so attribution, `access_count` and `last_accessed`
+  survive. It is an existing route and client method, so this step adds no
+  wire change.
+- *Which timestamp.* The row's own, so the import changes only the TTL. The
+  timestamp is the only creation date a record has, and the wire already carries
+  it to the second. The census's supersession test compares timestamps
+  (`memory_curate/__init__.py:569-570`); that RDR-207's rollup groups by the
+  record's month is inferred, not read (gate critique S6). Sending the time of
+  the run would give a person 30 days after the rollup, at the price of that
+  date. The consequence of the choice: a record already older than its
+  effective TTL, `ttl_days * (1 + ln(access_count + 1))`
+  (`MemoryRepository.java:697`), is quarantined by the next expire sweep, which
+  the session-end hook runs (`hooks/__init__.py:650-659`). Quarantine hides and
+  deletes nothing, `nx memory restore ID` undoes it, and the pointer, written
+  and read back first, names every title. That fits the purpose of Gap 6: these
+  are working state read within two days of being written, and a record past
+  30 days in a closed phase is the one A1 asks to retire. How many records are
+  already past their effective TTL: not measured.
 - *What expiry does.* Quarantine only, as RDR-207 built it: the record is
-  hidden, restorable with `nx memory restore ID`, and deleted only after an
-  attended `nx memory rollup` marks it and `nx memory reap` runs. A record's
-  heat lengthens its life by `1 + ln(access_count + 1)`, so a much-read
-  record outlives 30 days; that is the existing formula, not a change.
-- *Rows that never get a TTL.* `{id}-gate-latest` rows keep none: the rdr hook
-  and the plans lifecycle stream read them for every RDR, closed ones
-  included (research-8). They are listed in the pointer, never TTL'd. Step 4's
-  census currently flags them forever, so this step also makes `_census` skip
-  titles ending `-gate-latest`.
+  hidden, restorable, and deleted only after an attended `nx memory rollup`
+  marks it and `nx memory reap` runs. A record's heat lengthens its life by
+  `1 + ln(access_count + 1)`, so a much-read record outlives 30 days; that is
+  the existing formula, not a change.
+- *Census.* `census_projects` is `{repo, f"{repo}_rdr"}`
+  (`memory_curate/__init__.py:558`). The rows left alone in `<repo>_rdr` would
+  be flagged for ever, so this step removes `<repo>_rdr` from it.
 - *Rerun.* The command is idempotent: the pointer is replaced, records that
   already have a TTL are skipped.
 - *Residual race.* The write sends the content read a moment earlier. A
-  reviewer who rewrote the same title in that moment would be overwritten.
-  The phase is closed and its reviewers are done, and the engine offers no
-  compare-and-set, so this is accepted and stated.
+  reviewer who rewrote the same title in that moment would be overwritten, and
+  a row quarantined in that moment would be restored, because the import clears
+  both quarantine stamps (research-10). The phase is closed and its reviewers
+  are done, and the engine offers no compare-and-set, so this is accepted and
+  stated.
 
 ### Existing Infrastructure Audit
 
@@ -521,12 +552,12 @@ mismatch is reported and the record is left as it is.
 | page-aware search | `MemoryRepository.search`, `/v1/memory/search` | Extend: optional `limit`/`offset`, same ordering |
 | client page call | `HttpMemoryStore.search`, `T2Database.search` | Add `search_page`; leave `search` alone |
 | matching total | `/v1/memory/list` `matching_total` | Same idea, object envelope because a page can be empty |
-| whole-tag filter | `/v1/memory/all` `title_kinds` (nexus-pxp44) | Extend: `tags` parameter, client re-cut |
+| tagged-record listing | `get_all` plus `split_tags`, as `_census` does (`memory_curate/__init__.py:560`, `:600`) | Reuse: client-side partition, no engine change |
 | pointer record | `nexus-rdr-research` knowledge subject, `category` | Reuse the subject, new category |
 | loss check reads | `get_all` (no access stamping) | Reuse |
-| 30-day TTL | upsert via `HttpMemoryStore.put` | Reuse: a write with `ttl=30` |
+| 30-day TTL | `HttpMemoryStore.import_entry`, `POST /v1/memory/import` | Reuse: a verbatim write with `ttl=30` |
 | retirement | RDR-207 quarantine, rollup, reap | Reuse unchanged |
-| missed-close visibility | `_census` in `memory_curate` (Step 4) | Reuse; skip `-gate-latest` titles |
+| missed-close visibility | `_census` in `memory_curate` (Step 4) | Reuse; drop `<repo>_rdr` from its projects |
 | heat census (deferred) | `MemoryRepository` access columns | Reuse: one aggregate query |
 | graduation copy (deferred) | `commands/memory.py` promote path | Reuse: call it per row |
 | mark on T2 row (deferred) | RDR-207's `rolled_up_at` pattern | Extend: sibling columns |
@@ -538,8 +569,8 @@ A counter that counts rows nobody saw cannot carry a threshold, and it is
 already feeding the shipped TTL and RDR-238's audit, so fixing it is
 worthwhile before graduation is. The gate records are a separate, live
 problem that needs no threshold at all: they are written about 1,000 times a
-month and never expire. Each piece is a day of work against known code, and
-the engine changes for both ship in one engine release. Graduation needs a
+month and never expire. Each piece is a day of work against known code; only the
+counter needs an engine change. Graduation needs a
 counter with a history first, which is why Phases 1 and 2 wait and why the
 RDR does not guess a threshold.
 
@@ -589,21 +620,32 @@ trace, so only by-title reads would count.
 **Reason for rejection**: it loses the signal rather than repairing it. This
 is the fallback if the page-aware counter proves too noisy at the re-census.
 
-### Alternative 4: Search the tags by their own text instead of adding a filter
+### Alternative 4: How Step 1 lists a phase's gate records
 
-**Description**: for Step 1, call `search_by_tag(query=<the tag text>,
-tag=<the tag>)` and rely on the exact-tag condition for precision.
+**Description**: three ways were weighed. (a) `get_all` of the project and a
+client-side partition with `split_tags`, the way `_census` already lists
+tagged rows (`memory_curate/__init__.py:560`, `:600`; research-11). (b) A
+`tags` parameter on `GET /v1/memory/all`, following `title_kinds`. (c)
+`search_by_tag(query=<the tag text>, tag=<the tag>)`.
 
-**Pros**: no engine change.
+**Pros**: (a) is exact by construction, needs no engine change, no second
+wire change, no ledger entry and no parity test between a SQL pattern and
+`split_tags`. (b) would narrow the read to the matching rows. (c) needs no
+engine change either.
 
-**Cons**: the query still has to match the full-text index, which tokenizes
-tags such as `kind:gate` and `bead:nexus-qo7ie.1` by Postgres's own rules; the
-RDR has not verified that every bead id tokenizes the same way on both sides.
-The 2026-10-31 survey already found full-text matching on tag words returns
-untagged records.
+**Cons**: (a) reads the whole project, which held 3,158 rows for the nexus
+project on 2026-09-14; its size today is not measured. (b) adds a wire change
+and needs the engine pattern to trim spaces as `split_tags` does, where
+`searchByTag`'s pattern does not (`MemoryRepository.java:565`). (c) still has to
+match the full-text index, which tokenizes tags such as `kind:gate` and
+`bead:nexus-qo7ie.1` by Postgres's own rules; the RDR has not verified that every
+bead id tokenizes the same way on both sides, and the 2026-10-31 survey found
+full-text matching on tag words returns untagged records.
 
-**Reason for rejection**: it works only if an unmeasured tokenizer behaviour
-holds, and the engine change is small and has a precedent.
+**Reason for choosing (a)**: the command is attended and runs once per closed
+phase, so one read of the project is cheap against a second wire change. If a
+run proves slow on the live project, (b) is the follow-up, and the client
+already has the re-cut pattern.
 
 ### Alternative 5: Gate-record index as a tuple-space template
 
@@ -612,7 +654,7 @@ tuple template keyed by (kind, rdr, bead) with pointer bodies.
 
 **Reason for rejection**: not adopted and not pursued here. It would couple
 this work to the tuple space (the RDR-110 to 119 arc warns against bundling
-them), ride its own engine template cut, and the whole-tag filter plus a T3
+them), ride its own engine template cut, and a client-side partition plus a T3
 pointer reaches the same lookup with less. It stays a recorded alternative.
 
 ### Briefly Rejected
@@ -637,9 +679,10 @@ pointer reaches the same lookup with less. It stays a recorded alternative.
   increments, so rows with a TTL will tend to expire a little sooner than
   before. Only rows with a TTL feel this (39 on 2026-09-14), plus the gate
   records once Step 3 gives them one. The counts already accumulated stay.
-- A gate record rewritten for its TTL moves its timestamp forward, so it
-  drops out of Step 4's census (the census wants an old record with no TTL, and
-  it now has one).
+- A gate record given its TTL keeps its own timestamp, so one already older than
+  its effective TTL is quarantined at the next expire sweep (hidden, restorable
+  with `nx memory restore`). It drops out of Step 4's census because it now has
+  a TTL.
 - The counter's history is mixed: before the deploy it counts matches, after
   it counts receipts. Only a delta since the baseline has the new meaning.
 - Phases 1 and 2 are not built, so nothing graduates and bead nexus-2k66t.1
@@ -660,7 +703,7 @@ pointer reaches the same lookup with less. It stays a recorded alternative.
   **Mitigation**: the command prints each non-justified record for a person;
   the TTL only hides records (quarantine), it deletes nothing, and
   `nx memory restore` brings one back.
-- **Risk**: the TTL write overwrites a record rewritten in the same moment.
+- **Risk**: the TTL write overwrites a record rewritten, or restores one quarantined, in the same moment.
   **Mitigation**: phases are closed before the run; stated as accepted above.
 - **Risk**: gate records outside the title and tag conventions are missed.
   **Mitigation**: they stay unmapped and keep no TTL; Step 4's census shows
@@ -687,7 +730,6 @@ a count of 0.
 - [x] RDR-207 landed (the `rolled_up_at` mark; closed 2026-09-15).
 - [x] Phase 0 census recorded (research-1) and A1 resolved as refuted.
 - [x] Phase 3 Steps 0 and 4 shipped (nexus-qo7ie.1, nexus-qo7ie.28).
-- [ ] A7 verified by its test during Phase 3 Step 1.
 - [ ] Bead filing waits for accept (no new beads while the burn-down runs).
 
 ### Minimum Viable Validation
@@ -698,13 +740,14 @@ rows have `access_count` 1 and the other 25 have 0; the next page stamps its
 five; a `silent` search stamps none; a search with no `limit` stamps all 30.
 Gate records: a seeded closed phase with three gate records gets one pointer
 record that lists all three titles, all three then carry a 30-day TTL and read
-back unchanged; a seeded open phase is untouched; a planted unresolvable
+back unchanged, a record seeded with a null agent and session keeping both
+null; a seeded open phase is untouched; a planted unresolvable
 title stops the TTL step and names the title; an untagged record whose body
-says `kind:gate` is never returned by the tag filter.
+says `kind:gate` is never listed as a gate record.
 
 ### Phase 0b: a read counter that means received
 
-Sized at about a day of work plus the engine release it shares with Phase 3.
+Sized at about a day of work plus an engine release.
 
 #### Step 1: Engine, page-aware search
 
@@ -744,8 +787,8 @@ it.
 
 ### Phase 3: Gate-record rollup at phase close (Amendment A1)
 
-Does not depend on Phase 0b. Sized at about a day, in the same engine release
-as Phase 0b. Research 2 (2026-10-31) shaped it: only about 72% of the 2,320
+Does not depend on Phase 0b. Sized at about a day, client only: it needs no
+engine change. Research 2 (2026-10-31) shaped it: only about 72% of the 2,320
 gate-record titles name a bead, so a title-only rollup misses about 23%; and
 the `phase-review-gate` skill says nothing enforces its close step, so the
 trigger is `rdr-close` and the close of the phase's review bead, not the skill
@@ -761,36 +804,41 @@ title; the ones that do not map are listed as unmapped in the pointer record
 and keep no TTL. The lookup is an exact tag match, not a search: `memory_search`
 tokenizes, and a search for `kind:gate` on 2026-10-31 returned 273 hits, the
 first five untagged critiques matched on words in their bodies (the
-nexus-qo7ie.1 critique). That is why Step 1 adds a whole-tag filter.
+nexus-qo7ie.1 critique). That is why Step 1 reads whole tags with `split_tags` and does not search.
 
-#### Step 1: The tag filter, the command and the pointer record
+#### Step 1: The command and the pointer record
 
-As designed under Technical Design: part (a) the `tags` parameter on
-`/v1/memory/all` with the client re-cut (an `[additive]` ledger entry and the
-same engine release as Phase 0b); part (b) `nx memory gate-rollup`, the pointer
-record in T3, and the one-line change to the two skills that name it. Tests: the
-filter returns only whole-tag matches and not an untagged record that mentions
-`kind:gate`; `bead:nexus-1` does not match `bead:nexus-12`; a row stored as
-`kind:gate, bead:x` matches on both the engine and the client (A7); a tag with
-`_` or `%` is escaped; quarantined rows are hidden; another tenant's rows are
-not returned; the engine-ignores-`tags` fallback against a stub; a seeded closed
-phase yields one pointer listing its three records.
+As designed under Technical Design: `nx memory gate-rollup`, which lists a
+phase's gate records from one `get_all` of `<repo>` partitioned by `split_tags`,
+the pointer record in T3, and the one-line change to the two skills that name
+the command. Tests: only whole-tag matches are listed, and an untagged record
+that mentions `kind:gate` in its body is not; `bead:nexus-1` does not match
+`bead:nexus-12`; a stored value `kind:gate, bead:x` (a space after the comma)
+matches; an older untagged record whose title names a listed bead is listed; a
+record with no bead is listed as unmapped; a quarantined record is not listed;
+another tenant's rows are not listed; the `<repo>_rdr` rows are neither listed
+nor changed; a seeded closed phase yields one pointer listing its three
+records.
 
 #### Step 2: The loss check
 
 As designed. Tests: an open phase is refused; a planted unresolvable title
 stops the run and names it; a bead whose newest record is `not-justified`
 stops the run and is named, and `--accept-open` lets it through and appears in
-the pointer; the check leaves every record's `access_count` unchanged (A8).
+the pointer; a record with no bead takes no part in the chain and gets no TTL;
+the check leaves every record's `access_count` unchanged (A8).
 
 #### Step 3: The 30-day TTL
 
 As designed. Tests: three seeded records each get `ttl=30` with content, tags,
-agent and session unchanged and `access_count` unchanged; a rerun changes
-nothing; a forced pointer-write failure leaves no TTL; a `-gate-latest` row is
-listed but gets no TTL and `_census` no longer flags it; an `--all` run lists
-the `<repo>_rdr` critique and fix-check rows; a planted record without a
-readable verdict is unmapped and keeps no TTL.
+agent, session, timestamp, `access_count` and `last_accessed` unchanged; a
+record seeded with a null agent and a null session still has both null after the
+step, and a `put`-based write would not (the test fails for that reason when the
+step is switched to `put`); a seeded record with a never-accessed
+`last_accessed` stays never-accessed; a rerun changes nothing; a forced
+pointer-write failure leaves no TTL; the `<repo>_rdr` rows (gate-latest,
+critique, fix-check) get no TTL and `_census` no longer flags them; a planted
+record without a readable verdict is unmapped and keeps no TTL.
 
 #### Step 4 (shipped): the census flag
 
@@ -801,7 +849,7 @@ phase heading carries the close marker the `phase-review-gate` close step writes
 (`### Phase N (CLOSED, YYYY-MM-DD)`); a record's phases are the `-p<N>` /
 `-phase-<N>` pieces of its title, and each must be closed (a sub-phase such as
 3a is closed when Phase 3 is) (nexus-qo7ie.28, 2026-11-06). Step 2 reuses this
-rule. Step 3 adds one exclusion to the flag, the `-gate-latest` titles.
+rule. Step 3 removes `<repo>_rdr` from the projects the flag reads.
 
 ### Deferred: Phases 1 and 2
 
@@ -877,18 +925,23 @@ In scope:
   reports a usage error without sending a request.
 - **Scenario**: direct reads; **Verify**: by title, id and unique prefix each
   add one to the one row returned (unchanged).
-- **Scenario**: whole-tag filter; **Verify**: only whole-tag matches; an
-  untagged record mentioning `kind:gate` is absent; `bead:nexus-1` is not
-  `bead:nexus-12`; spaces around a stored tag match on engine and client; `_`
-  and `%` escaped; quarantined hidden; AND across several tags; the
-  engine-ignores-`tags` fallback.
+- **Scenario**: gate-record listing; **Verify**: only whole-tag matches are
+  listed; an untagged record mentioning `kind:gate` is not; `bead:nexus-1` is
+  not `bead:nexus-12`; a stored `kind:gate, bead:x` matches; an older untagged
+  record whose title names a listed bead is listed; a record with no bead is
+  unmapped; quarantined rows are not listed; the `<repo>_rdr` rows are neither
+  listed nor changed.
 - **Scenario**: pointer and loss check; **Verify**: closed phase with three
   records gets one pointer; all three titles resolve from it; an open phase is
   refused; an unresolvable title stops the TTL step and names it; a
-  not-justified newest record stops it; `--accept-open` passes and is recorded.
+  not-justified newest record stops it; `--accept-open` passes and is recorded;
+  a record with no bead takes no part in the chain and gets no TTL.
 - **Scenario**: TTL; **Verify**: three records get `ttl=30` with every other
-  field and `access_count` unchanged; rerun is a no-op; a forced pointer
-  failure leaves no TTL; `-gate-latest` rows get none and the census skips them.
+  field, `access_count` and timestamp unchanged; a record seeded with a null
+  agent and session keeps both null, and the test fails when the step is
+  switched to `put`; a never-accessed record stays never-accessed; rerun is a
+  no-op; a forced pointer failure leaves no TTL; the `<repo>_rdr` rows get none
+  and the census no longer flags them.
 - **Scenario**: tenant isolation; **Verify**: another tenant's rows are
   neither stamped, listed nor given a TTL.
 
@@ -914,20 +967,20 @@ The MVV above in the default suite against the engine substrate. The
 page-bound counter leg must fail for its stated reason when the page limit is
 removed from the engine (the 25 outside rows then show a count of 1). The
 pointer-before-TTL leg must fail for its stated reason when the ordering guard
-is deleted. The tag-filter tests include the untagged-body record, which is
-the case that motivated the filter. A new check (the filter's A7 parity test,
-the loss check) is run live once and its first run, with the counts examined
+is deleted. The listing tests include the untagged-body record, which is
+the case that motivated reading whole tags. The null-attribution TTL test must
+fail for its stated reason when the step is switched to `put`. A new check (the
+loss check) is run live once and its first run, with the counts examined
 and skipped, goes in its bead before close.
 
 ### Performance Expectations
 
 Not estimated. A paged search returns fewer rows than today (the whole match
 set), and the window count runs in the same statement as the page, so it adds
-no second scan. The tag filter narrows the read in the engine: a project of
-several thousand rows crosses the wire as the gate records wanted, as
-`title_kinds` did for the rdr hook (a project of 1,527 rows and 4.6 MB read as
-378, `src/nexus/db/t2_reads.py:50-60`). The command's cost is one filtered read
-per listed bead and one write per record.
+no second scan. The rollup's read is not narrowed: it is one `get_all` of the
+project per run, as the census makes (the nexus project held 3,158 rows on
+2026-09-14; its size today is not measured). The command's cost is that read
+and one write per record.
 
 ## Finalization Gate
 
@@ -941,20 +994,20 @@ each ship-blocker named in a gate record to a fix, but ship-blockers are free
 text and the structured field is the verdict. The Proposed Solution therefore
 checks the verdict chain per bead and prints non-justified records for a
 person, and the Step 2 text says it is narrower than A1's wording. A second
-tension: Step 4's census flags `-gate-latest` rows, which Step 3 must not give
-a TTL because live code reads them (research-8); the plan makes the census
-skip them. Otherwise no contradictions found between the research findings,
+tension: Step 4's census flags the `<repo>_rdr` gate rows, which Step 1 leaves
+alone because live code reads them (research-8, -9); the plan removes
+`<repo>_rdr` from the census projects. Otherwise no contradictions found between the research findings,
 the design principles and the proposed solution: the deferred phases are the
 only part that rests on an unresolved assumption (A1, A2, A3), and none of the
 in-scope work depends on them.
 
 ### Assumption Verification
 
-A5, A6, A8 and A9 are verified by source search and recorded in research-4
-to -6. A7 (engine and client agree on what a whole tag is) is unverified and is
-verified by its own test in Phase 3 Step 1, before the filter is relied on; the
-engine pattern is written to match `split_tags` rather than copying
-`searchByTag`'s pattern, which does not trim spaces. A1 is refuted as the
+A5, A6 and A8 are verified by source search and recorded in research-4
+to -6. A9 was reopened by the gate (the first revision's claim was false for a
+row with a null agent or session) and is restated against the import route,
+verified by source search in research-10 and pinned by the null-attribution test.
+A1 is refuted as the
 counter stands and is re-asked after Phase 0b, at the deferral trigger. A2 and
 A3 belong to the deferred Phase 1 and stay unverified until it is revived.
 
@@ -963,10 +1016,10 @@ A3 belong to the deferred Phase 1 and stay unverified until it is revived.
 | API Call | Library | Verification |
 | --- | --- | --- |
 | `POST /v1/memory/search` body fields | engine handler (`MemoryHandler.java:317-331`) | Source Search: reads only `query`, `project`, `access`; an older engine ignores `limit` |
-| `GET /v1/memory/all` params | engine handler (`MemoryHandler.java:455-462`) | Source Search: `title_kinds` precedent; `tags` is new |
-| `HttpMemoryStore.get_all` re-cut | `http_memory_store.py:735-767` | Source Search: client already re-cuts for `title_kinds` |
+| `get_all` plus `split_tags` lists tagged rows | `memory_curate/__init__.py:560`, `:600`; `audit_tags.py:89-93` | Source Search (research-11) |
+| `POST /v1/memory/import` stores every field as sent | engine (`MemoryHandler.java:660-667`, `:799-839`; `MemoryRepository.java:1393-1442`), client `http_memory_store.py:342-410` | Source Search (research-10) |
 | `MemoryRepository.getAll` does not stamp access | engine (`MemoryRepository.java:623-634`) | Source Search |
-| upsert keeps `access_count`, restarts the clock | engine (`MemoryRepository.java:1444-1485`) | Source Search |
+| `put` fills attribution and overwrites agent and session, restarts the clock | `http_memory_store.py:258`, engine (`MemoryRepository.java:1444-1485`) | Source Search (research-10) |
 | T3 pointer write by title | `store_put` / `nx store put` | Docs Only (`docs/collections.md` Rule 1; a titled re-put replaces); first run confirms |
 
 ### Scope Verification
@@ -978,23 +1031,23 @@ a threshold or a graduated row.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: both wire changes are additive (`[additive]` ledger entries,
-  direction safety stated for each direction); the engine deploys before the
-  client tag.
+- **Versioning**: the one wire change, the search page, is additive (an
+  `[additive]` ledger entry, direction safety stated for each direction); the
+  engine deploys before the client tag. Phase 3 changes no wire.
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
-- **Deployment model**: the engine change rides the next engine release, one
-  release for both pieces; local and cloud engines run the same handler.
+- **Deployment model**: the counter change rides the next engine release, and
+  Phase 3 needs none; local and cloud engines run the same handler.
   Nothing is migrated at boot and no data is rewritten by a release (Sam's
   2026-11-10 rule): the counter's history is kept and Step 5's baseline is a
   recorded read, not a rewrite.
 - **IDE compatibility**: N/A.
-- **Incremental adoption**: a client that never sends `limit` or `tags` keeps
+- **Incremental adoption**: a client that never sends `limit` keeps
   today's behaviour; the rollup is an attended command nobody has to run.
 - **Secret/credential lifecycle**: N/A.
-- **Memory management**: the paged search returns less than today; the tag
-  filter narrows the read; `--include-titled` does one unfiltered read of a
-  project of a few thousand rows, the same read Step 4's census already makes.
+- **Memory management**: the paged search returns less than today; the rollup
+  does one unfiltered read of a project of a few thousand rows, the same read
+  Step 4's census already makes.
 
 ### Proportionality
 
@@ -1011,16 +1064,16 @@ heavy; it is kept because it was a design input Sam was to weigh.
 - RDR-238 (index audit, the `--t2` command); RDR-240 (the `gate_record` procedure)
 - `service/src/main/java/dev/nexus/service/db/MemoryRepository.java`
   (`:393-429` search, `:556-567` searchByTag, `:592-634` title kinds and getAll,
-  `:679-709` expire, `:1444-1485` upsert)
+  `:679-709` expire, `:1393-1442` import, `:1444-1485` upsert)
 - `service/src/main/java/dev/nexus/service/http/MemoryHandler.java`
-  (`:309-331` search, `:337-361` list, `:455-462` all)
-- `src/nexus/db/t2/http_memory_store.py:531-591`, `:735-767`;
+  (`:309-331` search, `:337-361` list, `:455-462` all, `:660-667` import)
+- `src/nexus/db/t2/http_memory_store.py:258`, `:342-410`, `:531-591`, `:735-767`;
   `src/nexus/mcp/core.py:8252-8258`; `src/nexus/commands/memory.py:169-187`,
   `:527-666`; `src/nexus/hooks/__init__.py:526`, `:656`
 - `src/nexus/memory_curate/__init__.py:516-521`, `:586-615`, `:646`;
   `src/nexus/procedures/gate_record.lua:79-88`
 - `conexus/skills/phase-review-gate/SKILL.md:24`; `docs/wire-contract-pending.md`
-- T2 `nexus_rdr/209-research-1` to `-8`; T2 `nexus/draft-rdr-triage-2026-11-16`
+- T2 `nexus_rdr/209-research-1` to `-11`; T2 `nexus/draft-rdr-triage-2026-11-16`
 - arxiv 2604.01707 (heat-based promotion and the division formula)
 
 ## Revision History
@@ -1031,4 +1084,5 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-09-14 | Phase 0 census run by conexus-e9 on the live tenant (T2 `209-research-1`). A1 refuted as the counter stands: search tracking stamps every match, so `access_count` measures search matches, not reads. Gap 5 and Phase 0b added; A5 added. |
 | 2026-10-31 | Amendment A1 at Sam's direction (memory survey, nexus-qo7ie): Gap 6 and Phase 3, a phase-close rollup of gate records that keeps its sources, then a 30-day TTL so RDR-207 retires them. Sibling RDR-238 (memory curation) takes supersession, the index budget and promotion to skills, and uses Phase 0b's read counter when it lands. |
 | 2026-11-16 | Narrowed per Sam's draft triage: in scope are Phase 0b and Phase 3 Steps 1 to 3; Phases 1 and 2 are kept and deferred with the trigger "a re-census on the Phase 0b counter shows a usable tail"; RDR-207, Phase 3 Step 0 and Step 4 recorded as shipped; Phase 0b designed (the engine takes `limit` and `offset` and stamps the returned page; `matching_total` in an object answer; wire-ledger entry) and Phase 3 Step 1 given a whole-tag filter on `/v1/memory/all`; the loss check and the `-gate-latest` exclusion added; stale anchors fixed (`hooks.py` is now the `src/nexus/hooks/` package) and every current-code claim re-read at 2e09b8cfc with research-4 to -8 recorded; bead nexus-2k66t.1's trigger noted as "Phase 1 built". |
+| 2026-11-16 | Fix round after gate round 1, Sam's ruling "Fix the three, then accept" (S1, S2, S4 only; S3 and S5 to S8 stay in the critique record as implementation work). Step 3 writes through the verbatim import route and keeps the row's own timestamp, and A9 is reopened and restated (research-10); `--all` and Step 1 leave the `<repo>_rdr` gate rows alone, with research-9 recording their readers; the engine tag filter and A7 are dropped for a client-side `get_all` plus `split_tags` partition, so the search page is the only wire change (research-11). |
 - 2026-11-16: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `43b12b69464f`; critique `nexus_rdr/209-gate-critique-2026-11-16-r1`.
