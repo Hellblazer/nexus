@@ -387,3 +387,33 @@ def test_the_load_reads_the_git_top_levels_config_and_refuses_an_overlapping_cle
 
     subs = asyncio.run(scenario())
     assert subs.aura_topics() == [_TOPIC]
+
+
+def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(repo: Path) -> None:
+    """nexus-mdbds.12.1: the aura and procedure as they ship in the package root, not planted copies, through the
+    real run path: dims.sha reaches ci_red_notice, [when] show gates the display, the TD7 text lands as the
+    block's state line, the channel notice is the fixed template, and a green post removes the block."""
+    from nexus.auras import load_aura  # noqa: PLC0415 -- only this test reads the shipped root
+
+    sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
+    _seed_entry(title, sid)
+    notices: list[str] = []
+    aura = load_aura("ci_develop_red", cwd=None)
+    rt = AuraRuntime(
+        [aura], writer=ThreadsBlockWriter(sid, read_entries=_Threads.read, put=_Threads.put), run=_counting_run,
+        notify=lambda text, meta: notices.append(text),
+    )
+    sha = "8b30c161bdb23adab27171f3185c2b52f158b736"
+    before = len(_REAL_RUNS)
+    rt.offer(_TOPIC, [_row("t1", sha=sha)])
+    _settle(rt)
+    assert _ran(before) == 1
+    assert (
+        "## aura: develop CI red\nstate: develop red at 8b30c16: diagnose before the next push (worktrees rule 7)\n"
+        in _entry(title)
+    )
+    assert notices == [channel_notice(aura, _TOPIC, "t1")]
+    rt.offer(_TOPIC, [_row("t2", outcome="success", sha=sha)])
+    _settle(rt)
+    assert _ran(before) == 1, "the clear runs no procedure"
+    assert "aura:" not in _entry(title) and "## Work" in _entry(title)

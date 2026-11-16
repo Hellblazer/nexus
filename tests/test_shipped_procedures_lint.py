@@ -71,6 +71,25 @@ def test_the_directory_holds_procedures_and_nothing_a_run_would_not_read() -> No
     assert SHIPPED_AURAS <= auras, sorted(auras)
 
 
+def test_every_shipped_aura_passes_the_checks_that_need_no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each ``*.aura.toml`` beside the procedures parses and passes ``nx aura check``'s offline checks (the
+    procedure, the argument mapping, the clear, the threads block); the dictionary checks need the engine and are
+    ``tests/auras/test_registry_engine.py``'s."""
+    from nexus.auras import enumerate_auras  # noqa: PLC0415 -- kept out of the module's import-time surface
+    from nexus.auras.check import check_auras  # noqa: PLC0415
+    from nexus.lua_runtime import library  # noqa: PLC0415
+
+    monkeypatch.delenv(library.REPO_ROOT_ENV, raising=False)
+    entries = [e for e in enumerate_auras(cwd=None) if e.root == "shipped"]
+    assert SHIPPED_AURAS <= {e.name for e in entries}, [e.name for e in entries]
+    bad = [
+        f"{c.name}: {f.check} {f.key}: {f.detail}"
+        for c in check_auras(entries, cwd=None, templates=None)
+        for f in c.findings
+    ]
+    assert not bad, "\n".join(bad)
+
+
 # -- planted violations: each rule fires --------------------------------------
 
 GOOD = (

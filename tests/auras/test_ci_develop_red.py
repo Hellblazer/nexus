@@ -79,6 +79,11 @@ def test_the_text_passes_the_threads_sanitiser_intact() -> None:
     assert len(text) <= MAX_STATE_CHARS
 
 
+@pytest.mark.parametrize("sha", ["a" * 7, "a" * 64])
+def test_a_sha_of_exactly_7_or_64_hex_digits_is_accepted(sha: str) -> None:
+    assert _run(sha=sha, outcome="failure")["text"].startswith("develop red at aaaaaaa:")
+
+
 @pytest.mark.parametrize("bad", ["8B30C161", "8b30c1", "x" * 7, "8b30c161 ", "a" * 65])
 def test_a_sha_that_is_not_7_to_64_lower_case_hex_is_refused(bad: str) -> None:
     with pytest.raises(lua54.LuaError, match="sha must be 7 to 64 lower-case hex digits"):
@@ -111,9 +116,11 @@ def test_with_no_config_the_aura_is_off_by_default(tmp_path: Path, monkeypatch: 
     assert (got.on, got.level) == (False, "default")
 
 
-def test_the_repo_ships_no_config_that_turns_an_aura_on() -> None:
+def test_this_repos_own_config_leaves_the_aura_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The repo-level layer as this checkout ships it (whatever .nexus.yml holds, or none), with an empty global
+    layer: the aura stays off and the default decides. A shipped ``auras:`` key turning it on fails this."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
     repo_root = Path(__file__).resolve().parents[2]
-    for name in (".nexus.yml", ".nexus.yaml"):
-        path = repo_root / name
-        if path.exists():
-            assert "auras" not in path.read_text(encoding="utf-8"), f"{name} sets auras: they ship off (RDR-249 TD3)"
+    assert (repo_root / "src" / "nexus" / "procedures" / "ci_develop_red.aura.toml").is_file()  # the real checkout
+    got = resolve(["ci_develop_red"], repo_root=repo_root, env={})["ci_develop_red"]
+    assert (got.on, got.level) == (False, "default")

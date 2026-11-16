@@ -253,9 +253,8 @@ def test_the_listing_shows_auras_only_and_the_procedure_listing_shows_procedures
 
 
 def test_the_real_shipped_root_lists_without_failing() -> None:
-    # nexus-mdbds.10.1 ships no aura yet; the first (ci_develop_red) lands with Phase 2.
     entries = auras.list_auras(cwd=None)
-    assert isinstance(entries, list)
+    assert "ci_develop_red" in {e.name for e in entries}  # the first shipped aura (nexus-mdbds.12.1)
     assert all(isinstance(e, library.Procedure) and e.root == "shipped" for e in entries)
 
 
