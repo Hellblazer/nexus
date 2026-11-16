@@ -6,6 +6,10 @@ independent harnesses that measure different things — do not conflate
 them — plus the study scripts `operator_proxy_ab.py`, `model_tier_study.py`
 and `synthesis_tier_study.py`, which this page does not describe:
 
+## Public retrieval evaluation (RDR-244)
+
+`scripts/bench/coir_run.py` runs `nx search` over a pinned CoIR subset on its own loopback engine and scores it (NDCG@10, recall@10, MRR, with bootstrap intervals). Results and the recipe to reproduce them: `docs/rdr/evidence/rdr-244/results.md`.
+
 ## Retrieval bench (RDR-090)
 
 `scripts/bench/{runner,metrics,schema,paths}.py` + `bench/queries/*.yaml`

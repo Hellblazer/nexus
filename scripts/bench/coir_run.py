@@ -12,8 +12,9 @@ latency figure is labelled secondary. One discarded warm-up query runs per datas
 
 ``run`` takes the storage environment as given (``NX_SERVICE_URL``/``NX_SERVICE_TOKEN`` in
 ``os.environ``) and never sets the dev-checkout write opt-in itself. ``main`` boots its own engine and
-mints a tenant, as the Step 0 spike did; whether it may write there is the operator's
-``NX_ALLOW_PROD_WRITE``, an owner decision before Step 2.
+mints a tenant, as the Step 0 spike did; writing there needs the operator's ``NX_ALLOW_PROD_WRITE``
+with a reason (the published run used one scoped to the run, 2026-11-07; recipe in
+``docs/rdr/evidence/rdr-244/results.md``).
 """
 from __future__ import annotations
 
