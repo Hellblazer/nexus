@@ -206,7 +206,7 @@ ranges:
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| dml_utils (Hellblazer/dml_utils, a6cd544, PR #1 merged) | Yes | Launcher needs pg_background; per-chunk routine does not; bytea keys supported |
+| dml_utils (Hellblazer/dml_utils, 28b0b3aa9, PR #2 merged on PR #1's a6cd544) | Yes | Launcher needs pg_background; per-chunk routine does not; bytea keys supported; `run_migration_chunks_committing` is the committing procedure |
 | pg_background (vibhorkum/pg_background) | Yes, v2.0.4 (tag and pinned commit) | Runs SQL in a background worker with its own transaction. No shared_preload_libraries needed (verified on four platforms). Calls POSIX random() (one site, polling jitter). PostgreSQL License |
 | nexus PG bundle (scripts/build_pg_bundle.sh, build_pg_bundle_windows.py) | Yes | Before this RDR: PG, pgvector and contrib, with no pg_background. With Phase 1 Step 2, pg_background v2.0.4 is in every bundle, and the contrib checks fail closed without it |
 
@@ -813,7 +813,7 @@ launcher that upstream does not test.
 
 - [ ] All Critical Assumptions verified
 - [x] bytea keys merged in Hellblazer/dml_utils (PR #1, a6cd544, 2026-11-10). Sam ruled 2026-11-16 to pin merged commits rather than wait for releases; he may tag releases later. ddl_utils is pinned at 5f088e2
-- [ ] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR, Hellblazer/dml_utils#2); nexus pins the dml_utils commit that carries it, since a6cd544 has bytea keys but no procedure
+- [x] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR, Hellblazer/dml_utils#2, merge commit 28b0b3aa9, 2026-11-16); nexus pins 28b0b3aa9, since a6cd544 has bytea keys but no procedure. Its bloat test (RunMigrationChunksBloatTest) is green in the PR's Maven Build run 43900555823 on a tree identical to 28b0b3aa9's
 - [ ] a four-column primary key supported in Hellblazer/dml_utils (Step 1's third change) before any move over nexus.chunks, the Minimum Viable Validation's move included; nexus re-pins to the commit that carries it
 - [x] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins (engine-service-v0.1.194's bundles carry pg_background 2.0)
 - [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup (Step 4)
@@ -840,7 +840,7 @@ A reviewed PR to Hellblazer/dml_utils covering a single bytea key and a
 composite (text, text, bytea) key. Literals do not depend on bytea_output or
 standard_conforming_strings, and each row lands in exactly one chunk. The
 PR also covers resume and states the partitioned-table finding. Merged as
-PR #1 (a6cd544). A second PR adds a PROCEDURE entry point that takes the
+PR #1 (a6cd544). A second PR, merged as PR #2 (28b0b3aa9), adds a PROCEDURE entry point that takes the
 same parameters as `run_migration_chunks` and COMMITs after each chunk launch
 and poll round. A third change lets dml_utils chunk on a primary key of four
 columns, which nexus.chunks has; until it lands, a move over nexus.chunks is
@@ -848,8 +848,8 @@ refused when its run is created. The second is a restructured coordinator, not a
 function's loop sits inside a block with an EXCEPTION handler, where
 PL/pgSQL refuses a COMMIT. The PR comes with a test
 that a mid-run VACUUM finds no dead row held back by the coordinator (Sam's
-choice, 2026-11-16). Nexus pins the dml_utils commit that carries the
-procedure, then the one that carries the four-column change, and
+choice, 2026-11-16). Nexus pins dml_utils at 28b0b3aa9 (the merge of PR #2: bytea keys and the
+procedure), then the commit that carries the four-column change, and
 ddl_utils at 5f088e2 (Sam, 2026-11-16), until releases are tagged.
 
 #### Step 2: pg_background in the PG bundle

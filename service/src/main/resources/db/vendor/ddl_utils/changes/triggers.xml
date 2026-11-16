@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.22.xsd">
+
+    <!-- One changeset per trigger. Each trigger lives in its own file under
+         triggers/<schema>/ and is added with sqlFile. runOnChange re-applies
+         only the changeset whose body changed, and each one carries its own
+         rollback.
+
+         Every table gets created_at/updated_at (timestamptz, defaulted to
+         now()), and ddl_utils.set_updated_at() keeps updated_at current on
+         every UPDATE. This attaches that shared trigger to the lock-settings
+         tables; new tables created by later changesets must do the same.
+
+         CREATE OR REPLACE TRIGGER (PostgreSQL 14+) makes the changeset
+         re-runnable without dropping the trigger first, but only in place: the
+         replacement is keyed on (table, trigger name). If a later change renames
+         the trigger or moves it to another table, the forward script silently
+         creates a second trigger and leaves the old one attached to the old
+         table, and the paired rollback drops only the new one. A rename/move
+         therefore needs an explicit
+         `DROP TRIGGER IF EXISTS <old name> ON <old table>;` in the same
+         changeset, plus a matching rollback update. -->
+    <changeSet id="trigger-ddl_utils.database_lock_settings_set_updated_at" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/ddl_utils/database_lock_settings_set_updated_at.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/ddl_utils/database_lock_settings_set_updated_at-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-ddl_utils.schema_lock_settings_set_updated_at" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/ddl_utils/schema_lock_settings_set_updated_at.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/ddl_utils/schema_lock_settings_set_updated_at-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-ddl_utils.table_lock_settings_set_updated_at" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/ddl_utils/table_lock_settings_set_updated_at.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/ddl_utils/table_lock_settings_set_updated_at-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.22.xsd">
+
+    <changeSet id="001-create-schema" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/001-create-schema.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/001-create-schema-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="002-create-lib-schema" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/002-create-lib-schema.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/002-create-lib-schema-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="003-create-lock-settings" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/003-create-lock-settings.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/003-create-lock-settings-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="004-create-domains" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/004-create-domains.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/004-create-domains-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- The 004 array-domain CHECKs relied on AND short-circuiting before
+         array_position; this changeset redefines them with an explicit CASE so
+         the ndims guard does not depend on boolean evaluation order. 004 is
+         retained for databases that already applied it. -->
+    <changeSet id="005-redefine-array-domain-checks" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/005-redefine-array-domain-checks.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/005-redefine-array-domain-checks-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- The composite the lock-aware wrappers read get_lock_settings into; it
+         must exist before the routines that declare a variable of it, so it is
+         created here rather than after the routine includes. -->
+    <changeSet id="006-create-lock-settings-type" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/006-create-lock-settings-type.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/006-create-lock-settings-type-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- The non_null_text domain trims only ASCII whitespace, so its comment
+         must not promise a broader "not blank" guarantee. -->
+    <changeSet id="007-update-non-null-text-comment" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/007-update-non-null-text-comment.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/007-update-non-null-text-comment-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Stored routines: one changeset each, one file per routine. -->
+    <include file="functions.xml" relativeToChangelogFile="true"/>
+    <include file="procedures.xml" relativeToChangelogFile="true"/>
+
+    <!-- The tables' triggers, one per file. They call routines defined above,
+         so they run after the functions include. New tables created by later
+         changesets must attach the same trigger. -->
+    <include file="triggers.xml" relativeToChangelogFile="true"/>
+
+    <!-- A single, re-runnable changeset for all caller grants. runOnChange
+         re-applies it whenever the SQL changes, so new grants reach existing
+         databases. It is add-only: a GRANT removed from the file is not
+         reverted, so removal must always be an explicit REVOKE. Keep the
+         statements idempotent. Keep this changeset physically after every
+         object-creating include (functions.xml, procedures.xml, triggers.xml):
+         Liquibase orders by file position, not by the "999" id, so otherwise a
+         newly created routine keeps PostgreSQL's default EXECUTE TO PUBLIC.
+         The SQL file must stay free of dollar-quoted blocks because the default
+         sqlFile splitter is not dollar-quote aware. -->
+    <changeSet id="999-grant-privileges" author="lee.horner" dbms="postgresql" runOnChange="true">
+        <sqlFile path="sql_changes/999-grant-privileges.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/999-grant-privileges-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
