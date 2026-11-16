@@ -620,3 +620,4 @@ and the JSON appender is not built until something needs it.
   later phase; CA-1 verified by spike, CA-2 partly verified; correlation field named
   `correlation_id` to avoid RDR-222's `request_id`; anchors, plan, tests and gate
   section rewritten against develop `2e09b8cfc`.
+- 2026-11-16: Gate round 1 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `05a00fba9b74`; critique `nexus_rdr/167-gate-critique-2026-11-16-r1`.
