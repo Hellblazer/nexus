@@ -41,7 +41,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>The structure and CHECK tests read the shared, already-migrated cluster. The grant test builds its own
  * database with a non-superuser owner and runs the changelog twice, because the runAlways
  * {@code grants-nexus-svc-1} loop re-grants DML on every owned table at each boot: a REVOKE in the changeset
- * alone would hold only until the next one.
+ * alone would hold only until the next one. That test pins the loop's exclusion. It does NOT exercise the
+ * changeset's REVOKE: on a fresh walk the default ACL ({@code ALTER DEFAULT PRIVILEGES ... TO nexus_svc}) is
+ * installed by {@code grants-nexus-svc-1}, the last include, after {@code data_moves} is created, so there is
+ * nothing for the REVOKE to remove. {@link GrantsNexusSvcUpgradeIntegrationTest} covers it: there the default ACL
+ * already exists when the table is created.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class DataMovesSchemaLiquibaseTest {
@@ -70,7 +74,7 @@ class DataMovesSchemaLiquibaseTest {
         Map.entry("paused_by", "text YES")));
 
     private static final List<String> CONSTRAINTS = List.of(
-        "data_moves_pk", "data_moves_label_check", "data_moves_chunk_size_check", "data_moves_sleep_ms_check",
+        "data_moves_pk", "data_moves_label_check", "data_moves_label_nonempty_check", "data_moves_chunk_size_check", "data_moves_sleep_ms_check",
         "data_moves_statement_timeout_ms_check", "data_moves_supersedes_unique", "data_moves_supersedes_fk",
         "data_moves_supersedes_self_check", "data_moves_terminal_exclusive_check", "data_moves_failure_pair_check",
         "data_moves_transient_retries_check", "data_moves_transient_retries_stamp_check", "data_moves_transient_pair_check", "data_moves_paused_by_check");
@@ -153,6 +157,8 @@ class DataMovesSchemaLiquibaseTest {
                 .hasMessageContaining("data_moves_label_check");
             assertThatThrownBy(() -> insert(ctx, "/lead")).hasMessageContaining("data_moves_label_check");
             assertThatThrownBy(() -> insert(ctx, "trail/")).hasMessageContaining("data_moves_label_check");
+            assertThatThrownBy(() -> insert(ctx, ""))
+                .as("an empty label names no move").hasMessageContaining("data_moves_label_nonempty_check");
             insert(ctx, "label.with-dots_and:colons");
         }
     }
@@ -349,9 +355,9 @@ class DataMovesSchemaLiquibaseTest {
 
     /**
      * The production shape: a non-superuser owner runs the full changelog, then runs it again. The runAlways
-     * {@code grants-nexus-svc-1} loop grants DML on every table the owner owns at each boot, and
-     * ALTER DEFAULT PRIVILEGES grants it at CREATE, so both the changeset's REVOKE and the loop's exclusion
-     * must hold on the second boot.
+     * {@code grants-nexus-svc-1} loop grants DML on every table the owner owns at each boot, so its exclusion is
+     * what keeps {@code nexus_svc} out on the second boot (and the first, where the loop already ran after the
+     * table was created). The changeset's own REVOKE is not tested here; see the class comment.
      */
     @Test
     void nexusSvcStaysWithoutPrivilege_afterTheChangelogRunsAgainAsTheOwner() throws Exception {
@@ -371,13 +377,20 @@ class DataMovesSchemaLiquibaseTest {
                     .as("first boot: nexus_svc " + priv).isFalse();
             }
 
+            // Between the boots, take a sibling grant away: only the grants loop running again can give it back,
+            // so seeing it return proves the loop ran while data_moves stayed excluded.
+            sctx.revoke(DSL.privilege("insert")).on(DSL.table(DSL.name("nexus", "reembed_jobs")))
+                .from(DSL.user(DSL.name("nexus_svc"))).execute();
+            assertThat(hasTablePriv(sctx, "nexus_svc", "nexus.reembed_jobs", "INSERT"))
+                .as("the sibling grant is gone before the second boot").isFalse();
+
             liquibaseUpdate(empty.getJdbcUrl(), admin, pass);
+            assertThat(hasTablePriv(sctx, "nexus_svc", "nexus.reembed_jobs", "INSERT"))
+                .as("non-vacuity: the second boot's grants loop ran and restored the sibling grant").isTrue();
             for (String priv : DML) {
                 assertThat(hasTablePriv(sctx, "nexus_svc", "nexus.data_moves", priv))
                     .as("second boot (runAlways grants loop): nexus_svc " + priv).isFalse();
             }
-            assertThat(hasTablePriv(sctx, "nexus_svc", "nexus.chunks", "INSERT"))
-                .as("non-vacuity: the loop ran and granted a sibling table").isTrue();
 
             try (Connection as = DriverManager.getConnection(empty.getJdbcUrl(), admin, pass)) {
                 DSLContext actx = DSL.using(as, SQLDialect.POSTGRES);

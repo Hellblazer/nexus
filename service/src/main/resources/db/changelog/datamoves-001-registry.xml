@@ -8,7 +8,8 @@
       label                 the primary key. The worker names each dml_utils run <label>/<tenant>,
                             <label>/<tenant>/<leaf> for a per-leaf run on a table partitioned one tenant per leaf,
                             or <label> alone for a table with no tenant column; data_moves_label_check refuses a
-                            '/' so one move's runs are never read as another's.
+                            '/' so one move's runs are never read as another's, and data_moves_label_nonempty_check
+                            refuses the empty string.
       template              the DML template the move runs, one chunk at a time.
       driving_schema        the schema of the table dml_utils cuts into chunks by primary key.
       driving_table         that table's name.
@@ -41,10 +42,19 @@
 
     Access: written and read only as nexus_admin, the migrating role (Liquibase and the worker). Nothing on the
     serving pool reads it, so nexus_svc gets NO grant. Two things would give it one and both are handled:
-    ALTER DEFAULT PRIVILEGES hands nexus_svc DML on every table nexus_admin creates, so the changeset below
-    REVOKEs it; and the runAlways grants-nexus-svc-1 loop re-grants DML on every nexus_admin-owned table on
-    each boot, so that loop skips nexus.data_moves (an exclusion in its own SELECT, a runAlways body edit that
-    is checksum-safe). nexus_diag gets none either (it is not on NEXUS_DIAG_READABLE_TABLES).
+    ALTER DEFAULT PRIVILEGES (installed by grants-nexus-svc-1, the last include) hands nexus_svc DML on every
+    table nexus_admin creates AFTER it ran, which is every upgrade of a database that already booted once, so
+    the changeset below REVOKEs it (on a fresh walk the default ACL does not exist yet and the REVOKE finds
+    nothing to remove); and the runAlways grants-nexus-svc-1 loop re-grants DML on every nexus_admin-owned table
+    on each boot, so that loop skips nexus.data_moves (an exclusion in its own SELECT, a runAlways body edit
+    whose old checksum is a validCheckSum, see that changeset). The diagnostic role nexus_diag is not
+    addressed here: in the view era it has no grant on this table (it is not on NEXUS_DIAG_READABLE_TABLES),
+    but in the legacy era (grants-nexus-diag-1, and pg_provision.py's own grants) it holds SELECT on every
+    nexus table, which includes this one. The table holds no tenant data or credentials.
+
+    One posture is out of scope by design: where the migrating role is nexus_svc itself (RDR-246, single-role
+    posture) nexus_svc owns the table and the REVOKE is skipped, so "nexus_svc holds no privilege" holds only
+    where nexus_admin is the migrating role.
 
     Global table, no tenant column, so NO row-level security (the posture of service_tokens, embedding_models
     and install_pings). It holds no tenant data, so it is not in the tenant export registry either (that
@@ -84,6 +94,7 @@ CREATE TABLE nexus.data_moves (
     paused_by             TEXT,
     CONSTRAINT data_moves_pk PRIMARY KEY (label),
     CONSTRAINT data_moves_label_check CHECK (label !~ '/'),
+    CONSTRAINT data_moves_label_nonempty_check CHECK (label &lt;&gt; ''),
     CONSTRAINT data_moves_chunk_size_check CHECK (chunk_size BETWEEN 1 AND 1000000),
     CONSTRAINT data_moves_sleep_ms_check CHECK (sleep_ms BETWEEN 0 AND 60000),
     CONSTRAINT data_moves_statement_timeout_ms_check CHECK (statement_timeout_ms > 0),
@@ -102,7 +113,8 @@ CREATE TABLE nexus.data_moves (
 CREATE INDEX data_moves_open_registered_at ON nexus.data_moves (registered_at)
     WHERE completed_at IS NULL AND failed_at IS NULL;
 
--- ALTER DEFAULT PRIVILEGES (grants-nexus-svc-1) gave nexus_svc DML on this table the moment it was created.
+-- On an upgrade, ALTER DEFAULT PRIVILEGES (installed by an earlier boot's grants-nexus-svc-1) gave nexus_svc DML
+-- on this table the moment it was created; on a fresh walk that default ACL does not exist yet.
 -- Skipped when the migrating role is nexus_svc itself (an owner revoking its own rights would only lock out
 -- the one connection that works the registry).
 DO $$

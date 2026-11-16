@@ -100,6 +100,19 @@
         splitStatements="false": the block contains multiple SQL statements.
     -->
     <changeSet id="grants-nexus-svc-1" author="nexus-net63" runAlways="true">
+        <!--
+            nexus-f3yqd.2.12 (RDR-246) edited this body: the loop below skips nexus.data_moves, the data-move
+            registry, which only the migrating role reads. Every migrated database holds the checksum of the text
+            before that edit, so it is listed as a validCheckSum. MEASURED on Liquibase 4.29.0 (see
+            grants-004-monitor-wal-visibility below): the boot does not check a runAlways row's stored checksum, so
+            the entry is insurance, not the fix.
+
+            DO NOT ALSO LIST THE NEW CHECKSUM: Liquibase accepts a stored checksum when the changeset's CURRENT
+            checksum equals any validCheckSum entry, so listing the current one turns validation into a wildcard.
+            GrantsNexusSvcChecksumTest pins it. A later edit to this SQL adds the checksum of the text it
+            replaces, never its own.
+        -->
+        <validCheckSum>9:15c9a38e1a6119c0702314e7d6922d73</validCheckSum>
         <comment>
             Grant nexus_svc role the DML privileges it needs on the nexus and t1 schemas.
             REQUIRED: nexus_svc must exist before first migration; if missing, GRANT fails

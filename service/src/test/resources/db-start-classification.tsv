@@ -42,6 +42,7 @@ GrantsNexusDiagViewAccessIntegrationTest	startEmptyDatabase	OWNERSHIP	creates th
 Taxonomy011ForeignOwnedDiagViewTest	startEmptyDatabase	OWNERSHIP	replays taxonomy-011-1 against a pre-existing foreign-owned view, a state only a database before the walk can hold
 GrantsSvcForeignOwnedRelationTest	startEmptyDatabase	OWNERSHIP	replays the GH 1402 crash loop: an owner walks from scratch, then a superuser-owned view meets the grants changeset
 DataMovesSchemaLiquibaseTest	startEmptyDatabase	OWNERSHIP	a non-superuser owner walks the changelog twice, so the runAlways service-grant loop and the default privileges both meet nexus.data_moves, which must stay without a nexus_svc grant
+GrantsNexusSvcUpgradeIntegrationTest	startEmptyDatabase	WALK	walks the changelog as it stood before nexus.data_moves (a derived old grants-nexus-svc-1 text), then boots the current one on that database and asserts the registry and the absence of a nexus_svc grant
 TextGateProbeSingleRoleGuardIntegrationTest	startEmptyDatabase	OWNERSHIP	walks the schema as each of several migrator roles (nexus_svc, a superuser, a BYPASSRLS login) and asserts vectors-029's precondition
 TextGateProbeSingleRoleGuardIntegrationTest	startDedicated	CLUSTER_STATE	grants role membership edges on nexus_svc, which would leak into every later class on a shared cluster
 ServiceIntegrationTest	startEmptyDatabase	SKELETON	a hand-made RLS harness with no product schema; pins that /version reports a missing public.databasechangelog, so the database must be unmigrated

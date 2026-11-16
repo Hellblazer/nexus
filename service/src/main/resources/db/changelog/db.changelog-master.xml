@@ -2177,7 +2177,7 @@
     <!--
         Bead nexus-f3yqd.2.12 (RDR-246 Step 4): nexus.data_moves, the registry of data moves. A global table (no tenant
         column, no RLS) written and read only as nexus_admin, so nexus_svc gets no grant: the changeset REVOKEs the
-        default-privilege grant and grants-nexus-svc-1 skips the table. DDL only, no data effect. After vectors-061,
+        default-privilege grant (present on an upgrade) and grants-nexus-svc-1 skips the table. DDL only, no data effect. After vectors-061,
         before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/datamoves-001-registry.xml"/>
