@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextvars
 import os
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.pg_bootstrap import dml_utils as boot
+from nexus.daemon.binary_install import PINNED_SERVICE_TAG
 from nexus.db import pg_provision as pp
 from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._service_fixture import pg_bin_dir
@@ -149,10 +151,15 @@ def _require_library(box: _Box) -> None:
     under an explicit NEXUS_PG_BIN override (see the module docstring)."""
     if box.q("SELECT count(*) FROM pg_available_extensions WHERE name = 'pg_background'") != "0":
         return
-    reason = f"the bundle at {box.bins.bin_dir} has no pg_background control file"
+    reason = f"the PostgreSQL bundle at {box.bins.bin_dir} has no pg_background control file"
     if _PG_BIN_OVERRIDDEN:
-        pytest.skip(f"{reason} (NEXUS_PG_BIN override)")
-    pytest.fail(f"{reason}: the pinned engine tag's bundle must carry it, so this is a failure, not a skip")
+        pytest.skip(f"{reason} (NEXUS_PG_BIN is set to it)")
+    pytest.fail(
+        f"{reason}. NEXUS_PG_BIN is unset, so tests.db._service_fixture.pg_bin_dir() chose that directory: "
+        "the pinned engine tag's bundle if it self-provisioned, a host PostgreSQL if discovery found one "
+        f"first. CI's bundle ({PINNED_SERVICE_TAG}) carries the library, so on an unset NEXUS_PG_BIN this is "
+        "a failure, not a skip; point NEXUS_PG_BIN at a bundle that has it, or set it to skip on purpose"
+    )
 
 
 @pytest.fixture
@@ -312,15 +319,28 @@ class TestBackfillOnAnInstallProvisionedBefore:
         assert legacy.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'") != "dml_utils_owner"
         out = legacy.bootstrap()
         assert out.schema_problem is None and out.blocked_reason is None
+        assert out.schema_reowned and not out.schema_created, "it was handed over, not created"
         _assert_fully_bootstrapped(legacy)
 
+    @pytest.mark.parametrize(
+        "their_object",
+        [
+            "CREATE TABLE liquibase.theirs (i int)",
+            "CREATE FUNCTION liquibase.theirs() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+            "CREATE TYPE liquibase.theirs AS ENUM ('a')",
+        ],
+        ids=["table", "function-only", "type-only"],
+    )
     def test_a_non_empty_liquibase_schema_someone_else_owns_is_left_with_a_reason_and_the_rest_still_applies(
-        self, legacy: _Box
+        self, legacy: _Box, their_object: str
     ) -> None:
-        legacy.run("CREATE SCHEMA liquibase; CREATE TABLE liquibase.theirs (i int)")
+        """The hand-over counts relations, functions and types in one statement; a schema holding only a
+        function or only a type is not empty."""
+        legacy.run(f"CREATE SCHEMA liquibase; {their_object}")
         owner_before = legacy.q("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'liquibase'")
         assert owner_before != "dml_utils_owner"
         out = legacy.bootstrap()
+        assert not out.schema_reowned
         assert out.applied, "the extension, roles and grants are in place, only the schema is a problem"
         assert out.schema_problem == f"liquibase schema owned by {owner_before} and not empty"
         assert out.blocked_reason == out.schema_problem, "the line a doctor can show"
@@ -332,11 +352,14 @@ class TestBackfillOnAnInstallProvisionedBefore:
         CREATE ROLE and CREATE SCHEMA meet what the winner made. The state stays the winner's."""
         legacy.bootstrap()
         before = legacy.snapshot()
-        stale = {"installed": "0", "available": "1", "admin": "1", "schema_owner": "", "roles": "", "relations": "0"}
+        stale = {"installed": "0", "available": "1", "admin": "1", "schema_owner": "", "roles": ""}
         monkeypatch.setattr(boot, "_state", lambda *a, **k: stale)
         out = legacy.bootstrap()
         assert out.applied
         assert legacy.snapshot() == before
+        assert (out.extension_created, out.roles_created, out.schema_created, out.schema_reowned) == (
+            False, [], False, False,
+        ), "every create lost the race: none of them is this call's"
 
     def test_two_provisions_racing_from_an_empty_cluster_both_succeed(
         self, legacy: _Box, monkeypatch: pytest.MonkeyPatch
@@ -359,6 +382,10 @@ class TestBackfillOnAnInstallProvisionedBefore:
                 results = [f.result(timeout=120) for f in futures]
         assert all(r.applied for r in results)
         _assert_fully_bootstrapped(legacy)
+        # Each object was created by exactly one of the two: a loser reports nothing it did not make.
+        assert sorted(results[0].roles_created + results[1].roles_created) == sorted(_ROLES)
+        assert [r.schema_created for r in results].count(True) == 1
+        assert [r.extension_created for r in results].count(True) == 1
 
 
 class TestBundleWithoutTheLibrary:
@@ -379,7 +406,7 @@ class TestBundleWithoutTheLibrary:
         real_psql = boot._psql
 
         def refuse_extension(bins, port, db, user, sql, **kw):
-            if sql.startswith("CREATE EXTENSION"):
+            if "CREATE EXTENSION" in sql:
                 raise subprocess.CalledProcessError(
                     1, ["psql"], stderr=b'ERROR:  could not access file "$libdir/pg_background": No such file or directory'
                 )
@@ -425,6 +452,38 @@ class TestBundleWithoutTheLibrary:
         failed = log.named("pg_dml_utils_bootstrap_failed")
         assert [lvl for lvl, _ in failed] == ["warning"]
         assert "psql exploded" in failed[0][1]["error"]
+
+
+class TestTheLibraryGuard:
+    """No cluster: _require_library names the bin dir it looked at, whichever PostgreSQL that is."""
+
+    class _Box:
+        def __init__(self, bin_dir: Path) -> None:
+            self.bins = pp.PgBinaries.from_dir(bin_dir)
+
+        def q(self, sql: str) -> str:
+            return "0"
+
+    def test_an_unset_override_fails_naming_the_directory_and_not_only_the_pinned_tag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys.modules[__name__], "_PG_BIN_OVERRIDDEN", False)
+        host_bin = tmp_path / "host-postgresql" / "bin"
+        host_bin.mkdir(parents=True)
+        with pytest.raises(pytest.fail.Exception) as info:
+            _require_library(self._Box(host_bin))
+        text = str(info.value)
+        assert str(host_bin) in text, "which bin dir it used"
+        assert "host PostgreSQL" in text and "pg_bin_dir()" in text
+        assert "NEXUS_PG_BIN is unset" in text
+
+    def test_an_explicit_override_skips_with_the_same_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sys.modules[__name__], "_PG_BIN_OVERRIDDEN", True)
+        with pytest.raises(pytest.skip.Exception) as info:
+            _require_library(self._Box(tmp_path))
+        assert str(tmp_path) in str(info.value)
 
 
 class TestTheFailureLog:

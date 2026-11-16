@@ -21,7 +21,7 @@ It creates, in the nexus database:
   (the move runs as ``nexus_admin`` and calls their functions directly);
 * the ``liquibase`` schema owned by ``dml_utils_owner``, where both libraries
   keep their tracking tables. A ``liquibase`` schema that already exists under another
-  owner is re-owned when it holds no relations; otherwise it is left, and the result's
+  owner is re-owned when it holds no relations, functions or types (decided inside one statement); otherwise it is left, and the result's
   ``schema_problem`` says so (the roles and grants still apply).
 
 Idempotent, and tolerant of a concurrent provision (a creator that loses a race for a
@@ -35,6 +35,7 @@ failure here ever fails a service start. The verified recipe is T2
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 
@@ -68,11 +69,14 @@ class DmlUtilsBootstrap:
     #: Why nothing was done (library absent, CREATE EXTENSION refused); None when it ran.
     skipped_reason: str | None = None
     #: Why the ``liquibase`` schema is not ours although the roles and grants were applied
-    #: (it exists under another owner and holds relations); None otherwise.
+    #: (it exists under another owner and holds objects); None otherwise.
     schema_problem: str | None = None
+    #: What THIS call created. A create that lost a race to a concurrent provision is not counted.
     extension_created: bool = False
     roles_created: list[str] = field(default_factory=list)
     schema_created: bool = False
+    #: An empty ``liquibase`` schema under another owner was handed to ``dml_utils_owner``.
+    schema_reowned: bool = False
 
     @property
     def applied(self) -> bool:
@@ -101,14 +105,12 @@ def _state(bins: PgBinaries, port: int, os_user: str) -> dict[str, str]:
         f"WHERE nspname = '{LIBRARY_SCHEMA}'), "
         "(SELECT coalesce(string_agg(rolname || ':' || rolcanlogin::int || ':' || rolbypassrls::int "
         "|| ':' || rolsuper::int || ':' || rolcreaterole::int || ':' || rolcreatedb::int, ','), '') "
-        f"FROM pg_roles WHERE rolname IN ({names})), "
-        "(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-        f"WHERE n.nspname = '{LIBRARY_SCHEMA}')",
+        f"FROM pg_roles WHERE rolname IN ({names}))",
     )
-    installed, available, admin, schema_owner, roles, relations = (row.split("|") + [""] * 6)[:6]
+    installed, available, admin, schema_owner, roles = (row.split("|") + [""] * 5)[:5]
     return {
         "installed": installed, "available": available, "admin": admin,
-        "schema_owner": schema_owner, "roles": roles, "relations": relations,
+        "schema_owner": schema_owner, "roles": roles,
     }
 
 
@@ -119,16 +121,46 @@ def _bounded(value: object, limit: int = 500) -> str:
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def _tolerant(statement: str) -> str:
-    """*statement* as a DO block that treats a concurrent creator's win as success.
+def _tolerant(statement: str, tag: str) -> str:
+    """*statement* as a DO block that treats a concurrent creator's win as success, and says which
+    happened: ``nx-created:<tag>`` when this statement created the object, ``nx-lost:<tag>`` when
+    it met one a peer made first (read back by :func:`_notices`).
 
-    CREATE ROLE has no IF NOT EXISTS, and two provisions racing on a name can raise either
-    duplicate_object or, from the unique index, unique_violation. The loser's next run
-    converges the attributes."""
+    CREATE ROLE has no IF NOT EXISTS, and two provisions racing on a name can raise
+    duplicate_object (a role, an extension), duplicate_schema or, from the unique index,
+    unique_violation. The loser's next run converges the attributes."""
     return (
-        f"DO $nx$ BEGIN {statement}; "
-        "EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL; END $nx$"
+        f"DO $nx$ BEGIN {statement}; RAISE NOTICE 'nx-created:{tag}'; "
+        "EXCEPTION WHEN duplicate_object OR duplicate_schema OR unique_violation "
+        f"THEN RAISE NOTICE 'nx-lost:{tag}'; END $nx$"
     )
+
+
+def _handover(owner: str) -> str:
+    """Hand the ``liquibase`` schema to *owner* in ONE statement that counts relations, functions and
+    types in it and re-owns only when all are zero, so nothing can land between a probe and the ALTER.
+    Says ``nx-reowned:schema`` or ``nx-declined:schema``."""
+    def count(catalog: str, ns_column: str) -> str:
+        return (
+            f"NOT EXISTS (SELECT 1 FROM {catalog} o JOIN pg_namespace n ON n.oid = o.{ns_column} "
+            f"WHERE n.nspname = '{LIBRARY_SCHEMA}')"
+        )
+
+    empty = " AND ".join((
+        count("pg_class", "relnamespace"), count("pg_proc", "pronamespace"), count("pg_type", "typnamespace"),
+    ))
+    return (
+        f"DO $nx$ BEGIN IF {empty} THEN ALTER SCHEMA {_sql_ident(LIBRARY_SCHEMA)} OWNER TO {owner}; "
+        "RAISE NOTICE 'nx-reowned:schema'; ELSE RAISE NOTICE 'nx-declined:schema'; END IF; END $nx$"
+    )
+
+
+_NOTICE = re.compile(r"nx-(created|lost|reowned|declined):(\S+)")
+
+
+def _notices(result: object) -> set[tuple[str, str]]:
+    """The ``(verb, tag)`` pairs a script's DO blocks raised, from psql's stderr."""
+    return set(_NOTICE.findall(getattr(result, "stderr", "") or ""))
 
 
 def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBootstrap:
@@ -149,7 +181,10 @@ def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBo
             _log.info("pg_dml_utils_bootstrap_skipped", reason=out.skipped_reason)
             return out
         try:
-            _psql(bins, port, NEXUS_DB_NAME, os_user, f"CREATE EXTENSION IF NOT EXISTS {EXTENSION}")
+            res = _psql(
+                bins, port, NEXUS_DB_NAME, os_user,
+                _tolerant(f"CREATE EXTENSION {EXTENSION}", f"extension:{EXTENSION}"),
+            )
         except subprocess.CalledProcessError as exc:
             if _state(bins, port, os_user)["installed"] == "0":
                 # A control file with no loadable library, the shape of a bundle built without it.
@@ -158,8 +193,9 @@ def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBo
                 return out
             # else a concurrent provision created it between our probe and our statement.
         else:
-            out.extension_created = True
-            _log.info("pg_extension_created", extension=EXTENSION)
+            out.extension_created = ("created", f"extension:{EXTENSION}") in _notices(res)
+            if out.extension_created:
+                _log.info("pg_extension_created", extension=EXTENSION)
 
     # name -> (login, bypassrls, superuser, createrole, createdb), each a bool; all must be False.
     have = {
@@ -172,9 +208,8 @@ def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBo
         ident = _sql_ident(role)
         if role not in have:
             statements.append(_tolerant(
-                f"CREATE ROLE {ident} NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE"
+                f"CREATE ROLE {ident} NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE", f"role:{role}"
             ))
-            out.roles_created.append(role)
         elif any(have[role]):
             statements.append(
                 f"ALTER ROLE {ident} NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEROLE NOCREATEDB"
@@ -204,25 +239,25 @@ def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBo
         _log.warning("pg_dml_utils_no_nexus_admin", note="grants to nexus_admin skipped")
     schema = _sql_ident(LIBRARY_SCHEMA)
     if not state["schema_owner"]:
-        statements.append(_tolerant(f"CREATE SCHEMA IF NOT EXISTS {schema} AUTHORIZATION {owner}"))
-        out.schema_created = True
+        statements.append(_tolerant(f"CREATE SCHEMA {schema} AUTHORIZATION {owner}", f"schema:{LIBRARY_SCHEMA}"))
     elif state["schema_owner"] != OWNER_ROLE:
-        if state["relations"] == "0":
-            # Nothing in it to disturb: take it, so the libraries can install into it.
-            statements.append(f"ALTER SCHEMA {schema} OWNER TO {owner}")
-            _log.info("pg_dml_utils_schema_reowned", schema=LIBRARY_SCHEMA, was=state["schema_owner"])
-        else:
-            out.schema_problem = (
-                f"{LIBRARY_SCHEMA} schema owned by {state['schema_owner']} and not empty"
-            )
-            _log.warning(
-                "pg_dml_utils_schema_owner_mismatch",
-                schema=LIBRARY_SCHEMA, owner=state["schema_owner"], expected=OWNER_ROLE,
-                relations=state["relations"], reason=out.schema_problem,
-            )
+        # Take it only if it holds nothing; the statement decides and says what it did.
+        statements.append(_handover(owner))
 
     # One -c string is one implicit transaction: all of it or none of it.
-    _psql(bins, port, NEXUS_DB_NAME, os_user, "; ".join(statements))
+    res = _psql(bins, port, NEXUS_DB_NAME, os_user, "; ".join(statements))
+    heard = _notices(res)
+    out.roles_created = [role for role in LIBRARY_ROLES if ("created", f"role:{role}") in heard]
+    out.schema_created = ("created", f"schema:{LIBRARY_SCHEMA}") in heard
+    out.schema_reowned = ("reowned", "schema") in heard
+    if out.schema_reowned:
+        _log.info("pg_dml_utils_schema_reowned", schema=LIBRARY_SCHEMA, was=state["schema_owner"])
+    elif ("declined", "schema") in heard:
+        out.schema_problem = f"{LIBRARY_SCHEMA} schema owned by {state['schema_owner']} and not empty"
+        _log.warning(
+            "pg_dml_utils_schema_owner_mismatch",
+            schema=LIBRARY_SCHEMA, owner=state["schema_owner"], expected=OWNER_ROLE, reason=out.schema_problem,
+        )
     _log.info(
         "pg_dml_utils_bootstrap_applied",
         extension_created=out.extension_created,
