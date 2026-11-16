@@ -39,9 +39,12 @@ import java.util.function.Supplier;
  */
 final class CoverageInvalidation {
 
-    /** Every body key the listed routes use for a collection they change (a rename names two, a restore its origin). */
+    /**
+     * Every body key the listed routes use for a collection they change: the taxonomy rename's {@code old}/{@code new},
+     * the catalog rename's {@code old_name}/{@code new_name} (or {@code old}/{@code new}), a restore's origin.
+     */
     private static final List<String> COLLECTION_KEYS = List.of(
-        "collection", "collection_name", "old", "new", "old_collection", "new_collection", "origin_collection");
+        "collection", "collection_name", "old", "new", "old_name", "new_name", "origin_collection");
 
     private final TaxonomyCoverage coverage;
     private final Set<String> ops;

@@ -40,7 +40,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_COVERAGE_COUNTS_768;
  * body ends. {@code /store-delete} is not one of them: it deletes only chunks no manifest row names, which are in
  * neither count. NOT dropping, and so covered by the ten-minute ceiling alone: {@code ChashHandler}'s
  * {@code /rename_collection}, the tenant import commit ({@code TenantImportHandler}), the re-embed jobs, the engine's
- * own writers (the reaper, gc expiry) and the test-only tenant reset. A caller that does not know the collection a
+ * own writers (the reaper, gc expiry). The test-only tenant reset evicts the tenant ({@link #evictTenant}). A caller that does not know the collection a
  * write touched drops the whole tenant: over-invalidating costs one recount, under-invalidating hides chunks.
  *
  * <p><b>Ceiling.</b> An entry older than {@link #DEFAULT_TTL} (ten minutes) is recounted whatever invalidation did,

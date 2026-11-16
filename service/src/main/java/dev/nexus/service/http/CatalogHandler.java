@@ -154,7 +154,7 @@ public final class CatalogHandler implements HttpHandler {
     /** RDR-134 Step 2 (nexus-7fku2.1.2): drops the cached topic coverage of what a write to the routes below changed. */
     private final CoverageInvalidation coverage;
     /** The routes that change which chunks are live, answered in the request (the two 202 jobs, reconcile commit and manifest fill, drop in their own bodies). */
-    private static final java.util.Set<String> COVERAGE_OPS = java.util.Set.of(
+    static final java.util.Set<String> COVERAGE_OPS = java.util.Set.of(
         "/register", "/doc/register_many", "/update", "/update_many", "/merge", "/delete", "/delete_many", "/restore",
         "/purge-trash", "/ghost-sweep", "/manifest/write", "/manifest/append", "/manifest/append_many",
         "/manifest/write_many", "/manifest/purge", "/manifest/resync", "/manifest/null_collection",

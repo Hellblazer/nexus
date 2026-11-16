@@ -410,8 +410,9 @@ class TaxonomyCoverageInvalidationRouteTest {
         assertThat(read(a)).isEqualTo(new Counts(true, 4, 0));
         liveChunks(a, "late", 4, false); // behind the cache's back
 
-        // the run was never staged: the commit job ends failed (run_not_found). The 202 answers before the job runs, so
-        // nothing before the job's end can have dropped the entry.
+        // the run was never staged: the commit job ends failed (run_not_found). This read passes whether the drop lands
+        // at the 202 or at the job's end; CoverageInvalidationTest pins that the route is not listed, so only the job's
+        // own drop can make it pass.
         var started = post("/v1/catalog/reconcile/commit", Map.of("owner", "1.7", "run_id", "7fku212-no-such-run"));
         assertThat(started.statusCode()).as("body: %s", started.body()).isEqualTo(202);
         String jobId = (String) MAPPER.readValue(started.body(), Map.class).get("job_id");
