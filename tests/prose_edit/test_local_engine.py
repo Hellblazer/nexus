@@ -126,7 +126,7 @@ class Box:
              "CLAUDE_BIN": str(self.claude), "PROSE_EDIT_STANDIN_PYTHON": sys.executable}
         for k in ("PROSE_EDIT_NX", "PROSE_EDIT_LOCAL_ENGINE", "PROSE_EDIT_ENGINE_CACHE", "PROSE_EDIT_APP_RUNNER",
                   "PROSE_EDIT_ENGINE_STOP_WAIT", "RESUME_FROM", "SCENARIOS", "GATE_JOBS", "ANSWER",
-                  "PROSE_EDIT_STANDIN_DECISIONS", "HTTPS_PROXY", "HTTP_PROXY", "PROSE_EDIT_ISOLATED_SESSION"):
+                  "PROSE_EDIT_STANDIN_DECISIONS", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "PROSE_EDIT_ISOLATED_SESSION"):
             e.pop(k, None)
         e.update(extra)
         return e
@@ -170,8 +170,21 @@ def test_the_wrapper_is_an_env_i_allowlist_aimed_at_a_sandbox_under_tmpdir(box: 
     assert pairs["PYTHONIOENCODING"] == "utf-8" and pairs["PYTHONUTF8"] == "1"   # env -i would drop what memory.py sets
     assert "throwaway" in pairs["NX_ALLOW_PROD_WRITE"] and str(sandbox) in pairs["NX_ALLOW_PROD_WRITE"]
     assert not [k for k in pairs if k.startswith(("UV_", "XDG_", "VOYAGE", "NX_SERVICE", "PIP_"))]
+    assert pairs["NO_PROXY"] == "127.0.0.1,localhost"      # a proxy never intercepts the loopback engine call
     assert set(pairs) == {"HOME", "NEXUS_CONFIG_DIR", "PATH", "TERM", "NX_LOCAL", "NX_NO_TELEMETRY", "NX_ALLOW_PROD_WRITE",
-                          "PYTHONIOENCODING", "PYTHONUTF8"}
+                          "PYTHONIOENCODING", "PYTHONUTF8", "NO_PROXY"}
+
+
+@pytest.mark.parametrize(("operators", "expected"), [
+    ({}, "127.0.0.1,localhost"),
+    ({"NO_PROXY": "internal.invalid,10.0.0.0/8"}, "127.0.0.1,localhost,internal.invalid,10.0.0.0/8")])
+def test_the_wrapper_keeps_loopback_out_of_a_proxy_and_appends_the_operators_no_proxy(
+        box: Box, operators: dict[str, str], expected: str) -> None:
+    body = 'local_engine_start t\neval "$PROSE_EDIT_NX memory list -p zzprose_x" > /dev/null'
+    proc = drive(box, body, HTTPS_PROXY="http://proxy.invalid:3128", **operators)
+    assert proc.returncode == 0, proc.stderr
+    seen = box.call_env(box.calls().index("memory list -p zzprose_x"))
+    assert seen["NO_PROXY"] == expected and seen["HTTPS_PROXY"] == "http://proxy.invalid:3128"
 
 
 def test_init_runs_through_the_same_scrubbed_environment_and_nothing_ambient_reaches_it(box: Box) -> None:

@@ -93,7 +93,9 @@ local_engine_start() {
     NX_NO_TELEMETRY=1
     "NX_ALLOW_PROD_WRITE=prose-edit acceptance runner: these writes go to a throwaway local engine in $sandbox, never the operator's store"
     PYTHONIOENCODING=utf-8   # memory.py sets these for its child, and env -i would drop them
-    PYTHONUTF8=1)
+    PYTHONUTF8=1
+    # a proxy must never intercept the call to the loopback engine; the operator's own NO_PROXY is kept after it
+    "NO_PROXY=127.0.0.1,localhost${NO_PROXY:+,$NO_PROXY}")
   [ -z "${HTTPS_PROXY:-}" ] || LOCAL_ENGINE_ENV+=("HTTPS_PROXY=$HTTPS_PROXY")
   [ -z "${HTTP_PROXY:-}" ] || LOCAL_ENGINE_ENV+=("HTTP_PROXY=$HTTP_PROXY")
   LOCAL_ENGINE_ENV+=("$nxbin")

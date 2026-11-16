@@ -401,6 +401,27 @@ def test_a_refusal_other_than_the_recorded_one_is_flagged_as_invented(tmp_path: 
     assert "invented" not in json.loads(calls.read_text(encoding="utf-8").splitlines()[-1])
 
 
+def test_the_no_op_and_code_block_refusals_are_recorded_texts_and_are_not_flagged_as_invented(tmp_path: Path) -> None:
+    """fixtures/markupeditor/propose_edits.json holds both texts verbatim (results 3 and 4)."""
+    calls = tmp_path / "calls.jsonl"
+    app = standin.Standin(calls_path=calls)
+    app.open_document(str(_doc(tmp_path, "# T\n\nA really line.\n\n```\ncode\n```\n")))
+    blocks = app.get_document()["blocks"]
+    code = next(b["index"] for b in blocks if b["kind"] == "code")
+    h = _hashes(app.get_document())
+    for edit, reason in ((_edit(1, h[1], "really", "really", "Edit 1"), "replace is the same as find; that edit is a no-op"),
+                         (_edit(code, h[code], "code", "x", "Edit 2"), f"block {code} is a code block; suggestions are for prose")):
+        out = app.propose_edits([edit])
+        assert out["results"][0] == {"index": 0, "reason": reason, "status": "refused"}
+        assert "invented" not in json.loads(calls.read_text(encoding="utf-8").splitlines()[-1])
+    recorded = json.loads((Path(__file__).parent / "fixtures" / "markupeditor" / "propose_edits.json").read_text(encoding="utf-8"))
+    assert {r["reason"] for r in recorded["results"] if r["status"] == "refused"} >= {
+        "replace is the same as find; that edit is a no-op", "block 6 is a code block; suggestions are for prose"}
+    # the invented ones stay flagged: the text of an expected-hash mismatch is not in the fixtures
+    app.propose_edits([_edit(1, "deadbeef", "really", "x", "Edit 3")])
+    assert json.loads(calls.read_text(encoding="utf-8").splitlines()[-1])["invented"]
+
+
 def test_the_state_file_is_written_through_a_temp_file_of_its_own_name(tmp_path: Path) -> None:
     state = tmp_path / "state.json"
     app = standin.Standin(state_path=state)

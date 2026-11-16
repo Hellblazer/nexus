@@ -243,6 +243,18 @@ def answer_turn(events: list[Obj]) -> tuple[bool, str]:
     return bool(echoed) and not applied, f"echo={bool(echoed)} applied-early={bool(applied)}"
 
 
+def hold_turn(first: list[Obj], answer: list[Obj], confirm: list[Obj]) -> tuple[bool, bool, str, str]:
+    """The hold-everything answer turn after `first`: (held back, flow ok, echo note, flow note). When `first` rendered a
+    query or a paragraph proposal the answer turn reads the app and stops to ask question 1, and the dry run and the apply
+    belong to the confirmation turn (deferred_flow); otherwise the answer turn ends at the dry-run echo (app_flow)."""
+    if held_question(last(first, "review", "render")):
+        flow_ok, flow_note = deferred_flow(answer, confirm)
+        return real_apply(answer) is None, flow_ok, "echo=in the confirmation turn (question 1 first)", flow_note
+    held_back, echo_note = answer_turn(answer)
+    flow_ok, flow_note = app_flow(answer, applied=False)
+    return held_back, flow_ok, echo_note, flow_note
+
+
 def clean(events: list[Obj]) -> tuple[bool, str]:
     c = V.compliance(events, None)
     bad = bool(c["denied"] or c["off_list_bash"] or c["nx_attempts"])
@@ -297,8 +309,7 @@ def check_a(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
         # a3 kept no edit, so it sent the app nothing to hold and "reviewed" answers a3's query question
         out.append(("a4", "NOT-MEASURABLE", f"a3 kept no edit after the filter, so the app held nothing to leave pending; {note}"))
         return out
-    held_back, echo_note = answer_turn(a4)
-    flow_ok, flow_note = app_flow(a4, applied=False)
+    held_back, flow_ok, echo_note, flow_note = hold_turn(a3, a4, runs.get("a4c", []))
     out.append(("a4", "PASS" if ok and held_back and flow_ok and apply4 and not apply4.get("rejected") and not apply4.get("applied")
                 else "FAIL", f"{echo_note} {flow_note} held={(apply4 or {}).get('held')} rejected={(apply4 or {}).get('rejected')} {note}"))
     return out
@@ -339,8 +350,7 @@ def check_b(runs: dict[str, list[Obj]]) -> list[tuple[str, str, str]]:
             out.append(("b3", "PASS" if ok else "FAIL", f"the removed edit is proposed again; {note}"))
     apply4 = real_apply(runs.get("b4c", []))
     ok, note = clean(b4)
-    held_back, echo_note = answer_turn(b4)
-    flow_ok, flow_note = app_flow(b4, applied=False)
+    held_back, flow_ok, echo_note, flow_note = hold_turn(b3, b4, runs.get("b4c", []))
     out.append(("b4", "PASS" if ok and held_back and flow_ok and apply4 and not apply4.get("rejected") else "FAIL",
                 f"{echo_note} {flow_note} held={(apply4 or {}).get('held')} {note}"))
     return out
@@ -456,7 +466,7 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(f"{name:3} {shown:8} {note}\n")
     verdicts = {v for _, v, _ in rows}
     if verdicts == {"PASS"}:
-        return 0
+        return V.standin_exit(0, standin)
     return 3 if verdicts <= {"PASS", "NOT-RUN"} else 1
 
 

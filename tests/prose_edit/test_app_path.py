@@ -19,6 +19,10 @@ import pytest
 from tests.prose_edit.test_acceptance_tools import (
     _b_runs,
     ACC,
+    PROTECTED,
+    _both,
+    _ed,
+    _verdicts,
     _app_turn,
     _check_a_runs,
     _gate,
@@ -165,6 +169,44 @@ def test_b4_reads_the_app_too() -> None:
     assert {n: v for n, v, _ in rv.check_b(runs)}["b4"] == "FAIL"
 
 
+def _held_turn(tid: str) -> tuple[list[dict], list[dict]]:
+    """A hold-everything answer turn after a first turn with a query: it reads the app and stops to ask question 1, and the
+    confirmation turn dry-runs and applies (SKILL.md step 11 Branch A)."""
+    held = {"applied": [], "rejected": [], "held": [1]}
+    return (_app_turn(tid, {"accept": []})[:4],
+            _script("review", "apply", f"{tid}y", {"dry_run": True}, "--work /w --accept none --dry-run")
+            + _script("review", "apply", f"{tid}p", held, "--work /w --accept none"))
+
+
+@pytest.mark.parametrize("counts", [{"edits": 1, "queries": 1}, {"edits": 1, "paragraphs": 1}])
+def test_a4_after_a_query_turn_scores_the_deferred_flow(counts: dict) -> None:
+    runs = _check_a_runs([2], ABSENT)
+    runs["a3"] = runs["a3"] + _script("review", "render", "r3", {"counts": counts})
+    runs["a4"], runs["a4c"] = _held_turn("a4")
+    row = {n: (v, note) for n, v, note in _review_verdicts().check_a(runs)}["a4"]
+    assert row[0] == "PASS" and "deferred" in row[1], row
+    runs["a4"] = []                                                    # never read the app
+    row = {n: (v, note) for n, v, note in _review_verdicts().check_a(runs)}["a4"]
+    assert row[0] == "FAIL" and "list_suggestions" in row[1], row
+    runs["a4"] = _held_turn("a4")[0] + _script("review", "apply", "e", {"applied": [], "rejected": [], "held": [1]}, "--work /w --accept none")
+    assert {n: v for n, v, _ in _review_verdicts().check_a(runs)}["a4"] == "FAIL"   # applied before question 1
+
+
+@pytest.mark.parametrize("counts", [{"edits": 1, "queries": 1}, {"edits": 1, "paragraphs": 1}])
+def test_b4_after_a_query_turn_scores_the_deferred_flow(counts: dict) -> None:
+    removed = {"old": "really quite ", "new": ""}
+    again = {"edits": [{"n": 1, "old": "The worker really quite simply retries", "new": "The worker simply retries"}], "dropped": []}
+    runs = _b_runs(removed, again)
+    runs["b3"] = runs["b3"] + _script("review", "render", "r3", {"counts": counts})
+    runs["b4"], runs["b4c"] = _held_turn("b4")
+    rv = _review_verdicts()
+    row = {n: (v, note) for n, v, note in rv.check_b(runs)}["b4"]
+    assert row[0] == "PASS" and "deferred" in row[1], row
+    runs["b4"] = []
+    row = {n: (v, note) for n, v, note in rv.check_b(runs)}["b4"]
+    assert row[0] == "FAIL" and "list_suggestions" in row[1], row
+
+
 # ---------------------------------------------------------------------------
 # A stand-in run says so
 # ---------------------------------------------------------------------------
@@ -199,7 +241,7 @@ def test_the_teach_and_gate_verdicts_say_so_too(tmp_path: Path, capsys: pytest.C
     out.mkdir()
     tt._all_runs(out)
     _mark(out, "t1")
-    assert tt.T.main([str(out)]) == 0
+    assert tt.T.main([str(out)]) == 3                  # an all-PASS stand-in batch is not a clean real pass
     text = capsys.readouterr().out
     assert text.splitlines()[0].startswith(STANDIN_HEADER) and "PASS (stand-in)" in text
     gate = _gate()
@@ -210,10 +252,88 @@ def test_the_teach_and_gate_verdicts_say_so_too(tmp_path: Path, capsys: pytest.C
     assert gate.main([str(g)]) == 0
     assert STANDIN_HEADER not in capsys.readouterr().out
     _mark(g, "doc-1-1")
-    assert gate.main([str(g)]) == 0
+    assert gate.main([str(g)]) == 3
     text = capsys.readouterr().out
     assert text.startswith(STANDIN_HEADER) and "harness measurement, not a run of the preregistered gate" in text
     assert "PASS (stand-in)" in text
+
+
+def _per_kind_root(tmp_path: Path) -> Path:
+    root = tmp_path / "root"
+    (root / "tests" / "prose_edit" / "fixtures").mkdir(parents=True)
+    (root / "tests" / "prose_edit" / "fixtures" / "protected.md").write_text(PROTECTED, encoding="utf-8")
+    return root
+
+
+def _per_kind_run(out: Path, name: str, events: list[dict]) -> None:
+    out.mkdir(exist_ok=True)
+    (out / f"{name}.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    (out / f"{name}.rc").write_text("rc=0\n", encoding="utf-8")
+
+
+def test_the_per_kind_verdicts_print_the_header_tag_each_pass_and_exit_three_for_a_standin_batch(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    v = _verdicts()
+    root = _per_kind_root(tmp_path)
+    out = tmp_path / "per-kind"
+    _per_kind_run(out, "protected-1", _both([_ed(1, "The scheduler basically hands each job", "x")]))
+    assert v.main([str(out), "--root", str(root)]) == 0
+    plain = capsys.readouterr().out
+    assert STANDIN_HEADER not in plain and "(stand-in)" not in plain
+    _mark(out, "protected-1")
+    assert v.main([str(out), "--root", str(root)]) == 3
+    text = capsys.readouterr().out
+    assert text.splitlines()[0].startswith(STANDIN_HEADER)
+    assert any(ln.startswith("protected-1") and "PASS (stand-in)" in ln for ln in text.splitlines())
+    # a failure in a stand-in batch is still a failure: exit 1, and the FAIL row is not tagged
+    _per_kind_run(out, "protected-2", _both([_ed(1, "This is basically a very simple loop", "x")]))
+    _mark(out, "protected-2")
+    assert v.main([str(out), "--root", str(root)]) == 1
+    assert not any("FAIL (stand-in)" in ln for ln in capsys.readouterr().out.splitlines())
+
+
+def test_the_canary_run_of_a_standin_batch_is_tagged_too(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """run-canaries.sh runs a path canary through run-scenario.sh, which gives it the stand-in under the switch."""
+    v = _verdicts()
+    out = tmp_path / "canaries"
+    _per_kind_run(out, "protected-1", _both([_ed(1, "The scheduler basically hands each job", "x")]))
+    (out / "protected-1.mcp.json").write_text("{}", encoding="utf-8")     # no .app marker: record-run.sh never ran
+    assert v.main([str(out), "--root", str(_per_kind_root(tmp_path))]) == 3
+    assert capsys.readouterr().out.startswith(STANDIN_HEADER)
+
+
+# ---------------------------------------------------------------------------
+# standin_run: an MCP config in the out dir is enough, a failed record-run.sh cannot hide the stand-in
+# ---------------------------------------------------------------------------
+
+
+def test_standin_run_reads_the_app_marker_and_any_mcp_config_the_runner_wrote(tmp_path: Path) -> None:
+    v = _verdicts()
+    assert v.standin_run(tmp_path) is False
+    _mark(tmp_path, "a1", app="none")
+    assert v.standin_run(tmp_path) is False
+    (tmp_path / "a2.mcp.json").write_text("{}", encoding="utf-8")        # run-scenario.sh writes it before the session
+    assert v.standin_run(tmp_path) is True                               # and record-run.sh may have died before NAME.app
+    other = tmp_path / "other"
+    other.mkdir()
+    _mark(other, "a1")
+    assert v.standin_run(other) is True
+
+
+def test_the_standin_exit_code_is_three_only_for_a_run_that_would_exit_zero() -> None:
+    v = _verdicts()
+    assert [v.standin_exit(code, True) for code in (0, 1, 2, 3)] == [3, 1, 2, 3]
+    assert [v.standin_exit(code, False) for code in (0, 1, 2, 3)] == [0, 1, 2, 3]
+
+
+def test_the_review_verdicts_exit_three_for_an_all_pass_standin_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rv = _review_verdicts()
+    monkeypatch.setattr(rv, "group_rows", lambda group, runs, asked, skipped: [(f"{group}1", "PASS", "ok")])
+    assert rv.main([str(tmp_path)]) == 0
+    _mark(tmp_path, "a1")
+    assert rv.main([str(tmp_path)]) == 3
+    monkeypatch.setattr(rv, "group_rows", lambda group, runs, asked, skipped: [(f"{group}1", "FAIL", "x")])
+    assert rv.main([str(tmp_path)]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -424,10 +544,22 @@ def test_the_control_fails_d1_when_edit_1_or_2_never_reached_the_app() -> None:
 @pytest.mark.parametrize(("counts", "verdict"), [({"edits": 2, "queries": 1}, "NOT-MEASURABLE"),
                                                  ({"edits": 2, "paragraphs": 1}, "NOT-MEASURABLE"),
                                                  ({"edits": 2}, "FAIL")])
-def test_teach_decided_is_not_measurable_when_t1_held_a_query_or_paragraph(counts: dict, verdict: str) -> None:
+def test_teach_decided_is_not_measurable_when_t1_held_a_query_and_t2_read_the_app_then_t2c_applied(
+        counts: dict, verdict: str) -> None:
     t1 = _script("review", "render", "r1", {"counts": counts})
-    got, note = tt.T.check_decided([], None, t1)              # t2 asked question 1 and did not apply
+    t2 = _read_turn("t2")
+    t2c = _confirm_turn("c", REAL_D)
+    got, note = tt.T.check_decided(t2, t2c, t1)    # t2 read the app and asked question 1; t2c dry-ran and applied
     assert got == verdict, note
+
+
+@pytest.mark.parametrize("counts", [{"edits": 2, "queries": 1}, {"edits": 2, "paragraphs": 1}])
+def test_teach_decided_fails_a_broken_flow_even_when_t1_held_a_query(counts: dict) -> None:
+    t1 = _script("review", "render", "r1", {"counts": counts})
+    got, note = tt.T.check_decided([], None, t1)              # t2 never read the app: a broken flow, not an unmeasured one
+    assert got == "FAIL" and "list_suggestions" in note, note
+    got, note = tt.T.check_decided(_read_turn("t2"), None, t1)  # read the app, but no confirmation turn ever applied
+    assert got == "FAIL", note
 
 
 # ---------------------------------------------------------------------------

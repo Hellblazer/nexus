@@ -276,14 +276,23 @@ def _has_real_apply(events: list[Obj] | None) -> bool:
 def check_decided(t2: list[Obj] | None, t2c: list[Obj] | None, t1: list[Obj] | None = None) -> tuple[str, str]:
     """The answer turn read the app's decisions and, every suggestion being decided and none held, applied in the same turn.
     When t1 rendered a query or a paragraph proposal, SKILL.md step 11 Branch A asks question 1 and ends the answer turn
-    before any apply, which is right; the row is then NOT-MEASURABLE rather than a FAIL of a correct skill."""
+    before any apply, which is right; when that deferred flow (t2 reads the app, t2c dry-runs and applies) holds, the row is
+    NOT-MEASURABLE rather than a FAIL of a correct skill, and when it is broken the row is a FAIL."""
     ok, note = RV.app_flow(t2 or [], applied=True)
     if ok:
         return PASS, f"t2 read list_suggestions, then decisions --from-file, then dry-ran and applied in the same turn ({note})"
     counts = (RV.last(t1 or [], "review", "render") or {}).get("counts") or {}
     if counts.get("queries") or counts.get("paragraphs"):
+        # question 1 comes first (step 11 Branch A): the right flow reads the app in t2 and applies in t2c. A skill that
+        # never read the app, or never applied after the question, is a broken flow, not an unmeasured one.
+        deferred_ok, deferred_note = RV.deferred_flow(t2 or [], t2c or [])
+        if not deferred_ok:
+            return FAIL, (f"t1 rendered {counts.get('queries', 0)} queries and {counts.get('paragraphs', 0)} paragraph "
+                          f"proposals, so t2 should read the app and ask question 1 and t2c apply, and the flow is broken "
+                          f"({deferred_note})")
         return NOT_MEASURABLE, (f"t1 rendered {counts.get('queries', 0)} queries and {counts.get('paragraphs', 0)} paragraph "
-                                f"proposals, so the answer turn asks question 1 before applying (step 11 Branch A) ({note})")
+                                f"proposals, so the answer turn asks question 1 before applying (step 11 Branch A) "
+                                f"and the same-turn apply is not exercised ({deferred_note})")
     if _has_real_apply(t2c) and not _has_real_apply(t2):
         return FAIL, ("the run was App-decided (accept 1, reject the rest, in the app) but t2 only asked: a confirmation "
                       f"turn applied ({note})")
@@ -358,7 +367,7 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(f"{name:8} {V.tag_standin(verdict, standin):14} {note}\n")
     if any(v == FAIL for _, v, _ in rows):
         return 1
-    return 3 if any(v == NOT_MEASURABLE for _, v, _ in rows) else 0
+    return V.standin_exit(3 if any(v == NOT_MEASURABLE for _, v, _ in rows) else 0, standin)
 
 
 if __name__ == "__main__":

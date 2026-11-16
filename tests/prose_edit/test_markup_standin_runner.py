@@ -351,3 +351,17 @@ def test_without_the_isolation_mark_the_argv_is_unchanged(tmp_path: Path, value:
     wt = _tree(tmp_path)
     argv, _ = _run(wt, tmp_path, "c1", STDIN_RUN, PROSE_EDIT_ISOLATED_SESSION=value)
     assert argv == _baseline(wt, tmp_path, STDIN_RUN)
+
+
+def test_the_readme_states_what_the_standin_does_not_reproduce_and_what_it_imitates() -> None:
+    text = (Path(__file__).parent / "acceptance" / "README.md").read_text(encoding="utf-8")
+    doc = (Path(__file__).parent / "acceptance" / "markup_standin.py").read_text(encoding="utf-8")
+    for source in (text, doc):
+        assert "quirk g" in source and "reference links" in source          # the serializer rewrites are not reproduced
+        assert "Reload from Disk" in source and "imitation" in source       # the unsaved-document replies are not recorded
+    assert "a1`, `a2`, `d1` and `d2` PASS" in text and "`a3` and `a4` NOT-MEASURABLE" in text and "have not run live" in text
+    assert "restores these scenarios" not in text
+    assert "NO_PROXY=127.0.0.1,localhost" in text and "PYTHONUTF8=1" in text and "and nothing else, so no" in text
+    assert "no-op" in text and "code block" in text                          # the recorded refusals are listed as recorded
+    assert "read-only against T2" not in text
+    assert "`run-cut.sh`, `run-canaries.sh` and a direct `run-scenario.sh` call do not" in text   # not every runner resets the state

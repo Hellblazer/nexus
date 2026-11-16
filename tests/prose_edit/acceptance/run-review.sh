@@ -57,8 +57,8 @@ esac
 runner_lock run-review.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose024_}"
-# A path run reviews in the MarkupEditor app, which a headless session cannot drive (nexus-scmcs.2.13): groups a
-# and b are NOT-RUN (recorded in $OUT/not-run.txt, scored NOT-RUN by review_verdicts.py), and c, the stdin run,
+# A path run reviews in the MarkupEditor app, which a headless session cannot drive (nexus-scmcs.2.13): groups a,
+# b and d are NOT-RUN (recorded in $OUT/not-run.txt, scored NOT-RUN by review_verdicts.py), and c, the stdin run,
 # keeps its in-chat review and runs. PROSE_EDIT_APP_RUNNER=1, set only by a harness that answers the MarkupEditor
 # tools, runs them.
 if [ "${PROSE_EDIT_APP_RUNNER:-0}" != 1 ]; then

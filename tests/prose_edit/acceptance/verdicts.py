@@ -240,8 +240,17 @@ STANDIN_HEADER = ("app: STAND-IN (the MarkupEditor tools were answered by markup
 
 def standin_run(out_dir: Path) -> bool:
     """Whether any session of the run in OUT_DIR ran against the stand-in MarkupEditor server: a NAME.app file that
-    says `standin` (record-run.sh writes it when NAME.mcp.json exists)."""
-    return any(p.read_text(encoding="utf-8").strip() == "standin" for p in out_dir.glob("*.app"))
+    says `standin`, or any NAME.mcp.json. run-scenario.sh writes the config before the session starts and only for a
+    stand-in session, while record-run.sh writes NAME.app last, after four steps that can each end it, so a run whose
+    record step failed still reads as a stand-in run."""
+    return (any(p.read_text(encoding="utf-8").strip() == "standin" for p in out_dir.glob("*.app"))
+            or any(out_dir.glob("*.mcp.json")))
+
+
+def standin_exit(code: int, standin: bool) -> int:
+    """A stand-in batch that would exit 0 exits 3, the code for "not a clean real pass" that NOT-RUN and NOT-MEASURABLE
+    already use: an all-PASS stand-in batch must not read as a real-app pass to a caller that only looks at the status."""
+    return 3 if standin and code == 0 else code
 
 
 def tag_standin(verdict: str, standin: bool) -> str:
@@ -1231,6 +1240,9 @@ def main(argv: list[str]) -> int:
     fails = 0
     unmeasured = 0
     totals: Counter[str] = Counter()
+    standin = standin_run(out_dir)
+    if standin:
+        sys.stdout.write(STANDIN_HEADER + "\n")
     for rc in sorted(out_dir.glob("*.rc")):
         name = rc.stem
         kind = re.sub(r"-[0-9]+$", "", name)
@@ -1250,7 +1262,7 @@ def main(argv: list[str]) -> int:
         counts = {k: (len(val) if isinstance(val, list) else val) for k, val in c.items()}
         for k, val in counts.items():
             totals[k] += int(val)
-        sys.stdout.write(f"{name:14} {v:5} {note} | {json.dumps(counts)}\n")
+        sys.stdout.write(f"{name:14} {tag_standin(v, standin):5} {note} | {json.dumps(counts)}\n")
     skipped = not_run_rows(out_dir)
     for name, reason in skipped:
         sys.stdout.write(f"{name:14} {NOT_RUN:5} {reason}\n")
@@ -1261,7 +1273,7 @@ def main(argv: list[str]) -> int:
     models = sorted({m.read_text(encoding="utf-8").strip() for m in out_dir.glob("*.model")} - {""})
     if models:  # the session model each run recorded (the orchestrator's; the editor's is the agent file's)
         sys.stdout.write(f"MODELS {' '.join(models)}\n")
-    return 1 if fails else (3 if unmeasured or skipped else 0)
+    return standin_exit(1 if fails else (3 if unmeasured or skipped else 0), standin)
 
 
 if __name__ == "__main__":

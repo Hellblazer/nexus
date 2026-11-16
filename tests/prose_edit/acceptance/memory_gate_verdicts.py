@@ -275,7 +275,7 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(f"SHORT: {label} has {n} measurable runs, fewer than the {floor} asked for\n")
     if verdict == "MISS":
         return 1
-    return 3 if short else 0
+    return V.standin_exit(3 if short else 0, standin)
 
 
 if __name__ == "__main__":

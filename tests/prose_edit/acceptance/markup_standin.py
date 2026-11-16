@@ -26,6 +26,8 @@ What it reproduces (NOTES.md there):
     the accepted changes and then says "There is nothing to undo" with hasChanges still true. Only open_document or
     save_document clears it
   - quirk f is NOT reproduced: open_document finishes loading before it replies
+  - quirk g is NOT reproduced: the app's serializer rewrites what it saves (`_x_` to `*x*`, `&amp;` to `&`, `[sic]`
+    escaping, reference links to inline links), and this server writes the Markdown it was given
 
 The app decides, so the author's decisions are statuses in list_suggestions. A script says what the author decided: a
 JSON table (MARKUP_STANDIN_DECISIONS) maps a scenario name (MARKUP_STANDIN_SCENARIO, an fnmatch pattern, the first
@@ -34,8 +36,11 @@ The rule applies when that scenario's session calls list_suggestions, to the sug
 in the note ("Edit <n>"), and a decision made is kept. A scenario with no rule leaves everything pending: the author
 has not looked yet, or held every edit.
 
-What it invents (no fixture shows it): the success replies of undo and save_document, and the text of every refusal
-except the formatting-boundary one. Each tool call is appended to MARKUP_STANDIN_CALLS (a JSON line: the tool, its
+What it invents (no fixture shows it): the success replies of undo and save_document, the error texts (no document is
+open, an edit that is not an object, cannot open a file), and the text of every refusal except the three the fixtures
+hold verbatim (formatting boundary, no-op, code block). The replies for the unsaved-document branch (undo with nothing
+to undo, the Reload from Disk warning) are imitations, not recorded from the real app; the real-app facts are an open
+gap that needs the Mac. Each tool call is appended to MARKUP_STANDIN_CALLS (a JSON line: the tool, its
 arguments, the outcome, the decisions the rule applied, any `invented` reply, any `ambiguous` find) so a stand-in run
 can be read for what it did and where it made something up. An edit whose find occurs more than once in its block is
 located at the FIRST occurrence (as written, not confirmed against the app) and flagged `ambiguous` in that log. An
@@ -78,7 +83,12 @@ class StandinError(Exception):
 
 
 class _Refused(Exception):
-    """One edit of a propose_edits call the app refuses."""
+    """One edit of a propose_edits call the app refuses. `recorded` is True when the text is one the fixtures hold
+    (fixtures/markupeditor/propose_edits.json): the formatting-boundary, no-op and code-block refusals."""
+
+    def __init__(self, text: str, *, recorded: bool = False) -> None:
+        super().__init__(text)
+        self.recorded = recorded
 
 
 def render(reply: dict[str, Any]) -> str:
@@ -398,8 +408,8 @@ class Standin:
             try:
                 found = self._locate(state, edit)
             except _Refused as why:
-                if not str(why).startswith(CROSSES):
-                    self._invent("refusal text (only the formatting-boundary refusal is in the fixtures)")
+                if not why.recorded:
+                    self._invent("refusal text (only the formatting-boundary, no-op and code-block refusals are in the fixtures)")
                 results.append({"index": index, "reason": str(why), "status": "refused"})
                 continue
             state["counter"] += 1
@@ -421,9 +431,9 @@ class Standin:
         if not isinstance(find, str) or not find or not isinstance(replace, str):
             raise _Refused("an edit needs a non-empty find and a replace, both text")
         if blocks[block]["kind"] == "code":
-            raise _Refused(IS_CODE.format(block=block))
+            raise _Refused(IS_CODE.format(block=block), recorded=True)
         if find == replace:
-            raise _Refused(NO_OP)
+            raise _Refused(NO_OP, recorded=True)
         expected = edit.get("expected")
         if expected is not None and expected != block_hash(blocks[block]["markdown"]):
             raise _Refused(f"block {block} changed since it was read (expected hash {expected}, it is now "
@@ -436,7 +446,7 @@ class Standin:
                 continue
             end = at + len(find)
             if len(set(runs[at:end])) > 1:
-                raise _Refused(CROSSES)
+                raise _Refused(CROSSES, recorded=True)
             for other in state["suggestions"]:
                 if (other["status"] == "pending" and other["url"] == state["url"] and other["block"] == block
                         and other["unit"] == unit and at < other["end"] and other["start"] < end):
