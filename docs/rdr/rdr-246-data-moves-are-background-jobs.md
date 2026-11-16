@@ -164,6 +164,15 @@ ranges:
   backend's dead tuples cannot be reclaimed until its top-level call returns,
   so a procedure bloats the table by the whole migration. One worker per chunk
   bounds the bloat to one chunk. **Documented** (README, "Why pg_background").
+  **Measured 2026-11-16, and it does not hold as called** (T2
+  nexus_rdr/246-research-3): `run_migration_chunks` is one statement, and its
+  own snapshot holds the vacuum cutoff for the whole move. A VACUUM mid-move
+  removed none of 7,000 dead rows ("removable cutoff: 1692", the coordinator's
+  backend_xmin); after the call returned it removed 20,004. A procedure
+  coordinator that COMMITs after each chunk launch held no xmin, and a mid-run
+  VACUUM left no dead row unremovable. Sam chose, 2026-11-16 (ask
+  dml-utils-coordinator): "Procedure entry in dml_utils (Recommended)", a
+  committing PROCEDURE entry point added to dml_utils upstream.
 - `dml_utils_lib.process_migration_chunk(run_id, boundary_no, sql_text)` claims one
   boundary with `UPDATE ... RETURNING` and runs its SQL in the caller's
   transaction. Only the launcher needs pg_background. **Verified** (source
@@ -277,8 +286,10 @@ and installed on the cloud host, and bytea keys added to dml_utils upstream.
    row naming the label, the DML template, the driving table and the chunk
    size. Registration writes one row, whatever the data size.
 2. After boot, the engine's data-move worker finds every registered move that
-   is not complete and calls `dml_utils.run_migration_chunks` for it. Each
-   chunk commits on its own; a restart resumes from the last committed batch.
+   is not complete and CALLs dml_utils' committing procedure entry point for
+   it. Each chunk commits on its own, the coordinator commits between chunks so
+   VACUUM can reclaim each chunk's dead rows, and a restart resumes from the
+   last committed batch.
 3. While a move runs, /v1/status `boot_work` reports it in nexus-f3yqd.3's
    shape: done and total in chunks, `safe_to_stop: true`, `on_stop: "resumes
    from the last committed batch"`. nx doctor shows the same.
@@ -333,8 +344,10 @@ each move it:
 
 1. checks that pg_background is installed and that one
    `max_worker_processes` slot is free, and waits otherwise;
-2. calls `dml_utils.run_migration_chunks(template, schema, table, label,
-   chunk_size, threads => 1)` on its own connection;
+2. CALLs dml_utils' procedure entry point (the committing counterpart of
+   `run_migration_chunks`, added upstream by this RDR: same arguments, threads
+   1) on its own autocommit connection, so the coordinator holds no snapshot
+   between chunks;
 3. once dml_utils reports every tenant's run complete, runs the verification
    query for each tenant, and sets `completed_at` only when every one returns
    no rows. A row returned means a writer produced the old shape after the move
@@ -528,14 +541,17 @@ last committed chunk, and f3yqd.1's write gate measures no boot-time row move.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: bytea keys in dml_utils
+#### Step 1: bytea keys and a committing entry point in dml_utils
 
 A reviewed PR to Hellblazer/dml_utils covering a single bytea key and a
 composite (text, text, bytea) key. Literals do not depend on bytea_output or
 standard_conforming_strings, and each row lands in exactly one chunk. The
 PR also covers resume and states the partitioned-table finding. Merged as
-PR #1 (a6cd544). Nexus pins that commit, and ddl_utils at 5f088e2 (Sam,
-2026-11-16), until releases are tagged.
+PR #1 (a6cd544). A second PR adds a PROCEDURE entry point that runs the same
+coordinator and COMMITs after each chunk launch and poll round, with a test
+that a mid-run VACUUM finds no dead row held back by the coordinator (Sam's
+choice, 2026-11-16). Nexus pins the dml_utils commit that carries it, and
+ddl_utils at 5f088e2 (Sam, 2026-11-16), until releases are tagged.
 
 #### Step 2: pg_background in the PG bundle
 
@@ -614,6 +630,7 @@ from /v1/status on the live engine.
 - **Scenario**: pg_background is absent. **Verify**: the engine skips the dml_utils changelogs and serves, the move is reported blocked, and no row changes; after the extension is created, the next boot applies the changelogs and the move runs.
 - **Scenario**: a chunk fails. **Verify**: the move is reported failed with the error, the committed chunks stay, and a later boot retries.
 - **Scenario**: tenants under FORCE RLS. **Verify**: the move runs once per registered tenant, rewrites every tenant's rows, and no run, whether as the move's role or through `dml_utils_owner`'s boundary scan, touches or reads a row of a tenant other than its own.
+- **Scenario**: bloat. A move over 100k rows with autovacuum off, VACUUM run mid-move. **Verify**: the coordinator's backend_xmin is null between chunks and VACUUM reports no dead row "not yet removable" from chunks already committed.
 - **Scenario**: writers during a move: insert new-shape rows, update and delete existing rows of both shapes while a move runs. **Verify**: the final state equals a quiet run's for the rows that existed before, the new rows are untouched, and the verification query is empty.
 - **Scenario**: a writer inserts an old-shape row after the move starts. **Verify**: the verification query returns it, the move is reported `failed:` and `completed_at` stays NULL.
 - **Scenario**: a new changeset with an UPDATE on chunks. **Verify**: DataMoveChangesetGateTest is red. Registering the same move through nexus.data_moves is green.
@@ -675,3 +692,4 @@ reporting. The mechanism has no consumer until the first registered move.
 
 - 2026-11-16: Phase 1 Step 3 spikes reported (T2 nexus_rdr/246-research-1, -2) on engine-service-v0.1.194's released bundle. pg_background workers inherit the caller's role and tenant setting, so moves run once per tenant; dml_utils and ddl_utils install as a non-superuser `dml_utils_owner`, whose SELECT on every chunk leaf the partition grant loop now carries; partition-wise and plain runs over a FORCE-RLS (text, text, bytea) table processed every row exactly once across a killed coordinator. Step 2 is done. Step 1's bytea change is merged; a dml_utils release to pin is still open.
 - 2026-11-16: dml_utils' changelogs are applied only when pg_background is installed, so an engine without it serves and reports its moves blocked; the cloud install lands before the first registered move runs. Finalization Gate responses written.
+- 2026-11-16: gate round 1 fixes: writers during a move and a verification query that gates completion, the tenant source, progress in chunks, one source for a move's SQL, stale bytea text, the measured coordinator bloat and Sam's choice of a committing procedure entry point in dml_utils, and Sam's pin of the merged commits.
