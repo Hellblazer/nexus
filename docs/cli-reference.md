@@ -2985,7 +2985,7 @@ ever — not unlimited.
 
 ## nx ci
 
-CI results read from the CI board, without polling GitHub.
+CI results: develop and main from the CI board, any other branch from GitHub's check-runs.
 
 ### nx ci wait
 
@@ -3009,6 +3009,17 @@ The board wake is best effort: a run set the adapter could not fold posts no row
 | 5 | the wait could not run: not a sha, no tuple store, a refused board read, or the engine unreachable until the deadline |
 
 Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as for every `nx` command.
+
+**GitHub-only mode.** The board has CI topics for `develop` and `main` only. For any other `--branch` (a release or feature branch, whose CI runs on `pull_request` events the board never sees), or when the engine refuses the topic as unknown, the board is skipped and the wait reads the sha's check-runs from GitHub (`gh api repos/<gh-repo>/commits/<sha>/check-runs --paginate`, all events, the latest run of each check). Reads are about 60 seconds apart and never closer, so a wait is a request a minute, plus one read at the deadline's edge; a read that would fall after `--timeout` is skipped. A finished set that includes a failure is reported at once. Any other finished set is reported only when two consecutive reads list the same completed check-runs, so a workflow that registers late is not missed; the cost is one extra read, 60 seconds. A sha with no check-runs yet waits. When a watched branch falls back, the time already spent on the board counts against `--timeout`. The result line ends `(GitHub only: the board was not used for <branch>)` and names the check-runs that did not pass. `--fresh` is ignored. `--gh-repo` must be `OWNER/NAME` (default `Hellblazer/<repo>`).
+
+| Exit (GitHub-only) | Meaning |
+|---|---|
+| 0 | every check-run completed as success, neutral or skipped, on two consecutive reads |
+| 1 | a check-run failed (`failure`, `timed_out`, `startup_failure`, `action_required`) |
+| 2 | `--timeout` passed with check-runs still running, unconfirmed, or none listed |
+| 3 | check-runs were cancelled or stale and none failed |
+| 4 | a conclusion is missing or one this table does not know |
+| 5 | GitHub could not be read: at once for `gh` missing, HTTP 401, 404 or 422 or a login prompt; after 3 consecutive failed reads with the same error; or at the deadline when no read worked. The line names the last error. Also a `--gh-repo` that is not `OWNER/NAME` |
 
 ## nx collection
 

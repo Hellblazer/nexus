@@ -47,4 +47,6 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/stop_wake_guard.py` -- a CI-wait block steers to nx ci wait --branch for a release or PR (nexus-x4jok)
+
 ## Deferred to the next client release
