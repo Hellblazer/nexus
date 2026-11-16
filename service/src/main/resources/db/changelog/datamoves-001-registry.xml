@@ -31,7 +31,7 @@
                             and failed_at are NULL and no row supersedes it; a paused move is still open and
                             the worker filters it out in its own query.
       transient_retries     how many consecutive transient failures the worker has retried; the retry counter
-                            and its backoff come from RDR-246's nexus-f3yqd.2.3 amendment (in progress).
+                            and its backoff come from RDR-246's nexus-f3yqd.2.3 amendment (approved, 2026-11-16).
       last_transient_at,    when and what the latest transient failure was; set together (the same .2.3
       last_transient        amendment). data_moves_transient_retries_stamp_check ties them to the counter: zero
                             retries means no timestamp, a positive count means one is set, so the backoff always
@@ -42,7 +42,7 @@
 
     Access: written and read only as nexus_admin, the migrating role (Liquibase and the worker). Nothing on the
     serving pool reads it, so nexus_svc gets NO grant. Two things would give it one and both are handled:
-    ALTER DEFAULT PRIVILEGES (installed by grants-nexus-svc-1, the last include) hands nexus_svc DML on every
+    ALTER DEFAULT PRIVILEGES (installed by grants-nexus-svc-1, which runs after data_moves is created) hands nexus_svc DML on every
     table nexus_admin creates AFTER it ran, which is every upgrade of a database that already booted once, so
     the changeset below REVOKEs it (on a fresh walk the default ACL does not exist yet and the REVOKE finds
     nothing to remove); and the runAlways grants-nexus-svc-1 loop re-grants DML on every nexus_admin-owned table

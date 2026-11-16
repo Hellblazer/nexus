@@ -103,8 +103,8 @@
         <!--
             nexus-f3yqd.2.12 (RDR-246) edited this body: the loop below skips nexus.data_moves, the data-move
             registry, which only the migrating role reads. Every migrated database holds the checksum of the text
-            before that edit, so it is listed as a validCheckSum. MEASURED on Liquibase 4.29.0 (see
-            grants-004-monitor-wal-visibility below): the boot does not check a runAlways row's stored checksum, so
+            before that edit, so it is listed as a validCheckSum. The same Liquibase 4.29.0 behaviour measured for
+            grants-004-monitor-wal-visibility (below) applies: the boot does not check a runAlways row's stored checksum, so
             the entry is insurance, not the fix.
 
             DO NOT ALSO LIST THE NEW CHECKSUM: Liquibase accepts a stored checksum when the changeset's CURRENT

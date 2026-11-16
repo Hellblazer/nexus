@@ -81,7 +81,7 @@ class GrantsNexusSvcUpgradeIntegrationTest {
                 .as("non-vacuity: the old loop granted nexus_svc a sibling table").isTrue();
             // The default ACL is what makes this test a falsifier of the changeset's REVOKE: a table the admin role
             // creates NOW carries nexus_svc DML from the moment it exists, as data_moves will in the upgrade below.
-            // (On a fresh walk the default ACL is installed by the last include, after data_moves, so the REVOKE
+            // (On a fresh walk the default ACL is installed by grants-nexus-svc-1, after data_moves, so the REVOKE
             // has nothing to remove and a test that only walks fresh cannot see it.)
             try (Connection as = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS)) {
                 DSLContext actx = DSL.using(as, SQLDialect.POSTGRES);

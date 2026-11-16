@@ -43,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code grants-nexus-svc-1} loop re-grants DML on every owned table at each boot: a REVOKE in the changeset
  * alone would hold only until the next one. That test pins the loop's exclusion. It does NOT exercise the
  * changeset's REVOKE: on a fresh walk the default ACL ({@code ALTER DEFAULT PRIVILEGES ... TO nexus_svc}) is
- * installed by {@code grants-nexus-svc-1}, the last include, after {@code data_moves} is created, so there is
+ * installed by {@code grants-nexus-svc-1}, which runs after {@code data_moves} is created, so there is
  * nothing for the REVOKE to remove. {@link GrantsNexusSvcUpgradeIntegrationTest} covers it: there the default ACL
  * already exists when the table is created.
  */
