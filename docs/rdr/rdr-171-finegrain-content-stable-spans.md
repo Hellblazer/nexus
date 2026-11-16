@@ -535,3 +535,4 @@ no schema.
 - 2026-11-16: Gate round 1 — BLOCKED (3 Critical, 7 Significant, 3 ship-blocker(s)); blob `3b9d78764797`; critique `nexus_rdr/171-gate-critique-2026-11-16-r1`.
 - 2026-11-16: scope narrowed to source-backed text documents; the stored copy left to a later RDR
   (Sam, `nexus_rdr/171-scope-decision-2026-11-16`).
+- 2026-11-16: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `82011306dcb4`; critique `nexus_rdr/171-gate-critique-2026-11-16-r2`.
