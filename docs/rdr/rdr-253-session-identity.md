@@ -2,12 +2,12 @@
 title: "Session Identity: Named Seats That Outlive Sessions, a Binding Log, One Resolver, and Fenced Identity State"
 id: RDR-253
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
-reviewed-by: pending
+reviewed-by: self
 created: 2026-11-16
-accepted_date:
+accepted_date: 2026-11-16
 related_issues: [nexus-65a9k, nexus-gff3g, nexus-5daww, nexus-fe96p, nexus-r0d37, nexus-dmyrm, nexus-d8yul]
 related: [RDR-208, RDR-252, RDR-245, JDR-001, JDR-002]
 ---
@@ -1008,3 +1008,5 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-16: post-pass fix check 1 findings addressed (`nexus_rdr/253-fix-check-9299310ff81f`; spikes `nexus_rdr/253-research-10`): the holder check is client work, sent to `bind` as `holder_gone` evidence, with a pid probe so a crash is caught; take-over and release keyed on registry `entrypoint` (`sdk-cli` for a `claude -p` child), refused with no Claude ancestor; in-place `/restart` measured to fire `source: resume` with a new `startedAt`; the MCP heartbeat re-reads its token file so an identity switch never depends on the marker; one marker content (identity, generation, session id, token-file path); a seat closes with `release`, an ephemeral with `end`; same-host liveness by the probe however long the lapse; Desktop holders freed by the holder check; the session-scope check accepts the identity's session ids; `display_name` for ephemerals; retention by end or lapse with the holder gone; the delegated token file's path and cleanup; `nx identity purge` for the operator override; `work/<id>` kinds for worktrees and tmux servers; the Phase 2 gate on the Step 5 release; the bead ruling cited; stale sites swept.
 - 2026-11-16: accept residuals fixed in the text (Sam: "Fix in text"): the ended-identity resume row narrowed to ephemeral and delegated identities; a `gone` route and a SessionStart sweep report gone holders for retention and purge; `holder_gone` in the binding body and a pending bind when the hook's registry wait times out; release frees only a gone holder's seat and runs from a plain shell; the pid probe compares the OS start time with `procStart`; an empty in-place `/restart` keeps its seat by pid and start-time continuity; the session-scope check, heartbeat re-read and renewal client version given owning steps; seats created by Sam, not the restart script.
 - 2026-11-16: accept fix check `nexus_rdr/253-fix-check-224682f97eef` (FAIL, one counted blocking defect) fixed: Step 4 drops the take-over guards from release; `proc_start` in the binding and bind evidence, compared as UTC instants; the empty in-place `/restart` rebind binds a new generation by its own policy row; the `gone` row with a holder-match guard and compare-and-set, the bindings-by-host route, and a sweep that skips its own process and delegated identities; the pending file keyed by pid and OS start time, bound by the MCP server and deleted; Sam's decision 1 restored (the restart script creates seats for sessions it relaunches under a user-set name).
+- 2026-11-16: accept residual dispositions: residuals 1-8 of `253-gate-latest` fixed in the text by 2c602b905 and 60e941318 (fix checks `253-fix-check-224682f97eef` FAIL, `253-fix-check-125b505e41d3` PASS 3-0); its four counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
+- 2026-11-16: gate fix check `253-fix-check-88e4ee8da3a2` rerun at Sam's direction in the format the accept guard counts: PASS 3-0, 0 BLOCKS-PLANNING; accepted.
