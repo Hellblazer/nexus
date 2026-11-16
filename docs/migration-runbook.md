@@ -399,23 +399,42 @@ run a span pass), and shares its rule and guards, the title-rule record mark inc
 ### The `retire-keys-sweep` rung
 
 RDR-236 Phase 4 Step 3 (nexus-6pfgb.43). The two cloud tenants were swept by an operator on 2026-11-08 with
-`nx t3 retire-keys`; this rung runs the same engine sweep on every install that runs the ladder, local mode chiefly. It
-is a data move at `nx upgrade`, through an engine job, never at engine boot (RDR-246). It runs last: hard edges from the
-RDR-192 backfill, `note-tags-array`, `manifest-section-labels` and `manifest-span-fill`, which clear the sweep's
-preconditions.
+`nx t3 retire-keys`; this rung runs the same engine sweep on every install that runs the ladder with a credential the
+route accepts (below), local mode chiefly. It is a data move at `nx upgrade`, through an engine job, never at engine boot
+(RDR-246). It runs last: hard edges from the RDR-192 backfill, `note-tags-array`, `manifest-section-labels` and
+`manifest-span-fill`, which clear the sweep's preconditions. **On a local engine `nx upgrade --auto` runs it too, at
+every session start until the install is swept: that is a real unattended write**, which is why a standing precondition
+defers it instead of letting it write a residue nobody judged.
 
-- **Detect.** The dry run (a count job in the engine; nothing is written or locked). Converged when no chunk row holds a
-  retired key. An interactive `nx upgrade` with no completion record asks no dry run in detect and makes the one in
-  converge.
+- **Credential.** The route takes a tenant or root credential and refuses any other with 403. A local install presents
+  the supervisor's persistent root bearer (root scope, its own tenant, audited in `gc_audit`). A managed install that
+  `nx init` set up usually holds a mint or data credential, which the route refuses: the rung then reads as not
+  applicable (detect) or deferred (converge), never failed, and the sweep stays the operator's verb. The same holds for a
+  409 `sweep_job_running` (a job another request started: the operator verb, a dry run) and a 503 `sweep_jobs_busy`:
+  converge defers naming the verb and the job id. A 5xx otherwise, or an answer the rung cannot read, still fails the
+  rung.
+- **Detect.** Converged from the completion record (as `manifest-span-fill` does), so a steady-state `nx upgrade` makes
+  no dry run. `nx doctor`'s `Retired chunk keys` row says a record is not a live count: an older client can write a retired
+  key back before the Step 2c engine check. With no record: an interactive `nx upgrade` asks no dry run in detect and
+  makes the one in converge; otherwise the dry run (a count job in the engine; nothing is written or locked), converged
+  when no chunk row holds a retired key. A running job, or a count still running, is pending, not an error.
 - **Converge.** The dry run, then, when `blocking` is empty, the apply job (`chunk_keys_apply`) with nothing accepted, so
   the engine itself refuses a residue that grew since the dry run. When a precondition stands in the way the rung DEFERS
-  and writes nothing; its detail names each count and `nx t3 retire-keys --tenant T --apply --accept NAME=N`. The rung
-  never accepts a residue for you: accepting one is the operator's per-residue judgment, with the counts in front of
-  them, and the deferral repeats on every `nx upgrade` until the residue is fixed or accepted through the verb. A call
-  waits at most 10 minutes (less under the `--auto` time limit) for the job and returns RESUMABLE; the job keeps
-  sweeping in the engine and the next call joins it. A sweep that leaves a collection alone (a manifest-less census
-  above zero) or takes no row at all DEFERS, naming it.
-- **Verify.** A dry run that succeeded and counts no retired-key row. An error or an unknown answer is not zero.
+  and writes nothing. The deferral names each count and what accepting it destroys (the sweep keeps no copy of a removed
+  key): `generated_nulls` stops `tags=` and `category=` filters finding those documents; `keyless_notes` makes those notes
+  follow the catalog TTL, and one with no manifest row reads as permanent; `legacy_label_rows`, `null_span_rows`,
+  `keyless_ttl_rows` and `homeless_documents` lose the label, span, TTL or document keys the row alone held. It offers
+  `--accept NAME=N` only for a name the engine lists in `acceptable_residues`; any other count is fix-required. The rung
+  never accepts a residue: that is the operator's per-residue judgment, with the counts in front of them. The full text
+  prints the first time, and as one line while the counts are unchanged; the full text is on the `Retired chunk keys`
+  doctor row. A call waits at most 10 minutes (less under the `--auto` time limit) for the job and returns RESUMABLE; the
+  job keeps sweeping in the engine and the next call joins it. A sweep that leaves a collection alone (a manifest-less
+  census above zero) or takes no row at all DEFERS, naming it.
+- **Verify.** A dry run that succeeded and counts no retired-key row. An error or an unknown answer is not zero. Rows the
+  sweep cannot take (a wrong-width chash, a blocked collection) and a count that did not finish defer the verify, naming
+  them; sweepable rows still standing fail it.
+- **The RDR-192 backfill** refuses to run once this rung is recorded: it attributes a chunk by the `doc_id` and
+  `catalog_doc_id` the sweep removes.
 - **A managed service.** The sweep is an operator verb there. `--auto` runs no dry run and no sweep (not applicable
   without a record, converged from one); an interactive `nx upgrade` does the dry run and applies only when nothing
   stands in the way.

@@ -132,6 +132,7 @@ import structlog
 
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
+    completion_recorded_at,
     managed_service,
     refuses_unbounded_read,
     unattended_verify_refusal,
@@ -152,7 +153,7 @@ from nexus.upgrade_ladder.protocol import (
     ProgressReporter,
     RungStatus,
 )
-from nexus.upgrade_ladder.registry import RUNG_RDR192_MANIFEST_BACKFILL
+from nexus.upgrade_ladder.registry import RUNG_RDR192_MANIFEST_BACKFILL, RUNG_RETIRE_KEYS_SWEEP
 from nexus.upgrade_ladder.runner import installed_package_version
 
 _log = structlog.get_logger(__name__)
@@ -684,6 +685,13 @@ def _default_record() -> CompletionRecord | None:
         return store.completions().get(RUNG_NAME)
 
 
+def _sweep_record() -> CompletionRecord | None:
+    """This tenant's completion record for the retire-keys sweep rung, from the engine's ledger."""
+    from nexus.upgrade_ladder.auto_guard import default_completion_record  # noqa: PLC0415 — deferred; keeps cold CLI start cheap
+
+    return default_completion_record(RUNG_RETIRE_KEYS_SWEEP)  # type: ignore[return-value]
+
+
 class ResidualMemo(Protocol):
     """Durable, per-tenant note of the last failed attempt."""
 
@@ -785,6 +793,11 @@ class Rdr192ManifestBackfillRung:
     lock_factory: Callable[[], contextlib.AbstractContextManager[bool]] = _cross_process_lock
     #: Is the engine a managed service? (nexus-75w5d: the unattended-run refusal in :meth:`converge`.)
     managed_fn: Callable[[], bool] = managed_service
+    #: The retire-keys sweep's completion record (nexus-6pfgb.43, RDR-236 pin): once the sweep has completed on the
+    #: install this rung refuses to run, because it attributes a chunk by the ``doc_id`` and ``catalog_doc_id`` the
+    #: sweep removes. ``None`` reads the engine's ledger when :attr:`record_fn` is the default one, and reads nothing
+    #: when a test injects its own record (so no test reaches the ledger through it).
+    sweep_record_fn: RecordFn | None = None
     now_fn: Callable[[], datetime] = lambda: datetime.now(UTC)  # noqa: E731 — a dataclass default seam, not a def
     max_passes: int = DEFAULT_MAX_PASSES
     name: str = RUNG_NAME
@@ -834,6 +847,21 @@ class Rdr192ManifestBackfillRung:
             None,
         )
 
+    def _swept_at(self) -> str | None:
+        """When the retire-keys sweep completed on this install (its record's ``verified_at``), else ``None``. An
+        unreadable ledger is not a record."""
+        fn = self.sweep_record_fn
+        if fn is None and self.record_fn is _default_record:
+            fn = _sweep_record
+        return None if fn is None else completion_recorded_at(fn, RUNG_RETIRE_KEYS_SWEEP)
+
+    @staticmethod
+    def _swept_reason(when: str) -> str:
+        return (
+            f"the retired-key sweep completed on this install ({when}) and removed the chunk-row doc_id and "
+            "catalog_doc_id this backfill attributes a chunk by, so it does not run (nexus-6pfgb.43)"
+        )
+
     # ── detect ───────────────────────────────────────────────────────────────
 
     def detect(self) -> RungStatus:
@@ -861,6 +889,9 @@ class Rdr192ManifestBackfillRung:
             ledger_error = f" (the completion ledger could not be read: {exc})"
         if record is not None and record.package_version == version:
             return RungStatus(applicable=True, converged=True)
+        swept = self._swept_at()
+        if swept is not None:
+            return RungStatus(applicable=False, converged=False, pending_detail=self._swept_reason(swept))
 
         if record is not None:
             state = (
@@ -886,6 +917,9 @@ class Rdr192ManifestBackfillRung:
         self._last_clean = None
         self._cut_at = None
         self._tally = CensusTally()
+        swept = self._swept_at()
+        if swept is not None:
+            return ConvergeResult(ConvergeOutcome.DEFERRED, detail=self._swept_reason(swept))
         if refuses_unbounded_read(self.managed_fn):
             # nexus-75w5d: the census is one engine statement per collection, a per-chunk anti-join
             # whose cost grows with the collection (112 to 152 s on one 80,000-chunk collection, with no

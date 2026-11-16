@@ -230,6 +230,40 @@ def test_detect_unreadable_ledger_is_pending_with_the_reason() -> None:
     assert status.pending and "ledger down" in status.pending_detail
 
 
+# ── the retire-keys sweep pin (RDR-236 Step 3, nexus-6pfgb.43) ───────────────
+
+
+def _swept() -> CompletionRecord:
+    return CompletionRecord(rung_name="retire-keys-sweep", verified_at="2026-11-16T00:00:00Z", package_version=_VERSION)
+
+
+def test_once_the_retire_keys_sweep_has_completed_the_backfill_is_not_applicable_and_converge_defers_without_a_census() -> None:
+    """The sweep removes the chunk-row ``doc_id`` and ``catalog_doc_id`` this backfill attributes a chunk by, so a
+    backfill that runs after it would attribute nothing (or the wrong document): it refuses, in detect and in converge."""
+    tenant = FakeTenant({"knowledge__a": 7})
+    rung = tenant.rung(sweep_record_fn=_swept)
+    status = rung.detect()
+    assert (status.applicable, status.converged) == (False, False)
+    assert "retired-key sweep completed" in status.pending_detail and "2026-11-16T00:00:00Z" in status.pending_detail
+    result = rung.converge(_Reporter())
+    assert result.outcome is ConvergeOutcome.DEFERRED and "does not run" in result.detail
+    assert tenant.censuses == 0 and tenant.backfilled == []
+
+
+def test_a_backfill_recorded_at_the_installed_version_stays_converged_after_the_sweep_and_without_one_it_runs() -> None:
+    tenant = FakeTenant({})
+    tenant.record = _record()
+    assert tenant.rung(sweep_record_fn=_swept).detect().converged, "the record answers first; the sweep is not asked"
+    unswept = FakeTenant({"knowledge__a": 7})
+    assert unswept.rung(sweep_record_fn=lambda: None).detect().pending
+    broken = FakeTenant({"knowledge__a": 7})
+
+    def boom():
+        raise ConnectionError("ledger down")
+
+    assert broken.rung(sweep_record_fn=boom).detect().pending, "an unreadable ledger is not a sweep record"
+
+
 # ── converge ─────────────────────────────────────────────────────────────────
 
 

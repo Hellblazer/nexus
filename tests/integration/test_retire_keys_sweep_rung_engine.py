@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
+from nexus.upgrade_ladder.retire_keys_state import default_state_store
 from nexus.upgrade_ladder.rungs.retire_keys_sweep import RetireKeysSweepRung
 from tests.test_retire_keys import _last_written, _metadata
 from tests.upgrade._substrate_sql import MODEL, seed_chunk
@@ -66,7 +67,8 @@ def _rung(spy_holder: list[Spy] | None = None) -> RetireKeysSweepRung:
             spy_holder.append(spy)
         return spy
 
-    return RetireKeysSweepRung(client_factory=client, record_fn=lambda: None, managed_fn=lambda: False)
+    return RetireKeysSweepRung(client_factory=client, record_fn=lambda: None, managed_fn=lambda: False,
+                               state_store=default_state_store())
 
 
 def test_the_rung_sweeps_a_seeded_install_defers_on_a_standing_precondition_and_a_rerun_is_a_no_op(
@@ -114,6 +116,10 @@ def test_the_rung_sweeps_a_seeded_install_defers_on_a_standing_precondition_and_
     assert "null_span_rows=1" in result.detail and "--accept null_span_rows=1" in result.detail, result.detail
     assert [c for s in spies for c in s.calls] == ["chunk_keys_dry_run"], "no apply was started"
     assert retired_keys_left() == before, "a deferral writes nothing"
+    measured = default_state_store().load()
+    assert measured is not None and measured["outcome"] == "blocked" and measured["blocking"] == {"null_span_rows": 1}
+    assert "accept it with" in measured["detail"], "the full text is kept for `nx doctor`'s row"
+    assert "still held by null_span_rows=1" in _rung().converge(Reporter()).detail, "the next run is one line"
     assert [_last_written(tenant, c, h) for c, h in rows] == stamps
 
     # The operator-free fix: the manifest row takes the span the chunk row holds (what the span-fill rung does). The
@@ -140,6 +146,8 @@ def test_the_rung_sweeps_a_seeded_install_defers_on_a_standing_precondition_and_
     (kept,) = cat.get_manifest(doc)
     assert (kept.line_start, kept.line_end, kept.char_start, kept.char_end) == (3, 9, 40, 190), "the catalog is untouched"
     assert any(e == "retire_keys_sweep_batch" and f["swept"] for e, f in reporter.events), reporter.events
+    swept_note = default_state_store().load()
+    assert swept_note is not None and swept_note["outcome"] == "swept" and swept_note["retired_key_rows"] == 0
 
     # A rerun on the converged install is a no-op: detect reads converged, converge starts no apply, verify holds.
     spies = []

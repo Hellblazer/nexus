@@ -1509,6 +1509,13 @@ class TestNoAutomaticTrigger:
         # by test_only_the_verb_and_the_rung_call_the_client_and_the_rung_never_touches_the_constraints below.
         "src/nexus/upgrade_ladder/rungs/retire_keys_sweep.py",
         "src/nexus/upgrade_ladder/registry.py",
+        # the rung's measurement note and the `Retired chunk keys` doctor row read it (no route is called there), and
+        # health.py wires the row; the rdr192 rung names the sweep's completion record to refuse after it
+        "src/nexus/upgrade_ladder/retire_keys_state.py",
+        "src/nexus/health.py",
+        "src/nexus/upgrade_ladder/rungs/rdr192_manifest_backfill.py",
+        "tests/upgrade/test_retire_keys_state.py",
+        "tests/upgrade/test_rdr192_manifest_backfill_rung.py",
         "tests/upgrade/test_retire_keys_sweep_rung.py",
         "tests/integration/test_retire_keys_sweep_rung_engine.py",
         "tests/upgrade/test_ladder_registry.py",

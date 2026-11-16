@@ -10049,6 +10049,13 @@ def _check_beads_prime() -> list[HealthResult]:
     )]
 
 
+def _check_retired_chunk_keys() -> list[HealthResult]:
+    """nexus-6pfgb.43: the ``Retired chunk keys`` row (one T2 note and one ledger read; bounded, never raises)."""
+    from nexus.upgrade_ladder.retire_keys_state import doctor_row  # noqa: PLC0415 — deferred to avoid module-load cost
+
+    return [doctor_row()]
+
+
 def _check_pending_rungs() -> list[HealthResult]:
     """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
 
@@ -13650,6 +13657,8 @@ def run_health_checks(
     results.extend(_step("_check_beads_prime", lambda: _check_beads_prime()))
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_step("_check_pending_rungs", lambda: _check_pending_rungs()))
+    # nexus-6pfgb.43 (RDR-236 Step 3): rows that still carry retired chunk keys, from the sweep rung's own note.
+    results.extend(_step("_check_retired_chunk_keys", lambda: _check_retired_chunk_keys()))
 
     # RDR-155 P4b: the legacy chunk-id census, migration-report, and
     # migration-divergence doctor rows died with the migration machinery;

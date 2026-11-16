@@ -124,8 +124,9 @@ HARD_EDGES: tuple[tuple[str, str], ...] = (
     # reads converged for good, so it must not run while the backfill is deferred (nexus-l8o33).
     (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SPAN_FILL),
     # The sweep deletes the chunk-row keys the three fills above copy from, and counts what they clear as its
-    # preconditions (legacy labels, NULL spans, tags as a string): it must not run while any of them is deferred, and
-    # once recorded it reads converged for good (nexus-6pfgb.43).
+    # preconditions (legacy labels, NULL spans, tags as a string): it must not run while any of them is deferred.
+    # Once recorded it reads converged from the record, like the span fill (nexus-6pfgb.43); `nx doctor`'s
+    # `Retired chunk keys` row says a record is not a live count.
     (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_RETIRE_KEYS_SWEEP),
     (RUNG_NOTE_TAGS_ARRAY, RUNG_RETIRE_KEYS_SWEEP),
     (RUNG_MANIFEST_SECTION_LABELS, RUNG_RETIRE_KEYS_SWEEP),

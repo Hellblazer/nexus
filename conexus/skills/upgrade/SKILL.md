@@ -46,13 +46,13 @@ Both are safe to run unprompted.
 Nothing, today. The ladder's rungs (`manifest_section_labels`, `manifest_span_fill`, `note_tags_array`,
 `rdr192_manifest_backfill`, `retire_keys_sweep`) either finish or DEFER: a deferred rung stays pending and holds back the rungs that depend on it, the walk
 goes on to the rungs that do not, and it retries on a later run (`nx doctor`'s `Upgrade ladder` row says "REPEATEDLY DEFERRED:" once one keeps deferring).
-No rung rolls back, so there is no rollback to choose.
+No rung rolls back.
 
 `manifest_span_fill` has no engine count to ask, so unattended (`--auto`) against a managed tenant it reads nothing and
-reports not applicable. A managed tenant needs one interactive `nx upgrade` (three walks of the catalog) before
-`nx t3 retire-keys --apply`; run it with the tenant quiet, since a concurrent re-index can be reverted by the write.
+reports not applicable. A managed tenant needs one interactive `nx upgrade` (three catalog walks) before
+`nx t3 retire-keys --apply`, run with the tenant quiet: a concurrent re-index can be reverted by the write.
 
-`retire_keys_sweep` runs that sweep last. It never accepts a residue: a standing precondition DEFERS it, and the detail names `nx t3 retire-keys --tenant T --apply --accept NAME=N`. Relay it; the accept is the user's.
+`retire_keys_sweep` runs last, and on a local engine `--auto` runs it (a real write). It never accepts a residue: a standing one DEFERS it. Give the user the counts (`nx t3 retire-keys --tenant T`) and what accepting each loses; the decision is theirs, never a pasted command.
 
 If a rung ever asks a question (a billed re-embed, a choice the walk cannot derive), surface it to the user and let
 them choose; never answer on their behalf.

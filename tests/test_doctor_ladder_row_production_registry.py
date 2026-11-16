@@ -158,8 +158,9 @@ def test_the_interactive_run_the_remedy_names_clears_every_not_checked_entry(ins
     for rung in REFUSABLE:
         assert rung not in head, (rung, row.detail)
     assert install.scan_reads == [], "the row answered from the records, without a scan"
-    # rdr192-manifest-backfill has no record here and says so: pending, which `nx upgrade` clears.
-    assert "rdr192-manifest-backfill" in row.detail
+    # rdr192-manifest-backfill has no record here, but the retire-keys sweep is recorded now, and the backfill refuses to
+    # run after it (it attributes a chunk by the keys the sweep removed): not applicable, so it is not named pending.
+    assert "rdr192-manifest-backfill" not in row.detail
 
 
 def test_a_walk_over_the_production_registry_under_auto_lists_nothing_once_recorded(install: _Install) -> None:
