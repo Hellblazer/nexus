@@ -38,8 +38,8 @@ class VendoredLibrariesLintTest {
     private static final Path VENDOR = Path.of("src", "main", "resources", "db", "vendor");
 
     private static final Pattern NEXUS = Pattern.compile("(?i)nexus");
-    private static final Pattern OTHER_SCHEMA = Pattern.compile("(?i)\\b(t1|staging|nexus_test)\\s*\\.\\s*[a-z_]");
-    private static final Pattern PUBLIC_QUALIFIED = Pattern.compile("(?i)\\bpublic\\s*\\.\\s*([a-z_][a-z0-9_]*)");
+    private static final Pattern OTHER_SCHEMA = Pattern.compile("(?i)\\b(t1|staging|nexus_test)\"?\\s*\\.\\s*\"?[a-z_]");
+    private static final Pattern PUBLIC_QUALIFIED = Pattern.compile("(?i)\\bpublic\"?\\s*\\.\\s*\"?([a-z_][a-z0-9_]*)");
 
     private static final Pattern COMMENTS = Pattern.compile("(?s)<!--.*?-->|/\\*.*?\\*/|--[^\n]*");
 
@@ -104,6 +104,11 @@ class VendoredLibrariesLintTest {
         assertThat(offences("a public.mine b")).containsExactly("public.mine at 2");
         assertThat(offences("public.pg_background_launch(x)")).isEmpty();
         assertThat(offences("dml_utils.run_chunks liquibase.x pg_catalog.now")).isEmpty();
+        // quoted identifiers
+        assertThat(offences("a \"nexus\".\"chunks\" b")).isNotEmpty();
+        assertThat(offences("a \"public\".\"mine\" b")).hasSize(1);
+        assertThat(offences("a \"t1\".\"scratch\" b")).hasSize(1);
+        assertThat(offences("\"public\".\"pg_background_launch\"(x)")).isEmpty();
         assertThat(offences("<!-- nexus.chunks and public. The end --> -- nexus.x\n/* t1.x */ ok")).isEmpty();
     }
 }

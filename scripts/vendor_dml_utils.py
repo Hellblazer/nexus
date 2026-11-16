@@ -27,13 +27,14 @@ holds no changelog files, writes nothing.
 that changeset is ``runOnChange`` (nexus-f3yqd.2.11): the engine applies both libraries at boot and Liquibase
 validates each applied changeset's checksum, so an edited one fails that library's install on every install
 that applied the old pin, and nothing repairs it. A library change is a new changeset appended; the refusal
-names each edited changeset as ``<file>::<id>::<author>``.
+names each edited or dropped changeset as ``<file>::<id>::<author>``.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import posixpath
 import xml.etree.ElementTree as ET
 import os
 import re
@@ -227,7 +228,7 @@ def _changesets(files: dict[str, bytes]) -> dict[tuple[str, str, str], tuple[byt
                 if path is None:
                     continue
                 relative = sub.get("relativeToChangelogFile", "false").lower() == "true"
-                target = os.path.normpath(os.path.join(os.path.dirname(rel), path)) if relative else path
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(rel), path)) if relative else path
                 digest.append(b"\0" + target.encode("utf-8") + b"\0" + files.get(target, b"<missing>"))
             run_on_change = element.get("runOnChange", "false").lower() == "true"
             out[(rel, element.get("id", ""), element.get("author", ""))] = (b"".join(digest), run_on_change)
@@ -235,15 +236,24 @@ def _changesets(files: dict[str, bytes]) -> dict[tuple[str, str, str], tuple[byt
 
 
 def edited_applied_changesets(old: dict[str, bytes], new: dict[str, bytes]) -> list[str]:
-    """The changesets present in *old* and *new* whose bytes differ and that are not ``runOnChange`` in *new*, as
-    ``<file>::<id>::<author>``, sorted. Each fails Liquibase's checksum validation on an install that applied *old*."""
+    """The changesets of *old* that a re-pin to *new* breaks for an install that applied *old*, as
+    ``<file>::<id>::<author>``, sorted: present in both with different bytes and not ``runOnChange`` in *new* (Liquibase's
+    checksum validation fails), or missing from *new* and not ``runOnChange`` in *old* (Liquibase no longer knows the
+    row, and a changeset that moved to another file or changed its id would run again). A missing one is suffixed
+    `` (missing from the new pin)``."""
     before = _changesets(old)
     after = _changesets(new)
-    return sorted(
+    edited = [
         "::".join(key)
         for key, (data, run_on_change) in after.items()
         if key in before and not run_on_change and before[key][0] != data
-    )
+    ]
+    missing = [
+        "::".join(key) + " (missing from the new pin)"
+        for key, (_, run_on_change) in before.items()
+        if key not in after and not run_on_change
+    ]
+    return sorted(edited + missing)
 
 
 def _read_vendored(directory: Path) -> dict[str, bytes]:
@@ -285,9 +295,9 @@ def update(repo_root: Path, revisions: dict[str, str], clones: dict[str, Path] |
         edited += [f"{name}: {item}" for item in edited_applied_changesets(_read_vendored(vendor / name), contents)]
     if edited:
         raise VendorError(
-            "the re-pin edits changesets the current pin already carries, which are not runOnChange; an install that "
-            "applied them would fail Liquibase's checksum validation on every boot. Append a new changeset upstream "
-            "instead. Edited: " + "; ".join(edited)
+            "the re-pin edits or drops changesets the current pin already carries, which are not runOnChange; an install "
+            "that applied them would fail Liquibase's checksum validation on every boot, or run a moved one again. Append "
+            "a new changeset upstream instead. Offending: " + "; ".join(edited)
         )
     vendor.mkdir(parents=True, exist_ok=True)
     pins_path = vendor / PINS_NAME

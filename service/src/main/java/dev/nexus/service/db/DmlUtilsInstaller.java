@@ -91,7 +91,9 @@ public final class DmlUtilsInstaller {
 
     /**
      * Test seam: runs just before each library's real walk, on the migration connection, inside the role window.
-     * {@code DmlUtilsInstallIntegrationTest} injects an {@link Error} through it.
+     * {@code DmlUtilsInstallIntegrationTest} injects an {@link Error} through it. Public for the cross-package reason
+     * {@link SchemaMigrator#migrate(javax.sql.DataSource, Runnable)} gives: that test lives in {@code dev.nexus.service}
+     * with the container fixtures it shares, one package above this class; nothing in production reads it.
      */
     @FunctionalInterface
     public interface LibraryWalkHook {
@@ -187,7 +189,7 @@ public final class DmlUtilsInstaller {
         }
 
         String failure = null;
-        String roleAfter;
+        String roleAfter = null;
         String priorLockTimeout = null;
         try {
             try {
@@ -210,8 +212,11 @@ public final class DmlUtilsInstaller {
             }
         } finally {
             // Whatever ended the window, the connection leaves it as it entered: the nexus walk runs as the login.
-            restoreLockTimeout(conn, priorLockTimeout);
-            roleAfter = resetRole(conn, ctx);
+            try {
+                restoreLockTimeout(conn, priorLockTimeout);
+            } finally {
+                roleAfter = resetRole(conn, ctx);
+            }
         }
         status = failure == null ? new Status(State.APPLIED, null, roleAfter)
             : new Status(State.FAILED, "a library changelog failed: " + failure, roleAfter);
@@ -336,11 +341,11 @@ public final class DmlUtilsInstaller {
         return ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val(name))).fetchOne(0, String.class);
     }
 
-    /** {@code SET <name> = <value>} for the session, as {@code set_config(..., false)}, committed. */
+    /** {@code SET <name> = <value>} for the session, as {@code set_config(..., false)}, committed; a null value is {@code RESET}. */
     private static void setSetting(Connection conn, String name, String value) throws SQLException {
         try {
             DSL.using(conn, SQLDialect.POSTGRES)
-                .select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val(name), DSL.val(value), DSL.val(false)))
+                .select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val(name), DSL.val(value, SQLDataType.VARCHAR), DSL.val(false)))
                 .fetchOne();
         } catch (DataAccessException e) {
             throw new SQLException("setting " + name + " failed: " + e.getMessage(), e);
@@ -348,7 +353,13 @@ public final class DmlUtilsInstaller {
         commit(conn);
     }
 
-    /** Puts the session's {@code lock_timeout} back; the value is null when the window never got that far. */
+    /**
+     * Puts the session's {@code lock_timeout} back; the value is null when the window never got that far. When the
+     * prior value cannot be set, the setting is reset to its default instead ({@code set_config(name, NULL, false)} is
+     * {@code RESET}); when that fails too the connection still carries the window's short timeout, and nexus's
+     * walk must not run under it, so that is a {@link SchemaMigrator.MigrationException}, as a role that cannot be
+     * reset is.
+     */
     private static void restoreLockTimeout(Connection conn, String prior) {
         if (prior == null) {
             return;
@@ -356,8 +367,16 @@ public final class DmlUtilsInstaller {
         try {
             rollbackQuietly(conn);
             setSetting(conn, "lock_timeout", prior);
+            return;
         } catch (SQLException e) {
             log.warn("event=data_move_libraries_lock_timeout_restore_failed prior={} cause=\"{}\"", prior, e.toString());
+        }
+        try {
+            rollbackQuietly(conn);
+            setSetting(conn, "lock_timeout", null);
+        } catch (SQLException e) {
+            throw new SchemaMigrator.MigrationException("the migration connection could not leave the library window's "
+                + "lock_timeout of " + LIBRARY_LOCK_TIMEOUT + "; refusing to walk nexus's changelog under it", e);
         }
     }
 

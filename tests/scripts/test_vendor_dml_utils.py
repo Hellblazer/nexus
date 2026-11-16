@@ -500,3 +500,46 @@ class TestEditedAppliedChangesets:
             '<changeSet id="002" author="a"><sql>select 2</sql></changeSet>')}, "append")
         v.update(repo_root, {"dml_utils": second}, _clone_paths(clones))
         assert v.read_pins(_vendor(repo_root) / v.PINS_NAME)["dml_utils"] == second
+
+    def test_a_changeset_missing_from_the_new_pin_is_named_unless_it_was_run_on_change(self):
+        new = dict(self.OLD)
+        new["changes/changes.xml"] = _changes(
+            '<changeSet id="002" author="a" runOnChange="true"><sql>select 1</sql></changeSet>')
+        assert v.edited_applied_changesets(self.OLD, new) == [
+            "changes/changes.xml::001::a (missing from the new pin)",
+            "changes/changes.xml::003::a (missing from the new pin)",
+        ]
+
+    def test_a_changeset_that_moved_files_is_missing_from_its_old_file(self):
+        new = {
+            "changes/changes.xml": self.OLD["changes/changes.xml"].replace(
+                b'<changeSet id="003" author="a"><sql>select 3</sql></changeSet>', b""),
+            "changes/sql/001.sql": self.OLD["changes/sql/001.sql"],
+            "changes/more.xml": _changes('<changeSet id="003" author="a"><sql>select 3</sql></changeSet>'),
+        }
+        assert v.edited_applied_changesets(self.OLD, new) == ["changes/changes.xml::003::a (missing from the new pin)"]
+
+    def test_update_refuses_a_dropped_changeset(self, repo_root, clones):
+        clone, _ = clones["dml_utils"]
+        base = "dml_utils/src/main/resources/db/changelog"
+        first = _commit(clone, {f"{base}/changes/changes.xml": _changes(
+            '<changeSet id="001" author="a"><sql>select 1</sql></changeSet>',
+            '<changeSet id="002" author="a"><sql>select 2</sql></changeSet>')}, "two changesets")
+        v.update(repo_root, _pins(clones) | {"dml_utils": first}, _clone_paths(clones))
+        second = _commit(clone, {f"{base}/changes/changes.xml": _changes(
+            '<changeSet id="001" author="a"><sql>select 1</sql></changeSet>')}, "drop one")
+        with pytest.raises(v.VendorError) as refused:
+            v.update(repo_root, {"dml_utils": second}, _clone_paths(clones))
+        assert "dml_utils: changes/changes.xml::002::a (missing from the new pin)" in str(refused.value)
+
+    def test_sqlfile_paths_resolve_with_posix_separators_whatever_the_host(self):
+        """A vendored key is always '/'-separated, so the join must not be the host's: ntpath would make 'changes\\sql\\001.sql'
+        and read the referenced file as missing, hiding every sqlFile edit on Windows."""
+        import ntpath
+
+        assert v.posixpath is not ntpath
+        old = {"a/b/c.xml": _changes('<changeSet id="1" author="x"><sqlFile path="../s/1.sql" relativeToChangelogFile="true"/></changeSet>'),
+               "a/s/1.sql": b"one"}
+        new = dict(old)
+        new["a/s/1.sql"] = b"two"
+        assert v.edited_applied_changesets(old, new) == ["a/b/c.xml::1::x"]

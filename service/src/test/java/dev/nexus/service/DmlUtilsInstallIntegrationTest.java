@@ -493,6 +493,21 @@ class DmlUtilsInstallIntegrationTest {
         assertThat(libraryLockRows()).containsExactly(false, false);
     }
 
+    /** The fallback of the lock_timeout restore rests on this: set_config(name, NULL, false) is RESET. */
+    @Test
+    void setConfigWithANullValue_resetsTheSessionSettingToItsDefault() throws Exception {
+        try (Connection c = pg.createConnection("")) {
+            DSLContext s = DSL.using(c, SQLDialect.POSTGRES);
+            String before = s.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class);
+            s.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("7s"), DSL.val(false))).fetch();
+            assertThat(s.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class))
+                .as("non-vacuity: the setting really moved").isEqualTo("7s");
+            s.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val((String) null), DSL.val(false))).fetch();
+            assertThat(s.select(DSL.function("current_setting", String.class, DSL.val("lock_timeout"))).fetchOne(0, String.class))
+                .isEqualTo(before);
+        }
+    }
+
     /**
      * A re-pin that edits a changeset an install already applied fails Liquibase's checksum validation: FAILED with a
      * reason that names the checksum, and the boot serves. (The vendoring script refuses such a re-pin; this is what
