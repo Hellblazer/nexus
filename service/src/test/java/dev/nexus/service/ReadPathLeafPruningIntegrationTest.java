@@ -61,6 +61,9 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_768;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_768;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
@@ -444,6 +447,14 @@ class ReadPathLeafPruningIntegrationTest {
         }
     }
 
+    @Test
+    void topicSet_oneLeaf() throws Exception {
+        for (String coll : List.of(CTX_1, CODE_1, BGE_1, MINI_1)) {
+            Seen s = observe(() -> rowsAs(TA, fnFor("search_topic_set", coll, TA, false)));
+            assertLeaves("search_topic_set " + coll, s, chunkLeaf(coll, TA));
+        }
+    }
+
     // ── taxonomy families ───────────────────────────────────────────────────
 
     @Test
@@ -492,7 +503,8 @@ class ReadPathLeafPruningIntegrationTest {
     private static final List<String> FAMILIES = List.of(
         "plain_search", "text_gated_search_hnsw_first", "text_gated_search_by_chash", "text_gated_search_allowed",
         "search_metadata_scoped",
-        "search_aspect_scoped", "search_graph_hop", "search_topic_scoped", "text_gate_probe", "taxonomy_ann_query",
+        "search_aspect_scoped", "search_graph_hop", "search_topic_scoped", "search_topic_set", "text_gate_probe",
+        "taxonomy_ann_query",
         "assign_from_chashes", "cross_preview", "manifest_search");
 
     private static final org.jooq.JSONB MANIFEST_ANY = org.jooq.JSONB.valueOf("{\"section_title\": \"\"}");
@@ -555,6 +567,12 @@ class ReadPathLeafPruningIntegrationTest {
                 case 384 -> SEARCH_TOPIC_SCOPED_384.call(q, TOPIC, coll, 10, model, t, false);
                 case 768 -> SEARCH_TOPIC_SCOPED_768.call(q, TOPIC, coll, 10, model, t, false);
                 default -> SEARCH_TOPIC_SCOPED_1024.call(q, TOPIC, coll, 10, model, t, false);
+            };
+            // nexus-7fku2.1.1 (RDR-134 Step 1): the topic-set variant, a set of the one topic the fixture seeds
+            case "search_topic_set" -> switch (dim) {
+                case 384 -> SEARCH_TOPIC_SET_384.call(q, new Long[] {topicId(t, coll)}, coll, 10, model, t, false);
+                case 768 -> SEARCH_TOPIC_SET_768.call(q, new Long[] {topicId(t, coll)}, coll, 10, model, t, false);
+                default -> SEARCH_TOPIC_SET_1024.call(q, new Long[] {topicId(t, coll)}, coll, 10, model, t, false);
             };
             case "text_gate_probe" -> switch (dim) {
                 case 384 -> TEXT_GATE_PROBE_384.call(COMMON, colls, null, null, 100, model, t);

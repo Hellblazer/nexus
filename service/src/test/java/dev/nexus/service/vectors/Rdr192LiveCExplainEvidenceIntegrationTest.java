@@ -50,6 +50,7 @@ import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.HYBRID_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_BY_CHASH_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
@@ -510,6 +511,14 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         Table<?> fn = SEARCH_TOPIC_SCOPED_384.call(queryVec(), TOPIC_LABEL, COLL, 10, MODEL, TENANT, false);
         String plan = explain("search_topic_scoped_384", ctx -> ctx.select(fn.field("id")).from(fn));
         assertInlinedLiveC(plan, "search_topic_scoped_384");
+    }
+
+    /** nexus-7fku2.1.1 (RDR-134 Step 1): the topic-SET variant carries the same live-owner EXISTS and inlines it. */
+    @Test
+    void topicSetSearch_inlinesLiveC() {
+        Table<?> fn = SEARCH_TOPIC_SET_384.call(queryVec(), new Long[] {9_100_000_001L}, COLL, 10, MODEL, TENANT, false);
+        String plan = explain("search_topic_set_384", ctx -> ctx.select(fn.field("id")).from(fn));
+        assertInlinedLiveC(plan, "search_topic_set_384");
     }
 
     // ── hybrid ──────────────────────────────────────────────────────────────

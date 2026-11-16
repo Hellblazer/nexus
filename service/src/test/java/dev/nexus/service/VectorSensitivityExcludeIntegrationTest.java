@@ -607,7 +607,7 @@ class VectorSensitivityExcludeIntegrationTest {
             DSL.inline("nexus_svc"), oid, DSL.inline("EXECUTE"));
         String families = "^(plain_search|hybrid_search|manifest_search|text_gated_search_allowed|"
             + "text_gated_search_by_chash|text_gated_search_hnsw_first|search_metadata_scoped|"
-            + "search_aspect_scoped|search_graph_hop|search_topic_scoped)_(384|768|1024)$";
+            + "search_aspect_scoped|search_graph_hop|search_topic_scoped|search_topic_set)_(384|768|1024)$";
         try (Connection su = pg.createConnection("")) {
             var rows = DSL.using(su, SQLDialect.POSTGRES)
                 .select(name, args, src, svcExec)
@@ -617,8 +617,8 @@ class VectorSensitivityExcludeIntegrationTest {
                     .and(name.likeRegex(families).or(name.eq("manifest_qualifying_hits"))))
                 .orderBy(name)
                 .fetch();
-            assertThat(rows).as("10 families x 3 dimensions + manifest_qualifying_hits, one signature each")
-                .hasSize(31);
+            assertThat(rows).as("11 families x 3 dimensions + manifest_qualifying_hits, one signature each")
+                .hasSize(34);
             assertThat(rows.getValues(name)).doesNotHaveDuplicates();
             for (var rec : rows) {
                 String fn = rec.get(name);
@@ -631,7 +631,7 @@ class VectorSensitivityExcludeIntegrationTest {
                 assertThat(countOf(body, "p_exclude_sensitive")).as(fn + ": the flag appears once").isEqualTo(1);
                 assertThat(body).as(fn).contains("WHERE p_exclude_sensitive IS NOT FALSE")
                     .doesNotContain("NOT p_exclude_sensitive OR");
-                String restriction = fn.startsWith("search_topic_scoped")
+                String restriction = fn.startsWith("search_topic_")
                     ? "AND sm.collection = p_collection" : "AND sm.collection = ANY(p_collections)";
                 assertThat(countOf(body, restriction)).as(fn + ": the sublink repeats the collection restriction")
                     .isEqualTo(1);

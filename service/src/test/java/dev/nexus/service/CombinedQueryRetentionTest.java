@@ -320,7 +320,9 @@ class CombinedQueryRetentionTest {
             for (int dim : new int[]{384, 768, 1024}) {
                 for (String prefix : new String[]{
                         "search_metadata_scoped_", "search_graph_hop_",
-                        "search_topic_scoped_", "search_aspect_scoped_"}) {
+                        "search_topic_scoped_", "search_aspect_scoped_",
+                        // nexus-7fku2.1.1: vectors-062's topic-set variant returns the same table
+                        "search_topic_set_"}) {
                     String name = prefix + dim;
                     PgCatalogProbes.RoutineSignature sig =
                         PgCatalogProbes.routineSignature(ctx, "nexus", name);
@@ -344,7 +346,9 @@ class CombinedQueryRetentionTest {
 
     private static final List<String> COMBINED_QUERY_PREFIXES = List.of(
         "search_metadata_scoped_", "search_graph_hop_",
-        "search_topic_scoped_", "search_aspect_scoped_");
+        "search_topic_scoped_", "search_aspect_scoped_",
+        // nexus-7fku2.1.1: vectors-062 creates the topic-set variant with its own explicit GRANT
+        "search_topic_set_");
 
     /**
      * Uses {@link PgCatalogProbes#hasExplicitRoutineGrant}, NOT {@code has_function_privilege}:

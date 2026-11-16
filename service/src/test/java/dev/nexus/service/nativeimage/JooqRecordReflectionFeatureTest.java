@@ -312,7 +312,9 @@ class JooqRecordReflectionFeatureTest {
     // ...1024Record), +3.
     // 134 -> 135: nexus-f3yqd.2.12 (RDR-246 Step 4), datamoves-001-registry.xml added the table nexus.data_moves, one generated
     // Record type (DataMovesRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 135;
+    // 135 -> 138: nexus-7fku2.1.1 (RDR-134 Step 1), vectors-062-topic-set-search.xml added nexus.search_topic_set_384/768/1024,
+    // three RETURNS TABLE functions, three generated Record types (SearchTopicSet384Record, ...768Record, ...1024Record), +3.
+    private static final int EXPECTED_RECORD_TYPES = 138;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
