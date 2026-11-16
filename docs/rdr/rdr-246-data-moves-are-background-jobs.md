@@ -211,12 +211,20 @@ ranges:
   round 1 is in progress. — **Method**: Spike
 - [x] dml_utils works with a partitioned driving table (PK on the parent) — **Status**:
   Verified for bytea, non-partition-wise and partition-wise (dml_utils
-  supports partition-wise runs since 1.16), in the same change — **Method**: Spike
-- [ ] dml_utils needs Sam's ddl_utils installed, and the migrating role needs
+  supports partition-wise runs since 1.16), in the same change. Repeated on a
+  FORCE-RLS, list-partitioned (text, text, bytea) table as the engine's role,
+  partition-wise and over the parent, with resume after a killed coordinator:
+  every row processed exactly once (T2 nexus_rdr/246-research-2) — **Method**: Spike
+- [x] dml_utils needs Sam's ddl_utils installed first, and its install role needs
   ddl_utils_caller: the bytea change adds the first changeset that calls
-  ddl_utils' constraint helpers, behind a HALT precondition. The engine must
-  therefore install ddl_utils before dml_utils, locally and in the cloud —
-  **Status**: Unverified — **Method**: Source Search, then the engine spike
+  ddl_utils' constraint helpers, behind a HALT precondition — **Status**:
+  Verified 2026-11-16 (T2 nexus_rdr/246-research-2): ddl_utils' changelog then
+  dml_utils' applied as a non-superuser `dml_utils_owner` once pg_background,
+  `ddl_utils_caller` and `dml_utils_caller` existed and `dml_utils_owner` held
+  CREATE on the database, `ddl_utils_caller` and `pgbackground_role`. The owner
+  role's name is fixed by the library (its default-privilege changeset names
+  `dml_utils_owner`). Applied with psql in Liquibase order, not through
+  Liquibase — **Method**: Spike
 - [ ] The cloud host's PostgreSQL loads pg_background and has spare
   max_worker_processes — **Status**: Checked 2026-11-10, NOT available
   today (bob's read-only check on Sam's go, SSM command 60942485, T2
@@ -229,17 +237,26 @@ ranges:
   The host has no general egress, so the PGDG package must be baked into the
   db-host golden image or db-configure, followed by CREATE EXTENSION in each
   database. That is a conexus host change on Sam's go. Raising
-  max_worker_processes needs a PostgreSQL restart. — **Method**: Live
+  max_worker_processes needs a PostgreSQL restart. Sam ruled 2026-11-15 that
+  the install waits until the first job that uses it lands, or until PGDG ships
+  2.0.4 (recorded on nexus-f3yqd.2). — **Method**: Live
   read-only check
-- [ ] `CREATE EXTENSION pg_background` needs a superuser, because the
+- [x] `CREATE EXTENSION pg_background` needs a superuser, because the
   extension is not marked trusted. Locally, the engine's bundle cluster is
   initialized with the engine's own superuser. On the cloud host, the host
   configuration runs it, not the engine's migration role — **Status**:
-  Unverified — **Method**: Spike (bundle) and the host change (bob)
-- [ ] A pg_background worker sees the rows the engine's role sees under FORCE
-  row-level security. The worker starts a new session, so a GUC the caller
-  set (the tenant) is not inherited: the template must set it, or the move
-  runs as a role that bypasses RLS — **Status**: Unverified — **Method**: Spike
+  Documented: the bundled `pg_background.control` (2.0) sets neither `trusted`
+  nor `superuser = false`, so PostgreSQL requires a superuser. Its functions are
+  granted to the NOLOGIN `pgbackground_role`, which the caller must hold
+  (T2 nexus_rdr/246-research-1) — **Method**: Docs only
+- [x] A pg_background worker sees the rows the engine's role sees under FORCE
+  row-level security — **Status**: Verified 2026-11-16, and the premise was
+  wrong (T2 nexus_rdr/246-research-1). pg_background 2.0 runs the worker as the
+  caller's role and copies the caller's settings, the tenant included. Under the
+  engine's policy a NOBYPASSRLS role with no tenant set sees no rows, so a move
+  sees exactly one tenant per run: the run with tenant a touched only tenant a's
+  rows, an UPDATE aimed at tenant b touched 0, and an INSERT of a tenant-b row
+  was refused — **Method**: Spike
 
 ## Proposed Solution
 
@@ -311,11 +328,24 @@ each move it:
 A stopped engine leaves committed chunks committed. The next boot's worker
 calls the same label, which resumes at the first unprocessed chunk.
 
-**Row-level security.** The chunk tables use FORCE RLS keyed on a tenant
-setting, and a pg_background worker is a new session that inherits no setting
-from the caller. A move therefore runs as the role the schema walk uses, which
-already rewrites rows across tenants. It does not run as nexus_svc. This is a
-critical assumption, spiked in Phase 1.
+**Row-level security.** The chunk tables use FORCE RLS keyed on the
+`nexus.tenant` setting, and the engine's roles are all NOBYPASSRLS, so a role
+with no tenant set sees no rows. pg_background workers run as the caller and
+copy its settings (T2 nexus_rdr/246-research-1). A move over a tenant-scoped
+table therefore runs once per registered tenant: the worker sets
+`nexus.tenant` on its own connection, then calls `run_migration_chunks` with the
+label `<move>/<tenant>`, so each tenant resumes on its own. A move over a table
+with no tenant column runs once. It does not run as nexus_svc.
+
+**Roles and grants.** dml_utils fixes its owner role's name, so the engine
+creates `dml_utils_owner`, `dml_utils_caller` and `ddl_utils_caller` (NOLOGIN
+except the owner, all NOBYPASSRLS) in its role changesets and applies both
+libraries' changelogs as `dml_utils_owner`. The move's role holds
+`dml_utils_caller` and `pgbackground_role`. `dml_utils_owner` needs USAGE on the
+driving table's schema and SELECT on the table and on every leaf, because its
+SECURITY DEFINER boundary scan reads the table and checks each leaf
+(246-research-2). New chunk leaves are created at run time, so the engine's
+partition grant loop grants SELECT to `dml_utils_owner` on each leaf it creates.
 
 **Progress.** `/v1/status` `boot_work` lists each incomplete move in
 nexus-f3yqd.3's shape: label, done and total in rows from
@@ -427,8 +457,8 @@ launcher that upstream does not test.
 ### Prerequisites
 
 - [ ] All Critical Assumptions verified
-- [ ] bytea keys merged in Hellblazer/dml_utils, and a dml_utils release that nexus pins
-- [ ] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins
+- [ ] bytea keys merged in Hellblazer/dml_utils (done: PR #1, a6cd544, 2026-11-10), and a dml_utils release that nexus pins (none yet: the repository has no tag or release)
+- [x] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins (engine-service-v0.1.194's bundles carry pg_background 2.0)
 - [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup
 - [ ] A Java test image with pg_background for the engine suite's data-move tests
 
@@ -536,3 +566,5 @@ reported.
 - Board ask linda/dml-utils-shape (answered 2026-11-10, option 2)
 
 ## Revision History
+
+- 2026-11-16: Phase 1 Step 3 spikes reported (T2 nexus_rdr/246-research-1, -2) on engine-service-v0.1.194's released bundle. pg_background workers inherit the caller's role and tenant setting, so moves run once per tenant; dml_utils and ddl_utils install as a non-superuser `dml_utils_owner`, whose SELECT on every chunk leaf the partition grant loop now carries; partition-wise and plain runs over a FORCE-RLS (text, text, bytea) table processed every row exactly once across a killed coordinator. Step 2 is done. Step 1's bytea change is merged; a dml_utils release to pin is still open.
