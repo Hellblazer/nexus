@@ -486,7 +486,12 @@ the move blocked until a new changeset adds the policy. The same holds on
 after the policy exists is caught at boot: `ChunksIsolationCheck`, which today
 refuses boot when any permissive policy other than `tenant_isolation` on
 `nexus.chunks` or the centroid trees applies to the role serving traffic, is
-extended to every driving table a row in `nexus.data_moves` names.
+extended to every driving table an open or failed row in `nexus.data_moves`
+names (a completed move's table keeps its owner-read policy until a changeset
+drops it, and stays in scope until then; a table that no longer exists
+contributes no policy and passes). A table counts as chunk-family for
+`on_complete` when the driving table or any table `on_complete` names is in
+the family.
 
 The tenant list is the set the table-wide retire-keys routes check
 (ChunkKeysAdminHandler.java:97-100 and 116-119): the default tenant, every
@@ -955,7 +960,8 @@ from /v1/status on the live engine.
 - **Scenario**: the gate over the shipped changelogs. **Verify**: it is green (the frozen list exempts every shipped changeset from every rule), and a new changeset with a validating ADD CONSTRAINT on `nexus.catalog_documents`, or a destructive statement on a registered move's table without the precondition, is red. The template and verification text inside a registering INSERT are not flagged.
 - **Scenario**: a move over a chunk-family table whose `on_complete` drops a column, run while a per-collection index build is in flight on that table. **Verify**: the move worker ends the builder first, `on_complete` takes its lock within `lock_timeout` or reports `blocked:`, and no reader waits behind the move; a later-release CONTINUE changeset doing the same drop is red in the CONTINUE-precondition lint.
 - **Scenario**: `on_complete` on a chunk-family table while another session holds a conflicting lock. **Verify**: it fails with 55P03 within `lock_timeout`, `completed_at` and `failed_at` stay unset, the move reports `blocked:`, and the next pass completes it.
-- **Scenario**: the single-role posture, a move over a table outside the chunk family. **Verify**: the policy changeset is MARK_RAN, the move is registered and `blocked:`, and the service role reads only its tenant's rows; granting a role membership later makes the boot refuse through `ChunksIsolationCheck`.
+- **Scenario**: the single-role posture, a move over a table outside the chunk family. **Verify**: the policy changeset is MARK_RAN, the move is registered and `blocked:`, the service role reads only its tenant's rows, and the boot does not refuse.
+- **Scenario**: the two-role posture, a move over a table outside the chunk family, then the migrating role granted to the serving role. **Verify**: the owner-read policy exists, and the next boot refuses through the extended `ChunksIsolationCheck`.
 - **Scenario**: a new changeset with an UPDATE on chunks. **Verify**: DataMoveChangesetGateTest is red. Registering the same move through nexus.data_moves is green.
 - **Scenario**: an upgrade boot on a copy of a live-like store, measured by f3yqd.1's write gate. **Verify**: no row-move writes occur during the boot.
 
