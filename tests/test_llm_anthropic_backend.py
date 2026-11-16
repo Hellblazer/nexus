@@ -70,7 +70,9 @@ class Harness:
     def run(self, **req_kw):
         req_kw.setdefault("json_schema", SCHEMA)
         req_kw.setdefault("prompt", "what is the answer?")
-        req_kw.setdefault("timeout", 10.0)
+        # A safety cap, not a pin: the fake server answers at once, but a loaded CI shard can stall the first
+        # event for seconds (develop 3b580d898, shard 1). Tests of the timeout itself pass their own value.
+        req_kw.setdefault("timeout", 60.0)
         return asyncio.run(self.backend.run(DispatchRequest(**req_kw)))
 
 
