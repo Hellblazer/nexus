@@ -84,7 +84,12 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     cat = _cat_cmd._get_catalog()
 
     # RDR-241: the engine reads the prefix (literal, case-sensitive, ordered by tumbler); no catalog walk.
-    chroma_rows = list(cat.list_scoped(source_uri_prefix="chroma://"))
+    # The client keeps its own case-sensitive check, so a CHROMA:// row stays out even if the engine's
+    # match ever changes; backfill etags keeps the same check for https://.
+    chroma_rows = [
+        d for d in cat.list_scoped(source_uri_prefix="chroma://")
+        if (d.source_uri or "").startswith("chroma://")
+    ]
 
     by_collection = Counter(d.physical_collection for d in chroma_rows)
     census = {

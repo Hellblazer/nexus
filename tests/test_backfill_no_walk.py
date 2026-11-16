@@ -56,14 +56,17 @@ class _FakeEngine:
     """The ``/list`` route the catalog client reads: a literal prefix filter, an owner filter, and the
     unfiltered pages. Every request is recorded as ``(path, params)``."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, ignore_case: bool = False) -> None:
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self.docs = [_wire_doc(i) for i in range(DOCUMENTS)]
+        self.ignore_case = ignore_case  # an engine whose prefix match ignores case, for the client guard
 
     def get(self, path: str, **params: Any) -> dict[str, Any]:
         self.requests.append((path, dict(params)))
         assert path == "/list", path
         if prefix := params.get("source_uri_prefix"):
+            if self.ignore_case:
+                return {"documents": [d for d in self.docs if d["source_uri"].lower().startswith(prefix.lower())]}
             return {"documents": [d for d in self.docs if d["source_uri"].startswith(prefix)]}
         if owner := params.get("owner"):
             return {"documents": [d for d in self.docs if d["tumbler"].startswith(f"{owner}.")]}
@@ -159,3 +162,19 @@ class TestBackfillEtags:
         assert engine.requests == [("/list", {"owner": "1.2"})], engine.requests
         assert f"missing an ETag: {DOCUMENTS // 5}" in out
         assert "under owner 1.2" in out
+
+
+@pytest.mark.parametrize("command", ["backfill-source-uri", "backfill-etags"])
+def test_an_engine_that_ignores_case_does_not_change_either_command(
+    command: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine's prefix match is case-sensitive SQL LIKE today; nothing in this repo runs it against an
+    upper-case scheme. Each command checks the scheme itself, so its output is the same when the engine
+    returns CHROMA:// and HTTPS:// rows too."""
+    args = [command, "--json"] if command == "backfill-source-uri" else [command, "--dry-run", "--limit", "2000"]
+    exact = _FakeEngine()
+    _use(monkeypatch, _client(exact, monkeypatch), walk=False)
+    expected = _run(*args).stdout
+    loose = _FakeEngine(ignore_case=True)
+    _use(monkeypatch, _client(loose, monkeypatch), walk=False)
+    assert _run(*args).stdout == expected
