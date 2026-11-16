@@ -2,12 +2,12 @@
 title: "Heat-Based Graduation Between Memory Tiers"
 id: RDR-209
 type: Feature
-status: draft
+status: accepted
 priority: high
 author: Sam
 reviewed-by: self
 created: 2026-09-14
-accepted_date:
+accepted_date: 2026-11-16
 related_issues: ["nexus-2k66t.1", "nexus-qo7ie"]
 related_rdrs: [RDR-057, RDR-207, RDR-131, RDR-132, RDR-194, RDR-238, RDR-240]
 ---
