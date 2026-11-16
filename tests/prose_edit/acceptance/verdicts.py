@@ -550,15 +550,15 @@ def _norm(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def _on_card(card: str, markers: tuple[str, ...]) -> bool:
-    return any(_norm(m) in _norm(card) for m in markers)
+def _on_card(voice: str, markers: tuple[str, ...]) -> bool:
+    return any(_norm(m) in _norm(voice) for m in markers)
 
 
 def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: list[Obj],
-                     card: str = "") -> tuple[list[str], str | None, str]:
+                     voice: str = "") -> tuple[list[str], str | None, str]:
     """(what touches a device, a reason the device lists cannot be applied to this document or None, a note on the
     card-conditional devices). The always-protected devices are scored whatever the card says; a card-conditional
-    one only when `card` (the editor's reply voice_card) names it."""
+    one only when `voice` (the editor's reply voice card) names it."""
     spans: dict[str, tuple[int, int]] = {}
     conditional = CARD_DEVICES.get(kind, ())
     for phrase in (*DEVICES.get(kind, ()), *(p for p, _ in conditional)):
@@ -566,7 +566,7 @@ def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: lis
         if len(found) != 1:
             return [], f"the device {phrase[:50]!r} is in the document {len(found)} times; the list no longer matches it", ""
         spans[phrase] = found[0]
-    scored = [p for p, markers in conditional if _on_card(card, markers)]
+    scored = [p for p, markers in conditional if _on_card(voice, markers)]
     for phrase, _ in conditional:
         if phrase not in scored:
             del spans[phrase]  # not on the card: the editor may restructure it
@@ -692,7 +692,7 @@ def _unpacks(prefix: str, old: str, new: str) -> bool:
 
 
 def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
-                        card: str) -> tuple[str | None, list[str], str]:
+                        voice: str) -> tuple[str | None, list[str], str]:
     """(a reason the oracle tables no longer fit the document or None, what fails the run, the note) for a compression
     run. Hits and decoys are read from the post-filter edits and queries by plain span arithmetic on the document."""
     table: list[tuple[str, str, tuple[int, int]]] = []
@@ -705,7 +705,7 @@ def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
         table.append((label, text, found[0]))
     seeded_at = {e[0]: table[i][2] for i, e in enumerate(COMPRESSION_SEEDED)}
     scored = table[len(COMPRESSION_SEEDED):]
-    dense_named = _on_card(card, COMPRESSION_DENSE[1])
+    dense_named = _on_card(voice, COMPRESSION_DENSE[1])
     applicable = _unique_edits(doc_text, edits)
     problems: list[str] = []
     for e in edits:
@@ -789,11 +789,11 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
         return NOT_MEASURABLE, f"edits {stale} are not in the document: it is not the one the run edited"
     reply_edits = [e for e in reply.get("edits") or [] if isinstance(e, dict)]
     extra = ""
-    card_note = ""
+    voice_note = ""
     problems += _nonunique_problems(doc_text, edits)
     if kind == "compression":
-        card = str(reply.get("voice_card") or proposal.get("voice_card") or "")
-        stale_table, found_c, card_note = _compression_scored(doc_text, edits, queries, card)
+        voice = str(reply.get("voice_card") or proposal.get("voice_card") or "")
+        stale_table, found_c, voice_note = _compression_scored(doc_text, edits, queries, voice)
         if stale_table:
             return NOT_MEASURABLE, stale_table
         problems += found_c
@@ -831,17 +831,17 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
     if filler and not any(_cuts(e, filler) for e in edits):
         problems.append(f"the filler word {filler!r} was not cut (a filler word is cut, not queried or left)")
     if kind in DEVICE_KINDS:
-        card = str(reply.get("voice_card") or proposal.get("voice_card") or "")
-        found, stale_list, card_note = _device_problems(kind, doc_text, edits, paragraphs, card)
+        voice = str(reply.get("voice_card") or proposal.get("voice_card") or "")
+        found, stale_list, voice_note = _device_problems(kind, doc_text, edits, paragraphs, voice)
         if stale_list:
             return NOT_MEASURABLE, stale_list
         problems += found
     if problems:
-        return FAIL, "; ".join(problems) + f"; {drops}" + (f"; {card_note}" if card_note else "")
+        return FAIL, "; ".join(problems) + f"; {drops}" + (f"; {voice_note}" if voice_note else "")
     note = (f"{len(edits)} edits, {len(queries)} queries, {len(paragraphs)} paragraph proposals after the filter; "
             f"{drops}{extra}")
-    if card_note:
-        note += f"; {card_note}"
+    if voice_note:
+        note += f"; {voice_note}"
     if kind in ("xanadu", "linda"):
         note += f"; semicolon queries: {_semicolon_queries(queries)} (the document holds {doc_text.count(';')} ';')"
     if kind in EDITS_EXPECTED and not edits:
