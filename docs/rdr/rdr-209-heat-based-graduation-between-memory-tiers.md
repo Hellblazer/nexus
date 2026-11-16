@@ -527,7 +527,9 @@ printed so a person can write them back; the command does not undo it.
   and read back first, names every title. That fits the purpose of Gap 6: these
   are working state read within two days of being written, and a record past
   30 days in a closed phase is the one A1 asks to retire. How many records are
-  already past their effective TTL: not measured.
+  already past their effective TTL: not measured. Sam chose this on 2026-11-16
+  (by dialog in halcyon's session, relayed by halcyon: "Keep timestamps, count
+  first"), with a count step before the first real run (Step 3, Count first).
 - *What expiry does.* Quarantine only, as RDR-207 built it: the record is
   hidden, restorable, and deleted only after an attended `nx memory rollup`
   marks it and `nx memory reap` runs. A record's heat lengthens its life by
@@ -830,7 +832,18 @@ the check leaves every record's `access_count` unchanged (A8).
 
 #### Step 3: The 30-day TTL
 
-As designed. Tests: three seeded records each get `ttl=30` with content, tags,
+Count first (Sam, 2026-11-16). Before the command's first run that writes a
+TTL, a dry run lists the records the run would give a TTL and, for each, its
+timestamp, `access_count` and whether `ttl_days * (1 + ln(access_count + 1))`
+with `ttl_days = 30` is already past (`MemoryRepository.java:697`). It writes
+nothing and reports one number: how many of those records the next expire
+sweep would quarantine. That number goes to Sam (through the session that
+coordinates the work) before any TTL is written, and the real run waits for
+his word. The dry run is the command with `--dry-run`; it reads with the same
+`get_all` as Step 1 and computes the same effective TTL as the engine.
+
+As designed. Tests: the dry run writes nothing and reports the count, with one
+seeded record past its effective TTL and one not, counting exactly one; three seeded records each get `ttl=30` with content, tags,
 agent, session, timestamp, `access_count` and `last_accessed` unchanged; a
 record seeded with a null agent and a null session still has both null after the
 step, and a `put`-based write would not (the test fails for that reason when the
