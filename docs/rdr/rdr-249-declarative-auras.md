@@ -535,7 +535,7 @@ child; with an aura subscribed to
 `board/ci/nexus-develop--done` and no session subscription to it, the Stop
 hook still blocks a turn that ends on a develop-CI wait.
 
-### Phase 3: The first consumer
+### Phase 3 (CLOSED, 2026-11-16): The first consumer
 
 `ci_red_notice.lua` and `ci_develop_red.aura.toml` in the package root,
 shipped off; measure one fire's cost (the Critical
