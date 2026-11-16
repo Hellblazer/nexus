@@ -8,7 +8,7 @@ author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-26
 related_issues: [nexus-3kybd]
-related_rdrs: [RDR-053, RDR-108, RDR-086, RDR-152, RDR-180, RDR-236]
+related_rdrs: [RDR-053, RDR-108, RDR-086, RDR-152, RDR-180, RDR-236, RDR-243]
 supersedes: []
 external_ref: conductus RDR-001 OQ-3
 ---
@@ -23,8 +23,7 @@ external_ref: conductus RDR-001 OQ-3
 Nexus keeps a *catalog*: one entry per indexed document, each addressed by a *tumbler* (a stable
 dotted id such as `1.2.45`), with *links* between entries. A link can point at part of a document,
 not only the whole of it. The part is named by a *span*, a short string stored in the link's
-`from_span` or `to_span`. Documents are stored for search as *chunks*, pieces of a few hundred words
-each. Today there are four span forms (`src/nexus/catalog/catalog_spans.py`, census in
+`from_span` or `to_span`. Documents are stored for search as *chunks*, pieces of bounded size. Today there are four span forms (`src/nexus/catalog/catalog_spans.py`, census in
 171-research-3):
 
 | Form | Meaning | Survives re-chunking? |
@@ -77,7 +76,8 @@ The request came from Conductus, a separate project that connects an Obsidian no
 nexus catalog. Its RDR-001 (open question 3) wanted to map Obsidian links to a heading or block of a
 note onto catalog spans, and could only approximate them to the containing chunk. Conductus's
 RDR-001 is accepted but its repository has been quiet since 2026-08-28 (171-research-6). The driver
-now is Sam, who asked on 2026-11-16 for RDR-171 to be finished. The design does not depend on
+now is Sam, who asked on 2026-11-16 for RDR-171 to be finished. Conductus's own vault notes, indexed as
+stored notes and edited often, fall outside this RDR's scope (171-research-10). The design does not depend on
 Conductus: any caller that wants to pin a passage (a citation in a note, a quotation in a review, a
 transclusion) needs the same thing.
 
@@ -89,9 +89,12 @@ transclusion) needs the same thing.
 - The Python client resolves a span with `resolve_span_text_for_entry(entry, span, catalog=...)` in
   `catalog_spans.py`, given an already-resolved `CatalogEntry`.
 - A catalog entry carries `file_path` and `source_uri`. `file_path` is repo-relative for documents
-  indexed from a repository and absolute for single files; `source_uri` is a `file://` URI for a
-  file, an `nx-note://` URI for a note, and empty only on legacy rows (171-research-7). `HttpCatalogClient.resolve_path(tumbler)` turns an entry into an
-  absolute path.
+  indexed from a repository and absolute for single files, which belong to a *curator* owner (an
+  owner with no repository); `source_uri` is a `file://` URI for a file, an `nx-note://` URI for a
+  note, other schemes stored as given, and empty on legacy rows and for a relative path whose owner
+  has no repository root (171-research-7, -9). `HttpCatalogClient.resolve_path(tumbler)` turns a
+  repository document into an absolute path and returns `None` for a curator-owned one
+  (171-research-9).
 - A document's hash of record is `index_content_hash`, but what it hashes differs by ingest path
   (171-research-1, -2).
 
@@ -102,8 +105,8 @@ transclusion) needs the same thing.
 A code read of every place a document hash is computed, stored or read; every span parser; the link
 write path in the client and the engine; `link_audit`; where full document text exists after
 indexing; and, after gate round 1, path resolution, the resolver's error handling and the client's
-write paths. Each finding carries file and line references, recorded as T2 entries
-`nexus_rdr/171-research-1` to `-8`.
+write paths. Each finding carries its source (file and line references for code), recorded as T2
+entries `nexus_rdr/171-research-1` to `-10`.
 
 #### Dependency Source Verification
 
@@ -135,9 +138,13 @@ write paths. Each finding carries file and line references, recorded as T2 entri
   dormant. *Source: 171-research-6.*
 - **✅ Verified** (source search): a repo-indexed document's `file_path` is repo-relative;
   `resolve_path` anchors it on the owner's repository root, and `aspect_readers.file_uri_path`
-  decodes a `file://` URI. *Source: 171-research-7.*
+  turns a `file://` URI into a path. *Source: 171-research-7.*
+- **✅ Verified** (source search): `resolve_path` returns `None` for a curator-owned document, and
+  single files register under a curator owner by absolute path with a `file://` `source_uri`;
+  `src/nexus/catalog/` holds 40 modules, its cap. *Source: 171-research-9.*
 - **✅ Verified** (source search): the resolver turns every exception in its chash branch into
-  `None`, and `nx catalog show` catches only engine errors around it; links reach the engine through
+  `None` except an engine outage (`VectorServiceError`), which it re-raises (171-research-9), and
+  `nx catalog show` catches only that error around it; links reach the engine through
   three client methods (`link`, `link_if_absent`, `links_upsert_many`); no class named `Catalog`
   exists; `http_catalog_client.py` is 4 lines under its size ceiling. *Source: 171-research-8.*
 
@@ -173,53 +180,70 @@ separate RDR when a caller needs it (Sam, 2026-11-16, after gate round 1).
 
 ### Technical Design
 
-All new code lives in a new module, `src/nexus/catalog/catalog_dchash.py`. The client file
-`http_catalog_client.py` is 4 lines under its size ceiling (171-research-8), so it gains only the
-calls into this module.
+The new logic lives in a new subpackage, `src/nexus/catalog/dchash/`, because `src/nexus/catalog/`
+is at its 40-module cap (171-research-9); existing files gain only calls into it. The client file
+`http_catalog_client.py` is 4 lines under its size ceiling (171-research-8), so `link_audit` moves
+out of it into the subpackage first.
 
 **Canonical text.** `canonical_text(raw: bytes) -> str`: decode as strict UTF-8 (an undecodable
 source has no canonical text); remove one leading U+FEFF; replace every `\r\n`, then every remaining
 `\r`, with `\n`. Nothing else changes: no Unicode normalization, no trailing-whitespace trimming.
 `text_hash(text: str) -> str` is the lowercase hex SHA-256 of `text.encode("utf-8")`.
 
-**Span grammar.** `^dchash:([0-9a-f]{64}):(\d+)-(\d+)$` with `start < end`. Offsets are Unicode code
-points (Python string indices) into the canonical text, half-open, with `end <= len(text)`. A caller
-working in UTF-16 (JavaScript, Obsidian) converts. A string that starts `dchash:` and fails the
-grammar is malformed. `parse_dchash_span(span) -> tuple[str, int, int]` raises `ValueError` on a
-malformed span; it is called by validation and status, never inside the resolver.
+**Span grammar.** The whole string must match `dchash:([0-9a-f]{64}):(0|[1-9][0-9]*)-(0|[1-9][0-9]*)`
+(ASCII digits, no leading zeros, nothing after the end), with `start < end`. Offsets are Unicode
+code points (Python string indices) into the canonical text, half-open, with `end <= len(text)`. A
+caller working in UTF-16 (JavaScript, Obsidian) converts. A string that starts `dchash:` and fails
+the grammar is malformed. `parse_dchash_span(span) -> tuple[str, int, int]` raises `ValueError` on a
+malformed span.
 
-**Source lookup.** `dchash_source(entry, catalog) -> Path | None`: `catalog.resolve_path(entry.tumbler)`
-when a catalog is given (it anchors a repo-relative `file_path` on the repository root,
-171-research-7); otherwise the path `aspect_readers.file_uri_path` gives for a `file://`
-`source_uri`; otherwise `None`.
+**Source lookup.** `dchash_source(entry, catalog) -> Path | None`, trying in order: 
+`catalog.resolve_path(entry.tumbler)` when a catalog is given (it anchors a repo-relative
+`file_path` on the repository root, 171-research-7); then, when that gives `None`, as it does for a
+curator-owned single file (171-research-9), or no catalog is given, the path
+`aspect_readers.file_uri_path` gives for a `file://` `source_uri`; then an absolute `file_path`;
+otherwise `None`.
 
 **Minting.** `dchash_span(catalog, tumbler, start, end) -> str` reads the source's canonical text,
-checks the range, and returns the span. `dchash_span_for_passage(catalog, tumbler, passage: str) ->
-str` finds `passage` in the canonical text and returns its span; it raises when the passage occurs
-zero times or more than once. Both are module functions that take a catalog reader, so the client's
-write whitelist does not change. `nx catalog span <tumbler> --passage TEXT` (or `--start/--end`)
-prints a span.
+checks `start < end <= len(text)`, and returns the span. `dchash_span_for_passage(catalog, tumbler,
+passage: str) -> str` refuses an empty passage, applies the same line-end normalization to it, finds
+it in the canonical text, and returns its span; it raises when the passage occurs zero times or more
+than once, overlapping occurrences included. Both refuse a PDF (`content_type` `pdf`) and a document
+with no file source by name before reading anything. Both are functions taking a catalog reader, so
+the client's write whitelist does not change. `nx catalog span <tumbler> --passage TEXT` (or
+`--start/--end`) prints a span; it lives in a new `commands/catalog_cmds/span.py`, and its help
+recommends `--passage`.
 
 **Resolution.** A new branch in `resolve_span_text_for_entry`, before its final `return None`, for a
-span starting `dchash:`. It never raises, like the chash branch above it (171-research-8): it parses,
-reads the source through `dchash_source`, and returns `text[start:end]` when the canonical text hashes
-to the span's hash and the range fits; otherwise `None`.
+span starting `dchash:`. It parses, reads the source through `dchash_source`, and returns
+`text[start:end]` when the canonical text hashes to the span's hash and the range fits; otherwise
+`None`. Every exception inside it, a malformed span's `ValueError` included, becomes `None`, except
+an engine outage (`VectorServiceError`), which it re-raises as the chash branch does and which
+`nx catalog show` already catches (171-research-8, -9).
 
-**Status.** `dchash_status(entry, span, catalog) -> str` says why a span does or does not resolve,
-without the text: `ok`; `malformed`; `missing` (no entry for the link's tumbler, or a deleted one);
+**Status.** `dchash_status(entry | None, span, catalog) -> str` says why one span does or does not
+resolve against the entry on its own side of the link (`from_span` against the `from` document,
+`to_span` against the `to` document), without the text: `ok`; `malformed`; `missing` (the caller
+found no entry, or a deleted one, and passes `None`);
 `unreadable` (no source path, the file cannot be read, or it is not UTF-8); `changed` (the source
-reads but hashes differently); `out_of_range` (the range exceeds the text).
+reads but hashes differently); `out_of_range` (the range exceeds the text). An engine error is not a
+status: it propagates, so an outage fails the audit instead of listing every span as stale.
 
 **Write validation.** The client's three link write paths, `link`, `link_if_absent` and
 `links_upsert_many`, refuse a `from_span` or `to_span` that starts `dchash:` and fails the grammar
-(a `ValueError` naming the span). Other forms are untouched; the engine is unchanged, so another
-client could still store a malformed span; the resolver and the report treat it as `malformed`.
+(a `ValueError` naming the span). `links_upsert_many` checks every edge before its first request, so a
+bad edge on a later page writes nothing. The recovery-bundle import, which calls `link` per record
+(171-research-9), counts such a refusal in its summary and goes on to the next record. Other forms are
+untouched; the engine is unchanged, so another client could still store a malformed span; the
+resolver and the report treat it as `malformed`. The span help in `nx catalog link` and the MCP link
+tool's field description name the new form.
 
-**Stale report.** `link_audit` gains `stale_dchash` and `stale_dchash_count`: every link with a
-`dchash:` span whose status is not `ok`, with the status. It reads each document once, however many
-spans point into it. The report is local to the machine it runs on, because it reads source files by
+**Stale report.** `link_audit` gains `stale_dchash` and `stale_dchash_count`: one row per `dchash:`
+span whose status is not `ok`, naming the link, the side (`from` or `to`) and the status. They come
+from `dchash_audit(links, catalog) -> list[dict]`, which groups the `dchash:` spans by document, reads
+each document once, and keeps only its hash and length while it checks that document's spans. The report is local to the machine it runs on, because it reads source files by
 path. The MCP `link_audit` docstring loses the two keys the code no longer returns (`stale_spans`,
-`stale_chash`) and names the new one; `nx catalog link-audit` prints the count.
+`stale_chash`), and the paragraph explaining them, and names the two new keys; `nx catalog link-audit` prints the count.
 
 ```text
 // Illustrative, verify signatures at implementation
@@ -227,17 +251,18 @@ def canonical_text(raw: bytes) -> str                      # UnicodeDecodeError 
 def text_hash(text: str) -> str                            # 64 lowercase hex
 def parse_dchash_span(span: str) -> tuple[str, int, int]   # ValueError when malformed
 def dchash_status(entry, span: str, catalog) -> str        # ok | malformed | missing | unreadable | changed | out_of_range
+def dchash_audit(links: list[dict], catalog) -> list[dict] # the stale_dchash rows, one read per document
 ```
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| span parse, canonical text, mint, status | none | New module `catalog_dchash.py` (size ceiling, 171-research-8) |
+| span parse, canonical text, mint, status, audit | none | New subpackage `src/nexus/catalog/dchash/` (module cap, 171-research-9) |
 | resolve branch | `catalog_spans.py` `resolve_span_text_for_entry` | Extend: one branch calling the new module |
 | source lookup | `HttpCatalogClient.resolve_path`, `aspect_readers.file_uri_path` | Reuse both (171-research-7) |
 | document hash | `index_content_hash` (`types.py:210`) | Not used as the stamp (Approach) |
-| stale report | `link_audit`, `http_catalog_client.py:3630` | Extend with `stale_dchash`, computed in the new module |
+| stale report | `link_audit`, `http_catalog_client.py:3630` | Move into the subpackage (size ceiling, 171-research-8), then extend with `stale_dchash` |
 
 ### Decision Rationale
 
@@ -348,41 +373,56 @@ a caller needs PDFs, notes or edit survival (Sam, 2026-11-16).
 
 ### Minimum Viable Validation
 
-On a local engine: index a markdown file from a repository (so its `file_path` is repo-relative),
-mint a `dchash:` span with `--passage` for a sentence in it, link two documents with that span from a
-working directory outside the repository, re-index the file with a different chunk size, and read the
-span back: the same sentence. Then edit the file and run `link_audit`: the link is listed with status
-`changed`.
+On a local engine: index a markdown file from a repository (so its `file_path` is repo-relative)
+and a second one with `nx index md` (curator-owned, found through its `file://` `source_uri`), mint a
+`dchash:` span with `--passage` for a sentence in each, link documents with those spans from a working
+directory outside the repository, force a re-index of both (`--force`), and read the spans back: the
+same sentences. Then edit one file and run `link_audit`: its span is listed with status `changed`.
+Survival across a different chunk size is pinned by the Step 2 unit test, since no command sets the
+chunk size.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: The module, canonical text, hash and grammar
+#### Step 0: The subpackage, and `link_audit` moved
 
-Create `catalog_dchash.py` with `canonical_text`, `text_hash` and `parse_dchash_span`. Tests: BOM,
-CRLF, lone CR, non-UTF-8, non-BMP offsets, `start >= end`, every malformed shape.
+Create `src/nexus/catalog/dchash/` and move `link_audit` out of `http_catalog_client.py` into it,
+unchanged, so the client file has room for the calls the later steps add. The existing `link_audit`
+tests pass unchanged.
+
+#### Step 1: Canonical text, hash and grammar
+
+`canonical_text`, `text_hash` and `parse_dchash_span` in the subpackage. Tests: BOM, CRLF, lone CR,
+non-UTF-8, non-BMP offsets, `start >= end`, leading zeros, non-ASCII digits, a trailing newline,
+every other malformed shape.
 
 #### Step 2: Source lookup, resolution and status
 
 `dchash_source`, the `resolve_span_text_for_entry` branch and `dchash_status`. Tests: re-chunk
 survival (same text, different chunks); a repo-relative `file_path` resolved from a working directory
-outside the repository; a `file://` `source_uri` with no catalog; changed, missing, unreadable and
-out-of-range spans; a malformed span returns `None`; `nx catalog show` on a document with a
+outside the repository; a curator-owned single file with a catalog passed, found through its
+`file://` `source_uri`; a `file://` `source_uri` with no catalog; changed, missing, unreadable and
+out-of-range spans; a malformed span returns `None`; `resolve_path` raising a non-engine error gives
+`None`, and a `VectorServiceError` propagates; `nx catalog show` on a document with a
 malformed `dchash:` link prints the rest of its links.
 
 #### Step 3: Minting
 
-`dchash_span`, `dchash_span_for_passage` and `nx catalog span`. Tests: zero and multiple passage
-matches refused; a PDF or a note refused; the minted span resolves to the passage.
+`dchash_span`, `dchash_span_for_passage` and `nx catalog span`. Tests: empty, zero, multiple and
+overlapping passage matches refused; a passage typed with CRLF found; `start >= end` refused; a PDF
+or a note refused by name; the minted span resolves to the passage.
 
 #### Step 4: Write validation
 
-`link`, `link_if_absent` and `links_upsert_many` refuse a malformed `dchash:` span. Tests against the
-fake link engine, one per write path.
+`link`, `link_if_absent` and `links_upsert_many` refuse a malformed `dchash:` span, the recovery-bundle
+import counts the refusal and goes on, and the span help names the new form. Tests against the fake
+link engine: one per write path; a bad edge on the second page of `links_upsert_many` writes nothing;
+a bundle with one malformed span imports the rest and reports one failure.
 
 #### Step 5: The stale report
 
-`stale_dchash` and its count in `link_audit`, the MCP docstring corrected, the CLI count. Tests:
-each non-`ok` status reaches the report; a document with many spans is read once.
+`dchash_audit`, `stale_dchash` and its count in `link_audit`, the MCP docstring corrected, the CLI
+count. Tests: each non-`ok` status reaches the report with its side; a document with many spans is
+read once; an engine error fails the audit instead of listing stale spans.
 
 ### Day 2 Operations
 
@@ -402,14 +442,17 @@ None.
   passage.
 - **Scenario**: repo-indexed document, span read from a working directory outside the repository —
   **Verify**: resolves (`resolve_path` anchors the relative path).
+- **Scenario**: a single file indexed with `nx index md`, span minted and read with a catalog —
+  **Verify**: resolves through its `file://` `source_uri`.
 - **Scenario**: file saved with CRLF line ends and a BOM, span minted, file re-saved with LF and no
   BOM — **Verify**: still `ok` (same canonical text).
 - **Scenario**: one character inserted before the passage — **Verify**: `changed`, listed in
   `link_audit`.
 - **Scenario**: an emoji before the passage — **Verify**: offsets are code points; the slice is
   exact.
-- **Scenario**: `link`, `link_if_absent` or `links_upsert_many` with `dchash:abc:1-2` or
-  `dchash:<64 hex>:7-3` — **Verify**: refused with the span named.
+- **Scenario**: `link`, `link_if_absent` or `links_upsert_many` with `dchash:abc:1-2`,
+  `dchash:<64 hex>:7-3` or `dchash:<64 hex>:01-3` — **Verify**: refused with the span named, and
+  nothing written.
 - **Scenario**: a stored malformed `dchash:` span — **Verify**: `nx catalog show` lists the
   document's links; `link_audit` reports `malformed`.
 
@@ -445,6 +488,7 @@ The one critical assumption is verified by source search.
 | `bytes.decode("utf-8")` strict, `hashlib.sha256` | Python stdlib | Source Search |
 | `resolve_path`, `link`, `link_if_absent`, `links_upsert_many`, `link_audit` | nexus catalog client | Source Search (171-research-4, -7, -8) |
 | `aspect_readers.file_uri_path` | nexus | Source Search (171-research-7) |
+| `resolve_path` returning `None` for curator owners | nexus catalog client | Source Search (171-research-9) |
 
 ### Scope Verification
 
@@ -467,16 +511,19 @@ The Minimum Viable Validation is in scope and runs on a local engine before the 
 
 ### Proportionality
 
-Right-sized: one span form, one new module, one resolver branch, one report key, no schema.
+Right-sized: one span form, one new subpackage, one resolver branch, one report key and its count,
+no schema.
 
 ## References
 
-- `src/nexus/catalog/catalog_spans.py`, `http_catalog_client.py`, `types.py`, `src/nexus/aspect_readers.py`
+- `src/nexus/catalog/catalog_spans.py`, `http_catalog_client.py`, `types.py`, `recovery_bundle.py`,
+  `src/nexus/aspect_readers.py`, `src/nexus/mcp/catalog.py`, `src/nexus/commands/catalog_cmds/links.py`,
+  `scripts/file_size_ratchet.py`
 - `src/nexus/doc_indexer.py`, `prose_indexer.py`, `code_indexer.py`, `indexer.py`, `pipeline_stages.py`,
   `catalog/store_hook.py`, `catalog/note_write.py`, `commands/catalog.py`
 - `service/src/main/java/dev/nexus/service/http/CatalogLinksHandler.java`,
   `service/src/main/resources/db/changelog/catalog-020-index-run-fence.xml`, `catalog-048-reconcile.xml`
-- T2 `nexus_rdr/171-research-1` to `-8`; `nexus_rdr/171-scope-decision-2026-11-16`
+- T2 `nexus_rdr/171-research-1` to `-10`; `nexus_rdr/171-scope-decision-2026-11-16`
 - Conductus RDR-001 open question 3; design memo T2 `nexus/design-finegrain-author-anchored-spans.md`
 
 ## Revision History
