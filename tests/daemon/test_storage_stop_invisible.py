@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import nexus.daemon.service_registry as sr
 import nexus.daemon.storage_service_daemon as ssd
 from nexus.daemon.service_registry import ServiceRegistry, service_identity, ttl_for_tier
 
@@ -53,6 +54,28 @@ def test_a_legacy_lease_naming_someone_elses_pid_does_not_signal_its_group(tmp_p
         outcome = ssd.stop_storage_service(config_dir=tmp_path)
         assert bystander.poll() is None, "the reused pid's process group was signalled"
         assert bystander.pid not in outcome.pids
+        assert registry.records() == [], "the stale lease is still released"
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=10)
+
+
+def test_a_legacy_lease_whose_endpoint_cmdline_reads_empty_does_not_signal_its_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Linux reads /proc/<pid>/cmdline empty while a just-spawned child is still in execve, so an
+    unreadable command line is no evidence the pid is ours: it is not signalled, and the stale lease
+    still goes."""
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        monkeypatch.setattr(sr, "process_command", lambda _pid, *, platform=None: "")
+        registry = _registry(tmp_path)
+        registry.publish(service_identity(), endpoint={"pid": bystander.pid, "port": 1}, version="t", owner_token="tok")
+        outcome = ssd.stop_storage_service(config_dir=tmp_path)
+        assert bystander.poll() is None, "a pid whose command line could not be read was signalled"
+        assert bystander.pid not in outcome.pids
+        assert outcome.unreadable == (bystander.pid,)
+        assert not outcome.already_stopped
         assert registry.records() == [], "the stale lease is still released"
     finally:
         bystander.kill()

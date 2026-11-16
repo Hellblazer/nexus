@@ -2282,6 +2282,39 @@ def _platform_has_pid_namespaces() -> bool:
     return sys.platform.startswith("linux")
 
 
+#: What the pid-recycle re-check found: the pid runs our command, runs something
+#: else, or has a command line that could not be read.
+HolderIdentity = Literal["ours", "foreign", "unreadable"]
+
+
+def holder_identity(
+    pid: int,
+    *,
+    is_ours: Callable[[str], bool],
+    platform: str | None = None,
+    command: Callable[[int], str] | None = None,
+    is_ours_argv: Callable[[list[str]], bool] | None = None,
+    argv_of: Callable[[int], list[str]] | None = None,
+) -> HolderIdentity:
+    """The pid-recycle re-check every stop site makes before it signals a recorded pid. Fails closed.
+
+    Only ``"ours"`` may be signalled. An empty command line is ``"unreadable"``, never ours: the
+    pid may have exited, or belong to another user, and on Linux ``/proc/<pid>/cmdline`` reads
+    empty while a just-spawned child is still in ``execve``, so under load a reused pid can read
+    empty and be someone else's process (nexus-f3yqd). *command* defaults to
+    :func:`process_command`; with *is_ours_argv*, a readable argv (*argv_of*, default
+    :func:`process_argv`) decides, and *is_ours* decides on the joined command line otherwise.
+    """
+    cmd = command(pid) if command is not None else process_command(pid, platform=platform)
+    if not cmd:
+        return "unreadable"
+    if is_ours_argv is not None:
+        argv = argv_of(pid) if argv_of is not None else process_argv(pid, platform=platform)
+        if argv:
+            return "ours" if is_ours_argv(argv) else "foreign"
+    return "ours" if is_ours(cmd) else "foreign"
+
+
 def stop_tier_holders(
     *,
     dir: Path,
@@ -2339,8 +2372,10 @@ def stop_tier_holders(
             continue
         if pid in targets or pid in unreadable or pid in foreign or pid in invisible:
             continue
-        cmd = read_command(pid)
-        if not cmd:
+        identity = holder_identity(
+            pid, is_ours=is_ours, command=read_command, is_ours_argv=is_ours_argv, argv_of=read_argv,
+        )
+        if identity == "unreadable":
             if pid_running(pid):
                 unreadable.append(pid)
             elif lease_holder_invisible(record, pid, now=now):
@@ -2349,9 +2384,7 @@ def stop_tier_holders(
                 # second holder start beside it.
                 invisible.append(pid)
             continue
-        argv = read_argv(pid) if is_ours_argv is not None else []
-        ours = is_ours_argv(argv) if is_ours_argv is not None and argv else is_ours(cmd)
-        if ours:
+        if identity == "ours":
             targets.append(pid)
         elif pid_running(pid):
             foreign.append(pid)

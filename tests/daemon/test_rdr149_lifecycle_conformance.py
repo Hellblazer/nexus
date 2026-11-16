@@ -1080,6 +1080,27 @@ class TestTeardownStopsHolders:
             stranger.kill()
             stranger.wait()
 
+    def test_an_unreadable_command_line_is_never_signalled(self, tier: str, config_dir: Path) -> None:
+        """nexus-f3yqd: Linux reads /proc/<pid>/cmdline empty while a just-spawned child is still in
+        execve, so an empty command line is no evidence of identity. The re-check fails closed."""
+        _maybe_xfail("teardown_stops_holders", tier)
+        stranger = _spawn_holder()
+        try:
+            self._publish(config_dir, tier, "default", stranger.pid)
+            result = stop_tier_holders(
+                dir=config_dir, tier=tier, pid_key=_TEARDOWN_PID_KEY[tier],
+                is_ours=lambda _cmd: True, grace_s=1.0, command=lambda _pid: "",
+            )
+            assert stranger.poll() is None, "a pid whose command line could not be read was signalled"
+            assert result.unreadable == (stranger.pid,)
+            assert result.stopped == ()
+            assert len(ServiceRegistry(dir=config_dir, tier=tier).records()) == 1, (
+                "an unidentified live holder keeps its record"
+            )
+        finally:
+            stranger.kill()
+            stranger.wait()
+
 
 def _spawn_kwargs_storage_service(config_dir: Path) -> dict[str, Any]:
     """The kwargs the REAL ``ensure_storage_supervisor`` hands ``Popen``."""

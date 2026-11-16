@@ -4066,10 +4066,11 @@ class StopOutcome:
     #: hard-kills). ``source`` is ``"refused"`` when nothing else was signalled.
     #: A refused pid is still running, so it is also in ``stubborn``.
     refused: tuple[GracefulStopSend, ...] = ()
-    #: Flagless ``daemon service start`` processes the stop could not place in
-    #: any directory (unreadable or malformed environment, nexus-oacd3). They
-    #: were NOT signalled and may still be running, so ``sweep_verified`` is
-    #: False and the outcome is not "already stopped".
+    #: Running pids the stop could not identify, so it did not signal them: flagless
+    #: ``daemon service start`` processes it could not place in any directory
+    #: (unreadable or malformed environment, nexus-oacd3; ``sweep_verified`` is then
+    #: False), and a legacy lease's endpoint pid whose command line could not be read
+    #: (nexus-f3yqd). They may still be running, so the outcome is not "already stopped".
     unreadable: tuple[int, ...] = ()
     #: Supervisor pids a FRESH lease names that are not visible from this process
     #: (nexus-dyfsw): a supervisor in another PID namespace sharing the config
@@ -4251,6 +4252,9 @@ def _stop_marked_service(
     signalled: list[int] = []
     #: Lease-named pids still running after the hard kill had its settle window.
     lease_stubborn: list[int] = []
+    #: A legacy lease's endpoint pid that is running but whose command line could not be read
+    #: (nexus-f3yqd): not signalled, reported in ``StopOutcome.unreadable``.
+    lease_unreadable: list[int] = []
     source = "none"
 
     if record is not None:
@@ -4386,18 +4390,26 @@ def _stop_marked_service(
                     hard_kill_pid(pid_to_signal, platform=platform)
                     lease_stubborn.extend(wait_for_exit([pid_to_signal]))
             else:
-                from nexus.daemon.service_registry import process_command  # noqa: PLC0415 — deferred import — stop path only
+                from nexus.daemon.service_registry import holder_identity  # noqa: PLC0415 — deferred import — stop path only
                 from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
-                # nexus-dyfsw: a legacy lease's endpoint pid may have been reused.
-                # Signal its group only when its live command line is this
-                # directory's stack; an unreadable one keeps the old behaviour.
-                live_cmd = process_command(pid_to_signal, platform=platform)
-                if live_cmd and not storage_service_stack_matcher(config_dir, platform=platform)(live_cmd):
-                    _log.warning("storage_service_stop_endpoint_pid_not_ours", pid=pid_to_signal)
-                    pid_to_signal = None  # not signalled; the stale lease is still released below
-                else:
+                # nexus-dyfsw, nexus-f3yqd: a legacy lease's endpoint pid may have been
+                # reused. Its group is signalled only when its live command line reads as
+                # this directory's stack. Not signalled otherwise; the stale lease is still
+                # released below, and the sweep after it still stops the real stack.
+                identity = holder_identity(
+                    pid_to_signal, is_ours=storage_service_stack_matcher(config_dir, platform=platform),
+                    platform=platform,
+                )
+                if identity == "ours":
                     safe_killpg(pid_to_signal, signal.SIGTERM)
+                else:
+                    if identity == "foreign":
+                        _log.warning("storage_service_stop_endpoint_pid_not_ours", pid=pid_to_signal)
+                    elif _pid_is_running(pid_to_signal):
+                        _log.warning("storage_service_stop_endpoint_pid_unreadable", pid=pid_to_signal)
+                        lease_unreadable.append(pid_to_signal)
+                    pid_to_signal = None
             # Clean up the lease record. Bounded (nexus-cd1k0 review round 3
             # finding 6): this is the OUTER ``stop_storage_service`` caller
             # (e.g. the CLI's ``nx daemon service stop``) doing its own
@@ -4440,6 +4452,7 @@ def _stop_marked_service(
                 source="process_table_unavailable",
                 lease_seen=lease_seen,
                 sweep_verified=False,
+                unreadable=tuple(lease_unreadable),
             )
         return StopOutcome(
             pids=tuple(signalled),
@@ -4447,6 +4460,7 @@ def _stop_marked_service(
             source=source,
             lease_seen=lease_seen,
             sweep_verified=False,
+            unreadable=tuple(lease_unreadable),
         )
 
     if sweep.unreadable:
@@ -4458,6 +4472,7 @@ def _stop_marked_service(
             config_dir=str(config_dir),
         )
     sweep_verified = not sweep.unreadable
+    unreadable = tuple(dict.fromkeys([*lease_unreadable, *sweep.unreadable]))
 
     # Captured BEFORE the sweep extends `signalled`, so the log reason below
     # can distinguish "the lease produced nothing to signal, the sweep is
@@ -4507,7 +4522,7 @@ def _stop_marked_service(
             lease_seen=lease_seen,
             sweep_verified=sweep_verified,
             refused=sweep.refused,
-            unreadable=sweep.unreadable,
+            unreadable=unreadable,
         )
 
     if not signalled:
@@ -4524,7 +4539,7 @@ def _stop_marked_service(
             source="none",
             lease_seen=lease_seen,
             sweep_verified=sweep_verified,
-            unreadable=sweep.unreadable,
+            unreadable=unreadable,
         )
 
     return StopOutcome(
@@ -4534,5 +4549,5 @@ def _stop_marked_service(
         lease_seen=lease_seen,
         sweep_verified=sweep_verified,
         refused=sweep.refused,
-        unreadable=sweep.unreadable,
+        unreadable=unreadable,
     )
