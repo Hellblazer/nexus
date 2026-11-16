@@ -214,7 +214,12 @@ migration_wal_bytes_per_worker = 12143000
 # Counted from the changeset's statements (9) and measured: chas lab-m via lab-remote, 2026-11-14, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-bbtc2 route-probe tree (gate jar rebuilt), ddl: migration=2426.
 # 2426 -> 2431 (2026-11-15, nexus-z0o2p.29): vectors-061-1 redefines nexus.stamp_chunks_on_manifest_delete and _update (2 CREATE OR REPLACE FUNCTION, ACL kept), creates nexus.clear_orphaned_on_manifest_insert (1 CREATE FUNCTION, 1 REVOKE EXECUTE FROM PUBLIC) and trg_catalog_chunks_clear_orphan_on_insert (1 CREATE TRIGGER): 5 statements, no table, so no runAlways grant.
 # Counted from the changeset's statements (5) and measured: chas lab-m via lab-remote, 2026-11-15, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-z0o2p.29 tree (base 7e51c9fcf, no newer vectors changeset on origin/develop; gate jar rebuilt), ddl: migration=2431. Commit: the nexus-z0o2p.29 commit that adds vectors-061.
-migration_ddl_per_worker = 2431
+# 2431 -> 2578 (2026-11-16, conexus 8.3.0 release, halcyon): the pin moves to engine-service-v0.1.194, whose PG bundle
+# builds pgvector 0.8.7 (8013eb3ef) instead of 0.8.2, and CREATE EXTENSION vector at 0.8.7 runs 147 more DDL statements.
+# No changeset changed. Measured: release PR #1660 CI fan-in 2578 on all 24 workers (total_ddl 102806 vs 99278 on
+# develop 2cbf76584); scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued
+# on the release tree reads ddl: migration=2578 with the 0.1.194 mac bundle (NEXUS_PG_BIN) and 2431 with the 0.1.191-era one.
+migration_ddl_per_worker = 2578
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
