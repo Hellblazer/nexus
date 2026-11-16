@@ -2,7 +2,8 @@
 title: "Public retrieval evaluation others can run"
 id: RDR-244
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-16
 priority: medium
 author: Sam
 reviewed-by: self

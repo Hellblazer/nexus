@@ -260,7 +260,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-241](rdr-241-no-client-walks-of-the-managed-catalog.md) | No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs | Architecture | Draft | 2026-11-02 |
 | [RDR-242](rdr-242-sandboxed-lua-runtime.md) | Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First | Architecture | Accepted | 2026-11-02 |
 | [RDR-243](rdr-243-first-class-document-sensitivity.md) | First-Class Document Sensitivity: Route, Stamp and Exempt Sensitive Documents from Every LLM and External Surface | Feature | Closed | 2026-11-03 |
-| [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Accepted | 2026-11-03 |
+| [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Closed | 2026-11-03 |
 | [RDR-245](rdr-245-structured-asks-on-the-threads-board.md) | Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox | Feature | Accepted | 2026-11-05 |
 | [RDR-246](rdr-246-data-moves-are-background-jobs.md) | Data Moves Run as Batched, Resumable Background Jobs, Never at Engine Boot | Architecture | Draft | 2026-11-10 |
 | [RDR-247](rdr-247-one-index-per-row.md) | One Index per Row: Index Each Vector Once, Not in Both the Leaf Graph and a Per-Collection Graph | Architecture | Deferred | 2026-11-10 |
