@@ -56,7 +56,7 @@ The harness is `scripts/bench/coir_run.py` (sampling `coir_sample.py`, scoring `
 Fetch the data at the pinned revisions. Each dataset has two Hugging Face repositories, `CoIR-Retrieval/<name>-queries-corpus` and `CoIR-Retrieval/<name>-qrels`, at the revisions in the table in `preregistration.md` (full hashes in `coir_run.py`'s `POOL`). The harness reads the parquet files directly under `DATA/<name>-queries-corpus/` (`corpus-*.parquet`, `queries-*.parquet`) and `DATA/<name>-qrels/` (`test-*.parquet`). The repositories keep them in a `data/` folder, so move them up one level:
 
 ```bash
-DATA=$PWD/coir-data
+DATA=$HOME/coir-data   # outside the checkout: the harness refuses a dirty tree
 fetch() {  # fetch NAME KIND REVISION
   hf download "CoIR-Retrieval/$1-$2" --repo-type dataset --revision "$3" --local-dir "$DATA/$1-$2"
   mv "$DATA/$1-$2"/data/*.parquet "$DATA/$1-$2"/
@@ -66,12 +66,13 @@ fetch codetrans-dl qrels 3c26def7e3903a50c219584fedc85d3ad77fac43
 # ...and the same for each dataset you run, with its two revisions from POOL
 ```
 
-Then run from the checkout:
+Then run from the checkout, writing outside it:
 
 ```bash
+mkdir -p "$HOME/coir-out"
 NX_ALLOW_PROD_WRITE="RDR-244 Track A run against its own loopback engine" \
   uv run --with pyarrow python scripts/bench/coir_run.py \
-  --data "$DATA" --out out/results.json --datasets codetrans-dl codetrans-contest synthetic-text2sql
+  --data "$DATA" --out "$HOME/coir-out/results.json" --datasets codetrans-dl codetrans-contest synthetic-text2sql
 ```
 
 `NX_ALLOW_PROD_WRITE` is needed because the run writes from a source checkout, which the production-write guard refuses without a stated reason. The writes go only to the engine the harness boots on loopback (it refuses any other host) and to a tenant it mints there. The published run used this opt-in, scoped to the run (2026-11-07). Leave out `--datasets` to run all five; the two codefeedback datasets are then dropped at the cap, as they were here. With the same checkout and data, the per-query rankings and scores reproduce exactly; latency does not.
