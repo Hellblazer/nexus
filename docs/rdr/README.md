@@ -268,6 +268,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-249](rdr-249-declarative-auras.md) | Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure | Feature | Closed | 2026-11-12 |
 | [RDR-250](rdr-250-multi-hop-answers-past-the-six-chunk-budget.md) | Multi-hop answers read past the six-chunk generator budget | Feature | Draft | 2026-11-15 |
 | [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Draft | 2026-11-16 |
+| [RDR-252](rdr-252-aura-relevance-and-one-responder.md) | Aura Relevance and One Responder: Load Conditions, an Owner Computed from the Record, and Local Actions for Everyone Else | Architecture | Draft | 2026-11-16 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 
