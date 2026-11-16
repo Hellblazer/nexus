@@ -89,11 +89,10 @@ remove hits, never reach chunks the unscoped search missed.
   the measurements) of that collection's nearest topic.
 - **Per-collection k**: how many rows the engine takes from each collection
   before merging (`search_engine.py:1195-1226`).
-- **Coverage**: one minus the share of a collection's chunks that the
-  engine's `taxonomy_unassigned_chashes_<dim>` reports as having no
-  assignment to that collection's own topics (projection rows from other
-  collections do not count). A collection with no chunks has no coverage and
-  is never routed.
+- **Coverage**: one minus the share of a collection's live chunks that have
+  no assignment to that collection's own topics (projection rows from other
+  collections do not count), as `taxonomy_coverage_counts_<dim>` counts them.
+  A collection with no chunks has no coverage and is never routed.
 - **`chash_allow`**: a list of chunk hashes a search is confined to (document
   confinement, RDR-232).
 - **Sensitivity exclusion**: the engine dropping chunks marked sensitive from
@@ -295,10 +294,13 @@ difference, band only>}`. Absent means today's behaviour, byte for byte.
 
 1. Coverage check: route the collection only if it has chunks and its
    coverage is at least 0.9. Coverage comes from
-   `taxonomy_unassigned_chashes_<dim>` and is cached per collection; the
-   cache is refreshed after discovery, after assignment batches, and after
-   any stored batch whose assignment was deferred or lost, and it expires
-   after ten minutes in any case. Below the threshold, with no chunks, or
+   `taxonomy_coverage_counts_<dim>` (`taxonomy-022`): one row of
+   (has_taxonomy, chunks, unassigned) over the collection's live chunks, the
+   same live-chunk filter the plain search applies. It is cached per tenant
+   and collection, and dropped by every store, assignment, topic, centroid or
+   manifest write that reaches the engine's routes (the two catalog
+   background jobs drop the tenant when they end); writers that do not reach
+   those routes rely on a ten-minute ceiling. Below the threshold, with no chunks, or
    with no centroids, the collection is searched unscoped with status
    `no_topics`. A routed collection at coverage 0.9 still hides up to a
    tenth of its chunks from the routed search; that remainder is an accepted
@@ -364,7 +366,7 @@ order (`-13`); the benchmark orders by distance, while callers order by
 | Query vector | Engine query embedder in the search request | Reuse |
 | Centroid ranking | `taxonomy_ann_query_<dim>`, `TaxonomyCentroidRepository.annQuery` | Reuse |
 | Topic-restricted search | `search_topic_scoped_<dim>`, one per dimension (384, 768, 1024; first defined in `catalog-006`, redefined since, latest in `vectors-055`) | Extend: a set of topic ids, three functions |
-| Coverage | `taxonomy_unassigned_chashes_<dim>` (`taxonomy-019`) | Reuse, with a per-collection cache |
+| Coverage | `taxonomy_coverage_counts_<dim>` (`taxonomy-022`; `taxonomy_unassigned_chashes_<dim>` pages chashes capped at 1000 with no count) | New, three functions, with a per-collection cache |
 | Multi-collection request and merge | `/v1/vectors/search-per-collection` | Extend with `topic_route` |
 | Capability flag | `GET /version`, `supports_chash_allow` pattern | Reuse the pattern |
 | Benchmark leg | `scripts/bench/taxonomy_ab.py`, `taxonomy_ab2.py` | New (RDR-179 Phase 4.2) |
@@ -452,8 +454,8 @@ collection.
   rather than across collections, and the measured rate: 0 of 33 questions
   got worse, and recall rose. Accepted as a residual risk, watched by Step 9.
 - **Risk**: in a routed collection above 0.9 coverage, unassigned chunks
-  (up to a tenth) are not searched. **Mitigation**: the cache refresh on
-  deferred and lost assignments, `nx taxonomy drain` as the repair, and
+  (up to a tenth) are not searched. **Mitigation**: the cache drop on every
+  store and assignment write, `nx taxonomy drain` as the repair, and
   Step 5a's check of the threshold. Accepted as a residual risk.
 - **Risk**: a filtered search under an approximate index returns fewer rows
   than asked: the centroid ANN filters one shared HNSW index by collection,
@@ -521,7 +523,8 @@ them, and needs its own arm method, since the existing direct call
 #### Step 2: Coverage
 
 A cached per-collection coverage ratio from
-`taxonomy_unassigned_chashes_<dim>`, refreshed as engine step 1 says. Tests:
+`taxonomy_coverage_counts_<dim>` (`taxonomy-022`), dropped as engine step 1
+says. Tests:
 an orphaned taxonomy (topics, no chunks) is never routed; a half-assigned
 collection reads below 0.9; projection rows do not count as assigned; a
 stored batch whose assignment is deferred lowers the cached ratio.
@@ -653,8 +656,8 @@ deferred.
 
 ### Proportionality
 
-Three SQL function variants (one per dimension), a coverage cache over an
-existing function, one request field, one capability flag and its edge
+Six SQL functions (the topic-set search and the coverage count, one of each
+per dimension), a coverage cache over the count, one request field, one capability flag and its edge
 allowlist entry, one setting carried like `chash_allow`, one log event, and
 two benchmark scripts.
 The design reuses the RDR-156 routes rather than adding an index.
@@ -694,3 +697,8 @@ The design reuses the RDR-156 routes rather than adding an index.
   assignments, the runner transport and edge allowlist named, the log event
   given a step, counts and citations corrected.
 - 2026-11-16: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); blob `48d312ee05a5`; critique `nexus_rdr/134-gate-critique-2026-11-16-r2`.
+- 2026-11-16: Step 2 as built (nexus-7fku2.1.2, reviewed): coverage comes
+  from new count functions `taxonomy_coverage_counts_<dim>` (`taxonomy-022`)
+  over live chunks, because `taxonomy_unassigned_chashes_<dim>` returns
+  capped pages with no count; the cache is dropped by every engine write
+  route that changes a count input, with a ten-minute ceiling for the rest.
