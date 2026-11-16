@@ -76,8 +76,9 @@ _ALLOWED: dict[str, tuple[str, int]] = {
     ),
     "src/nexus/commands/catalog_cmds/backfill.py": (
         "`nx catalog backfill` finds and repairs stored chroma:// rows under file-routed collections by "
-        "prefix; it builds a pattern to FIND residue, never an identity to store",
-        6,
+        "prefix; it builds a pattern to FIND residue, never an identity to store (the seventh line is the "
+        "client-side case check on the engine's prefix read, nexus-uwggq.1.3)",
+        7,
     ),
     "src/nexus/commands/enrich.py": (
         "`nx enrich list --scheme chroma` recognises the retired scheme name to print a hint to use nx-note "
