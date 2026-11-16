@@ -177,6 +177,9 @@ class CatalogReader(Protocol):
     def list_owners(self) -> object:  # canonical
         ...
 
+    def list_scoped(self, *, owner=..., content_types=..., source_uri_prefix=...) -> object:  # service-only (RDR-193 A4)
+        ...
+
     def lookup_doc_id_by_collection_and_path(self, collection, source_path) -> object:  # canonical DIVERGENT
         ...
 

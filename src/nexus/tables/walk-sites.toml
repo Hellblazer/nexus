@@ -46,8 +46,6 @@ domain = [
   "catalog/sensitivity_doctor.py::_walk_sensitive",
   "commands/catalog.py::list_cmd",
   "commands/catalog.py::reconcile_cmd",
-  "commands/catalog_cmds/backfill.py::backfill_source_uri_cmd",
-  "commands/catalog_cmds/backfill.py::backfill_etags_cmd",
   "commands/catalog_cmds/doctor.py::_run_store_put_integrity",
   "commands/catalog_cmds/integrity.py::_audit_membership_all",
   "commands/catalog_cmds/integrity.py::_verify_full",
@@ -99,16 +97,6 @@ emit = { class = "AGGREGATE", calls = 1, reason = "The --meta and --sensitive mo
 id = "commands/catalog.py::reconcile_cmd"
 match = { site = "commands/catalog.py::reconcile_cmd" }
 emit = { class = "BULK JOB", calls = 1, reason = "Heals manifest gaps for every document; stays." }
-
-[[row]]
-id = "commands/catalog_cmds/backfill.py::backfill_source_uri_cmd"
-match = { site = "commands/catalog_cmds/backfill.py::backfill_source_uri_cmd" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Wants only the chroma:// rows; Phase 1 reads them with list_scoped(source_uri_prefix=\"chroma://\").", next = "nexus-uwggq.1.3" }
-
-[[row]]
-id = "commands/catalog_cmds/backfill.py::backfill_etags_cmd"
-match = { site = "commands/catalog_cmds/backfill.py::backfill_etags_cmd" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Wants only the https:// rows when no owner is given; Phase 1 reads them with list_scoped(source_uri_prefix=\"https://\").", next = "nexus-uwggq.1.3" }
 
 [[row]]
 id = "commands/catalog_cmds/doctor.py::_run_store_put_integrity"
