@@ -2,12 +2,12 @@
 title: "Data Moves Run as Batched, Resumable Background Jobs, Never at Engine Boot"
 id: RDR-246
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: linda (session), for Sam
 reviewed-by: pending (code-review-expert and substantive-critic at the gate)
 created: 2026-11-10
-accepted_date:
+accepted_date: 2026-11-16
 related_issues: [nexus-f3yqd, nexus-f3yqd.1, nexus-f3yqd.2, nexus-f3yqd.3]
 ---
 
@@ -979,3 +979,4 @@ the first registered move.
 - 2026-11-16: round 3 revision on Sam's choice (ask rdr246-accept, "Revise, gate round 3"): the eight fix-check residuals (nexus_rdr/246-fix-check-ee87998f1575) and the six round 2 Significant findings (nexus_rdr/246-gate-critique-2026-11-16-r2), addressed in the Technical Design, Risks, Failure Modes, Steps 3b, 3c and 4, the Minimum Viable Validation and the Test Plan.
 - 2026-11-16: before round 3, the fixes for the nine defects the third fix check counted (T2 nexus_rdr/246-fix-check-9ebbce21154d): a tenant bind parameter for the verification query, the admin visibility check in pass step 1, the gate's three rules and their exemptions, `on_complete` atomic with `completed_at`, failure classes by SQLSTATE and by whether dml_utils recorded the error, a per-environment `sleep_ms` override, a CHECK on `label`, vectors-029's guard on the owner-read policy, and SET ROLE NONE; plus nexus.chunks' four-column key (a third dml_utils change) and the observations.
 - 2026-11-16: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `17045500b1f0`; critique `nexus_rdr/246-gate-critique-2026-11-16-r3`.
+- 2026-11-16: accepted by Sam ("Accept, residuals to beads"; dml_utils with its pg_background launcher kept). Residual dispositions: round 3's five to beads nexus-f3yqd.2.1 (the BLOCKS-PLANNING one, chosen by Sam), nexus-f3yqd.2.2, nexus-f3yqd.2.3, nexus-f3yqd.2.4 and nexus-f3yqd.2.5; the eight carried from round 2 to commit e39d4fb28 (fix check `nexus_rdr/246-fix-check-9ebbce21154d`).
