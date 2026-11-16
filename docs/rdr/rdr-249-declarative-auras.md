@@ -166,12 +166,16 @@ checks for this draft, 2026-11-12, in the worktree at origin/develop.
 
 ### Critical Assumptions
 
-- **Assumed:** running a procedure per matching arrival costs a worker start
-  (a `python -I` process), on the order of a few hundred milliseconds, which
-  is acceptable for posts that arrive minutes apart. Worker start measured
-  at gate round 1: 318 ms first, 47-57 ms warm (T2
-  `nexus_rdr/249-gate-critique-2026-11-15-r1`). A whole fire is measured in
-  Phase 3 on the CI consumer.
+- **Verified (Phase 3, 2026-11-15):** running a procedure per matching
+  arrival costs a worker start (a `python -I` process), which is acceptable
+  for posts that arrive minutes apart. Worker start measured at gate round
+  1: 318 ms first, 47-57 ms warm (T2
+  `nexus_rdr/249-gate-critique-2026-11-15-r1`). A whole fire of the shipped
+  `ci_develop_red`, from the row reaching the aura to the threads entry
+  written on a self-provisioned engine (the run path's repository probe,
+  the worker and the T2 read and write included), measured over 5 fires on
+  chas (lab-m): 66 ms first, then 49-50 ms, median 49 ms (bead
+  nexus-mdbds.12.1).
 - **Decided (Sam, 2026-11-13):** each enabled session shows its own block.
   Several sessions subscribed to the same topic each run the aura and each
   write their own threads block; there is no lock tuple limiting an aura to
