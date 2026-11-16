@@ -9,7 +9,7 @@ run-canaries.sh also work-dirs-before.txt and work-dirs-after.txt. A run's kind 
 without a trailing -N. Exit 1 when any run fails; exit 3 when none failed but a run was
 NOT-MEASURABLE or VACUOUS (it proves nothing, so it is never a pass) or a scenario was NOT-RUN (a runner skipped it on
 purpose and wrote "NAME: reason" to not-run.txt, as run-scenario.sh does for a path run with no MarkupEditor harness;
-it has no transcript); 0 only when every run passed.
+it has no transcript) or a stand-in batch would exit 0; 0 only when every run passed in the app.
 
 The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range, compression) are scored on
 the post-filter proposal: the last `brief.py filter` output in the transcript, which is what the author sees.

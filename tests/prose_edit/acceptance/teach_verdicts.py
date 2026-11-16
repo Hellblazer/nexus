@@ -22,7 +22,7 @@ OUT_DIR holds what run-teach.sh writes:
 
 Each verdict reads what the skill's own scripts printed, as the author would have seen it. Exit 1 on a FAIL, 3
 when none failed but a run is missing or NOT-MEASURABLE (it proves nothing, so it is never a pass), 0 when every
-check passed. A run against the stand-in MarkupEditor server (a NAME.app file that says `standin`) prints `app: STAND-IN`
+check passed (a stand-in batch that would exit 0 exits 3). A run against the stand-in MarkupEditor server (a NAME.app file that says `standin`) prints `app: STAND-IN`
 first and tags each PASS row `PASS (stand-in)`: a harness measurement, not a run in the app.
 
   decided    the decisions came from the app: in t2, a list_suggestions call, then `review.py decisions --from-file`,
@@ -278,14 +278,17 @@ def check_decided(t2: list[Obj] | None, t2c: list[Obj] | None, t1: list[Obj] | N
     When t1 rendered a query or a paragraph proposal, SKILL.md step 11 Branch A asks question 1 and ends the answer turn
     before any apply, which is right; when that deferred flow (t2 reads the app, t2c dry-runs and applies) holds, the row is
     NOT-MEASURABLE rather than a FAIL of a correct skill, and when it is broken the row is a FAIL."""
-    ok, note = RV.app_flow(t2 or [], applied=True)
-    if ok:
-        return PASS, f"t2 read list_suggestions, then decisions --from-file, then dry-ran and applied in the same turn ({note})"
     counts = (RV.last(t1 or [], "review", "render") or {}).get("counts") or {}
     if counts.get("queries") or counts.get("paragraphs"):
-        # question 1 comes first (step 11 Branch A): the right flow reads the app in t2 and applies in t2c. A skill that
-        # never read the app, or never applied after the question, is a broken flow, not an unmeasured one.
-        deferred_ok, deferred_note = RV.deferred_flow(t2 or [], t2c or [])
+        # question 1 comes first (step 11 Branch A), checked before the same-turn PASS so an apply ahead of question 1
+        # fails: the right flow reads the app in t2 and applies in t2c. A skill that never read the app, applied early,
+        # or never applied after the question, is a broken flow; a run with no t2c turn was not measured.
+        if t2c is None:
+            read_ok, read_note = RV.deferred_read(t2 or [])
+            if not read_ok:
+                return FAIL, f"t1 held a query or a paragraph proposal and t2's flow is broken (read {read_note})"
+            return NOT_MEASURABLE, f"t1 held a query or a paragraph proposal, t2 read the app ({read_note}), and no t2c turn ran"
+        deferred_ok, deferred_note = RV.deferred_flow(t2 or [], t2c)
         if not deferred_ok:
             return FAIL, (f"t1 rendered {counts.get('queries', 0)} queries and {counts.get('paragraphs', 0)} paragraph "
                           f"proposals, so t2 should read the app and ask question 1 and t2c apply, and the flow is broken "
@@ -293,6 +296,9 @@ def check_decided(t2: list[Obj] | None, t2c: list[Obj] | None, t1: list[Obj] | N
         return NOT_MEASURABLE, (f"t1 rendered {counts.get('queries', 0)} queries and {counts.get('paragraphs', 0)} paragraph "
                                 f"proposals, so the answer turn asks question 1 before applying (step 11 Branch A) "
                                 f"and the same-turn apply is not exercised ({deferred_note})")
+    ok, note = RV.app_flow(t2 or [], applied=True)
+    if ok:
+        return PASS, f"t2 read list_suggestions, then decisions --from-file, then dry-ran and applied in the same turn ({note})"
     if _has_real_apply(t2c) and not _has_real_apply(t2):
         return FAIL, ("the run was App-decided (accept 1, reject the rest, in the app) but t2 only asked: a confirmation "
                       f"turn applied ({note})")

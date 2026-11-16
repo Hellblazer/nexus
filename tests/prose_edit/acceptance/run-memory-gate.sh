@@ -66,7 +66,8 @@ if [ "${PROSE_EDIT_APP_RUNNER:-0}" = 1 ]; then
     exit 1
   fi
 fi
-mkdir -p "$OUT"
+mkdir -p "$OUT" || exit 1
+OUT="$(cd "$OUT" && pwd)"   # absolute before the cd "$WT" below, as run-cut.sh does
 runner_standin_reset "$OUT"
 cd "$WT" || exit 1
 [ -f "$SOURCE" ] || { echo "no such source: $SOURCE" >&2; exit 1; }

@@ -42,7 +42,8 @@ harness measurement, not a run of the preregistered gate, and tags the pooled PA
 
 Exit 0 when the pooled rate is at most the threshold, 1 when it is above it, 2 on a usage error or when nothing
 was measurable (no measurable run, or no stored rejection), 3 when the rate passes but a document has fewer
-measurable runs than --min-measurable (default 0: not checked; the decision asks for 10).
+measurable runs than --min-measurable (default 0: not checked; the decision asks for 10), or when a stand-in batch
+would exit 0.
 """
 from __future__ import annotations
 

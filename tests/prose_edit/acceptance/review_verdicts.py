@@ -43,7 +43,8 @@ is.
 run-review.sh records the groups it was asked to run (SCENARIOS, default a b c) in OUT_DIR/scenarios.txt. A group
 that is not listed there and left no transcript is NOT-RUN, never FAIL; a listed group with no transcript, or a
 directory with no scenarios.txt, keeps failing, and a group that ran is scored whether or not it was listed. Exit 0
-when every row is PASS, 3 when every row is PASS or NOT-RUN (part of the matrix was not asked for), 1 otherwise.
+when every row is PASS, 3 when every row is PASS or NOT-RUN (part of the matrix was not asked for) or when a
+stand-in batch would exit 0, 1 otherwise.
 """
 from __future__ import annotations
 
@@ -207,13 +208,22 @@ def deferred_flow(answer: list[Obj], confirm: list[Obj]) -> tuple[bool, str]:
     """The flow of a run whose first turn held a query or a paragraph proposal: SKILL.md step 11 Branch A asks question 1
     and ends the answer turn after reading the app, so the answer turn has list_suggestions then `decisions --from-file`,
     and the confirmation turn has the dry run then the real apply."""
-    read_ok, read_note = _ordered(answer, [("list_suggestions", _app_index(answer, "list_suggestions")),
-                                           ("decisions --from-file", _bash_index(answer, "review", "decisions", has="--from-file"))])
+    read_ok, read_note = deferred_read(answer)
     apply_ok, apply_note = _ordered(confirm, [("apply --dry-run", _bash_index(confirm, "review", "apply", has="--dry-run")),
                                               ("apply", _bash_index(confirm, "review", "apply", lacks="--dry-run"))])
     early = real_apply(answer) is not None
     ok = read_ok and apply_ok and not early
     return ok, f"flow=deferred(read {read_note}; confirm {apply_note}{'; applied before question 1' if early else ''})"
+
+
+def deferred_read(answer: list[Obj]) -> tuple[bool, str]:
+    """The answer-turn half of :func:`deferred_flow`: list_suggestions, then `decisions --from-file`, and no real apply
+    before question 1."""
+    ok, note = _ordered(answer, [("list_suggestions", _app_index(answer, "list_suggestions")),
+                                 ("decisions --from-file", _bash_index(answer, "review", "decisions", has="--from-file"))])
+    if real_apply(answer) is not None:
+        return False, f"{note}; applied before question 1"
+    return ok, note
 
 
 def held_question(render: Obj | None) -> bool:

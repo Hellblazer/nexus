@@ -423,7 +423,8 @@ def test_with_a_query_the_gate_scores_a_run_that_reads_the_app_then_applies_in_t
 def test_with_a_query_the_gate_errors_a_run_that_applied_before_question_1(tmp_path: Path) -> None:
     gate = _gate()
     early = _read_turn("g1") + _script("review", "apply", "e", REAL_G, "--work /w --reject all")
-    confirm = _script("review", "apply", "cy", {"dry_run": True}, "--work /w --reject all --dry-run")
+    confirm = (_script("review", "apply", "cy", {"dry_run": True}, "--work /w --reject all --dry-run")
+               + _script("review", "apply", "cp", REAL_G, "--work /w --reject all"))   # a whole confirmation: only `early` can fail it
     _write_runs(tmp_path, _gate_query_run(early, confirm))
     _, pooled = gate.summarize(gate.collect(tmp_path))
     assert pooled["measurable"] == 0 and pooled["errors"] == 1
@@ -558,8 +559,19 @@ def test_teach_decided_fails_a_broken_flow_even_when_t1_held_a_query(counts: dic
     t1 = _script("review", "render", "r1", {"counts": counts})
     got, note = tt.T.check_decided([], None, t1)              # t2 never read the app: a broken flow, not an unmeasured one
     assert got == "FAIL" and "list_suggestions" in note, note
-    got, note = tt.T.check_decided(_read_turn("t2"), None, t1)  # read the app, but no confirmation turn ever applied
+    got, note = tt.T.check_decided(_read_turn("t2"), None, t1)  # read the app, and no confirmation turn ran: unmeasured
+    assert got == "NOT-MEASURABLE", note
+    got, note = tt.T.check_decided(_read_turn("t2"), [], t1)    # a confirmation turn ran and never applied
     assert got == "FAIL", note
+
+
+@pytest.mark.parametrize("counts", [{"edits": 2, "queries": 1}, {"edits": 2, "paragraphs": 1}])
+@pytest.mark.parametrize("with_t2c", [True, False], ids=["t2c", "no-t2c"])
+def test_teach_decided_fails_an_apply_before_question_1(counts: dict, with_t2c: bool) -> None:
+    t1 = _script("review", "render", "r1", {"counts": counts})
+    same_turn = _app_turn("t2", {}, {"applied": [{"n": 1}], "rejected": [2], "held": [], "rejections_stored": True})
+    got, note = tt.T.check_decided(same_turn, [] if with_t2c else None, t1)
+    assert got == "FAIL" and "before question 1" in note, note
 
 
 # ---------------------------------------------------------------------------

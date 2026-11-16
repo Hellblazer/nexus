@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Sourced by run-review.sh, run-teach.sh and run-memory-gate.sh (not run on its own). WT must be set first.
+# Sourced by run-review.sh, run-teach.sh, run-memory-gate.sh, run-scenario.sh, run-cut.sh and run-canaries.sh
+# (not run on its own). WT must be set first.
 #
 # Why it exists (nexus-ger02.7, the exit batch of 2026-10-03): the three runners each copy the scenario document
 # into docs/ in the shared worktree and the editor Greps the genre's paths. Run at the same time, each runner's

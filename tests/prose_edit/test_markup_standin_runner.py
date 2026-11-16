@@ -365,3 +365,13 @@ def test_the_readme_states_what_the_standin_does_not_reproduce_and_what_it_imita
     assert "no-op" in text and "code block" in text                          # the recorded refusals are listed as recorded
     assert "read-only against T2" not in text
     assert "`run-cut.sh`, `run-canaries.sh` and a direct `run-scenario.sh` call do not" in text   # not every runner resets the state
+
+
+@pytest.mark.parametrize("runner", ["run-review.sh", "run-teach.sh", "run-memory-gate.sh"])
+def test_a_runner_makes_out_absolute_before_it_moves_into_the_checkout(runner: str) -> None:
+    # A relative OUT_DIR resolved after `cd "$WT"` splits the stand-in reset from the transcripts (review r1, nexus-scmcs.3)
+    lines = (ACC / runner).read_text(encoding="utf-8").splitlines()
+    absolute = lines.index('OUT="$(cd "$OUT" && pwd)"   # absolute before the cd "$WT" below, as run-cut.sh does')
+    reset = next(i for i, line in enumerate(lines) if line.startswith("runner_standin_reset"))
+    cd_wt = next(i for i, line in enumerate(lines) if line.strip() == 'cd "$WT" || exit 1')
+    assert absolute < reset and absolute < cd_wt, runner
