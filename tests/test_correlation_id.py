@@ -16,8 +16,10 @@ import logging
 import re
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
 from importlib.metadata import version
 from types import SimpleNamespace
+from typing import Any
 
 import anyio
 import click
@@ -36,14 +38,14 @@ _HEX32 = re.compile(r"correlation_id='([0-9a-f]{32})'")
 
 
 @pytest.fixture(autouse=True)
-def _restore_structlog_after_test():
+def _restore_structlog_after_test() -> Iterator[None]:
     saved = structlog.get_config()
     yield
     structlog.configure(**saved)
 
 
 @pytest.fixture
-def rendered() -> io.StringIO:
+def rendered() -> Iterator[io.StringIO]:
     """The real configured chain's output: configure_logging, then a stream on the root logger."""
     configure_logging("cli", verbose=True)
     stream = io.StringIO()
@@ -94,25 +96,35 @@ def test_each_cli_invocation_gets_its_own_id() -> None:
     assert seen[0] != seen[1]
 
 
-def _install_logged():
+def _install_logged() -> Callable[..., Any]:
     server = SimpleNamespace(middleware=[])
     assert _tool_call_log.install_tool_call_log(server) == "applied"
     return next(m for m in server.middleware if getattr(m, "_nx_tool_call_log", False))
 
 
-def test_concurrent_tool_calls_get_different_ids_and_leave_nothing_bound() -> None:
+def _call_ctx() -> SimpleNamespace:
+    return SimpleNamespace(method="tools/call", params={"name": "t", "arguments": {}})
+
+
+# anyio.run and task groups run in a COPY of the caller's Context, so a check after anyio.run returns would
+# pass even with the reset removed. Every "nothing stays bound" check below runs inside the same task, right
+# after the call returns or raises.
+
+
+def test_concurrent_tool_calls_get_different_ids_and_each_resets_its_own() -> None:
     entry = _install_logged()
     recorded: list[str | None] = []
+    after: list[str | None] = []
 
-    async def _next(_ctx):
+    async def _next(_ctx: Any) -> dict[str, Any]:
         await anyio.sleep(0.01)  # let the sibling call bind before this one reads
         recorded.append(correlation.current_correlation_id())
         return {"content": [], "isError": False}
 
     async def _run() -> None:
         async def _one() -> None:
-            ctx = SimpleNamespace(method="tools/call", params={"name": "t", "arguments": {}})
-            await entry(ctx, _next)
+            await entry(_call_ctx(), _next)
+            after.append(correlation.current_correlation_id())
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(_one)
@@ -123,31 +135,76 @@ def test_concurrent_tool_calls_get_different_ids_and_leave_nothing_bound() -> No
     assert len(recorded) == 2
     assert all(r is not None and re.fullmatch(r"[0-9a-f]{32}", r) for r in recorded)
     assert recorded[0] != recorded[1]
-    assert correlation.current_correlation_id() is None
+    assert after == [None, None]
 
 
 def test_a_failing_tool_call_still_resets_the_id() -> None:
     entry = _install_logged()
+    outcome: list[str | None] = []
 
-    async def _boom(_ctx):
+    async def _boom(_ctx: Any) -> None:
         raise RuntimeError("tool failed")
 
-    ctx = SimpleNamespace(method="tools/call", params={"name": "t", "arguments": {}})
-    with pytest.raises(RuntimeError):
-        anyio.run(entry, ctx, _boom)
-    assert correlation.current_correlation_id() is None
+    async def _run() -> None:
+        try:
+            await entry(_call_ctx(), _boom)
+        except RuntimeError:
+            outcome.append(correlation.current_correlation_id())
+        else:
+            raise AssertionError("the tool failure was swallowed")
+
+    anyio.run(_run)
+    assert outcome == [None]
 
 
 def test_other_methods_stay_unbound() -> None:
     entry = _install_logged()
     recorded: list[str | None] = []
 
-    async def _next(_ctx):
+    async def _next(_ctx: Any) -> dict[str, Any]:
         recorded.append(correlation.current_correlation_id())
         return {}
 
     anyio.run(entry, SimpleNamespace(method="tools/list", params={}), _next)
     assert recorded == [None]
+
+
+def test_the_mcp_tool_call_line_carries_the_bound_id(
+    rendered: io.StringIO, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The real ``_emit`` line, inside a bound tools/call, through the real configured chain."""
+    # Importing the app sets a WARNING level on the nexus logger tree; the line is INFO.
+    caplog.set_level(logging.DEBUG, logger=_tool_call_log.__name__)
+    entry = _install_logged()
+    _tool_call_log._reset_state()  # the line is INFO the first time a key-set is seen
+    seen: list[str | None] = []
+
+    async def _next(_ctx: Any) -> dict[str, Any]:
+        seen.append(correlation.current_correlation_id())
+        return {"content": [], "isError": False}
+
+    try:
+        anyio.run(entry, _call_ctx(), _next)
+    finally:
+        _tool_call_log._reset_state()
+
+    lines = [ln for ln in rendered.getvalue().splitlines() if "mcp_tool_call" in ln]
+    assert lines, rendered.getvalue()
+    match = _HEX32.search(lines[0])
+    assert match is not None, lines[0]
+    assert seen == [match.group(1)]
+
+
+def test_the_processor_chain_has_one_store_and_no_structlog_contextvars() -> None:
+    configure_logging("cli", verbose=False)
+    processors = structlog.get_config()["processors"]
+    assert correlation.add_correlation_id in processors
+    assert processors[0] is correlation.add_correlation_id
+    merging = [
+        p for p in processors if getattr(p, "__module__", "").startswith("structlog.contextvars")
+        or "contextvars" in getattr(p, "__name__", "")
+    ]
+    assert merging == []
 
 
 def test_unbound_log_line_has_no_correlation_id_and_headers_are_unchanged(rendered: io.StringIO) -> None:
@@ -207,9 +264,3 @@ def test_importing_the_module_does_not_import_nexus_db() -> None:
     )
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
-
-
-def test_the_conftest_reset_fixture_is_autouse(request: pytest.FixtureRequest) -> None:
-    """No test sees an id another test bound: the conftest fixture runs for every test."""
-    assert "_correlation_id_reset" in request.fixturenames
-    assert correlation.current_correlation_id() is None

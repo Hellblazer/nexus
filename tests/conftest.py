@@ -2933,17 +2933,19 @@ def _restore_cwd():
 
 @pytest.fixture(autouse=True)
 def _correlation_id_reset():
-    """nexus-dngtz.1.1 (RDR-167): no test sees a correlation id another test bound. The CLI group callback and
-    the MCP tool-call middleware bind one and reset it by token; a test that binds directly, or one that dies
-    between bind and reset, must not leak it to the next test in the worker."""
+    """nexus-dngtz.1.1 (RDR-167): no test sees a correlation id another test bound, and none leaves one bound.
+    The CLI group callback and the MCP tool-call middleware bind one and reset it by token; a test that exits
+    with an id still bound in its own context fails here, so a missing reset is a red test and not a leak into
+    the next test in the worker. The var is then put back by token."""
     from nexus import correlation  # noqa: PLC0415 - deferred: keeps conftest import light
 
     token = correlation._CORRELATION_ID.set(None)
-    yield
     try:
+        yield
+        leaked = correlation.current_correlation_id()
+        assert leaked is None, f"the test left correlation id {leaked!r} bound: a bind without its reset"
+    finally:
         correlation._CORRELATION_ID.reset(token)
-    except ValueError:  # the test ran in another Context (an event loop thread); clear instead
-        correlation._CORRELATION_ID.set(None)
 
 
 @pytest.fixture(autouse=True)
