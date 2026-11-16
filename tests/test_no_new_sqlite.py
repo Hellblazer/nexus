@@ -286,6 +286,9 @@ def _vendored_manifest_files() -> set[pathlib.Path]:
         for line in manifest.read_text().splitlines():
             m = re.match(r"^[0-9a-f]{40} (.+)$", line)
             if m:
+                entry = (manifest.parent / m.group(1)).resolve()
+                # An absolute or escaping manifest path must never exempt a file outside the vendor tree.
+                assert manifest.parent.resolve() in entry.parents, f"{manifest}: {m.group(1)!r} leaves its library"
                 listed.add(manifest.parent / m.group(1))
     return listed
 
