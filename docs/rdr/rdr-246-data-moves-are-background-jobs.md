@@ -124,10 +124,13 @@ file:line for each site). **Verified** (source read):
   it has not yet run, in one boot.
 - The PCI reconciler is not a row move. It builds an HNSW index per large
   collection, in the background after the engine serves, one `CREATE INDEX
-  CONCURRENTLY` at a time (`PciReconciler.java:453`, `PciBuilderSession.java:103`).
-  Its cost still grows with chunk volume. Every boot ends any build in flight
-  (`SchemaMigrator.terminatePciBuilders`, `SchemaMigrator.java:587`), and the
-  reconciler then rebuilds that index from scratch. Its first pass also
+  CONCURRENTLY` at a time (`PciReconciler`, `PciBuilderSession`).
+  Its cost still grows with chunk volume. When this RDR was drafted, every boot
+  ended any build in flight. Since ed34ea26e (2026-11-09) a boot ends builders
+  only when the walk has a schema changeset to run (`SchemaMigrator.migrate`,
+  the `terminatePciBuilders` call with reason `schema_changesets_pending`,
+  around line 568), so an upgrade boot with pending changesets still ends a
+  build in flight and the reconciler rebuilds that index from scratch. Its first pass also
   re-counts every index, because its readings live in memory only.
 - 8.0.0 paired with engine v0.1.184, and the changelogs added in
   v0.1.175..v0.1.184 do no full-table move. So the 8.0.0 boot rewrite was
@@ -146,8 +149,11 @@ What this means for the design:
 
 - Shipped changesets are not converted here. Liquibase checksums every
   changeset, and an install that already ran one fails validation if its text
-  changes unless the changeset lists the old checksum in `validCheckSum`, which
-  this repo already does (grants-nexus-svc.xml lines 305-320). Converting a
+  changes unless the changeset lists the old checksum in `validCheckSum`, a
+  standard Liquibase attribute. This repo uses it once, on a runAlways
+  changeset whose stored checksum the boot does not check
+  (grants-nexus-svc.xml lines 305-320, "insurance, not the fix"), so there is
+  no in-repo precedent for editing a one-time changeset. Converting a
   shipped move would need that edit, a registration of the move, and tests
   that the result is the same from every install state it could start in. That
   is a scope decision, not an impossibility: the rule governs new changesets.
@@ -247,6 +253,11 @@ ranges:
   role's name is fixed by the library (its default-privilege changeset names
   `dml_utils_owner`). Applied with psql in Liquibase order, not through
   Liquibase — **Method**: Spike
+- [ ] dml_utils, once it takes a four-column primary key, drives
+  nexus.chunks itself: four key columns, and two levels of list partitioning
+  (embedding model, then tenant, vectors-030 lines 530 and 675) — **Status**:
+  Unverified; the spikes used a three-column, one-level stand-in —
+  **Method**: Spike with the four-column change (bead nexus-f3yqd.2.21)
 - [ ] Liquibase applies the vendored ddl_utils and dml_utils changelogs as
   `nexus_admin` with the session role `dml_utils_owner` — **Status**:
   Unverified; 246-research-5 applied the same files with psql in Liquibase's
@@ -312,8 +323,10 @@ and installed on the cloud host, and bytea keys added to dml_utils upstream.
 4. Code that reads the moved data copes with a move in progress (it reads
    both shapes, or the feature waits for the move's completion row). A
    changeset that needs the move finished first carries a precondition on
-   the move's completion (Technical Design, Finishing a move), and the gate
-   refuses one without it.
+   the move's completion (Technical Design, Finishing a move). The gate
+   refuses, by table name, a destructive statement on a moved table without
+   that precondition; a dependency it cannot see by name (a new unique index
+   on the new column, a view) is the review's to catch.
 5. From the release that registers a move, every writer produces only the
    new shape. dml_utils fixes a run's chunk boundaries when the run starts
    (README lines 108-110: a row inserted later with a key above the captured
@@ -549,12 +562,29 @@ is set. A move whose readers cannot cope is redesigned, not run at boot.
 
 **Finishing a move.** A move's finishing step (VALIDATE CONSTRAINT on a check
 added NOT VALID, dropping the old column, swapping a table in) is its
-`on_complete` SQL when the move's own release knows it. A step that comes in a
-later release is a changeset that carries a Liquibase precondition on
-`nexus.data_moves.completed_at` for that label with `onFail="CONTINUE"`, so it
-is skipped and retried on each boot until the move completes; a VALIDATE
-CONSTRAINT never goes in such a changeset (gate rule 2). The gate (below)
-refuses a dependent changeset without the precondition. On a fresh install a
+`on_complete` SQL when the move's own release knows it. On the chunk-family
+tables (`nexus.chunks`, its leaves, and every table with a foreign key into
+it: `catalog_document_chunks`, `topic_assignments`, `chunk_orphaned_at`) that
+is the only way to finish: a later-release changeset that waits with
+`onFail="CONTINUE"` is refused there by
+`tests/test_changelog_continue_precondition_chunks_lint.py`, because
+`SchemaMigrator` does not count a self-retrying changeset as schema work
+(`RetryingChangesets.isSelfRetrying`) and keeps the index builders running
+through it, and a DROP or ALTER on those tables takes ACCESS EXCLUSIVE, which
+would queue behind a `CREATE INDEX CONCURRENTLY`. A later finishing step on a
+chunk-family table is therefore a new move whose `on_complete` does it. The
+move worker runs `on_complete` on a chunk-family table the way the migrator
+runs schema work: it first ends the per-collection index builders on that
+table (`SchemaMigrator.terminatePciBuilders`' query, reason
+`data_move_on_complete`), then runs `on_complete` with `SET LOCAL
+lock_timeout` below `statement_timeout_ms`, so a lock it cannot get fails
+fast as a transient `blocked:` and readers never queue behind it. On any other
+table, a step that comes in a later release may be a changeset that carries a
+Liquibase precondition on `nexus.data_moves.completed_at` for that label with
+`onFail="CONTINUE"`, so it is skipped and retried on each boot until the move
+completes; a VALIDATE CONSTRAINT never goes in such a changeset on a gate
+rule 2 table. The gate (below) refuses a dependent destructive changeset
+without the precondition. On a fresh install a
 gated changeset applies at the first boot after the move completes, not the
 first boot. If the move it waits for is superseded, the changeset that
 registers the replacement also re-points the waiting step: it is re-issued
@@ -593,11 +623,15 @@ engine test that reads every changelog. It has three rules.
    `nexus.catalog_links` and `nexus.topic_assignments`,
    listed in the test. An ADD CONSTRAINT ... NOT VALID passes.
 3. *Waiting for a move.* A changeset that runs a destructive statement (DROP
-   COLUMN, DROP TABLE, a rename) or a rule-2 statement on a table some
-   registered move drives must carry a precondition on that move's
-   `completed_at` with `onFail="CONTINUE"` (Finishing a move). The
-   registering changeset itself is exempt: it creates the new shape and adds
-   any NOT VALID constraint before the move exists. The test matches by table
+   COLUMN, DROP TABLE, a rename) on a table some registered move drives must
+   carry a precondition on that move's `completed_at` with
+   `onFail="CONTINUE"` (Finishing a move); on a chunk-family table it is
+   refused outright, by the CONTINUE-precondition lint, and the step belongs
+   in a move's `on_complete`. Rule 2's statements stay refused on its tables
+   with or without a precondition. The registering changeset is exempt from
+   this rule only for what it adds: the new shape (new tables and nullable
+   columns) and NOT VALID constraints; a destructive statement in it is
+   refused like any other. The test matches by table
    name, so it cannot see which move a changeset depends on; the review checks
    that the precondition names the right label.
 
@@ -725,7 +759,8 @@ launcher that upstream does not test.
 
 - [ ] All Critical Assumptions verified
 - [x] bytea keys merged in Hellblazer/dml_utils (PR #1, a6cd544, 2026-11-10). Sam ruled 2026-11-16 to pin merged commits rather than wait for releases; he may tag releases later. ddl_utils is pinned at 5f088e2
-- [ ] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR); nexus pins the dml_utils commit that carries it, since a6cd544 has bytea keys but no procedure
+- [ ] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR, Hellblazer/dml_utils#2); nexus pins the dml_utils commit that carries it, since a6cd544 has bytea keys but no procedure
+- [ ] a four-column primary key supported in Hellblazer/dml_utils (Step 1's third change) before any move over nexus.chunks, the Minimum Viable Validation's move included; nexus re-pins to the commit that carries it
 - [x] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins (engine-service-v0.1.194's bundles carry pg_background 2.0)
 - [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup (Step 4)
 - [ ] the superuser bootstrap creates pg_background, the three library roles and their grants: `nexus.db.pg_provision` locally (Step 4) and the db-host configuration in the cloud (Activation Step 1)
@@ -745,7 +780,7 @@ numbers).
 
 ### Phase 1: Code Implementation
 
-#### Step 1: bytea keys and a committing entry point in dml_utils
+#### Step 1: bytea keys, a committing entry point and four-column keys in dml_utils
 
 A reviewed PR to Hellblazer/dml_utils covering a single bytea key and a
 composite (text, text, bytea) key. Literals do not depend on bytea_output or
@@ -759,7 +794,8 @@ refused when its run is created. The second is a restructured coordinator, not a
 function's loop sits inside a block with an EXCEPTION handler, where
 PL/pgSQL refuses a COMMIT. The PR comes with a test
 that a mid-run VACUUM finds no dead row held back by the coordinator (Sam's
-choice, 2026-11-16). Nexus pins the dml_utils commit that carries it, and
+choice, 2026-11-16). Nexus pins the dml_utils commit that carries the
+procedure, then the one that carries the four-column change, and
 ddl_utils at 5f088e2 (Sam, 2026-11-16), until releases are tagged.
 
 #### Step 2: pg_background in the PG bundle
@@ -851,7 +887,7 @@ cloud.
 
 #### Activation Step 2: the first registered move
 
-Step 1's second PR, Steps 3b and 3c, and Step 4 come before this. The first
+Step 1's second PR and four-column change, Steps 3b and 3c, and Step 4 come before this. The first
 move to use this path ships in its own engine cut. That cut's
 upgrade boot is measured by f3yqd.1's gate, and the move's progress is read
 from /v1/status on the live engine.
@@ -892,14 +928,16 @@ from /v1/status on the live engine.
 - **Scenario**: a move with an `on_complete` VALIDATE CONSTRAINT, and a later changeset that drops the old column with the completion precondition. **Verify**: the VALIDATE runs only after verification; the later changeset is skipped at each boot until `completed_at` is set, then applies.
 - **Scenario**: an install provisioned before this change. **Verify**: the storage daemon's grant backfill creates the extension, roles, grants and `liquibase` schema, and the next boot installs the libraries.
 - **Scenario**: the gate over the shipped changelogs. **Verify**: it is green (the frozen list exempts every shipped changeset from every rule), and a new changeset with a validating ADD CONSTRAINT on `nexus.catalog_documents`, or a destructive statement on a registered move's table without the precondition, is red. The template and verification text inside a registering INSERT are not flagged.
+- **Scenario**: a move over a chunk-family table whose `on_complete` drops a column, run while a per-collection index build is in flight on that table. **Verify**: the move worker ends the builder first, `on_complete` takes its lock within `lock_timeout` or reports `blocked:`, and no reader waits behind the move; a later-release CONTINUE changeset doing the same drop is red in the CONTINUE-precondition lint.
 - **Scenario**: a new changeset with an UPDATE on chunks. **Verify**: DataMoveChangesetGateTest is red. Registering the same move through nexus.data_moves is green.
 - **Scenario**: an upgrade boot on a copy of a live-like store, measured by f3yqd.1's write gate. **Verify**: no row-move writes occur during the boot.
 
 ## Finalization Gate
 
-Phase 1 Steps 1 to 3 have reported, with one open item: the bytea change is
-merged in dml_utils and Sam chose to pin merged commits, and the committing
-procedure entry point (Step 1's second PR) is in progress. pg_background
+Phase 1 Steps 1 to 3 have reported, with two open items: the bytea change is
+merged in dml_utils and Sam chose to pin merged commits; the committing
+procedure entry point (Step 1's second PR, Hellblazer/dml_utils#2) is open,
+and the four-column-key change is not started. pg_background
 2.0 is in engine-service-v0.1.194's released bundles, and the spikes are in T2
 nexus_rdr/246-research-1 to -5. Gate round 2 passed with eight fix-check
 residuals and six Significant findings; Sam chose on 2026-11-16 to revise for
@@ -925,7 +963,7 @@ tenant on `nexus.chunks` through vectors-029's policy.
 
 ### Assumption Verification
 
-Six of the eight critical assumptions are verified by spike or by the
+Six of the nine critical assumptions are verified by spike or by the
 extension's own control file. The cloud host's pg_background is checked and
 absent; installing it is Activation Step 1, on Sam's ruling of 2026-11-15.
 That Liquibase, not only psql, applies the libraries with the session role
@@ -980,3 +1018,4 @@ the first registered move.
 - 2026-11-16: before round 3, the fixes for the nine defects the third fix check counted (T2 nexus_rdr/246-fix-check-9ebbce21154d): a tenant bind parameter for the verification query, the admin visibility check in pass step 1, the gate's three rules and their exemptions, `on_complete` atomic with `completed_at`, failure classes by SQLSTATE and by whether dml_utils recorded the error, a per-environment `sleep_ms` override, a CHECK on `label`, vectors-029's guard on the owner-read policy, and SET ROLE NONE; plus nexus.chunks' four-column key (a third dml_utils change) and the observations.
 - 2026-11-16: Gate round 3 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `17045500b1f0`; critique `nexus_rdr/246-gate-critique-2026-11-16-r3`.
 - 2026-11-16: accepted by Sam ("Accept, residuals to beads"; dml_utils with its pg_background launcher kept). Residual dispositions: round 3's five to beads nexus-f3yqd.2.1 (the BLOCKS-PLANNING one, chosen by Sam), nexus-f3yqd.2.2, nexus-f3yqd.2.3, nexus-f3yqd.2.4 and nexus-f3yqd.2.5; the eight carried from round 2 to commit e39d4fb28 (fix check `nexus_rdr/246-fix-check-9ebbce21154d`).
+- 2026-11-16: residual beads nexus-f3yqd.2.1 (chunk-family tables finish only through `on_complete`, with builder termination and `lock_timeout`), .2.2 (gate rules 2 and 3), .2.4 (the four-column change listed as a prerequisite and an assumption) and .2.5 (the PCI-builder and `validCheckSum` citations) fixed in the text.
