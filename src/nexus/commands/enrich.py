@@ -4048,7 +4048,7 @@ def aspects_list_cmd(
 @enrich.command(name="aspects-backfill-uri")
 @click.option(
     "--collection", default="",
-    help="Repair one collection. Default: every collection holding aspect rows.",
+    help="Repair one collection. Default: every collection the catalog's live documents live in.",
 )
 @click.option(
     "--apply", is_flag=True,
@@ -4087,7 +4087,7 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
         else:
             collections = sorted({
                 c["name"] if isinstance(c, dict) else str(c)
-                for c in _aspect_bearing_collections(db)
+                for c in _catalog_collections(db)
             })
 
         per_collection: list[dict] = []
@@ -4159,8 +4159,11 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
         click.echo("Dry run — re-run with --apply to write.")
 
 
-def _aspect_bearing_collections(db) -> list[str]:
-    """Collection names the catalog's documents live in, sorted.
+def _catalog_collections(db) -> list[str]:
+    """Collection names the catalog's live documents live in, sorted.
+
+    Not only collections that hold aspect rows: a collection with none plans
+    nothing, so the command's output is the same.
 
     One engine request (``GET /v1/catalog/docs/distinct-collections``), not a walk
     of every document: the planner consumes a per-collection list, and the catalog

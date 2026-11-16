@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-241 Phase 1 Step 2 (nexus-uwggq.1.2): ``_aspect_bearing_collections`` reads one engine route.
+"""RDR-241 Phase 1 Step 2 (nexus-uwggq.1.2): ``_catalog_collections`` reads one engine route.
 
 ``nx enrich aspects-backfill-uri`` (no ``--collection``) needs the set of collection names the catalog
 holds. It used to build that set from ``all_documents()``, which an HTTP client pages 1000 documents at a
@@ -10,10 +10,12 @@ record paths. The second proves the answer is the one the walk built.
 """
 from __future__ import annotations
 
+import click
 import pytest
 
+from nexus.catalog import factory
 from nexus.catalog.http_catalog_client import HttpCatalogClient
-from nexus.commands.enrich import _aspect_bearing_collections
+from nexus.commands.enrich import _catalog_collections
 
 DOCUMENTS = 50_000
 COLLECTIONS = ("code__1-1__voyage-code-3__v1", "docs__1-2__voyage-context-3__v1", "knowledge__1-3__x__v1")
@@ -37,7 +39,8 @@ class _FakeEngine:
     def get(self, path: str, **params):
         self.paths.append(path)
         if path == "/docs/distinct-collections":
-            return {"collections": sorted({d["physical_collection"] for d in self.docs} - {""})}
+            # Reverse order, so the caller's own sort is observable.
+            return {"collections": sorted({d["physical_collection"] for d in self.docs} - {""}, reverse=True)}
         if path == "/list":
             off, lim = int(params.get("offset", 0)), int(params.get("limit", 200))
             return {"documents": self.docs[off:off + lim]}
@@ -54,19 +57,31 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> _FakeEngine:
 
 
 def test_one_distinct_collections_request_and_no_catalog_walk(engine: _FakeEngine) -> None:
-    _aspect_bearing_collections(None)
+    _catalog_collections(None)
     assert engine.paths == ["/docs/distinct-collections"], engine.paths
 
 
 def test_result_is_the_set_the_walk_built(engine: _FakeEngine) -> None:
-    walked = sorted({d["physical_collection"] for d in engine.docs if d["physical_collection"]})
+    """The old walk's expression, run through the real client's ``all_documents`` over the fake ``/list``.
+
+    The fake answers both routes from one document list, so this pins the client side (paging, entry
+    conversion, the empty-value skip, the sort). That the engine's two queries select the same rows
+    (both drop soft-deleted documents; distinct-collections also drops an empty value) is pinned by the
+    engine's own ``CatalogRepositoryTest.distinctDocCollections_exactValues``.
+    """
+    cat = factory.make_catalog_reader()  # the patched reader
+    walked = sorted({e.physical_collection for e in cat.all_documents() if e.physical_collection})
     assert walked == sorted(COLLECTIONS)  # the fixture holds every collection, and the empty ones are skipped
-    assert _aspect_bearing_collections(None) == walked
+    engine.paths.clear()
+    assert _catalog_collections(None) == walked
+
+
+def test_an_empty_route_answer_is_an_empty_list(engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine, "docs", [])
+    assert _catalog_collections(None) == []
 
 
 def test_an_empty_catalog_reader_still_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    import click
-
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: None)
     with pytest.raises(click.ClickException, match="Catalog is empty"):
-        _aspect_bearing_collections(None)
+        _catalog_collections(None)
