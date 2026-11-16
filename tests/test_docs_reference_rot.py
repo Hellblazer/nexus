@@ -81,6 +81,7 @@ SHA_ALLOWLIST: dict[str, str] = {
     "a1b2c3d4e5f6": "docs/catalog.md: chash placeholder in a usage example",
     "5f088e2": "rdr-246: a commit in Hellblazer/ddl_utils, the commit nexus pins, not a commit here",
     "a6cd544": "rdr-246: a commit in Hellblazer/dml_utils (PR #1, bytea keys), the commit nexus pins, not a commit here",
+    "28b0b3aa9": "rdr-246: the merge of Hellblazer/dml_utils PR #2 (bytea keys and the committing procedure), the commit nexus pins, not a commit here",
     "328b6b68": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-dl queries-corpus, not a commit here",
     "3c26def7": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-dl qrels, not a commit here",
     "60a64fc8": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-contest queries-corpus, not a commit here",
