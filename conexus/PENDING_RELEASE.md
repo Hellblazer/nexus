@@ -43,23 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.2.3)
+## Awaiting the next release (pinned: v8.3.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/commands/rdr-fix.md`
-  the fix range and fix-check title read the gate record's `blob:` key (nexus-3jjkg)
-- `conexus/skills/rdr-accept-checklist/SKILL.md`
-  accept checks `fix_check:` against the record's `blob:`, `commit:` only for older records (nexus-3jjkg)
-- `conexus/skills/rdr-fix-checklist/SKILL.md`
-  fix-check records are titled by the RDR file's blob after the disposition (nexus-3jjkg)
-- `conexus/skills/rdr-gate-checklist/SKILL.md`
-  the gate record carries `blob:`; `fix_check:` must equal it, or `commit:` for older records (nexus-3jjkg)
-- `prose-edit/skills/prose-edit/SKILL.md` (nexus-scmcs, nexus-scmcs.2.12): the setup run is a guided wizard, and the run-time genre question, the accept and reject step and the step 13 offers are `AskUserQuestion` choice prompts instead of free-text questions; a path run reviews its edits as suggestions in the MarkupEditor app (open and confirm the document before the editor runs, translate, propose, wait for the author's decisions, apply, then undo and reopen), the Typora viewer is gone, and the setup run checks for the MarkupEditor propose_edits tool. Cut-only (nexus-ger02.10): the invocation and mode tables point `--mode cut-only`, `decide` and `count` to the prose-cut skill. Known gap, shipped by Sam's decision (2026-11-14, nexus-h72g3): the way out of a MarkupEditor document that has unsaved edits (the unsaved-changes prompt, Reload from Disk, the changed-on-disk dialog) is not yet checked against the app, so save or close such a document in MarkupEditor before a path run.
-- `prose-edit/skills/prose-edit/markup-route.md` (nexus-h72g3): new file, the path-run text of the prose-edit skill (open the document in MarkupEditor, translate and propose, read the author's decisions, apply, return the app to the file, the voice-card offer and the setup check for the app), moved out of SKILL.md to keep it within its context budget; the skill reads it only on a path run, so a stdin run does not load it.
-- `prose-edit/skills/prose-edit/scripts/brief.py` (nexus-scmcs): `setup` reports at most eight `genre_candidates` with `ready`, `try_path` and `unmapped_other` in place of `no_genre`; new `suggest-genre`; the genre description table the skill and the README share. Cut-only (nexus-ger02.10): `parse`, `build` and `filter` take `--mode cut-only --voice-card --word-budget` (filter drops an edit that adds a word, keeps paragraph cuts, moves queries aside and reports `words`), `parse decide` maps to `review.py apply`, new `count` verb (the prose words of a page, the unit of `words.document`); a cut that adds any symbol (markup, or `&` or `/` for a word) is dropped as not-a-cut, and a kept cut that removes a negation (contractions included) or a limit, or leaves markdown emphasis unpaired, is warned; a cut-only HTML run also protects nav, headings, button and samp (a normal HTML run does not); `filter` in a cut-only work directory refuses to run without the cut-only flags.
-- `prose-edit/skills/prose-edit/scripts/memory.py` (nexus-scmcs, nexus-scmcs.2.11): `add-entry` refuses a `genre_map` entry whose genre is not one of the six and stores nothing from that call, so a mistyped genre cannot break later runs in a folder; the `viewer` verb and its record shape are removed (a `prose/viewer` record already in T2 is left alone and nothing reads it).
-- `prose-edit/skills/prose-edit/scripts/review.py` (nexus-scmcs.2.5, nexus-scmcs.2.11): new `translate`, `proposed` and `decisions` verbs turn the editor's edits into MarkupEditor suggestions and the author's in-app decisions into `apply` flags; the marked-up copy, the viewer and `PROSE_EDIT_OPEN` are removed, `render` only sets the session up, and `apply` probes T2 through `status`; `decisions` treats a missing `propose.json` as nothing sent when the editor has no placed edit, so a query answered with a change in a run with no editor edits still decides and applies. Cut-only (nexus-ger02.10): `apply` refuses an accepted edit that is not a cut in a cut-only session (the session is cut-only when the proposal or the work directory says so) and the session log carries `cut_only`, `word_budget` and `words` with the applied cuts' count beside the proposed one.
-- `prose-edit/skills/prose-edit/scripts/suggest.py` (nexus-scmcs.2.2): new module that translates Markdown edits into MarkupEditor `propose_edits` entries and maps the app's suggestion statuses to accept, reject and hold.
 
 ## Deferred to the next client release
