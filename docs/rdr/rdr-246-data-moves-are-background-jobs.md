@@ -551,12 +551,10 @@ always reports how many times it has been retried:
 - *Changed partition tree.* A per-leaf run on `nexus.chunks` is not
   partition-wise, so dml_utils makes no tree check on it, and a new leaf for
   any tenant, this one or another, cannot disturb a run in progress (step 2).
-  The tree check applies only to a move whose driving table is partitioned and
-  which the registry marks partition-wise; none of nexus's tables is. For such
-  a move, a changed tree (dml_utils raises 55000 and "leaves existing progress
-  committed", README, Changed tree) makes the move `failed:` with "partition
-  tree changed", like any 55000, and a superseding move (driven per leaf)
-  does the work. Nothing is archived and re-created, so no chunk runs twice
+  The move worker never runs a move partition-wise (step 2), so the tree
+  check never applies. If a 55000 arrives anyway (dml_utils also raises it
+  for other states, such as an unusable index), it is permanent like any
+  55000, and a superseding move does the work. Nothing is archived and re-created, so no chunk runs twice
   and `done` never falls.
 - *Cancelled runs.* Only a run dml_utils records as deliberately cancelled
   (`dml_utils_data.migration_run.cancelled_at` IS NOT NULL, from
