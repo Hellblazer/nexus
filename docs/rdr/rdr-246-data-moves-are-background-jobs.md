@@ -194,7 +194,7 @@ ranges:
 ### Key Discoveries
 
 - **Verified**: before this RDR, no local bundle or nexus changeset provided pg_background. Phase 1 Step 2 adds it to the bundle.
-- **Verified** (bundle code review): the engine substrate in CI downloads the pinned *released* bundle, and the Java suite boots the pgvector/pgvector:pg17 image. Neither has pg_background until a bundle release carries it. So the first changeset that runs `CREATE EXTENSION pg_background` must wait for that bundle release (the pin and floor move), and Java tests of a data move need an image with the extension.
+- **Verified** (bundle code review): the engine substrate in CI downloads the pinned *released* bundle, and the Java suite boots the pgvector/pgvector:pg17 image. Neither had pg_background until a bundle release carried it (engine-service-v0.1.194's bundles do). No changeset runs `CREATE EXTENSION pg_background`: the superuser bootstrap creates it (Technical Design, Install sequence), and Java tests of a data move need an image with the extension.
 - **Documented**: the cloud host is self-managed, so installing pg_background
   there is a nexus host-configuration step with no vendor allow-list (bob, 2026-11-10).
 - **Verified**: before PR #1 (a6cd544), dml_utils could not chunk on a bytea key; that merge added it.
@@ -305,12 +305,14 @@ and installed on the cloud host, and bytea keys added to dml_utils upstream.
 
 ### Technical Design
 
-**dml_utils in the engine.** The engine depends on a pinned dml_utils
-release, which carries the bytea key support. At boot, before nexus's own
-changelog runs, it applies dml_utils' bundled changelog. That changelog keeps
-its own tracking tables in the `liquibase` schema, separate from nexus's.
-Installing it is schema only and costs the same whatever the data size.
-It cannot be created without pg_background: dml_utils' plpgsql functions
+**dml_utils in the engine.** The engine carries ddl_utils' and dml_utils'
+changelogs vendored under its resources at the commits Sam pinned (ddl_utils
+5f088e2, and the dml_utils commit with the bytea keys and the committing
+entry point), with a test that checks the copies against those commits. At
+boot, before nexus's own changelog runs, it applies ddl_utils' changelog and
+then dml_utils'. Each keeps its own tracking tables in the `liquibase`
+schema, separate from nexus's. Installing them is schema only and costs the
+same whatever the data size. dml_utils cannot be created without pg_background: dml_utils' plpgsql functions
 declare variables of pg_background's types (`pg_background_handle`,
 `pg_background_run_result`), and dml_utils' own test base installs the
 extension first because the routines "declare its types, so the extension must
@@ -378,11 +380,32 @@ confirms it. `completed_at` needs every listed tenant's label complete and its
 verification query empty, so a tenant the list missed shows up as a failed
 verification, not as a silent skip.
 
-**Roles and grants.** dml_utils fixes its owner role's name, so the engine
-creates `dml_utils_owner`, `dml_utils_caller` and `ddl_utils_caller` (NOLOGIN
-except the owner, all NOBYPASSRLS) in its role changesets and applies both
-libraries' changelogs as `dml_utils_owner`. The move's role holds
-`dml_utils_caller` and `pgbackground_role`. `dml_utils_owner` needs USAGE on the
+**Install sequence.** Three steps, in this order (T2
+nexus_rdr/246-research-5):
+
+1. A superuser bootstrap, the step that already pre-installs pgvector and
+   pg_trgm before the first schema walk (vectors-001-baseline.xml lines 28-36,
+   SchemaMigrator's Phase-5 provisioning note): `nexus.db.pg_provision`
+   locally, the db-host configuration in the cloud. It creates the
+   pg_background extension and the three roles dml_utils names,
+   `dml_utils_owner`, `dml_utils_caller` and `ddl_utils_caller`, all NOLOGIN
+   and NOBYPASSRLS, and grants: CREATE on the database, `ddl_utils_caller` and
+   `pgbackground_role` to `dml_utils_owner`; `dml_utils_owner`,
+   `dml_utils_caller` and `pgbackground_role` to `nexus_admin`. Roles live
+   here, not in a changeset, because the dml_utils walk runs before nexus's
+   changelog.
+2. At boot the engine checks that the extension and the three roles exist.
+   If they do, it applies ddl_utils' then dml_utils' changelog on its usual
+   migration connection as `nexus_admin`, with the session role set to
+   `dml_utils_owner`, so the objects are owned by `dml_utils_owner` and no
+   second login credential exists. Then nexus's changelog runs.
+3. If the extension or a role is missing, or either library's changelog
+   fails, the engine skips the libraries, serves, and reports every
+   registered move `blocked:` with the reason. No library install failure
+   fails a boot.
+
+**Roles and grants.** The move runs as `nexus_admin`, which holds
+`dml_utils_caller` and `pgbackground_role` (step 1). `dml_utils_owner` needs USAGE on the
 driving table's schema and SELECT on the table and on every leaf, because its
 SECURITY DEFINER boundary scan reads the table and checks each leaf
 (246-research-2). New chunk leaves are created at run time, so the engine's
