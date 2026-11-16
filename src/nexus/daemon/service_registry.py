@@ -3052,14 +3052,9 @@ def sweep_matching_processes(
                 unreadable.append(pid)
             continue
         current = process_command(pid)
-        if not current:
-            # nexus-dyfsw follow-up: an empty re-read is no evidence the pid still runs the
-            # matched command (Linux reads /proc/<pid>/cmdline empty mid-execve, so a reused
-            # pid can). Not signalled; a pid still running is reported as unreadable.
-            if pid_running(pid):
-                unreadable.append(pid)
-            continue
-        if current.split() != command.split():
+        # An unreadable argv (permissions, zombie mid-reap) is not evidence
+        # of a recycle; only a DIFFERENT readable argv is.
+        if current and current.split() != command.split():
             _log.info(
                 "sweep_matching_processes_pid_recycled",
                 pid=pid, recorded=command[:120], current=current[:120],

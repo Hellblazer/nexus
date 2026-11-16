@@ -18,6 +18,7 @@ import pytest
 import structlog
 
 from nexus import upgrade_finish as uf
+from nexus.daemon.binary_lifecycle import well_known_binary_path
 
 _FLAGLESS = "/v/bin/python3 /v/bin/nx daemon service start"
 
@@ -38,7 +39,7 @@ def _reader(table: dict[int, dict[str, str] | None]):
 def _rows(cfg: Path) -> list[tuple[int, int, str]]:
     return [
         (196, 60, f"/v/bin/python3 /v/bin/nx daemon service start --foreground --config-dir {cfg}"),
-        (214, 60, f"{cfg}/service/nexus-service -Xmx1g"),
+        (214, 60, f"{well_known_binary_path(cfg)} -Xmx1g"),
         (310, 60, _FLAGLESS),  # serves this dir
         (311, 60, _FLAGLESS),  # serves another dir
         (312, 60, _FLAGLESS),  # environment cannot be read
@@ -137,7 +138,7 @@ class TestLivenessScanReportsTheUnverifiedCandidate:
         from nexus.daemon.storage_service_daemon import _default_engine_liveness_scan  # noqa: PLC0415 — file pattern: deferred imports
 
         cfg = tmp_path / "nexus"
-        binary = cfg / "service" / "nexus-service"
+        binary = well_known_binary_path(cfg)
 
         def fake_stack(config_dir, *, unreadable_out=None, **_kw):
             if unreadable_out is not None:

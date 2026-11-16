@@ -1856,30 +1856,15 @@ def _sweep_surviving_stack_detail(
 ) -> tuple[str, list[GracefulStopSend]]:
     """The survivor sweep (:func:`_sweep_survivors`) plus the unverified-candidate
     note for *unreadable* pids (nexus-qwn3p), joined into one note."""
-    unidentified: list[int] = []
-    note, refused = _sweep_survivors(config_dir, before, unidentified_out=unidentified)
-    for extra in (_unidentified_survivor_note(unidentified), _unverified_candidate_note(unreadable)):
-        if extra:
-            note = f"{note} {extra}" if note else extra
+    note, refused = _sweep_survivors(config_dir, before)
+    unverified = _unverified_candidate_note(unreadable)
+    if unverified:
+        note = f"{note} {unverified}" if note else unverified
     return note, refused
-
-
-def _unidentified_survivor_note(pids: Sequence[int]) -> str:
-    """The sweep note for pre-stop pids still running whose command line could not be
-    re-read, so they were not signalled (nexus-dyfsw follow-up), or ``""`` for none."""
-    if not pids:
-        return ""
-    return (
-        f"[stop-sweep] UNVERIFIED: pid(s) {', '.join(str(p) for p in pids)} from the "
-        "pre-stop stack are still running, but their command line could not be re-read, "
-        "so it is not known whether they are still that stack; they were left running. "
-        "If one is this stack's, stop it by hand before relying on the restart"
-    )
 
 
 def _sweep_survivors(
     config_dir: Path, before: list[tuple[int, str]],
-    *, unidentified_out: list[int] | None = None,
 ) -> tuple[str, list[GracefulStopSend]]:
     """Kill any pre-stop stack member that survived ``nx daemon service stop``.
 
@@ -1924,14 +1909,10 @@ def _sweep_survivors(
             _log.info("restart_stop_sweep_pid_already_dead", pid=pid, state="Z")
             continue
         current = process_command(pid)
-        if not current:
-            # nexus-dyfsw follow-up: an empty re-read is no evidence the pid is still the one
-            # recorded. On Linux /proc/<pid>/cmdline reads empty while a just-spawned process
-            # is in execve, so a reused pid can read empty. Not signalled; reported instead.
-            if unidentified_out is not None:
-                unidentified_out.append(pid)
-            continue
-        if current.split() != cmd.split():
+        # An unreadable argv (permissions, a zombie mid-reap) is not evidence
+        # of a recycle; fall back to the recorded command rather than skipping
+        # a genuine survivor.
+        if current and current.split() != cmd.split():
             _log.info(
                 "restart_stop_sweep_pid_recycled", pid=pid,
                 recorded=cmd[:120], current=current[:120],

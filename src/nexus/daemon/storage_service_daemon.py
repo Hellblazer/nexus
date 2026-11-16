@@ -4398,8 +4398,10 @@ def _stop_marked_service(
                 # this directory's stack. Not signalled otherwise; the stale lease is still
                 # released below, and the sweep after it still stops the real stack.
                 # Releasing differs from stop_tier_holders, which keeps an unreadable
-                # holder's record, on purpose: a running process of this user reads its
-                # own cmdline except mid-execve, so one that stays unreadable is not ours.
+                # holder's record, on purpose: on Linux a running process of this user
+                # reads its own cmdline except mid-execve, so one that stays unreadable is
+                # not ours. Elsewhere the read can fail for a real one too (macOS reads it
+                # through a bounded process listing), and the pid is named either way.
                 identity = holder_identity(
                     pid_to_signal, is_ours=storage_service_stack_matcher(config_dir, platform=platform),
                     platform=platform,
