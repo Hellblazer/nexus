@@ -522,3 +522,4 @@ leg. The design reuses the RDR-156 routes rather than adding an index.
   measurement (Sam: "Measure first", cap 5 USD); the design moved from a
   client-side collection prefilter to per-collection topic routing inside
   the engine's multi-collection search.
+- 2026-11-16: Gate round 1 — PASSED (0 Critical, 7 Significant, 0 ship-blocker(s)); blob `e521660724c2`; critique `nexus_rdr/134-gate-critique-2026-11-16-r1`.
