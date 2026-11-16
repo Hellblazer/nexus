@@ -2048,9 +2048,9 @@ def search_cross_corpus(
         a pool of 8, instead of failing the group, and the group is remembered
         for 10 minutes so later searches go straight to per-collection.
 
-        ``--lexical`` (nexus-xd2rc): with ``NX_SEARCH_ROUTE_LEXICAL`` set
-        (nexus-n51v1; off by default, the engine's per-collection lexical arms
-        made the search slower) the request asks the engine for each
+        ``--lexical`` (nexus-xd2rc): unless ``NX_SEARCH_ROUTE_LEXICAL`` is
+        turned off (``0``/``false``/``off``/``no``; on by default since nexus-bbtc2,
+        it was off from nexus-n51v1 until then) the request asks the engine for each
         collection's lexical arm too (``lexical: true``), so the leg costs no
         second round trip. Without it the field is not sent and the leg runs
         on ``/hybrid-search`` as described at the end of this paragraph. The engine unions those rows in, threshold-exempt
