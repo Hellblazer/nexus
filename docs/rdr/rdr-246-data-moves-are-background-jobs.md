@@ -86,8 +86,13 @@ heavy boot work announcing itself (f3yqd.3).
   where the engine runs too (bob, 2026-11-10; the earlier Crunchy Bridge
   cluster is idle and pending decommission). Extensions on it are installed
   by nexus's own host configuration.
-- The largest table, nexus.chunks, is partitioned. Its primary key is
-  (tenant_id text, collection text, chash bytea), and chash is a 32-byte sha256.
+- The largest table, nexus.chunks, is list-partitioned by embedding model.
+  Its primary key is four columns, (tenant_id, collection, chash,
+  embedding_model) (vectors-030-model-tenant-partition-functions.xml line 677),
+  and chash is a 32-byte sha256. dml_utils supports a primary key of one to
+  three columns (its primary_key_columns.sql and primary_key_attributes.sql
+  refuse more), so a move over nexus.chunks needs dml_utils to take a fourth
+  key column (Phase 1 Step 1).
 
 ## Research Findings
 
@@ -245,7 +250,7 @@ ranges:
 - [ ] Liquibase applies the vendored ddl_utils and dml_utils changelogs as
   `nexus_admin` with the session role `dml_utils_owner` — **Status**:
   Unverified; 246-research-5 applied the same files with psql in Liquibase's
-  order — **Method**: Spike in Phase 1 Step 4
+  order — **Method**: Spike in Phase 1 Step 3b
 - [ ] The cloud host's PostgreSQL loads pg_background and has spare
   max_worker_processes — **Status**: Checked 2026-11-10, NOT available
   today (bob's read-only check on Sam's go, SSM command 60942485, T2
@@ -306,8 +311,9 @@ and installed on the cloud host, and bytea keys added to dml_utils upstream.
    from the last committed batch"`. nx doctor shows the same.
 4. Code that reads the moved data copes with a move in progress (it reads
    both shapes, or the feature waits for the move's completion row). A
-   changeset that would need the move finished first is a design error the
-   review catches.
+   changeset that needs the move finished first carries a precondition on
+   the move's completion (Technical Design, Finishing a move), and the gate
+   refuses one without it.
 5. From the release that registers a move, every writer produces only the
    new shape. dml_utils fixes a run's chunk boundaries when the run starts
    (README lines 108-110: a row inserted later with a key above the captured
@@ -345,15 +351,27 @@ a *background worker* is a pg_background process in the database.
 
 - `label`, the primary key. The move worker names each dml_utils run
   `<label>/<tenant>`, or `<label>` alone for a table with no tenant column;
-  a label may not contain `/`;
+  a CHECK (`label !~ '/'`) keeps one move's runs from being read as
+  another's;
 - the DML template;
 - the driving schema and table (the table whose primary key dml_utils cuts
   into chunks);
 - the chunk size and `sleep_ms`, the pause after each chunk (dml_utils'
-  `i_sleep_ms`), which throttles the move against serving traffic;
-- `statement_timeout_ms`, the bound on each verification query run;
+  `i_sleep_ms`), which throttles the move against serving traffic. This is
+  the value measured in the Minimum Viable Validation, written into the
+  registering INSERT before the release; an engine setting,
+  `NX_DATA_MOVE_SLEEP_MS`, overrides it per environment, and the move worker
+  applies the override to a run that already exists with
+  `dml_utils.set_migration_run_sleep_ms`, since dml_utils keeps the value it
+  was created with;
+- `statement_timeout_ms`, NOT NULL and positive, the bound on each
+  verification run and on `on_complete`;
 - the verification query, NOT NULL: a SELECT that returns the old-shape rows
-  still present. It runs in a READ ONLY transaction, so it cannot write;
+  still present, written with one bind parameter, the tenant: the move worker
+  binds a tenant id for a per-tenant run and NULL for the table-wide run, and
+  the query filters on `tenant_id = $1 OR $1 IS NULL`. It never reads
+  `nexus.tenant`, so the two runs differ only in the bound value. It runs in a
+  READ ONLY transaction, so it cannot write;
 - `on_complete`, NULL or the SQL that finishes the new shape once the move is
   verified (a VALIDATE CONSTRAINT, dropping the old column, swapping a table);
 - the changeset id that registered it;
@@ -373,8 +391,10 @@ starts after the HTTP listener and handles one open move at a time, oldest
 
 1. grants what the libraries need on the driving table (Roles and grants,
    below), then checks that dml_utils is installed (`to_regprocedure` of the
-   committing entry point, not only the extension) and that one
-   `max_worker_processes` slot is free. If either is missing, the move is
+   committing entry point, not only the extension), that the admin connection
+   reads every row of the driving table (AdminDdlSession's
+   `requireUnrestrictedView`: superuser, BYPASSRLS, or a true-qual SELECT
+   policy), and that one `max_worker_processes` slot is free. If either is missing, the move is
    `blocked:` with the reason, and the move worker goes on to the next open
    move and comes back on its next pass;
 2. for each tenant, on a dedicated connection that no other code borrows,
@@ -387,15 +407,27 @@ starts after the HTTP listener and handles one open move at a time, oldest
    tenant under that tenant's setting, then once table-wide on a separate
    admin connection after checking that `current_setting('nexus.tenant',
    true)` is empty there. If every run returns no rows, it runs `on_complete`
-   (if any) on the admin connection and sets `completed_at`.
+   (if any) and the UPDATE that sets `completed_at` in one transaction on the
+   admin connection, so a stop between them leaves neither; `on_complete`
+   holds DDL that PostgreSQL runs inside a transaction (VALIDATE CONSTRAINT,
+   DROP COLUMN, renames), never CREATE INDEX CONCURRENTLY or another statement
+   that cannot.
 
-Failures are classified. A launch that finds no free slot, a missing install,
-and a verification run that hits `statement_timeout_ms` are transient: the move
-is `blocked:` and retried on the next pass. A template error that dml_utils
-records, a non-empty verification, or an `on_complete` that fails sets
-`failed_at` and `failure`: the move stays reported `failed:` across restarts,
-is not retried, and does not hold up the moves behind it. The fix is a new
-move that supersedes it (Changing a move). A non-empty verification means an
+Failures are classified by what the move worker can read. *Transient*,
+retried on the next pass with the move `blocked:`: no free slot, or a launch
+that fails (the CALL raises and dml_utils recorded no `migration_error` row for
+the run); a missing install or role; an admin connection that cannot see every
+row; a verification run or `on_complete` that hits `statement_timeout_ms`; a
+lost connection or a stopped engine; and a chunk error dml_utils recorded with
+SQLSTATE 40001 (serialization), 40P01 (deadlock), 55P03 (lock not available) or
+57014 (statement cancelled), which live writers can cause and a re-run of the
+same label clears. *Permanent*, which sets `failed_at` and `failure`: any other
+recorded chunk error (a template or constraint error), a non-empty
+verification, and an `on_complete` that fails for a reason other than its
+timeout. An error the move worker cannot place in either list is permanent,
+so nothing loops. A failed move stays reported `failed:` across restarts, is
+not retried, and does not hold up the moves behind it. The fix is a new move
+that supersedes it (Changing a move). A non-empty verification means an
 old-shape row exists: a writer that still produces the old shape, a template
 that missed a case, or a row put back.
 
@@ -404,7 +436,8 @@ worker calls the same label, which resumes at the first unprocessed chunk.
 
 **Row-level security.** The engine's tables use FORCE row-level security
 (FORCE RLS: the policies bind the table's owner too) keyed on the
-`nexus.tenant` setting, and the engine's login roles are NOBYPASSRLS (they do
+`nexus.tenant` setting, and the roles the engine reads and writes data as,
+`nexus_svc` and `nexus_admin`, are NOBYPASSRLS (they do
 not skip the policies). Writes are therefore always tenant-scoped: an UPDATE
 or INSERT sees and changes only the rows of the tenant set on the session,
 and so does `dml_utils_owner`'s boundary scan, which runs as a role with no
@@ -417,11 +450,20 @@ Reads by `nexus_admin` differ by table. On `nexus.chunks`, vectors-029 gives
 the migrating role a permissive SELECT policy, `chunks_gate_probe_owner_read`
 (`USING (true)`), so `nexus_admin` already reads every tenant's chunk rows; a
 per-tenant verification run there must therefore filter by `tenant_id`
-itself. Any other driving table has only the tenant policy, so the move's
+itself (the bound tenant in the verification query does this). Any other
+driving table has only the tenant policy (a census of CREATE POLICY in the
+changelogs finds `tenant_isolation` everywhere and the owner-read policy only
+on `nexus.chunks`), so the move's
 registering changeset adds the same owner-read SELECT policy for the
 migrating role (`TO CURRENT_USER`, the vectors-029 pattern) when it creates
-the new shape. Without it the admin session cannot see every row, and the
-move is `blocked:`.
+the new shape, with vectors-029's guard: a precondition that skips the policy
+(MARK_RAN) when `nexus_svc`, or any other login role subject to row-level
+security, is or inherits the migrating role, and a post-condition that the
+policy names exactly the migrating role. In the single-role posture (the
+migrating role is `nexus_svc`) the guard skips the policy, so the service role
+never gains a cross-tenant read; the admin connection then cannot see every
+row, and the move is `blocked:` (step 1). The same holds on `nexus.chunks` if
+vectors-029 itself was skipped there.
 
 The tenant list is the set the table-wide retire-keys routes check
 (ChunkKeysAdminHandler.java:97-100 and 116-119): the default tenant, every
@@ -449,18 +491,19 @@ nexus_rdr/246-research-5):
    `dml_utils_owner`, where both libraries keep their tracking tables
    (dml_utils README lines 696-702; ddl_utils README lines 93-95). Roles live
    here, not in a changeset, because the dml_utils walk runs before nexus's
-   changelog. `pg_provision` is a no-op on a cluster it already provisioned,
-   so an existing local install gets this step from the storage daemon's
-   grant backfill that runs before it starts the engine
-   (`_backfill_provision_grants`, storage_service_daemon.py), extended to
-   create the extension, roles, grants and schema when they are missing; the
-   engine never runs as a superuser, so it cannot do this itself. Until it has
+   changelog. An existing local install gets this step from the fast path
+   `pg_provision.provision()` takes on a cluster it already provisioned, which
+   the storage daemon runs before it starts the engine
+   (`_backfill_provision_grants`, storage_service_daemon.py) and which already
+   backfills the diag role; it is extended to create the extension, roles,
+   grants and schema when they are missing. In production the engine does not
+   run as a superuser, so it cannot do this itself. Until it has
    run, moves report `blocked:`.
 2. At boot the engine checks that the extension and the three roles exist.
    If they do, it applies ddl_utils' then dml_utils' changelog on its
-   migration connection as `nexus_admin`, after `SET ROLE dml_utils_owner`,
-   so the objects are owned by `dml_utils_owner` and no second login
-   credential exists; then `RESET ROLE`, and nexus's changelog runs as
+   migration connection as `nexus_admin`, after a `SET ROLE dml_utils_owner`
+   statement, so the objects are owned by `dml_utils_owner` and no second
+   login credential exists; then `SET ROLE NONE`, and nexus's changelog runs as
    `nexus_admin` (vectors-029's policy binds the migrating role by
    `CURRENT_USER`, so the reset matters). An engine configured with one
    database role (no separate `NX_DB_ADMIN_*`, so the admin connection is the
@@ -486,7 +529,7 @@ role. A leaf created later inherits the parent's grants through the partition
 grant loop (`nexus.partition_copy_access`, which copies the parent's grants to
 each new leaf, vectors-039).
 
-**Progress.** `/v1/status` `boot_work` lists each open move in
+**Progress.** `/v1/status` `boot_work` lists each open or failed move in
 nexus-f3yqd.3's shape (BootWorkRegistry.java:45: id, what, startedAt, done,
 total, unit, safeToStop, onStop, step). `done` and `total` are
 `total_chunks_completed` and `total_chunks` from
@@ -506,12 +549,16 @@ is set. A move whose readers cannot cope is redesigned, not run at boot.
 
 **Finishing a move.** A move's finishing step (VALIDATE CONSTRAINT on a check
 added NOT VALID, dropping the old column, swapping a table in) is its
-`on_complete` SQL, which the move worker runs after verification, never a
-changeset at boot. A later changeset that depends on a move being complete
-carries a Liquibase precondition on `nexus.data_moves.completed_at` for that
-label with `onFail="CONTINUE"`, so it is skipped and retried on the next boot
-until the move completes. The gate (below) refuses such a changeset without
-the precondition.
+`on_complete` SQL when the move's own release knows it. A step that comes in a
+later release is a changeset that carries a Liquibase precondition on
+`nexus.data_moves.completed_at` for that label with `onFail="CONTINUE"`, so it
+is skipped and retried on each boot until the move completes; a VALIDATE
+CONSTRAINT never goes in such a changeset (gate rule 2). The gate (below)
+refuses a dependent changeset without the precondition. On a fresh install a
+gated changeset applies at the first boot after the move completes, not the
+first boot. If the move it waits for is superseded, the changeset that
+registers the replacement also re-points the waiting step: it is re-issued
+under a new id with a precondition on the new label.
 
 **Writers during a move.** The engine keeps writing while a move runs, so a
 new row can fall into a chunk already done. Three rules cover it. Writers
@@ -531,28 +578,33 @@ the gate, this INSERT is how a move is registered or replaced, and it closes
 the old move without an UPDATE.
 
 **The check that stops a new boot move.** `DataMoveChangesetGateTest` is an
-engine test that reads every changelog. It refuses a changeset that:
+engine test that reads every changelog. It has three rules.
 
-- has row DML (UPDATE, DELETE, INSERT ... SELECT, ALTER COLUMN TYPE, a
-  generated column re-added, CREATE TABLE AS); the SQL inside an INSERT into
-  `nexus.data_moves`, such as the template and the verification query, is a
-  string value and not DML;
-- on a table that grows with user data, adds a constraint without NOT VALID,
-  runs VALIDATE CONSTRAINT, or runs SET NOT NULL. These scan the whole table
-  at boot while writing almost nothing. The tables are `nexus.chunks` and its
-  per-model tables, `nexus.catalog_document_chunks` (the manifest), `nexus.catalog_documents` and
-  `nexus.catalog_links`, listed in the test;
-- names a table a registered move drives, in a constraining or destructive
-  statement, without the completion precondition (Finishing a move).
+1. *Row DML.* It refuses UPDATE, DELETE, INSERT ... SELECT, ALTER COLUMN TYPE,
+   a generated column re-added and CREATE TABLE AS. The SQL inside an INSERT
+   into `nexus.data_moves` (the template, the verification query,
+   `on_complete`) is a string value and not DML. A changeset whose only DML is
+   one INSERT into `nexus.data_moves` passes this rule.
+2. *Boot scans.* On a table that grows with user data it refuses an ADD
+   CONSTRAINT without NOT VALID, a VALIDATE CONSTRAINT and a SET NOT NULL,
+   which scan the whole table at boot while writing almost nothing. The
+   tables are `nexus.chunks` and its per-model tables,
+   `nexus.catalog_document_chunks` (the manifest), `nexus.catalog_documents`,
+   `nexus.catalog_links` and `nexus.topic_assignments`,
+   listed in the test. An ADD CONSTRAINT ... NOT VALID passes.
+3. *Waiting for a move.* A changeset that runs a destructive statement (DROP
+   COLUMN, DROP TABLE, a rename) or a rule-2 statement on a table some
+   registered move drives must carry a precondition on that move's
+   `completed_at` with `onFail="CONTINUE"` (Finishing a move). The
+   registering changeset itself is exempt: it creates the new shape and adds
+   any NOT VALID constraint before the move exists. The test matches by table
+   name, so it cannot see which move a changeset depends on; the review checks
+   that the precondition names the right label.
 
-A changeset passes when one of these holds:
-
-- its id is in the frozen list of changesets that existed when the gate
-  landed (derived from the changelogs at that commit and stored as a
-  resource); the frozen list exempts it from every rule above;
-- its only DML is an INSERT into nexus.data_moves;
-- it carries an exemption line naming a table whose size does not grow with
-  user data, with the reason.
+An exemption line, naming a table whose size does not grow with user data and
+the reason, lifts all three rules for that changeset. The frozen list of
+changesets that existed when the gate landed (derived from the changelogs at
+that commit and stored as a resource) exempts them from all three rules.
 
 The static check reads changelog text only: DML inside a `sqlFile`, a
 function body or a DO block's dynamic SQL passes it, and so does a
@@ -656,7 +708,7 @@ launcher that upstream does not test.
 - **`on_complete` fails**: the move is `failed:` with the error, and its
   finishing step is fixed by a superseding move.
 - **A library role is missing or a library changelog fails**: the engine
-  skips both libraries, serves, and reports every registered move `blocked:`
+  skips both libraries, serves, and reports every open move `blocked:`
   with the reason.
 - **The engine stops mid-move**: chunks already committed stay committed. The
   next boot resumes the label at the first unprocessed chunk.
@@ -701,7 +753,9 @@ standard_conforming_strings, and each row lands in exactly one chunk. The
 PR also covers resume and states the partitioned-table finding. Merged as
 PR #1 (a6cd544). A second PR adds a PROCEDURE entry point that takes the
 same parameters as `run_migration_chunks` and COMMITs after each chunk launch
-and poll round. It is a restructured coordinator, not a wrapper: the
+and poll round. A third change lets dml_utils chunk on a primary key of four
+columns, which nexus.chunks has; until it lands, a move over nexus.chunks is
+refused when its run is created. The second is a restructured coordinator, not a wrapper: the
 function's loop sits inside a block with an EXCEPTION handler, where
 PL/pgSQL refuses a COMMIT. The PR comes with a test
 that a mid-run VACUUM finds no dead row held back by the coordinator (Sam's
@@ -729,10 +783,10 @@ across a killed coordinator.
 
 Before the engine side is built: apply the vendored ddl_utils and dml_utils
 changelogs through Liquibase (not psql) as `nexus_admin` after `SET ROLE
-dml_utils_owner` on the migration connection (Liquibase has no session-role
-option of its own, so the role is set on the connection, for example by the
-JDBC `options` parameter or an init statement), then `RESET ROLE` and nexus's
-changelog, and check the owners and that vectors-029's policy binds
+dml_utils_owner` as a statement on the migration connection (not the JDBC
+`options` startup parameter: `RESET ROLE` returns to a role given there, which
+3B measured on PG 17.5, while `SET ROLE NONE` always returns to the session
+user), then `SET ROLE NONE` and nexus's changelog, and check the owners and that vectors-029's policy binds
 `nexus_admin`. The result closes or reopens the Liquibase critical assumption
 before Step 4 starts.
 
@@ -821,7 +875,7 @@ from /v1/status on the live engine.
 
 ## Test Plan
 
-- **Scenario**: a move over a table with a (text, text, bytea) key, 100k rows. **Verify**: every row is processed exactly once; `done` never falls, and at the end `done` equals `total`.
+- **Scenario**: a move over a table with a (text, text, bytea) key, 100k rows, and one over a list-partitioned table with nexus.chunks' four-column key. **Verify**: every row is processed exactly once; `done` never falls, and at the end `done` equals `total`.
 - **Scenario**: the engine is killed after some chunks commit. **Verify**: the next boot serves at once and resumes at the next chunk, and the final state equals an uninterrupted run.
 - **Scenario**: pg_background is absent. **Verify**: the engine skips the dml_utils changelogs and serves, the move is reported blocked, and no row changes; after the extension is created, the next boot applies the changelogs and the move runs.
 - **Scenario**: a chunk fails. **Verify**: the move is reported `failed:` with the error, `failed_at` is set, the committed chunks stay, and neither the next pass nor a later boot retries it.
@@ -832,7 +886,7 @@ from /v1/status on the live engine.
 - **Scenario**: a tenant that holds rows in the driving table and no `service_tokens` row. **Verify**: the admin probe lists it, its rows are moved, and if it is left out of the per-tenant runs the table-wide verification fails the move.
 - **Scenario**: a library role is missing, then a library changelog fails. **Verify**: each time the engine serves, the nexus walk completes, and every move is reported `blocked:` with the reason.
 - **Scenario**: a failed move and a later move registered behind it. **Verify**: the later move runs; a new move whose INSERT names the failed one in `supersedes` closes it.
-- **Scenario**: a move registered before the library roles exist (the cloud order); the roles are created later. **Verify**: the next pass grants `dml_utils_owner` its access on the parent and every leaf, and the move runs and completes.
+- **Scenario**: a move registered before the library roles exist (the cloud order); the roles are created later and the engine restarts (the libraries install at boot). **Verify**: the next pass grants `dml_utils_owner` its access on the parent and every leaf, and the move runs and completes.
 - **Scenario**: a launch finds no free background worker slot (all slots held by a test). **Verify**: the move is `blocked:`, not `failed:`, and runs once a slot frees.
 - **Scenario**: after a move over two tenants, the dedicated connection and the admin connection. **Verify**: `current_setting('nexus.tenant', true)` is empty on the admin connection when the table-wide verification runs, and the dedicated connection carries no tenant after the RESET.
 - **Scenario**: a move with an `on_complete` VALIDATE CONSTRAINT, and a later changeset that drops the old column with the completion precondition. **Verify**: the VALIDATE runs only after verification; the later changeset is skipped at each boot until `completed_at` is set, then applies.
@@ -923,3 +977,4 @@ the first registered move.
 - 2026-11-16: fix check of round 1's fixes failed on one counted defect (T2 nexus_rdr/246-fix-check-e8f69a581170): the tenant list now includes tenants found by the admin probe and completion needs a table-wide verification; the counted implementation-level items (superseded moves, the bootstrap's plan steps and grants, pending-chunk writers, the dml_utils pin, the session-level tenant setting, the slot wording) and the observations are fixed with it.
 - 2026-11-16: Gate round 2 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); blob `ee87998f1575`; critique `nexus_rdr/246-gate-critique-2026-11-16-r2`.
 - 2026-11-16: round 3 revision on Sam's choice (ask rdr246-accept, "Revise, gate round 3"): the eight fix-check residuals (nexus_rdr/246-fix-check-ee87998f1575) and the six round 2 Significant findings (nexus_rdr/246-gate-critique-2026-11-16-r2), addressed in the Technical Design, Risks, Failure Modes, Steps 3b, 3c and 4, the Minimum Viable Validation and the Test Plan.
+- 2026-11-16: before round 3, the fixes for the nine defects the third fix check counted (T2 nexus_rdr/246-fix-check-9ebbce21154d): a tenant bind parameter for the verification query, the admin visibility check in pass step 1, the gate's three rules and their exemptions, `on_complete` atomic with `completed_at`, failure classes by SQLSTATE and by whether dml_utils recorded the error, a per-environment `sleep_ms` override, a CHECK on `label`, vectors-029's guard on the owner-read policy, and SET ROLE NONE; plus nexus.chunks' four-column key (a third dml_utils change) and the observations.
