@@ -182,11 +182,14 @@ special-warning guide, KickSync, Sniffa and Blizzard's Midnight post.
 
 ### Critical Assumptions
 
-- [ ] The pushing session can be recorded durably at push time without
-  slowing the push. **Method**: Source Search of `git-push-develop.sh`, then a
-  spike. Source half done (`nexus_rdr/252-research-1` F4): the script already
-  resolves the session id and writes tuples for its push lock, so the record
-  is one more `nx tuple out`; the spike times it on a local engine.
+- [x] The pushing session can be recorded durably at push time without
+  slowing the push. **Status**: Verified. Source (`nexus_rdr/252-research-1`
+  F4): the script already resolves the session id and writes tuples for its
+  push lock. Spike (`nexus_rdr/252-research-2`): ten records written through
+  `nx tuple out` with an ordinary tenant token were all accepted by the
+  existing `board/ci/<topic>` template, at a median 466 ms a call, nearly all
+  CLI start-up, against a push that takes seconds. The write passes the
+  template's key, `--key topic=nexus-develop--push`.
 - [x] One writer can join a CI post with the push records and stamp the owner
   within seconds of the post. **Status**: met by design. The stamper runs in
   the engine on the write of the CI post (Sam, 2026-11-16), so the join is a
@@ -513,8 +516,8 @@ writer check on them (`nexus_rdr/252-research-1` F6).
 
 #### Step 2: Push record in `git-push-develop.sh`
 
-Client: one `nx tuple out` to `board/ci/nexus-develop--push` after
-`PUSH_OK`, never failing the push; the `board/ci/<topic>` doc block names the
+Client: one `nx tuple out` to `board/ci/nexus-develop--push` (with
+`--key topic=nexus-develop--push`) after `PUSH_OK`, never failing the push; the `board/ci/<topic>` doc block names the
 new writer.
 
 #### Step 3: The owner stamper and the owner post
@@ -637,4 +640,4 @@ the attestation work is evaluated and included (Trust and attestation, levels
   the procedure surface narrows; marginalia's notes on load timing and commit
   order kept.
 - 2026-11-16: Sam's answers to questions 2 and 4 recorded: a per-group acknowledgement deadline (20-minute default, per-aura override, calibrated from measured times); attestation evaluated in four levels against JDR-002, with level 1 in Phase 1, level 2 as Step 6 and level 3 named, not built.
-- 2026-11-16: ownership moved from wren to marginalia. Gaps from the source audit (`nexus_rdr/252-research-1`) closed in the design: memberships under `member/<session>` (one read at load); push records on `board/ci/nexus-develop--push` with the existing template, ordered by base and tip; the stamper in the engine (Sam's refined answer 5); the `self.session` argument source and `display.channel` naming a result field; Phase 1 split into engine and client steps. Assumptions 2 and 3 met by design; assumption 1's timing spike still to run.
+- 2026-11-16: ownership moved from wren to marginalia. Gaps from the source audit (`nexus_rdr/252-research-1`) closed in the design: memberships under `member/<session>` (one read at load); push records on `board/ci/nexus-develop--push` with the existing template, ordered by base and tip; the stamper in the engine (Sam's refined answer 5); the `self.session` argument source and `display.channel` naming a result field; Phase 1 split into engine and client steps. Assumptions 2 and 3 met by design; assumption 1 verified by source and a spike (`nexus_rdr/252-research-2`).
