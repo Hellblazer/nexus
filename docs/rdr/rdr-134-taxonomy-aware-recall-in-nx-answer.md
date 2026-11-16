@@ -677,3 +677,4 @@ The design reuses the RDR-156 routes rather than adding an index.
   over `taxonomy_unassigned_chashes_<dim>` with refresh on deferred
   assignments, the runner transport and edge allowlist named, the log event
   given a step, counts and citations corrected.
+- 2026-11-16: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); blob `48d312ee05a5`; critique `nexus_rdr/134-gate-critique-2026-11-16-r2`.
