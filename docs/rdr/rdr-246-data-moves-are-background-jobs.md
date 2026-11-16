@@ -168,16 +168,17 @@ ranges:
   boundary with `UPDATE ... RETURNING` and runs its SQL in the caller's
   transaction. Only the launcher needs pg_background. **Verified** (source
   read, functions/dml_utils_lib/process_migration_chunk.sql).
-- Supported key column types as of dml_utils PR #142 (main, 2026-11-10): smallint, integer, bigint, text,
-  uuid, timestamptz (the migration_key composite type, 004-create-domains.sql).
-  bytea is not supported, so nexus.chunks cannot be a driving table today.
-  **Verified** (source read).
+- Supported key column types: smallint, integer, bigint, text, uuid,
+  timestamptz and, since Hellblazer/dml_utils PR #1 (merged a6cd544,
+  2026-11-10), bytea, for a primary key of up to three columns (README lines
+  102-105). Before that merge bytea was not supported. **Verified** (source
+  read, T2 nexus_rdr/246-research-4).
 
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| dml_utils (Hellblazer/dml_utils main as of PR #142) | Yes | Launcher needs pg_background; per-chunk routine does not; no bytea keys |
+| dml_utils (Hellblazer/dml_utils, a6cd544, PR #1 merged) | Yes | Launcher needs pg_background; per-chunk routine does not; bytea keys supported |
 | pg_background (vibhorkum/pg_background) | Yes, v2.0.4 (tag and pinned commit) | Runs SQL in a background worker with its own transaction. No shared_preload_libraries needed (verified on four platforms). Calls POSIX random() (one site, polling jitter). PostgreSQL License |
 | nexus PG bundle (scripts/build_pg_bundle.sh, build_pg_bundle_windows.py) | Yes | Before this RDR: PG, pgvector and contrib, with no pg_background. With Phase 1 Step 2, pg_background v2.0.4 is in every bundle, and the contrib checks fail closed without it |
 
@@ -187,7 +188,7 @@ ranges:
 - **Verified** (bundle code review): the engine substrate in CI downloads the pinned *released* bundle, and the Java suite boots the pgvector/pgvector:pg17 image. Neither has pg_background until a bundle release carries it. So the first changeset that runs `CREATE EXTENSION pg_background` must wait for that bundle release (the pin and floor move), and Java tests of a data move need an image with the extension.
 - **Documented**: the cloud host is self-managed, so installing pg_background
   there is a nexus host-configuration step with no vendor allow-list (bob, 2026-11-10).
-- **Verified**: dml_utils cannot chunk on a bytea key.
+- **Verified**: before PR #1 (a6cd544), dml_utils could not chunk on a bytea key; that merge added it.
 
 ### Critical Assumptions
 
@@ -207,8 +208,8 @@ ranges:
   (Hellblazer/dml_utils, feature/bytea-keys). Its tests cover edge keys
   0x00/0xff and prefixes of different lengths, resume, and both session
   settings. Boundary text is bare hex, and chunk literals are
-  `pg_catalog.decode('<hex>','hex')`, a constant the planner folds. Review
-  round 1 is in progress. — **Method**: Spike
+  `pg_catalog.decode('<hex>','hex')`, a constant the planner folds. Merged as
+  PR #1 (a6cd544). — **Method**: Spike
 - [x] dml_utils works with a partitioned driving table (PK on the parent) — **Status**:
   Verified for bytea, non-partition-wise and partition-wise (dml_utils
   supports partition-wise runs since 1.16), in the same change. Repeated on a
@@ -271,20 +272,25 @@ and installed on the cloud host, and bytea keys added to dml_utils upstream.
 
 **What a move looks like:**
 
-1. A changeset creates the new shape (empty table, nullable column, new index
-   built CONCURRENTLY where the engine allows it) and registers the move: a
+1. A changeset creates the new shape (empty table, nullable column) and
+   registers the move: a
    row naming the label, the DML template, the driving table and the chunk
    size. Registration writes one row, whatever the data size.
 2. After boot, the engine's data-move worker finds every registered move that
    is not complete and calls `dml_utils.run_migration_chunks` for it. Each
    chunk commits on its own; a restart resumes from the last committed batch.
 3. While a move runs, /v1/status `boot_work` reports it in nexus-f3yqd.3's
-   shape: done and total in rows, `safe_to_stop: true`, `on_stop: "resumes
+   shape: done and total in chunks, `safe_to_stop: true`, `on_stop: "resumes
    from the last committed batch"`. nx doctor shows the same.
 4. Code that reads the moved data copes with a move in progress (it reads
    both shapes, or the feature waits for the move's completion row). A
    changeset that would need the move finished first is a design error the
    review catches.
+5. From the release that registers a move, every writer produces only the
+   new shape. dml_utils fixes a run's chunk boundaries when the run starts, so
+   a row written later is never visited by the move (README lines 108-110);
+   the move only has to cover rows that existed before that release, and its
+   verification query proves no old-shape row is left.
 
 ### Technical Design
 
@@ -312,6 +318,9 @@ move:
 - the DML template;
 - the driving schema and table;
 - the chunk size;
+- the verification query: SQL that returns the old-shape rows still present
+  (for one tenant, under that tenant's setting), which must return none before
+  the move is complete;
 - the changeset id that registered it;
 - `registered_at` and `completed_at`.
 
@@ -326,7 +335,11 @@ each move it:
    `max_worker_processes` slot is free, and waits otherwise;
 2. calls `dml_utils.run_migration_chunks(template, schema, table, label,
    chunk_size, threads => 1)` on its own connection;
-3. sets `completed_at` once dml_utils reports the run complete.
+3. once dml_utils reports every tenant's run complete, runs the verification
+   query for each tenant, and sets `completed_at` only when every one returns
+   no rows. A row returned means a writer produced the old shape after the move
+   began: the move is reported failed, with the count, and is not marked
+   complete.
 
 A stopped engine leaves committed chunks committed. The next boot's worker
 calls the same label, which resumes at the first unprocessed chunk.
@@ -340,6 +353,18 @@ table therefore runs once per registered tenant: the worker sets
 label `<move>/<tenant>`, so each tenant resumes on its own. A move over a table
 with no tenant column runs once. It does not run as nexus_svc.
 
+The tenant list cannot come from the moved table, which a role with no tenant
+set cannot see (the reason vectors-046 added `nexus.request_ledger_tenants`).
+It is the set the retire-keys sweep already treats as registered: the default
+tenant and every tenant holding a `nexus.service_tokens` row, revoked or
+expired included (ChunkKeysAdminHandler.java:116-119; T2
+nexus_rdr/246-research-4). The worker reads it at the start of each pass. A
+tenant created after the move's release holds only new-shape rows (step 5 of
+the Approach); its run finds nothing to change and its verification query
+confirms it. `completed_at` needs every listed tenant's label complete and its
+verification query empty, so a tenant the list missed shows up as a failed
+verification, not as a silent skip.
+
 **Roles and grants.** dml_utils fixes its owner role's name, so the engine
 creates `dml_utils_owner`, `dml_utils_caller` and `ddl_utils_caller` (NOLOGIN
 except the owner, all NOBYPASSRLS) in its role changesets and applies both
@@ -351,14 +376,35 @@ SECURITY DEFINER boundary scan reads the table and checks each leaf
 partition grant loop grants SELECT to `dml_utils_owner` on each leaf it creates.
 
 **Progress.** `/v1/status` `boot_work` lists each incomplete move in
-nexus-f3yqd.3's shape: label, done and total in rows from
-`dml_utils.migration_run_summary`, `safe_to_stop: true`, and `on_stop:
-"resumes from the last committed batch"`. nx doctor prints the same as one
-line per move.
+nexus-f3yqd.3's shape (BootWorkRegistry.java:45: id, what, startedAt, done,
+total, unit, safeToStop, onStop, step): done and total are the completed and
+total chunk counts from `dml_utils.migration_run_summary` summed over the
+move's tenant labels, `unit: "chunks"`, `safe_to_stop: true`, and `on_stop:
+"resumes from the last committed batch"`. The shape has no state field, so a
+move that cannot run says so in `what`, which begins `blocked:` (no
+pg_background, no free worker slot) or `failed:` (a chunk error or a failed
+verification, with the error text); nx doctor shows a red line for either.
+nx doctor prints one line per move.
 
 **Readers during a move.** Each move's RDR or bead states how readers behave
 while it runs: read both shapes, or keep the feature off until `completed_at`
 is set. A move whose readers cannot cope is redesigned, not run at boot.
+
+**Writers during a move.** The engine keeps writing while a move runs, and
+chunk keys (sha256 chashes) land anywhere in the key space, so a new row can
+fall into a chunk already done. Three rules cover it. Writers produce only the
+new shape from the registering release on (Approach, step 5). A move's
+template is idempotent and correct against rows that live writers update or
+delete while it runs (it rewrites a row from its own current values, never
+from values read earlier). And the verification query gates `completed_at`
+(The worker, step 3).
+
+**Changing a move.** dml_utils keeps a run's SQL when the run is created and
+ignores a different template on a resumed call (README lines 113-119), so the
+template stored in dml_utils is the one that runs; the registry's copy is the
+text the run was created with. A move is never edited: a failed move's fix is
+a new changeset that registers a new move with a new label, and marks the old
+one superseded.
 
 **The check that stops a new boot move.** `DataMoveChangesetGateTest` is an
 engine test that reads every changelog. It refuses a changeset with row DML
@@ -372,8 +418,12 @@ re-added, CREATE TABLE AS) unless one of these holds:
 - it carries an exemption line naming a table whose size does not grow with
   user data, with the reason.
 
-nexus-f3yqd.1's write gate measures a real upgrade boot and catches what a
-static scan misses.
+The static check reads changelog text only: DML inside a `sqlFile`, a
+function body or a DO block's dynamic SQL passes it, and it does not cover
+schema operations that scan a large table (a non-concurrent CREATE INDEX, an
+ADD CONSTRAINT that validates, SET NOT NULL). Those are out of this RDR's
+scope. nexus-f3yqd.1's write gate, which measures a real upgrade boot, is the
+backstop for all of them.
 
 ### Existing Infrastructure Audit
 
@@ -421,8 +471,9 @@ launcher that upstream does not test.
 
 ### Risks and Mitigations
 
-- **Risk**: pg_background does not build on Windows. **Mitigation**: the bundle spike reports it first; the RDR does not lock until it builds.
-- **Risk**: a worker under FORCE RLS sees no rows. **Mitigation**: a critical assumption above, spiked before the design locks.
+- **Risk** (retired 2026-11-10): pg_background might not build on Windows. It builds on all four platforms (Critical Assumptions).
+- **Risk** (retired 2026-11-16): a worker under FORCE RLS might see no rows. The spike showed it inherits the caller's tenant setting, so moves run once per tenant (Technical Design, Row-level security).
+- **Risk**: a writer that still produces the old shape after the registering release leaves rows the move never visits. **Mitigation**: the verification query gates `completed_at`, and a non-empty result fails the move instead of completing it.
 - **Risk**: workers exhaust max_worker_processes. The cloud host has 8 slots,
   and parallel query and autoprewarm share them. **Mitigation**: one move at a time with threads=1,
   so one pg_background worker at a time. The move worker reads
@@ -445,8 +496,11 @@ launcher that upstream does not test.
   chunks, lets the ones in flight commit, records the failure in
   migration_error, and raises. The worker logs the label and the error,
   leaves the move incomplete, and boot_work reports it as `failed` with the
-  error text. A later boot retries it. A fix is a new template set through
-  `dml_utils.set_migration_run_sql_text`, in a new changeset.
+  error text. A later boot retries it. A fix is a new changeset that
+  registers a new move with a new label (Technical Design, Changing a move).
+- **The verification query returns rows**: a writer produced the old shape
+  after the move began. The move is reported `failed:` with the count per
+  tenant and is not marked complete; the fix is in the writer, then a new move.
 - **The engine stops mid-move**: chunks already committed stay committed. The
   next boot resumes the label at the first unprocessed chunk.
 - **No free worker slot**: the worker waits and boot_work reports `waiting
@@ -460,7 +514,7 @@ launcher that upstream does not test.
 ### Prerequisites
 
 - [ ] All Critical Assumptions verified
-- [ ] bytea keys merged in Hellblazer/dml_utils (done: PR #1, a6cd544, 2026-11-10), and a dml_utils release that nexus pins (none yet: the repository has no tag or release)
+- [x] bytea keys merged in Hellblazer/dml_utils (PR #1, a6cd544, 2026-11-10). Sam ruled 2026-11-16 to pin the merged commits rather than wait for releases: dml_utils at a6cd544 and ddl_utils at 5f088e2; he may tag releases later
 - [x] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins (engine-service-v0.1.194's bundles carry pg_background 2.0)
 - [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup
 - [ ] A Java test image with pg_background for the engine suite's data-move tests
@@ -479,8 +533,9 @@ last committed chunk, and f3yqd.1's write gate measures no boot-time row move.
 A reviewed PR to Hellblazer/dml_utils covering a single bytea key and a
 composite (text, text, bytea) key. Literals do not depend on bytea_output or
 standard_conforming_strings, and each row lands in exactly one chunk. The
-PR also covers resume and states the partitioned-table finding. Nexus pins
-the release that carries it.
+PR also covers resume and states the partitioned-table finding. Merged as
+PR #1 (a6cd544). Nexus pins that commit, and ddl_utils at 5f088e2 (Sam,
+2026-11-16), until releases are tagged.
 
 #### Step 2: pg_background in the PG bundle
 
@@ -558,7 +613,9 @@ from /v1/status on the live engine.
 - **Scenario**: the engine is killed after some chunks commit. **Verify**: the next boot serves at once and resumes at the next chunk, and the final state equals an uninterrupted run.
 - **Scenario**: pg_background is absent. **Verify**: the engine skips the dml_utils changelogs and serves, the move is reported blocked, and no row changes; after the extension is created, the next boot applies the changelogs and the move runs.
 - **Scenario**: a chunk fails. **Verify**: the move is reported failed with the error, the committed chunks stay, and a later boot retries.
-- **Scenario**: tenants under FORCE RLS. **Verify**: the move runs once per registered tenant, rewrites every tenant's rows, and no run touches a row of a tenant other than its own; no nexus_svc session ever sees another tenant's rows.
+- **Scenario**: tenants under FORCE RLS. **Verify**: the move runs once per registered tenant, rewrites every tenant's rows, and no run, whether as the move's role or through `dml_utils_owner`'s boundary scan, touches or reads a row of a tenant other than its own.
+- **Scenario**: writers during a move: insert new-shape rows, update and delete existing rows of both shapes while a move runs. **Verify**: the final state equals a quiet run's for the rows that existed before, the new rows are untouched, and the verification query is empty.
+- **Scenario**: a writer inserts an old-shape row after the move starts. **Verify**: the verification query returns it, the move is reported `failed:` and `completed_at` stays NULL.
 - **Scenario**: a new changeset with an UPDATE on chunks. **Verify**: DataMoveChangesetGateTest is red. Registering the same move through nexus.data_moves is green.
 - **Scenario**: an upgrade boot on a copy of a live-like store, measured by f3yqd.1's write gate. **Verify**: no row-move writes occur during the boot.
 
@@ -577,11 +634,13 @@ assumption, Step 3 and the RLS test scenario now all say a move runs once per
 tenant with the tenant set by the worker. The install-order statements (Technical
 Design, Risks, Failure Modes, Activation Step 1, the absent-extension test)
 all say the engine applies dml_utils' changelog only when pg_background is
-present.
+present. The statements that dml_utils cannot chunk a bytea key predate its
+PR #1 merge and now say so (Research Findings, Key Discoveries, the
+dependency table).
 
 ### Assumption Verification
 
-Five of the six critical assumptions are verified by spike or by the
+Six of the seven critical assumptions are verified by spike or by the
 extension's own control file. The cloud host's pg_background is checked and
 absent; installing it is Activation Step 1, on Sam's ruling of 2026-11-15.
 
@@ -600,9 +659,11 @@ library's fixed owner role and its leaf grants), worker slots on the cloud host
 
 ### Proportionality
 
-The engine adopts Sam's library as is, at one thread, behind one registry table
-and one worker; the only new mechanism nexus owns is the worker loop and its
-reporting.
+The engine adopts Sam's library at pinned commits, at one thread, behind one
+registry table and one worker. Adopting it added bytea keys upstream, a
+ddl_utils dependency, three roles, per-tenant runs and a verification query;
+nexus owns the worker loop, the tenant loop, the verification gate and the
+reporting. The mechanism has no consumer until the first registered move.
 
 ## References
 
