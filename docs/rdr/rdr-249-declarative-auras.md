@@ -501,7 +501,7 @@ green one; its channel notification is the fixed template, with no
 procedure text; the next green develop sha removes the block; and
 `NX_AURAS_OFF=ci_develop_red` stops it.
 
-### Phase 1: The aura file, its check and its list
+### Phase 1 (CLOSED, 2026-11-15): The aura file, its check and its list
 
 #### Step 1: Parser and loader
 
