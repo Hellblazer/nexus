@@ -254,12 +254,19 @@ class TaxonomyCoverageInvalidationRouteTest {
         assertThat(read(a)).isEqualTo(new Counts(true, 4, 0));
         liveChunks(a, "late", 4, false);
 
-        service.ownerlessWritePolicy().set(dev.nexus.service.vectors.OwnerlessWriteMode.ENFORCE);
-        // a chash with no owner is refused (422) by the ownerless-write guard: nothing is stored, but the handler
-        // cannot know that from outside the repository, so it drops the entry either way
-        var resp = post("/v1/vectors/upsert-chunks", Map.of("collection", a.name(),
-            "ids", List.of(chash(a.name() + "/no-owner")), "documents", List.of("ownerless"),
-            "metadatas", List.of(Map.of())));
+        var policy = service.ownerlessWritePolicy();
+        var before = policy.mode();
+        HttpResponse<String> resp;
+        try {
+            policy.set(dev.nexus.service.vectors.OwnerlessWriteMode.ENFORCE);
+            // a chash with no owner is refused (422) by the ownerless-write guard: nothing is stored, but the handler
+            // cannot know that from outside the repository, so it drops the entry either way
+            resp = post("/v1/vectors/upsert-chunks", Map.of("collection", a.name(),
+                "ids", List.of(chash(a.name() + "/no-owner")), "documents", List.of("ownerless"),
+                "metadatas", List.of(Map.of())));
+        } finally {
+            policy.set(before);
+        }
         assertThat(resp.statusCode()).as("body: %s", resp.body()).isIn(409, 422);
 
         assertThat(read(a)).isEqualTo(new Counts(true, 8, 4));
@@ -354,6 +361,108 @@ class TaxonomyCoverageInvalidationRouteTest {
 
         assertThat(read(a)).as("the tombstoned document's chunks are no longer live: out of both counts")
             .isEqualTo(new Counts(true, 0, 0));
+    }
+
+    @Test
+    void assignFromChashesWithTheCrossPass_dropsTheWholeTenant_becauseItWritesOntoOtherCollectionsTopics() throws Exception {
+        Coll a = collection("crossA", 4);
+        Coll b = collection("crossB", 4);
+        liveChunks(a, "late", 4, false);
+        liveChunks(b, "late", 4, false);
+        service.taxonomyCoverage().invalidateTenant(TENANT);
+        assertThat(read(a)).isEqualTo(new Counts(true, 8, 4));
+        assertThat(read(b)).isEqualTo(new Counts(true, 8, 4));
+        seed(dsl -> {
+            for (int i = 0; i < 4; i++) {
+                assignTo(dsl, a, chash(a.name() + "/late" + i));
+                assignTo(dsl, b, chash(b.name() + "/late" + i));
+            }
+        });
+
+        // cross_collection is absent, so it defaults to true: the route may write projection rows onto B's topics
+        var resp = post("/v1/taxonomy/assignments/assign_from_chashes", Map.of("collection", a.name(),
+            "chashes", List.of(chash(a.name() + "/late0"))));
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
+
+        assertThat(read(a)).isEqualTo(new Counts(true, 8, 0));
+        assertThat(read(b)).as("B is dropped too: the cross pass can write onto its topics").isEqualTo(new Counts(true, 8, 0));
+    }
+
+    // ── routes that answer before they write: the job's own end drops ─────────
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> pollUntilDone(String path, String stateKey) throws Exception {
+        for (int i = 0; i < 300; i++) {
+            var resp = http.send(TestHttp.request(url(path)).header("Authorization", "Bearer " + TOKEN).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertThat(resp.statusCode()).as("poll body: %s", resp.body()).isEqualTo(200);
+            Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
+            if (!"running".equals(body.get(stateKey))) return body;
+            Thread.sleep(100);
+        }
+        throw new AssertionError("the job did not finish in 30 s: " + path);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void aReconcileCommitJob_dropsTheTenantWhenItEnds_evenWhenItFails() throws Exception {
+        Coll a = collection("reconcile", 4);
+        assertThat(read(a)).isEqualTo(new Counts(true, 4, 0));
+        liveChunks(a, "late", 4, false); // behind the cache's back
+
+        // the run was never staged: the commit job ends failed (run_not_found). The 202 answers before the job runs, so
+        // nothing before the job's end can have dropped the entry.
+        var started = post("/v1/catalog/reconcile/commit", Map.of("owner", "1.7", "run_id", "7fku212-no-such-run"));
+        assertThat(started.statusCode()).as("body: %s", started.body()).isEqualTo(202);
+        String jobId = (String) MAPPER.readValue(started.body(), Map.class).get("job_id");
+        var done = pollUntilDone("/v1/catalog/reconcile/" + jobId, "status");
+        assertThat(done.get("status")).as("the job ended: %s", done).isEqualTo("failed");
+
+        assertThat(read(a)).as("a count read after the job ended is current, whether the job wrote or failed")
+            .isEqualTo(new Counts(true, 8, 4));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void aManifestFillJob_dropsTheTenantWhenItEnds() throws Exception {
+        Coll a = collection("fill", 4);
+        assertThat(read(a)).isEqualTo(new Counts(true, 4, 0));
+        liveChunks(a, "late", 4, false);
+
+        var started = post("/v1/catalog/manifest/fill", Map.of("kind", "labels", "dry_run", true));
+        assertThat(started.statusCode()).as("body: %s", started.body()).isEqualTo(202);
+        String jobId = (String) MAPPER.readValue(started.body(), Map.class).get("job_id");
+        var done = pollUntilDone("/v1/catalog/manifest/fill/" + jobId, "state");
+        assertThat(done.get("state")).as("the job ended: %s", done).isNotEqualTo("running");
+
+        assertThat(read(a)).isEqualTo(new Counts(true, 8, 4));
+    }
+
+    // ── the restore routes put chunks back into their origin ──────────────────
+
+    @Test
+    void theRestoreRoutes_dropTheOriginCollection_andNotAnother() throws Exception {
+        Coll a = collection("restoreA", 4);
+        Coll b = collection("restoreB", 4);
+        seed(dsl -> PgContainerHelper.insertCollection(dsl, TENANT, "quarantine-" + a.name()));
+        assertThat(read(a)).isEqualTo(new Counts(true, 4, 0));
+        assertThat(read(b)).isEqualTo(new Counts(true, 4, 0));
+        liveChunks(a, "late", 4, false);
+        liveChunks(b, "late", 4, false);
+
+        var rereferenced = post("/v1/vectors/gc/restore-rereferenced",
+            Map.of("quarantine_collection", "quarantine-" + a.name(), "origin_collection", a.name()));
+        assertThat(rereferenced.statusCode()).as("body: %s", rereferenced.body()).isLessThan(500);
+        assertThat(read(a)).as("restore-rereferenced dropped its origin").isEqualTo(new Counts(true, 8, 4));
+        assertThat(read(b)).as("and not B").isEqualTo(new Counts(true, 4, 0));
+
+        liveChunks(a, "later", 4, false);
+        assertThat(read(a)).as("precondition: cached again").isEqualTo(new Counts(true, 8, 4));
+        var restored = post("/v1/vectors/gc/quarantine-restore",
+            Map.of("origin_collection", a.name(), "chashes", List.of(chash(a.name() + "/later0"))));
+        assertThat(restored.statusCode()).as("body: %s", restored.body()).isLessThan(500);
+        assertThat(read(a)).as("quarantine-restore dropped its origin").isEqualTo(new Counts(true, 12, 8));
+        assertThat(read(b)).isEqualTo(new Counts(true, 4, 0));
     }
 
     // ── fixture embedder ──────────────────────────────────────────────────────

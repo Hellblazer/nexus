@@ -25,16 +25,23 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_COVERAGE_COUNTS_768;
  * {@link #ROUTE_MIN_COVERAGE}. A collection with no chunks has no coverage (never 1) and an orphaned taxonomy (topics,
  * no chunks) is therefore never routed.
  *
- * <p><b>Invalidation: option (a), the engine invalidates on every store.</b> The engine cannot see which assignments
+ * <p><b>Invalidation: option (a), the engine invalidates on a store.</b> The engine cannot see which assignments
  * the client deferred or lost ({@code taxonomy_deferral()} and the lost-chunk tripwire are client state), so it does
- * not try. Every write that changes an input of the count (chunks stored or deleted, the manifest that makes a chunk
- * live, an assignment, a topic, a centroid) calls {@link #invalidate} or {@link #invalidateTenant} after it commits,
- * and the next read recounts. A store whose assignment never happened or failed is then counted as what it is,
- * unassigned chunks, with no signalling and no failure path. Option (b), the client telling the engine, would add a
- * call that can itself be lost, and a lost signal is a stale high reading that hides chunks. The callers are the
- * route handlers ({@code VectorHandler}, {@code TaxonomyHandler}, {@code CatalogHandler}); engine-internal writers
- * (the reaper, gc, re-embed) do not call it and are covered by the ceiling below. Over-invalidating costs one recount;
- * under-invalidating hides chunks, so a caller that does not know the collection invalidates the whole tenant.
+ * not try. A route that stores chunks, or changes an input of the count (the manifest that makes a chunk live, a
+ * document's tombstone, an assignment, a topic, a centroid), drops the affected entries through {@code
+ * CoverageInvalidation}, and the next read recounts. A store whose assignment never happened or failed is then counted
+ * as what it is, unassigned chunks, with no signalling and no failure path. Option (b), the client telling the engine,
+ * would add a call that can itself be lost, and a lost signal is a stale high reading that hides chunks.
+ *
+ * <p><b>Which writers drop, and which do not.</b> Dropping: {@code VectorHandler}'s {@code /upsert-chunks} and the two
+ * restore routes ({@code /gc/restore-rereferenced}, {@code /gc/quarantine-restore}); the {@code TaxonomyHandler} routes
+ * that write topics, assignments or centroids; the {@code CatalogHandler} routes that write manifest rows, documents or
+ * collections; and the two catalog background jobs (reconcile commit, manifest fill), which drop the tenant when their
+ * body ends. {@code /store-delete} is not one of them: it deletes only chunks no manifest row names, which are in
+ * neither count. NOT dropping, and so covered by the ten-minute ceiling alone: {@code ChashHandler}'s
+ * {@code /rename_collection}, the tenant import commit ({@code TenantImportHandler}), the re-embed jobs, the engine's
+ * own writers (the reaper, gc expiry) and the test-only tenant reset. A caller that does not know the collection a
+ * write touched drops the whole tenant: over-invalidating costs one recount, under-invalidating hides chunks.
  *
  * <p><b>Ceiling.</b> An entry older than {@link #DEFAULT_TTL} (ten minutes) is recounted whatever invalidation did,
  * which bounds the staleness a missed hook or an engine-internal writer can cause.
@@ -42,8 +49,8 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_COVERAGE_COUNTS_768;
  * <p><b>Invalidate versus an in-flight fill.</b> A read that started before a commit and finishes after its
  * invalidation must not cache what it counted. Each key's {@link Slot} carries a version that every invalidation
  * bumps; a fill notes the version before it counts and stores only if it is unchanged, both under the slot's monitor.
- * The invalidation runs after the write commits (the handlers call it once the repository call has returned), so a
- * count that began after the commit sees the write, and one that began before it is discarded.
+ * The drop runs when the route's repository call has returned (see {@code CoverageInvalidation} for the exact moment),
+ * so a count that began after the commit sees the write, and one that began before the drop is discarded.
  *
  * <p><b>A failed lookup is not an error.</b> {@link #lookup} answers empty on any failure (an unregistered
  * collection, a pool or statement timeout) and caches nothing, so the caller searches unscoped instead of failing
@@ -189,6 +196,17 @@ public final class TaxonomyCoverage {
                 }
             }
         });
+    }
+
+    /**
+     * Forget every entry of {@code tenant} (a tenant reset or delete, through {@code NexusService.tenantKeyedState()}):
+     * the slots go, not just their values, so the cache holds nothing that names the tenant. A fill in flight keeps its
+     * detached slot and stores into it, where nothing reads it. Returns the entries removed.
+     */
+    public int evictTenant(String tenant) {
+        int before = slots.size();
+        slots.keySet().removeIf(key -> key.tenant().equals(tenant));
+        return Math.max(0, before - slots.size());
     }
 
     private Counts count(String tenant, String collection) {

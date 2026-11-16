@@ -90,7 +90,12 @@ final class CatalogManifestFillRoutes {
     /** Null answers both routes 503. */
     private final EngineJobs<Progress> jobs;
 
-    CatalogManifestFillRoutes(ManifestFill fill, ManifestFillableCount count, EngineJobs<Progress> jobs) {
+    /** RDR-134 Step 2: the fill job's body drops the tenant's cached topic coverage when it ends (it answers 202, so no route-level drop is late enough). */
+    private final CoverageInvalidation coverage;
+
+    CatalogManifestFillRoutes(ManifestFill fill, ManifestFillableCount count, EngineJobs<Progress> jobs,
+                              CoverageInvalidation coverage) {
+        this.coverage = coverage;
         this.fill = fill;
         this.count = count;
         this.jobs = jobs;
@@ -141,7 +146,7 @@ final class CatalogManifestFillRoutes {
         EngineJobs.Started<Progress> started;
         try {
             started = jobs.start(tenant, ManifestFillJobs.SCOPE, ManifestFillJobs.fingerprint(kind, dryRun),
-                job -> new Progress(kind, dryRun, rows, from), (job, stage) -> run(tenant, job, stage));
+                job -> new Progress(kind, dryRun, rows, from), (job, stage) -> coverage.dropAfter(tenant, () -> run(tenant, job, stage)));
         } catch (EngineJobs.Conflict c) {
             Map<String, Object> err = new LinkedHashMap<>();
             err.put("error", c.getMessage());

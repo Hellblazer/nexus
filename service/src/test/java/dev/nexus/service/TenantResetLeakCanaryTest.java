@@ -187,6 +187,9 @@ class TenantResetLeakCanaryTest {
     /** The evictors the census names that this canary does NOT feed, each with why. A new evictor lands in neither
      *  this map nor {@link #FED} and fails {@code theCataloguesEvictorsAreEachFed...} until it is placed in one. */
     private static final Map<String, String> UNFED = new TreeMap<>(Map.of(
+        "TaxonomyCoverage", "its entries are filled by a routed search's coverage lookup (RDR-134 Step 3), which needs "
+            + "the vector backend this engine does not have, so the canary's workload cannot read one. "
+            + "TaxonomyCoverageTest.evictingATenant... covers its evictor, and TenantKeyedStateGateTest lists its holders",
         "ChunkKeysSweepJobs", "its jobs are filled by a background dry run of the key-retirement sweep (the "
             + "sweep route's async field), which needs a registered root or tenant credential and a vector backend; "
             + "ChunkKeysSweepJobsTest and TenantKeyedEvictorsTest cover its evictor",

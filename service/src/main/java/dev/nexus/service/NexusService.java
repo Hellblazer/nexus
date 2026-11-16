@@ -698,8 +698,7 @@ public final class NexusService {
         this.planRepo     = new PlanRepository(tenantScope);
         var telemetryRepo = new TelemetryRepository(tenantScope);
         this.scratchRepo  = new ScratchRepository(tenantScope);
-        var taxonomyRepo  = new TaxonomyRepository(tenantScope);
-        var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2, shared by 3 handlers
+        var taxonomyRepo  = new TaxonomyRepository(tenantScope); var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2
         var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
@@ -1139,7 +1138,7 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("TenantExportSessions", t -> exportSessions.evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("TenantImportSessions", importWiring::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
-            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant),
+            dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant), dev.nexus.service.db.TenantKeyedState.of("TaxonomyCoverage", t -> taxonomyCoverage().evictTenant(t)),
             dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs",
                 t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
     }
@@ -2237,6 +2236,7 @@ public final class NexusService {
     int dataSweepFailuresForTenant(String tenant) {
         return dataSweepFailuresByTenant.getOrDefault(tenant, 0);
     }
+
 
     /** Stop the HTTP server, TTL sweep scheduler, and purge-trash VACUUM
      *  executor immediately. */

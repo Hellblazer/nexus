@@ -93,6 +93,7 @@ final class TenantKeyedStateTables {
         keyed.put("ChunkReaper.resumeCollection", REAPER);
         keyed.put("ChunkReaper.resumeExpiry", REAPER);
         keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
+        TenantKeyedStateCoverageEntries.fill(keyed, notKeyed);   // nexus-7fku2.1.2: TaxonomyCoverage and its invalidation helper
         keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
         keyed.put("TokenCache.Entry.tenantId", TOKEN_CACHE);   // the value of map
         keyed.put("ChunkKeysSweepJobs.Job.callerTenant", CHUNK_KEYS_JOBS);   // the starter of a sweep job (nexus-v75nw)

@@ -638,6 +638,7 @@ public final class TaxonomyHandler implements HttpHandler {
         // any non-Boolean value means "run the cross pass"; only an explicit `false`
         // disables it.
         boolean crossCollection = !(body.get("cross_collection") instanceof Boolean b) || b;
+        if (crossCollection) coverage.widen(ex); // the cross pass writes projection rows onto other collections' topics
         Map<String, Object> result = repo.assignFromChashes(tenant, collection, chashes, crossCollection);
         HttpUtil.send(ex, 200, json(result));
     }

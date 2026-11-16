@@ -11,7 +11,6 @@ import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
-import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
@@ -39,7 +38,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
-import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_COVERAGE_COUNTS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TOPICS;
 import static dev.nexus.service.jooq.nexus.Tables.TOPIC_ASSIGNMENTS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -375,9 +373,8 @@ class TaxonomyCoverageTest {
     }
 
     /**
-     * The count over 50,000 live chunks, 5 of them unassigned, in one statement and a bounded time: it reads the
-     * collection once, and (unlike taxonomy_unassigned_chashes) is not paged. Seeded set-based, as
-     * TaxonomyUnassignedChashesRepositoryTest does.
+     * The count over 50,000 live chunks, 5 of them unassigned, in one statement and a bounded time (unlike
+     * taxonomy_unassigned_chashes it is not paged). Seeded set-based, as TaxonomyUnassignedChashesRepositoryTest does.
      */
     @Test
     void scale_fiftyThousandLiveChunks_areCountedInOneBoundedStatement() throws Exception {
@@ -420,12 +417,10 @@ class TaxonomyCoverageTest {
 
         assertThat(counts).isEqualTo(new Counts(true, total, unassignedIdx.size()));
         assertThat(counts.routable()).isTrue();
-        assertThat(elapsedMs).as("generous bound; a per-row probe plan at this size would still pass, so the plan is read below")
-            .isLessThan(15_000L);
-        Table<?> countsFn = TAXONOMY_COVERAGE_COUNTS_1024.call(c.name());
-        String plan = scope.withTenant(TENANT, ctx -> PgContainerHelper.explainPlan(ctx, ctx.selectFrom(countsFn)));
-        assertThat(plan).as("the live set is probed through the manifest's index or a join, never a per-row"
-            + " chunk_live_owners call. Plan was:%n%s", plan).doesNotContain("chunk_live_owners");
+        // A bound only: it catches an order-of-magnitude regression (the 50k rows read in about a second), not a plan
+        // shape. The function is not inlined, so a plain EXPLAIN shows one Function Scan and says nothing of its body;
+        // its body plan is not asserted here.
+        assertThat(elapsedMs).as("50k live chunks counted in one bounded statement").isLessThan(15_000L);
     }
 
     private static Field<byte[]> indexChash(Field<Integer> i) {
@@ -573,6 +568,23 @@ class TaxonomyCoverageTest {
 
         assertThat(read(coverage, c)).as("not the discarded fill: the next read sees the store")
             .isEqualTo(new Counts(true, 20, 10));
+    }
+
+    @Test
+    void evictingATenant_removesItsEntriesAndNoOthers_andTheNextReadRecounts() throws Exception {
+        Coll a = collection(TENANT, 1024, "evictA", true);
+        Coll b = collection(TENANT, 1024, "evictB", true);
+        Coll theirs = otherTenantSameName(a);
+        for (Coll c : List.of(a, b, theirs)) liveChunks(c, "k", 4, 4);
+        TaxonomyCoverage coverage = fresh();
+        for (Coll c : List.of(a, b, theirs)) read(coverage, c);
+        for (Coll c : List.of(a, b, theirs)) liveChunks(c, "late", 4, 0);
+
+        assertThat(coverage.evictTenant(TENANT)).as("the two entries of this tenant").isEqualTo(2);
+        assertThat(coverage.evictTenant(TENANT)).as("nothing left to remove").isZero();
+
+        assertThat(read(coverage, a)).isEqualTo(new Counts(true, 8, 4));
+        assertThat(read(coverage, theirs)).as("another tenant's entry is kept").isEqualTo(new Counts(true, 4, 0));
     }
 
     @Test
