@@ -1,0 +1,148 @@
+name: Engine Bundle Canary
+
+# Runs develop's engine substrate on a NEW engine tag's PG bundle, before a client release pins it.
+#
+# WHY. develop CI exercises only the PG bundle of REQUIRED_ENGINE_VERSION, which moves at a client release,
+# so a new engine tag's bundle is first tested by the release PR's CI. conexus 8.3.0's PR went red that way:
+# engine-service-v0.1.194 bundles pgvector 0.8.7, whose CREATE EXTENSION runs 147 more DDL statements, and
+# tests/ddl_ceiling.toml [python_unit] migration_ddl_per_worker read 2578 against 2431. scripts/engine_bundle_canary.py
+# fetches the tag's bundle, runs the scoped substrate tests on it, and compares the `ddl: migration=N` line with
+# the ceiling. A red here means: raise the ceiling with the measured reason in the release that bumps
+# REQUIRED_ENGINE_VERSION (docs/agents/engine-service-release.md, "Engine-bundle canary").
+#
+# TRIGGERS, deliberately two (CI cost discipline: one run per engine tag, never per push or PR):
+#   - release published, engine-service-v* tags only (the job-level `if` below; a conexus v* release also fires
+#     this event and reports the jobs skipped);
+#   - workflow_dispatch with the tag to test.
+# A release that engine-service-release.yml's promote-release publishes with GITHUB_TOKEN does NOT raise a
+# `release` event (GitHub does not start workflows from events GITHUB_TOKEN creates), so promote-release also
+# dispatches this workflow by name; a human who publishes the draft by hand raises the event.
+#
+# RUNNER. The pytest shards' pool class (lab-6c18g, 6 cores, 18 GB), the same runs-on shape as ci.yml's `test`
+# job minus the fork-PR clause (no pull_request trigger here); repo variable NX_CI_POOL=off sends it to
+# ubuntu-latest. The jar is built on ubuntu-latest the way ci.yml's service-jar job does (jOOQ codegen needs
+# Docker, which the pool's pytest class is not probed for).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Engine tag to test, engine-service-vX.Y.Z"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-bundle-canary-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: true
+
+jobs:
+  service-jar:
+    name: service jar (canary substrate)
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'engine-service-v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      NX_JOOQ_CACHE: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          # develop's tests and ceiling are what the new bundle is judged against; a dispatch from another
+          # branch tests that branch (tests/test_workflow_dispatch_ref_lint.py).
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
+          persist-credentials: false
+
+      - name: Set up GraalVM 25.0.3
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - name: Build shaded jar (no tests, no native)
+        working-directory: service
+        run: ./mvnw -q -DskipTests package
+
+      - name: Upload jar for the canary job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: canary-service-jar
+          path: service/target/nexus-service-1.0-SNAPSHOT.jar
+          retention-days: 1
+          if-no-files-found: error
+
+  canary:
+    name: engine bundle canary
+    needs: service-jar
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'engine-service-v') }}
+    runs-on: ${{ vars.NX_CI_POOL == 'off' && 'ubuntu-latest' || 'lab-6c18g' }}
+    timeout-minutes: 45
+    env:
+      ENGINE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # An absent or stale jar fails the substrate loudly instead of skipping it.
+      NX_T2_SUBSTRATE_EXPECTED: "1"
+    steps:
+      - name: Host binaries present (labrun-owz)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          NX_CI_HOST_BINARIES: bash git curl tar gzip xz unzip python3 ps pgrep setsid flock timeout ipcs sha256sum
+        run: |
+          set -u
+          [ -n "${NX_CI_HOST_BINARIES// /}" ] || { echo "host probe: empty binary list"; exit 1; }
+          missing=0
+          for b in $NX_CI_HOST_BINARIES; do
+            command -v "$b" >/dev/null 2>&1 || { echo "host missing: $b"; missing=1; }
+          done
+          exit "$missing"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Fetch the service jar
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: canary-service-jar
+          path: service/target
+
+      - name: Re-stamp the jar mtime
+        # tests/db/_service_fixture.py::jar_freshness_skip_reason compares the jar's mtime with the newest file
+        # under service/src; git stamps every checked-out file at checkout time, so a downloaded jar always
+        # looks older than the sources it was built from (the same note as ci.yml's step of this name).
+        run: touch service/target/nexus-service-1.0-SNAPSHOT.jar
+
+      - name: Set up Java (to launch the service jar)
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        uses: ./.github/actions/prime-bge-onnx
+        with:
+          persistent-home: ${{ runner.environment == 'self-hosted' }}
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Run the canary on the tag's PG bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            export TMPDIR="$RUNNER_TEMP/tmp"
+            mkdir -p "$TMPDIR"
+            export NX_ONNX_INTRA_OP_THREADS=2
+          fi
+          uv run python scripts/engine_bundle_canary.py --tag "$ENGINE_TAG"

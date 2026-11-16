@@ -1542,6 +1542,9 @@ jobs:
     needs: [create-release, build-publish, smoke-mac-arm64, build-publish-pg-bundle, build-publish-pg-bundle-windows, build-publish-engine-windows]
     if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/engine-service-v') && needs.create-release.result == 'success' && needs.build-publish.result == 'success' && needs.smoke-mac-arm64.result == 'success' && needs.build-publish-pg-bundle.result == 'success' && (vars.NX_WINDOWS_RELEASE_LEGS != 'on' || (needs.build-publish-pg-bundle-windows.result == 'success' && needs.build-publish-engine-windows.result == 'success')) }}
     timeout-minutes: 5
+    permissions:
+      contents: write  # flips the draft flag (scripts/promote_engine_release.sh)
+      actions: write   # dispatches engine-bundle-canary.yml after the promotion
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -1560,3 +1563,16 @@ jobs:
         run: |
           set -euo pipefail
           scripts/promote_engine_release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" "${WINDOWS_LEGS}"
+      - name: Start the engine-bundle canary on the published tag
+        # The release is published above with GITHUB_TOKEN, and GitHub starts no workflow from an event
+        # GITHUB_TOKEN creates, so engine-bundle-canary.yml's `release: published` trigger does not fire for
+        # this publish. A dispatch is the one event GITHUB_TOKEN may raise. The canary tests the tag's PG
+        # bundle against develop's DDL ceiling (docs/agents/engine-service-release.md). It is a warning,
+        # never part of the release: a failure here leaves the promoted release as it is, and the canary
+        # can be dispatched by hand.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run engine-bundle-canary.yml --repo "${GITHUB_REPOSITORY}" --ref develop -f tag="${GITHUB_REF_NAME}"
