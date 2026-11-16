@@ -62,7 +62,8 @@ public final class DmlUtilsInstaller {
     private static final Logger log = LoggerFactory.getLogger(DmlUtilsInstaller.class);
 
     static final String EXTENSION = "pg_background";
-    static final String OWNER_ROLE = "dml_utils_owner";
+    /** The role that owns every library object; the move worker grants it read access to a driving table. */
+    public static final String OWNER_ROLE = "dml_utils_owner";
     static final String DML_CALLER_ROLE = "dml_utils_caller";
     static final String DDL_CALLER_ROLE = "ddl_utils_caller";
     static final List<String> LIBRARY_ROLES = List.of(OWNER_ROLE, DML_CALLER_ROLE, DDL_CALLER_ROLE);

@@ -640,6 +640,11 @@ public final class Main {
 
         log.info("event=service_ready port={}", service.getPort());
 
+        // nexus-f3yqd.2.13 (RDR-246): the data-move worker works the open moves of nexus.data_moves, one at a time, on its
+        // own admin connections, after the listener is bound. It reads the library install the migration above recorded.
+        // Never takes the engine down: a worker that cannot start is logged and the engine serves without it.
+        var dataMoveWorker = startDataMoveWorker(adminConnection, dmlUtilsInstaller, applicationName);
+
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
         // JVM (the orphan would keep /health green while its lease ages out, and a
@@ -686,6 +691,9 @@ public final class Main {
         // (process exit closes the sockets, and the reaper has already ended the backends).
         Runnable stopAllButEmbedders = () -> {
             service.stop();
+            if (dataMoveWorker != null) {
+                dataMoveWorker.stop();   // cancels a CALL in flight at the server; the run resumes at the next boot
+            }
             stopPciReconciler.run();
             // nexus-g17tf: right after the listener stops and the reconciler's stop
             // (both return at once: neither waits), ahead of the embedder
@@ -735,6 +743,24 @@ public final class Main {
 
         // Block main thread until shutdown
         Thread.currentThread().join();
+    }
+
+    /**
+     * Starts the data-move worker, or returns null when it cannot start. Any failure here is logged and swallowed: the
+     * engine serves whether or not a move can run, and every registered move then shows as not worked.
+     */
+    private static dev.nexus.service.datamove.DataMoveWorker startDataMoveWorker(
+            dev.nexus.service.db.AdminConnection admin, dev.nexus.service.db.DmlUtilsInstaller installer,
+            String engineApplicationName) {
+        try {
+            var worker = dev.nexus.service.datamove.DataMoveWorker.create(admin, installer,
+                dev.nexus.service.datamove.DataMoveWorker.Settings.fromEnv(System::getenv), engineApplicationName);
+            worker.start();
+            return worker;
+        } catch (Exception e) {
+            log.error("event=data_move_worker_not_started cause=\"{}\"", e.toString(), e);
+            return null;
+        }
     }
 
     // ── One engine per database (nexus-5tykh) ────────────────────────────────

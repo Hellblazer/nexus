@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.13: hold every free max_worker_processes slot with a pg_background worker that sleeps, so the move worker
+    finds none. Run through DataMoveTestFixtures#holdWorkerSlots; db.changelog-test-datamove-release-slots.xml ends the
+    workers. Superuser, runAlways.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-hold-slots-1" author="nexus-f3yqd.2.13" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE free integer;
+BEGIN
+    SELECT current_setting('max_worker_processes')::int - count(*) INTO free
+      FROM pg_stat_activity
+     WHERE backend_type NOT IN ('client backend', 'autovacuum launcher', 'autovacuum worker', 'background writer',
+                                'checkpointer', 'archiver', 'startup', 'walreceiver', 'walsender', 'walwriter',
+                                'standalone backend', 'walsummarizer', 'io worker');
+    FOR i IN 1..free LOOP
+        PERFORM pg_background_launch('SELECT pg_sleep(600) /* nexus-datamove-slot-holder */');
+    END LOOP;
+END $$;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

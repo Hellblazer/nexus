@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.13: VACUUM dm_test.plain_rows (the bloat scenario runs it mid-move). VACUUM cannot run in a transaction
+    block, so runInTransaction="false". Superuser, runAlways. Run through DataMoveTestFixtures#vacuumPlainRows.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-vacuum-1" author="nexus-f3yqd.2.13" runAlways="true" runInTransaction="false">
+        <sql splitStatements="false" stripComments="false">
+VACUUM dm_test.plain_rows;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

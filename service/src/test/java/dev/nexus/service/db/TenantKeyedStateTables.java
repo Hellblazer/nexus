@@ -51,6 +51,12 @@ final class TenantKeyedStateTables {
         + "column; it holds no state";
     private static final String PRINCIPAL = "an immutable value naming a tenant, carried on one request's or one "
         + "sweep step's stack; the long-lived holders of tenant principals are the keyed entries (TokenCache.map)";
+    private static final String DATA_MOVE_STATES = "the data-move worker's view of its open moves, by move label (kind, "
+        + "reason, times): nexus.data_moves is a global registry with no tenant column, so nothing here is a tenant's";
+    private static final String DATA_MOVE_HANDLE = "the data-move worker's own thread, one per engine; holds no data";
+    private static final String DATA_MOVE_CALL = "the data-move worker's one call connection (or the statement in flight "
+        + "on it), kept so a stop can cancel it; it carries a tenant setting only for the length of one run, cleared (or "
+        + "the connection closed) after it, and holds no tenant data";
     private static final String REQUEST = "state of one search arm; dies with the request";
     private static final String EVICTOR_LIST = "the evictor list itself: an immutable List.copyOf of stateless "
         + "evictors";
@@ -152,6 +158,13 @@ final class TenantKeyedStateTables {
         }
         notKeyed.put("CatalogSensitiveReads.Page.documents", RESULT);   // nexus-f3yqd: one sensitive-list call's documents
         notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
+        // nexus-f3yqd.2.13 (RDR-246): the data-move worker. The registry it works is global, with no tenant column.
+        notKeyed.put("MoveStates.byLabel", DATA_MOVE_STATES);
+        notKeyed.put("DataMoveWorker.loop", DATA_MOVE_HANDLE);
+        notKeyed.put("DataMoveWorker.callConnection", DATA_MOVE_CALL);
+        notKeyed.put("CallConnection.running", DATA_MOVE_CALL);
+        notKeyed.put("LeafCatalog.TenantLeaf.tenant", PRINCIPAL);
+        notKeyed.put("MoveTenants.TENANT_ID", JOOQ_COLUMN);
         notKeyed.put("PdfStubMetadataReads.CollectionStubs.examples", RESULT);   // nexus-f3yqd: one collection's example names in that answer
         notKeyed.put("ChashConformanceConstraints.Report.constraints", RESULT);   // nexus-f3yqd: one chash-conformance call's entries (no tenant data: pg_catalog)
         notKeyed.put("ManifestForeignCollectionReads.Page.documents", RESULT);   // GH #1611: one foreign-collection call's documents

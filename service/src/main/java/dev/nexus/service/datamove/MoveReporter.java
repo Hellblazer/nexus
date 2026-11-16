@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.datamove;
+
+/**
+ * What the move worker says about each open move as it works. The in-memory {@link MoveStates} is the one
+ * implementation: boot_work and the nx doctor line (nexus-f3yqd.2.17) read it, never {@code nexus.data_moves} on the
+ * serving pool, since {@code nexus_svc} holds no grant there. {@code blocked} is the only way a pass that cannot proceed
+ * reports it, with the reason an operator reads after {@code blocked:}.
+ */
+public interface MoveReporter {
+
+    /** A pass over the move has begun. */
+    void working(DataMove move);
+
+    /** The pass stopped for a reason an operator reads; the move is retried after its wait. */
+    void blocked(DataMove move, String reason);
+
+    /** The move is paused ({@code paused_at} set): open, and not worked. */
+    void paused(DataMove move);
+
+    /** Every run of every listed tenant is complete; verification and {@code on_complete} are the finisher's. */
+    void runsComplete(DataMove move);
+}

@@ -86,3 +86,4 @@ Telemetry019DropFrecencyLiquibaseTest	startEmptyDatabase	WALK	walks to before te
 TenantExportTlsPageTest	startDedicated	CLUSTER_STATE	starts a cluster with ssl=on (a postmaster setting) so export pages read over TLS, the cloud path whose closed-socket end of stream the plain-TCP shared cluster never shows (nexus-csayy.9)
 PgBackgroundImageSmokeTest	startDataMove	IMAGE	boots the image with pg_background built at the bundle pin and asserts the extension, a worker and pgvector in it
 DmlUtilsInstallIntegrationTest	startDataMove	IMAGE	boots the pg_background image, migrates as a non-superuser admin and walks the library install scenarios: absent extension, missing role, failing changelog, single role, stale lock
+DataMoveWorkerIntegrationTest	startDataMove	IMAGE	boots the pg_background image and runs the data-move worker's passes over real dml_utils runs: 100k rows, kill and resume, FORCE RLS tenants, per-leaf runs, bloat, roles after registration, slots
