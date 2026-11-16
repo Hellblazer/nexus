@@ -211,7 +211,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-190](rdr-190-plan-ir-loop-collect-primitives.md) | Plan-IR Fan-Out and Fold: Add `loop` and `collect` Step Primitives So Plans Can Process More Than 100 Items Without Truncating or Round-Tripping Through the Agent | Architecture | Deferred | 2026-07-26 |
 | [RDR-191](rdr-191-unify-chunk-tables-enable-manifest-fk.md) | Unify the Dim-Sharded Chunk Tables into One nexus.chunks with Nullable Typed Embedding Columns: Make the Manifest FK Expressible and Retire the Client-Side Integrity Apparatus | Architecture | Closed | 2026-08-10 |
 | [RDR-192](rdr-192-superseded-note-chunks-outlive-manifest-less-is-live.md) | Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition | Bug Fix | Closed | 2026-08-12 |
-| [RDR-193](rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md) | Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs | Architecture | Accepted | 2026-08-15 |
+| [RDR-193](rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md) | Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs | Architecture | Closed | 2026-08-15 |
 | [RDR-194](rdr-194-fk-census-structural-schema-warts.md) | Post-RDR-187 FK Census and Structural Wart Retirement: One chash Encoding, One doc_id Meaning, Tenant-Keyed Uniqueness Everywhere, One TTL Semantics, and Every Enforceable Relationship Enforced | Architecture | Closed | 2026-08-15 |
 | [RDR-195](rdr-195-voyage-batch-token-limit.md) | Token-Aware Voyage Batch Splitting: Make the 120K-Tokens-Per-Request Ceiling a Planned Bound Instead of an Opaque 500 | Bug Fix | Closed | 2026-08-19 |
 | [RDR-196](rdr-196-cost-aware-nx-answer.md) | Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap | Architecture | Closed | 2026-08-19 |
@@ -267,6 +267,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-248](rdr-248-cloud-tenant-backup.md) | Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant | Feature | Closed | 2026-11-11 |
 | [RDR-249](rdr-249-declarative-auras.md) | Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure | Feature | Closed | 2026-11-12 |
 | [RDR-250](rdr-250-multi-hop-answers-past-the-six-chunk-budget.md) | Multi-hop answers read past the six-chunk generator budget | Feature | Draft | 2026-11-15 |
+| [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Draft | 2026-11-16 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

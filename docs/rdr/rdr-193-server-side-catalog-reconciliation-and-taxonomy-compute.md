@@ -2,7 +2,8 @@
 title: "Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs"
 id: RDR-193
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-16
 resumed_date: 2026-11-03
 priority: high
 author: Hal Hildebrand
@@ -48,6 +49,10 @@ JSON answer a finished engine job returns. A **ghost** is a catalog document
 that no longer stands for a live file of its own (a stale path, or a second
 registration of the same file).
 
+
+**Scope as closed (2026-11-16):** Parts A and A4, which close Gaps 1 and 4.
+Part B (Gap 2, taxonomy compute) moved to RDR-251. Gap 3 stays open; its
+count, 0 on this repository, is recorded under Gap 3. The title still names the full August scope.
 ## Problem Statement
 
 Indexing does catalog and taxonomy work on the client, one HTTP call at a
@@ -123,6 +128,10 @@ path resolution are set operations over rows the engine already holds.
 
 #### Gap 2: Taxonomy discover downloads the entire collection to cluster it, though embeddings are born on the engine
 
+**Moved to RDR-251 at close (2026-11-16, Sam: "Close A, move Part B out").**
+This RDR does not close Gap 2. The text below and Part B's design stay here as
+RDR-251's starting point.
+
 The flush-time assign step is already server-side
 (`nexus.assign_from_chashes_<dim>`, Liquibase `taxonomy-006`, shipped
 conexus 7.4.0 and engine v0.1.68; its cross-collection pass was rewritten
@@ -196,6 +205,16 @@ pipeline, because the hook hands the indexers each file's tumbler before
 chunking starts (`_catalog_hook` returns the `{abs_path: doc_id}` map,
 :6458). The reorder is its own decision. Step 6 counts the documents a full
 run leaves with no manifest, so that decision starts from a number.
+
+**Count (taken at close, 2026-11-16, on Sam's answer "Measure Gap 3"):** 0. A
+cold full `nx index repo` of develop 9b4618611 against a local engine on chas
+registered 5328 documents (4542 code, 411 prose, 375 rdr), and none had
+`chunk_count` 0 or lacked a manifest. The run used the same reduced tree as the
+Minimum Viable Validation run below: each text file cut to its first 1 KB
+(none of them had a whitespace-only first 1 KB with content after it, so the
+cut made no phantom) and the 7 PDFs dropped, so a PDF that extracts to nothing
+is not covered. The pre-registration guard skipped the 17 zero-byte files.
+On this repository, at this tree, the reorder has no measured case to fix.
 
 #### Gap 4: Index-time link generation lists whole content types across the tenant to link one repository's new files
 
@@ -612,7 +631,7 @@ These figures are "the baseline" cited below.
 
 ### Critical Assumptions
 
-- [ ] A set-based commit can reproduce the client's change predicate,
+- [x] A set-based commit can reproduce the client's change predicate,
   miss-count machine, rename rule, register-time metadata rules and the
   engine invariants of the methods it replaces, row for row and link for
   link. **Status**: Unverified. The rules are read from source
@@ -620,20 +639,23 @@ These figures are "the baseline" cited below.
   show that one plpgsql function achieves it. Gated at Step 2 by the parity
   fixtures (old path and commit on one seeded fixture, every column of
   every row and every link compared), with rename and stamp cases
-  mandatory. **Method**: Source Search, then Spike (at implementation)
+  mandatory. **Method**: Source Search, then Spike (at implementation).
+  **Result**: passed at Step 2, parity fixture 31 cases, 0 differences
+  (nexus-u5m5g.3).
 - [x] Tumbler minting can run inside plpgsql. **Status**: Verified.
   **Method**: Source Search (research-1)
 - [x] c-TF-IDF in SQL matches sklearn's top term. **Status**: Verified.
   **Method**: Spike (research-12)
-- [ ] A Java HDBSCAN port reproduces sklearn on the parity fixture (adjusted
+- [deferred: RDR-251] A Java HDBSCAN port reproduces sklearn on the parity fixture (adjusted
   Rand index, ARI, a 0-to-1 agreement score between two clusterings, at
   least 0.90; 16 clusters with the largest 40 capped; [359, 23] uncapped).
   **Status**: Unverified; held with Part B (Step 10 is outside this
   acceptance and is not claimed by its Done). **Method**: Spike (at
   implementation)
-- [ ] A 20,000-row commit finishes under 30 s on the test substrate.
+- [x] A 20,000-row commit finishes under 30 s on the test substrate.
   **Status**: Unverified, gated at Step 2 (Phase 1).
-  **Method**: Spike (at implementation)
+  **Method**: Spike (at implementation). **Result**: passed at Step 2,
+  8.5 s insert and 9.2 s update (nexus-u5m5g.3).
 
 ## Proposed Solution
 
@@ -1046,8 +1068,11 @@ stage calls, one commit, and polls.
    prefix, so `handleList` gains one combined branch. `rdr_resolution`
    makes two reads: the current owner's `rdr` and `prose` rows, and the
    rows under its `rdr_source_prefix` (the second admission arm of
-   `is_in_repo`, which covers the about 150 RDRs registered under a stale
-   owner, rdr_canonical.py:170-180). The first read returns every markdown
+   `is_in_repo`, which covers RDRs registered under a stale owner,
+   rdr_canonical.py:170-180; the August draft put them at about 150, and Step 0
+   count 4 found 0 under its definition, an RDR whose repository is another
+   owner's, which does not count RDRs under a curator owner with no
+   repository). The first read returns every markdown
    document of one repository, not only RDRs; it is bounded by one
    repository, not by the tenant. Because `rdr_resolution` itself changes,
    `nx rdr set-status` gets the same two reads.
@@ -1110,9 +1135,10 @@ repository no longer gets an `implements` link to it. Today that link is
 made only when the last listed document for the path happens to be the
 other repository's, which is the defect. A link to the same repository's
 file under a stale owner is kept by the identity arm; one whose target row
-has an empty `source_uri` under a stale owner is dropped. Step 0 counts
-both kinds today. (Open question 2 asks whether cross-repository path links
-should come back behind an opt-in.)
+has an empty `source_uri` under a stale owner is dropped. Step 0 counted
+them: count 3 found 103 live cross-repository `implements` links and 0
+same-repository ones. Sam kept the drop (open question 2), so those 103 links
+are not re-created on re-index.
 
 #### Part B1: taxonomy SQL (changeset `taxonomy-022-serverside-projection-links.xml`)
 
@@ -1407,6 +1433,14 @@ list reads and one write per 1000 edges; the dependency linker two scoped
 reads and one write; the PDF linker one `same_content` call; resolve calls
 are reported separately.
 
+As run (nexus-u5m5g.9, 2026-11-10, accepted by Sam as run): on a clone of
+this repository with every text file cut to its first 1 KB and the 7 PDFs
+dropped (N=5010, not 5017), because a cold run with full text embedded at
+about 20 files a minute and the PDF extractor timed out. The request counts
+are shapes and do not depend on file size; no real PDF went through a delta,
+so the PDF linker's `same_content` call was counted but not exercised on a
+real PDF.
+
 ### Phase 1: Engine half of Parts A, A4 and B1 (engine cut 1; B1 held)
 
 #### Step 0: Measure the live catalog (read-only, before Step 2's tests)
@@ -1522,6 +1556,13 @@ conexus, whose Liquibase walk on a point-in-time fork of production is the
 pre-deploy gate) and 6.1 (the client-path gate through the edge). The
 `--candidate-migration` leg the August draft named no longer exists.
 
+As shipped (engine-service-v0.1.185, live 2026-11-09): gate 5b.1, the
+`--package-upgrade` rehearsal, was deferred at the cut to the client release
+that raised the pin to 0.1.185, and Step 9 raised no pin (below). Sam
+recorded it on 2026-11-16 as covered, not waived: conexus 8.3.0's release
+battery ran the package-upgrade leg, and its 6e walk took 7.76.0, 7.99.0 and
+8.2.3 installs to engine 0.1.194, which carries `catalog-048`.
+
 ### Phase 2 (CLOSED, 2026-11-10): Client half of Parts A, A4 and B1 (B1 held)
 
 #### Step 6: Reconcile client
@@ -1556,9 +1597,11 @@ with a sensitive document.
 
 #### Step 9: Floor bump and release
 
-`REQUIRED_ENGINE_VERSION` raised to engine cut 1 in the client release that
-ships Steps 6 and 7 (paired release). Step 8 is held with Part B and takes its
-floor bump in the release that ships Part B.
+As shipped: no pin change for engine cut 1. Step 6 shipped in conexus 8.1.0
+and 8.1.1, which already required 0.1.186, past engine cut 1 (0.1.185), so
+raising the pin "to engine cut 1" would have lowered it. Step 7's link
+generator shipped in 8.1.2, which pinned 0.1.187 (nexus-u5m5g.10). Step 8 is held with Part B and
+takes its floor bump in the release that ships Part B.
 
 ### Phase 3: Part B2 engine (engine cut 2; held)
 
@@ -1619,7 +1662,9 @@ None. The clustering port is new Java code with no new library.
 ## Test Plan
 
 - **Scenario**: warm full run, nothing changed. **Verify**: one commit, no
-  row rewritten, `indexed_at` unchanged.
+  catalog row rewritten by the reconcile commit, `indexed_at` unchanged. (The
+  frecency stamp still writes every row through `update_many`, one page per
+  1000 rows: `_write_frecency_meta`, recorded at the Phase 2 gate.)
 - **Scenario**: warm full run after a commit that touched no file (HEAD
   bump only). **Verify**: every row `updated` with `content_hash_changed`
   false, `needs_fence` empty, no RDR relinked.
@@ -1671,7 +1716,11 @@ Measured against the baseline at Step 7: the delta-run linking and
 `all_documents` parts (4-6 s and 1-5 s) should stop growing with tenant
 size, since the scoped reads return one repository's rows. Whether they
 shrink depends on how much of today's time is list size, which the baseline
-does not say. The 20,000-row commit has an accept bar of 30 s in Phase 1.
+does not say. As measured at Step 7 (T2 `nexus/rdr193-step7-linking-probe`):
+row and request counts only, 23,337 rows read down to 27 on the delta shape;
+its loopback seconds are not comparable to the managed-tenant baseline, so
+whether list or probe and frontmatter time dominated is still not known. The
+20,000-row commit has an accept bar of 30 s in Phase 1.
 No other target is claimed; full-run housekeeping savings have no baseline
 and will be measured at Step 6, and discover's at Steps 11 and 12.
 
@@ -1690,8 +1739,12 @@ Three load-bearing claims were gated at named steps with pass or fail
 bars. Two passed at Step 2: commit parity (the parity fixture, 31 cases,
 0 differences) and the 20,000-row commit time (8.5 s insert, 9.2 s update,
 against a 30 s bar). The third, HDBSCAN parity (Step 10), is held with
-Part B. Three counts were measured at Step 0 before the identity tests were
-written (T2 `nexus/rdr193-identity-measurement`). One mechanism is inferred,
+Part B. Five counts (0 to 4) were measured at Step 0 before the identity
+tests were written (T2 `nexus/rdr193-identity-measurement`): 0 nested active
+roots; 734 documents with an empty `source_uri`, 0 sharing a path within an
+owner; 45 documents whose repository is another owner's; 103
+cross-repository `implements` links and 0 same-repository ones (open
+question 2); 0 stale-owner RDR sources. One mechanism is inferred,
 not read: whether `unlink` deletes softly or hard (checked at Step 3). Every other
 claim is verified by source reading or spike (research-1 to research-38).
 
@@ -1772,6 +1825,10 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
    - **Answer (Sam, 2026-11-08): the recommendation.** Drop them unless
      Step 0's count 3 shows reliance; then (b) with the
      exactly-one-repository rule.
+   - **Outcome:** count 3 found 103 cross-repository links (0 same-repository),
+     so the trigger fired. Sam answered ask `rdr193-q2-crossrepo-links`
+     (2026-11-08) "Keep the drop": (a) stands, and the 103 links are not
+     re-created on re-index (nexus-u5m5g.4).
 3. **Scope at accept.**
    - (a) Accept Parts A, A4 and B together.
    - (b) Accept Parts A and A4 now, and hold Part B (taxonomy) for a later
@@ -1863,3 +1920,4 @@ which removes Steps 4, 8 and 10-12 from this RDR's acceptance.
 - 2026-11-08: Accepted by Sam (Parts A and A4; Part B held). Residual dispositions: the two BLOCKS-PLANNING residuals by c8a4921eb and 6d05bc01e (fix check `nexus_rdr/193-fix-check-6d05bc01e`, after `-c8a4921eb` failed once); the three round-3 DISCOVER-AT-IMPLEMENTATION residuals and the five carried from fix check 962a93b3c by nexus-blbd3 (two of those five held with Part B).
 - 2026-11-10: held-scope wording amended to the reviewed Phase 2 code (standing grant 3; residual 8, nexus-u5m5g.9): Gaps closed by this acceptance are 1 and 4; one engine cut; the Java HDBSCAN check, the Step 10 gate, discover egress and both discover Test Plan scenarios marked held with Part B; Done stated as Steps 0-3, 5-7 and 9; the Minimum Viable Validation restated (residual 5) against the parity fixture's rules; factory line reference 417 to 429. Step 9 is not reworded here: its re-scope (no pin change; 0.1.186 already pinned) is recorded on nexus-u5m5g.10.
 - 2026-11-11: Assumption Verification amended to the measured results (standing grant 3; nexus-blbd3): the two Step 2 claims passed (parity fixture 31 cases, 0 differences; 20,000-row commit 8.5 s insert and 9.2 s update against the 30 s bar, nexus-u5m5g.3), HDBSCAN parity marked held with Part B, and the Step 0 counts given their record. The held Part B carry-list moved from nexus-blbd3 to epic nexus-u5m5g, named at Phase 3.
+- 2026-11-16: Closed, Implemented for Parts A and A4 (Sam, "Close A, move Part B out", relayed by halcyon; the close critique's partial verdict overridden on his word, T2 `nexus_rdr/193-close-override-2026-11-16`). Part B moved to RDR-251. Amended to the shipped record (standing grant 3): Step 0's five counts and the open-question-2 outcome (103 cross-repository links dropped), the stale-owner estimate (count 4 = 0), Step 5's gate 5b.1 (covered by conexus 8.3.0's package-upgrade and 6e runs, Sam), Step 9 (no pin change), the Minimum Viable Validation as run (reduced tree), Step 7's measurement (row counts only), the warm-run Test Plan scenario (frecency still writes), and the Gap 3 count (0 of 5328, taken at close). Post-mortem: `post-mortem/rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md`.
