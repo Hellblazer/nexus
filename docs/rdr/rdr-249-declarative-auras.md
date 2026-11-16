@@ -240,8 +240,8 @@ in the engine, and the procedure can still only read.
    - `clear.match` (optional) is equality on dimensions, like
      `trigger.match`, against posts on the same subspace. A post that
      matches it removes this session's `aura: <threads value>` block without
-     running the procedure; for `ci_develop_red`, the next green develop sha
-     clears the red (Sam, 2026-11-15: "amend two"). A `[clear]` that a post
+     running the procedure; for `ci_develop_red`, the next green develop post,
+     for any sha, clears the red (Sam, 2026-11-15: "amend two"). A `[clear]` that a post
      could meet together with `trigger.match` refuses the file at `nx aura
      check`: that is the case when `trigger.match` is absent (every post is
      a trigger, so none could clear), or when no key is in both tables with
@@ -468,8 +468,9 @@ was scrapped, and it is outside the narrowing of RDR-212 that this RDR makes
   (Technical Design 3).
 - `clear.match` is equality on dimensions, so `ci_develop_red`'s clear
   matches kind and outcome only: a late green for an older sha clears the
-  block of a newer red. Whether a clear should also match the sha is Sam's
-  choice (asked on the threads board, `aura-clear-sha`).
+  block of a newer red. Sam kept it that way: "Keep it as is" (Resolved
+  Question 8). A sha match would also need a source `clear.match` does not
+  have today.
 
 ### Risks and Mitigations
 
@@ -528,12 +529,16 @@ engine's registry (self-provisioned).
 Resolve on and off from config and `NX_AURAS_OFF`, subscribe (aura-owned,
 outside the status record's `board_topics`), match, run in a thread, condition, channel and
 threads display under its four write rules, the clear match, the failure and queue rules. Tests
-with a real engine and a real worker: one fire, no fire on a non-match, a
+run on the real Lua worker, with the threads entry held in memory behind the
+same reader and writer the server uses and the channel's delivery path over
+an in-memory model of the engine's announce (`_FakeTupleStore`). They cover: one fire, no fire on a non-match, a
 failing procedure disabled after three, a green post that removes the red
 block, no write when the session has no entry, no aura in a `claude -p`
 child; with an aura subscribed to
 `board/ci/nexus-develop--done` and no session subscription to it, the Stop
-hook still blocks a turn that ends on a develop-CI wait.
+hook still blocks a turn that ends on a develop-CI wait. Of these, only a fire,
+a green that writes nothing and a clear were observed against a real engine,
+in the Minimum Viable Validation; the rest are checked against the model only.
 
 ### Phase 3 (CLOSED, 2026-11-16): The first consumer
 
@@ -547,9 +552,14 @@ None (`tomllib` is in the standard library).
 
 ## Test Plan
 
-Unit tests for the parser's refusals and the argument mapping. Integration
-tests against a self-provisioned engine for subscription, announce-once
-evaluation, the clear match and the threads block, with a tuple whose
+Unit tests for the parser's refusals and the argument mapping. Tests of
+subscription, evaluation, the clear match and the threads block on the real
+Lua worker, with the threads entry in memory and announce-once taken from an
+in-memory model of the engine (Phase 2 Step 1); the registry checks of
+`nx aura check` run against a self-provisioned engine. The engine's own
+announce-once is not verified for the aura path: it is taken from RDR-213 and
+the model, and the live check saw one post produce one notice, not a repeat
+delivery. One test uses a tuple whose
 procedure text carries a newline, a `## ` heading and an `ask:` line, which
 must land as one capped `state:` line. A test that posts a
 tuple whose dimensions and body carry instruction-like text and asserts the
@@ -592,6 +602,13 @@ Gate round 1 raised two more, answered 2026-11-15:
    triggers and the drain path are cut from version 1, and the threads
    write rules and the clear match are added (Technical Design 1).
 
+Asked during Phase 2, answered 2026-11-15:
+
+8. Clear by sha (`aura-clear-sha`, tamsin's ask): "Keep it as is", by
+   dialog in halcyon's session. `ci_develop_red`'s clear matches kind and
+   outcome only, so any green develop post clears the red block, a late
+   green for an older sha included.
+
 ## References
 
 - T2 `nexus/design-declarative-auras.md` (design of record).
@@ -612,3 +629,4 @@ Gate round 1 raised two more, answered 2026-11-15:
 - 2026-11-15: S6 (nexus-mdbds.10.1): RDR-212's exclusion of "any reaction loop" is narrowed on purpose, client-side only (Sam, by dialog in halcyon's session: "Narrow it on purpose"); counted fix-check wording observations folded in (drain-hook bullet, `[limits]` in Technical Design 1, Resolved Question 2's pointer, the measured worker start).
 - 2026-11-15: Technical Design 1 and 2 and Phase 1 Step 2 amended to match the reviewed `nx aura check` (nexus-mdbds.10.2, its feat and fix commits; standing grant 3). The `[clear]` rule was too narrow as "equal tables": a `[clear]` is refused when a post could meet both tables, that is, `trigger.match` is absent or no key is in both with different values. The check also covers `clear.match`, `dims` and `body` fields and refuses two auras sharing a threads block.
 - 2026-11-15: Technical Design 1, 3, 4, 5 and 6 and Consequences amended to match the reviewed waiter path (nexus-mdbds.11.1, review round 1 and its fixes; standing grant 3): loading and the `claude -p` rule as built, the not-announced rule for an aura-only topic, the threads write rules, the failure kinds and the busy retry, and the per-aura queue.
+- 2026-11-16: Phases 2 and 3 closed (nexus-mdbds.11, nexus-mdbds.12; T2 `nexus/phase-review-rdr-249-phase-2-2026-11-16`, `-phase-3-2026-11-16`). The first consumer shipped off in conexus 8.3.0 (93f6f9532, f865a6b3d, 2cbf76584), fire cost recorded under Critical Assumptions. The MVV passed live: red d0d743c71 posted 12:40:42Z, block and fixed-template notice within 4 s; green d76add41d 13:01:27Z cleared it within 19 s; `NX_AURAS_OFF` checked through the resolver the loader calls, not by a restarted session. The opt-in was global by Sam's choice, since no switch scopes an aura to one session. Close critique r1 (partial, 0 Critical): Consequences, Phase 2 Step 1 and the Test Plan amended to match the tests as built and Sam's clear-by-sha answer recorded as Resolved Question 8 (standing grant 3); close critique r2 (partial, 0 Critical, 1 Significant: the amendment overstated what the live check covered) fixed by naming the three clauses observed live and stating that announce-once on the aura path is not verified.

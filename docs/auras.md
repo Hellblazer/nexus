@@ -19,7 +19,7 @@ One aura ships: `ci_develop_red`. It watches `board/ci/nexus-develop--done`, the
 state: develop red at 8b30c16: diagnose before the next push (worktrees rule 7)
 ```
 
-The next green develop run removes the block. It is meant for nexus developers: a red develop sha is a finding to diagnose before anyone pushes on top of it.
+The next green develop run removes the block (any green, as [Clearing](#what-you-see-when-it-fires) says). It is meant for nexus developers: a red develop sha is a finding to diagnose before anyone pushes on top of it.
 
 ## Turning one on
 
@@ -55,7 +55,7 @@ aura ci_develop_red fired on board/ci/nexus-develop--done tuple <id>; see the "a
 
 That notice wakes an idle session the way any channel message does.
 
-**Clearing.** An aura with a `[clear]` table removes its block when a post matching that table arrives on the same subspace. For `ci_develop_red` that is the next develop run whose outcome is `success`. A clear does not run the procedure.
+**Clearing.** An aura with a `[clear]` table removes its block when a post matching that table arrives on the same subspace. For `ci_develop_red` that is the next develop run whose outcome is `success`, for any sha: a green that finishes late for an older sha also clears a newer red, so after a clear, check the newest develop run before you push. A clear does not run the procedure.
 
 Posts on the aura's subspace are not announced to the agent unless the session also subscribes that subspace itself; the aura's notice is the only one.
 
