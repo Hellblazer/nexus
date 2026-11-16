@@ -28,6 +28,32 @@ MEMORY = PLUGIN_SKILL / "scripts" / "memory.py"
 SITE_PAGE = SKILLS / "site-page" / "SKILL.md"
 AGENT = ROOT / "prose-edit" / "agents" / "line-editor.md"
 SKILL = PLUGIN_SKILL / "SKILL.md"
+ROUTE = PLUGIN_SKILL / "markup-route.md"
+# SKILL.md sends a path run to a section of markup-route.md ('follow section "<name>" of `markup-route.md`'); a sentence that only
+# names a section as a cross-reference (without "follow") is left as it is.
+POINTER = re.compile(r'follows? section "([^"]+)" of `markup-route\.md`')
+
+
+def route_sections() -> dict[str, str]:
+    """The sections of markup-route.md by heading: the path-run text the model reads on demand."""
+    parts = re.split(r"^## (.+)$", ROUTE.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    return {name: body.strip("\n") for name, body in zip(parts[1::2], parts[2::2], strict=True)}
+
+
+def skill_text() -> str:
+    """SKILL.md as a path run reads it: each pointer replaced by the text of the section it names, indented as the
+    moved text was, so a test reads a path-run phrase from the file that holds it. A missing section raises."""
+    sections = route_sections()
+    out: list[str] = []
+    for line in SKILL.read_text(encoding="utf-8").split("\n"):
+        found = POINTER.search(line)
+        if found is None:
+            out.append(line)
+            continue
+        indent = len(line) - len(line.lstrip()) + (2 if line.lstrip().startswith("- ") else 0)
+        body = sections[found.group(1)].replace("\n", "\n" + " " * indent)
+        out.append(line[:found.start()] + body + line[found.end():])
+    return "\n".join(out)
 # What no instruction or message the model reads may name (nexus-ger02.15): naming the action primes it.
 NAMES_A_REPAIR = re.compile(r"\bnx\b|start a service|repair|daemon|doctor", re.IGNORECASE)
 
@@ -724,7 +750,7 @@ def test_the_skill_description_names_unpacking() -> None:
 def test_the_skill_has_frontmatter_and_names_only_real_helper_verbs() -> None:
     fm = _frontmatter(SKILL)
     assert fm["name"] == "prose-edit" and fm["description"].lower().startswith("use when")
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     assert "scripts/brief.py" in text and "scripts/memory.py" in text
     helper_verbs = set(re.findall(r"BRIEF (parse|build|filter|tmpdir|site-layer)\b", text))
     assert {"parse", "build", "filter", "tmpdir"} <= helper_verbs

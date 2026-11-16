@@ -760,26 +760,17 @@ class ManifestDepartedWriterSpanTest {
         s.write(s.docP, COLL, s.row(0, "z", P_SPAN), s.row(1, "p-keeps", P_SPAN));
         s.write(s.docA, COLL, s.row(0, "z", null));
 
-        // Only the chash column read fails (the grant leaves every other column): the before-read selects it,
-        // the write's own DELETE and INSERT do not.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-                .revoke(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).from(DSL.role(SVC_ROLE)).execute();
-            PgContainerHelper.runSuperuserTestChangelog(su,
-                "db/changelog-test/db.changelog-test-manifest-chunks-column-select.xml",
-                "databasechangelog_test_manifest_chunks_column_select", Map.of("role", SVC_ROLE));
-        }
+        // nexus-z0o2p.29: the before-read fails through its test hook, which runs a statement Postgres refuses (a
+        // division by zero) inside the read's savepoint, not through a REVOKE of the chash column: a replace now
+        // reads the document's rows itself (it writes the difference), so a revoked column fails the write too.
+        // The write committing after the refusal proves the rollback to the savepoint (else SQLSTATE 25P02).
         Map<String, Object> result;
         try {
+            catalog.setBeforeReadHookForTests((docId, ctx) -> ctx.select(DSL.val(1).div(DSL.val(0))).fetch());
             result = catalog.writeManifestMany(TENANT, List.of(Map.of("doc_id", s.docP,
                 "rows", List.of(s.row(0, "p-keeps", P_SPAN)))), COLL);
         } finally {
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                DSL.using(su, SQLDialect.POSTGRES)
-                    .grant(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).to(DSL.role(SVC_ROLE)).execute();
-            }
+            catalog.setBeforeReadHookForTests(null);
         }
 
         assertThat(result.get("docs")).as("the manifest write is not failed by the unreadable before-set").isEqualTo(1);

@@ -761,7 +761,7 @@ def test_rdr_accept_brief_names_the_disposition_rules(rdr_env):
             # residual disposition rule
             "`residuals:`", "blocks accept",
             # the fix check a sha disposition carries
-            "204-fix-check-<sha>", "docs/rdr/rdr-204-example.md", "tip", "bead id", "needs none",
+            "204-fix-check-<sha>", "docs/rdr/rdr-204-example.md", "blob after the disposition", "bead id", "needs none",
             FIX_CHECK_CONSENSUS_CLAUSE,
             # class-to-disposition rule
             DISCOVER_AT_IMPLEMENTATION, "Implementation Plan phase", BLOCKS_PLANNING,
@@ -1471,7 +1471,7 @@ _DIFF_RANGE = "git diff {gated}..HEAD -- docs/rdr/rdr-204-example.md"
 _FIX_CHECK_SCENARIOS = [
     {"name": "file_changed_names_the_diff_range", "after": "fix",
      "has": ["### Fix check (required before Layer 1)", _DIFF_RANGE, "fix", "{fixed}",
-             "204-fix-check-{fixed}",  # the T2 title carries the tip sha
+             "204-fix-check-{fixed_blob}",  # the T2 title carries the file's blob (nexus-3jjkg)
              "enumeration", "universal", "Do not enter Layer 1 or Layer 3",
              # nexus-yjf5l.5 (R2): every changed identifier's other
              # occurrences in the file, enumerated.
@@ -1500,7 +1500,8 @@ def test_fix_check_section_by_git_state(rdr_env, monkeypatch, case):
         _git_commit_rdr(rdr_env, _ROUND_BODY, "accept", status="accepted")
     _use_t2(monkeypatch, {"204-gate-latest": _gate_record(gated, outcome="PASSED")})
     out = _preamble("rdr-gate", "--", "204").output
-    fmt = lambda xs: [x.format(gated=gated, fixed=fixed) for x in xs]  # noqa: E731
+    fixed_blob = subprocess.check_output(["git", "-C", str(rdr_env["repo_root"]), "rev-parse", "--short=12", "HEAD:docs/rdr/rdr-204-example.md"], text=True).strip()  # nexus-3jjkg: the fix-check title is the blob
+    fmt = lambda xs: [x.format(gated=gated, fixed=fixed, fixed_blob=fixed_blob) for x in xs]  # noqa: E731
     _assert_output(name, out, has=fmt(case["has"]), lacks=fmt(case["lacks"]))
 
 
@@ -1544,7 +1545,7 @@ _FIX_STATE_CASES = [
              "{fixed}", "fix one",
              "204-research-4",  # the next research seq is the pre-edit entry's title
              "/conexus:rdr-research add 204", "nothing else", "inferred, not read", "census",
-             "204-fix-check-{fixed}",
+             "204-fix-check-{fixed_blob}",
              # nexus-yjf5l.5 (R2): the serial precondition (fix, check, then
              # Layer 1 and Layer 3, never a parallel dispatch) is printed here.
              "dispatched against the same commit in parallel",
@@ -1554,8 +1555,8 @@ _FIX_STATE_CASES = [
      "has_ci": ["no fix-check record yet"], "lacks": ["- fine"]},
     {"name": "existing_fix_check_record_is_reported", "scenario": "gated_fixed", "boom": False,
      "entries": {"204-gate-latest": 'outcome: "BLOCKED"\ncommit: {gated}\n',
-                 "204-fix-check-{fixed}": "verdict: CLEAN\n"},
-     "has": ["Fix-check record `204-fix-check-{fixed}` exists"], "has_ci": [], "lacks": []},
+                 "204-fix-check-{fixed_blob}": "verdict: CLEAN\n"},
+     "has": ["Fix-check record `204-fix-check-{fixed_blob}` exists"], "has_ci": [], "lacks": []},
     # nexus-qo7ie: after a PASSED gate the findings are a menu, fixed only when the
     # user names them (FIX_LOOP_RULES rule 1); a BLOCKED gate keeps "to fix".
     {"name": "passed_gate_findings_are_a_menu", "scenario": "gated_fixed", "boom": False,
@@ -1589,7 +1590,8 @@ def test_rdr_fix_by_gate_state(rdr_env, monkeypatch, case):
             fixed = _git_commit_rdr(rdr_env, _ROUND_BODY + "\nFive sites.\n", "fix one")
         else:
             _git_commit_rdr(rdr_env, _ROUND_BODY, "accept", status="accepted")
-    fmt = lambda s: s.format(gated=gated, fixed=fixed) if "{" in s else s  # noqa: E731
+    fixed_blob = subprocess.check_output(["git", "-C", str(rdr_env["repo_root"]), "rev-parse", "--short=12", "HEAD:docs/rdr/rdr-204-example.md"], text=True).strip()  # nexus-3jjkg: the fix-check title is the blob
+    fmt = lambda s: s.format(gated=gated, fixed=fixed, fixed_blob=fixed_blob) if "{" in s else s  # noqa: E731
     entries = {fmt(k): fmt(v) for k, v in case["entries"].items()}
     _use_t2(monkeypatch, entries, client=_Boom() if case["boom"] else None)
     result = _preamble("rdr-fix", "--", "204")
@@ -1983,11 +1985,12 @@ def test_prior_chain_names_each_rounds_own_critique_never_the_upserted_latest_id
 def test_verdict_prints_the_one_line_revision_history_form(rdr_env, monkeypatch):
     """nexus-yjf5l.12: a gate round appends ONE Revision History line (date,
     round, outcome, critical and significant counts, ship-blockers, the gated
-    commit and the critique's T2 record title) and nothing else. The
+    blob and the critique's T2 record title) and nothing else. The
     gate-latest record's own title is NOT named: it is upserted under one fixed
     title, so a pointer to it in an older round's line would resolve to a later
     round's content. The finding titles live only in the T2 records."""
-    sha = _git_commit_rdr(rdr_env, _VERDICT_BODY, "gated")
+    _git_commit_rdr(rdr_env, _VERDICT_BODY, "gated")  # nexus-3jjkg: the line cites the file's blob, which a rebase keeps
+    sha = subprocess.check_output(["git", "-C", str(rdr_env["repo_root"]), "rev-parse", "--short=12", "HEAD:docs/rdr/rdr-204-example.md"], text=True).strip()
     project = f"{rdr_env['repo_root'].name}_rdr"
     crit = (
         "## Critical Issues\n\n### Issue: alpha\n- **Location**: L1\n- **Ship-blocker**: yes\n\n"
@@ -2000,7 +2003,7 @@ def test_verdict_prints_the_one_line_revision_history_form(rdr_env, monkeypatch)
     today = datetime.now(timezone.utc).date().isoformat()
     expected = (
         f"- {today}: Gate round 4 — BLOCKED (1 Critical, 1 Significant, "
-        f"1 ship-blocker(s)); commit `{sha}`; critique `{project}/c`."
+        f"1 ship-blocker(s)); blob `{sha}`; critique `{project}/c`."
     )
     assert expected in out, out
     after = out.split("Revision History line to append", 1)[1]
@@ -2226,3 +2229,4 @@ def test_no_fix_rule_gives_a_gloss_commit_its_own_fix_check():
     stale = [name for name, text in texts.items()
              if "own fix check" in text or "gated separately" in text]
     assert not stale, f"per-commit fix-check wording survives in: {stale}"
+

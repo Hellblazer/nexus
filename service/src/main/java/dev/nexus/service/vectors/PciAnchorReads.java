@@ -31,8 +31,14 @@ final class PciAnchorReads {
      *
      * @param comment {@code obj_description}: the anchor text, or {@code null} when the index has no comment
      * @param bytes   {@code pg_relation_size} of the index
+     * @param relfilenode {@code pg_class.relfilenode} of the index, which every rebuild changes; {@code null} when not
+     *                known (a caller that read none), which is never evidence of a rebuild
      */
-    record IndexFacts(String comment, long bytes) { }
+    record IndexFacts(String comment, long bytes, Long relfilenode) {
+        IndexFacts(String comment, long bytes) {
+            this(comment, bytes, null);
+        }
+    }
 
     /**
      * The leaf's {@code pg_stat_user_tables} row. A leaf with no row yet (never touched since the statistics were
@@ -54,7 +60,8 @@ final class PciAnchorReads {
         Field<String> comment = DSL.function(DSL.name("pg_catalog", "obj_description"), SQLDataType.CLOB, oid,
             DSL.inline("pg_class"));
         Field<Long> bytes = DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT, oid);
-        Record row = tx.select(comment, bytes)
+        Field<Long> relfilenode = DSL.field(DSL.name("c", "relfilenode")).cast(SQLDataType.BIGINT);
+        Record row = tx.select(comment, bytes, relfilenode)
             .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
             .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
             .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
@@ -65,7 +72,23 @@ final class PciAnchorReads {
         if (row == null || row.get(bytes) == null) {
             return null;
         }
-        return new IndexFacts(row.get(comment), row.get(bytes));
+        return new IndexFacts(row.get(comment), row.get(bytes), row.get(relfilenode));
+    }
+
+    /**
+     * {@code pg_class.relfilenode} of {@code schema.indexName}, or {@code null} when no such index exists. The builder
+     * reads it on its own session right before it writes an anchor, so the anchor records the storage it was written
+     * against.
+     */
+    static Long relfilenode(DSLContext ctx, String schema, String indexName) {
+        return ctx.select(DSL.field(DSL.name("c", "relfilenode")).cast(SQLDataType.BIGINT))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+            .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+            .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(indexName))
+            .and(DSL.field(DSL.name("c", "relkind"), String.class).eq("i"))
+            .fetchOne(0, Long.class);
     }
 
     /** The leaf's statistics row, or {@link LeafStats#EMPTY} when it has none. */
@@ -87,6 +110,35 @@ final class PciAnchorReads {
         }
         return new LeafStats(nz(row.get(deleted)), nz(row.get(updated)), nz(row.get(hot)), nz(row.get(live)),
             row.get(vacuum), row.get(autovacuum));
+    }
+
+    /**
+     * The row estimate of every table in {@code schemas}, by {@code schema.table} (the leaf key
+     * {@link PciLeafReindexRule#leafId} makes): {@code max(n_live_tup, pg_class.reltuples)}, with a {@code reltuples}
+     * of {@code -1} (never analyzed) read as 0. One statement for all leaves of a pass.
+     *
+     * <p>Both are estimates and both err low, for different reasons: {@code n_live_tup} lags the writes and is zeroed by
+     * an unclean shutdown, {@code pg_stat_reset}, a restore or a major upgrade (it stays 0 until a vacuum or analyze
+     * runs, which a quiet leaf may never get); {@code reltuples} survives all of those but is only as fresh as the last
+     * vacuum or analyze. The larger of the two is the better floor, as {@code LeafBloatCatalog} reads "rows"
+     * (nexus-dxsjc). The reads are catalog and statistics views; they lock no relation.
+     */
+    static java.util.Map<String, Long> leafRowEstimates(DSLContext tx, java.util.Collection<String> schemas) {
+        Field<String> schema = DSL.field(DSL.name("s", "schemaname"), String.class);
+        Field<String> table = DSL.field(DSL.name("s", "relname"), String.class);
+        Field<Long> live = DSL.field(DSL.name("s", "n_live_tup"), SQLDataType.BIGINT);
+        Field<Double> planner = DSL.field(DSL.name("c", "reltuples")).cast(SQLDataType.DOUBLE);
+        java.util.Map<String, Long> out = new java.util.HashMap<>();
+        for (Record row : tx.select(schema, table, live, planner)
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_user_tables")).as("s"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("s", "relid"))))
+                .where(schema.in(schemas)).fetch()) {
+            Double est = row.get(planner);
+            long fromPlanner = est == null || est < 0 ? 0 : Math.round(est);
+            out.put(row.get(schema) + "." + row.get(table), Math.max(nz(row.get(live)), fromPlanner));
+        }
+        return out;
     }
 
     /**

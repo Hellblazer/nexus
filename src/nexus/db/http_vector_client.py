@@ -7162,8 +7162,8 @@ class HttpVectorClient:
         legacy on-disk chunk metadata row still carrying ``ttl_days: 0``
         from before this migration — a client-side, unstructured JSON
         field with no CHECK possible, deliberately NOT rewritten by this
-        migration's SQL changeset, which touches only the SQL
-        ``nexus.frecency`` table — is excluded by ``$gt: 0`` exactly as it
+        migration's SQL changeset, which touched only the SQL
+        ``nexus.frecency`` table (since dropped, nexus-6pfgb.42) — is excluded by ``$gt: 0`` exactly as it
         was excluded by ``$ne: 0``, so no behavior change for legacy rows
         either). The only row shape where the two predicates would ever
         diverge — a row explicitly written as JSON null — IS now producible:

@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.vectors;
+
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/** RDR-230 Technical Design 3: the install reference a size rule compares an adopted index against. */
+class PciReindexPolicyTest {
+
+    private static PciCatalog.Anchor built(long rows, long bytes) {
+        return new PciCatalog.Anchor(Instant.parse("2026-11-01T00:00:00Z"), rows, bytes, PciCatalog.ORIGIN_BUILT);
+    }
+
+    private static PciCatalog.Anchor adopted(long rows, long bytes) {
+        return new PciCatalog.Anchor(Instant.parse("2026-11-01T00:00:00Z"), rows, bytes, PciCatalog.ORIGIN_ADOPTED);
+    }
+
+    @Test
+    void theReference_isTheMedianBytesPerRowOverBuiltAnchors() {
+        assertThat(PciReindexPolicy.installReference(1024,
+            List.of(built(1000, 8_000_000), built(1000, 8_400_000), built(1000, 9_000_000)))).hasValue(8_400.0);
+        // An even count is the mean of the middle two.
+        assertThat(PciReindexPolicy.installReference(1024,
+            List.of(built(1000, 8_000_000), built(1000, 9_000_000)))).hasValue(8_500.0);
+        // At a dimension that has no fallback, the anchors are all there is.
+        assertThat(PciReindexPolicy.installReference(384, List.of(built(100, 100_000)))).hasValue(1_000.0);
+    }
+
+    @Test
+    void anAdoptedAnchor_isNotABuildFigure_andAnAnchorWithNoRowsOrBytesCarriesNoRatio() {
+        assertThat(PciReindexPolicy.installReference(1024,
+            List.of(adopted(1000, 99_000_000), built(1000, 8_000_000), built(0, 5), built(10, 0))))
+            .hasValue(8_000.0);
+    }
+
+    @Test
+    void withNoBuiltAnchor_1024Dimensions_fallBackTo8_2KbPerRow_andOtherDimensionsHaveNone() {
+        assertThat(PciReindexPolicy.installReference(1024, List.of())).hasValue(8_200.0);
+        assertThat(PciReindexPolicy.installReference(1024, List.of(adopted(1000, 9_000_000)))).hasValue(8_200.0);
+        assertThat(PciReindexPolicy.installReference(768, List.of())).isEmpty();
+        assertThat(PciReindexPolicy.installReference(384, List.of(adopted(1000, 9_000_000)))).isEmpty();
+    }
+
+    // -- the size bound (the recount rule) and the bulk fall ---------------------------------------------------------
+
+    @Test
+    void sizeFires_isTheSizeRule_forABuiltAnchorAndForAnAdoptedOneAgainstTheReference() {
+        assertThat(PciReindexPolicy.sizeFires(built(1000, 8_000_000), 11_300_000, 1000, OptionalDouble.empty())).isTrue();
+        assertThat(PciReindexPolicy.sizeFires(built(1000, 8_000_000), 11_100_000, 1000, OptionalDouble.empty())).isFalse();
+        assertThat(PciReindexPolicy.sizeFires(adopted(1000, 1), 11_500_000, 1000, OptionalDouble.of(8_200))).isTrue();
+        assertThat(PciReindexPolicy.sizeFires(adopted(1000, 1), 80_000_000, 1000, OptionalDouble.empty()))
+            .as("no reference: off").isFalse();
+        assertThat(PciReindexPolicy.sizeFires(built(1000, 8_000_000), 80_000_000, 0, OptionalDouble.empty()))
+            .as("no rows is never a size").isFalse();
+    }
+
+    /** The stale count is a lower bound on the rows, so bytes over it is an upper bound on bytes per row. */
+    @Test
+    void aBoundBelowTheTrigger_meansTheTrueRatioIsBelowItToo_andOneAboveItLeavesTheCountToBeRetaken() {
+        var anchor = built(1000, 8_000_000);   // 8000 bytes a row; the trigger is 11,200
+        // 50% more bytes, the stale count still 1000: bound 1.5 >= 1.4, a count could change the verdict.
+        assertThat(PciReindexPolicy.sizeFires(anchor, 12_000_000, 1000, OptionalDouble.empty())).isTrue();
+        // 20% more bytes: bound 1.2 < 1.4, so the true ratio (rows can only have grown) is below it too.
+        assertThat(PciReindexPolicy.sizeFires(anchor, 9_600_000, 1000, OptionalDouble.empty())).isFalse();
+        for (long trueRows = 1000; trueRows <= 5000; trueRows += 500) {
+            assertThat(PciReindexPolicy.sizeFires(anchor, 9_600_000, trueRows, OptionalDouble.empty()))
+                .as("true rows %d", trueRows).isFalse();
+        }
+    }
+
+    @Test
+    void bulkFall_isTenPercentOrMoreBelowThePreviousCount_andNeverWithoutOne() {
+        assertThat(PciReindexPolicy.bulkFall(OptionalLong.of(1000), 900)).isTrue();
+        assertThat(PciReindexPolicy.bulkFall(OptionalLong.of(1000), 901)).isFalse();
+        assertThat(PciReindexPolicy.bulkFall(OptionalLong.empty(), 1)).isFalse();
+        assertThat(PciReindexPolicy.bulkFall(OptionalLong.of(0), 0)).isFalse();
+        assertThat(PciReindexPolicy.bulkFall(OptionalLong.of(1000), 1500)).as("growth is not a fall").isFalse();
+    }
+
+    // -- red_unfixed (nexus-4lnn1.1.10): a red a REINDEX did not cure stops the daily red-canary trigger ----------------
+
+    private static final Instant NOW = Instant.parse("2026-11-20T00:00:00Z");
+    private static final String A = "aaaaaaaaaaaaaaaa";
+    private static final String B = "bbbbbbbbbbbbbbbb";
+    private static final String C = "cccccccccccccccc";
+    private static final List<String> RED_SET = List.of(A, B);
+
+    /** An anchor of 1,000 rows whose red_unfixed names {@code redRelfilenode}, 1,000 rows and {@code queries}. */
+    private static PciCatalog.Anchor unfixed(long relfilenode, long redRelfilenode, List<String> queries) {
+        return new PciCatalog.Anchor(Instant.parse("2026-11-01T00:00:00Z"), 1000, 8_000_000, PciCatalog.ORIGIN_BUILT,
+            relfilenode, new PciCatalog.RedUnfixed(Instant.parse("2026-11-01T01:00:00Z"), redRelfilenode, 1000, queries));
+    }
+
+    private static PciReindexPolicy.Candidate red(PciCatalog.Anchor anchor, long rows, long bytes, OptionalLong previous,
+                                                  List<String> redQueries) {
+        return new PciReindexPolicy.Candidate("pci_x", "c", 384, anchor, bytes, rows, 0, previous, false,
+            PciCanary.State.RED, 10, null, false, OptionalDouble.empty(), redQueries);
+    }
+
+    @Test
+    void aRedUnfixedAnchor_stopsTheRedCanaryTrigger_whileTheIndexAndTheRedQueriesAreTheSame() {
+        var held = red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), RED_SET);
+        var withoutField = red(built(1000, 8_000_000), 1000, 8_000_000, OptionalLong.empty(), RED_SET);
+
+        assertThat(PciReindexPolicy.trigger(withoutField, NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        assertThat(PciReindexPolicy.trigger(held, NOW)).isEmpty();
+    }
+
+    @Test
+    void aRedSetThatOnlyShrinks_keepsTheHold_becauseTheOldestRedQueryLeftTheWindow() {
+        // Recorded {A, B}; A was the oldest and left the window, so now only B reads red, on the same graph.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), List.of(B)),
+            NOW)).isEmpty();
+    }
+
+    @Test
+    void aRedQueryTheFieldDoesNotList_aRebuild_orNoRedQueries_liftTheHold() {
+        // A new red query C joins A: a new cause.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, List.of(A)), 1000, 8_000_000, OptionalLong.empty(),
+            List.of(A, C)), NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        // The index has been rebuilt since: the anchor's relfilenode is not the one the field names.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(9, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), RED_SET),
+            NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        // No red query is known for the latest run: nothing shows the red is the recorded one.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), null),
+            NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 8_000_000, OptionalLong.empty(), List.of()),
+            NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+    }
+
+    @Test
+    void growthOfTenPercentOrMore_liftsRedUnfixed_andLessKeepsIt() {
+        // The field recorded 1,000 rows. 1,099 keeps the hold, 1,100 lifts it; the bytes grow with the rows.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1099, 8_792_000, OptionalLong.empty(), RED_SET),
+            NOW)).isEmpty();
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1100, 8_800_000, OptionalLong.empty(), RED_SET),
+            NOW)).contains(PciReconcilePlanner.Trigger.RED_CANARY);
+    }
+
+    @Test
+    void sizeDeletesAndBulkDeleteStillFire_withRedUnfixedSet_andIgnoreIt() {
+        // Deletes since build: 1000 rows at the anchor, 600 now.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 600, 4_800_000, OptionalLong.empty(), RED_SET),
+            NOW)).contains(PciReconcilePlanner.Trigger.DELETES_SINCE_BUILD);
+        // Bulk delete: 20% below the previous count (and 20% deleted, under the deletes fraction).
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 800, 6_400_000, OptionalLong.of(1000), RED_SET),
+            NOW)).contains(PciReconcilePlanner.Trigger.BULK_DELETE);
+        // Size: 1.5x bytes a row.
+        assertThat(PciReindexPolicy.trigger(red(unfixed(7, 7, RED_SET), 1000, 12_000_000, OptionalLong.empty(), RED_SET),
+            NOW)).contains(PciReconcilePlanner.Trigger.SIZE);
+    }
+}

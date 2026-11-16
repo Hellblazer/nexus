@@ -978,7 +978,7 @@ jobs:
       # Pinned identically to ci.yml's CA-3 job (single source of truth is the
       # build script; these select versions). PG17 aligns with the deployed stack.
       PG_VERSION: "17.5"
-      PGVECTOR_VERSION: "v0.8.2"
+      PGVECTOR_VERSION: "v0.8.7"
       ASSET: nexus-pg-${{ matrix.target.arch }}
       # nexus-280ei: pin explicitly rather than relying on build_pg_bundle.sh's
       # own 13.0 default (which honours an inherited env value — so an
@@ -1276,7 +1276,7 @@ jobs:
     env:
       # Pinned identically to the other PG-bundle jobs (tests/test_pg_bundle_version_parity.py).
       PG_VERSION: "17.5"
-      PGVECTOR_VERSION: "v0.8.2"
+      PGVECTOR_VERSION: "v0.8.7"
       # Runner label segment of the cache key; must equal pg-bundle-cache-seed.yml's seed-windows.
       PG_BUNDLE_RUNNER: win-release
       ASSET: nexus-pg-windows-x64

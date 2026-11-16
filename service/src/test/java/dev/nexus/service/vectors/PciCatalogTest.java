@@ -244,6 +244,117 @@ class PciCatalogTest {
         assertThat(PciCatalog.parseAnchor(fine.toJson())).contains(fine);
     }
 
+    private static final String ANCHOR_WITH_RELFILENODE =
+        "{\"nexus_pci\":1,\"built_at\":\"2026-10-20T08:00:00Z\",\"rows\":58588,\"bytes\":480116736,"
+            + "\"origin\":\"built\",\"relfilenode\":16421}";
+
+    /**
+     * The anchor rule of the engine before the relfilenode field (af47a7334), as the deployed engine runs it: the
+     * version must be 1, the four fields must be there and well typed, and any other field is ignored. The text this
+     * engine writes must pass it, so a rollback or a mixed-engine fleet does not re-adopt.
+     */
+    private static boolean oldRuleReadsIt(String comment) {
+        try {
+            var n = new com.fasterxml.jackson.databind.ObjectMapper().readTree(comment);
+            if (n == null || !n.isObject()) {
+                return false;
+            }
+            var version = n.get("nexus_pci");
+            var builtAt = n.get("built_at");
+            var rows = n.get("rows");
+            var bytes = n.get("bytes");
+            var origin = n.get("origin");
+            if (version == null || !version.isIntegralNumber() || version.asInt() != 1
+                || builtAt == null || !builtAt.isTextual()
+                || rows == null || !rows.isIntegralNumber() || !rows.canConvertToLong() || rows.asLong() < 0
+                || bytes == null || !bytes.isIntegralNumber() || !bytes.canConvertToLong() || bytes.asLong() < 0
+                || origin == null || !origin.isTextual() || origin.asText().isBlank()) {
+                return false;
+            }
+            java.time.Instant.parse(builtAt.asText());
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @Test
+    void anchor_recordsTheRelfilenodeItWasWrittenAgainst_asAnAdditiveField_andAnAnchorWithoutOneStaysValid() {
+        var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
+        var stamped = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L);
+
+        assertThat(PciCatalog.ANCHOR_VERSION).as("additive: the version stays 1").isEqualTo(1);
+        assertThat(stamped.toJson()).isEqualTo(ANCHOR_WITH_RELFILENODE);
+        assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE)).contains(stamped);
+        // The text this engine writes is read by the engine before the field existed.
+        assertThat(oldRuleReadsIt(ANCHOR_WITH_RELFILENODE)).isTrue();
+        assertThat(oldRuleReadsIt(ANCHOR_TEXT)).as("the check reads the old text too").isTrue();
+        assertThat(oldRuleReadsIt(ANCHOR_TEXT.replace("\"nexus_pci\":1", "\"nexus_pci\":2")))
+            .as("and the old rule refuses a version it does not know").isFalse();
+        // An anchor written before the field existed is a valid anchor: its relfilenode is unknown, not an error.
+        var old = PciCatalog.parseAnchor(ANCHOR_TEXT).orElseThrow();
+        assertThat(old.relfilenode()).isNull();
+        assertThat(old.builtAt()).isEqualTo(at);
+        assertThat(old.rows()).isEqualTo(58588);
+        assertThat(old.rebuiltSince(99L)).as("no relfilenode, nothing to differ from").isFalse();
+        assertThat(stamped.rebuiltSince(16421L)).isFalse();
+        assertThat(stamped.rebuiltSince(16500L)).isTrue();
+        assertThat(stamped.rebuiltSince(null)).as("an unreadable current relfilenode is no evidence").isFalse();
+        assertThat(stamped.withRelfilenode(7L).relfilenode()).isEqualTo(7L);
+        assertThat(old.sameFigures(stamped)).as("the figures, not the relfilenode").isTrue();
+        assertThat(old.withRelfilenode(16421L).toJson()).as("stamping adds the field and nothing else")
+            .isEqualTo(ANCHOR_TEXT.replace("}", ",\"relfilenode\":16421}"));
+        // An unknown extra field is ignored, and so is an optional field of the wrong type.
+        assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("}", ",\"future\":1}"))).contains(stamped);
+        for (String bad : new String[] {"\"16421\"", "-1", "1.5", "null"}) {
+            assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("16421", bad))).as(bad)
+                .hasValueSatisfying(a -> assertThat(a.relfilenode()).isNull());
+        }
+    }
+
+    @Test
+    void anchor_redUnfixed_isAnAdditiveOptionalField_thatRoundTrips_andTheOldRuleStillReadsIt() {
+        var at = java.time.Instant.parse("2026-10-20T08:00:00Z");
+        var red = new PciCatalog.RedUnfixed(java.time.Instant.parse("2026-10-21T09:30:00.123456Z"), 16421L, 58588L,
+            java.util.List.of("89abcdef01234567", "0123456789abcdef"));
+        var anchor = new PciCatalog.Anchor(at, 58588, 480116736, PciCatalog.ORIGIN_BUILT, 16421L, red);
+        String text = ANCHOR_WITH_RELFILENODE.replace("}", ",\"red_unfixed\":{\"at\":\"2026-10-21T09:30:00.123456Z\","
+            + "\"relfilenode\":16421,\"rows\":58588,\"queries\":[\"0123456789abcdef\",\"89abcdef01234567\"]}}");
+
+        assertThat(anchor.toJson()).isEqualTo(text);
+        assertThat(PciCatalog.parseAnchor(text)).contains(anchor);
+        assertThat(oldRuleReadsIt(text)).as("an engine that knows only the old fields reads it").isTrue();
+        assertThat(anchor.withoutRedUnfixed().toJson()).isEqualTo(ANCHOR_WITH_RELFILENODE);
+        assertThat(anchor.withRelfilenode(9L).redUnfixed()).as("carried forward by a rewrite").isEqualTo(red);
+        assertThat(anchor.sameFigures(anchor.withoutRedUnfixed())).isTrue();
+        for (String bad : new String[] {"1", "\"x\"", "{}",
+            "{\"at\":\"yesterday\",\"relfilenode\":1,\"rows\":1,\"queries\":[\"0123456789abcdef\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":-1,\"rows\":1,\"queries\":[\"0123456789abcdef\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"queries\":[\"0123456789abcdef\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":[]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":\"0123456789abcdef\"}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":[\"short\"]}",
+            "{\"at\":\"2026-10-21T09:30:00Z\",\"relfilenode\":1,\"rows\":1,\"queries\":[1]}"}) {
+            assertThat(PciCatalog.parseAnchor(ANCHOR_WITH_RELFILENODE.replace("}", ",\"red_unfixed\":" + bad + "}")))
+                .as(bad).hasValueSatisfying(a -> assertThat(a.redUnfixed()).isNull());
+        }
+    }
+
+    @Test
+    void queryIds_areSortedAndDistinct_andAQueryKeepsItsIdWhateverElseIsInTheSet() {
+        var a = new float[] {1f, 2f, 3f};
+        var b = new float[] {4f, 5f, 6f};
+        var c = new float[] {7f, 8f, 9f};
+        var idA = PciQueryRing.queryIds(java.util.List.of(a)).get(0);
+
+        assertThat(idA).hasSize(PciQueryRing.QUERY_ID_HEX).matches("[0-9a-f]+");
+        assertThat(PciQueryRing.queryIds(java.util.List.of(a, b))).isEqualTo(PciQueryRing.queryIds(java.util.List.of(b, a)))
+            .isSorted().hasSize(2).contains(idA);
+        assertThat(PciQueryRing.queryIds(java.util.List.of(a, c, a))).as("distinct").hasSize(2).contains(idA);
+        assertThat(PciQueryRing.queryIds(java.util.List.of(a, b))).doesNotContainAnyElementsOf(
+            PciQueryRing.queryIds(java.util.List.of(c)));
+    }
+
     @Test
     void anchor_aTextWeDoNotWrite_isRefusedByTheWriter_andReadableByTheParser() {
         // Phase 2 adds an origin of its own; a reader of today still reads it, and this engine writes only two.

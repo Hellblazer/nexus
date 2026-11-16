@@ -27,9 +27,13 @@ import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_ROWS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_RECONCILE_RUNS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_SENSITIVITY_CHANGES;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOBS;
 import static dev.nexus.service.jooq.nexus.Tables.REEMBED_JOB_MOVES;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLE_CLAIM_LOG;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -62,8 +66,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>Fix lives in {@code grants-nexus-diag-3} (the changeset that runs LAST
  * among the runAlways grants blocks every boot): it re-grants SELECT on the
- * view plus the five {@code CHASH_BEARING_TABLES}
- * (src/nexus/db/chash_tables.py) every boot, making the grants the final
+ * view plus the four {@code CHASH_BEARING_TABLES}
+ * (src/nexus/db/chash_tables.py) every boot (since nexus-edchb only the one
+ * column of each that the view reads), making the grants the final
  * word regardless of what -1/-2/taxonomy-011-8 did earlier in the same
  * walk.
  *
@@ -78,7 +83,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * nexus_diag after a full changelog walk). Most of those 31 are correctly
  * denied (real content or credentials); {@code gc_audit} and
  * {@code search_telemetry} are not — both independently VERIFIED
- * content-free at the row/write-path level (see
+ * content-free at the row/write-path level, gc_audit except its
+ * {@code details} column, which is not granted (nexus-edchb; see
  * {@link CatalogRepository#NEXUS_DIAG_READABLE_TABLES}'s javadoc for the
  * per-table evidence). {@code hook_failures} shares
  * {@link CatalogRepository#AUDIT_ONLY_TABLES}'s "no content" CLASSIFICATION
@@ -112,7 +118,6 @@ class GrantsNexusDiagViewAccessIntegrationTest {
         "nexus.chunks",
         "nexus.catalog_document_chunks",
         "nexus.topic_assignments",
-        "nexus.frecency",
         "nexus.relevance_log");
 
     /** RDR-205's three tuple-space tables (tuples-001-baseline.xml, bead nexus-f1pbh). */
@@ -151,6 +156,26 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                         + "INVOKING role's own table privileges for each underlying "
                         + "relation, not the view owner's")
                     .isEmpty();
+            }
+
+            // nexus-edchb: the grant is column-level, so this BYPASSRLS role reads the view's one
+            // address column of each table and never a content column of any tenant.
+            var asSu = DSL.using(su, SQLDialect.POSTGRES);
+            for (String table : UNDERLYING_TABLES) {
+                assertThat(asSu.select(DSL.function("has_table_privilege", Boolean.class,
+                        DSL.inline(DIAG_ROLE), DSL.inline(table), DSL.inline("SELECT"))).fetchOne(0, Boolean.class))
+                    .as("no table-level SELECT on " + table).isFalse();
+            }
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus",
+                    UNDERLYING_TABLES.stream().map(t -> t.substring(t.indexOf('.') + 1)).toList()))
+                .as("nexus_diag may read only the column of each table the view reads")
+                .containsExactly("catalog_document_chunks.chash", "chunks.chash",
+                    "relevance_log.chunk_id", "topic_assignments.doc_id");
+            try (Connection diag = DriverManager.getConnection(pg.getJdbcUrl(), DIAG_ROLE, DIAG_PASS)) {
+                assertThatThrownBy(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(CHUNKS.CHUNK_TEXT).from(CHUNKS).limit(1).fetch())
+                    .as("nexus_diag reading chunk_text is refused")
+                    .hasMessageContaining("permission denied");
             }
         }
     }
@@ -194,9 +219,24 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                         + "evidence for the production gc_audit InsufficientPrivilege "
                         + "incident")
                     .isEmpty();
+                // nexus-edchb (Sam 2026-11-15): gc_audit.details holds the reaper's refusal
+                // sample, document titles and source paths, so it is the one column withheld.
+                assertThatThrownBy(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(GC_AUDIT.DETAILS).from(GC_AUDIT).limit(1).fetch())
+                    .as("nexus_diag reading gc_audit.details is refused")
+                    .hasMessageContaining("permission denied");
             }
+            assertThat(PgCatalogProbes.columnSelectGrants(DSL.using(su, SQLDialect.POSTGRES), DIAG_ROLE,
+                    "nexus", List.of("gc_audit")))
+                .as("nexus_diag may read every gc_audit column but details")
+                .containsExactly(GC_AUDIT_DIAG_COLUMNS);
         }
     }
+
+    /** Every gc_audit column but details (grants-nexus-diag-4, nexus-edchb). */
+    static final String[] GC_AUDIT_DIAG_COLUMNS = {
+        "gc_audit.actor", "gc_audit.chash_count", "gc_audit.chashes", "gc_audit.collection",
+        "gc_audit.created_at", "gc_audit.dry_run", "gc_audit.id", "gc_audit.operation", "gc_audit.tenant_id"};
 
     /**
      * bead nexus-f1pbh (2026-09-11): the PITR fork walk rehearsal for
@@ -227,13 +267,88 @@ class GrantsNexusDiagViewAccessIntegrationTest {
                     }
                 }
                 assertThat(denied)
-                    .as("nexus_diag must hold direct SELECT on nexus.tuples, "
+                    .as("nexus_diag must be able to count nexus.tuples, "
                         + "nexus.tuple_claim_log and nexus.tuple_tenants after a full "
                         + "changelog walk (bead nexus-f1pbh)")
                     .isEmpty();
+                // nexus-edchb: the grant on nexus.tuples is column-level, so this BYPASSRLS role
+                // never reads a tenant's tuple payload.
+                assertThatThrownBy(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(TUPLES.BODY).from(TUPLES).limit(1).fetch())
+                    .as("nexus_diag reading a tuple body is refused")
+                    .hasMessageContaining("permission denied");
+                // The shape of health._lock_claim_started_sql, the one statement that reads
+                // nexus.tuples as nexus_diag: it must run on the column grant.
+                assertThatCode(() -> DSL.using(diag, SQLDialect.POSTGRES)
+                        .select(DSL.min(TUPLE_CLAIM_LOG.AT)).from(TUPLES)
+                        .join(TUPLE_CLAIM_LOG).on(TUPLE_CLAIM_LOG.TENANT_ID.eq(TUPLES.TENANT_ID)
+                            .and(TUPLE_CLAIM_LOG.TUPLE_ID.eq(TUPLES.ID))
+                            .and(TUPLE_CLAIM_LOG.CLAIM_ID.eq(TUPLES.CLAIM_ID)))
+                        .where(TUPLES.SUBSPACE.eq("lock/x")).and(TUPLES.CLAIMANT.eq("c"))
+                        .and(TUPLES.CLAIM_STATE.eq("claimed")).and(TUPLES.CONSUMED_AT.isNull())
+                        .and(TUPLES.LEASE_UNTIL.gt(DSL.currentOffsetDateTime()))
+                        .and(TUPLE_CLAIM_LOG.TRANSITION.eq("claim"))
+                        .fetch())
+                    .as("nx doctor's lock-held fallback query runs as nexus_diag")
+                    .doesNotThrowAnyException();
             }
+            var asSu = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(asSu.select(DSL.function("has_table_privilege", Boolean.class,
+                    DSL.inline(DIAG_ROLE), DSL.inline("nexus.tuples"), DSL.inline("SELECT"))).fetchOne(0, Boolean.class))
+                .as("no table-level SELECT on nexus.tuples").isFalse();
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus", List.of("tuples")))
+                .as("nexus_diag may read only the tuples columns nx doctor's lock check reads")
+                .containsExactly(TUPLES_DIAG_COLUMNS);
+            // The two tuple-space tables -5 grants whole: every column is readable for every tenant,
+            // so a column added to either fails here until someone decides nexus_diag may read it.
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus",
+                    List.of("tuple_claim_log", "tuple_tenants")))
+                .as("the columns nexus_diag reads whole in tuple_claim_log and tuple_tenants carry no payload")
+                .containsExactly(
+                    "tuple_claim_log.at", "tuple_claim_log.claim_id", "tuple_claim_log.claimant",
+                    "tuple_claim_log.expires_at", "tuple_claim_log.log_id", "tuple_claim_log.subspace",
+                    "tuple_claim_log.template", "tuple_claim_log.tenant_id", "tuple_claim_log.transition",
+                    "tuple_claim_log.tuple_id",
+                    "tuple_tenants.first_seen", "tuple_tenants.last_seen", "tuple_tenants.last_swept_at",
+                    "tuple_tenants.tenant_id");
         }
     }
+
+    /**
+     * nexus-edchb, the upgrade path: an install whose earlier engine granted nexus_diag the whole
+     * nexus.tuples table must lose that grant at the next boot. The walk's view-era revoke
+     * (grants-nexus-diag-2) strips the table grant, and -5 grants back only the column list.
+     */
+    @Test
+    void anOldWholeTableGrantOnTuplesIsNarrowedAtTheNextBoot() throws Exception {
+        try (PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(DIAG_ROLE, ADMIN_ROLE);
+             Connection su = pg.createConnection("")) {
+            provisionAndMigrate(pg, su);
+            var asSu = DSL.using(su, SQLDialect.POSTGRES);
+            // The grant the previous -5 made.
+            asSu.grant(DSL.privilege("select")).on(TUPLES).to(DSL.role(DIAG_ROLE)).execute();
+            assertThat(tableSelect(asSu, "nexus.tuples"))
+                .as("precondition: nexus_diag holds the old table grant on nexus.tuples").isTrue();
+
+            liquibaseUpdate(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS);
+
+            assertThat(tableSelect(asSu, "nexus.tuples"))
+                .as("the next boot removes the table grant on nexus.tuples").isFalse();
+            assertThat(PgCatalogProbes.columnSelectGrants(asSu, DIAG_ROLE, "nexus", List.of("tuples")))
+                .as("and leaves only the columns nx doctor's lock check reads")
+                .containsExactly(TUPLES_DIAG_COLUMNS);
+        }
+    }
+
+    private static boolean tableSelect(org.jooq.DSLContext ctx, String table) {
+        return ctx.select(DSL.function("has_table_privilege", Boolean.class,
+            DSL.inline(DIAG_ROLE), DSL.inline(table), DSL.inline("SELECT"))).fetchOne(0, Boolean.class);
+    }
+
+    /** The columns of nexus.tuples health._lock_claim_started_sql reads (grants-nexus-diag-5). */
+    static final String[] TUPLES_DIAG_COLUMNS = {
+        "tuples.claim_id", "tuples.claim_state", "tuples.claimant", "tuples.consumed_at",
+        "tuples.id", "tuples.lease_until", "tuples.subspace", "tuples.tenant_id"};
 
     /**
      * RDR-222 Phase 1 (bead nexus-yye8l.1, Sam's ruling 2026-10-18): after a full

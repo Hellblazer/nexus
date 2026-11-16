@@ -25,7 +25,9 @@ SQLite->PG ETL readers, nexus-i711w Stage 2 sub-stage A; these retire with
 the 7.0.0 wave — see ``_ETL_DYING_WITH_THE_WAVE`` in
 tests/db/test_http_t2_store_parity.py):
     import_relevance_row, import_search_row, import_tier_write,
-    import_nx_answer_run, import_hook_failure, import_frecency_row
+    import_nx_answer_run, import_hook_failure
+(``import_frecency_row`` left with ``nexus.frecency``, dropped by the engine's
+telemetry-019-1, nexus-6pfgb.42.)
 
 Route mapping (matches TelemetryHandler Java):
     POST /v1/telemetry/relevance/log    — log_relevance
@@ -1875,41 +1877,6 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["batch_doc_ids"] = batch_doc_ids
         self._post("/v1/telemetry/import", payload)
 
-    def import_frecency_row(
-        self,
-        *,
-        chunk_id: str,
-        embedded_at: str | None,
-        ttl_days: int | None,
-        frecency_score: float,
-        miss_count: int,
-        last_hit_at: str | None,
-    ) -> None:
-        """Fidelity-preserving import of one frecency row.
-
-        Uses ``POST /v1/telemetry/import`` with ``table=frecency``.
-        GREATEST for score/count/last_hit_at; LEAST for embedded_at.
-
-        ``ttl_days`` type widened to ``int | None`` (code-review cosmetic
-        finding, nexus-tk070.p6b fix-pass, 2026-08-20): stale relative to
-        the None-sentinel convention (RDR-194 D5) — this is dead ETL-only
-        code (sole caller already deleted, retirement overdue since
-        7.0.0), so this is a type-hint-only correction, not a behavior
-        change; left for whoever eventually deletes the method.
-        """
-        payload: dict[str, Any] = {
-            "table":          "frecency",
-            "chunk_id":       chunk_id,
-            "ttl_days":       ttl_days,
-            "frecency_score": frecency_score,
-            "miss_count":     miss_count,
-        }
-        if embedded_at is not None:
-            payload["embedded_at"] = embedded_at
-        if last_hit_at is not None:
-            payload["last_hit_at"] = last_hit_at
-        self._post("/v1/telemetry/import", payload)
-
     def import_rows_batch(self, table: str, rows: list[dict[str, Any]]) -> int:
         """RDR-176 P3 (bead nexus-t9rmg.18): fidelity-preserving BULK import for
         one telemetry *table*.
@@ -1942,7 +1909,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     def probe_ids(self, table: str, keys: list[list[Any]]) -> list[list[Any]]:
         """Membership-probe for the verify-fill inner loop: given candidate
-        conflict-key tuples for one of the six telemetry tables, return the
+        conflict-key tuples for one of the five telemetry event-log tables, return the
         subset already present in the target.
 
         Each element of *keys* is the table's conflict-key tuple IN COLUMN
@@ -1956,7 +1923,6 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         - ``tier_writes``:      ``[session_id, ts, tool, tier]``
         - ``nx_answer_runs``:   ``[question, created_at]``
         - ``hook_failures``:    ``[doc_id, hook_name, occurred_at]``
-        - ``frecency``:         ``[chunk_id]``
 
         Paged transparently at ``QUOTAS.MAX_RECORDS_PER_WRITE`` (300)
         candidates per request — mirrors the batch discipline of

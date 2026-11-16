@@ -1,6 +1,5 @@
 package dev.nexus.service.db;
 
-import dev.nexus.service.jooq.nexus.tables.records.FrecencyRecord;
 import dev.nexus.service.jooq.nexus.tables.records.RelevanceLogRecord;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -16,7 +15,6 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static dev.nexus.service.db.JsonbSupport.jsonbOrNull;
 import static dev.nexus.service.jooq.nexus.Tables.*;
@@ -25,24 +23,18 @@ import static org.jooq.impl.DSL.*;
 /**
  * RDR-152 bead nexus-gmiaf.12 — jOOQ-based telemetry repository.
  *
- * <p>Covers all six telemetry tables:
+ * <p>Covers the event-log telemetry tables:
  * <ul>
  *   <li>{@code relevance_log}    — event log; mirrors {@code Telemetry.log_relevance} etc.</li>
  *   <li>{@code search_telemetry} — event log; composite PK.</li>
  *   <li>{@code tier_writes}      — event log; tier-discipline audit.</li>
  *   <li>{@code nx_answer_runs}   — event log; RDR-080 run metrics.</li>
  *   <li>{@code hook_failures}    — event log; post-store hook audit.</li>
- *   <li>{@code frecency}         — live-mutable; GREATEST on conflict.</li>
  * </ul>
  *
- * <p>Import conflict strategy (relay mandate):
- * <ul>
- *   <li>Event logs: {@code ON CONFLICT ... DO NOTHING} — event timestamps are the data;
- *       never overwrite a historical event.</li>
- *   <li>frecency (live-mutable): {@code ON CONFLICT ... DO UPDATE} with
- *       {@code GREATEST()} for counters/scores/timestamps;
- *       {@code LEAST()} for {@code embedded_at} (keep oldest embed time).</li>
- * </ul>
+ * <p>Import conflict strategy (relay mandate): {@code ON CONFLICT ... DO NOTHING} — event
+ * timestamps are the data; never overwrite a historical event. (The {@code nexus.frecency}
+ * table, the one live-mutable table here, was retired by telemetry-019-1, nexus-6pfgb.42.)
  */
 public final class TelemetryRepository {
 
@@ -2220,92 +2212,21 @@ public final class TelemetryRepository {
         });
     }
 
-    // ── frecency ───────────────────────────────────────────────────────────────
-
-    /**
-     * Upsert a frecency record (live write + ETL import path).
-     *
-     * <p>Conflict strategy (LIVE-MUTABLE):
-     * <ul>
-     *   <li>{@code frecency_score} — GREATEST: preserve highest observed score.</li>
-     *   <li>{@code miss_count}     — GREATEST: monotonic counter.</li>
-     *   <li>{@code last_hit_at}    — GREATEST: keep latest hit timestamp.</li>
-     *   <li>{@code ttl_days}       — GREATEST: take the larger TTL. {@code null}
-     *       (RDR-194 D5: the permanent sentinel, {@code 0} retired —
-     *       {@code telemetry-006-frecency-ttl-null.xml}) is ignored by
-     *       Postgres's {@code GREATEST} unless BOTH sides are {@code null},
-     *       so a permanent row merged against any concrete TTL keeps the
-     *       concrete value — identical merge behavior to the pre-migration
-     *       {@code GREATEST(0, x)}, since {@code 0} always lost to any
-     *       positive competitor there too (verified, not assumed: this is
-     *       why the sentinel flip needed no change to the merge SQL
-     *       itself, only to the parameter's nullability).</li>
-     *   <li>{@code embedded_at}    — LEAST: keep the OLDEST embed time (earliest entry wins).</li>
-     * </ul>
-     *
-     * @param ttlDays {@code null} for permanent (RDR-194 D5); a caller-
-     *     supplied {@code 0} is rejected before reaching this method by
-     *     {@code TelemetryHandler}'s boundary validation on the live
-     *     single-row path, or by {@code frecency_ttl_days_positive_chk} at
-     *     INSERT time on the ETL import paths (which pass values verbatim).
-     */
-    public void upsertFrecency(String tenant,
-                               String chunkId,
-                               String embeddedAtIso,
-                               Integer ttlDays,
-                               double frecencyScore,
-                               int missCount,
-                               String lastHitAtIso) {
-        tenantScope.withTenant(tenant, ctx -> {
-            OffsetDateTime embeddedAt = embeddedAtIso != null && !embeddedAtIso.isBlank()
-                ? parseTs(embeddedAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
-            OffsetDateTime lastHitAt = lastHitAtIso != null && !lastHitAtIso.isBlank()
-                ? parseTs(lastHitAtIso) : OffsetDateTime.now(ZoneOffset.UTC);
-
-            ctx.insertInto(FRECENCY)
-                .set(FRECENCY.TENANT_ID, tenant)
-                .set(FRECENCY.CHUNK_ID, chunkId)
-                .set(FRECENCY.EMBEDDED_AT, embeddedAt)
-                .set(FRECENCY.TTL_DAYS, ttlDays)
-                .set(FRECENCY.FRECENCY_SCORE, frecencyScore)
-                .set(FRECENCY.MISS_COUNT, missCount)
-                .set(FRECENCY.LAST_HIT_AT, lastHitAt)
-                .onConflict(FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID)
-                .doUpdate()
-                // GREATEST for monotonic counters and scores
-                .set(FRECENCY.FRECENCY_SCORE,
-                    greatest(field(name("excluded", "frecency_score"), Double.class), FRECENCY.FRECENCY_SCORE))
-                .set(FRECENCY.MISS_COUNT,
-                    greatest(field(name("excluded", "miss_count"), Integer.class), FRECENCY.MISS_COUNT))
-                .set(FRECENCY.LAST_HIT_AT,
-                    greatest(field(name("excluded", "last_hit_at"), OffsetDateTime.class), FRECENCY.LAST_HIT_AT))
-                .set(FRECENCY.TTL_DAYS,
-                    greatest(field(name("excluded", "ttl_days"), Integer.class), FRECENCY.TTL_DAYS))
-                // LEAST: keep the oldest embedded_at (earliest embed wins)
-                .set(FRECENCY.EMBEDDED_AT,
-                    least(field(name("excluded", "embedded_at"), OffsetDateTime.class), FRECENCY.EMBEDDED_AT))
-                .execute();
-            return null;
-        });
-    }
-
     /** PG Int16 bind-count limit is 32767; keep a safety margin (nexus-1usso). */
     private static final int MAX_BATCH_PARAMS = 30_000;
 
     /**
-     * nexus-1usso: fidelity-preserving BULK import for any of the six
-     * telemetry tables — ONE multi-row {@code INSERT} statement per chunk
+     * nexus-1usso: fidelity-preserving BULK import for any of the five
+     * telemetry event-log tables — ONE multi-row {@code INSERT} statement per chunk
      * (chunked at {@link #MAX_BATCH_PARAMS} bind params), mirroring {@code
      * ChashRepository.doImportBatch} (f0ab406f). Previously this looped a
      * per-row {@code .set(...).execute()} inside one transaction (GUC set
      * once, but still N round-trips) — the plan-audit finding on nexus-1usso
      * ("has the endpoint" != "batches at the DB") applies here too.
      *
-     * <p>{@code DO NOTHING} for the five event logs (no dedup needed — intra-
+     * <p>{@code DO NOTHING} for the event logs (no dedup needed — intra-
      * statement conflicts against {@code DO NOTHING} are a documented no-op,
-     * unlike {@code DO UPDATE} which cannot affect the same row twice).
-     * frecency's {@code GREATEST}/{@code LEAST} {@code DO UPDATE} dedupes on
-     * {@code chunk_id} within a chunk, last occurrence wins. Rows come from
+     * unlike {@code DO UPDATE} which cannot affect the same row twice). Rows come from
      * the trusted ETL; the strict timestamp parse ({@link #parseTsStrict}) is
      * applied per row so a blank ts fails the batch rather than silently
      * stamping {@code now()}. The per-row methods remain for the live/
@@ -2322,7 +2243,6 @@ public final class TelemetryRepository {
                 case "tier_writes"      -> importTierWritesBatch(ctx, tenant, rows);
                 case "nx_answer_runs"   -> importNxAnswerRunsBatch(ctx, tenant, rows);
                 case "hook_failures"    -> importHookFailuresBatch(ctx, tenant, rows);
-                case "frecency"         -> importFrecencyBatch(ctx, tenant, rows);
                 default -> throw new IllegalArgumentException("Unknown table: " + table);
             }
             log.debug("event=telemetry_import_batch tenant={} table={} rows={}", tenant, table, rows.size());
@@ -2427,50 +2347,11 @@ public final class TelemetryRepository {
         }
     }
 
-    private static void importFrecencyBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        // Conflict key: (tenant_id, chunk_id). tenant is constant for this call.
-        // Dedupe last-wins (defensive; the ETL source's PK makes intra-batch
-        // duplicates impossible in practice — same rationale as ChashRepository).
-        // nexus-tk070.p6b (RDR-194 D5): ttl_days's ETL-fidelity default is
-        // optInteger(r, "ttl_days") — null when omitted, matching the new
-        // permanent sentinel — not optI(..., 0) (0 is retired and would
-        // hit the CHECK on every row that simply omits the field). An
-        // EXPLICIT ttl_days in the source row (including an explicit 0)
-        // still flows through verbatim and hits the CHECK at INSERT if
-        // invalid — same ETL-verbatim scope decision as memory-003-
-        // ttl-days.xml's parseImportRow precedent.
-        var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
-        for (var r : rows) unique.put(reqS(r, "chunk_id"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
-
-        final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 7);
-        for (int start = 0; start < deduped.size(); start += chunkSize) {
-            var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
-            var insert = ctx.insertInto(FRECENCY,
-                    FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID, FRECENCY.EMBEDDED_AT, FRECENCY.TTL_DAYS,
-                    FRECENCY.FRECENCY_SCORE, FRECENCY.MISS_COUNT, FRECENCY.LAST_HIT_AT);
-            for (var r : batch) {
-                OffsetDateTime embeddedAt = optTsLenient(r, "embedded_at");
-                OffsetDateTime lastHitAt  = optTsLenient(r, "last_hit_at");
-                insert = insert.values(tenant, reqS(r, "chunk_id"), embeddedAt,
-                        optInteger(r, "ttl_days"), optDd(r, "frecency_score", 0.0),
-                        optI(r, "miss_count", 0), lastHitAt);
-            }
-            insert.onConflict(FRECENCY.TENANT_ID, FRECENCY.CHUNK_ID).doUpdate()
-                  .set(FRECENCY.FRECENCY_SCORE, greatest(field(name("excluded", "frecency_score"), Double.class), FRECENCY.FRECENCY_SCORE))
-                  .set(FRECENCY.MISS_COUNT, greatest(field(name("excluded", "miss_count"), Integer.class), FRECENCY.MISS_COUNT))
-                  .set(FRECENCY.LAST_HIT_AT, greatest(field(name("excluded", "last_hit_at"), OffsetDateTime.class), FRECENCY.LAST_HIT_AT))
-                  .set(FRECENCY.TTL_DAYS, greatest(field(name("excluded", "ttl_days"), Integer.class), FRECENCY.TTL_DAYS))
-                  .set(FRECENCY.EMBEDDED_AT, least(field(name("excluded", "embedded_at"), OffsetDateTime.class), FRECENCY.EMBEDDED_AT))
-                  .execute();
-        }
-    }
-
     // ── ids probe (RDR-178 wave-2 P1, bead nexus-s3dd4.3) ─────────────────────
 
     /**
      * Membership-probe for the verify-fill inner loop: given up to 300
-     * candidate conflict-key tuples for one of the six telemetry tables,
+     * candidate conflict-key tuples for one of the five telemetry event-log tables,
      * return the SUBSET that already exists in this tenant's rows.
      *
      * <p>Matched tuples are echoed back VERBATIM from the input — never
@@ -2492,7 +2373,6 @@ public final class TelemetryRepository {
      *   <li>{@code tier_writes}:      [session_id, ts, tool, tier]</li>
      *   <li>{@code nx_answer_runs}:   [question, created_at]</li>
      *   <li>{@code hook_failures}:    [doc_id, hook_name, occurred_at]</li>
-     *   <li>{@code frecency}:         [chunk_id]</li>
      * </ul>
      *
      * <p>Implemented as one {@code EXISTS} check per candidate (not a single
@@ -2550,11 +2430,6 @@ public final class TelemetryRepository {
                                 .and(HOOK_FAILURES.HOOK_NAME.eq(ks(key, 1)))
                                 .and(HOOK_FAILURES.OCCURRED_AT.eq(parseTsStrict(ks(key, 2))))));
                     }
-                    case "frecency" -> {
-                        requireArity(table, key, 1);
-                        yield ctx.fetchExists(ctx.selectFrom(FRECENCY).where(
-                            FRECENCY.CHUNK_ID.eq(ks(key, 0))));
-                    }
                     default -> throw new IllegalArgumentException("Unknown table: " + table);
                 };
                 if (exists) present.add(key);
@@ -2593,10 +2468,6 @@ public final class TelemetryRepository {
         if (v instanceof Number n) return n.doubleValue();
         try { return Double.parseDouble(v.toString()); } catch (NumberFormatException e) { return null; }
     }
-    private static double optDd(Map<String, Object> r, String k, double def) {
-        Double d = optD(r, k);
-        return d != null ? d : def;
-    }
     private static Long optL(Map<String, Object> r, String k) {
         Object v = r.get(k);
         if (v == null) return null;
@@ -2618,59 +2489,6 @@ public final class TelemetryRepository {
         if (v instanceof Number n) return n.intValue();
         if (v != null) { try { return Integer.parseInt(v.toString()); } catch (NumberFormatException ignored) { } }
         return def;
-    }
-    /**
-     * Nullable {@code Integer} read, mirroring {@link #optL}. nexus-tk070.p6b
-     * (RDR-194 D5): {@code ttl_days}'s ETL default must be {@code null}
-     * (permanent), not {@code 0} (retired, now CHECK-rejected) — an omitted
-     * field means "no opinion, keep it permanent," not "explicitly zero."
-     * An explicit {@code ttl_days} value (including an explicit {@code 0})
-     * still passes through verbatim, ETL-fidelity-preserving, exactly like
-     * {@link #optI}'s siblings — {@code 0} then fails loud at the CHECK,
-     * never silently reinterpreted.
-     */
-    private static Integer optInteger(Map<String, Object> r, String k) {
-        Object v = r.get(k);
-        if (v == null) return null;
-        if (v instanceof Number n) return n.intValue();
-        try { return Integer.parseInt(v.toString()); } catch (NumberFormatException e) { return null; }
-    }
-    private static OffsetDateTime optTsLenient(Map<String, Object> r, String k) {
-        String s = optS(r, k);
-        return (s != null && !s.isBlank()) ? parseTs(s) : OffsetDateTime.now(ZoneOffset.UTC);
-    }
-
-    /**
-     * Get frecency record for a single chunk. Returns empty Optional if not found.
-     */
-    public Optional<Map<String, Object>> getFrecency(String tenant, String chunkId) {
-        return tenantScope.withTenant(tenant, ctx -> {
-            var rec = ctx.select(
-                FRECENCY.CHUNK_ID,
-                FRECENCY.EMBEDDED_AT,
-                FRECENCY.TTL_DAYS,
-                FRECENCY.FRECENCY_SCORE,
-                FRECENCY.MISS_COUNT,
-                FRECENCY.LAST_HIT_AT)
-                .from(FRECENCY)
-                .where(FRECENCY.CHUNK_ID.eq(chunkId))
-                .fetchOne();
-            if (rec == null) return Optional.<Map<String, Object>>empty();
-            // nexus-tk070.p6b (RDR-194 D5): ttl_days can now be legitimately
-            // NULL (permanent) — Map.of throws NPE on a null value, a latent
-            // bug this migration would otherwise expose the first time a
-            // permanent frecency row is fetched. A mutable LinkedHashMap
-            // tolerates null; chunk_id/frecency_score/miss_count remain
-            // NOT NULL columns and can never be null here regardless.
-            var result = new java.util.LinkedHashMap<String, Object>();
-            result.put("chunk_id",       rec.value1());
-            result.put("embedded_at",    rec.value2() != null ? rec.value2().toString() : "");
-            result.put("ttl_days",       rec.value3());
-            result.put("frecency_score", rec.value4());
-            result.put("miss_count",     rec.value5());
-            result.put("last_hit_at",    rec.value6() != null ? rec.value6().toString() : "");
-            return Optional.<Map<String, Object>>of(result);
-        });
     }
 
     // ── capability_census (nexus-gjv9b PART 1) ──────────────────────────────────

@@ -9,8 +9,9 @@ Every ``src/nexus/procedures/*.lua``:
 * passes ``static_check.check`` with its own grants (which also refuses a grant it never uses
   and a verb it calls without a grant).
 
-Non-vacuity: the sweep must find the two procedures that ship now, and each rule has a planted
-violation. The wheel test builds a wheel and requires the procedures and the vocabulary table
+Non-vacuity: the sweep must find the procedures that ship now (SHIPPED_FLOOR) and the auras beside
+them (SHIPPED_AURAS), and each rule has a planted violation. The wheel test builds a wheel and
+requires the procedures, the auras and the vocabulary table
 ``research_add`` reads (``tables.get``) to be in it: a file missing from the wheel is a
 procedure that works in a checkout and fails on every installed ``conexus``.
 File-only, so it runs in the ``-m lint`` job.
@@ -31,7 +32,10 @@ pytestmark = pytest.mark.lint
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROCEDURES = REPO_ROOT / "src" / "nexus" / "procedures"
 #: The procedures that ship at this commit; a sweep that finds fewer is looking in the wrong place.
-SHIPPED_FLOOR = {"research_add", "transcripts"}
+SHIPPED_FLOOR = {"ci_red_notice", "research_add", "transcripts"}
+#: The auras that ship (RDR-249 Technical Design 7); each sits beside the procedure it wraps.
+SHIPPED_AURAS = {"ci_develop_red"}
+AURA_SUFFIX = ".aura.toml"
 
 
 def findings(path: Path, verbs: frozenset[str] = static_check.VERBS_V1) -> list[str]:
@@ -57,8 +61,33 @@ def test_every_shipped_procedure_is_clean() -> None:
 
 
 def test_the_directory_holds_procedures_and_nothing_a_run_would_not_read() -> None:
-    odd = sorted(p.name for p in PROCEDURES.iterdir() if p.suffix != ".lua" and p.name != "__pycache__")
-    assert not odd, f"files in src/nexus/procedures that are not .lua: {odd}"
+    odd = sorted(
+        p.name
+        for p in PROCEDURES.iterdir()
+        if p.suffix != ".lua" and not p.name.endswith(AURA_SUFFIX) and p.name != "__pycache__"
+    )
+    assert not odd, f"files in src/nexus/procedures that are not .lua or {AURA_SUFFIX}: {odd}"
+    auras = {p.name.removesuffix(AURA_SUFFIX) for p in PROCEDURES.glob(f"*{AURA_SUFFIX}")}
+    assert SHIPPED_AURAS <= auras, sorted(auras)
+
+
+def test_every_shipped_aura_passes_the_checks_that_need_no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each ``*.aura.toml`` beside the procedures parses and passes ``nx aura check``'s offline checks (the
+    procedure, the argument mapping, the clear, the threads block); the dictionary checks need the engine and are
+    ``tests/auras/test_registry_engine.py``'s."""
+    from nexus.auras import enumerate_auras  # noqa: PLC0415 -- kept out of the module's import-time surface
+    from nexus.auras.check import check_auras  # noqa: PLC0415
+    from nexus.lua_runtime import library  # noqa: PLC0415
+
+    monkeypatch.delenv(library.REPO_ROOT_ENV, raising=False)
+    entries = [e for e in enumerate_auras(cwd=None) if e.root == "shipped"]
+    assert SHIPPED_AURAS <= {e.name for e in entries}, [e.name for e in entries]
+    bad = [
+        f"{c.name}: {f.check} {f.key}: {f.detail}"
+        for c in check_auras(entries, cwd=None, templates=None)
+        for f in c.findings
+    ]
+    assert not bad, "\n".join(bad)
 
 
 # -- planted violations: each rule fires --------------------------------------
@@ -132,8 +161,10 @@ def test_procedures_and_the_vocabulary_table_are_present_in_a_built_wheel(tmp_pa
     with zipfile.ZipFile(wheels[-1]) as zf:
         names = set(zf.namelist())
 
-    shipped = sorted(f"nexus/procedures/{p.name}" for p in PROCEDURES.glob("*.lua"))
-    assert len(shipped) >= len(SHIPPED_FLOOR), shipped
+    shipped = sorted(
+        f"nexus/procedures/{p.name}" for pattern in ("*.lua", f"*{AURA_SUFFIX}") for p in PROCEDURES.glob(pattern)
+    )
+    assert len(shipped) >= len(SHIPPED_FLOOR) + len(SHIPPED_AURAS), shipped
     missing = [n for n in [*shipped, "nexus/tables/rdr-research-vocab.toml"] if n not in names]
     assert not missing, (
         f"missing from the built wheel: {missing}. A procedure or table that is not package data "

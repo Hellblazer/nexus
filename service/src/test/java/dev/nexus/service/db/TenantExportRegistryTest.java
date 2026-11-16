@@ -82,7 +82,9 @@ class TenantExportRegistryTest {
     void theWhitelistAnswersOnlyDataAndDerivedTables() {
         assertThat(TenantExport.exportable("chunks")).isPresent();
         assertThat(TenantExport.exportable("memory")).isPresent();
-        assertThat(TenantExport.exportable("frecency")).isPresent();
+        assertThat(TenantExport.exportable("frecency")).as("retired by telemetry-019-1, nexus-6pfgb.42").isEmpty();
+        assertThat(TenantExport.RETIRED).as("an older file's frecency section is skipped by name")
+            .anyMatch(r -> r.table().equals("frecency") && r.column() == null && r.changeset().equals("telemetry-019-1"));
         assertThat(TenantExport.exportable("tuples")).isEmpty();
         assertThat(TenantExport.exportable("t1.scratch")).isEmpty();
         assertThat(TenantExport.exportable("embedding_models")).as("a global table").isEmpty();
@@ -101,7 +103,7 @@ class TenantExportRegistryTest {
             "embedding_profile", "memory", "memory_summaries", "plans", "document_aspects",
             "document_highlights", "topics", "topic_assignments", "topic_links", "taxonomy_meta",
             "claude_assisted_remediation_consents");
-        Set<String> derived = Set.of("frecency", "taxonomy_centroids", "search_telemetry", "relevance_log",
+        Set<String> derived = Set.of("taxonomy_centroids", "search_telemetry", "relevance_log",
             "nx_answer_runs", "nx_answer_steps", "chunk_orphaned_at");
         TenantExport.TABLES.forEach(t -> {
             ExportClass expected = data.contains(t.name()) ? ExportClass.DATA

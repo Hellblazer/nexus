@@ -1385,9 +1385,10 @@ final class ChunkReaper {
 
     /**
      * One persisted sample row: the chunk's chash and its manifest owner's title and path, nothing of the chunk's
-     * text. The sample goes into {@code gc_audit.details}, which the cross-tenant {@code nexus_diag} role reads under
-     * the premise that the table is content-free (grants-nexus-diag-4); {@code text_prefix} is for the live
-     * {@code /v1/vectors/reapable} listing and the CLI, never for a stored row.
+     * text. The sample goes into {@code gc_audit.details}, the one gc_audit column the cross-tenant
+     * {@code nexus_diag} role is not granted (grants-nexus-diag-4, nexus-edchb), because titles and paths are
+     * content; {@code text_prefix} is for the live {@code /v1/vectors/reapable} listing and the CLI, never for a
+     * stored row.
      */
     private static Map<String, Object> sampleRow(String chash, String title, String sourcePath) {
         Map<String, Object> m = new LinkedHashMap<>();

@@ -2,13 +2,14 @@
 title: "Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant"
 id: RDR-248
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-15
 priority: high
 author: Claude (linda, for Sam)
 reviewed-by: self
 created: 2026-11-11
 accepted_date: 2026-11-11
-related_issues: [nexus-f3yqd.4]
+related_issues: [nexus-csayy, nexus-f3yqd.4]
 related_rdrs: [RDR-108, RDR-155, RDR-243]
 ---
 
@@ -45,8 +46,9 @@ cloud tenant to the user's disk.
 #### Gap 2: The exports that do work in cloud mode are partial and not one snapshot
 
 `nx store export --all` writes T3 collections with their embeddings; `nx catalog export` writes catalog
-links and `store_put` notes, without embeddings. Nothing exports T2, document aspects, highlights, tuples
-or the full catalog document rows. Run one after another they read different moments, so a write between
+links and `store_put` notes, without embeddings. Nothing exports T2, document aspects, highlights
+or the full catalog document rows. (Tuple-space state is coordination, not data: the export leaves it out
+on purpose and the verb says so; see the registry's `excluded` class.) Run one after another they read different moments, so a write between
 them leaves the copies disagreeing.
 
 #### Gap 3: No restore path exists for a cloud tenant, so a backup would be unproven
@@ -82,11 +84,14 @@ covers, 48,772 of them catalog documents (T2 `nexus/rdr248-cloud-spike-2026-11-1
 
 - Engine: Java 25, Postgres 17 with pgvector; cloud is a self-managed PG 17.11 on arm64 EC2 behind the
   managed service. Schema by Liquibase.
-- RLS: at the schema head (Liquibase `grants-nexus-diag-5`, 572 changesets) 50 parent tables carry
+- RLS: at the schema head of the spike (Liquibase `grants-nexus-diag-5`, 572 changesets) 50 parent tables carry
   `FORCE ROW LEVEL SECURITY`, keyed on `current_setting('nexus.tenant')` (`t1.scratch` on a second
   setting, `nexus.t1_tenant`), plus 40 RLS partition leaves of `nexus.chunks`, which is LIST-partitioned by
   model, then tenant. The global tables outside RLS: `embedding_models`, `install_pings`,
   `request_ledger_tenants`, `service_tokens`, `session_tokens`, `tuple_tenants`, and Liquibase's own.
+  Since `telemetry-019-1` dropped `frecency` (nexus-6pfgb.42, engine 0.1.192) there are 49 parent tables: the
+  shipped registry exports 25 (19 `data`, 6 `derived`) and excludes 24, and lists `frecency` as retired
+  (`TenantExport.java:97`), so a file from an older engine that still carries it is not refused: the import skips that table and reports it.
   (A first count from the changesets said 60; it included tables since dropped.)
 - The engine connects as `nexus_svc`: not superuser, no BYPASSRLS, not the tables' owner. It has SELECT
   and INSERT on all 50 tables and TEMP on the database, USAGE but not UPDATE on their sequences, and it
@@ -129,7 +134,7 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
   - 21 tables key on a global serial or hashed id without the tenant, so a restore into a second tenant
     in the same database collides unless ids are reassigned; reassigning through per-table maps, with
     foreign-key children rewritten and tables loaded in foreign-key order, loaded A into an empty C with
-    counts and checksums equal (outside the reassigned columns and one trigger-maintained column);
+    counts and row contents equal (outside the reassigned columns and one trigger-maintained column);
   - tuple ids hash the tenant, so tuples cannot move to another tenant by copying;
   - the seeded tenant exported 312 KB in 0.04 s, 285 KB of it chunks: size follows chunk count, about
     5 KB per bge-768 chunk.
@@ -144,7 +149,7 @@ changesets under `service/src/main/resources` (RLS and CREATE TABLE statements),
 | A1 | The cloud front end lets one authenticated response stream for tens of minutes and several GB | **Refuted** (bob, from conexus config, 2026-11-11): the edge proxy closes every exchange at an absolute 60 s, the load balancer idle timeout and CloudFront's origin read timeout are 60 s, and the sidecar caps a request body at 20 MB | Config reading; the design below works within those limits |
 | A2 | One `REPEATABLE READ READ ONLY` transaction with `set_config('nexus.tenant', T, true)` returns exactly that tenant's rows from every RLS table | Verified locally (spike); the cloud has no pooler (the engine reaches PG directly through its own Hikari pool, bob 2026-11-11), so the local result carries | Local spike |
 | A3 | Binary `COPY` of the column types in these tables round-trips | Verified for every type that held data; staged load required | Local spike; the remaining types (bigint[], smallint, uuid, identity) by the Steps 4 and 6 test's seed |
-| A4 | Import loads in one transaction | Verified at toy scale (57 chunks, 0.12 s) with id reassignment, foreign-key order and tuples excluded; at real scale the load cannot fit one 60-second exchange (248-research-11, inferred), so the commit is asynchronous; its time at scale is measured in Step 6 | Local spike |
+| A4 | Import loads in one transaction | Verified at toy scale (57 chunks, 0.12 s) with id reassignment, foreign-key order and tuples excluded; at real scale the load cannot fit one 60-second exchange (248-research-11, inferred), so the commit is asynchronous; its time at scale was measured in Step 6: 33 minutes for 500,000 chunks (Performance Expectations), one run | Local spike |
 | A5 | A read-only snapshot held for the export does not hurt the shared cloud database | Verified (bob, read-only cloud window, Sam's go, 2026-11-11, T2 `nexus/rdr248-cloud-spike-2026-11-11`): tenant `nexus` is 2,272,023 rows and 3.82 GB in binary COPY over the 26 data and derived tables, read from one snapshot in about 83 s (`chunks` 542,778 rows, 3.39 GB, 78 s, about 43 MB/s; the rest about 5 s). A snapshot held 60 minutes (by accident) left the xmin age near 1000 and dead tuples barely grown (`topic_assignments` 45.7k to 46.8k); no autovacuum ran in the window | Cloud measurement |
 | A6 | A snapshot exported by one transaction serves many later page transactions, confined by RLS, consistent across writes | Verified locally (spike round 2, T2 `nexus/rdr248-local-spike-r2-2026-11-11`): 43 pages, writes and deletes committed between pages, concatenated pages equal the single-transaction export row for row on all 26 tables | Local spike |
 | A7 | The cloud engine role has no `idle_in_transaction_session_timeout` that would kill the held transaction between page requests | Verified (bob, same window): idle-in-transaction, idle-session, statement and transaction timeouts are 0 at server level, with no role or database override for `nexus_svc`; the engine sets `statement_timeout` locally only on its search and taxonomy paths, so the export's dedicated connection sets its own bounds | Cloud settings read; engine source |
@@ -190,8 +195,9 @@ The classes, from the spike (one reason each in the spike record):
   catalog_meta, catalog_sensitivity_changes, chunks, embedding_profile, memory, memory_summaries, plans,
   document_aspects, document_highlights, topics, topic_assignments, topic_links, taxonomy_meta,
   claude_assisted_remediation_consents.
-- `derived`: frecency, taxonomy_centroids, search_telemetry, relevance_log, nx_answer_runs,
-  nx_answer_steps, chunk_orphaned_at.
+- `derived`: taxonomy_centroids, search_telemetry, relevance_log, nx_answer_runs,
+  nx_answer_steps, chunk_orphaned_at. (`frecency` was `derived` here until `telemetry-019-1` dropped the
+  table, nexus-6pfgb.42; the registry now lists it as retired.)
 - `excluded`: in-flight work (pdf_pipeline, pdf_pages, pdf_chunks, reembed_jobs, reembed_job_moves),
   coordination state whose ids hash the tenant and whose claims would be stale (tuples, tuple_claim_log,
   tuple_deliveries), session scratch (t1.scratch), and operational logs (agent_dispatches,
@@ -297,6 +303,11 @@ check holds a lock through the upload. Refusals, each naming what failed, and no
   the engine's registry with the same type nor listed as retired (see *Cross-release*); or a target column the
   file lacks is NOT NULL with no default.
 - **Missing model.** An `embedding_models` row the header names does not exist.
+- **Model not served.** The header names a Voyage-provider model that the engine's embedder does not serve (the engine
+  holds no Voyage key). The `embedding_models` table is seeded alike on every engine, voyage rows included, so the row
+  check above does not catch this; the open reads the models the engine's router serves and refuses with 422
+  `embedding_model_not_served`, naming the model, before any part is sent. A model of another provider is not gated,
+  and an engine told of no embedder (a test engine) is not asked.
 - **Too large.** The declared row bytes exceed `NX_IMPORT_MAX_BYTES` (default 8 GiB, about twice tenant `nexus`).
 - **Busy.** The tenant already has an import or export session (409, naming the open session's id, so a client
   that lost its earlier session can `DELETE` it), or the engine is at its session cap (503 with a retry-after).
@@ -307,7 +318,9 @@ The response is the session id and the client part size the engine accepts.
 
 *2. Upload: `PUT /v1/tenant/import/{id}/rows?table=T&part=k`*, a body of at most 8 MiB (a part fits 60 s at
 about 1.1 Mbps; the 20 MB edge cap would need 2.7 Mbps). The client re-cuts each exported page at row boundaries
-into parts, each a complete binary COPY stream (header, rows, trailer), and sends its SHA-256 in a header.
+into parts, each a complete binary COPY stream (header, rows, trailer), and sends its SHA-256 in the
+`X-Nexus-Part-Sha256` request header (an edge that forwards only listed headers must list it; the cloud's did not
+until conexus PR #710, Activation Step 2).
 Before any upload the client verifies the whole file (every page's SHA-256 and the trailer's counts, the same check
 as `nx backup --check`), so a damaged file is refused before it costs the cloud anything. On the engine a part is read whole into memory (at most 8 MiB) and its SHA-256 checked before anything touches
 the session's transaction, so a part damaged in transit is refused and sent again without cost. A part that
@@ -338,8 +351,10 @@ for the idle bound, and the upload's total bound stops at the first commit attem
 meets `restore_busy` after a long upload keeps it staged while another load runs, and no longer. The verb retries
 the commit every 60 s until that bound. Tenant create
 checks the same key: a new changeset redefines `create_tenant_partitions` (today only in `vectors-030`:349-403) with
-a parameter `p_check_restore boolean DEFAULT true`, which the token-insert trigger leaves at its default and the
-RDR-225 walk (`vectors-030`:724-725) passes as false. With it true, the slow path, the one that runs DDL (the fast
+a parameter `p_check_restore boolean DEFAULT true`, which every caller leaves at its default. The RDR-225 walk
+(`vectors-030`:724-725) cannot pass it: on a fresh install that changeset runs before the new one exists. That is
+harmless, because migration finishes before the engine serves, so no load can hold the key during the walk. False
+is for an operator's or the doctor's hand repair (the doctor's printed recovery statement passes it). With it true, the slow path, the one that runs DDL (the fast
 path at :378-386, every leaf present, takes no lock, so minting or rotating a token for an existing tenant is never
 delayed), first calls
 `pg_try_advisory_xact_lock_shared` on the restore key (a different key from its per-tenant lock at :387-389) and
@@ -364,8 +379,10 @@ would otherwise outlive it. The load, in that one transaction, in load order:
    the seeded one, or the load fails naming the key and the column (a different profile means the restored vectors do not match
    the engine's embedder).
 4. **Verify** (S3): for each table, inserted rows plus seeded rows skipped by `ON CONFLICT` plus rows dropped by
-   the soft-reference rule equal the staged count (skipped `derived` tables are not loaded and not counted); every
-   foreign key holds by construction; for each soft reference, every positive value is a new id from the map
+   the soft-reference rule equal the staged count (skipped `derived` tables are not loaded and not counted); a
+   foreign-key value whose parent row is not in the file fails the load, naming the column (a LEFT JOIN would
+   otherwise write NULL into a nullable key such as `topics.parent_id`), and a file with a child table but without
+   its reassigned-id parent table is refused at open, so no row can point at another tenant's parent; for each soft reference, every positive value is a new id from the map
    (a positive value outside the map fails the load), and the counts of remapped, passed-through and negated
    values are reported. Column checksums are a round-trip test check only, because trigger-maintained
    columns and reassigned ids change by design.
@@ -384,13 +401,18 @@ rolled back.
 load runs or after it ended answers 200 with the current status and never starts a second load, so a client that
 lost the 202 just commits again); status `GET /v1/tenant/import/{id}`; abort `DELETE /v1/tenant/import/{id}`; the
 restore marker `GET /v1/tenant/import-marker` (its own path, so no session id can shadow it). Session ids are UUIDs.
+The bodies, status fields and reason codes are recorded in the wire-contract entry (`docs/wire-contract-pending.md`,
+nexus-csayy.6), which is their authority; a 409 for an open session names the session's kind (export or import), so
+the client deletes it through the right route; a 200 from commit or status can carry `failed: <reason>`, so the
+client reads the body. `GET /version` reports `tenant_import_supported`.
 
 *Bounds* (S6 and the fix check). Before commit: idle 10 minutes without a part, 60 minutes in all, as for
 export; a status poll is not activity. After a commit refused `restore_busy`, the restore-wait bound above
 (`NX_IMPORT_LOAD_MAX` from the first attempt). In all a session can hold its slot and its transaction for up to
-three hours. After commit the load has a total bound, `NX_IMPORT_LOAD_MAX` (default 60
-minutes, set from the Step 6 scale run with a margin of at least 2x), enforced by the engine cancelling the load's
-backend; each statement also runs under a statement timeout of the same value. `DELETE /v1/tenant/import/{id}`
+about three hours and 12 minutes at the defaults. After commit the load has a total bound, `NX_IMPORT_LOAD_MAX` (default 3,960 s, twice the Step 6 load of 33 minutes for 500,000 chunks, as a floor: Sam, 2026-11-14,
+ask `rdr248-load-bound`; a larger tenant raises it), enforced by the engine cancelling the load's
+backend; each statement also runs under a statement timeout of the same value. Each part's staging COPY runs
+under a 120 s statement timeout. `DELETE /v1/tenant/import/{id}`
 aborts: before commit it rolls back the staged transaction; during the load it cancels the backend, and the
 status reads `failed: aborted`. The export keeps its 60-minute cap (Sam, 2026-11-11); A5 is stated as observed
 benign for 60 minutes at that window's write rate, not as a basis for a longer cap, and no xmin-age alarm is
@@ -424,27 +446,67 @@ match, it is skipped and named in the status, together with every table that ref
 later migration is entered there with the changeset that removed it, and a file's data in a retired table or
 column is skipped and reported, not refused. The parity test cannot see a column that is gone; the committed
 fixture's test is what catches a drop that was not entered in the retired list. A `data` column that is missing and not retired still refuses, by
-name. Supported cloud-to-local cases are Sam's decision (ask `rdr248-cloud-to-local`).
+name. A cloud file restores into a local engine under this rule, plus the model rule of the Restore verb (Sam, 2026-11-14, ask `rdr248-cloud-to-local`, option 1).
 The committed fixture (Step 6) is not silently regenerable: its test pins the fixture's SHA-256 and its header's
 `engine_version`, so a regenerated fixture fails until a reviewed change edits both, and the change must say why.
 
 *Capacity* (S2). The engine has no disk or WAL check today (no `pg_stat_wal`, `statvfs` or database-size check
 on any engine path; the only ones are the local `LocalDiskPreflight.java:94` and the client's
 `pg_backup.py:195-219`). A load stages about the file's size in temp tables, then writes it again with WAL and
-HNSW maintenance, on the database every tenant shares. What bounds that is Sam's decision (ask
-`rdr248-import-capacity`); the byte cap above is the floor whatever he decides.
+HNSW maintenance, on the database every tenant shares. Decided (Sam, 2026-11-14, ask `rdr248-import-capacity`,
+option 1): the engine checks no disk space. What bounds a restore is the byte cap above (`NX_IMPORT_MAX_BYTES`, 8 GiB
+by default, checked at the open), one load at a time per database, and an operator step the runbook makes explicit:
+before the restore token is issued, the operator checks that the database has at least 3 times the file's size free,
+WAL included. The Step 6 run needed about 3 times its file with the source tenant still in the database; without the
+source the floor is nearer 2 times plus WAL, and 3 times stays the instruction. Staging is capped by `NX_IMPORT_MAX_BYTES`
+part by part (the open checks only the declared `row_bytes`).
 
 **Restore verb.** `nx backup restore FILE` (cloud and local) starts an import session, uploads the
 pages, commits and polls the status until it ends. A cloud file restores into a local engine under the
-same column-compatibility rule; which cloud-to-local cases are supported is the ask `rdr248-cloud-to-local`. The local `pg_restore` runbook stays
+same column-compatibility rule, and when the local engine serves every Voyage embedding model the file names (the gate
+covers Voyage models only): a file with Voyage collections needs a local engine that holds a Voyage key, and otherwise the
+open is refused before any upload, naming the model (`embedding_model_not_served`; a model with no `embedding_models` row
+is `missing_embedding_model`), which the verb prints as the engine's words (Sam, 2026-11-14, ask `rdr248-cloud-to-local`,
+option 1; the engine's seeded table does not say whether a key is held, so the open asks the embedder router). A local-model
+(bge) collection in a file is not gated. The key is not the whole condition: a cloud file's `embedding_profile` rows must
+equal the local default tenant's boot-written ones (`voyage` profile), and they are data in the file, not in the header, so
+the open cannot compare them; a keyed engine on `NX_EMBED_PROFILE=bge` opens the file, takes the upload and fails the load
+on that comparison, rolled back (the runbook's step 1 says so). The local `pg_restore` runbook stays
 for whole-cluster restores. An empty tenant comes from tenant create: the operator on the cloud
-(conexus), `nx init` on a fresh local install. The runbook's order is: the operator runs the current
-engine, creates the empty tenant and issues its token; the user restores, and does not use the tenant until
+(conexus). On a local install `nx` holds only the supervisor's root token, which the import routes refuse. Decided
+(Sam, 2026-11-14, ask `rdr248-local-root`, option 1): when the token the client would send equals the supervisor's
+(the live lease's), the verb asks the engine's token route, the one `nx service token issue` uses, for a four-hour
+token of the `default` tenant (the install's own, which must be empty) and uses it for the import routes. The root
+token goes to the token route and never to an import route, and what a root token may do on the import routes is
+not widened. The minted token is replaced before it expires (ten minutes of margin; four hours covers the longest
+session of about 3 h 12 min at the defaults) and, when the engine rejects it, up to twice more (three mints in all). The
+token is revoked through the token route when the verb ends or aborts, best effort, never changing the restore's outcome; a
+killed verb cannot revoke and its token lives its four hours. The lease is read on every request and can fail while the
+engine restarts: every lease token read is remembered, so a held token that equals one is still the supervisor's; with no
+lease ever read and a held token the user did not set, the verb refuses rather than send it. A token the user exports as
+`NX_SERVICE_TOKEN` that is not the supervisor's is used as it is, which is how a restore into another tenant is made;
+if the mint fails the verb refuses before sending anything and prints the manual step (`nx service token issue
+--tenant default`, `export NX_SERVICE_TOKEN=<token>`). The cloud path is unchanged. The runbook's order is: the operator runs the current
+engine, checks the database has room (3 times the file's size), creates the empty tenant and issues its token (the
+cloud; a local install needs none); the user restores, and does not use the tenant until
 the verb reports the outcome (a write during the upload refuses the load at its re-check). Nobody pins an engine
 version. The verb first verifies the whole file, then opens, uploads, commits, and polls; after a lost
 connection it polls the status, and after "no such session" it reads `/v1/tenant/import-marker`. It prints row
 counts by class, the derived tables and retired columns skipped, the soft-reference values negated, and the
 centroid rows dropped.
+
+The verb's rules about a load it cannot see (client review, nexus-csayy.6): a stale import session found at open
+is deleted only when its status reads `staging`, `committed` or `failed`, or the engine says it has no such session;
+a session that is loading or verifying, or whose state cannot be read, is left alone and the verb says to wait.
+After its first commit attempt the verb deletes nothing (an interrupt, a lost connection or an unknown outcome all
+leave the load alone), except after a `restore_busy` answer, when the session is still staging. Any failed answer
+after a commit attempt is settled by the marker: committed only when it names this file's header SHA-256
+(the SHA-256 of the header frame's JSON, which keeps the export's `created_at`, so two exports of one tenant
+differ). Its own waits are failsafes behind the engine's bounds: the `restore_busy` wait ends at the load bound
+plus 180 s, and status polling at the load bound plus 300 s with an unknown outcome and exit 1, never committed.
+`row_bytes` is the bytes the engine will stage (page bodies re-cut into parts with their COPY headers and
+trailers). A table the engine lists in both `tables` and `skipped_tables` is uploaded and closed, because the
+engine requires every listed table closed before commit and skips it itself; an empty page sends no part.
 
 ### Existing Infrastructure Audit
 
@@ -458,9 +520,12 @@ centroid rows dropped.
 
 ### Decision Rationale
 
-Sam chose the engine export (2026-11-11). It is the only design that is complete (every RLS table, by a
-tested registry) and consistent (one snapshot), and it gives the cloud a restore path that the user runs,
-into an empty tenant the operator created. RLS confines it to the caller's tenant without any new authorization code.
+Sam chose the engine export (2026-11-11). It is the only design that is complete (every data and derived table, by a
+tested registry that classifies every RLS table; in-flight work, coordination state such as tuples, session
+scratch and operational logs are excluded, and the verb lists what it left out) and consistent (one snapshot),
+and it gives the cloud a restore path that the user runs, into an empty tenant the operator created. RLS
+confines it to the caller's tenant; the routes add only a scope check that refuses a root token (403
+`export_scope_forbidden`, `import_scope_forbidden`).
 
 ## Alternatives Considered
 
@@ -511,9 +576,12 @@ exporter; every new table needs a new exporter.
 - **Risk**: a schema change between export and import makes a file unloadable.
   **Mitigation**: the compatibility rule loads a file from an older engine whose columns still exist in
   the target, filling new columns from their defaults. A committed fixture enforces it: Step 6 writes a
-  small backup file with the engine of this RDR's implementation and keeps it in the repository; a test
-  loads that fixture on every later engine, so a migration that drops or retypes an exported column goes
-  red there and must say what it does to old backups.
+  small backup file with the code of this RDR's implementation and keeps it in the repository; a test
+  loads that fixture on every later engine. It is a file from THIS code, and it becomes an older-engine
+  file the day a later migration lands, so a migration that drops or retypes an exported column goes
+  red there and must say what it does to old backups. The SHA-256 pin is the guard against replacing
+  the file; the header's `engine_version` names the generating commit (a test engine is unstamped), and
+  is pinned only as a second, redundant label.
 - **Risk**: a restore's load blocks tenant create on the shared database until it commits.
   **Mitigation** (Sam, 2026-11-11: bound it): one restore load at a time per database (an advisory lock);
   tenant create's DDL path checks the same lock and answers `tenant_creation_busy` with a 30 s retry-after
@@ -521,9 +589,11 @@ exporter; every new table needs a new exporter.
   has a total bound and an abort route; the Step 6 scale run records the load's time.
 - **Risk**: a load stages and then writes a whole tenant (3.8 GB for `nexus`) with WAL and HNSW maintenance on the
   database every tenant shares, and the engine has no disk or WAL check.
-  **Mitigation**: the per-file byte cap `NX_IMPORT_MAX_BYTES`, one load at a time, and the decision in ask
-  `rdr248-import-capacity` (Sam).
-- **Risk**: an import holds a write transaction with an assigned transaction id for up to three hours (60 minutes of
+  **Mitigation** (Sam, 2026-11-14, ask `rdr248-import-capacity`, option 1): the per-file byte cap `NX_IMPORT_MAX_BYTES`,
+  one load at a time, and an operator step before the restore token is issued: the database has at least 3 times the
+  file's size free, WAL included (runbook step 3). The engine checks no disk space; a load that runs out fails with the
+  database's error and rolls back whole.
+- **Risk**: an import holds a write transaction with an assigned transaction id for up to about three hours and 12 minutes (60 minutes of
   upload, up to `NX_IMPORT_LOAD_MAX` waiting on another load, then the load), which holds back vacuum on the shared database longer than the export's read snapshot,
   and is a hold A5 did not observe.
   **Mitigation**: one load per database, the bounds, and the Step 6 scale run and Activation Step 2 record the
@@ -541,17 +611,30 @@ exporter; every new table needs a new exporter.
   **Mitigation**: the engine answers such a page `export_page_over_budget` and logs the tenant, table and
   time, and the client fails it as a page failure (not a busy wait), naming the budget. Measured shares are in
   Performance Expectations. **Owner and trigger**: a `(tenant_id, id)` Liquibase index on the id-keyed tables is
-  Sam's decision, taken when any id-keyed page starts its response in more than 5 s (Activation Step 2 or any
-  later export) or the over-budget log line fires.
+  Sam's decision, taken when the engine logs `event=export_page_over_budget` for an id-keyed table, the
+  20 s page budget (`TenantExportHandler.java:412`; the 25 s wall logs `event=export_page_wall_deadline`
+  at :406 instead; Activation Step 2 or any later export). Per-page response
+  starts are not logged, so an earlier 5 s trigger could not be read and is retired (Sam, 2026-11-15: "Accept,
+  watch the 20 s line").
 
 ### Failure Modes
 
 - A page request fails: the client asks again from the same key; after a bounded number of tries it
   closes the session, removes the partial file (`.<name>.partial-<pid>`), and says to run again.
+- A page never returns (a read stuck in the driver, as the 2026-11-14 cloud hang spun in PgJDBC's TLS skip): the
+  engine waits for the page's read at most `PAGE_WALL_MS`, 25,000 ms (`TenantExportSessions.java:510`), then
+  interrupts the reader and releases the session's page gate. The page answers 503 `export_page_over_budget` with
+  `page_budget_ms` 25000, and the engine logs `event=export_page_wall_deadline` (tenant, table, elapsed, wall).
+  A reader that ignores the interrupt is logged `event=export_page_reader_stuck` and keeps its pool connection
+  until it ends; until then the session's next page is refused 503 `export_page_busy` with `Retry-After: 1`. A
+  wall hit before the read's pool borrow returned answers as an exhausted pool instead. The client counts an
+  over-budget page as a failed try (the backoff ladder, five tries), not a busy wait, and when the tries run out
+  it closes the session, removes the partial file and fails naming the limit.
 - The engine restarts mid-session: the dedicated transaction ends, the snapshot is gone; the next page
   request gets a clear "session closed" and the client starts over.
 - An upload part fails in transit: its SHA-256 check refuses it before it touches the transaction, and the client
-  sends it again; a part whose COPY fails fails the session, and the client starts over; after a
+  sends it again; a part whose COPY fails fails the session, and the verb says to run it again (no automatic
+  restart, which could re-upload gigabytes against a cause such as a full disk); after a
   bounded number of tries the client aborts the session (`DELETE`), which rolls the staging back.
 - Import fails mid-load, including the in-load emptiness re-check or the total bound: one transaction, so the
   tenant is as it was; the status reports the table and reason.
@@ -559,12 +642,13 @@ exporter; every new table needs a new exporter.
 - The engine restarts during or after a load: the in-memory outcome is lost; the verb reads
   `/v1/tenant/import-marker`, which names the file's header SHA-256 only when the load committed.
 - A tenant create arrives during a load: `tenant_creation_busy` with a 30 s retry-after.
-- A session passes its idle, total or restore-wait bound: the engine rolls it back and closes it; the next request
-  gets "no such session", and the verb says which bound and to run again.
+- A session passes its idle, total or restore-wait bound: the engine rolls it back and closes it, and keeps its
+  outcome for 24 hours: status and commit answer `failed: <bound>`, while a part, close or abort gets "no such
+  session"; the verb says which bound and to run again.
 - A commit meets `restore_busy` until the restore-wait bound: as above, the session closes with that reason.
 - An open while the engine's singleton lock is not held: refused naming the lock; no session is opened.
 - The database runs out of disk or WAL space during the load: the transaction fails and rolls back, and the status
-  reports the database error; what prevents it is ask `rdr248-import-capacity`.
+  reports the database error; what prevents it is the operator's 3-times-the-file free-space check before the token is issued (decided 2026-11-14).
 - Registry out of date: the parity test fails in CI before release.
 
 ## Implementation Plan
@@ -604,9 +688,9 @@ operator task from the file.
 #### Step 5: Import session (staged load, id reassignment, foreign-key order, verification, asynchronous commit with a status route, the one-load-at-a-time bound) and `nx backup restore` (engine + client)
 
 The design is settled in the Import session section (nexus-csayy.5). Its two open asks to Sam,
-`rdr248-cloud-to-local` and `rdr248-import-capacity`, do not block the routes; they decide one refusal and one
-pre-check, each added when answered. The tenant-create check is the `p_check_restore` parameter of
-`create_tenant_partitions`, on its slow path only, which the RDR-225 walk turns off; the busy answer
+`rdr248-cloud-to-local` and `rdr248-import-capacity`, did not block the routes; both were answered on 2026-11-14 (a
+refusal of a model the engine cannot serve, and an operator free-space step in the runbook). The tenant-create check is the `p_check_restore` parameter of
+`create_tenant_partitions`, on its slow path only, at its default for every runtime caller; the busy answer
 carries the restore-held fact on `TenantCreationBusyException`, sets the header and the body's
 `retry_after_seconds` alike, and the `TokenStore.java:151-154` javadoc is corrected.
 
@@ -619,8 +703,21 @@ carries the restore-held fact on `TenantCreationBusyException`, sets the header 
 #### Activation Step 2: A cloud export of a test tenant in an announced window (bob), time and size recorded; after Phase 2, a cloud round trip
 
 The export records, beside time and size: the per-page response start for every page (chunks and the
-id-keyed tables, against the 5 s trigger in Risks), NX_POOL_SIZE and PG max_connections against the export
+id-keyed tables; the 5 s trigger this named was retired on 2026-11-15, see Risks), NX_POOL_SIZE and PG max_connections against the export
 cap, and any over-budget or busy answers. A tenant near nexus's size (about 540,000 chunks) is the target.
+
+Recorded (2026-11-15, both runs on test tenant `gate-xr789`, 116,492 chunks, about a fifth of the target): time,
+size, the snapshot's xmin age, and the absence of over-budget or busy answers (none in either run's log). Not
+measured: the per-page response start (the client logs only progress every 30 s, so only the mean is known), the
+cloud engine's `NX_POOL_SIZE` and PG `max_connections` (the export sampler counted 30 to 31 backends), and the
+database's oldest-xmin age during the import's hold (the sampler ran for the export only). The id-keyed tables
+held 13 rows (`plans`), one page each, so the over-budget trigger in Risks was not tested at size. Details under
+Performance Expectations.
+
+Accepted short of its target (Sam, 2026-11-15, by dialog in session halcyon: "Accept, watch the 20 s line"): the
+RDR closes with Activation Step 2 run on a 116,492-chunk tenant with 13 id-keyed rows and per-page response starts
+unrecorded, not on a near-nexus-size tenant. What is watched instead is the engine's `export_page_over_budget`
+log line, the trigger in Risks.
 
 ### Day 2 Operations
 
@@ -634,7 +731,7 @@ None.
 
 ## Test Plan
 
-- **Scenario**: export then import into an empty tenant — **Verify**: per-table counts and checksums equal.
+- **Scenario**: export then import into an empty tenant — **Verify**: per-table counts and row contents equal.
 - **Scenario**: two tenants — **Verify**: the export holds none of the other tenant's rows.
 - **Scenario**: import into a non-empty tenant — **Verify**: refused, nothing written.
 - **Scenario**: a file written by an older engine — **Verify**: it loads, and columns the file lacks take
@@ -689,6 +786,11 @@ None.
   completes, and its time is recorded for Performance Expectations.
 - **Scenario**: a page request cut mid-transfer — **Verify**: the client resumes from the page's key and
   the file still verifies.
+- **Scenario**: a page read that does not return by the page wall, over TLS and with a reader that ignores the
+  interrupt — **Verify**: the page answers over budget, the gate is released at the wall, and the next page is busy
+  until the stuck reader ends (`TenantExportTlsPageTest.aPageStillReadingAtTheWallAnswersOverBudgetReleasesTheGateAndTheInterruptEndsTheReader`,
+  `TenantExportPageWallTest.aReaderThatIgnoresTheInterruptFreesTheGateAtTheWallAndRefusesTheNextPageAsBusyUntilItEnds`,
+  `TenantExportPageWallTest.aWallHitBeforeThePoolBorrowReturnsAnswersAsAnExhaustedPoolNotOverBudget`).
 - **Scenario**: a write between two page requests — **Verify**: the export does not contain it (one
   snapshot across requests).
 - **Scenario**: a session idle past its bound — **Verify**: the engine closes it and releases the snapshot.
@@ -702,13 +804,23 @@ None.
   succeeds.
 - **Scenario**: the target lacks an `embedding_models` row the file needs — **Verify**: refused before
   any write, naming the model.
+- **Scenario**: the file names a Voyage model and the engine holds no Voyage key (its embedder router does not serve it) —
+  **Verify**: refused at the open with `embedding_model_not_served` before any part is sent, naming the model; a model the
+  router serves opens; the service's own router, not a test seam, decides.
+- **Scenario**: a local `nx backup restore` holds the supervisor's root token — **Verify**: a `default`-tenant token is
+  minted through the token route and every import request carries it, the root token on none; an exported token that is
+  not the supervisor's is used and nothing is minted; a mint that fails refuses before anything is sent, naming the manual
+  step; the minted token is replaced before it expires and up to twice when rejected, and revoked when the run ends; a lease that
+  stops being readable mid-run does not let the root token reach an import route; the cloud path is unchanged.
 
 ## Validation
 
 ### Testing Strategy
 
 Engine-substrate integration tests drive both routes against a local engine (no cloud). The cloud is
-exercised once per release in an announced window.
+exercised once per engine release, in its deploy window: the `engine-release` skill's Step 6.2 runs an export,
+a restore into a throwaway tenant and `tests/e2e/backup_roundtrip_compare.py` against the newly live engine
+(Sam, 2026-11-15, "Add it to the engine release").
 
 ### Performance Expectations
 
@@ -719,8 +831,39 @@ total 60 minutes (Sam, 2026-11-11), refused-with-retry when an engine already ha
 sessions. 60 minutes is the hold A5 observed as benign at that window's write rate; an export that
 would run longer fails, naming the limit. Import bounds (Phase 2 design): upload idle 10 minutes and 60 minutes
 in all, so a nexus-size file (3.82 GB) needs about 1.1 MB/s sustained, and a slower link fails at the bound,
-naming it; the load `NX_IMPORT_LOAD_MAX`, default 60 minutes until the Step 6 scale run sets it with a 2x margin;
-parts of at most 8 MiB. An import holds one of the engine's export/import session slots for up to three hours (upload, restore wait, load).
+naming it; the load `NX_IMPORT_LOAD_MAX`, default 3,960 s (twice the Step 6 run's 33 minutes for 500,000 chunks, a floor; Sam, 2026-11-14);
+parts of at most 8 MiB. An import holds one of the engine's export/import session slots for up to about three hours and 12 minutes (upload, restore wait, load).
+
+**First cloud round trip (Activation Step 2, nexus-csayy.9, 2026-11-15, engine 0.1.192).** Test tenant
+`gate-xr789`, exported through `api.conexus-nexus.com` by the shipped client: 59.8 s end to end, a 633,145,600-byte
+file, 10.59 MB/s, 25 tables and 233,108 rows (chunks 116,492 rows in 37 pages). `nx backup --check` verified every
+page, table and the file. A sampler of `pg_stat_activity` every 30 s saw the export's snapshot transaction held for the walk
+(age 0 at 11:54:40, 30 s old with xmin age 38 at 11:55:07), and gone at 11:55:37, one second after the verb
+returned at 11:55:36; no export transaction was left open. It held the snapshot about 60 s, inside A5's
+observed 60 minutes. 62 pages over 59.0 s is a mean of about 0.95 s a page, transfer included; per-page
+response starts were not logged. The tenant is 116,492 chunks, about a fifth of `nexus`, so this run does not
+stand in for the near-nexus-size target. At that rate the `nexus` tenant's 3.82 GB
+takes about 6 minutes, the estimate above. The first attempt, on 0.1.191, hung on the first chunks page: PgJDBC's
+`PGStream.skip` spins on a TLS socket closed mid-skip, which the 0.1.192 page path no longer reaches (T2
+`nexus/csayy9-export-page-hang-diagnosis-2026-11-14`; run evidence T2 `conexus/csayy9-cloud-export-gate-xr789-run2-2026-11-15`).
+
+**First cloud restore round trip (Activation Step 2, nexus-csayy.10, 2026-11-15, engine 0.1.192).** A fresh export
+of `gate-xr789` (56.6 s, 633,145,600 bytes) was restored by the shipped client into an empty throwaway tenant made by
+the operator: 555.5 s wall, 233,107 data rows loaded in 19 tables, 0 derived rows, and 1 row the engine had already
+written for the tenant kept. An export of the restored tenant (57.9 s, 637,110,239 bytes) and the source export both
+verified with `nx backup --check`. `tests/e2e/backup_roundtrip_compare.py` judged 24 of the 25 tables equal in row
+count and in every row's content over the columns a restore keeps. Eight of the 25 tables held rows (chunks and
+the manifest 116,492 each, catalog documents 51, collections 43, owners 15, plans 13, embedding_profile 1,
+catalog_meta 1); the other 17 were empty in this tenant, so `memory`, `topics`, links, `memory_summaries` and
+`nx_answer_runs` were not exercised in the cloud: id reassignment beyond `plans` and every soft-reference rule
+are proven by the local round-trip test (Step 6) only. The only differing columns were `tenant_id`
+everywhere, plus `plans.id` (a reassigned key). `catalog_meta` is not judged: it went from 1 row to 2, the restore's
+own `rdr248_restore` marker. The first attempt stopped at the edge after 2 s, with nothing loaded:
+the CloudFront origin request policy forwards only listed request headers, and `X-Nexus-Part-Sha256`, the one
+request header the import routes add, was not on the list (conexus PR #710 added it). Query strings, `PUT` and an
+8 MiB part body already passed the edge. Scaled linearly from 116,492 chunks, the 555.5 s
+restore (upload included) is about 2,600 s for `nexus`'s 540,000, a 1.5 times margin under `NX_IMPORT_LOAD_MAX`
+(3,960 s), not the 2 times the bound was set for. The import hold's xmin age was not sampled.
 
 **Gate N1 scale run (nexus-csayy.4, 2026-11-12, local engine on chas, `tests/e2e/export_scale_run.py`).** One tenant
 of 500,000 bge-768 chunks (distinct vectors, about 1 KB of text each), 500,000 manifest rows over 50,000 documents,
@@ -799,6 +942,22 @@ the limit.
 Not measured here: the cloud's edge rate, its pool size and `max_connections`, and a cold volume. The cloud round
 trip (Activation Step 2) records those; its 500,000-chunk page times should be read against 0.28 s above, not 0.1 s.
 
+**Step 6 commit at scale (nexus-csayy.7, 2026-11-14, local engine on chas `lab-l`, `tests/e2e/import_scale_run.py`; T2
+`nexus/rdr248-import-scale-run-2026-11-14`). One run (n=1).** The 500,000-chunk tenant of the export run, with every other data
+and derived table seeded beside it (26 tables, 2,151,015 rows, soft references of every kind), exported (2,438,747,324 bytes,
+56 s) and restored by the shipped client into an empty tenant of the same database. The database was a throwaway cluster with
+`fsync` off and `wal_level = minimal`, which a cloud database is not, and a tenant create probe ran every 3.6 s for the whole
+load (the probes take locks for under a second). Every table's row count equals the source's (`catalog_meta` plus the marker);
+counts were compared, not checksums. Upload 20 s over loopback (444 parts); staged bytes 2,438,681,881. **The load took 1,973 s
+(32.9 minutes)**: the chunks insert 1,361 s (69%, HNSW maintenance, about 2.7 ms a chunk), the topic assignments 261 s, the
+verify phase 263 s, everything else under a minute; about 4 ms of load per chunk in all. The held transaction lived about
+2,000 s (sampled maximum 1,993 s); the oldest `xmin` age of any backend reached 2,191 transactions, from an idle database, and
+is no bound for a busy one. Tenant create during the load: 545 probes, every one 503 `tenant_creation_busy` with
+`Retry-After: 30` in 0.42 to 0.81 s (median 0.61 s); a token for an existing tenant 545 of 545 in under 20 ms; 0.04 s on an idle
+database and after the commit. Tenant `nexus` is about 1.1x the chunks and 1.6x the bytes of this tenant, so its load would be
+longer. The default `NX_IMPORT_LOAD_MAX` is set to 3,960 s, the 2x margin this section promised (Sam, 2026-11-14, ask
+`rdr248-load-bound`, option 1), as a floor: a durable, busy database or a larger tenant needs more, and the runbook says to raise it.
+
 ## Finalization Gate
 
 ### Contradiction Check
@@ -806,7 +965,7 @@ trip (Activation Step 2) records those; its 500,000-chunk page times should be r
 The first draft's single streamed response contradicted A1 once it was refuted (the cloud edge ends
 every exchange at 60 s); the design was changed to sessions of short requests, and no part of
 the text still assumes one long stream. The first draft's "60 tables" came from a changeset count; the
-live catalog says 50 parent tables plus 40 chunk leaves, and the registry is built from the live catalog.
+live catalog said 50 parent tables plus 40 chunk leaves (49 since `frecency` was dropped), and the registry is built from the live catalog.
 Gate round 1 found the import commit and the changeset rule contradicting the cloud limits; both were
 redesigned (asynchronous commit; a column-compatibility rule, with the changeset count advisory since the
 Phase 2 design). No other
@@ -818,7 +977,7 @@ A2 to A7 are verified (research records 248-research-1 to -14): A2, A3 and A6 by
 scale by a local spike, A5 and A7 by a read-only cloud window, A1 refuted and designed around. Left for
 implementation, not assumed in the design: the column types the spike did not exercise (bigint[],
 smallint, uuid, the identity column), which the Step 4 and 6 tests seed; the commit's time at scale, measured
-in Step 6 and used to set the load's total bound `NX_IMPORT_LOAD_MAX`; and the cloud edge's transfer rate, which sets an
+in Step 6 (33 minutes for 500,000 chunks, one run), which set the load's total bound `NX_IMPORT_LOAD_MAX` to 3,960 s; and the cloud edge's transfer rate, which sets an
 export's time but no design choice and is recorded at Activation Step 2.
 
 #### API Verification
@@ -833,9 +992,9 @@ export's time but no design choice and is recorded at Activation Step 2.
 ### Scope Verification
 
 The Minimum Viable Validation is Step 4's export tests at scale (Phase 1) and Step 6's round-trip test (Phase 2): export a seeded tenant through the shipped
-routes, import into an empty tenant in the same database, and assert equal counts, checksums and joins,
+routes, import into an empty tenant in the same database, and assert equal counts, row contents and joins,
 in-process with the test fixtures, plus one commit at scale (at least 500,000 synthetic chunks) whose time
-is recorded. Step 4 gates the export release (Activation Step 1); Step 6 gates the later restore
+is recorded and whose per-table counts are compared (not checksums). Step 4 gates the export release (Activation Step 1); Step 6 gates the later restore
 release (Activation Step 1); the cloud export is Activation Step 2.
 
 ### Cross-Cutting Concerns
@@ -875,3 +1034,15 @@ tenants. Nothing to trim.
 - 2026-11-13: Phase 2 design check (substantive-critic, T2 `nexus_rdr/248-phase2-design-check`): B1 settled with a per-column soft-reference rule (sentinels, dangling values, `source_ids` negated); D1-D11 folded in (no per-part savepoints, transaction-scoped admission lock, a 1 s tenant-create answer, the verify count identity, a refused commit keeps its upload, staged-byte cap, one part in flight, derived dependents skipped together, the embedding_profile comparison, stale lines, token expiry); O1-O7 stated as risks or notes.
 - 2026-11-13: Phase 2 design check round 2 (T2 `nexus_rdr/248-phase2-design-check-r2`): negative soft-reference values pass through, so negation survives a second backup and restore; a deleted plan's id is negated, keeping the run a plan hit; a restore-wait bound on a commit refused `restore_busy`; the session hold restated as up to three hours; stale savepoint, 3.8 s and two-reference lines swept; Step 5 names the asks and the trigger-path placement.
 - 2026-11-13: Phase 2 design check round 3 (T2 `nexus_rdr/248-phase2-design-check-r3`, 0 BLOCKS-PLANNING): the route list (table close, idempotent commit, `import-marker`, busy names the open session), the tenant-create check as a `create_tenant_partitions` parameter on its slow path only, the cloud-to-local line pointed at its ask, the census left at the types a BIGSERIAL fits, and the remaining Test Plan and Failure Modes lines.
+- 2026-11-13: Step 5 review round 1 (T2 `nexus/review-712a73dfb-nexus-csayy.6-2026-11-13`, `nexus/critique-712a73dfb-nexus-csayy.6-2026-11-13`): the RDR-225 walk cannot pass `p_check_restore` and does not need to (amended); ended sessions keep their outcome for 24 hours; verify fails a foreign-key value with no parent in the file and refuses a child table without its parent; staging statement timeout 120 s; Routes points at the wire-contract entry for bodies and reason codes, and a 409 names the session's kind. Amended under standing grant 3 to match reviewed code.
+- 2026-11-13: Step 5 client review (T2 `nexus/review-a8efcfcef-nexus-csayy.6-client-2026-11-13`, `nexus/critique-a8efcfcef-nexus-csayy.6-2026-11-13`): the Restore verb states its rules for a load it cannot see (fail-closed stale delete, nothing deleted after a commit attempt, marker settles any failed answer), its failsafe waits, `header_sha256` and `row_bytes`, the both-lists upload, no automatic restart after a part failure, and that a local restore uses a tenant token, the default tenant's included (ask `rdr248-local-root`). Amended under standing grant 3 to match reviewed code.
+- 2026-11-14: Step 6 (nexus-csayy.7): the round trip, the committed fixture, the runbook and the commit at scale (33 minutes for 500,000 chunks, one run); the load bound the RDR promised to set with a 2x margin is left as a decision for Sam (ask `rdr248-load-bound`) because the measured load is over 30 minutes; review round 1 (T2 `nexus/critique-a4e85add1-nexus-csayy.7-2026-11-14-r1`, `nexus/review-a4e85add1-nexus-csayy.7-2026-11-14-r1`) folded in.
+- 2026-11-14: `NX_IMPORT_LOAD_MAX` default raised from 3,600 s to 3,960 s, twice the Step 6 load, as a floor (Sam, ask `rdr248-load-bound`, option 1); the longest session hold becomes about 3 h 12 min. Amended under standing grant 3.
+- 2026-11-14: Ask `rdr248-cloud-to-local`, option 1 (Sam): a cloud file restores into a local engine that serves every Voyage model the file names (a Voyage key; the gate covers Voyage models only, so it is narrower than the ask's wording), otherwise it is refused before upload, naming the model; the keyed engine's embedding profile must also be `voyage`, which only the load can check. The ask's premise was wrong: the missing-model refusal reads `embedding_models`, which every engine seeds with the Voyage rows, so a keyless local engine passed it. The engine's open now also refuses a Voyage model its embedder router does not serve (422 `embedding_model_not_served`); engine change under `service/`. Amended under standing grant 3.
+- 2026-11-14: Ask `rdr248-import-capacity`, option 1 (Sam): the byte cap, one load at a time, and an explicit operator step in the runbook before the restore token is issued (3 times the file's size free, WAL included); the engine checks no disk space. The Risks and Failure Modes entries that pointed at the ask say so. Amended under standing grant 3.
+- 2026-11-14: Ask `rdr248-local-root`, option 1 (Sam): on a local install the verb mints a four-hour `default`-tenant token through the existing token route when it holds the supervisor's root token, and uses it; the root token is never sent to an import route and what it may do there is not widened. An explicit non-supervisor token wins; a failed mint falls back to the manual step. Client change only. Amended under standing grant 3.
+- 2026-11-14: Review round 1 of the three asks (T2 `nexus/review-817d75982-nexus-csayy-2026-11-14-r1`, `nexus/critique-817d75982-nexus-csayy-asks-2026-11-14-r1`) folded in: the remembered lease root and the refusal of a token that cannot be told from the supervisor's, the minted token revoked at the end, three mints (not two) stated, the Voyage-only gate and the embedding-profile condition stated, the capacity step's cap and 2x-3x floor stated, and the ledger's load bound corrected to 3,960 s.
+- 2026-11-15: Activation Step 2 recorded (nexus-csayy.9, .10): the first cloud export and restore round trip on engine 0.1.192, the per-page hang on 0.1.191 and the edge header fix (conexus PR #710).
+- 2026-11-15: Close critique (T2 `nexus/critique-8a97bb459-nexus-csayy-2026-11-15-r1`) folded in: what Activation Step 2 measured and did not (per-page starts, pool size, import xmin; a tenant a fifth of the target), which tables held rows, the snapshot release wording, the load-bound margin at scale, Gap 2's tuples and the Decision Rationale's "complete" matched to the registry, and "no new authorization code" replaced by the scope checks; the Testing Strategy's per-release cloud run points at engine-release Step 6.2 (Sam: "Add it to the engine release"). Amended under standing grant 3.
+- 2026-11-15: Close critique round 2 (T2 `nexus/critique-2f8879d42-nexus-csayy-2026-11-15-r2`): Sam accepts closing with Activation Step 2 short of its target ("Accept, watch the 20 s line", by dialog in session halcyon), and the Risks index trigger becomes the logged `export_page_over_budget` line at the 20 s budget; the shipped 25 s page wall gets its Failure Modes entry and Test Plan line. Amended under standing grant 3.
+- 2026-11-15: Close critique round 3 (T2 `nexus/critique-dd2cf32ad-nexus-csayy-2026-11-15-r3`): `frecency` is retired, not `derived` (telemetry-019-1, nexus-6pfgb.42, engine 0.1.192), so the shipped registry is 19 data plus 6 derived exported and 24 excluded, of 49 parent tables; the over-budget cite moves to `TenantExportHandler.java:412`; Activation Step 2's 5 s trigger points at its retirement; engine-release Step 6.2 reads the engine log for both page-limit events in the deploy window. Amended under standing grant 3.

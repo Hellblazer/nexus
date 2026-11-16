@@ -752,7 +752,7 @@ class P225MigrationWalkIntegrationTest {
                     assertThat(accessShape(ctx, expectedName("chunks", CODE_3, "default")).get("acl").toString()).contains("nexus_svc=arwdm/");
                     assertThat(PgCatalogProbes.viewExists(ctx, "nexus", "diag_chash_conformance")).isTrue();
                     assertThat(viewDependsOn(ctx, "diag_chash_conformance", "chunks")).isTrue();
-                    assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "diag_chash_conformance")))).isEqualTo(5);
+                    assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "diag_chash_conformance")))).isEqualTo(4);
                 }
                 // and nexus_svc can still write into the leaf the trigger made, as itself, under its tenant
                 try (Connection svc = DriverManager.getConnection(c2.getJdbcUrl(), PgContainerHelper.SVC_USERNAME, PgContainerHelper.SVC_PASSWORD)) {

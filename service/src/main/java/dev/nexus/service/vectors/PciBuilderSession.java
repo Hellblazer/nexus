@@ -17,9 +17,11 @@ import org.slf4j.LoggerFactory;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Properties;
+import java.util.Set;
 
 /**
  * RDR-227 Step 2 (nexus-43ulx.16): the DDL half's database session. It builds and drops the per-collection HNSW
@@ -37,7 +39,7 @@ import java.util.Properties;
  * rendered by PostgreSQL ({@code format()} with {@code %I} and {@code %L}, called through {@code DSL.function}), so
  * identifiers and the collection are quoted by the server and Java concatenates none of them. Each statement
  * kind then goes out through one {@code Statement.execute(sql)} call ({@link #runBuild}, {@link #runDrop}, and
- * {@code runComment} for RDR-230's {@code COMMENT ON INDEX}), each registered in
+ * {@code runComment} for RDR-230's {@code COMMENT ON INDEX}, {@code runReindex} and {@code runVacuum}), each registered in
  * {@code RawSqlGateTest.SANCTIONED_STATEMENTS}. Plain JDBC rather than jOOQ's {@code execute(String)}
  * because jOOQ parses a plain-SQL string for bind markers and braces, and a collection name may hold either.
  *
@@ -105,6 +107,7 @@ public final class PciBuilderSession {
     private static final String BUILD_LOCK_TIMEOUT = "0";
     private static final String DROP_LOCK_TIMEOUT = "5s";
     private static final String COMMENT_LOCK_TIMEOUT = "5s";
+    private static final String VACUUM_LOCK_TIMEOUT = "5s";
 
     /** The pgvector operator class lives in schema {@code nexus} (search-path-001), and the builder has no search_path. */
     private static final String OPERATOR_CLASS = "nexus.vector_cosine_ops";
@@ -118,6 +121,12 @@ public final class PciBuilderSession {
 
     /** RDR-230: the index's anchor is its comment. {@code %L} quotes the JSON text on the server. */
     private static final String COMMENT_TEMPLATE = "COMMENT ON INDEX %I.%I IS %L";
+
+    /** RDR-230: the old index serves until the swap, and the swap keeps its name. */
+    private static final String REINDEX_TEMPLATE = "REINDEX INDEX CONCURRENTLY %I.%I";
+
+    /** RDR-230: reaps the leaf's dead tuples after a bulk delete; {@code ANALYZE} refreshes its statistics. */
+    private static final String VACUUM_TEMPLATE = "VACUUM (ANALYZE) %I.%I";
 
     /** SQLSTATE: invalid_password. */
     private static final String INVALID_PASSWORD = "28P01";
@@ -432,6 +441,8 @@ public final class PciBuilderSession {
         /** The outcome every DDL request returns once the pass is over, or {@code null} while it is live. */
         private DdlOutcome ended;
         private boolean skippedForMigration;
+        /** The ids ({@code schema.name}) of the leaves of the pass's catalog snapshot, or null before {@link #useSnapshot}. */
+        private volatile Set<String> leafIds;
 
         private Pass(PciBuilderSession owner, Connection conn, DSLContext ctx) {
             this.owner = owner;
@@ -624,10 +635,14 @@ public final class PciBuilderSession {
         }
 
         /**
-         * Drop {@code index} from {@code leaf}. Only two kinds are touched: a parsed index with the builder's name
-         * shape, and an INVALID REINDEX CONCURRENTLY leftover ({@link PciCatalog.Index#leftover()}) whose name is a
-         * builder name plus {@code _ccnew}/{@code _ccold} and a counter (nexus-rn1yd). An operator's {@code pci_} index
-         * and a valid {@code _ccnew} are {@link DdlOutcome#REJECTED}.
+         * Drop {@code index} from {@code leaf}. Only three kinds are touched: a parsed index with the builder's name
+         * shape; an INVALID REINDEX CONCURRENTLY leftover ({@link PciCatalog.Index#leftover()}) whose name is a
+         * builder name plus {@code _ccnew}/{@code _ccold} and a counter (nexus-rn1yd); and, from RDR-230, an INVALID
+         * leftover of the leaf's own HNSW index ({@link PciCatalog.Index#leafLeftover()}) whose name is that index's
+         * name, as {@code leaf} identifies it ({@link PciCatalog.Leaf#hnswIndexes()}), plus {@code _ccnew}/{@code
+         * _ccold} and a counter ({@link PciCatalog#isLeafLeftoverName}). An operator's {@code pci_} index, a valid
+         * {@code _ccnew} and the leaf's own index itself are {@link DdlOutcome#REJECTED}. The leaf leftover goes
+         * through exactly this path, the same re-read and the same 5 s lock timeout (Open Question 3's condition).
          *
          * <p>A leftover is judged on a snapshot that may be a pass old, so its drop re-reads
          * {@code pg_index.indisvalid} for that name on this session immediately before the DROP. An index that is valid
@@ -644,13 +659,14 @@ public final class PciBuilderSession {
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
             boolean ours = index.parsed() ? PciCatalog.isBuilderName(index.name())
-                : index.leftover() && !index.valid() && PciCatalog.isLeftoverName(index.name());
+                : index.leftover() ? !index.valid() && PciCatalog.isLeftoverName(index.name())
+                : index.leafLeftover() && !index.valid() && isLeafLeftover(leaf, index);
             if (!ours) {
-                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={} leftover={}",
-                    index.name(), index.parsed(), index.leftover());
+                log.warn("event=pci_ddl_rejected op=drop reason=not_builders_index name={} parsed={} leftover={} "
+                    + "leaf_leftover={}", index.name(), index.parsed(), index.leftover(), index.leafLeftover());
                 return DdlOutcome.REJECTED;
             }
-            java.util.function.Supplier<DdlOutcome> recheck = index.leftover()
+            java.util.function.Supplier<DdlOutcome> recheck = index.leftover() || index.leafLeftover()
                 ? () -> staleLeftover(leaf, index.name()) : () -> null;
             return run("drop", DROP_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, index.name(), leaf, recheck, () -> {
                 String sql = render(DROP_TEMPLATE, leaf.schema(), index.name());
@@ -659,43 +675,203 @@ public final class PciBuilderSession {
         }
 
         /**
+         * Whether {@code index} is a leftover of one of {@code leaf}'s own HNSW indexes: the leaf is one the builder
+         * resolved (model and tenant parsed), the index names the own index it was made from, that index is among
+         * {@code leaf.hnswIndexes()}, and the index's name is that name plus the REINDEX CONCURRENTLY suffix. Anchored
+         * to the leaf's own identified name, never to a generic pattern.
+         */
+        private static boolean isLeafLeftover(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+            if (leaf.model() == null || leaf.tenant() == null) {
+                return false;
+            }
+            String base = index.leafLeftoverOf();
+            return leaf.hnswIndexes().stream().anyMatch(own -> own.name().equals(base))
+                && PciCatalog.isLeafLeftoverName(base, index.name());
+        }
+
+        /**
          * Write {@code anchor} as the comment of {@code index} on {@code leaf} (RDR-230 Technical Design 1). Only a
          * valid, parsed index with the builder's name for this leaf is touched: the name must be
          * {@link PciCatalog#indexName} of the leaf's model and tenant and the index's collection. Any other index, an
          * operator's {@code pci_} index included, is {@link DdlOutcome#REJECTED} and nothing is sent. The leaf's own
-         * HNSW index is not yet identifiable ({@link PciCatalog} does not read it), so it is rejected too; the
-         * REINDEX work of RDR-230 Phase 2 extends this guard with its identification.
+         * HNSW index has its own overload, {@link #comment(PciCatalog.Leaf, PciCatalog.LeafIndex, PciCatalog.Anchor)}.
          *
-         * <p>5 s lock timeout, as a drop. A comment takes a lock on the index that a long-running statement on it
-         * would hold; one that expires leaves the old comment, and the next pass writes it again (an index with no
-         * parseable anchor is adopted).
+         * <p>The anchor is written with the index's relfilenode: this session reads it right before the COMMENT
+         * (nexus-4lnn1.1.10), whatever {@code anchor} carried. 5 s lock timeout, as a drop. A comment takes a lock on
+         * the index that a long-running statement on it would hold; one that expires leaves the old comment, and the
+         * next pass writes it again (an index with no parseable anchor is adopted).
          */
         public DdlOutcome comment(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor).outcome();
+        }
+
+        /** As {@link #comment(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor)}, answering with the anchor written. */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor, null);
+        }
+
+        /**
+         * As {@link #write(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor)}; with {@code expectedRelfilenode} the
+         * COMMENT is sent only if the index still has it on this session ({@link DdlOutcome#STALE} otherwise): a rebuild
+         * that landed after the caller read the index must not be stamped over figures taken from the old build.
+         */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.Index index, PciCatalog.Anchor anchor,
+                                   Long expectedRelfilenode) {
             if (ended != null) {
-                return ended;
+                return new AnchorOutcome(ended, null);
             }
             Objects.requireNonNull(leaf, "leaf");
             Objects.requireNonNull(index, "index");
             Objects.requireNonNull(anchor, "anchor");
-            String text;
             try {
                 if (!ownsForComment(leaf, index)) {
                     log.warn("event=pci_ddl_rejected op=comment reason=not_builders_index name={} parsed={} valid={}",
                         index.name(), index.parsed(), index.valid());
-                    return DdlOutcome.REJECTED;
+                    return new AnchorOutcome(DdlOutcome.REJECTED, null);
                 }
-                text = anchor.toJson();
+                anchor.checkWritable();
             } catch (IllegalStateException e) {
                 log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
-                return DdlOutcome.REJECTED;
+                return new AnchorOutcome(DdlOutcome.REJECTED, null);
             }
-            return run("comment", COMMENT_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, index.name(), leaf, () -> {
-                String sql = render(COMMENT_TEMPLATE, leaf.schema(), index.name(), text);
-                runComment(sql);
-            });
+            return stampAndComment(leaf, index.name(), anchor, expectedRelfilenode);
         }
 
-        private static boolean ownsForComment(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+        /**
+         * As {@link #comment(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor)}, for one of the leaf's own HNSW
+         * indexes (RDR-230, nexus-4lnn1.1.10). Only an index {@link #ownsForComment(PciCatalog.Leaf,
+         * PciCatalog.LeafIndex)} accepts is touched; any other is {@link DdlOutcome#REJECTED} and nothing is sent.
+         * Same statement, same 5 s lock timeout, same v2 stamp.
+         */
+        public DdlOutcome comment(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor).outcome();
+        }
+
+        /** As {@link #comment(PciCatalog.Leaf, PciCatalog.LeafIndex, PciCatalog.Anchor)}, answering with the anchor written. */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, PciCatalog.Anchor anchor) {
+            return write(leaf, index, anchor, null);
+        }
+
+        /** As above, with the expected relfilenode of {@link #write(PciCatalog.Leaf, PciCatalog.Index, PciCatalog.Anchor, Long)}. */
+        public AnchorOutcome write(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, PciCatalog.Anchor anchor,
+                                   Long expectedRelfilenode) {
+            if (ended != null) {
+                return new AnchorOutcome(ended, null);
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            Objects.requireNonNull(index, "index");
+            Objects.requireNonNull(anchor, "anchor");
+            if (!ownsForComment(leaf, index)) {
+                log.warn("event=pci_ddl_rejected op=comment reason=not_leafs_own_index name={} valid={}", index.name(),
+                    index.valid());
+                return new AnchorOutcome(DdlOutcome.REJECTED, null);
+            }
+            try {
+                anchor.checkWritable();
+            } catch (IllegalStateException e) {
+                log.warn("event=pci_ddl_rejected op=comment reason=anchor cause=\"{}\"", e.getMessage());
+                return new AnchorOutcome(DdlOutcome.REJECTED, null);
+            }
+            return stampAndComment(leaf, index.name(), anchor, expectedRelfilenode);
+        }
+
+        /**
+         * The COMMENT, with the index's relfilenode read on this session right before it (the precheck, after the lock
+         * and statement timeouts are set): the anchor records the storage it was written against. An index that is gone
+         * is {@link DdlOutcome#STALE} and nothing is sent; so is one whose relfilenode is not {@code expected} (when given).
+         */
+        private AnchorOutcome stampAndComment(PciCatalog.Leaf leaf, String indexName, PciCatalog.Anchor anchor,
+                                              Long expected) {
+            PciCatalog.Anchor[] stamped = {anchor};
+            DdlOutcome outcome = run("comment", COMMENT_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, indexName, leaf, () -> {
+                Long relfilenode = PciAnchorReads.relfilenode(ctx, leaf.schema(), indexName);
+                if (relfilenode == null) {
+                    log.info("event=pci_anchor_skipped reason=gone index={} leaf={}.{}", indexName, leaf.schema(),
+                        leaf.name());
+                    return DdlOutcome.STALE;
+                }
+                if (expected != null && !expected.equals(relfilenode)) {
+                    log.info("event=pci_anchor_skipped reason=rebuilt_since_read index={} leaf={}.{} expected_relfilenode={} "
+                        + "relfilenode={}", indexName, leaf.schema(), leaf.name(), expected, relfilenode);
+                    return DdlOutcome.STALE;
+                }
+                stamped[0] = anchor.withRelfilenode(relfilenode);
+                return null;
+            }, () -> runComment(render(COMMENT_TEMPLATE, leaf.schema(), indexName, stamped[0].toJson())));
+            return new AnchorOutcome(outcome, stamped[0]);
+        }
+
+        /** What {@link #anchorAfterLeafReindex} did: the comment's outcome and the anchor it tried to write. */
+        public record AnchorOutcome(DdlOutcome outcome, PciCatalog.Anchor anchor) { }
+
+        /**
+         * Anchor a leaf's own HNSW index right after a REINDEX of it, the way a build anchors a {@code pci_} index
+         * (RDR-230 Technical Design 1 and 3): the anchor is {@code {rows, bytes, built_at, origin:"built"}}, with
+         * {@code bytes} read here, on this session, as {@code pg_relation_size} of the index by its name now (the
+         * REINDEX swapped in a new index under the same name), and {@code rows} and {@code builtAt} given by the caller
+         * ({@code builtAt} taken before the rows were read, as for a build; {@code rows} is the leaf's live row count
+         * the size rule divides by). The write is {@link #comment(PciCatalog.Leaf, PciCatalog.LeafIndex,
+         * PciCatalog.Anchor)}, so its guard and lock timeout apply. A failed or lost comment leaves the old comment,
+         * and the next pass anchors the index again.
+         *
+         * @return {@link DdlOutcome#REJECTED} (anchor null) when the guard refuses the index, {@link DdlOutcome#STALE}
+         *         (anchor null) when the index is gone, else the comment's outcome with the anchor it carried
+         * @throws DataAccessException when the size read fails (a lock timeout on the index included)
+         */
+        public AnchorOutcome anchorAfterLeafReindex(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, long rows,
+                                                    java.time.Instant builtAt) {
+            return anchorAfterLeafReindex(leaf, index, rows, builtAt, null);
+        }
+
+        /** As above; with {@code expectedRelfilenode} the write is vetoed if the index was rebuilt meanwhile (see {@code write}). */
+        public AnchorOutcome anchorAfterLeafReindex(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index, long rows,
+                                                    java.time.Instant builtAt, Long expectedRelfilenode) {
+            if (ended != null) {
+                return new AnchorOutcome(ended, null);
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            Objects.requireNonNull(index, "index");
+            Objects.requireNonNull(builtAt, "builtAt");
+            if (!ownsForComment(leaf, index)) {
+                log.warn("event=pci_ddl_rejected op=comment reason=not_leafs_own_index name={} valid={}", index.name(),
+                    index.valid());
+                return new AnchorOutcome(DdlOutcome.REJECTED, null);
+            }
+            // The REINDEX before this left its own session settings (no lock timeout, hours of statement timeout): the
+            // size read takes a lock on the index, so it is bounded as the COMMENT after it is. A timeout is thrown to
+            // the caller, which owes the index its anchor.
+            setSession("lock_timeout", COMMENT_LOCK_TIMEOUT);
+            setSession("statement_timeout", OTHER_STATEMENT_TIMEOUT.toMillis() + "ms");
+            Long bytes = ctx.select(DSL.function(DSL.name("pg_catalog", "pg_relation_size"), SQLDataType.BIGINT,
+                    DSL.field(DSL.name("c", "oid"))))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_class")).as("c"))
+                .join(DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n"))
+                .on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(leaf.schema()))
+                .and(DSL.field(DSL.name("c", "relname"), String.class).eq(index.name()))
+                .fetchOne(0, Long.class);
+            if (bytes == null) {
+                log.info("event=pci_anchor_skipped reason=gone index={} leaf={}.{}", index.name(), leaf.schema(),
+                    leaf.name());
+                return new AnchorOutcome(DdlOutcome.STALE, null);
+            }
+            return write(leaf, index, new PciCatalog.Anchor(builtAt, rows, bytes, PciCatalog.ORIGIN_BUILT),
+                expectedRelfilenode);
+        }
+
+        /**
+         * The comment guard for the leaf's own HNSW index: {@code index} is a member of {@code leaf.hnswIndexes()}
+         * (same name and same dimension; the size is not compared, it moves), it is valid, and the leaf is one the
+         * builder resolved (model and tenant parsed). Nothing else: not an operator's unattached hnsw index, not an
+         * index of another leaf, not an invalid one, not a name the read did not identify.
+         */
+        static boolean ownsForComment(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index) {
+            return index.valid() && leaf.model() != null && leaf.tenant() != null
+                && leaf.hnswIndexes().stream()
+                    .anyMatch(own -> own.name().equals(index.name()) && own.dimension() == index.dimension());
+        }
+
+        static boolean ownsForComment(PciCatalog.Leaf leaf, PciCatalog.Index index) {
             if (!index.parsed() || !index.valid() || !PciCatalog.isBuilderName(index.name())
                 || leaf.model() == null || leaf.tenant() == null) {
                 return false;
@@ -705,6 +881,109 @@ public final class PciBuilderSession {
             } catch (IllegalArgumentException e) {
                 return false;
             }
+        }
+
+        /**
+         * {@code REINDEX INDEX CONCURRENTLY} of {@code index} on {@code leaf} (RDR-230 Technical Design 4). The old
+         * index serves until the swap and the swap keeps its name, so the router's set never loses the collection; while
+         * it runs the read half counts the invalid {@code _ccnew} as a reindex leftover. Only an index
+         * {@link #ownsForReindex} accepts is touched; any other is {@link DdlOutcome#REJECTED} and nothing is sent.
+         *
+         * <p>No {@code lock_timeout} (the statement waits for older transactions the way a build does) and the build's
+         * statement timeout: a REINDEX the timeout cancels leaves an invalid copy, is retried from zero after its
+         * backoff, and could loop for ever on an index too big for the bound. A failure is
+         * {@code event=pci_ddl_failed op=reindex} and {@link DdlOutcome#FAILED}; a backend ended by a migration is
+         * {@link DdlOutcome#CONNECTION_LOST}, which says nothing about the statement. Either leaves an invalid
+         * {@code _ccnew}/{@code _ccold} that the leftover rule drops on a later pass.
+         */
+        public DdlOutcome reindex(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+            if (ended != null) {
+                return ended;
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            Objects.requireNonNull(index, "index");
+            if (!ownsForReindex(leaf, index)) {
+                log.warn("event=pci_ddl_rejected op=reindex reason=not_builders_index name={} parsed={} valid={}",
+                    index.name(), index.parsed(), index.valid());
+                return DdlOutcome.REJECTED;
+            }
+            return run("reindex", BUILD_LOCK_TIMEOUT, owner.buildStatementTimeout, index.name(), leaf, () -> {
+                String sql = render(REINDEX_TEMPLATE, leaf.schema(), index.name());
+                runReindex(sql);
+            });
+        }
+
+        /**
+         * {@link #reindex(PciCatalog.Leaf, PciCatalog.Index)} for one of the leaf's own HNSW indexes (RDR-230,
+         * nexus-4lnn1.1.10): the same statement, the same {@code run("reindex", ...)} path and timeouts, behind
+         * {@link #ownsForReindex(PciCatalog.Leaf, PciCatalog.LeafIndex)}. Any other index is
+         * {@link DdlOutcome#REJECTED} and nothing is sent. The swap keeps the name and the attachment to the parent's
+         * index. The caller anchors the result with {@link #anchorAfterLeafReindex}.
+         */
+        public DdlOutcome reindex(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index) {
+            if (ended != null) {
+                return ended;
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            Objects.requireNonNull(index, "index");
+            if (!ownsForReindex(leaf, index)) {
+                log.warn("event=pci_ddl_rejected op=reindex reason=not_leafs_own_index name={} valid={}",
+                    index.name(), index.valid());
+                return DdlOutcome.REJECTED;
+            }
+            return run("reindex", BUILD_LOCK_TIMEOUT, owner.buildStatementTimeout, index.name(), leaf, () -> {
+                String sql = render(REINDEX_TEMPLATE, leaf.schema(), index.name());
+                runReindex(sql);
+            });
+        }
+
+        /**
+         * Tell the pass which leaves it may vacuum: those of the catalog snapshot the caller is working from.
+         * {@link #vacuum} refuses every other relation, and every leaf until this is called.
+         */
+        public void useSnapshot(PciCatalog.Snapshot snapshot) {
+            Objects.requireNonNull(snapshot, "snapshot");
+            Set<String> ids = new HashSet<>();
+            for (PciCatalog.Leaf leaf : snapshot.leaves()) {
+                ids.add(leaf.schema() + "." + leaf.name());
+            }
+            leafIds = Set.copyOf(ids);
+        }
+
+        /**
+         * {@code VACUUM (ANALYZE)} of {@code leaf}, which must be a leaf of the snapshot this pass was given
+         * ({@link #useSnapshot}) and never another table (RDR-230, the widened admin statement set). It runs after a
+         * bulk-delete REINDEX, to reap what the deletes left. It holds a {@code ShareUpdateExclusiveLock} on the leaf
+         * for its run, so autovacuum skips the leaf meanwhile; 5 s lock timeout, and the other statements' 30 minute
+         * statement timeout.
+         */
+        public DdlOutcome vacuum(PciCatalog.Leaf leaf) {
+            if (ended != null) {
+                return ended;
+            }
+            Objects.requireNonNull(leaf, "leaf");
+            if (leafIds == null || !leafIds.contains(leaf.schema() + "." + leaf.name())) {
+                log.warn("event=pci_ddl_rejected op=vacuum reason=not_a_leaf_of_the_snapshot leaf={}.{}", leaf.schema(),
+                    leaf.name());
+                return DdlOutcome.REJECTED;
+            }
+            return run("vacuum", VACUUM_LOCK_TIMEOUT, OTHER_STATEMENT_TIMEOUT, leaf.name(), leaf, () -> {
+                String sql = render(VACUUM_TEMPLATE, leaf.schema(), leaf.name());
+                runVacuum(sql);
+            });
+        }
+
+        /**
+         * The REINDEX name guard: a parsed, valid index with the builder's name for this leaf and collection, exactly
+         * what {@link #comment} accepts. The leaf's own HNSW index has the overload below.
+         */
+        static boolean ownsForReindex(PciCatalog.Leaf leaf, PciCatalog.Index index) {
+            return ownsForComment(leaf, index);
+        }
+
+        /** The REINDEX guard for the leaf's own HNSW index: what {@code ownsForComment(Leaf, LeafIndex)} accepts. */
+        static boolean ownsForReindex(PciCatalog.Leaf leaf, PciCatalog.LeafIndex index) {
+            return ownsForComment(leaf, index);
         }
 
         /** {@link DdlOutcome#STALE} when the leftover is valid or gone now, else {@code null}: go on to the DROP. */
@@ -838,6 +1117,24 @@ public final class PciBuilderSession {
         // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.1): COMMENT ON INDEX has no typed jOOQ form. The text is rendered by
         // format() with %I/%L on the server (render), and the pass has already checked the name (ownsForComment).
         private void runComment(String sql) throws SQLException {
+            try (java.sql.Statement st = conn.createStatement()) {
+                st.execute(sql);
+            }
+        }
+
+        // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): REINDEX INDEX CONCURRENTLY has no typed jOOQ form and cannot run in a
+        // function or a transaction block. The text is rendered by format() with %I on the server (render), and the pass
+        // has already checked the name (ownsForReindex).
+        private void runReindex(String sql) throws SQLException {
+            try (java.sql.Statement st = conn.createStatement()) {
+                st.execute(sql);
+            }
+        }
+
+        // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): VACUUM (ANALYZE) has no typed jOOQ form and cannot run in a function
+        // or a transaction block. The text is rendered by format() with %I on the server (render), and the pass has
+        // already checked that the relation is a leaf of its snapshot (vacuum).
+        private void runVacuum(String sql) throws SQLException {
             try (java.sql.Statement st = conn.createStatement()) {
                 st.execute(sql);
             }

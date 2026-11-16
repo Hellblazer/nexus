@@ -1,0 +1,53 @@
+{
+  "ok" : true,
+  "suggestions" : [
+    {
+      "block" : 1,
+      "find" : "that taxonomy is built per.",
+      "id" : "s1",
+      "note" : "\"built per\" ends the sentence on a dangling preposition that reads like a typo.",
+      "replace" : "the unit taxonomy is built for.",
+      "status" : "accepted"
+    },
+    {
+      "block" : 8,
+      "find" : "A good test is whether the same name would still be right in two years and would still hold everything you add on that subject.",
+      "id" : "s2",
+      "note" : "Shorter; the test reads as a question the reader asks.",
+      "replace" : "A good test: would the name still be right in two years, and still hold everything you add on that subject?",
+      "status" : "rejected"
+    },
+    {
+      "block" : 1,
+      "find" : "basically ordered",
+      "id" : "s12",
+      "note" : "Edit 1: hedge",
+      "replace" : "ordered",
+      "status" : "accepted"
+    },
+    {
+      "block" : 2,
+      "find" : "really quite simply ",
+      "id" : "s13",
+      "note" : "Edit 2: hedge",
+      "replace" : "",
+      "status" : "rejected"
+    },
+    {
+      "block" : 5,
+      "find" : "basically ",
+      "id" : "s14",
+      "note" : "Edit 3: hedge inside bold",
+      "replace" : "",
+      "status" : "pending"
+    },
+    {
+      "block" : 7,
+      "find" : "it is “really” simple",
+      "id" : "s15",
+      "note" : "Edit 6: curly quotes",
+      "replace" : "it is \"plainly\" simple",
+      "status" : "pending"
+    }
+  ]
+}

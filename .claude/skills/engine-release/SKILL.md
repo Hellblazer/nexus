@@ -409,6 +409,56 @@ Two legs added by nexus-wbfpw.50 cover the RDR-192 surface through the same edge
 
 Client version to run it from: the working tree (`HEAD`) — this script has no separate published-client mode. This step's job is edge-contract visibility, not client-write compatibility.
 
+### 6.2. Post-deploy cloud backup round trip (MANDATORY, in the deploy window)
+
+Sam, 2026-11-15 (RDR-248 close, finding 4): "Add it to the engine release". After Step 6.1, still inside the
+deploy window Sam gave for this cut, run one cloud round trip of `nx backup` against the newly live engine,
+about 12 minutes end to end (the 2026-11-15 restore took 555 s for 233,107 rows). Nothing else tests the export
+and import routes through the public edge: the first run found the edge dropping `X-Nexus-Part-Sha256`
+(conexus PR #710), which every engine-direct gate had passed. The operator session (bob) runs it; provision
+and teardown are production writes, so they run only on Sam's go for the window, typed in that session.
+
+Preconditions: the edge `/version` reports `tenant_import_supported`, and CloudFront forwards every request
+header the import routes send. A new import request header must be added to the forwarded list in conexus
+`infra/terraform/modules/app-server/cloudfront.tf`, or the restore fails 400 at the edge.
+
+1. Export the test tenant `gate-xr789` with the shipped client: `nx backup --to <dir>/fresh.nxtenant`, its
+   mint-locked credential in the environment only, an isolated `NEXUS_CONFIG_DIR`.
+2. Provision an empty throwaway tenant from the conexus repo, with a slug carrying the throwaway marker
+   (`throwaway-<bead>-<yyyymmdd>`):
+   `PYTHONPATH=deploy deploy/gate/with-db-tunnel.sh --writes --i-know-this-writes-production -- python3 -m gate.throwaway_tenant provision --slug <slug> --name "<tag> restore target"`.
+   It prints the engine credential once: send stdout to a 0600 file, read the credential into a shell
+   variable, remove it from the file, and pass it as `NX_SERVICE_TOKEN` with its own `NEXUS_CONFIG_DIR`. Leave
+   `OPERATOR_TOKEN` unset, so no control-plane bearer is issued. Then `nx backup restore <dir>/fresh.nxtenant`.
+3. With the same credential, export the restored tenant to `<dir>/restored.nxtenant`. Run `nx backup --check`
+   on both files; a non-zero exit from either fails the step. Then
+   `uv run python tests/e2e/backup_roundtrip_compare.py <dir>/fresh.nxtenant <dir>/restored.nxtenant > <dir>/compare.json`.
+   Exit 0 is PASS. Exit 1 (FAIL) or 3 (REVIEW) holds the release's sign-off until it is read. Expected and not a
+   finding: `catalog_meta` is not judged and the restored export is one row larger (the restore's
+   `rdr248_restore` marker); `tenant_id` and reassigned keys differ.
+4. Tear the tenant down, whatever the outcome: the same `gate.throwaway_tenant teardown --slug <slug>` command
+   once as a dry run and once with `--confirm`. It passes on `residue_total` 0,
+   `engine_leaves.leaves_remaining` 0 and an empty `engine_api.active_token_hashes`.
+5. Read the cloud engine's log over the deploy window for the two page-limit events. The log is the CloudWatch
+   log group `/conexus/dev/engine` in `us-east-1`; `S` and `E` are the window's start and end in epoch ms:
+   ```bash
+   aws logs filter-log-events --region us-east-1 --log-group-name /conexus/dev/engine --start-time $S --end-time $E \
+     --filter-pattern '?"event=export_page_over_budget" ?"event=export_page_wall_deadline"' \
+     --query 'events[].message' --output text | tr '\t' '\n' | grep -cE 'event=export_page_(over_budget|wall_deadline)'
+   ```
+   Positive control: the same window must show the round trip's own `event=export_session_opened` lines (the
+   fresh export and the re-export): the same command with `--filter-pattern '"event=export_session_opened"'` and
+   `grep -c event=export_session_opened`, so a
+   zero means no page hit a limit, not a wrong log or window. Each hit names the tenant and the table. A hit on an
+   id-keyed table (memory, plans, aspects and the other tables keyed by `id` alone) is the trigger for Sam's
+   `(tenant_id, id)` index decision (RDR-248 Risks; Sam, 2026-11-15: "Accept, watch the 20 s line"). Record both
+   counts, zero included. Baseline since engine 0.1.192: 0 page-limit hits against 4 export session events (bob).
+
+Record in T2 `conexus/<tag>-backup-roundtrip`, and name it on the cut bead: the export, restore and re-export
+wall times and row counts, the compare verdict and its per-table summary, the teardown residue, and the
+page-limit event count. Keep the
+files at 0600 until recorded, then delete them. The worked run is RDR-248 Activation Step 2 (nexus-csayy.10).
+
 ### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
 
 (For the RDR-223 cut, "cloud-gated green" means Step 6.1 against `log-only`; the enforce flip, nexus-z0o2p.40, follows the cut and is not waited on here.)

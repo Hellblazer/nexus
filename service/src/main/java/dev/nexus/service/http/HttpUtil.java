@@ -416,7 +416,7 @@ public final class HttpUtil {
      *       malformed_after} (400), {@code export_session_exists} and {@code page_in_flight} (409, the
      *       latter with {@code Retry-After}), {@code
      *       session_closed} (410), {@code export_capacity_full} (503, with {@code retry_after_seconds}) and
-     *       {@code export_page_busy} (503, with {@code Retry-After}: a lock bound) and {@code export_page_over_budget} (503, no {@code Retry-After}: the page's time budget). The client's copy of these values lands with the client half of
+     *       {@code export_page_busy} (503, with {@code Retry-After}: a lock bound, or an earlier page read of the session still ending) and {@code export_page_over_budget} (503, no {@code Retry-After}: the page's database time budget, or the page wall, whose value {@code page_budget_ms} then carries). The client's copy of these values lands with the client half of
      *       RDR-248 (nexus-csayy.3).</li>
      * </ul>
      * The typed 409 bodies predate the rule and discriminate on {@code status}
@@ -631,11 +631,15 @@ public final class HttpUtil {
         if (tenantCreationBusy != null) {
             log.warn("event={}_tenant_creation_busy {} tenant={} attempts={}",
                 event, context, tenantCreationBusy.tenant(), tenantCreationBusy.attempts());
-            exchange.getResponseHeaders().set("Retry-After", Long.toString(TENANT_CREATION_RETRY_AFTER_SECONDS));
+            // the header and the body's retry_after_seconds are one value (RDR-248, nexus-csayy.6): 30 s while a
+            // tenant restore load holds the restore key, the creation's own 2 s otherwise
+            long retryAfter = tenantCreationBusy.restoreHeld()
+                ? TENANT_CREATION_RESTORE_RETRY_AFTER_SECONDS : TENANT_CREATION_RETRY_AFTER_SECONDS;
+            exchange.getResponseHeaders().set("Retry-After", Long.toString(retryAfter));
             send(exchange, 503,
                 "{\"error\":" + jsonString(tenantCreationBusy.getMessage())
                 + ",\"reason\":\"" + TENANT_CREATION_BUSY_REASON + "\""
-                + ",\"retry_after_seconds\":" + TENANT_CREATION_RETRY_AFTER_SECONDS + "}");
+                + ",\"retry_after_seconds\":" + retryAfter + "}");
             return true;
         }
         String noPartition = noPartitionMessage(e);
@@ -668,6 +672,7 @@ public final class HttpUtil {
             log.warn("event={}_integrity_violation {} sqlstate={} constraint={} error={}",
                 event, context, sqlState, constraint, e.getMessage());
             String remedy = ttlDaysCheckRemedy(constraint);
+            if (remedy == null) remedy = manifestLabelsCheckRemedy(constraint);
             send(exchange, 409,
                 "{\"error\":\"integrity constraint violation\",\"sqlstate\":"
                 + jsonString(sqlState)
@@ -740,6 +745,20 @@ public final class HttpUtil {
         if (constraint != null && constraint.endsWith("_ttl_days_positive_chk")) {
             return "ttl_days must be omitted, null, or a positive integer number "
                 + "of days — 0 does NOT mean permanent; null does";
+        }
+        return null;
+    }
+
+    /**
+     * nexus-6pfgb.42: the remedy of the manifest labels CHECK ({@code labels_written OR the three section labels are
+     * NULL}), once an operator has added it. A manifest write that sends {@code labels_written: false} beside a section
+     * label is refused 23514; the body says what to send instead.
+     */
+    static String manifestLabelsCheckRemedy(String constraint) {
+        if (dev.nexus.service.db.ManifestCheck.LABELS.constraint().equals(constraint)) {
+            return "a manifest row may carry section_title, section_type or page_number only with labels_written true: "
+                + "send labels_written true with the labels, or omit labels_written (a row that carries a label key is "
+                + "written), or send no label keys for a legacy row";
         }
         return null;
     }
@@ -841,6 +860,9 @@ public final class HttpUtil {
 
     /** {@code Retry-After} on {@link #TENANT_CREATION_BUSY_REASON}: one {@code lock_timeout} of the creation. */
     static final long TENANT_CREATION_RETRY_AFTER_SECONDS = 2;
+
+    /** {@code Retry-After} on the same answer while a tenant restore load holds the restore key (RDR-248): a load lasts minutes. */
+    static final long TENANT_CREATION_RESTORE_RETRY_AFTER_SECONDS = 30;
 
     /** The {@link dev.nexus.service.db.CollectionModelMismatchException} in {@code t}'s cause chain, or null. */
     static dev.nexus.service.db.CollectionModelMismatchException collectionModelMismatch(Throwable t) {

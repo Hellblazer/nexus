@@ -29,9 +29,14 @@
       VIEW era (the superuser provisioning path — pg_provision locally, the
       DBA block in docs/configuration.md for managed — has created the
       counts view): changeset grants-nexus-diag-2 below REVOKES nexus_diag's
-      direct table SELECT, leaving SELECT on the view + the Liquibase
-      journal only. The content boundary is then COUNT-BY-CONSTRUCTION at
-      the DB level; the choke-point lint remains as defense in depth. The
+      direct table SELECT. What remains is SELECT on the view, the
+      Liquibase journal, the one address column of each table the view
+      reads (grants-nexus-diag-3; the view is security_invoker, so the
+      role needs them), the three whole tables -4 and -5 name, and the
+      gc_audit and nexus.tuples columns they name. Those address
+      columns hold content hashes and ids, never chunk text (column grants
+      since nexus-edchb; -3 granted whole tables before, chunk_text
+      included); the choke-point lint remains as defense in depth. The
       view must be superuser-owned: under FORCE RLS a view counts
       cross-tenant rows only when its OWNER is RLS-exempt (the nexus-vounk
       lesson, structurally), which is why the changelog (nexus_admin,
@@ -279,12 +284,14 @@ $$;
             file), it is the correct place to make the content-boundary
             grants stick as the final word every boot — re-granting
             exactly what security_invoker=true requires: SELECT on the
-            view itself, PLUS direct SELECT on every table the view reads
-            internally (security_invoker means Postgres checks the
+            view itself, PLUS direct SELECT on every column the view reads
+            internally. Since nexus-edchb these are column grants. Before,
+            they were table grants, which let the role read chunk_text
+            across tenants. (security_invoker means Postgres checks the
             INVOKING role's OWN table privileges for the relations the
             view references — nexus_diag's BYPASSRLS exempts it from
             row-level policies, never from ordinary GRANT-based privilege
-            checks). The five tables below are exactly
+            checks). The four tables below are exactly
             CHASH_BEARING_TABLES (src/nexus/db/chash_tables.py) — the SAME
             set diag_conformance_view_ddl() reads to build the view text —
             named individually (never a schema-wide bulk grant) so this
@@ -297,7 +304,7 @@ $$;
             nexus_diag and SELECTs the view plus every underlying table
             against a live install.
 
-            No foreign-owner guard is needed for the five table grants
+            No foreign-owner guard is needed for the four table grants
             (unlike the view's own GRANT below): nexus_admin created every
             one of them via forward DDL and always owns them, the same
             assumption -1's own unguarded bulk grant already makes for
@@ -320,7 +327,7 @@ BEGIN
     -- comment element above for the full derivation. View existence
     -- implies every underlying table already exists too (the view's own
     -- CREATE would have failed otherwise), so no separate existence
-    -- guard is needed for the five GRANTs below.
+    -- guard is needed for the four GRANTs below.
     IF EXISTS (
         SELECT 1 FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -335,11 +342,18 @@ BEGIN
         -- Exactly CHASH_BEARING_TABLES (src/nexus/db/chash_tables.py) --
         -- the set diag_conformance_view_ddl() reads. nexus_admin owns
         -- every one of these via forward DDL, so no foreign-owner guard.
-        GRANT SELECT ON nexus.chunks                  TO nexus_diag;
-        GRANT SELECT ON nexus.catalog_document_chunks TO nexus_diag;
-        GRANT SELECT ON nexus.topic_assignments        TO nexus_diag;
-        GRANT SELECT ON nexus.frecency                 TO nexus_diag;
-        GRANT SELECT ON nexus.relevance_log            TO nexus_diag;
+        -- COLUMN grants (nexus-edchb): the view reads one column of each
+        -- table (the entry's column), and count(*) needs SELECT on only
+        -- one column. A table-level grant let this BYPASSRLS role read
+        -- every tenant's chunk_text and the other content columns. No
+        -- REVOKE is needed here: grants-nexus-diag-2 revokes the table
+        -- grant every boot in this era, and in PostgreSQL a table-level
+        -- REVOKE also removes the column grants, which this block then
+        -- re-grants.
+        GRANT SELECT (chash)    ON nexus.chunks                  TO nexus_diag;
+        GRANT SELECT (chash)    ON nexus.catalog_document_chunks TO nexus_diag;
+        GRANT SELECT (doc_id)   ON nexus.topic_assignments        TO nexus_diag;
+        GRANT SELECT (chunk_id) ON nexus.relevance_log            TO nexus_diag;
     END IF;
 END
 $$;
@@ -357,7 +371,7 @@ $$;
             could not read the very audit table it exists to check. Same
             defect CLASS as the nexus-lhuhe v0.1.78 zero-grants bug
             (grants-nexus-diag-3 above), one generation later: -3's re-grant
-            list is scoped EXACTLY to CHASH_BEARING_TABLES (the five tables
+            list is scoped EXACTLY to CHASH_BEARING_TABLES (the four tables
             nexus.diag_chash_conformance reads internally), because that
             changeset was written to fix ONE bug (the view went dark) — it
             was never meant to be, and is not, the general view-era
@@ -383,7 +397,11 @@ $$;
             catalog-033-gc-audit-producers.xml — the in-memory sample also
             carries a title field, but title never reaches the persisted
             row; nexus-kgft3 claimed otherwise and was closed as a
-            confirmed false positive, 2026-08-19). relevance_log is already
+            confirmed false positive, 2026-08-19). That held for the
+            quarantine producers only: since nexus-2x9xa the reaper's
+            refusal sample stores title and source_path in gc_audit.details,
+            so gc_audit is granted by column without details (nexus-edchb,
+            below). relevance_log is already
             granted above (a CHASH_BEARING table). This is NOT a
             default-privileges fix and deliberately not a bulk ON ALL
             TABLES grant: default privileges stay revoked in the view era
@@ -437,14 +455,21 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Era-independent by design (unlike -1/-2/-3's view-era dance): these
-    -- two tables carry no content-boundary concern at all (verified
-    -- individually — see CatalogRepository.NEXUS_DIAG_READABLE_TABLES),
-    -- so nexus_diag should see them whether or not the counts view
+    -- Era-independent by design (unlike -1/-2/-3's view-era dance): what
+    -- this grants carries no content (search_telemetry whole, gc_audit
+    -- without details; see CatalogRepository.NEXUS_DIAG_READABLE_TABLES),
+    -- so nexus_diag should see it whether or not the counts view
     -- exists. hook_failures is deliberately NOT granted here (see comment
-    -- above) -- do not add it for symmetry with -3's five-table list.
+    -- above) -- do not add it for symmetry with -3's four-table list.
     GRANT SELECT ON nexus.search_telemetry TO nexus_diag;
-    GRANT SELECT ON nexus.gc_audit         TO nexus_diag;
+    -- Every gc_audit column but details (nexus-edchb, Sam 2026-11-15): the
+    -- reaper's refusal sample stores document titles and source paths there
+    -- (ChunkReaper.sampleRow), which this BYPASSRLS role would otherwise read
+    -- for every tenant. COUNT(*) still works on a column grant. No REVOKE:
+    -- in the view era -2 revokes the table grant every boot before this
+    -- runs, and in the legacy era -1's schema-wide grant applies anyway.
+    GRANT SELECT (id, tenant_id, operation, collection, actor, dry_run, chash_count, chashes, created_at)
+                    ON nexus.gc_audit         TO nexus_diag;
 END
 $$;
         </sql>
@@ -480,14 +505,28 @@ $$;
             file's own header) already exempts it from that policy for
             every other tenant-scoped table it holds SELECT on today (the
             legacy era's schema-wide grant, before the view narrowed it) —
-            this changeset grants the SAME diagnostic visibility to these
-            three tables specifically, not a new privilege class.
+            this changeset grants diagnostic visibility on these three
+            tables, not a new privilege class (on nexus.tuples, by column;
+            see below).
             nexus.tuple_tenants carries no RLS at all (no tenant_id column
             — tuples-001-baseline.xml changeset 3's own comment).
 
             No foreign-owner guard needed (matches -3/-4's own reasoning):
             nexus_admin creates all three tables via ordinary forward DDL
             (tuples-001-baseline.xml) and always owns them.
+
+            COLUMN GRANT ON nexus.tuples (nexus-edchb, Sam 2026-11-15): the
+            role reads only the eight columns nx doctor's tuples.lock_held
+            fallback joins and filters on (health._lock_claim_started_sql),
+            never a payload column (keys, dims, body), which it could
+            otherwise read for every tenant. COUNT(*) needs SELECT on one
+            column only, so a row count still works. tuple_claim_log and
+            tuple_tenants carry no payload and keep the table grant; a test
+            pins their column lists, so a column added to either fails it
+            until someone decides whether nexus_diag may read it. No
+            REVOKE here: in the view era -2 revokes the table grant every
+            boot before this runs, and in the legacy era -1's schema-wide
+            grant applies anyway.
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
@@ -497,7 +536,8 @@ BEGIN
         RETURN;
     END IF;
 
-    GRANT SELECT ON nexus.tuples          TO nexus_diag;
+    GRANT SELECT (id, tenant_id, subspace, claimant, claim_id, claim_state, consumed_at, lease_until)
+                    ON nexus.tuples          TO nexus_diag;
     GRANT SELECT ON nexus.tuple_claim_log TO nexus_diag;
     GRANT SELECT ON nexus.tuple_tenants   TO nexus_diag;
 END

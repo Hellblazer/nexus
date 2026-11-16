@@ -209,7 +209,11 @@ class TenantResetLeakCanaryTest {
             + "(ChunkKeyAllowlistCheck, nexus-6pfgb.66). Both are filled by a client chunk write, which needs the "
             + "vector backend and the combined write service this engine does not have, so the canary cannot feed "
             + "either; TenantKeyedEvictorsTest covers the limiter's evictor and TenantResetRouteTest drives a reset "
-            + "through the allow-list check's own windows"));
+            + "through the allow-list check's own windows",
+        "TenantImportSessions", "an import session and the export session the canary opens for the same tenant cannot "
+            + "coexist (one session per tenant), so the canary's workload holds the tenant's place with its export and "
+            + "cannot also open an import. TenantImportRoutesTest.aTenantResetEndsTheImportSessionAndFreesItsPlace drives "
+            + "the evictor through the service's own evictor list"));
 
     /** The structures the workload feeds, named as {@code kindOf} names them: the positive control. */
     private static final List<String> EXPECTED_KINDS = List.copyOf(FED.values());

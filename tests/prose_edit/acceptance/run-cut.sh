@@ -3,7 +3,8 @@
 # usage: OUT_DIR=<dir> TMPDIR=<a directory outside the repository> [SCENARIOS="a web"] run-cut.sh
 #
 # The cut-only scenarios (RDR-221 Step 3.1, nexus-ger02.10): real headless runs of the prose-cut skill, each turn
-# through run-scenario.sh, the decide turn through RESUME_FROM. They WRITE to T2 (a stored rejection), so every record goes to
+# through run-scenario.sh, the decide turn through RESUME_FROM. prose-cut has no MarkupEditor step, so none of these
+# is held back as a path run (runner_guard.bash). They WRITE to T2 (a stored rejection), so every record goes to
 # projects named with PROSE_EDIT_PROJECT_PREFIX (default zzprose0210_), never to the live prose projects. Afterwards:
 #   python3 verdicts.py $OUT_DIR, then delete the zzprose0210_* T2 projects.
 #

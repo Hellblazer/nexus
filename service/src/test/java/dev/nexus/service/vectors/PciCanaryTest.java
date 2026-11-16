@@ -232,6 +232,60 @@ class PciCanaryTest {
         assertThat(r.minRecall()).isCloseTo(0.9, org.assertj.core.data.Offset.offset(1e-9));
     }
 
+    /** The HNSW page of query {@code outlier} lacks its nearest row (a tie fills the page); every other is exact. */
+    private static Script oneOutlier(int outlier) {
+        return new Script((q, k) -> {
+            if (q != outlier) {
+                return exactPage(k);
+            }
+            List<Hit> page = new ArrayList<>(exactPage(k).subList(1, k));
+            page.add(new Hit("tied-" + k, 0.001 * k));
+            return page;
+        });
+    }
+
+    @Test
+    void aRedRun_namesTheQueriesThatReadRedThemselves_theOutlierAlone() {
+        Result r = canary(5, oneOutlier(2)).run(TARGET, "daily");
+
+        assertThat(r.state()).isEqualTo(State.RED);
+        assertThat(r.top1Misses()).isEqualTo(1);
+        assertThat(r.redSample()).as("the whole run").hasSize(5);
+        assertThat(r.redQueries()).as("only the outlier").hasSize(1);
+        assertThat(r.redQueries().get(0)).isEqualTo(vec(2));
+    }
+
+    @Test
+    void aMeanDrivenRed_namesTheQueryWhoseOwnMeanIsBelowTheBar() {
+        // Query 1 alone has a tenth of every page replaced by far rows: its mean is 0.9, the others are 1.0, the run's
+        // mean is 0.98, below the bar, and no query has a top-1 miss.
+        Script script = new Script((q, k) -> {
+            List<Hit> page = new ArrayList<>(exactPage(k));
+            if (q == 1) {
+                for (int i = k - k / 10; i < k; i++) {
+                    page.set(i, new Hit("far-" + i, 5.0 + i));
+                }
+            }
+            return page;
+        });
+
+        Result r = canary(5, script).run(TARGET, "daily");
+
+        assertThat(r.top1Misses()).isZero();
+        assertThat(r.state()).isEqualTo(State.RED);
+        assertThat(r.redQueries()).hasSize(1);
+        assertThat(r.redQueries().get(0)).isEqualTo(vec(1));
+    }
+
+    @Test
+    void aGreenRun_hasNoRedQueries() {
+        Result r = canary(5, new Script(PciCanaryTest::perfect)).run(TARGET, "daily");
+
+        assertThat(r.state()).isEqualTo(State.GREEN);
+        assertThat(r.redSample()).isNull();
+        assertThat(r.redQueries()).isNull();
+    }
+
     @Test
     void aShortPage_countsAgainstRecall() {
         Script script = new Script((q, k) -> exactPage(k / 2));
@@ -418,5 +472,121 @@ class PciCanaryTest {
         assertThat(PciCanaryPolicy.VACUUM_MIN_INTERVAL).hasHours(6);
         assertThat(PciCanaryPolicy.STALE_AFTER).hasHours(24);
         assertThat(PciCanaryPolicy.PASS_BUDGET).hasSeconds(60);
+    }
+
+    // -- the re-measure after a REINDEX (RDR-230 Technical Design 3, nexus-4lnn1.1.10) --------------------------------
+
+    static List<float[]> sample(int n) {
+        List<float[]> out = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            out.add(vec(i));
+        }
+        return out;
+    }
+
+    @Test
+    void remeasure_runsTheGivenQueries_andNeverReadsTheRing() {
+        AtomicInteger ringReads = new AtomicInteger();
+        Script script = new Script(PciCanaryTest::perfect);
+        PciCanary canary = new PciCanary((t, c) -> {
+            ringReads.incrementAndGet();
+            return ring(0);
+        }, script);
+
+        Result r = canary.remeasure(TARGET, "after_reindex", sample(10));
+
+        assertThat(r.state()).isEqualTo(State.GREEN);
+        assertThat(r.trigger()).isEqualTo("after_reindex");
+        assertThat(r.queries()).isEqualTo(10);
+        assertThat(ringReads.get()).as("the same in-memory queries, not the ring's").isZero();
+        assertThat(script.hnswCalls.get()).isEqualTo(50);
+        assertThat(script.exactCalls.get()).isEqualTo(10);
+    }
+
+    @Test
+    void remeasure_withFewerThanThreeQueries_isUnmeasured_noQueries() {
+        PciCanary canary = canary(0, new Script(PciCanaryTest::perfect));
+
+        Result r = canary.remeasure(TARGET, "after_reindex", sample(2));
+
+        assertThat(r.state()).isEqualTo(State.UNMEASURED);
+        assertThat(r.reason()).isEqualTo(PciCanary.NO_QUERIES);
+        assertThat(r.queries()).isEqualTo(2);
+    }
+
+    @Test
+    void remeasure_scoresLikeARun_aRedSampleStaysRedUntilTheIndexIsRight() {
+        // A page that misses the nearest row at every k: a top-1 miss, red.
+        Script script = new Script((q, k) -> {
+            List<Hit> page = new ArrayList<>(exactPage(k + 1));
+            page.remove(0);
+            return page;
+        });
+        PciCanary canary = canary(0, script);
+        List<float[]> red = sample(10);
+
+        Result still = canary.remeasure(TARGET, "after_reindex", red);
+
+        assertThat(still.state()).isEqualTo(State.RED);
+        assertThat(still.top1Misses()).isEqualTo(10);
+        assertThat(still.redSample()).as("a red re-measure keeps its sample for the next one").hasSize(10);
+        assertThat(canary(0, new Script(PciCanaryTest::perfect)).remeasure(TARGET, "after_reindex", red).state())
+            .as("the same queries on a good index").isEqualTo(State.GREEN);
+    }
+
+    /**
+     * {@code PciCanarySchedule#remeasure}: the REINDEX's measurement goes through the runner (with the sample when there
+     * is one, the ring's queries when there is not), is recorded as the index's latest result, consumes a pending
+     * trigger, stamps the last run, and keeps a no-queries result pending.
+     */
+    @Test
+    void theSchedulesRemeasure_runsTheRunnerWithTheSample_andRecordsTheResultLikeAScheduledRun() {
+        List<List<float[]>> sampled = new ArrayList<>();
+        List<String> ringRuns = new ArrayList<>();
+        PciCanary real = canary(10, new Script(PciCanaryTest::perfect));
+        PciCanarySchedule.Runner spy = new PciCanarySchedule.Runner() {
+            @Override public Result run(Target target, String trigger) {
+                ringRuns.add(trigger);
+                return real.run(target, trigger);
+            }
+
+            @Override public Result remeasure(Target target, String trigger, List<float[]> queries) {
+                sampled.add(queries);
+                return real.remeasure(target, trigger, queries);
+            }
+        };
+        var schedule = new PciCanarySchedule(spy, java.time.Clock.systemUTC(), System::nanoTime);
+        schedule.built(TARGET.index());
+        assertThat(schedule.pending(TARGET.index())).isEqualTo(PciCanarySchedule.AFTER_BUILD);
+        List<float[]> redSample = sample(10);
+
+        Result withSample = schedule.remeasure(TARGET, redSample);
+
+        assertThat(sampled).as("the sample reached the runner").containsExactly(redSample);
+        assertThat(ringRuns).isEmpty();
+        assertThat(withSample.state()).isEqualTo(State.GREEN);
+        assertThat(withSample.trigger()).isEqualTo(PciCanarySchedule.AFTER_REINDEX);
+        assertThat(schedule.latest(TARGET.index())).isSameAs(withSample);
+        assertThat(schedule.results()).containsKey(TARGET.index());
+        assertThat(schedule.pending(TARGET.index())).as("a measured result consumes the pending trigger").isNull();
+        // Run due now? it was just measured: nothing is due.
+        assertThat(schedule.runPass(List.of(TARGET)).ran()).isZero();
+
+        // No sample (the canary was not red): the runner measures through the ring, labelled after_reindex.
+        Result viaRing = schedule.remeasure(TARGET, null);
+        assertThat(ringRuns).containsExactly(PciCanarySchedule.AFTER_REINDEX);
+        assertThat(viaRing.trigger()).isEqualTo(PciCanarySchedule.AFTER_REINDEX);
+        assertThat(schedule.latest(TARGET.index())).isSameAs(viaRing);
+    }
+
+    @Test
+    void theSchedulesRemeasure_withTooFewQueries_staysPending_forTheNextPassToTry() {
+        PciCanary real = canary(0, new Script(PciCanaryTest::perfect));
+        var schedule = new PciCanarySchedule(real, java.time.Clock.systemUTC(), System::nanoTime);
+
+        Result r = schedule.remeasure(TARGET, sample(1));
+
+        assertThat(r.reason()).isEqualTo(PciCanary.NO_QUERIES);
+        assertThat(schedule.pending(TARGET.index())).isEqualTo(PciCanarySchedule.AFTER_REINDEX);
     }
 }

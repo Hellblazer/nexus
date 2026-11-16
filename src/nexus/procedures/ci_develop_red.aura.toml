@@ -1,0 +1,21 @@
+aura = "ci_develop_red"
+summary = "A red develop sha, posted to this session's threads entry."
+procedure = "ci_red_notice"
+
+[trigger]
+subspace = "board/ci/nexus-develop--done"
+match = { kind = "sha", outcome = "failure" }
+
+[args]
+sha = "dims.sha"
+outcome = "dims.outcome"
+
+[when]
+field = "show"
+
+[clear]
+match = { kind = "sha", outcome = "success" }
+
+[display]
+channel = true
+threads = "develop CI red"

@@ -74,7 +74,9 @@ class ManifestWriteRetryGateTest {
 
     private static final Path MAIN = Path.of("src", "main", "java");
     private static final Path DB = MAIN.resolve(Path.of("dev", "nexus", "service", "db"));
-    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository", "ManifestFill");
+    private static final List<String> SCANNED = List.of("CatalogRepository", "ChashRepository", "ManifestFill",
+        // nexus-z0o2p.29: the manifest replace's diff; it takes the caller's DSLContext, so it runs inside writeManifestRows' retried transaction
+        "ManifestReplace");
 
     /** Retried manifest-writing methods, as {@code File#method}. */
     private static final TreeSet<String> EXPECTED_RETRIED = new TreeSet<>(List.of(
@@ -104,6 +106,13 @@ class ManifestWriteRetryGateTest {
             + " it holds no DML"),
         Map.entry("ChashConstraintValidator", "nexus-f3yqd: VALIDATE CONSTRAINT of the chash width CHECK on the table (DDL, "
             + "and a SELECT count of its non-conformant rows); it changes no row"),
+        Map.entry("ManifestCheck", "nexus-6pfgb.42: names the constraints and builds the predicates of the two manifest CHECKs"
+            + " (jOOQ conditions over unqualified column names); it writes nothing"),
+        Map.entry("ManifestCheckAdmin", "nexus-6pfgb.42: the operator step's census (a jOOQ SELECT count grouped by tenant) and"
+            + " ADD / VALIDATE CONSTRAINT of a manifest CHECK, chunk_index = position or the label marker (DDL through"
+            + " AdminDdlSession); it changes no row"),
+        Map.entry("ManifestCheckHandler", "nexus-6pfgb.42: a tenant-scoped SELECT count of the manifest rows (the census's"
+            + " second line) and prose; no DML"),
         Map.entry("ValidateConstraintsHandler", "javadoc naming the table whose CHECK the job validates; no DML"),
         Map.entry("TaxonomyRepository", "a comment naming the idiom; no code reference"),
         Map.entry("TenantScope", "a table-name list for the VACUUM allowlist; VACUUM ANALYZE is not manifest DML"),

@@ -160,10 +160,12 @@ class SqlStringLiteralGateTest {
         Map.entry("dev/nexus/service/db/TenantScopeVacuumMaintainGrantParityTest.java", 1),
         // expected substrings of the trigger function bodies
         Map.entry("dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java", 3),
+        // expected substrings of the insert trigger's clear function body (vectors-061)
+        Map.entry("dev/nexus/service/vectors/ChunkOrphanRecordTriggerIntegrationTest.java", 2),
         // an expected substring of the gc function body
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 1));
 
-    private static final int TEXT_TOTAL = 74;
+    private static final int TEXT_TOTAL = 76;
 
     /** JDBC calls that take SQL text, per file, exact. Each entry says what the SQL is. */
     private static final Map<String, Integer> JDBC_ENTRY = Map.ofEntries(

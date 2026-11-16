@@ -1,0 +1,692 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-bbtc2: one text-gate probe over a request's collections that answers per collection.
+
+    WHY. On the per-collection route (searchPerCollection with the lexical leg) every collection's lexical arm ran
+    text_gate_probe_<dim> as its own one-collection statement. The trigram and tsvector GIN indexes are per leaf
+    (tenant x model), not per collection, so each arm rebuilt the leaf-wide bitmap for the pattern before ANDing it down
+    to its collection: about 65 ms an arm for resolve_active_session_id, 120 arms, 7.9 s of index work against 2.7 s for
+    /hybrid-search's batches of three and 0.09 s for one statement over all of them (T2
+    nexus/bbtc2-query-e-diagnosis-2026-11-14). The engine now runs this function once over all the request's
+    collections, and each arm ranks from its collection's answer.
+
+    WHAT IT RETURNS. nexus.text_gate_probe_by_collection_<dim>(p_text, p_collections, p_where, p_where_path, p_cap,
+    p_embedding_model, p_tenant) has text_gate_probe_<dim>'s arguments and the same gate in all three modes
+    (nexus.lexical_trgm 'off', 'substring', anything else), one scan of the leaf, and returns (collection, chash)
+    capped PER COLLECTION at p_cap rows, with the dense collections collapsed:
+      - a collection with fewer than p_cap gated rows returns every one as (collection, chash): exactly the chashes
+        text_gate_probe_<dim> returns for that collection alone, which the arm ranks with text_gated_search_by_chash;
+      - a collection with p_cap or more gated rows returns ONE row, (collection, NULL), and its chashes are not sent.
+        The engine passes the same p_cap + 1 = 5,001 its per-arm probe uses, so a collection is dense here exactly when
+        its own probe would have counted more than 5,000 rows and ranked HNSW-first.
+      - a collection with no gated row returns nothing.
+    A row's gate does not depend on its collection (chunk_text and chunk_tsv are the chunk's), so the rows an arm gets from
+    here are the rows its own probe returns.
+
+    HOW, IN TWO STEPS. On a dense leaf the cost is the trigram recheck, not the bitmap and not the liveness test. For
+    'advisory lock' over 413,938 rows (T2 nexus/bbtc2-dense-leaf-bound-2026-11-14) the trigram GIN bitmap takes 66 ms
+    and names 39,575 candidates; word_similarity on each candidate's text (about 200 us for a 1,500-character chunk)
+    keeps 7,905 and takes about 7.5 s of the statement's 8.1 s; the liveness EXISTS takes 0.16 s and the windows
+    nothing. No collection there is dense, so no per-collection stop could save a row of that work; it can only be
+    spread. Step 1 collects (collection, chash) for every row the gate admits, in one scan of the leaf, into two arrays
+    (one aggregate over one input stream, so the two stay aligned). It is an EXECUTE of constant text with the arguments
+    bound by USING (nothing is spliced into the text), because PL/pgSQL plans a static SELECT INTO without
+    parallelism: measured on that leaf, the same statement took 7.7 s as a static SELECT INTO and 2.8 s as EXECUTE INTO.
+    It holds no parallel-unsafe call (nexus.chunk_live_owners is not marked PARALLEL SAFE, and one such call anywhere in
+    a query makes the planner plan all of it serially), and the function's SET clauses make a parallel bitmap heap
+    scan the cheaper plan. parallel_setup_cost and parallel_tuple_cost are 0, and min_parallel_table_scan_size 0
+    because the planner's estimate of the trigram candidates is far below the truth (41 estimated, 39,575 actual), so
+    it would otherwise judge the scan too small to split. cpu_operator_cost is 0.25 (100 times the default) because
+    pg_trgm's operators carry procost 1, so the planner prices a recheck that costs about 200 us as a hundredth of a
+    page read; at the default the parallel plan saves less than the planner's 1% fuzz and the serial one is kept
+    (measured: no Gather with the other three settings alone). The setting applies to BOTH statements of the function,
+    step 2's liveness EXISTS included, which is planned at 100 times the default operator price too (it has no join to
+    reorder and measured 0.16 s on the 7,905 rows). jit is off, as in vectors-032: the inflated price can lift a dense
+    leaf's plan cost past jit_above_cost, and compiling the gate for a statement of this kind costs more than it saves.
+    How many workers the statement may use is NOT set here: the workers come from the cluster-wide max_parallel_workers
+    pool that the engine's own arm permits do not count, so the bound belongs to the engine. It sets
+    max_parallel_workers_per_gather for the statement's transaction (SET LOCAL, from NX_SEARCH_ROUTE_PROBE_WORKERS,
+    default 2, 0 means serial), which replaces a role or database value for that statement: the operator's lever is the
+    env var. With no worker free, or none allowed, step 1 runs alone, as the per-arm probes do.
+    Step 1 is bounded: it takes at most 2,000,000 rows (a subquery LIMIT) and raises SQLSTATE 54000
+    (program_limit_exceeded) when the gate admits more, so the arrays never hold more than about 200 MB (two arrays of 2
+    million entries, ~100 bytes a (collection, chash) pair, against the 1 GB array limit), while 120 collections at the
+    per-arm cap hold at most 600,000 gated rows. The engine reads the error as "this leaf is too dense to share" and
+    every arm runs its own capped probe, which is what it ran before. The ceiling reads the custom setting
+    nexus.gate_probe_max_rows when one is set (a test seam: a connection can lower it), else 2,000,000. Step 2
+    applies the liveness EXISTS (nexus.chunk_live_owners, the probes' own predicate) to those rows and caps them per
+    collection, as the one statement did. The gate and the liveness test are both per row, so applying them in two
+    statements admits exactly the rows one statement admits.
+
+    WHAT STAYS. text_gate_probe_<dim> and every other function are untouched. The new functions take the posture the
+    probes have, read back as vectors-057-1 and vectors-058-1 read it: SECURITY DEFINER with search_path pinned and
+    EXECUTE revoked from PUBLIC when the three probes are definer functions (the migrating role owns them, and the
+    chunks_gate_probe_owner_read policy of vectors-029 lets the body use the GIN indexes), SECURITY INVOKER otherwise.
+    EXECUTE is granted to nexus_svc either way. plan_cache_mode = force_custom_plan, so the substring pattern is a
+    constant when the statement is planned. Rollback drops the three functions.
+
+    No DATA EFFECT: function definitions only. Placed after vectors-059, before the grants-nexus-svc.xml runAlways block.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-060-1" author="nexus-bbtc2">
+        <comment>nexus-bbtc2: nexus.text_gate_probe_by_collection_384/768/1024 return (collection, chash) for the rows the text gate admits, capped per collection (a collection at the cap returns one (collection, NULL) row), in one scan of the leaf. The engine runs one for a request's lexical leg. Step 1 gathers the gated rows (at most 2,000,000, else SQLSTATE 54000) with a parallel-eligible plan, step 2 applies the liveness test and the per-collection cap. jit off; the engine bounds the workers. Posture read from text_gate_probe_&lt;dim&gt;: definer with search_path pinned and EXECUTE revoked from PUBLIC, else invoker; EXECUTE granted to nexus_svc. No data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $do$
+DECLARE
+    definer boolean;
+    n_def   int;
+    n_probe int;
+BEGIN
+    SELECT count(*), count(*) FILTER (WHERE p.prosecdef) INTO n_probe, n_def
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_probe <> 3 THEN
+        RAISE EXCEPTION 'vectors-060-1: expected exactly 3 text_gate_probe functions, found %', n_probe;
+    END IF;
+    IF n_def NOT IN (0, 3) THEN
+        RAISE EXCEPTION 'vectors-060-1: % of the 3 text_gate_probe functions are SECURITY DEFINER; the three must agree before this changeset reads the posture', n_def;
+    END IF;
+    definer := n_def = 3;
+    IF definer THEN
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+SET parallel_setup_cost = 0
+SET parallel_tuple_cost = 0
+SET min_parallel_table_scan_size = 0
+SET cpu_operator_cost = 0.25
+SET jit = off
+AS $$
+DECLARE
+    v_coll    text[];
+    v_chash   bytea[];
+    v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSE
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    END IF;
+    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+        RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
+            USING ERRCODE = 'program_limit_exceeded',
+                  HINT = 'the engine answers with each collection''s own capped probe';
+    END IF;
+    RETURN QUERY
+    WITH g AS (
+        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.coll) AS rn
+          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_chash)) AS u(coll, ch)
+         WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(p_tenant, u.coll, u.ch))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+SET parallel_setup_cost = 0
+SET parallel_tuple_cost = 0
+SET min_parallel_table_scan_size = 0
+SET cpu_operator_cost = 0.25
+SET jit = off
+AS $$
+DECLARE
+    v_coll    text[];
+    v_chash   bytea[];
+    v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSE
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    END IF;
+    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+        RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
+            USING ERRCODE = 'program_limit_exceeded',
+                  HINT = 'the engine answers with each collection''s own capped probe';
+    END IF;
+    RETURN QUERY
+    WITH g AS (
+        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.coll) AS rn
+          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_chash)) AS u(coll, ch)
+         WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(p_tenant, u.coll, u.ch))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+SET plan_cache_mode = force_custom_plan
+SET parallel_setup_cost = 0
+SET parallel_tuple_cost = 0
+SET min_parallel_table_scan_size = 0
+SET cpu_operator_cost = 0.25
+SET jit = off
+AS $$
+DECLARE
+    v_coll    text[];
+    v_chash   bytea[];
+    v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSE
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    END IF;
+    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+        RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
+            USING ERRCODE = 'program_limit_exceeded',
+                  HINT = 'the engine answers with each collection''s own capped probe';
+    END IF;
+    RETURN QUERY
+    WITH g AS (
+        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.coll) AS rn
+          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_chash)) AS u(coll, ch)
+         WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(p_tenant, u.coll, u.ch))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+END
+$$$f$;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_384(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_768(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+        REVOKE EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_1024(text, text[], jsonb, text, int, text, text) FROM PUBLIC;
+    ELSE
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_384(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+SET parallel_setup_cost = 0
+SET parallel_tuple_cost = 0
+SET min_parallel_table_scan_size = 0
+SET cpu_operator_cost = 0.25
+SET jit = off
+AS $$
+DECLARE
+    v_coll    text[];
+    v_chash   bytea[];
+    v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSE
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    END IF;
+    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+        RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
+            USING ERRCODE = 'program_limit_exceeded',
+                  HINT = 'the engine answers with each collection''s own capped probe';
+    END IF;
+    RETURN QUERY
+    WITH g AS (
+        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.coll) AS rn
+          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_chash)) AS u(coll, ch)
+         WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(p_tenant, u.coll, u.ch))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_768(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+SET parallel_setup_cost = 0
+SET parallel_tuple_cost = 0
+SET min_parallel_table_scan_size = 0
+SET cpu_operator_cost = 0.25
+SET jit = off
+AS $$
+DECLARE
+    v_coll    text[];
+    v_chash   bytea[];
+    v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSE
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    END IF;
+    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+        RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
+            USING ERRCODE = 'program_limit_exceeded',
+                  HINT = 'the engine answers with each collection''s own capped probe';
+    END IF;
+    RETURN QUERY
+    WITH g AS (
+        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.coll) AS rn
+          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_chash)) AS u(coll, ch)
+         WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(p_tenant, u.coll, u.ch))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+END
+$$$f$;
+        EXECUTE $f$CREATE FUNCTION nexus.text_gate_probe_by_collection_1024(
+    p_text         text,
+    p_collections  text[],
+    p_where        jsonb,
+    p_where_path   text,
+    p_cap          int,
+    p_embedding_model text,
+    p_tenant          text
+) RETURNS TABLE(collection text, chash bytea)
+LANGUAGE plpgsql
+STABLE
+SECURITY INVOKER
+SET plan_cache_mode = force_custom_plan
+SET parallel_setup_cost = 0
+SET parallel_tuple_cost = 0
+SET min_parallel_table_scan_size = 0
+SET cpu_operator_cost = 0.25
+SET jit = off
+AS $$
+DECLARE
+    v_coll    text[];
+    v_chash   bytea[];
+    v_ceiling int := COALESCE(NULLIF(pg_catalog.current_setting('nexus.gate_probe_max_rows', true), '')::int, 2000000);
+BEGIN
+    IF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'off' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSIF pg_catalog.current_setting('nexus.lexical_trgm', true) = 'substring' THEN
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1)
+              OR c.chunk_text OPERATOR(pg_catalog.~~*) ('%' || pg_catalog.replace(pg_catalog.replace(pg_catalog.replace($1, E'\\', E'\\\\'), '%', E'\\%'), '_', E'\\_') || '%'))
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    ELSE
+        EXECUTE $q$SELECT pg_catalog.array_agg(g.collection), pg_catalog.array_agg(g.chash)
+          FROM (SELECT c.collection, c.chash
+          FROM nexus.chunks c
+         WHERE true
+         AND c.embedding_model = $5
+         AND c.tenant_id = $6
+         AND c.tenant_id = NULLIF(pg_catalog.current_setting('nexus.tenant', true), '')
+         AND c.collection = ANY($2)
+         AND ($3 IS NULL OR c.metadata @> $3)
+         AND ($4 IS NULL OR c.metadata @@ $4::jsonpath)
+         AND (c.chunk_tsv @@ pg_catalog.plainto_tsquery('english', $1) OR $1 OPERATOR(nexus.<%) c.chunk_text)
+         LIMIT $7) g$q$
+          INTO v_coll, v_chash
+          USING p_text, p_collections, p_where, p_where_path, p_embedding_model, p_tenant, v_ceiling + 1;
+    END IF;
+    IF pg_catalog.cardinality(v_coll) > v_ceiling THEN
+        RAISE EXCEPTION 'text_gate_probe_by_collection: the gate admitted more than % rows', v_ceiling
+            USING ERRCODE = 'program_limit_exceeded',
+                  HINT = 'the engine answers with each collection''s own capped probe';
+    END IF;
+    RETURN QUERY
+    WITH g AS (
+        SELECT u.coll, u.ch, pg_catalog.row_number() OVER (PARTITION BY u.coll) AS rn
+          FROM ROWS FROM (pg_catalog.unnest(v_coll), pg_catalog.unnest(v_chash)) AS u(coll, ch)
+         WHERE EXISTS (SELECT 1 FROM nexus.chunk_live_owners(p_tenant, u.coll, u.ch))
+    ), capped AS (
+        SELECT g.coll, g.ch, g.rn, pg_catalog.count(*) OVER (PARTITION BY g.coll) AS n
+          FROM g
+         WHERE g.rn <= p_cap
+    )
+    SELECT x.coll, CASE WHEN x.n < p_cap THEN x.ch END
+      FROM capped x
+     WHERE x.n < p_cap OR x.rn = p_cap;
+END
+$$$f$;
+    END IF;
+    GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_384(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+    GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_768(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+    GRANT EXECUTE ON FUNCTION nexus.text_gate_probe_by_collection_1024(text, text[], jsonb, text, int, text, text) TO nexus_svc;
+END
+$do$;
+
+
+DO $post$
+DECLARE
+    n         int;
+    n_def     int;
+    n_probe_def int;
+BEGIN
+    SELECT count(*), count(*) FILTER (WHERE p.prosecdef) INTO n, n_def
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_by_collection_384', 'text_gate_probe_by_collection_768',
+                         'text_gate_probe_by_collection_1024');
+    IF n <> 3 THEN
+        RAISE EXCEPTION 'vectors-060-1: expected exactly 3 text_gate_probe_by_collection functions, found %', n;
+    END IF;
+    SELECT count(*) FILTER (WHERE p.prosecdef) INTO n_probe_def
+      FROM pg_catalog.pg_proc p
+     WHERE p.pronamespace = 'nexus'::pg_catalog.regnamespace
+       AND p.proname IN ('text_gate_probe_384', 'text_gate_probe_768', 'text_gate_probe_1024');
+    IF n_def <> n_probe_def THEN
+        RAISE EXCEPTION 'vectors-060-1: % of the 3 new functions are SECURITY DEFINER but % of the probes are; the posture must match', n_def, n_probe_def;
+    END IF;
+END
+$post$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_384(text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_768(text, text[], jsonb, text, int, text, text);
+DROP FUNCTION IF EXISTS nexus.text_gate_probe_by_collection_1024(text, text[], jsonb, text, int, text, text);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

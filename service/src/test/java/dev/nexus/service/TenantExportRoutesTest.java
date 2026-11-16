@@ -680,6 +680,28 @@ class TenantExportRoutesTest {
     }
 
     @Test
+    void aPageCutByTheWallIs503ExportPageOverBudgetWithTheWallInItsBody() throws Exception {
+        // the database budget (20 s) and lock bound far above the wall: only the wall ends the wait on the held lock
+        var sessions = new TenantExportSessions(ds,
+            TenantExportSessions.Config.defaults().withLockTimeoutMs(60_000).withSweepInterval(Duration.ofHours(1)),
+            java.time.Clock.systemUTC());
+        sessions.pageWallMsForTests(500);
+        service.exportSessions(sessions);
+        var id = open(A_TOKEN).get("session_id").asText();
+        try (Connection holder = lockedBy(MEMORY)) {
+            var wall = rowsBytes(A_TOKEN, id, rowsQuery("memory", null));
+            assertThat(wall.statusCode()).as("wall").isEqualTo(503);
+            var body = MAPPER.readTree(wall.body());
+            assertThat(body.get("reason").asText()).isEqualTo("export_page_over_budget");
+            assertThat(body.get("page_budget_ms").asInt()).as("the wall's value, not the database budget's").isEqualTo(500);
+            assertThat(body.get("error").asText()).contains("wall deadline");
+            assertThat(wall.headers().firstValue("Retry-After")).isEmpty();
+            holder.rollback();
+        }
+        assertThat(rowsBytes(A_TOKEN, id, rowsQuery("memory", null)).statusCode()).as("and it is not sticky").isEqualTo(200);
+    }
+
+    @Test
     void aHeaderReadThatWaitsOutItsLockIs503ExportPageBusyAndOpensNothing() throws Exception {
         service.exportSessions(new TenantExportSessions(ds,
             TenantExportSessions.Config.defaults().withLockTimeoutMs(300).withSweepInterval(Duration.ofHours(1)),

@@ -171,8 +171,13 @@ class PciReconcilerIntegrationTest {
 
     // -- fixtures ----------------------------------------------------------------------------------------
 
+    /**
+     * REINDEX is off in this class: its clock stands in the past, so every row the database stamped counts as written
+     * since an anchor's {@code built_at} and the deletes rule would fire in tests about something else. The REINDEX has
+     * its own class ({@code PciReindexIntegrationTest}), on a real clock.
+     */
     static PciSettings settings(int maxPerLeaf) {
-        return new PciSettings(true, B, 600, maxPerLeaf);
+        return new PciSettings(true, B, 600, maxPerLeaf, null, false);
     }
 
     static final class MutableClock extends Clock {
@@ -220,7 +225,7 @@ class PciReconcilerIntegrationTest {
         try (Connection owner = adminDs.getConnection()) {
             owner.setAutoCommit(true);
             dev.nexus.service.jooq.nexus.Routines.createTenantPartitions(
-                DSL.using(owner, SQLDialect.POSTGRES).configuration(), "nexus.chunks", tenant, true);
+                DSL.using(owner, SQLDialect.POSTGRES).configuration(), "nexus.chunks", tenant, true, true);
         }
         return tenant;
     }
@@ -2406,7 +2411,7 @@ class PciReconcilerIntegrationTest {
     }
 
     @Test
-    void theComment_survivesAHandRunReindexConcurrently() throws Exception {
+    void aHandRunReindexConcurrently_carriesTheCommentAcross_andTheNextPassReanchorsIt() throws Exception {
         String tenant = newTenant("anc-reindex");
         collection(tenant, name("big"), 300);
         PciSettings s = settings(16);
@@ -2425,7 +2430,7 @@ class PciReconcilerIntegrationTest {
         assertThat(leaf(tenant).indexes()).extracting(PciCatalog.Index::name).containsExactly(index);
         assertThat(leaf(tenant).indexes().get(0).valid()).isTrue();
         reconciler(s, sweep).reconcileOnce();
-        assertThat(commentOf(leaf, index)).isEqualTo(text);
+        assertThat(commentOf(leaf, index)).as("re-anchored (nexus-4lnn1.1.10)").isNotEqualTo(text).contains("\"relfilenode\":");
         assertThat(logged("event=pci_anchor_adopted")).isZero();
     }
 
@@ -2494,7 +2499,8 @@ class PciReconcilerIntegrationTest {
         assertThat(r.reading(leaf, index).rows()).as("first look").isEqualTo(350);
         assertThat(r.reading(leaf, index).bytes()).isEqualTo(relationSize(leaf, index));
 
-        // Inserts alone move none of the figures that trigger a count.
+        // Inserts alone move none of the figures that trigger a count, and 50 rows cannot make the index a 1.4x bigger one
+        // per row (nexus-4lnn1.1.10: bytes over the stale count bounds it), so the size rule needs no recount either.
         clock.advance(Duration.ofHours(1));
         addRows(tenant, name("c"), 50);
         r.reconcileOnce();

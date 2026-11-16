@@ -690,42 +690,31 @@ class CatalogManifestSweepRepositoryTest {
         // was falling back to Set.of() indistinguishably from a legitimately
         // EMPTY manifest (a brand-new doc with nothing to drop) -- so a failed
         // read was silently absorbed: not in sweep_skipped, not in
-        // sweep_detail, nowhere. Forced here via a column-level REVOKE
-        // (REVOKE-style, matching the delete-side fail-open test) that blocks
-        // JUST the chash column read -- writeManifestRows's own DELETE/INSERT
-        // on this table never SELECT chash, so the manifest write itself is
-        // unaffected; only currentManifestRows's `SELECT collection, chash, line_start ...` breaks.
+        // sweep_detail, nowhere. Forced here through the before-read hook with a
+        // statement Postgres refuses, so the failure is a real SQL error inside the
+        // read's savepoint (the manifest write that follows must still commit).
         String col = "code__swp9__minilm-l6-v2-384__v1";
         registerDoc(TENANT_A, "swp.9", col);
         writeManifestManySeeded(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "swp.9", "rows", List.<Map<String, Object>>of(
                 Map.<String, Object>of("position", 0, "chash", ch("swp9-x"), "chunk_index", 0)))), col);
 
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES)
-                .revoke(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).from(DSL.role(SVC_ROLE)).execute();
-            PgContainerHelper.runSuperuserTestChangelog(su,
-                "db/changelog-test/db.changelog-test-manifest-chunks-column-select.xml",
-                "databasechangelog_test_manifest_chunks_column_select", Map.of("role", SVC_ROLE));
-        }
-        // Only the operation under test runs with the column revoked — every
-        // verification read below (including this test's own getManifest
-        // assertion, which SELECTs chash) needs the grant restored FIRST, or
-        // it fails for the SAME reason the before-read does, masking what
-        // this test is actually proving.
+        // nexus-z0o2p.29: the before-read fails through its hook, which runs a statement Postgres refuses (a
+        // division by zero) inside the read's savepoint, not through a REVOKE of the chash column: a replace now
+        // reads the document's rows itself (it writes the difference), so a revoked column fails the write too.
+        // The refusal aborts the transaction (SQLSTATE 25P02 for every statement after it) until the savepoint is
+        // rolled back, so the write below committing proves the rollback to the savepoint happened.
         Map<String, Object> result;
         try {
+            repo.setBeforeReadHookForTests((docId, ctx) -> {
+                if (docId.equals("swp.9")) ctx.select(DSL.val(1).div(DSL.val(0))).fetch();
+            });
             result = writeManifestManySeeded(TENANT_A, List.of(
                 Map.<String, Object>of("doc_id", "swp.9", "rows", List.<Map<String, Object>>of(
                     Map.<String, Object>of("position", 0, "chash", ch("swp9-y"), "chunk_index", 0)))), col,
                 null, true);
         } finally {
-            try (Connection su = pg.createConnection("")) {
-                su.setAutoCommit(true);
-                DSL.using(su, SQLDialect.POSTGRES)
-                    .grant(DSL.privilege("SELECT")).on(CATALOG_DOCUMENT_CHUNKS).to(DSL.role(SVC_ROLE)).execute();
-            }
+            repo.setBeforeReadHookForTests(null);
         }
 
         assertThat(result.get("docs"))

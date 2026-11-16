@@ -1,0 +1,82 @@
+{
+  "blocks" : [
+    {
+      "hash" : "03ba45743a7a59",
+      "index" : 0,
+      "kind" : "heading",
+      "markdown" : "# Queue notes",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "1b6aff7befcd58",
+      "index" : 1,
+      "kind" : "paragraph",
+      "markdown" : "The queue is basically ordered, and entries leave in the order they arrived.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "03f5af1f64f6dd",
+      "index" : 2,
+      "kind" : "paragraph",
+      "markdown" : "The worker really quite simply retries a failed job once before it gives up.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "1c4c412b052878",
+      "index" : 3,
+      "kind" : "paragraph",
+      "markdown" : "It should be noted that the retry path is unchanged from the previous release.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "034083ccb56163",
+      "index" : 4,
+      "kind" : "paragraph",
+      "markdown" : "The scheduler just wakes every ten seconds and picks the oldest job.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "1964920d536ffc",
+      "index" : 5,
+      "kind" : "paragraph",
+      "markdown" : "The **retry budget is basically fixed** at one attempt per job.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "092a2eb1fa62f0",
+      "index" : 6,
+      "kind" : "code",
+      "markdown" : "```bash\nworker --retries 1 --basically-on\n```",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "18bb2a8f3d04ae",
+      "index" : 7,
+      "kind" : "bullet-list",
+      "markdown" : "* The list item says it is “really” simple.",
+      "warnings" : [
+
+      ]
+    }
+  ],
+  "documentType" : "md",
+  "firstEditable" : 0,
+  "hasChanges" : false,
+  "selectionBlock" : 0,
+  "url" : "\/private\/tmp\/me-t1\/review-scenario.md",
+  "view" : "editor"
+}

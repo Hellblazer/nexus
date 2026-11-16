@@ -763,8 +763,9 @@ class T3Database:
         nexus-tk070.p6b fix-pass / nexus-24rof): an explicit ``ttl_days``
         that is ``0`` or negative is REJECTED loudly with :exc:`ValueError`
         naming the fix, never silently reinterpreted as permanent — this
-        write path now matches the SQL ``nexus.frecency`` /
-        ``nexus.memory.ttl_days`` / ``nexus.plans.ttl_days`` columns'
+        write path now matches the SQL ``nexus.memory.ttl_days`` /
+        ``nexus.frecency`` (since dropped, nexus-6pfgb.42) /
+        ``nexus.plans.ttl_days`` columns'
         CHECK-enforced contract, and closes the gap the initial P6b pass
         left open (that pass changed only the READ-path predicate in this
         class's :meth:`expire`, citing RDR-194 D5's "No other wire field
@@ -1187,8 +1188,8 @@ class T3Database:
         permanent by :func:`is_expired`'s tolerant check, unaffected by
         this docstring update, because this is unstructured client-side
         JSON metadata with no population-wide rewrite possible — unlike
-        the SQL ``nexus.frecency`` table, which the migration DOES
-        rewrite). Never expires regardless of indexed_at.
+        the SQL ``nexus.frecency`` table, which the migration DID
+        rewrite before it was dropped, nexus-6pfgb.42). Never expires regardless of indexed_at.
 
         Returns the total number of deleted documents.
         """

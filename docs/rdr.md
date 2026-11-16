@@ -35,10 +35,10 @@ Match depth to the decision's complexity.
 
 | Scenario | Sections needed | Example |
 |---|---|---|
-| **Minimal** (bug, single option) | Problem + Root Cause + Fix | AST line-range bug: splitter returns empty metadata |
-| **Full** (architecture, multiple options) | All sections | Four-store T3 architecture with quota enforcement |
+| **Minimal** (bug, single option) | All sections, each a few lines | AST line-range bug: splitter returns empty metadata |
+| **Full** (architecture, multiple options) | All sections, each filled in | Four-store T3 architecture with quota enforcement |
 
-If you can state the problem, root cause, and fix in one paragraph, that IS the RDR. Don't add sections to look thorough.
+The gate checks every RDR for the same sections (Context, Research Findings, Proposed Solution, Alternatives Considered, Trade-offs, Implementation Plan, Success Criteria, and, in a new RDR, `#### Gap N:` headings under Problem), so a small RDR keeps each section short. Don't pad a section to look thorough.
 
 ## Evidence classification
 
@@ -187,11 +187,11 @@ Three-layer validation. Optional but recommended before committing to irreversib
 
 **Layer 3, AI critique**: Delegates to the `substantive-critic` agent, which evaluates logical coherence, missing alternatives, unstated assumptions, and evidence gaps. Findings are appended to the RDR.
 
-The gate either **BLOCKS** or **PASSES**. No conditional outcomes. Rounds 1 and 2 block on any Critical; from round 3 only a ship-blocker (an implementer would build the wrong thing, or the decision rests on a refuted assumption) blocks, and every other finding is a residual recorded in the gate record for `/conexus:rdr-accept` to disposition. The round number is derived from the gate records themselves and never resets. A re-gate leads with the prior findings (Layer 0) and, when the file changed since the gated commit, a diff-scoped fix check that has to store its verdict before the full critique runs. The result is stored in T2 for `/conexus:rdr-accept` to verify.
+The gate either **BLOCKS** or **PASSES**. No conditional outcomes. Rounds 1 and 2 block on any Critical; from round 3 only a ship-blocker (an implementer would build the wrong thing, or the decision rests on a refuted assumption) blocks, and every other finding is a residual recorded in the gate record for `/conexus:rdr-accept` to disposition. The round number is derived from the gate records themselves and never resets. A re-gate leads with the prior findings (Layer 0) and, when the file changed since the gate (its blob, or its commit on an older record), a diff-scoped fix check that has to store its verdict before the full critique runs. The result is stored in T2 for `/conexus:rdr-accept` to verify.
 
 ## Fix (`/conexus:rdr-fix`)
 
-The step between a gate's findings and the next gate. Prints the findings with the sites where each fact lives, the diff and fix commits since the gated commit, and the title the pre-edit research entry will get. After a PASSED gate, only the findings the user names are fixed; a fix for a Significant adds no new design; and a fix round gets one fix check over its whole range. A fix changes the fact the critic named and nothing else; every added clause carries a quote read by a tool or is marked as inferred; a count or a universal needs a census, not a spot read. The research entry is recorded before the edit, and the fix check runs on the committed diff before any re-gate. Session start names any draft RDR whose file has moved past its gated commit.
+The step between a gate's findings and the next gate. Prints the findings with the sites where each fact lives, the diff and fix commits since the gate, and the title the pre-edit research entry will get. After a PASSED gate, only the findings the user names are fixed; a fix for a Significant adds no new design; and a fix round gets one fix check over its whole range. A fix changes the fact the critic named and nothing else; every added clause carries a quote read by a tool or is marked as inferred; a count or a universal needs a census, not a spot read. The research entry is recorded before the edit, and the fix check runs on the committed diff before any re-gate. Session start names any draft RDR whose file has moved past its gate (the gated blob, or the gated commit on an older record).
 
 ## Accept (`/conexus:rdr-accept`)
 

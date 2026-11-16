@@ -716,7 +716,7 @@ def test_stdin_run_logs_under_log_stdin_and_writes_no_document_record(prose: Pro
 
 
 # ---------------------------------------------------------------------------
-# Genres, exemplars, viewer
+# Genres, exemplars
 # ---------------------------------------------------------------------------
 
 
@@ -811,13 +811,6 @@ def test_genre_put_merges_unless_told_to_replace(prose: Prose) -> None:
     for bad in ({"exemplars": [{"text": "x"}]}, {"unknown": 1}, {"notes": [1]}, [1]):
         assert prose.run("genre-put", "rdr", stdin=json.dumps(bad)).returncode == 1, bad
     assert prose.run("genre-put", "Bad Name", stdin="{}").returncode == 1
-
-
-def test_viewer_preference_is_a_user_record(prose: Prose) -> None:
-    assert prose.ok("viewer")["viewer"] is None
-    prose.ok("viewer", "--set", "glow")
-    assert prose.ok("viewer")["viewer"] == "glow"
-    assert t2_titles(USER_PROJECT) == ["viewer"]
 
 
 # ---------------------------------------------------------------------------

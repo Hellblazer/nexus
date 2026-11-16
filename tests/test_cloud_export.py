@@ -286,7 +286,7 @@ def test_n_failed_pages_close_the_session_remove_the_partial_file_and_say_run_ag
         failing = [r for r in engine.requests("rows") if r.nth >= 1]
         assert len(failing) == ce.PAGE_ATTEMPTS and len({tuple(r.query.items()) for r in failing}) == 1
     text = str(err.value)
-    assert "memory" in text and "run nx backup again" in text
+    assert "memory" in text and "run the backup again" in text
     assert sleeps.seconds == list(ce.BACKOFF_LADDER)
     assert not dest.exists() and _entries(dest.parent) == set(), "no partial file"
 
@@ -432,7 +432,7 @@ def test_a_session_forgotten_again_and_again_gives_up_and_says_run_again(tmp_pat
                 return Reply(410, {"error": "gone", "reason": "session_closed"})
             return None
         engine.script.append(forget)
-        with pytest.raises(BackupFailed, match="run nx backup again"):
+        with pytest.raises(BackupFailed, match="run the backup again"):
             run_export(_client(engine), tmp_path / "x.nxtenant")
         assert len(engine.opened) == ce.MAX_RESTARTS + 1
     assert _entries(tmp_path) == set()
@@ -568,7 +568,7 @@ def test_a_full_disk_fails_with_the_free_space_message_and_leaves_nothing(tmp_pa
             run_export(_client(engine), dest)
         assert engine.deleted == engine.opened
     text = str(err.value)
-    assert "No space left on device" in text and "Free some space" in text and "run nx backup again" in text
+    assert "No space left on device" in text and "Free some space" in text and "run the backup again" in text
     assert _entries(dest.parent) == set()
 
 
@@ -605,7 +605,7 @@ def test_a_page_that_stays_busy_past_the_budget_fails_and_says_run_again(tmp_pat
         engine.script.append(lambda r: Reply(409, {"error": "x", "reason": "page_in_flight"}, {"Retry-After": "30"}) if r.kind == "rows" else None)
         with pytest.raises(BackupFailed, match="page_in_flight") as err:
             run_export(_client(engine, sleeps=sleeps), tmp_path / "x.nxtenant")
-    assert "run nx backup again" in str(err.value) and sum(sleeps.seconds) >= ce.BUSY_WAIT_BUDGET_S
+    assert "run the backup again" in str(err.value) and sum(sleeps.seconds) >= ce.BUSY_WAIT_BUDGET_S
     assert _entries(tmp_path) == set()
 
 

@@ -744,7 +744,14 @@ from __future__ import annotations
 #: text (rerank_sensitive_exclusion_supported). SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION
 #: is 0.1.182, so the pin rises with it. The eleven wire-ledger entries this
 #: release ships are all additive.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 191)
+#: 0.1.194 (conexus 8.3.0): pairs with engine-service-v0.1.194 (tagged on
+#: 0efb33d7e, live since 2026-11-16 07:13Z, STEP-6 green). It carries 0.1.192's
+#: export page wall, shared lexical probe, frecency drop and RDR-230 Phase 2;
+#: 0.1.193's canary fixes; and 0.1.194's orphan-race fix (vectors-061), the
+#: replace that keeps unchanged rows, the anchor v2 relfilenode and red_unfixed
+#: hold, and the pgvector 0.8.7 bundle. Already deployed, so this release is
+#: not a paired one.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 194)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -50,8 +50,8 @@ def canonical_chunk_id(label: str) -> str:
     """Deterministic 64-hex chash for a short test chunk-id label.
 
     nexus-lgdel.l1: the engine enforces a canonical-chash CHECK
-    (``^[0-9a-f]{64}$``) on ``nexus.frecency.chunk_id`` and
-    ``nexus.relevance_log.chunk_id``, so legacy short literals like
+    (``^[0-9a-f]{64}$``) on ``nexus.relevance_log.chunk_id`` (and, before it was dropped,
+    ``nexus.frecency.chunk_id``), so legacy short literals like
     ``"c1"`` no longer round-trip. Deriving the hex value from the old
     literal keeps fixtures traceable to their original meaning.
     """

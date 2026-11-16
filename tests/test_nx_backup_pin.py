@@ -39,12 +39,14 @@ SCAN_ROOTS = (
 #: arm's session driver and file format, nexus-csayy.3), and cli.py (which imports the verb).
 _SELF = {
     "src/nexus/commands/backup_cmd.py", "src/nexus/backup/pg_backup.py",
-    "src/nexus/backup/cloud_export.py", "src/nexus/backup/tenant_file.py",
+    "src/nexus/backup/cloud_export.py", "src/nexus/backup/cloud_import.py", "src/nexus/backup/tenant_file.py",
+    "src/nexus/backup/local_token.py",  # the restore arm's local-token credentials (rdr248-local-root)
 }
 _VERB_AND_ARM = "src/nexus/commands/backup_cmd.py"
 _MODULES = {
     "nexus.backup.pg_backup": {_VERB_AND_ARM},
     "nexus.backup.cloud_export": {_VERB_AND_ARM},
+    "nexus.backup.cloud_import": {_VERB_AND_ARM},
     "nexus.backup.tenant_file": {_VERB_AND_ARM},
     "nexus.commands.backup_cmd": {"src/nexus/cli.py"},
 }

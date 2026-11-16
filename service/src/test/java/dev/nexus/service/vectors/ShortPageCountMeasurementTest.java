@@ -465,6 +465,33 @@ class ShortPageCountMeasurementTest {
         return keys;
     }
 
+    /**
+     * The 13 s shape under the count's budget (nexus-h7kw2): the all-last-by-position gate on the unanalyzed tables,
+     * counted through {@link PgVectorRepository#exactOnUnderReturn} for a short page of one row. The budget cancels the
+     * count and the page re-runs (a stand-in re-run here, so the time is the count's). Timed once per call, three calls:
+     * the time is the budget, not the shape.
+     */
+    private void budgetedCount(String state) {
+        long spent0 = ShortPageCountBudget.spentCount();
+        int calls = 3;
+        long[] ns = new long[calls];
+        for (int j = 0; j < calls; j++) {
+            long start = System.nanoTime();
+            int rows = tenantScope.withTenant(TENANT, ctx -> PgVectorRepository.exactOnUnderReturn(
+                ctx, 10, () -> ctx.select(DSL.inline(1).as("x")).fetch(), null, true, TENANT, COLLECTION,
+                cap -> read(ctx, "body", cap, BETA).size()).size());
+            ns[j] = System.nanoTime() - start;
+            assertThat(rows).isEqualTo(1);
+        }
+        long spent = ShortPageCountBudget.spentCount() - spent0;
+        Arrays.sort(ns);
+        cells++;
+        assertThat(spent).as("the budget cancelled every count of the 13 s shape").isEqualTo(calls);
+        System.out.println("H7KW2 budgeted-count state=" + state + " gate=beta-last-by-position-2.3pct budget_ms="
+            + ShortPageCountBudget.startupBudgetMs() + " spent=" + spent + " "
+            + ms(new double[] {ns[calls / 2] / 1e6, ns[0] / 1e6}));
+    }
+
     private void endToEnd(String state) {
         PgSession.overrideScanBudgetForTests(1000, 100);
         try {
@@ -493,6 +520,7 @@ class ShortPageCountMeasurementTest {
     void measure() throws Exception {
         gatedCounts("unanalyzed");
         distinctReads("unanalyzed");
+        budgetedCount("unanalyzed");
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.analyzeTable(su, CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
@@ -501,7 +529,7 @@ class ShortPageCountMeasurementTest {
         gatedCounts("analyzed");
         distinctReads("analyzed");
         endToEnd("analyzed");
-        // 2 states x 5 gates x 4 caps, 2 x 5 labels x 3 caps, and 4 end-to-end labels.
-        assertThat(cells).as("cells measured").isEqualTo(2 * 5 * 4 + 2 * 5 * 3 + 4);
+        // 2 states x 5 gates x 4 caps, 2 x 5 labels x 3 caps, 4 end-to-end labels, and the budgeted 13 s shape.
+        assertThat(cells).as("cells measured").isEqualTo(2 * 5 * 4 + 2 * 5 * 3 + 4 + 1);
     }
 }

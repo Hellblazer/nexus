@@ -19,7 +19,7 @@ from pathlib import Path
 from tests.prose_edit.conftest import ROOT, Prose
 from tests.prose_edit.test_brief import (
     AGENT,
-    SKILL,
+    skill_text,
     brief_ok,
     edit,
     fenced,
@@ -41,7 +41,7 @@ def _build(prose: Prose, *args: str) -> tuple[Path, str]:
     head, brief = out.split("\n\n", 1)
     first, dispatch, *ready = head.split("\n")  # WORK=<dir>, DISPATCH=<prompt> (round 6), REPLY/FILTERED/REASONS (round 7)
     assert first.startswith("WORK=") and dispatch.startswith("DISPATCH="), head
-    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS", "ANSWERS"], head
+    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS", "ANSWERS", "BLOCKS", "PROPOSED", "STATUSES"], head
     return Path(first[len("WORK="):]), brief
 
 
@@ -131,7 +131,7 @@ def test_filter_warns_when_brief_md_was_changed_after_it_was_built(prose: Prose)
 
 
 def test_the_dispatch_prompt_names_only_the_path_and_the_editor_reads_the_id_from_the_file() -> None:
-    skill = SKILL.read_text(encoding="utf-8")
+    skill = skill_text()
     assert "BRIEF_SHA" not in skill  # step 4 prints no id and step 7 passes none
     step7 = _step(skill, 7)
     assert "DISPATCH=" in step7 and "never type a path" in step7
@@ -190,7 +190,7 @@ def test_a_brief_with_no_stored_card_never_warns_about_the_reply_card(prose: Pro
 
 
 def test_step_13_shows_the_stored_card_back_after_saving_it() -> None:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     step = text[text.index("\n13. "):]
     bullet = step[step.index("The voice card the editor returned"):step.index("An edit the author says is never a defect")]
     after = bullet[bullet.index("--from-stdin"):]  # round 5 made the show-back its own numbered sub-step after the save
@@ -264,7 +264,7 @@ def test_the_section_3_rules_heading_no_longer_says_apply_as_written() -> None:
 def test_each_refusal_for_a_missing_or_stale_dry_run_matches_exactly_one_key_of_skill_step_12(
     prose: Prose, repo: Path
 ) -> None:
-    keys = _keyed_phrases(_step(SKILL.read_text(encoding="utf-8"), 12))
+    keys = _keyed_phrases(_step(skill_text(), 12))
     f = tracked(repo)
     work, _ = start(prose, repo, [E1, E2])
 

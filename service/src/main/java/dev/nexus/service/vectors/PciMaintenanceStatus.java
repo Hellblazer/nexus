@@ -15,8 +15,8 @@ import java.util.Optional;
 /**
  * The {@code maintenance} object of {@code GET /v1/status} {@code per_collection_indexes.this_engine} (RDR-230
  * Technical Design 7, bead nexus-4lnn1.1.5), as the reconciler holds it: values in memory, so the route runs no catalog
- * query (RDR-227's rule). Phase 1 reports the canary half; the REINDEX half is fixed at {@code off}, no index in
- * flight, no reindex yet, because nothing reindexes until Phase 2.
+ * query (RDR-227's rule). The canary half is the canary's latest results; the REINDEX half is this engine's own counts
+ * (Phase 2, nexus-4lnn1.1.10): on or off, the index in flight, when the last finished, how many.
  *
  * <p><b>Who may read what.</b> {@code GET /v1/status} is unauthenticated, so by Sam's rulings of 2026-10-19 and
  * 2026-11-06 it renders the counts of {@link Canary} and nothing else: no {@code pci_} name and no per-index list. The
@@ -28,14 +28,15 @@ import java.util.Optional;
  * more worth a look than a green one), then green; newest {@code measured_at} first within a state, then index name.
  * The counts cover every result, not only the entries listed.
  *
- * @param reindex       {@code on} or {@code off}; {@code off} until Phase 2
- * @param reindexing    the index being reindexed on the holder, or null
+ * @param reindex       {@code on} or {@code off}: REINDEX and the post-delete VACUUM are enabled
+ * @param reindexing    the index being reindexed on the holder, or null. Held as the index name for the operator-only
+ *                      views; the unauthenticated {@code GET /v1/status} must not render it (see {@code StatusHandler})
  * @param lastReindexAt when this engine last finished a reindex, or null
  * @param reindexes     reindexes this engine has finished since boot
  * @param canary        the canary's counts and entries
  */
 public record PciMaintenanceStatus(String reindex, String reindexing, Instant lastReindexAt, int reindexes,
-                                   Canary canary) {
+                                   int unanchored, Canary canary) {
 
     /** The most entries the list carries. */
     public static final int MAX_ENTRIES = 64;
@@ -59,21 +60,34 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      * @param minRecall       null unless measured
      * @param meanRecall      null unless measured
      * @param top1Misses      queries with a top-1 miss; 0 unless measured
-     * @param trigger         {@code after_build}, {@code vacuum} or {@code daily}
+     * @param trigger         {@code after_build}, {@code vacuum}, {@code daily} or {@code after_reindex}
      * @param measuredAt      when the run ended
      * @param anchor          {@code built} or {@code adopted}, or null when the index carries no anchor this engine can
      *                        read
-     * @param sizeRatio       bytes per row now over bytes per row at the anchor; null for an adopted index (it is judged
+     * @param sizeRatio       bytes per row at the last row count over bytes per row at the anchor (a coherent pair: after
+     *                        ingest that needed no recount the size is newer than the count); null for an adopted index (it is judged
      *                        against the install's reference, which Phase 2 builds), without a reading, or at zero rows
      * @param deletesSinceBuild {@code max(0, anchor.rows + written_since - rows_now) / rows_now}, the estimate of RDR-230
      *                        Technical Design 3; null without a reading or at zero rows
+     * @param redAfterReindex the last red-canary REINDEX of the index re-measured red, and neither a later green run nor a
+     *                        day has passed (a green run clears the flag; the 24 hour floor on the next red-canary
+     *                        REINDEX stands either way; operator-only; never on the
+     *                        unauthenticated status route)
      */
     public record Entry(String index, String state, String reason, int queries, Double minRecall, Double meanRecall,
                         int top1Misses, String trigger, Instant measuredAt, String anchor, Double sizeRatio,
-                        Double deletesSinceBuild) {
+                        Double deletesSinceBuild, boolean redAfterReindex) {
+
+        /** An entry that is not {@code red_after_reindex}. */
+        public Entry(String index, String state, String reason, int queries, Double minRecall, Double meanRecall,
+                     int top1Misses, String trigger, Instant measuredAt, String anchor, Double sizeRatio,
+                     Double deletesSinceBuild) {
+            this(index, state, reason, queries, minRecall, meanRecall, top1Misses, trigger, measuredAt, anchor,
+                sizeRatio, deletesSinceBuild, false);
+        }
 
         /**
-         * The entry as the {@code canary_indexes} element of {@code GET /v1/admin/chunks-leaves}: the twelve keys in
+         * The entry as the {@code canary_indexes} element of {@code GET /v1/admin/chunks-leaves}: the thirteen keys in
          * the order of this record's components. Times are whole seconds; recall is rounded to three places, the size
          * ratio to two and the delete fraction to three, as plain decimals; a value that is not finite is null.
          */
@@ -91,6 +105,7 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
             m.put("anchor", anchor);
             m.put("size_ratio", decimal(sizeRatio, 2));
             m.put("deletes_since_build", decimal(deletesSinceBuild, 3));
+            m.put("red_after_reindex", redAfterReindex);
             return m;
         }
     }
@@ -103,8 +118,23 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
         return BigDecimal.valueOf(value).setScale(scale, RoundingMode.HALF_UP);
     }
 
-    /** The Phase 1 status: the canary half over {@code entries} (any order, any number), the reindex half off. */
+    /** The canary half over {@code entries} (any order, any number), the reindex half off. */
     public static PciMaintenanceStatus phase1(List<Entry> entries) {
+        return of(entries, false, null, null, 0, 0);
+    }
+
+    /**
+     * The status over {@code entries} with the REINDEX half as this engine holds it.
+     *
+     * @param reindexOn      whether REINDEX and the post-delete VACUUM are enabled ({@code NX_SEARCH_PCI} and
+     *                       {@code NX_SEARCH_PCI_REINDEX})
+     * @param reindexing     the index in flight, or null
+     * @param lastReindexAt  when this engine last finished a REINDEX, or null
+     * @param reindexes      REINDEXes this engine has finished since boot
+     * @param unanchored     leaf indexes whose size rule is inactive for want of an install reference
+     */
+    public static PciMaintenanceStatus of(List<Entry> entries, boolean reindexOn, String reindexing,
+                                          Instant lastReindexAt, int reindexes, int unanchored) {
         int green = 0;
         int red = 0;
         int unmeasured = 0;
@@ -120,7 +150,8 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
             }
         }
         List<Entry> shown = entries.stream().sorted(ORDER).limit(MAX_ENTRIES).toList();
-        return new PciMaintenanceStatus("off", null, null, 0, new Canary(green, red, unmeasured, lastRun, shown));
+        return new PciMaintenanceStatus(reindexOn ? "on" : "off", reindexing, lastReindexAt, reindexes,
+            unanchored, new Canary(green, red, unmeasured, lastRun, shown));
     }
 
     private static int rank(String state) {
@@ -141,13 +172,22 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
      *
      * @param reading     what the reconciler last read of this index (its anchor, bytes, and the row counts), or null
      * @param sweepOrigin the origin of the anchor the router's set holds for the index, used when there is no reading
+     * @param redAfterReindex whether the index's last red-canary REINDEX re-measured red and neither a green run nor a day
+     *                    has passed since
      */
     static Entry entry(PciCanary.Result r, PciReconciler.IndexReading reading, Optional<String> sweepOrigin) {
+        return entry(r, reading, sweepOrigin, false);
+    }
+
+    /** As above for an index whose last red-canary REINDEX may have re-measured red. */
+    static Entry entry(PciCanary.Result r, PciReconciler.IndexReading reading, Optional<String> sweepOrigin,
+                       boolean redAfterReindex) {
         String origin = reading != null ? reading.anchor().origin() : sweepOrigin.orElse(null);
         // The word is an operator-writable comment; only the two the engine writes are published.
         String anchor = PciCatalog.ORIGIN_BUILT.equals(origin) || PciCatalog.ORIGIN_ADOPTED.equals(origin) ? origin : null;
         return new Entry(r.target().index(), r.state().wire(), r.reason(), r.queries(), r.minRecall(), r.meanRecall(),
-            r.top1Misses(), r.trigger(), r.at(), anchor, sizeRatio(anchor, reading), deletesSinceBuild(reading));
+            r.top1Misses(), r.trigger(), r.at(), anchor, sizeRatio(anchor, reading), deletesSinceBuild(reading),
+            redAfterReindex);
     }
 
     private static Double sizeRatio(String anchor, PciReconciler.IndexReading reading) {
@@ -158,7 +198,8 @@ public record PciMaintenanceStatus(String reindex, String reindexing, Instant la
         if (reading.rows() <= 0 || a.rows() <= 0 || a.bytes() <= 0) {
             return null;
         }
-        return ((double) reading.bytes() / reading.rows()) / ((double) a.bytes() / a.rows());
+        // The size and the row count as of the last COUNT: the fresh size over a stale count would overstate it.
+        return ((double) reading.countedBytes() / reading.rows()) / ((double) a.bytes() / a.rows());
     }
 
     private static Double deletesSinceBuild(PciReconciler.IndexReading reading) {

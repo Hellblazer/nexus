@@ -176,7 +176,7 @@ def test_nightly_workflow_calls_the_prime_mineru_action() -> None:
     before the slow leg, rather than caching ~/.cache/huggingface directly —
     that old actions/cache step is exactly what nexus-ggonw removes."""
     workflow = yaml.safe_load(NIGHTLY_WORKFLOW_PATH.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["gate"]["steps"]
+    steps = workflow["jobs"]["slow"]["steps"]
     assert any(s.get("uses", "") == "./.github/actions/prime-mineru" for s in steps)
     # The old HuggingFace cache step (an actions/cache step whose path is
     # the HF hub cache dir) must be gone.
@@ -193,7 +193,7 @@ def test_nightly_workflow_primes_mineru_before_the_slow_leg() -> None:
     """The prime-mineru step must run before the slow-marked test leg that
     actually needs the models, or the cache does nothing for it."""
     workflow = yaml.safe_load(NIGHTLY_WORKFLOW_PATH.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["gate"]["steps"]
+    steps = workflow["jobs"]["slow"]["steps"]
 
     prime_idx = next(
         i for i, s in enumerate(steps) if s.get("uses", "") == "./.github/actions/prime-mineru"
@@ -207,6 +207,26 @@ def test_nightly_workflow_primes_mineru_before_the_slow_leg() -> None:
         f"prime-mineru must run before the slow-marked test leg; "
         f"prime at {prime_idx}, slow leg at {slow_idx}"
     )
+
+
+def test_nightly_slow_leg_is_its_own_job_and_builds_its_jar_first() -> None:
+    """The slow leg runs in its own job, not at the tail of the gate job. On
+    2026-11-14 and 2026-11-15 the shared 75-minute budget cancelled it 4
+    minutes in, after a 63-minute gate step. Its own job has no gate script to
+    build the dev jar for it, so it must build the stamped jar before the slow
+    tests boot the engine substrate."""
+    workflow = yaml.safe_load(NIGHTLY_WORKFLOW_PATH.read_text(encoding="utf-8"))
+    gate_steps = workflow["jobs"]["gate"]["steps"]
+    assert not [s for s in gate_steps if "-m slow" in s.get("run", "")], (
+        "the gate job still runs the slow leg"
+    )
+    steps = workflow["jobs"]["slow"]["steps"]
+    jar_idx = next(
+        i for i, s in enumerate(steps) if "scripts/build-gate-jar.sh" in s.get("run", "")
+    )
+    slow_idx = next(i for i, s in enumerate(steps) if "-m slow" in s.get("run", ""))
+    assert jar_idx < slow_idx
+    assert workflow["jobs"]["slow"].get("timeout-minutes"), "the slow job needs its own bound"
 
 
 def test_prime_mineru_action_verifies_sha256_before_extraction() -> None:

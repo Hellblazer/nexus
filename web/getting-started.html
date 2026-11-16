@@ -161,7 +161,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <p class="lede">Everything on this page happens inside Claude Code. You describe what you want, and Claude chooses the Nexus tools and skills for you. Each lesson gives an instruction to type, says what Claude does with it, and says what you will see.</p>
 <p class="note">Words in <span class="ph">&lt;ORANGE CAPITALS IN ANGLE BRACKETS&gt;</span> are placeholders. Replace them with something from your own project before you send the instruction.</p>
 <p class="note">Before you start, install Nexus and the plugin with the <a href="./">install guide</a>. Then open a terminal in one of your projects and run <code>claude</code>.</p>
-<div class="callout rule"><p>You describe what you want in your own words, and you do not learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and uses the debugger agent. If you say "is what the docs say about caching true in the code", Claude plans a search across many documents. The <code>/conexus:…</code> commands in the lessons are shortcuts that start one skill or agent directly, and they are never required. The prompts here are examples of phrasing, and your own words work the same way.</p></div>
+<div class="callout rule"><p>You describe what you want in your own words, and you do not learn a command for each task. If you say "this test fails and I do not know why", Claude recognizes a debugging situation and uses the debugger agent. If you say "is what the docs say about caching true in the code", Claude plans a search across many documents. The <code>/conexus:…</code> commands in the lessons are shortcuts that start one skill or agent directly, and they are never required. The prompts here are examples of phrasing.</p></div>
 
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
@@ -172,7 +172,7 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Index this repository into Nexus.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What Claude does</div>
-<p>Claude runs the terminal command <code>nx index repo .</code>, and Claude Code shows a Bash tool call with that command. The command reads every file, cuts it into chunks, and stores the chunks, which takes longer on a large repository. At the end the output shows <code>Done.</code> and, after the first index, the topics that Nexus found.</p>
+<p>Claude runs the terminal command <code>nx index repo .</code>, and Claude Code shows a Bash tool call with that command. The command takes longer on a large repository. At the end the output shows <code>Done.</code> and, after the first index, a line with the number of topics that Nexus found.</p>
 <p class="note">If you index the same repository again later, Nexus skips files that did not change and shows <code>skipped: index fresh</code> for them.</p>
 
 <h3>Find out what is in the index</h3>
@@ -180,13 +180,13 @@ ol.plain li,ul.plain li{margin:3px 0}
 <div class="see">You might say</div>
 <div class="cmd"><pre>Which topics did Nexus find in this repository? List them with a short description of each.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude runs <code>nx taxonomy list</code> and describes each topic. The topics are groups of related code that Nexus found by itself, and together they are a map of your repository. Pick one for the next step.</p>
+<p>Claude runs <code>nx taxonomy list</code> and describes each topic. Nexus names the topics in the background, so a topic can be unnamed at first. The topics are groups of related code that Nexus found by itself, and together they are a map of your repository. Pick one for the next step.</p>
 
 <h3>Search one topic</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Use Nexus search to show me the main files for the topic "<span class="ph">&lt;TOPIC&gt;</span>", and explain in a few sentences what they do.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
-<p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks with the file path and line number of each. Claude answers from those chunks and names the files. Open one of the files to check that the answer is correct.</p>
+<p>Claude Code shows a tool call named <code>search</code> on the <code>nexus</code> server. The tool returns the best matching chunks with the file path and line number of each. Claude answers from those chunks and names the files. Each hit also carries a short <code>id=</code> of eight characters. A hit from a document that a newer document replaced says <code>superseded by</code> and names the newer one. Open one of the files to check that the answer is correct.</p>
 <div class="callout"><p>If Claude uses <code>grep</code> instead, say <em>"Use Nexus search, not grep."</em> Grep finds exact words. Nexus search finds meaning, so it also finds code that uses different words for the same idea.</p></div>
 
 <h3>Ask your own questions</h3>
@@ -270,7 +270,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="cmd"><pre>Show me the topic map for this project. Which topics appear in both the code and the documentation?</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>Claude runs <code>nx taxonomy list</code> and <code>nx taxonomy hubs</code>. The hubs are topics that connect several collections, and they are often the most important ideas in the project. You can then limit a search to one topic. Say <em>"Search for <span class="ph">&lt;A QUESTION&gt;</span> inside the topic <span class="ph">&lt;TOPIC&gt;</span> only."</em> Claude gives the topic to the <code>search</code> tool, which leaves out results from other topics.</p>
-<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> Claude runs <code>nx taxonomy rename</code>. To move one chunk to a topic, say <em>"Assign <span class="ph">&lt;CHUNK OR FILE&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>,"</em> and Claude runs <code>nx taxonomy assign</code>. To review every topic, run <code>nx taxonomy review</code> in the terminal, which goes through them one by one while you accept, rename, or merge each.</p>
+<p>When a topic is wrong, say so: <em>"The topic <span class="ph">&lt;TOPIC&gt;</span> should be called <span class="ph">&lt;BETTER NAME&gt;</span>."</em> Claude runs <code>nx taxonomy rename</code>. To move one chunk to a topic, say <em>"Assign <span class="ph">&lt;CHUNK&gt;</span> to the topic <span class="ph">&lt;TOPIC&gt;</span>,"</em> and Claude runs <code>nx taxonomy assign</code>. To review every topic, run <code>nx taxonomy review</code> in the terminal, which goes through them one by one while you accept, rename, or merge each.</p>
 
 <div class="further"><h4>Investigate further</h4><ul>
 <li><a href="https://github.com/Hellblazer/nexus/blob/main/docs/catalog.md">Document catalog</a>: all link types, and how links change search ranking.</li>
@@ -288,7 +288,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="cmd"><pre>Compare what the documentation says about <span class="ph">&lt;A CONCEPT FROM LESSON 1&gt;</span> with what the code actually does.</pre><button class="copy" type="button">Copy</button></div>
 <div class="see">What you see</div>
 <p>A tool call named <code>nx_answer</code>. It searches the documentation and the code, takes the relevant facts from each, compares them, and returns one answer with sources. This takes much longer than a normal search, so start it and do something else.</p>
-<p class="note">Use it when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster. Claude plans the search, and you need no command.</p>
+<p class="note">Use it when one search cannot hold the answer. For a simple question, a normal sentence to Claude is faster.</p>
 
 <h3>Other commands to know</h3>
 <p>Each command below starts one skill or agent directly. A skill is a named procedure that Claude follows for one kind of situation. An agent is a helper that Claude starts for one job. You can describe the task in your own words instead, and Claude chooses the same one.</p>
@@ -383,12 +383,13 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <h3>Health check</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Run nx doctor and tell me if anything is wrong.</pre><button class="copy" type="button">Copy</button></div>
-<p>No line may show ✗. Read every ⚠ line. Right after <code>nx self install</code>, "Orphan uv install" is normal, and it goes away once the old uv copy is removed. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
+<p>No line may show ✗. Read every ⚠ line. The line "Orphan uv install" means a copy of conexus installed with uv is still on disk. Right after <code>nx self install</code> that is normal, and Nexus removes the old copy at the next <code>nx self install</code>. Inside Claude Code, <code>/conexus:nx-preflight</code> checks the plugin in the same way.</p>
 
 <h3>Back up before you update</h3>
 <div class="see">You might say</div>
 <div class="cmd"><pre>Back up the Nexus database.</pre><button class="copy" type="button">Copy</button></div>
-<p>Claude runs <code>nx backup</code>, which writes the local database to one file in <code>~/nexus-backups/</code> while the engine keeps running. The file is about as large as the database. Nothing runs a backup for you, not <code>nx upgrade</code> and not a hook, so ask for one before an update.</p>
+<p>Claude runs <code>nx backup</code>, which writes the local database to one file in <code>~/nexus-backups/</code> while the engine keeps running. The file is about as large as the database. Nothing runs a backup for you, not <code>nx upgrade</code> and not a hook, so ask for one before an update. If your store still holds old-format rows, Nexus refuses to start the engine until a backup taken after that refusal exists. A backup you took earlier does not count, and the message names the commands to run.</p>
+<p>On a managed service, <code>nx backup</code> writes your own tenant to a <code>.nxtenant</code> file in the same folder, and it needs engine 0.1.191 or later. To check that file without contacting the service, run <code>nx backup --check <span class="ph">&lt;FILE&gt;</span></code>.</p>
 
 <h3>Update</h3>
 <div class="see">You might say</div>
@@ -431,23 +432,25 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <details class="gloss" id="stores"><summary>The three stores</summary><div style="padding:0 14px 6px">
 <p>Every Nexus tool works on one of three stores, and the stores differ in one thing only: how long the data lives.</p>
 <div class="tiers">
-  <div class="tier" style="--tc:var(--t1)"><small>T1 · lives for one session</small><b>Scratch</b><p>Notes for the current session. Nexus deletes them when the session ends, unless you promote them.</p></div>
+  <div class="tier" style="--tc:var(--t1)"><small>T1 · lives for one session</small><b>Scratch</b><p>Notes for the current session. Nexus deletes them when the session ends.</p></div>
   <div class="tier" style="--tc:var(--t2)"><small>T2 · lives for one project</small><b>Memory</b><p>Facts and decisions about a project. Each entry has a project name and a title, and stays forever by default. You can give a temporary finding a shorter lifetime instead, and each read stretches it further.</p></div>
   <div class="tier" style="--tc:var(--t3)"><small>T3 · lives permanently</small><b>Knowledge</b><p>Indexed code, documents, PDFs, and notes. Claude finds them with semantic search.</p></div>
 </div>
-<p class="arrowrow">Data moves in one direction only: scratch to memory, then memory to knowledge.</p>
-<figure class="fig"><svg viewBox="0 0 680 230" role="img" aria-label="Three stores by lifetime. Scratch lives one session, memory one project, knowledge permanently. Entries move only forward: scratch to memory by promote or at session end, memory to knowledge by promote. Indexing and storing write to knowledge directly. The catalog registers every knowledge document and its links."><defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker></defs>
+<p>Claude does not have to go through scratch. It writes to each store directly. When a note turns out to matter for longer, Claude copies it to the next store, and the original stays. The <code>scratch_manage promote</code> tool copies a scratch note to memory. The <code>nx memory promote</code> command copies a memory entry to knowledge.</p>
+<figure class="fig"><svg viewBox="0 0 680 230" role="img" aria-label="Three stores by lifetime. Scratch lives one session, memory one project, knowledge permanently. Each store has its own writer: the scratch tool, memory_put, and nx index or nx store. A promote tool or command can copy an entry to the next store."><defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="currentColor" stroke="none"/></marker></defs>
 <text x="100" y="18" class="sm" text-anchor="middle">one session</text><text x="340" y="18" class="sm" text-anchor="middle">one project</text><text x="580" y="18" class="sm" text-anchor="middle">permanent</text>
 <rect class="box" x="10" y="34" width="180" height="76" rx="6"/><text x="100" y="60" text-anchor="middle" font-weight="600">Scratch</text><text x="100" y="80" text-anchor="middle" class="lbl">Claude and its agents</text><text x="100" y="96" text-anchor="middle" class="lbl">deleted at session end</text>
 <rect class="box" x="255" y="34" width="170" height="76" rx="6"/><text x="340" y="60" text-anchor="middle" font-weight="600">Memory</text><text x="340" y="80" text-anchor="middle" class="lbl">facts and decisions</text><text x="340" y="96" text-anchor="middle" class="lbl">permanent by default</text>
 <rect class="box" x="490" y="34" width="180" height="76" rx="6"/><text x="580" y="60" text-anchor="middle" font-weight="600">Knowledge</text><text x="580" y="80" text-anchor="middle" class="lbl">code, documents, notes</text><text x="580" y="96" text-anchor="middle" class="lbl">found by semantic search</text>
-<line x1="190" y1="72" x2="253" y2="72" marker-end="url(#a1)"/><text x="222" y="62" text-anchor="middle" class="lbl">promote</text><text x="222" y="128" text-anchor="middle" class="lbl">or marked, at session end</text><path d="M222 118 L222 84" class="dash"/>
-<line x1="425" y1="72" x2="488" y2="72" marker-end="url(#a1)"/><text x="457" y="62" text-anchor="middle" class="lbl">promote</text>
-<rect class="box" x="255" y="160" width="170" height="44" rx="6"/><text x="340" y="179" text-anchor="middle" font-weight="600">nx index · nx store</text><text x="340" y="195" text-anchor="middle" class="lbl">repositories, PDFs, notes</text>
-<path d="M425 182 L455 182 L455 122 L520 122 L520 112" marker-end="url(#a1)"/>
-<rect class="box" x="490" y="160" width="180" height="44" rx="6"/><text x="580" y="179" text-anchor="middle" font-weight="600">Catalog</text><text x="580" y="195" text-anchor="middle" class="lbl">every document, and its links</text>
-<line x1="610" y1="110" x2="610" y2="158" marker-end="url(#a1)"/><text x="618" y="138" class="lbl">registers</text>
-</svg><figcaption>The three stores by lifetime. Indexing and storing write straight to knowledge, and the catalog registers every knowledge document.</figcaption></figure>
+<path d="M190 72 L253 72" class="dash" marker-end="url(#a1)"/><text x="222" y="62" text-anchor="middle" class="lbl">copy</text>
+<path d="M425 72 L488 72" class="dash" marker-end="url(#a1)"/><text x="457" y="62" text-anchor="middle" class="lbl">copy</text>
+<rect class="box" x="10" y="160" width="180" height="44" rx="6"/><text x="100" y="179" text-anchor="middle" font-weight="600">scratch</text><text x="100" y="195" text-anchor="middle" class="lbl">as Claude works</text>
+<line x1="100" y1="158" x2="100" y2="112" marker-end="url(#a1)"/>
+<rect class="box" x="255" y="160" width="170" height="44" rx="6"/><text x="340" y="179" text-anchor="middle" font-weight="600">memory_put</text><text x="340" y="195" text-anchor="middle" class="lbl">decisions, findings</text>
+<line x1="340" y1="158" x2="340" y2="112" marker-end="url(#a1)"/>
+<rect class="box" x="490" y="160" width="180" height="44" rx="6"/><text x="580" y="179" text-anchor="middle" font-weight="600">nx index · nx store</text><text x="580" y="195" text-anchor="middle" class="lbl">repositories, PDFs, notes</text>
+<line x1="580" y1="158" x2="580" y2="112" marker-end="url(#a1)"/>
+</svg><figcaption>The three stores by lifetime, each with its own writer. The dashed arrows are the optional promote copies.</figcaption></figure>
 <p>To choose a store, ask how long the data must live. Data for this session only goes to scratch. Data for this project, which you will look up by name, goes to memory. Data to keep permanently, which you will look up by meaning, goes to knowledge. You rarely choose yourself, because Claude does it as it works, and this rule lets you judge whether it chose well.</p>
 <p><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md">Storage tiers</a> explains how a session is identified and how the lifetime of a memory entry grows with each read.</p>
 </div></details>
@@ -455,7 +458,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <details class="gloss" id="memory"><summary>Memory and scratch</summary><div style="padding:0 14px 6px">
 <p>Memory is the store Claude fills for itself and reads first in every new session. It is not a to-do list and not a place for your own notes. As Claude works on a real task, it records what it decided and what it found. The helper agents that Claude starts write their results to the same store. The next day Claude refers to yesterday's decision without you repeating it. To check, ask <em>"What do you already know about this project from earlier sessions?"</em> In a brand-new project the answer is "nothing yet".</p>
 <p>When Claude remembers something wrong, or does not know a fact that is not in the code, tell it as you would tell a colleague. Say "that was changed last week, we use X now". Claude updates the store, and you see a <code>memory_put</code> tool call. From the terminal, <code>nx memory list -p PROJECT</code> shows every entry for a project.</p>
-<p>Scratch is the shared notepad of one session. When Claude starts helper agents to investigate a problem, each agent reads and writes the same scratch store, and that is how they coordinate. You see it as tool calls named <code>scratch</code> on the <code>nexus</code> server. Most scratch notes disappear when the session ends, which is the purpose of the store. A finding that proved true is promoted to memory. Claude does it during the session, or the plugin does it at session end if Claude marked the note. If a finding is worth keeping and Claude has not kept it, say "keep that". From the terminal, <code>nx scratch list</code> shows the notes of the current session.</p>
+<p>Scratch is the shared notepad of one session. When Claude starts helper agents to investigate a problem, each agent reads and writes the same scratch store, and that is how they coordinate. You see it as tool calls named <code>scratch</code> on the <code>nexus</code> server. Most scratch notes disappear when the session ends, which is the purpose of the store. Claude writes a finding that proved true to memory itself. A note it flags to keep is copied to memory when the session ends or moves to a new session. By default it goes to the memory project <code>scratch_sessions</code>. If a finding is worth keeping and Claude has not kept it, say "keep that". From the terminal, <code>nx scratch list</code> shows the notes of the current session.</p>
 <p><a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t2----memory-bank">Storage tiers: T2</a> and <a href="https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md#t1----session-scratch">T1</a> have the details.</p>
 </div></details>
 

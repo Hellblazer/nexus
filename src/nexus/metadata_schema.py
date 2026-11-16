@@ -332,8 +332,8 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
 
     ``None``/absent ``ttl_days`` is the canonical permanent sentinel
     (RDR-194 D5, nexus-tk070.p6b — matching ``nexus.memory.ttl_days`` /
-    ``nexus.plans.ttl_days`` / ``nexus.frecency.ttl_days``'s CHECK-enforced
-    contract). ``T3Database.put`` (and, until its retirement, ``HttpVectorClient.put``; fix-pass,
+    ``nexus.plans.ttl_days`` (and the since-dropped ``nexus.frecency.ttl_days``)
+    CHECK-enforced contract). ``T3Database.put`` (and, until its retirement, ``HttpVectorClient.put``; fix-pass,
     nexus-24rof) REJECT an explicit ``ttl_days=0`` loudly at write
     time — 0 can no longer be freshly written by either write path. A
     ``ttl_days == 0`` reaching this function is therefore always LEGACY
@@ -343,7 +343,7 @@ def is_expired(metadata: dict[str, Any], *, now_iso: str) -> bool:
     by design, see that factory's own comment). This function still
     treats a legacy ``0`` as permanent — reads are not writes, and there
     is no population-wide rewrite path for T3 chunk metadata (unlike the
-    SQL ``nexus.frecency`` table's CHECK-backed migration) — but now logs
+    SQL ``nexus.frecency`` table's CHECK-backed migration, since dropped) — but now logs
     a warning each time, making the legacy-compat path observable instead
     of fully silent. ``not ttl`` remains the single guard for both ``None``
     and ``0``; the warning is a side effect layered in front of it, not a

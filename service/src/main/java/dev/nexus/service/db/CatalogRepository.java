@@ -152,8 +152,7 @@ public final class CatalogRepository {
     private static final Set<String> COUNT_ONLY_RELATIONS = Set.of(
         "nexus.relevance_log",
         "nexus.search_telemetry",
-        "nexus.tier_writes",
-        "nexus.frecency"
+        "nexus.tier_writes"
     );
 
     static final ObjectMapper MAPPER = new ObjectMapper()
@@ -5484,8 +5483,8 @@ public final class CatalogRepository {
     }
 
     /**
-     * Shared REPLACE body (delete all rows for docId, then insert the provided
-     * rows) used by both {@link #writeManifest} (one doc per transaction) and
+     * Shared REPLACE body (the document's rows become the provided rows, by diff:
+     * see {@link ManifestReplace}) used by both {@link #writeManifest} (one doc per transaction) and
      * {@link #writeManifestMany} (N docs, one transaction each). Assumes
      * {@code ctx} is already scoped to {@code tenant}. Folds
      * {@code documents.chunk_count = rows.size()} in the SAME transaction
@@ -5824,11 +5823,12 @@ public final class CatalogRepository {
     private static final String SWEEP_STATEMENT_TIMEOUT_MS = "5000";
 
     /**
-     * Test-only seam (RDR-223 fix round): invoked with the doc id INSIDE the savepoint-guarded
-     * previous-manifest read of {@link #writeManifestMany}, so a test can make that read fail and
-     * pin the {@code dropped_unknown} contract. Null (a no-op) in production.
+     * Test-only seam (RDR-223 fix round): invoked with the doc id and the transaction's context INSIDE
+     * the savepoint-guarded previous-manifest read of {@link #writeManifestMany}, so a test can make that
+     * read fail, by throwing or by running a statement Postgres refuses (which aborts the transaction until
+     * the savepoint is rolled back), and pin the {@code dropped_unknown} contract. Null (a no-op) in production.
      */
-    private volatile java.util.function.Consumer<String> beforeReadHookForTests;
+    private volatile java.util.function.BiConsumer<String, DSLContext> beforeReadHookForTests;
 
     /**
      * Test-only seam (RDR-223 fix round): invoked with the append transaction's own context right
@@ -5843,7 +5843,7 @@ public final class CatalogRepository {
     }
 
     /** Test-only: install (or clear with {@code null}) the previous-manifest read hook. */
-    public void setBeforeReadHookForTests(java.util.function.Consumer<String> hook) {
+    public void setBeforeReadHookForTests(java.util.function.BiConsumer<String, DSLContext> hook) {
         this.beforeReadHookForTests = hook;
     }
 
@@ -6032,10 +6032,10 @@ public final class CatalogRepository {
     }
 
     /** Which {@code ON CONFLICT} shape {@link #insertManifestChunkRows} applies. */
-    private enum ManifestInsertMode {
-        /** Bare insert, no conflict handling — the caller ({@link #writeManifestRows}) has
-         *  already deleted every row for this doc_id in the SAME transaction, so no
-         *  conflict is possible in practice. */
+    enum ManifestInsertMode {
+        /** Bare insert, no conflict handling — the caller ({@link #writeManifestRows}) inserts only
+         *  positions the document does not hold at that point (the rest deleted or updated in the SAME
+         *  transaction), so no conflict is possible in practice. */
         PLAIN,
         /** Mirrors {@link #appendManifestChunks}' pre-existing minimal upsert: only
          *  {@code chash}/{@code collection} (and, nexus-tko2w, the section labels that describe the
@@ -6064,7 +6064,9 @@ public final class CatalogRepository {
      * on that method's javadoc. Deliberately NOT taken here: the ordering
      * rule ("gate, then {@link #acquireIndexRunLock}") needs to stay visible
      * at each call site, not buried inside a helper that runs after both
-     * locks already exist.
+     * locks already exist. {@link ManifestReplace#replace} calls it from outside this
+     * file (package-private for that); its one caller, {@link #writeManifestRows}, has
+     * taken the gate and the index-run lock before it runs.
      *
      * @param rows one or more manifest rows written as ONE multi-row
      *             {@code INSERT ... VALUES (...), (...), ...} statement.
@@ -6082,7 +6084,7 @@ public final class CatalogRepository {
      *             dedupes by position before calling this, so its
      *             multi-row batches are safe as-is.
      */
-    private static void insertManifestChunkRows(DSLContext ctx, String tenant, String docId, String coll,
+    static void insertManifestChunkRows(DSLContext ctx, String tenant, String docId, String coll,
                                                  List<Map<String, Object>> rows, ManifestInsertMode mode) {
         if (rows == null || rows.isEmpty()) return;
         // RDR-191 (Hal ruling 2026-08-12): `coll` is the CALLER-SUPPLIED
@@ -6207,7 +6209,7 @@ public final class CatalogRepository {
      * of the three label keys (a client sends them all, "" for a chunk with no heading; a client that
      * predates catalog-046 sends none, and so does a backfill, which must not mint authoritative labels).
      */
-    private static boolean labelsWritten(Map<String, Object> row) {
+    static boolean labelsWritten(Map<String, Object> row) {
         if (row.get("labels_written") instanceof Boolean explicit) {
             return explicit;
         }
@@ -6220,15 +6222,17 @@ public final class CatalogRepository {
     }
 
     /**
-     * Shared per-doc REPLACE body: delete every existing row for {@code
-     * docId}, then insert {@code rows}, ALL stamped with the caller-supplied
+     * Shared per-doc REPLACE body: leave the document's manifest holding exactly {@code
+     * rows} (the difference is written, {@link ManifestReplace}; a bad row, or a rewrite of more
+     * than its cap, deletes every existing row for {@code docId} and then inserts {@code rows}),
+     * ALL stamped with the caller-supplied
      * {@code collection} (RDR-191, Hal ruling 2026-08-12 — writers send the
      * collection, the engine stamps it verbatim, never infers it). When
      * {@code resolvedChunks} is non-null (the combined-write path, {@link
      * #writeManifestMany(String, List, String, Map, boolean, Map)}), this
      * doc's chunk VECTOR rows are ALSO upserted into {@code chunks_<dim>}
      * INSIDE this SAME per-doc transaction, under the sweep gate SHARED
-     * already held below, BEFORE the manifest DELETE+INSERT — so a chunk row
+     * already held below, BEFORE the manifest rows are replaced (the diff, or the delete-and-insert fallback) — so a chunk row
      * from this path can never be observed committed without the manifest
      * row that references it (and vice versa).
      *
@@ -6299,12 +6303,12 @@ public final class CatalogRepository {
         acquireSweepGateShared(ctx, tenant, collection);
         // nexus-5xn3k.2 (stacked-review item 1): the WRITE side of the
         // completeIndexRun/writeManifestRows advisory-lock pair — see
-        // acquireIndexRunLock's javadoc. Acquired BEFORE the delete+insert below
+        // acquireIndexRunLock's javadoc. Acquired BEFORE the manifest rows are replaced below
         // so a concurrent completeIndexRun for the same doc either runs entirely
         // before or entirely after this manifest mutation, never interleaved.
         acquireIndexRunLock(ctx, tenant, docId);
         // nexus-kl2z6 increment 1 (design memo §0): the chunk-vector UPSERT
-        // runs BEFORE the manifest DELETE+INSERT below — a chash lands in
+        // runs BEFORE the manifest rows are replaced below — a chash lands in
         // chunks_<dim> before (in this same, still-open transaction) the
         // manifest row that references it is even written, so a concurrent
         // reader can only ever observe both or neither, never one without
@@ -6319,35 +6323,46 @@ public final class CatalogRepository {
         // nexus-pvkbv: the span clear below needs the rows this rewrite removes (collection, chash, and the
         // document's own span, which tells whether it could have written the chunk row's). The batch writer
         // already read them (priorRows, fail-open, one statement it paid for anyway); any other caller gets
-        // them from the delete itself (RETURNING), with no statement of its own.
+        // them from the document's rows, which the replace reads (and locks) itself (the fallback's delete
+        // RETURNs them, with no statement of its own).
         List<DepartedWriterSpans.Gone> removed;
-        var removal = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
-        if (priorRows == null) {
-            removed = DepartedWriterSpans.Gone.allOf(
-                removal.returningResult(DepartedWriterSpans.Gone.COLUMNS).fetch());
+        // nexus-z0o2p.29: a replace writes the difference (ManifestReplace) so a re-index that keeps a chunk's
+        // row stops dropping and re-listing it; the delete-and-insert below remains for a bad row (it fails there
+        // as it always did) and for a rewrite of more than ManifestReplace.MAX_CHANGED_ROWS rows.
+        List<DepartedWriterSpans.Gone> diffed = ManifestReplace.replace(ctx, tenant, docId, collection, rows);
+        if (diffed != null) {
+            if (!rows.isEmpty()) stampIndexedAt(ctx, tenant, docId);
+            removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows != null ? priorRows : diffed;
         } else {
-            removal.execute();
-            removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows;
-        }
-        if (!rows.isEmpty()) {
-            stampIndexedAt(ctx, tenant, docId);
-            // nexus-11gh6 §7d: routed through the single-homed insert helper.
-            // ONE multi-row PLAIN insert (not a per-row loop): PLAIN mode has
-            // no ON CONFLICT, so batching every row of ONE call into a single
-            // multi-row INSERT ... VALUES statement changes only round-trip
-            // count, never failure semantics (a genuine duplicate `position`
-            // within `rows` still violates the PK exactly as it would across
-            // separate per-row INSERTs). RDR-191: every row of `rows` is
-            // stamped with the SAME `collection` -- there is no longer a
-            // per-row resolution outcome to vary on, so there is nothing to
-            // skip.
-            insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
+            var removal = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId));
+            if (priorRows == null) {
+                removed = DepartedWriterSpans.Gone.allOf(
+                    removal.returningResult(DepartedWriterSpans.Gone.COLUMNS).fetch());
+            } else {
+                removal.execute();
+                removed = priorRows == PRIOR_ROWS_UNREAD ? null : priorRows;
+            }
+            if (!rows.isEmpty()) {
+                stampIndexedAt(ctx, tenant, docId);
+                // nexus-11gh6 §7d: routed through the single-homed insert helper.
+                // ONE multi-row PLAIN insert (not a per-row loop): PLAIN mode has
+                // no ON CONFLICT, so batching every row of ONE call into a single
+                // multi-row INSERT ... VALUES statement changes only round-trip
+                // count, never failure semantics (a genuine duplicate `position`
+                // within `rows` still violates the PK exactly as it would across
+                // separate per-row INSERTs). RDR-191: every row of `rows` is
+                // stamped with the SAME `collection` -- there is no longer a
+                // per-row resolution outcome to vary on, so there is nothing to
+                // skip.
+                insertManifestChunkRows(ctx, tenant, docId, collection, rows, ManifestInsertMode.PLAIN);
+            }
         }
         // nexus-pvkbv: a chunk this document held and no longer does (edited so it dropped it, or now under
         // another collection) keeps the span this document wrote on the chunk row; the row records no writer, so
-        // a sole remaining holder with no span of its own would show it. After the delete: the delete's trigger
-        // has locked only those of these chunk rows that are older than an hour, in key order; a younger row is
-        // locked by nothing before the clear's UPDATE, and a deadlock there retries (see DepartedWriterSpans).
+        // a sole remaining holder with no span of its own would show it. After the delete these chunk rows are
+        // already locked in key order: by ManifestReplace's pre-lock, or on the delete-and-insert path by the
+        // delete trigger, which since vectors-061 locks the chunk of every deleted row. A deadlock in the clear's
+        // UPDATE still retries (see DepartedWriterSpans).
         if (removed != null && !removed.isEmpty()) {
             DepartedWriterSpans.clear(ctx, tenant,
                 DepartedWriterSpans.departed(removed, collection, newChashes(rows)));
@@ -6365,7 +6380,7 @@ public final class CatalogRepository {
         // silent 0-row update here would misreport success to the caller
         // while quietly discarding the just-written manifest rows above (this
         // throw rolls back the whole per-doc transaction, including the
-        // delete+insert above — TenantScope.withTenant wraps this in one txn).
+        // replace above — TenantScope.withTenant wraps this in one txn).
         int updated = ctx.update(CATALOG_DOCUMENTS)
            .set(CATALOG_DOCUMENTS.CHUNK_COUNT, manifestRowCount(ctx, tenant, docId))
            .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId)
@@ -6386,6 +6401,28 @@ public final class CatalogRepository {
      */
     private static final List<DepartedWriterSpans.Gone> PRIOR_ROWS_UNREAD =
         Collections.unmodifiableList(new ArrayList<>());
+
+    /**
+     * nexus-z0o2p.29: refuse two rows at one position in one document's append. The append upserts by
+     * position, so the second row would replace the first after the chunk upsert had already inserted
+     * BOTH chashes, committing the first chunk with no row that lists it. {@code write_many} needs no
+     * such check: its PLAIN insert violates the primary key on a duplicate position and fails the whole
+     * document, chunks included, in its own transaction. Rows without an integer position are left to
+     * the insert, as before.
+     *
+     * @throws IllegalArgumentException naming the position (a bad request, mapped to 400 on the
+     *         single-document routes and to a per-document failure on {@code append_many})
+     */
+    static void requireDistinctPositions(List<Map<String, Object>> rows) {
+        Set<Integer> seen = new HashSet<>();
+        for (var row : rows) {
+            Integer position = i(row, "position");
+            if (position != null && !seen.add(position)) {
+                throw new IllegalArgumentException(
+                    "duplicate 'position' " + position + " in one document's rows: an append writes one row per position");
+            }
+        }
+    }
 
     /** Position to the lower-case hex chash {@code rows} write there (the last row of a position wins), nexus-pvkbv. */
     private static Map<Integer, String> chashesByPosition(List<Map<String, Object>> rows) {
@@ -6670,7 +6707,7 @@ public final class CatalogRepository {
     /**
      * Batch REPLACE manifest for multiple docs (bead nexus-u2kwq). Each doc is
      * replaced in its OWN {@link TenantScope#withTenant} transaction that folds
-     * together the {@link #writeManifest} REPLACE (delete all rows + insert) AND
+     * together the {@link #writeManifest} REPLACE (the rows become the provided rows) AND
      * a {@code documents.chunk_count = rows.size()} UPDATE — collapsing the
      * client's separate {@code /manifest/write} + chunk_count {@code /update}
      * round-trips into one atomic per-doc write. A failure on one doc rolls back
@@ -6773,8 +6810,8 @@ public final class CatalogRepository {
      * When {@code resolvedChunks} is non-null, each doc's chunk VECTOR rows
      * are upserted into {@code chunks_<dim>} INSIDE that doc's OWN per-doc
      * transaction (see {@link #writeManifestRows(DSLContext, String,
-     * String, String, List, Map, int[])}), BEFORE the manifest
-     * DELETE+INSERT, under the SAME sweep gate SHARED that transaction
+     * String, String, List, Map, int[])}), BEFORE the manifest rows are
+     * replaced, under the SAME sweep gate SHARED that transaction
      * already takes. A chunk row from this path can therefore never be
      * observed committed without the manifest row that references it (and
      * vice versa) — there is no window to size, because there is no
@@ -6986,8 +7023,8 @@ public final class CatalogRepository {
                         List<DepartedWriterSpans.Gone> beforeRows =
                             withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
                                   tenant, docId, () -> {
-                                      java.util.function.Consumer<String> hook = beforeReadHookForTests;
-                                      if (hook != null) hook.accept(docId);
+                                      java.util.function.BiConsumer<String, DSLContext> hook = beforeReadHookForTests;
+                                      if (hook != null) hook.accept(docId, ctx);
                                       return currentManifestRows(ctx, tenant, docId);
                                   }, null);
                         Set<String> beforeRead = beforeRows == null ? null : chashesOf(beforeRows);
@@ -7977,6 +8014,8 @@ public final class CatalogRepository {
             throw new IllegalArgumentException(
                 "'expected' is honoured by manifest/append_many only; this route would write the row unguarded");
         }
+        // nexus-z0o2p.29: before the transaction, so no chunk is written for a refused document.
+        requireDistinctPositions(rows);
         requireNonBlank(collection, "collection");
         int[] chunksWritten = new int[1];
         // nexus-wbfpw.66: this transaction runs under DeadlockRetry and is re-run from scratch
@@ -10937,6 +10976,9 @@ public final class CatalogRepository {
      *       {@code title} field, but the INSERT into {@code gc_audit} extracts only the chash
      *       ({@code jsonb_agg(elem->>'chash')}, catalog-033-gc-audit-producers.xml) — title
      *       never reaches the persisted row. Confirmed false positive, closed 2026-08-19.</li>
+     *   <li>{@code gc_audit.details} DOES carry titles and source paths: the reaper's refusal
+     *       sample (ChunkReaper.sampleRow, since nexus-2x9xa). So {@code grants-nexus-diag-4}
+     *       grants every gc_audit column but {@code details} (nexus-edchb).</li>
      * </ul>
      *
      * <p><strong>{@code hook_failures} is deliberately EXCLUDED, not omitted by
@@ -14454,7 +14496,7 @@ public final class CatalogRepository {
 
     // ── Null-safe helper statics ───────────────────────────────────────────────
 
-    private static String s(Map<String, Object> m, String k) {
+    static String s(Map<String, Object> m, String k) {
         Object v = m.get(k);
         return v instanceof String sv ? sv : null;
     }
@@ -14464,7 +14506,7 @@ public final class CatalogRepository {
         return v != null ? v : def;
     }
 
-    private static Integer i(Map<String, Object> m, String k) {
+    static Integer i(Map<String, Object> m, String k) {
         Object v = m.get(k);
         if (v instanceof Number n) return n.intValue();
         // nexus-cecqy: JSON booleans coerce to 0/1. Our integer columns that model flags
@@ -14664,7 +14706,7 @@ public final class CatalogRepository {
     }
 
     /** Non-null integer: returns def if null. */
-    private static int ni(Integer v, int def) { return v != null ? v : def; }
+    static int ni(Integer v, int def) { return v != null ? v : def; }
 
     /** Non-null double: returns 0.0 if null. */
     private static double nd(Double v) { return v != null ? v : 0.0; }

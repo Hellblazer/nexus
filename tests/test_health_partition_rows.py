@@ -199,6 +199,8 @@ def test_a_tenant_with_a_token_and_a_missing_leaf_is_a_finding_with_the_recovery
     assert "create_tenant_partitions" in fix
     assert "'nexus.chunks'::regclass, 'acme'" in fix
     assert "'nexus.taxonomy_centroids'::regclass, 'acme'" in fix
+    # the recovery works while a tenant restore load holds the restore key (vectors-059): both calls skip the check
+    assert fix.count("'acme', p_check_restore => false)") == 2
     assert rows["Model partitions"].ok, "a tenant finding does not colour the model row"
 
 

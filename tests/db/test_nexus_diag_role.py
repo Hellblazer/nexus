@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pytest
 
+import nexus.health as h
+
 from tests._child_process import integration_pg_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._service_fixture import pg_bin_dir
 
@@ -326,3 +328,191 @@ class TestViewEraChangesetLive:
         r = diag("SELECT chash FROM nexus.diag_probe")
         assert r.returncode != 0
         assert "permission denied" in r.stderr
+
+
+class TestProvisionBestEffortGrantsEra:
+    """nexus-edchb: the provisioning path's best-effort grants (the SQL both
+    ``_create_roles`` and ``_backfill_diag_role`` run) must not hand this
+    BYPASSRLS role table-level SELECT once the counts view exists: the engine
+    grants it only the columns the view reads (grants-nexus-diag-3). The bulk
+    grant stays for the legacy era, when no view exists to read through."""
+
+    def test_bulk_table_grant_only_before_the_view(self, diag_cluster):
+        from nexus.db.pg_provision import _diag_best_effort_grants_sql
+
+        su = diag_cluster["su"]
+
+        def can_select() -> str:
+            return su("SELECT has_table_privilege('nexus_diag', 'nexus.diag_probe', 'SELECT')")
+
+        had_view = su(
+            "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+        ) == "1"
+        try:
+            su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+               "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+               "FROM nexus.diag_probe WHERE length(chash) <> 32")
+            su("REVOKE SELECT ON nexus.diag_probe FROM nexus_diag")
+            assert can_select() == "f"  # non-vacuity: the grant really is gone first
+            su(_diag_best_effort_grants_sql())
+            assert can_select() == "f", "view era: provisioning must not re-grant whole tables"
+
+            su("DROP VIEW nexus.diag_chash_conformance")
+            su(_diag_best_effort_grants_sql())
+            assert can_select() == "t", "legacy era: the bulk grant still applies"
+        finally:
+            su("GRANT SELECT ON nexus.diag_probe TO nexus_diag")
+            if not had_view:
+                su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+            else:
+                su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+                   "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+                   "FROM nexus.diag_probe WHERE length(chash) <> 32")
+                su("GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag")
+
+
+def test_both_provisioning_paths_run_the_era_gated_grants():
+    """nexus-edchb: ``_create_roles`` and ``_backfill_diag_role`` both run
+    ``_diag_best_effort_grants_sql()``, not an inline bulk grant of their own."""
+    import inspect
+
+    from nexus.db import pg_provision
+
+    for fn in (pg_provision._create_roles, pg_provision._backfill_diag_role):
+        src = inspect.getsource(fn)
+        assert "_diag_best_effort_grants_sql()" in src, fn.__name__
+        assert "ALL TABLES IN SCHEMA" not in src, fn.__name__
+
+
+def test_view_era_grants_land_on_the_view_input_columns(diag_cluster):
+    """nexus-edchb: in the view era the provisioning grants give nexus_diag
+    SELECT on the view's input column of a chash table and on none of its
+    content columns. A scratch nexus.chunks stands in for the engine's."""
+    from nexus.db.pg_provision import _diag_best_effort_grants_sql
+
+    su = diag_cluster["su"]
+    had_view = su(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+    ) == "1"
+    had_chunks = su("SELECT to_regclass('nexus.chunks') IS NOT NULL") == "t"
+    if had_chunks:
+        pytest.skip("this fixture's cluster already has a nexus.chunks of its own")
+    try:
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.chunks (chash bytea, chunk_text text, metadata jsonb)")
+        su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+           "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+           "FROM nexus.diag_probe WHERE length(chash) <> 32")
+        su(_diag_best_effort_grants_sql())
+
+        def col(c: str) -> str:
+            return su(f"SELECT has_column_privilege('nexus_diag', 'nexus.chunks', '{c}', 'SELECT')")
+
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.chunks', 'SELECT')") == "f"
+        assert col("chash") == "t"
+        assert col("chunk_text") == "f"
+        assert col("metadata") == "f"
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.diag_chash_conformance', 'SELECT')") == "t"
+    finally:
+        su("DROP TABLE IF EXISTS nexus.chunks")
+        if not had_view:
+            su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+
+
+def test_provisioning_column_grants_match_the_engine_changesets():
+    """nexus-edchb: provisioning grants nexus_diag the same column lists on
+    gc_audit and nexus.tuples as grants-nexus-diag-4 and -5, never a content
+    column (gc_audit.details, a tuple's keys, dims or body)."""
+    from nexus.db.pg_provision import DIAG_COLUMN_GRANTS, DIAG_TABLE_GRANTS
+
+    xml = (
+        Path(__file__).resolve().parents[2]
+        / "service/src/main/resources/db/changelog/grants-nexus-diag.xml"
+    ).read_text()
+    assert DIAG_COLUMN_GRANTS, "no column grants: the pin checks nothing"
+    for table, cols in DIAG_COLUMN_GRANTS:
+        m = re.search(
+            rf"GRANT SELECT \(([^)]*)\)\s+ON {re.escape(table)}\s+TO nexus_diag", xml
+        )
+        assert m, f"the changelog grants no column list on {table}"
+        engine = {c.strip() for c in m.group(1).split(",")}
+        assert set(cols) == engine, f"{table}: provisioning {sorted(cols)} vs engine {sorted(engine)}"
+        assert not set(cols) & {"details", "keys", "dims", "body"}, table
+    assert DIAG_TABLE_GRANTS, "no table grants: the pin checks nothing"
+    for table in DIAG_TABLE_GRANTS:
+        assert re.search(rf"GRANT SELECT ON {re.escape(table)}\s+TO nexus_diag", xml), (
+            f"provisioning grants {table} whole but the engine does not"
+        )
+    engine_tuple_tables = set(re.findall(r"GRANT SELECT ON (nexus\.tuple_\w+)\s+TO nexus_diag", xml))
+    assert engine_tuple_tables, "the changelog grants no tuple-space table whole: the reverse pin checks nothing"
+    assert engine_tuple_tables <= set(DIAG_TABLE_GRANTS), (
+        f"the engine grants {sorted(engine_tuple_tables - set(DIAG_TABLE_GRANTS))} whole; provisioning does not"
+    )
+
+
+def test_view_era_grants_land_on_the_gc_audit_and_tuples_columns(diag_cluster):
+    """nexus-edchb: in the view era provisioning grants the DIAG_COLUMN_GRANTS
+    columns and no content column. A table missing one of its columns (an older
+    engine) skips only its own grant: the view grant and the other table's
+    columns still land."""
+    from nexus.db.pg_provision import _diag_best_effort_grants_sql
+
+    su = diag_cluster["su"]
+    if su("SELECT to_regclass('nexus.tuples') IS NOT NULL OR to_regclass('nexus.gc_audit') IS NOT NULL "
+          "OR to_regclass('nexus.tuple_claim_log') IS NOT NULL "
+          "OR to_regclass('nexus.tuple_tenants') IS NOT NULL") == "t":
+        pytest.skip("this fixture's cluster already has an engine tuple-space or gc_audit table")
+    had_view = su(
+        "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+    ) == "1"
+    try:
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.tuples (id bytea, tenant_id text, subspace text, "
+           "claimant text, claim_id text, claim_state text, consumed_at timestamptz, "
+           "lease_until timestamptz, keys jsonb, dims jsonb, body text)")
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.tuple_claim_log (log_id bigint, tenant_id text, "
+           "subspace text, template text, tuple_id bytea, claim_id text, claimant text, transition text, "
+           "at timestamptz, expires_at timestamptz)")
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.tuple_tenants (tenant_id text, first_seen timestamptz, "
+           "last_seen timestamptz, last_swept_at timestamptz)")
+        lock_sql = h._lock_claim_started_sql("lock/x", "claimant")
+        before = diag_cluster["diag"](lock_sql)
+        assert before.returncode != 0 and "permission denied" in before.stderr, (
+            "non-vacuity: before provisioning the lock query must be refused"
+        )
+        # No chashes column: the older-engine shape whose grant must skip on its own.
+        su("SET ROLE nexus_admin; CREATE TABLE nexus.gc_audit (id bigint, tenant_id text, operation text, "
+           "collection text, actor text, dry_run boolean, chash_count int, created_at timestamptz, details jsonb)")
+        su("CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+           "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+           "FROM nexus.diag_probe WHERE length(chash) <> 32")
+        su(_diag_best_effort_grants_sql())
+
+        def col(table: str, c: str) -> str:
+            return su(f"SELECT has_column_privilege('nexus_diag', '{table}', '{c}', 'SELECT')")
+
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.tuples', 'SELECT')") == "f"
+        for c in ("id", "tenant_id", "subspace", "claimant", "claim_id", "claim_state", "consumed_at", "lease_until"):
+            assert col("nexus.tuples", c) == "t", c
+        for c in ("keys", "dims", "body"):
+            assert col("nexus.tuples", c) == "f", c
+        assert col("nexus.gc_audit", "id") == "f", "a missing column skips the whole table's grant"
+        assert col("nexus.gc_audit", "details") == "f"
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.diag_chash_conformance', 'SELECT')") == "t"
+        after = diag_cluster["diag"](lock_sql)
+        assert after.returncode == 0, f"nx doctor's lock query as nexus_diag: {after.stderr}"
+        assert su("SELECT has_table_privilege('nexus_diag', 'nexus.tuple_tenants', 'SELECT')") == "t"
+
+        su("SET ROLE nexus_admin; ALTER TABLE nexus.gc_audit ADD COLUMN chashes jsonb")
+        su(_diag_best_effort_grants_sql())
+        assert col("nexus.gc_audit", "id") == "t"
+        assert col("nexus.gc_audit", "chashes") == "t"
+        assert col("nexus.gc_audit", "details") == "f"
+    finally:
+        su("DROP TABLE IF EXISTS nexus.tuples")
+        su("DROP TABLE IF EXISTS nexus.tuple_claim_log")
+        su("DROP TABLE IF EXISTS nexus.tuple_tenants")
+        su("DROP TABLE IF EXISTS nexus.gc_audit")
+        if not had_view:
+            su("DROP VIEW IF EXISTS nexus.diag_chash_conformance")

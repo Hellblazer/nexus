@@ -431,7 +431,17 @@ class RawSqlGateTest {
             // format() with %I and %L (PciBuilderSession.Pass#render), so no identifier or JSON text is concatenated
             // in Java, and Pass#comment refuses any index that is not a builder index of the leaf before it renders.
             // Plain JDBC Statement.execute for the reason runBuild gives. Single-homed: Pass#comment.
-            "runComment", Map.of(".execute(sql)", 1))),
+            "runComment", Map.of(".execute(sql)", 1),
+            // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): REINDEX INDEX CONCURRENTLY has no typed jOOQ form and cannot run
+            // inside a function or a transaction block. Same rendering as runBuild (format() with %I on the server), and
+            // Pass#reindex refuses any index that is not a builder index on the leaf it names before it renders. Plain
+            // JDBC Statement.execute for the reason runBuild gives. Single-homed: Pass#reindex.
+            "runReindex", Map.of(".execute(sql)", 1),
+            // SANCTIONED RAW (RDR-230, nexus-4lnn1.1.10): VACUUM (ANALYZE) has no typed jOOQ form and cannot run inside a
+            // function or a transaction block. Same rendering as runBuild (format() with %I on the server); Pass#vacuum
+            // takes only a leaf of the pass's catalog snapshot, never another table. Plain JDBC Statement.execute for the
+            // reason runBuild gives. Single-homed: Pass#vacuum, after a bulk-delete REINDEX.
+            "runVacuum", Map.of(".execute(sql)", 1))),
         Map.entry("AdminDdlSession.java", Map.of(
             // SANCTIONED RAW (RDR-236 Phase 4 Step 3, nexus-6pfgb.43; shared with nexus-6pfgb.44): ALTER TABLE ... ADD
             // CONSTRAINT ... NOT VALID and VALIDATE CONSTRAINT take a rendered CHECK expression, which has no typed
@@ -1534,8 +1544,8 @@ class RawSqlGateTest {
     // t1 scratch grants (GRANT USAGE ON SCHEMA t1 plus the t1.scratch table grant) in ScratchRepositoryTest,
     // ScratchHandlerTest, TokenBoundaryAdversarialTest and ScratchSchemaLiquibaseTest go through
     // PgContainerHelper.grantT1ScratchTo (schema USAGE in db.changelog-test-t1-schema-usage.xml, table grant jOOQ);
-    // CatalogManifestSweepRepositoryTest's REVOKE/GRANT on chunks and catalog_document_chunks are jOOQ, its
-    // column-level GRANT SELECT is db.changelog-test-manifest-chunks-column-select.xml, and its slow BEFORE DELETE
+    // CatalogManifestSweepRepositoryTest's REVOKE/GRANT on chunks and catalog_document_chunks are jOOQ, and its
+    // slow BEFORE DELETE
     // trigger is install/drop changelogs (db.changelog-test-slow-sweep-delete-*.xml); TupleRepositoryTest's
     // poison-row trigger is db.changelog-test-poison-tuple-row-{install,drop-trigger,drop-function}.xml and its
     // pg_sleep is DSL.function; UpdatedAtTriggerTest's and CollectionVectorStatsTest's UPDATE/SELECT probes are
@@ -3090,6 +3100,8 @@ class RawSqlGateTest {
         "vacuum-table", "auto-explain-reset",
         // nexus-4lnn1.1.1 (RDR-230 P1.1): the anchor is an index comment; each text is fixed in its changelog
         "index-comment-not-an-anchor", "index-comment-wrong-version", "index-comment-clear",
+        // nexus-4lnn1.1.10: an anchor text with no relfilenode, behind PgContainerHelper.commentIndexAnchorWithoutRelfilenode
+        "index-comment-no-relfilenode",
         // earlier batches, each behind a requireTestIdentifier helper (or taking no caller input) and named nowhere
         // else in code
         "role-planner-guc", "nologin-role", "schema-usage", "schema-default-select-acl", "table-owner",
@@ -3118,8 +3130,6 @@ class RawSqlGateTest {
         Map.entry("role-membership", "grantRoleMembership: role names are fixed test literals, no validator"),
         Map.entry("t1-schema-usage", "grantT1ScratchTo: the role is a fixed test literal, no validator"),
         Map.entry("diag-view-foreign-owned", "Taxonomy011ForeignOwnedDiagViewTest runs it with fixed role literals"),
-        Map.entry("manifest-chunks-column-select", "CatalogManifestSweepRepositoryTest runs it with one fixed role "
-            + "literal"),
         Map.entry("tuples-column-select", "NexusServiceTupleSweepIsolationTest runs it with one fixed role literal"),
         Map.entry("chunks-text-column-select", "StoreGetIncludeColumnPrivilegeTest runs it with one fixed role "
             + "literal"),

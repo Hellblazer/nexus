@@ -65,11 +65,21 @@ final class PciCanarySchedule {
     static final String AFTER_BUILD = "after_build";
     static final String VACUUM = "vacuum";
     static final String DAILY = "daily";
+    /** The measurement right after a REINDEX of the index (RDR-230 Technical Design 3). */
+    static final String AFTER_REINDEX = "after_reindex";
 
     /** Runs the canary on one index; {@link PciCanary} is the production one. */
     @FunctionalInterface
     interface Runner {
         Result run(Target target, String trigger);
+
+        /**
+         * Measure {@code target} again with exactly {@code queries} (a red run's sample, kept in memory) instead of the
+         * ring's: the re-measure after a REINDEX. A runner with no such path reads the ring.
+         */
+        default Result remeasure(Target target, String trigger, List<float[]> queries) {
+            return run(target, trigger);
+        }
     }
 
     /** What one {@link #runPass} did. */
@@ -121,6 +131,18 @@ final class PciCanarySchedule {
         s.pending = AFTER_BUILD;
         s.retryNotBefore = null;   // a new index owes nothing to the old one's error
         s.errorStreak = 0;
+    }
+
+    /**
+     * Measure {@code target} now, right after a REINDEX of it, with {@code sample} (a red run's queries, kept in memory)
+     * when there is one, else the ring's. The result is recorded exactly as a scheduled run's is. Never throws.
+     */
+    Result remeasure(Target target, List<float[]> sample) {
+        IndexState s = state(target.index());
+        Result r = sample == null ? runner.run(target, AFTER_REINDEX)
+            : runner.remeasure(target, AFTER_REINDEX, sample);
+        record(new Due(target, AFTER_REINDEX, s), r);
+        return r;
     }
 
     /** The index was dropped: forget it. */

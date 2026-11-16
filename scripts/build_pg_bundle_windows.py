@@ -90,7 +90,7 @@ from pathlib import Path
 #: Defaults mirror scripts/build_pg_bundle.sh and the workflows' env pins;
 #: tests/test_pg_bundle_windows.py pins all three together.
 DEFAULT_PG_VERSION = "17.5"
-DEFAULT_PGVECTOR_VERSION = "v0.8.2"
+DEFAULT_PGVECTOR_VERSION = "v0.8.7"
 DEFAULT_PG_BACKGROUND_VERSION = "v2.0.4"
 
 #: Literal pins (nexus-f9bgu.27, code review m5). ftp.postgresql.org publishes the
@@ -98,14 +98,14 @@ DEFAULT_PG_BACKGROUND_VERSION = "v2.0.4"
 #: not authenticity; the literal below was fetched once from the host on 2026-10-05
 #: and recomputed locally over the downloaded tarball, and the build refuses a
 #: tarball that matches only the host's own file. A git tag moves; the commit does
-#: not (``git ls-remote https://github.com/pgvector/pgvector refs/tags/v0.8.2`` on
-#: 2026-10-05). A version not listed here is refused: moving a pin is one reviewed
-#: line, never an environment variable.
+#: not (``git ls-remote https://github.com/pgvector/pgvector refs/tags/v0.8.7`` on
+#: 2026-11-15, replacing v0.8.2's pin of 2026-10-05). A version not listed here is refused:
+#: moving a pin is one reviewed line, never an environment variable.
 PINNED_PG_SHA256: dict[str, str] = {
     "17.5": "fcb7ab38e23b264d1902cb25e6adafb4525a6ebcbd015434aeef9eda80f528d8",
 }
 PINNED_PGVECTOR_COMMITS: dict[str, str] = {
-    "v0.8.2": "cab9da72c04353f143bb06b42ab70a403daac64a",
+    "v0.8.7": "f37c13f68b57d2c3472b2214fbcff699d6d34876",
 }
 #: ``git ls-remote https://github.com/vibhorkum/pg_background refs/tags/v2.0.4`` on 2026-11-10
 #: (release published 2026-09-28; scripts/build_pg_bundle.sh pins the same commit).

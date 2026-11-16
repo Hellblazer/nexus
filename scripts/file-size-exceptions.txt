@@ -9,7 +9,7 @@ service/src/main/java/dev/nexus/service/db/AspectRepository.java 1669
 service/src/main/java/dev/nexus/service/db/CatalogRepository.java 15274
 service/src/main/java/dev/nexus/service/db/SchemaMigrator.java 1630
 service/src/main/java/dev/nexus/service/db/TaxonomyRepository.java 3428
-service/src/main/java/dev/nexus/service/db/TelemetryRepository.java 3163
+service/src/main/java/dev/nexus/service/db/TelemetryRepository.java 2972
 service/src/main/java/dev/nexus/service/db/TupleRepository.java 3764
 service/src/main/java/dev/nexus/service/http/CatalogHandler.java 4152
 service/src/main/java/dev/nexus/service/http/ChunkKeysAdminHandler.java 1625
@@ -58,7 +58,6 @@ service/src/test/java/dev/nexus/service/http/CatalogHandlerReconcileRoutesTest.j
 service/src/test/java/dev/nexus/service/reembed/ReembedCutoverTest.java 1281
 service/src/test/java/dev/nexus/service/tuples/TemplateRegistryTest.java 1131
 service/src/test/java/dev/nexus/service/vectors/CceEmbedderParallelTest.java 1283
-service/src/test/java/dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java 1144
 service/src/test/java/dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java 1107
 service/src/test/java/dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java 1103
 service/src/test/java/dev/nexus/service/vectors/OrtNativeDirTest.java 1469
@@ -137,8 +136,7 @@ tests/db/test_http_scratch_store.py 1476
 tests/db/test_http_store_selfheal.py 1342
 tests/db/test_http_taxonomy_store.py 3306
 tests/db/test_http_taxonomy_store_integration.py 1329
-tests/db/test_http_telemetry_store.py 2421
-tests/db/test_http_telemetry_store_integration.py 1154
+tests/db/test_http_telemetry_store.py 2284
 tests/db/test_http_tuple_store.py 1830
 tests/db/test_http_vector_client.py 4715
 tests/db/test_mvv_memory_service.py 1106

@@ -56,7 +56,6 @@ _nx_answer_run_complete_requests: list[dict[str, Any]] = []
 #: ``tests/db/test_refreshable_client.py``'s ``_GATEWAY_FAIL_QUEUE`` pattern.
 _COMPLETE_FAIL_QUEUE: list[int] = []
 _hook_failures: list[dict[str, Any]] = []
-_frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
 _capability_census: dict[str, dict[str, Any]] = {}  # keyed by session_id (upsert)
 _routing_events: list[dict[str, Any]] = []
 #: nexus-mtheb.4: agent_dispatches, keyed (session_id, agent_id) like the engine's unique constraint.
@@ -89,7 +88,6 @@ def _clear_all() -> None:
         _retention_markers.clear()
         _nx_answer_runs.clear()
         _hook_failures.clear()
-        _frecency.clear()
         _capability_census.clear()
         _routing_events.clear()
         _agent_dispatches.clear()
@@ -379,38 +377,6 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                     deleted = before - len(_hook_failures)
             self._send(200, {"deleted": deleted, "dry_run": dry_run})
 
-        elif pp == "/v1/telemetry/frecency/upsert":
-            chunk_id = body.get("chunk_id", "")
-            with _STORE_LOCK:
-                existing = _frecency.get(chunk_id)
-                if existing is None:
-                    _frecency[chunk_id] = dict(body)
-                else:
-                    # GREATEST for score/count/last_hit_at, LEAST for embedded_at
-                    def _gts(a: str | None, b: str | None) -> str | None:
-                        if a is None: return b
-                        if b is None: return a
-                        return max(a, b)
-                    def _lts(a: str | None, b: str | None) -> str | None:
-                        if a is None: return b
-                        if b is None: return a
-                        return min(a, b)
-                    existing["frecency_score"] = max(
-                        float(existing.get("frecency_score", 0.0) or 0.0),
-                        float(body.get("frecency_score", 0.0) or 0.0),
-                    )
-                    existing["miss_count"] = max(
-                        int(existing.get("miss_count", 0) or 0),
-                        int(body.get("miss_count", 0) or 0),
-                    )
-                    existing["last_hit_at"] = _gts(
-                        existing.get("last_hit_at"), body.get("last_hit_at")
-                    )
-                    existing["embedded_at"] = _lts(
-                        existing.get("embedded_at"), body.get("embedded_at")
-                    )
-            self._send(200, {"ok": True})
-
         elif pp == "/v1/telemetry/import":
             # Capture payload for assertion; do same routing as above
             with _STORE_LOCK:
@@ -429,38 +395,6 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                         # VERBATIM from source — fidelity-preserving import
                         "timestamp":  body.get("timestamp", ""),
                     })
-            elif table == "frecency":
-                chunk_id = body.get("chunk_id", "")
-                with _STORE_LOCK:
-                    existing = _frecency.get(chunk_id)
-                    if existing is None:
-                        _frecency[chunk_id] = dict(body)
-                    else:
-                        # GREATEST/LEAST conflict
-                        def _g(a, b, default=0.0):
-                            a = a if a is not None else default
-                            b = b if b is not None else default
-                            return max(a, b)
-                        def _gts(a, b):
-                            if a is None: return b
-                            if b is None: return a
-                            return max(a, b)
-                        def _lts(a, b):
-                            if a is None: return b
-                            if b is None: return a
-                            return min(a, b)
-                        existing["frecency_score"] = _g(
-                            body.get("frecency_score"), existing.get("frecency_score")
-                        )
-                        existing["miss_count"] = int(_g(
-                            body.get("miss_count"), existing.get("miss_count"), 0
-                        ))
-                        existing["last_hit_at"] = _gts(
-                            existing.get("last_hit_at"), body.get("last_hit_at")
-                        )
-                        existing["embedded_at"] = _lts(
-                            existing.get("embedded_at"), body.get("embedded_at")
-                        )
             # For other tables: just record in IMPORT_LOG (already done above)
             self._send(200, {"ok": True})
 
@@ -742,15 +676,6 @@ class _FakeTelemetryHandler(FakeT2HandlerBase):
                 "avg_cost_usd": avg_cost_usd,
                 "latency_buckets": buckets,
             })
-
-        elif pp == "/v1/telemetry/frecency/get":
-            chunk_id = qs.get("chunk_id", "")
-            with _STORE_LOCK:
-                row = _frecency.get(chunk_id)
-            if row is None:
-                self._send(404, {"error": "not found"})
-            else:
-                self._send(200, row)
 
         else:
             self._send(404, {"error": "not found"})
@@ -2026,61 +1951,6 @@ class TestImportTimestampFidelity:
             payloads = [p for p in IMPORT_LOG if p.get("table") == "hook_failures"]
         assert len(payloads) == 1
         assert payloads[0]["occurred_at"] == PAST_TS
-
-
-class TestFrecencyGreatestLeast:
-    """Verify GREATEST no-clobber and LEAST embedded_at via the fake server."""
-
-    def test_frecency_greatest_does_not_clobber_live_score(self, client):
-        # Insert live-mutable frecency
-        client.import_frecency_row(
-            chunk_id="chunk-greatest",
-            embedded_at="2024-01-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.95,
-            miss_count=20,
-            last_hit_at="2025-06-01T00:00:00Z",
-        )
-        # Re-import with stale (lower) values
-        client.import_frecency_row(
-            chunk_id="chunk-greatest",
-            embedded_at="2023-01-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.50,
-            miss_count=5,
-            last_hit_at="2024-01-01T00:00:00Z",
-        )
-        row = _frecency.get("chunk-greatest")
-        assert row is not None
-        assert float(row["frecency_score"]) == pytest.approx(0.95), (
-            "GREATEST: re-import with stale score=0.50 must not clobber live score=0.95")
-        assert int(row["miss_count"]) == 20, (
-            "GREATEST: re-import with stale miss_count=5 must not clobber live miss_count=20")
-
-    def test_frecency_least_preserves_oldest_embedded_at(self, client):
-        # Insert with a recent embedded_at
-        client.import_frecency_row(
-            chunk_id="chunk-least",
-            embedded_at="2025-06-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.5,
-            miss_count=1,
-            last_hit_at=None,
-        )
-        # Re-import with an OLDER embedded_at — LEAST means older wins
-        client.import_frecency_row(
-            chunk_id="chunk-least",
-            embedded_at="2023-01-01T00:00:00Z",
-            ttl_days=30,
-            frecency_score=0.3,
-            miss_count=0,
-            last_hit_at=None,
-        )
-        row = _frecency.get("chunk-least")
-        assert row is not None
-        assert row["embedded_at"] == "2023-01-01T00:00:00Z", (
-            "LEAST: older embedded_at must win on conflict; "
-            f"got {row['embedded_at']!r}")
 
 
 class TestImportDoNothing:

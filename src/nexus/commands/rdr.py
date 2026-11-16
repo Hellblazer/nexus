@@ -25,6 +25,18 @@ import click
 import yaml
 
 from nexus.bounded_subprocess import run_bounded
+from nexus.rdr_gate_key import (
+    BLOB_ABBREV,
+    FIX_LOG_CAP,
+    GatedKey,
+    blob_delta,
+    DIRTY_NOTE,
+    blob_range,
+    file_blob,
+    fix_commits,
+    gated_key,
+    has_uncommitted_edits,
+)
 from nexus.util.nx_argv import argv_off_cwd, nx_argv
 from nexus.plans.audit_rounds import (
     BLOCKS_PLANNING,
@@ -1030,13 +1042,21 @@ def _gate_record_accept_defect(content: str, title: str) -> str | None:
     if is_regate and not fix_check_field:
         return f"gate record {title!r} is a re-gate (it has a `prior:` chain) with no `fix_check:`; a skipped fix check is not a clean one"
     if fix_check_field and not fix_check_field.lower().startswith("none"):
-        gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip().strip('"').strip("`")
+        key = _record_gate_key(content)
         m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
         sha = m.group(1) if m else fix_check_field.split()[0]
-        shorter = min(len(sha), len(gated_commit))
-        if gated_commit and not (shorter >= 7 and sha[:shorter] == gated_commit[:shorter]):
-            return f"gate record {title!r} names fix check {sha} but its commit is {gated_commit}; the fix check is of an older tree"
+        if key.value and not key.matches(sha):
+            return f"gate record {title!r} names fix check {sha} but its {key.kind} is {key.value}; the fix check is of an older tree"
     return None
+
+
+def _record_gate_key(content: str) -> GatedKey:
+    """The key a gate record carries: ``blob:`` when present, else
+    ``commit:`` (nexus-3jjkg; records written before it have only the
+    commit and keep the commit semantics)."""
+    return gated_key(
+        _preamble_parse_t2_field(content, "blob"), _preamble_parse_t2_field(content, "commit"),
+    )
 
 
 def _gate_repo_name(repo_root: str) -> str:
@@ -1709,6 +1729,9 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
     print(f"### RDR File: {rdr_file.name}")
     print(f"**Title:** {title}  **Status:** {fm.get('status', '?')}  **Type:** {fm.get('type', '?')}")
     print()
+    if has_uncommitted_edits(repo_root, os.path.relpath(str(rdr_file), repo_root)):
+        print(f"> **{DIRTY_NOTE}**")
+        print()
 
     def _strip_code_blocks(src: str) -> str:
         return re.sub(r"```.*?```", "", src, flags=re.DOTALL)
@@ -1784,7 +1807,7 @@ def preamble_rdr_gate(args: tuple[str, ...]) -> None:
         print()
 
     # nexus-7vdf9: a re-gate after a BLOCKED round leads with the prior
-    # findings and the diff since the gated commit.
+    # findings and the diff since the gate.
     _regate_printed = False
     for _line in _preamble_regate_block(
         repo_root=repo_root, repo_name=repo_name, t2_key=t2_key, rdr_file=rdr_file,
@@ -2099,8 +2122,8 @@ def _preamble_regate_block(
     file, because the fix was applied at the quoted line and nothing
     surfaced the other occurrences. This block prints the prior outcome,
     the critique's Critical and Significant lines verbatim, the diff of
-    the RDR file since the gated commit (when the record carries
-    ``commit:``), and the Layer 0 survivor-sweep instruction.
+    the RDR file since the gate (against ``blob:`` when the record carries
+    it, else ``commit:``), and the Layer 0 survivor-sweep instruction.
 
     Returns ``[]`` only when there is no gate record (a first gate). The
     block fires after a PASSED gate too (nexus-g7zgw.4): of RDR-204's four
@@ -2109,7 +2132,7 @@ def _preamble_regate_block(
     PASSED gate's Significants, and the sweep was structurally off for
     them. It also carries the gate round number, derived from the record's
     ``prior:`` chain (nexus-g7zgw.2), and the Fix check section naming the
-    exact diff range whenever the file changed since the gated commit
+    exact diff range whenever the file changed since the gate
     (nexus-g7zgw.1). A T2 read failure returns a single named note rather
     than nothing, so an unreachable T2 is visible and never mistaken for
     "no prior round".
@@ -2147,6 +2170,7 @@ def _preamble_regate_block(
             critique_project = critique_title.rsplit("/", 1)[0] if "/" in critique_title else project
             critique_title = critique_title.rsplit("/", 1)[-1]
             gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
+            gated_blob = (_preamble_parse_t2_field(content, "blob") or "").strip().strip('"').strip("`")
             fix_check_field = (_preamble_parse_t2_field(content, "fix_check") or "").strip()
             fix_check_exists: bool | None = None
             fix_check_content: str | None = None
@@ -2252,7 +2276,7 @@ def _preamble_regate_block(
     lines.extend(_fix_check_pointer_lines(
         fix_check_field, gated_commit,
         is_regate=bool(_t2_field_block(content, "prior")), record_exists=fix_check_exists,
-        record_content=fix_check_content,
+        record_content=fix_check_content, gated_blob=gated_blob,
     ))
     if second_missing:
         lines.append(
@@ -2414,7 +2438,13 @@ def _preamble_regate_block(
         )
     lines.append("")
 
-    if gated_commit:
+    if gated_blob:
+        lines.extend(_blob_regate_lines(
+            repo_root=repo_root, t2_key=t2_key, rel=os.path.relpath(str(rdr_file), repo_root),
+            status=status, gated_commit=gated_commit, gated_blob=gated_blob,
+        ))
+        lines.append("")
+    elif gated_commit:
         rel = os.path.relpath(str(rdr_file), repo_root)
         try:
             diff = run_bounded(
@@ -2451,7 +2481,8 @@ def _preamble_regate_block(
                         "gate). A residual dispositioned by a change to the RDR file still "
                         f"carries a fix check on that change: `git diff {gated_commit}..HEAD "
                         f"-- {rel}`, verdict stored as `{t2_key}-fix-check-<sha>`, `<sha>` "
-                        "the RDR file's tip after the disposition. A residual dispositioned "
+                        "the RDR file's blob after the disposition (`git rev-parse --short=12 "
+                        "HEAD:<file>`). A residual dispositioned "
                         "by a bead id changed nothing in the file and needs none."
                     )
                 else:
@@ -2853,11 +2884,12 @@ def _gate_round_lines(gate_record: str, critique_count: int = 0) -> list[str]:
 
 def _fix_check_pointer_lines(
     fix_check_field: str, gated_commit: str, *, is_regate: bool, record_exists: bool | None,
-    record_content: str | None = None,
+    record_content: str | None = None, gated_blob: str = "",
 ) -> list[str]:
     """Flag a gate record whose ``fix_check:`` is missing on a re-gate, names
-    a sha other than its ``commit:``, or points at a T2 record that does not
-    exist. Critique [24865] Critical 1 found the sha invariant prose-only and
+    a sha other than its ``blob:`` (its ``commit:`` on a record written
+    before nexus-3jjkg, which has no blob), or points at a T2 record that
+    does not exist. Critique [24865] Critical 1 found the sha invariant prose-only and
     already violated live; deep critique [24873] Critical 3 found that
     omitting the field entirely was indistinguishable from a clean check.
     The field may carry the pointer form ``<project>/<id>-fix-check-<sha>
@@ -2868,7 +2900,7 @@ def _fix_check_pointer_lines(
             return [
                 "**Fix check missing:** this gate record has a `prior:` chain, so it is a "
                 "re-gate, and it carries no `fix_check:` field. Every re-gated record names "
-                "either `{id}-fix-check-<sha>` (sha equal to `commit:`) or `none (no change "
+                "either `{id}-fix-check-<sha>` (sha equal to `blob:`, or to `commit:` on a record with no `blob:`) or `none (no change "
                 "since <sha>)`; a skipped fix check is not a clean one. Run the fix check on the "
                 "current diff before Layer 3, and accept refuses this record until it is named.",
                 "",
@@ -2876,15 +2908,15 @@ def _fix_check_pointer_lines(
         return []
     if fix_check_field.lower().startswith("none"):
         return []
-    if not gated_commit:
+    key = gated_key(gated_blob, gated_commit)
+    if not key.value:
         return []
     m = re.search(r"fix-check-([0-9a-f]{6,40})", fix_check_field)
     sha = m.group(1) if m else fix_check_field.split()[0]
-    shorter = min(len(sha), len(gated_commit))
-    if not (shorter >= 7 and sha[:shorter] == gated_commit[:shorter]):
+    if not key.matches(sha):
         return [
             f"**Fix check pointer mismatch:** the gate record's `fix_check:` names `{sha}` but "
-            f"its `commit:` is `{gated_commit}`. The prior gate cited a fix check of an older "
+            f"its `{key.kind}:` is `{key.value}`. The prior gate cited a fix check of an older "
             "tree; run the fix check on the current diff before Layer 3, and accept refuses "
             "this record until the two agree.",
             "",
@@ -2935,50 +2967,175 @@ FIX_CHECK_CONSENSUS_CLAUSE: Final = (
 )
 
 
+def _blob_regate_lines(
+    *, repo_root: str, t2_key: str, rel: str, status: str, gated_commit: str, gated_blob: str,
+) -> list[str]:
+    """The re-gate block's "changed since the gate" lines for a record keyed
+    to a blob (nexus-3jjkg): the file at HEAD against the blob the gate
+    judged, with no history read, so a rebase that left the text alone is
+    "no changes"."""
+    delta = blob_delta(repo_root, rel, gated_blob)
+    if delta.state == "unknown":
+        return [
+            f"Changed since the gated blob `{gated_blob}`: unknown ({delta.error})",
+            "",
+            "Fix check: the RDR file's current blob could not be read, so the diff to verify is "
+            "unknown. Read it by hand (`git rev-parse --short=12 HEAD:<file>`) before Layer 3.",
+        ]
+    if delta.state == "same":
+        return [
+            f"Changed since the gated blob `{gated_blob}`: no changes to the RDR file",
+            "",
+            *_fix_check_lines(
+                repo_root=repo_root, t2_key=t2_key, rel=rel, gated_commit=gated_commit,
+                gated_blob=gated_blob, changed=False,
+            ),
+        ]
+    summary = delta.stat[-1].strip() if delta.stat else f"changed ({delta.error})"
+    out = [f"Changed since the gated blob `{gated_blob}`: {summary}", ""]
+    if delta.error:
+        out.extend([
+            f"The gated blob `{gated_blob}` is not in this clone ({delta.error}), so the diff "
+            "cannot be printed here; fetch the branch that carried it, or read the gated text "
+            "from the critique record.",
+            "",
+        ])
+    if status.strip().lower() not in ("", "draft", "open"):
+        out.append(
+            f"Fix check: no re-gate fix check (RDR status is `{status.strip()}`; that check gates a "
+            "re-gate of a draft, and this RDR is past the gate). A residual dispositioned by a "
+            f"change to the RDR file still carries a fix check on that change: "
+            f"`{blob_range(gated_blob, delta.current)}`, verdict stored as `{t2_key}-fix-check-<sha>`, "
+            "`<sha>` the RDR file's blob after the disposition. A residual dispositioned by a bead "
+            "id changed nothing in the file and needs none."
+        )
+    else:
+        out.extend(_fix_check_lines(
+            repo_root=repo_root, t2_key=t2_key, rel=rel, gated_commit=gated_commit,
+            gated_blob=gated_blob, changed=True,
+        ))
+    return out
+
+
+def _print_blob_tree_state(
+    *, repo_root: str, rel: str, t2_key: str, gated_blob: str, gated_commit: str, tip: str,
+    fix_check_exists: bool,
+) -> None:
+    """The rdr-fix "Tree state" block for a blob-keyed record (nexus-3jjkg)."""
+    delta = blob_delta(repo_root, rel, gated_blob)
+    print(f"Gated blob `{gated_blob}`; RDR file blob now `{tip or '?'}`.")
+    if delta.state == "unknown":
+        print(f"Changed since the gated blob: unknown ({delta.error}). Name the gated tree by hand.")
+        return
+    print(f"Range the fix check will read: `{blob_range(gated_blob, delta.current)}`")
+    print("Changed since the gated blob: " + (
+        "no changes to the RDR file" if delta.state == "same"
+        else (delta.stat[-1].strip() if delta.stat else f"changed ({delta.error})")
+    ))
+    if delta.state == "changed":
+        for ln in _blob_fix_commit_lines(repo_root, rel, gated_key(gated_blob, gated_commit)):
+            print(ln)
+    if tip:
+        if fix_check_exists:
+            print(f"Fix-check record `{t2_key}-fix-check-{tip}` exists for the current blob.")
+        else:
+            print(f"No fix-check record yet for the current blob (`{t2_key}-fix-check-{tip}`).")
+
+
+def _blob_fix_commit_lines(repo_root: str, rel: str, key: GatedKey) -> list[str]:
+    """The "Fix commits" lines of a blob-keyed Fix check section: the commits
+    that changed the file since the gated text, found by walking the file's own
+    history back to the commit holding the gated blob, so a rebase that
+    replaced the gated commit changes nothing here (:func:`fix_commits`)."""
+    found = fix_commits(repo_root, rel, key.value)
+    if found.error:
+        return [f"Fix commits: could not be listed ({found.error}); list them by hand with "
+                f"`git log --format=%h %s -- {rel}`."]
+    if not found.found:
+        cap = f" within the last {FIX_LOG_CAP} commits that touch it" if found.capped else ""
+        return [
+            f"Fix commits: the gated blob `{key.value}` was not found in this file's history{cap}; "
+            "it may never have landed (a squash, or a later edit before landing), or the branch that "
+            f"carried it is not in this clone. Read the gated text from the gate record's `commit:` (possibly orphaned; the reflog or the pre-rebase branch holds it), "
+            f"or re-gate. The range above does not depend on it; `git log --format=%h %s -- {rel}` "
+            "lists the file's commits."
+        ]
+    return ["Fix commits:", *(f"- {c}" for c in found.commits)]
+
+
 def _fix_check_lines(
     *, repo_root: str, t2_key: str, rel: str, gated_commit: str, changed: bool,
+    gated_blob: str = "",
 ) -> list[str]:
     """The Fix check section (nexus-g7zgw.1): the exact diff range, the fix
     commits, the T2 title the verdict goes under, and the obligation.
 
-    The T2 title carries the RDR file's tip sha, which is the sha the next
-    gate record's ``commit:`` field will name, so a gate can never cite a
-    fix check of an older tree.
+    The T2 title carries the RDR file's current blob id, whatever key the
+    prior record has (nexus-3jjkg): the next gate record is written with
+    ``blob:``, and its ``fix_check:`` must name it. The prior record's key only
+    chooses the diff range (``<commit>..HEAD`` for a commit-only record).
+    Only when git cannot read the file does the title fall back to the tip
+    commit. A gate can never cite a fix check of an older tree.
     """
+    key = gated_key(gated_blob, gated_commit)
     if not changed:
+        since = f"the gated blob `{key.value}`" if key.is_blob else f"`{gated_commit}`"
         return [
-            f"Fix check: not required (no change to the RDR file since `{gated_commit}`).",
+            f"Fix check: not required (no change to the RDR file since {since}).",
         ]
+    if key.is_blob:
+        current = file_blob(repo_root, rel)
+        if current is None:
+            return [
+                f"Fix check: git cannot read `{rel}` at HEAD; read its blob by hand "
+                "(`git rev-parse --short=12 HEAD:<file>`) and name it in the T2 title "
+                "`{id}-fix-check-<blob>` yourself.",
+            ]
+        return _fix_check_brief_lines(
+            t2_key=t2_key, range_cmd=blob_range(key.value, current),
+            commit_lines=_blob_fix_commit_lines(repo_root, rel, key), tip_sha=current, key_label="blob",
+        )
+    blob_now = file_blob(repo_root, rel)
     try:
         log = run_bounded(
             ["git", "-C", repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel],
             timeout=20,
         )
-        tip = run_bounded(
+        tip = None if blob_now else run_bounded(
             ["git", "-C", repo_root, "log", "-1", "--format=%h", "--", rel],
             timeout=20,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return [f"Fix check: git log failed ({exc}); list the fix commits by hand."]
-    if log.returncode != 0 or tip.returncode != 0 or not tip.stdout.strip():
-        err = (log.stderr or tip.stderr).strip()[:160]
+    if log.returncode != 0 or (tip is not None and (tip.returncode != 0 or not tip.stdout.strip())):
+        err = (log.stderr or (tip.stderr if tip is not None else "")).strip()[:160]
         return [
             "### Fix check (required before Layer 1)",
             "",
             f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
-            f"The fix commits and the RDR file's tip sha could not be read (git log failed: {err}); "
+            f"The fix commits or the RDR file's tip could not be read (git log failed: {err}); "
             "read them by hand with `git log --format=%h %s` on that range before dispatching the "
-            "fix check, and name the tip sha in the T2 title `{id}-fix-check-<sha>` yourself.",
+            "fix check, and name the file's blob (`git rev-parse --short=12 HEAD:<file>`) in the T2 "
+            "title `{id}-fix-check-<sha>` yourself.",
         ]
     commits = [ln for ln in log.stdout.strip().splitlines() if ln.strip()]
-    tip_sha = tip.stdout.strip()
+    return _fix_check_brief_lines(
+        t2_key=t2_key, range_cmd=f"git diff {gated_commit}..HEAD -- {rel}",
+        commit_lines=["Fix commits:", *(f"- {c}" for c in commits)],
+        tip_sha=blob_now or tip.stdout.strip(), key_label="blob" if blob_now else "commit",
+    )
+
+
+def _fix_check_brief_lines(
+    *, t2_key: str, range_cmd: str, commit_lines: list[str], tip_sha: str, key_label: str,
+) -> list[str]:
+    """The Fix check section body, shared by the blob and commit keys."""
     lines = [
         "### Fix check (required before Layer 1)",
         "",
-        f"Range: `git diff {gated_commit}..HEAD -- {rel}`",
-        "Fix commits:",
+        f"Range: `{range_cmd}`",
     ]
-    lines.extend(f"- {c}" for c in commits)
+    lines.extend(commit_lines)
     lines.extend([
         "",
         "Dispatch substantive-critic with ONLY that diff and the RDR file. For every ADDED "
@@ -3007,7 +3164,7 @@ def _fix_check_lines(
         FIX_CHECK_CONSENSUS_CLAUSE,
         f"The consensus verdict goes to T2 `{t2_key}-fix-check-{tip_sha}` (project `<repo>_rdr`), "
         f"naming all three dispatches; the gate record's `fix_check:` must name `{tip_sha}`, equal "
-        "to its `commit:`. Do not enter Layer 1 or Layer 3 with a first failure open. "
+        f"to its `{key_label}:`. Do not enter Layer 1 or Layer 3 with a first failure open. "
         "The fix check and the gate critique are never dispatched against the same commit in "
         "parallel: fix, then check, then Layer 1 and Layer 3.",
     ])
@@ -3120,11 +3277,12 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     )
     print(
         "   A residual dispositioned by a change to the RDR file carries a fix check on "
-        f"that change: read `git diff <the record's commit:>..HEAD -- "
-        f"{os.path.relpath(str(rdr_file), repo_root)}` and store the verdict as "
+        f"that change: read `git diff <the record's blob:> <the file's blob now>` (a "
+        f"record with only `commit:` reads `git diff <the record's commit:>..HEAD -- "
+        f"{os.path.relpath(str(rdr_file), repo_root)}`) and store the verdict as "
         f"`{t2_key}-fix-check-<sha>` (project `{repo_name}_rdr`), `<sha>` the RDR file's "
-        "tip after the disposition. A residual dispositioned by a bead id changed nothing "
-        "in the file and needs none (nexus-yjf5l.1)."
+        "blob after the disposition (`git rev-parse --short=12 HEAD:<file>`). A residual dispositioned by a bead id "
+        "changed nothing in the file and needs none (nexus-yjf5l.1)."
     )
     print(f"   {FIX_CHECK_CONSENSUS_CLAUSE}")
     print(
@@ -3464,7 +3622,7 @@ def _git_out(repo_root: str, *args: str) -> str | None:
 @click.argument("args", nargs=-1)
 def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     """Print the fix-step context for an RDR: the latest gate's findings with
-    their Sites, the diff and fix commits since the gated commit, the
+    their Sites, the diff and fix commits since the gate, the
     pre-edit research title, and the fix rules."""
     repo_root, repo_name = _preamble_resolve_repo()
     rdr_dir = _preamble_rdr_dir(repo_root)
@@ -3499,7 +3657,7 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
             "not gate fixes and there is no gate fix to make here; residual dispositions "
             "go through rdr-accept, and a design change reopens the RDR. A residual "
             "dispositioned by a change to the RDR file carries a fix check on that change, "
-            f"stored as `{t2_key}-fix-check-<sha>` with `<sha>` the RDR file's tip after "
+            f"stored as `{t2_key}-fix-check-<sha>` with `<sha>` the RDR file's blob after "
             "the disposition; a residual dispositioned by a bead id changed nothing in the "
             "file and needs none."
         )
@@ -3518,13 +3676,18 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
             outcome = (_preamble_parse_t2_field(content, "outcome") or "?").strip().upper()
             date = _preamble_parse_t2_field(content, "date") or "?"
             gated_commit = (_preamble_parse_t2_field(content, "commit") or "").strip()
+            gated_blob = (_preamble_parse_t2_field(content, "blob") or "").strip().strip('"').strip("`")
             critique_title = (_preamble_parse_t2_field(content, "critique") or "").strip()
             critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title).rsplit("/", 1)[-1]
             rows = client.get_all(project=project) or [] if callable(getattr(client, "get_all", None)) else []
             critique_count = len(_distinct_critique_rows(rows, t2_key))
             next_seq = _rdr_research_next_seq(rows, t2_key)
             critique = client.get(project=project, title=critique_title) if critique_title else None
-            tip = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
+            # nexus-3jjkg: the fix-check title carries the file's blob, the
+            # key the next gate record writes, whichever key the prior has.
+            tip = file_blob(repo_root, rel) or (
+                _git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or ""
+            ).strip()
             fix_check_exists = (
                 client.get(project=project, title=f"{t2_key}-fix-check-{tip}") is not None if tip else False
             )
@@ -3596,10 +3759,15 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
 
     print("#### Tree state")
     print()
-    if gated_commit:
+    if gated_blob:
+        _print_blob_tree_state(
+            repo_root=repo_root, rel=rel, t2_key=t2_key, gated_blob=gated_blob,
+            gated_commit=gated_commit, tip=tip, fix_check_exists=fix_check_exists,
+        )
+    elif gated_commit:
         stat = (_git_out(repo_root, "diff", "--stat", f"{gated_commit}..HEAD", "--", rel) or "").strip().splitlines()
         log = (_git_out(repo_root, "log", "--format=%h %s", f"{gated_commit}..HEAD", "--", rel) or "").strip().splitlines()
-        print(f"Gated commit `{gated_commit}`; RDR file tip `{tip or '?'}`.")
+        print(f"Gated commit `{gated_commit}`; RDR file blob now `{tip or '?'}`.")
         print(f"Range the fix check will read: `git diff {gated_commit}..HEAD -- {rel}`")
         print("Changed since the gated commit: " + (stat[-1].strip() if stat else "no changes to the RDR file"))
         if log:
@@ -3608,9 +3776,9 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
                 print(f"- {ln}")
         if tip:
             if fix_check_exists:
-                print(f"Fix-check record `{t2_key}-fix-check-{tip}` exists for the current tip.")
+                print(f"Fix-check record `{t2_key}-fix-check-{tip}` exists for the current blob.")
             else:
-                print(f"No fix-check record yet for the current tip (`{t2_key}-fix-check-{tip}`).")
+                print(f"No fix-check record yet for the current blob (`{t2_key}-fix-check-{tip}`).")
     else:
         print("The gate record carries no `commit:`; the fix check has no range. Name the gated tree by hand.")
     print()
@@ -4156,6 +4324,12 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
         return f"[{cls}] {title}{suffix}"
 
     commit = (_git_out(repo_root, "log", "-1", "--format=%h", "--", rel) or "").strip()
+    # nexus-3jjkg: the gate is keyed to the file's blob (a rebase keeps it);
+    # `commit:` is still written, for the fix-commit listing and old readers.
+    # A dirty file leaves `blob:` unfilled: HEAD:<rel> is not the text judged.
+    dirty = has_uncommitted_edits(repo_root, rel)
+    blob = "" if dirty else (file_blob(repo_root, rel) or "")
+    key_sha = "" if dirty else (blob or commit)
     prev_outcome = (_preamble_parse_t2_field(latest_content, "outcome") or "").strip().upper()
     prev_c = (_preamble_parse_t2_field(latest_content, "critical_count") or "?").strip()
     prev_s = (_preamble_parse_t2_field(latest_content, "significant_count") or "?").strip()
@@ -4178,6 +4352,8 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     else:
         print("The round assumes this critique is the new, not yet recorded, gate.")
     print(f"Counted: {len(tally.criticals)} Critical, {len(tally.significants)} Significant, {counted_sb} marked Ship-blocker: yes.")
+    if dirty:
+        print(f"> **{DIRTY_NOTE}** `blob:` below is left unfilled.")
     for n in notes:
         print(f"- {n}")
     print()
@@ -4203,8 +4379,9 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     print(f"round: {round_no}")
     print("summary: <one sentence>")
     print(f"critique: {project}/{critique_title}")
+    print(f"blob: {blob or '<git rev-parse --short=' + str(BLOB_ABBREV) + ' HEAD:' + rel + '>'}")
     print(f"commit: {commit or '<git log -1 --format=%h -- ' + rel + '>'}")
-    print(f"fix_check: {'<' + project + '/' + t2_key + '-fix-check-' + (commit or '<sha>') + ', or none (no change since <sha>)>' if latest_content else 'none (first gate)'}")
+    print(f"fix_check: {'<' + project + '/' + t2_key + '-fix-check-' + (key_sha or '<sha>') + ', or none (no change since <sha>)>' if latest_content else 'none (first gate)'}")
     if residuals:
         print("residuals:")
         for r in residuals:
@@ -4232,7 +4409,7 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
         # stale gate-record pointer rather than reintroduce it.
         f"- {datetime.now(timezone.utc).date().isoformat()}: Gate round {round_no} — {outcome} "
         f"({critical_count} Critical, {significant_count} Significant, {ship_blockers} "
-        f"ship-blocker(s)); commit `{commit or '?'}`; "
+        f"ship-blocker(s)); {'commit' if (commit and not blob and not dirty) else 'blob'} `{key_sha or '?'}`; "
         f"critique `{project}/{critique_title}`."
     )
 

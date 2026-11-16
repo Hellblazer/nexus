@@ -72,13 +72,9 @@ import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_HNSW_FIRST_768;
-// nexus-zrcj7 (T2 [24219] critique finding B, single-gate-eval restored): text_gate_probe_
-// <dim> is a SETOF-bytea table-valued function (vectors-011), and
-// text_gated_search_by_chash_<dim> ranks ONLY over the probe's own chash set -- no second
+// nexus-zrcj7 (T2 [24219] critique finding B, single-gate-eval restored): text_gated_search_by_chash_<dim> ranks
+// ONLY over the text_gate_probe_<dim> chash set (the probe helpers live in LexicalGateProbe) -- no second
 // text-gate evaluation.
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_1024;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
-import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_768;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_384;
 import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATED_SEARCH_ALLOWED_768;
@@ -1982,7 +1978,7 @@ public final class PgVectorRepository {
         org.jooq.Table<?> fn = plainSearchFn(entry.dimension(), Vector.of(query), colls, planWhere(null), k,
             entry.embeddingModel(), target.tenant());
         return runPlainSearchStatement(target.tenant(), entry.embeddingModel(), fn, entry.dimension(), colls, k,
-            PgSession::startupSearchStatementTimeoutMs, false, phases, exact, null, hook);
+            PciCanaryPolicy.statementTimeoutMs(exact), false, phases, exact, null, hook);
     }
 
     private static List<PciCanary.Hit> canaryHits(Result<? extends Record> result) {
@@ -2477,8 +2473,19 @@ public final class PgVectorRepository {
         void error(ArmErrorKind kind, String text);
     }
 
-    /** One unit of fan-out work: a collection's vector arm, or its lexical arm. */
-    private record ArmTask(int slot, boolean lexical) {}
+    /**
+     * One unit of fan-out work: a collection's vector arm, or its lexical arm, or (nexus-bbtc2, {@code probe}) the
+     * lexical leg's one shared text-gate probe, which belongs to no collection and runs first.
+     */
+    private record ArmTask(int slot, boolean lexical, boolean probe) {
+        ArmTask(int slot, boolean lexical) {
+            this(slot, lexical, false);
+        }
+
+        static ArmTask sharedProbe() {
+            return new ArmTask(-1, true, true);
+        }
+    }
 
     /** Per-arm scratch: which limit set the arm's CURRENT statement bound, and the bound itself. */
     private static final class ArmRun {
@@ -2815,8 +2822,43 @@ public final class PgVectorRepository {
      * @param parallelism    arms of ONE request in flight at once, clamped to {@code [1, pool size]}
      * @param fanoutBudgetMs aggregate wall budget of the fan-out, counted from entry
      * @param searchBoundMs  the per-statement search bound ({@code NX_SEARCH_STATEMENT_TIMEOUT_MS})
+     * @param selectiveGateMax the lexical arms' gate-match cutoff, {@link #SELECTIVE_GATE_MAX} in production: at or below
+     *                       it an arm ranks the gated rows exactly, above it HNSW-first (a test pins a small one)
+     * @param sharedLexicalProbe run the lexical arms' text-gate probe once for all collections instead of once per
+     *                       arm (nexus-bbtc2, {@link #SHARED_LEXICAL_PROBE_ENV}); the rows are the same either way
+     * @param probeWorkers   {@code max_parallel_workers_per_gather} for the shared probe's statement
+     *                       ({@link LexicalGateProbe#PROBE_WORKERS_ENV}); {@code 0} is serial
      */
-    public record FanoutSettings(int parallelism, long fanoutBudgetMs, int searchBoundMs) {}
+    public record FanoutSettings(int parallelism, long fanoutBudgetMs, int searchBoundMs, int selectiveGateMax,
+                                 boolean sharedLexicalProbe, int probeWorkers) {
+        /** The production settings for a lexical leg: the cutoff of {@link #SELECTIVE_GATE_MAX}, the shared probe by env. */
+        public FanoutSettings(int parallelism, long fanoutBudgetMs, int searchBoundMs) {
+            this(parallelism, fanoutBudgetMs, searchBoundMs, SELECTIVE_GATE_MAX,
+                 sharedLexicalProbeEnabled(System.getenv(SHARED_LEXICAL_PROBE_ENV)));
+        }
+
+        /** As above with the cutoff and the sharing explicit; the probe's workers come from the environment. */
+        public FanoutSettings(int parallelism, long fanoutBudgetMs, int searchBoundMs, int selectiveGateMax,
+                              boolean sharedLexicalProbe) {
+            this(parallelism, fanoutBudgetMs, searchBoundMs, selectiveGateMax, sharedLexicalProbe,
+                 LexicalGateProbe.probeWorkers(System.getenv(LexicalGateProbe.PROBE_WORKERS_ENV)));
+        }
+    }
+
+    /**
+     * Environment switch for {@link FanoutSettings#sharedLexicalProbe} (nexus-bbtc2): {@code 0}, {@code off} or
+     * {@code false} makes every lexical arm run its own text-gate probe, as before the shared probe existed. Anything
+     * else, unset included, shares it.
+     */
+    public static final String SHARED_LEXICAL_PROBE_ENV = "NX_SEARCH_ROUTE_SHARED_PROBE";
+
+    public static boolean sharedLexicalProbeEnabled(String raw) {
+        if (raw == null) {
+            return true;
+        }
+        String v = raw.strip().toLowerCase(java.util.Locale.ROOT);
+        return !(v.equals("0") || v.equals("off") || v.equals("false"));
+    }
 
     /** As above with an explicit {@code parallelism} (clamped to {@code [1, pool size]}); a test seam. */
     public PerCollectionResult searchPerCollection(String tenant, String queryText,
@@ -3108,7 +3150,15 @@ public final class PgVectorRepository {
 
         // nexus-xd2rc: with the lexical leg every runnable collection is two tasks, its vector arm and its
         // lexical arm, drawn from one queue through the same workers and the same arm gate.
-        List<ArmTask> tasks = new ArrayList<>(lexical ? runnable.size() * 2 : runnable.size());
+        // nexus-bbtc2: the lexical arms' text-gate probe runs ONCE for every runnable collection, as the queue's first task
+        // (so it overlaps the vector arms), and each lexical arm ranks from its answer. A single collection gains nothing
+        // from it, and a chash_allow request has no probe at all.
+        final boolean shareProbe = lexical && chashAllow == null && settings.sharedLexicalProbe() && runnable.size() >= 2;
+        final SharedLexicalProbe share = shareProbe ? new SharedLexicalProbe() : null;
+        List<ArmTask> tasks = new ArrayList<>(lexical ? runnable.size() * 2 + 1 : runnable.size());
+        if (shareProbe) {
+            tasks.add(ArmTask.sharedProbe());
+        }
         for (int i : runnable) {
             tasks.add(new ArmTask(i, false));
         }
@@ -3140,6 +3190,13 @@ public final class PgVectorRepository {
                                 return;
                             }
                             ArmTask task = tasks.get(slot);
+                            if (task.probe()) {
+                                LexicalGateProbe.runShared(tenantScope, share, tenant, model, dims[runnable.get(0)], gateText,
+                                    runnable.stream().map(cols::get).toArray(String[]::new), wherePlan,
+                                    settings.selectiveGateMax(), settings.probeWorkers(), requestDeadlineNanos,
+                                    fanoutDeadlineNanos, searchBoundMs, armGate);
+                                continue;
+                            }
                             int i = task.slot();
                             String col = cols.get(i);
                             ArmRun run = new ArmRun();
@@ -3148,7 +3205,8 @@ public final class PgVectorRepository {
                                 try {
                                     lexicalLeg.accept(i, runLexicalArm(tenant, model, col, dims[i], queryVec,
                                         gateText, wherePlan, perCollectionK, requestDeadlineNanos,
-                                        fanoutDeadlineNanos, searchBoundMs, armGate, run, chashAllow));
+                                        fanoutDeadlineNanos, searchBoundMs, armGate, run, chashAllow,
+                                        settings.selectiveGateMax(), share));
                                 } catch (Throwable t) {
                                     settleArmFailure(t, col, run, fanoutBudgetMs,
                                                      (kind, text) -> lexicalLeg.error(i, kind, text), failure);
@@ -3296,10 +3354,16 @@ public final class PgVectorRepository {
                 slowestLexicalMs = Math.max(slowestLexicalMs, ms);
                 sumLexicalMs += ms;
             }
+            // slowest_arm_ms and sum_arm_ms are each lexical arm's whole time, so they include its wait for the shared
+            // probe's answer (an arm that waited 3 s for it shows 3 s here, however fast its own rank was).
+            // shared_probe is off (not shared), not_started (shared, but the probe task never ran), per_collection or
+            // fallback; shared_dense is the number of collections the probe found dense (HNSW-first).
             log.info("event=search_per_collection_lexical arms={} lexical_rows={} extra_rows={} errors={} "
-                     + "slowest_arm_ms={} sum_arm_ms={}",
+                     + "slowest_arm_ms={} sum_arm_ms={} shared_probe={} shared_probe_ms={} shared_dense={}",
                      runnable.size(), lexicalStats.stream().mapToInt(LexicalStat::count).sum(), lexicalRows.size(),
-                     lexicalStats.stream().filter(s -> s.error() != null).count(), slowestLexicalMs, sumLexicalMs);
+                     lexicalStats.stream().filter(s -> s.error() != null).count(), slowestLexicalMs, sumLexicalMs,
+                     share == null ? "off" : share.label(),
+                     share == null ? 0L : share.probeMillis(), share == null ? 0 : share.denseCount());
         }
         return new PerCollectionResult(rows, stats, embed.tokens(), skipped, merger.peakRetained(),
                                        includeEmbeddings ? queryDim : 0, lexicalRows, lexicalStats,
@@ -3485,8 +3549,22 @@ public final class PgVectorRepository {
     private List<Candidate> runLexicalArm(String tenant, String model, String collection, int dim, Vector queryVec,
                                           String gateText, WherePlan wherePlan, int k, long requestDeadlineNanos,
                                           long fanoutDeadlineNanos, int searchBoundMs, Semaphore armGate,
-                                          ArmRun run, byte[][] chashAllow) {
+                                          ArmRun run, byte[][] chashAllow, int selectiveGateMax,
+                                          SharedLexicalProbe share) {
         String[] colls = new String[] {collection};
+        // nexus-bbtc2: what the request's shared probe says this collection's arm does. It waits, holding no arm slot
+        // and no connection, for at most the nearer budget; no answer in time means the arm's own probe, which then
+        // meets the same budget itself.
+        SharedLexicalProbe.ArmPlan plan = new SharedLexicalProbe.OwnProbe();
+        if (share != null) {
+            long waitUntil = requestDeadlineNanos == RequestDeadlineProbe.NONE
+                ? fanoutDeadlineNanos : Math.min(fanoutDeadlineNanos, requestDeadlineNanos);
+            plan = share.planFor(share.await(waitUntil), collection);
+        }
+        if (plan instanceof SharedLexicalProbe.RankChashes none && none.chashes().length == 0) {
+            // The gate admitted no row of this collection: its own probe would return none and rank an empty set.
+            return List.of();
+        }
         acquireArmSlot(armGate, requestDeadlineNanos, fanoutDeadlineNanos);
         try {
             // The gate probe, the rank and an exact re-run are separate statements; each is bounded by
@@ -3497,9 +3575,10 @@ public final class PgVectorRepository {
                 run.boundMs = b.timeoutMs();
                 return b.timeoutMs();
             };
+            final SharedLexicalProbe.ArmPlan armPlan = plan;
             return plainSearchCandidates(tenantScope.withTenant(tenant, ctx ->
-                hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, SELECTIVE_GATE_MAX, model, tenant,
-                           bound, true, chashAllow)));
+                hybridRank(ctx, dim, queryVec, gateText, colls, wherePlan, k, selectiveGateMax, model, tenant,
+                           bound, true, chashAllow, armPlan)));
         } finally {
             armGate.release();
         }
@@ -3509,7 +3588,7 @@ public final class PgVectorRepository {
      * Take one arm slot, waiting at most until the nearer of the fan-out and request budgets. On
      * timeout the request budget wins (whole-request deadline), else the fan-out budget (isolated).
      */
-    private static void acquireArmSlot(Semaphore armGate, long requestDeadlineNanos, long fanoutDeadlineNanos) {
+    static void acquireArmSlot(Semaphore armGate, long requestDeadlineNanos, long fanoutDeadlineNanos) {
         long now = System.nanoTime();
         long waitNanos = fanoutDeadlineNanos - now;
         boolean requestIsNearer = false;
@@ -3971,7 +4050,7 @@ public final class PgVectorRepository {
 
         Result<? extends Record> result = tenantScope.withTenant(tenant, ctx ->
             hybridRank(ctx, dim, queryVec, gateQueryText, colls, wherePlan, nResults, selectiveGateMax,
-                       model, tenant, PgSession::startupSearchStatementTimeoutMs, false, chashAllow));
+                       model, tenant, PgSession::startupSearchStatementTimeoutMs, false, chashAllow, null));
         if (ringOut != null) {
             // nexus-4lnn1.1.7: the recall canary's query ring, by the rule /search follows. The rows are the text-gated
             // ones, so on a fan-out the nearest gated row names the arm.
@@ -4003,11 +4082,12 @@ public final class PgVectorRepository {
                                                 String[] colls, WherePlan wherePlan, int nResults,
                                                 int selectiveGateMax, String model, String tenant,
                                                 java.util.function.IntSupplier statementTimeoutMs,
-                                                boolean rebind, byte[][] chashAllow) {
+                                                boolean rebind, byte[][] chashAllow,
+                                                SharedLexicalProbe.ArmPlan shared) {
         // nexus-bbtc2: a one-token gate text is matched by substring, so the token itself is the pattern; surrounding
         // whitespace would only make the pattern miss.
         final String trgmMode = lexicalTrgmMode(rawGateText);
-        final String gateQueryText = LEXICAL_TRGM_SUBSTRING.equals(trgmMode) ? rawGateText.strip() : rawGateText;
+        final String gateQueryText = LexicalGateProbe.gateQueryText(rawGateText, trgmMode);
         // nexus-g17tf: bound EVERY statement in this transaction -- the gate probe (a
         // <% trigram heap-recheck), the selective rank, and the HNSW-first rank all
         // inherit it. Set here, before the first fetch, rather than per branch: a
@@ -4020,20 +4100,8 @@ public final class PgVectorRepository {
         // byte-equivalent to the retired Java dispatch (see vectors-011's own header
         // for the derivation from git history). Probe cap and comparison are
         // unchanged: LIMIT selectiveGateMax + 1, dispatch on matches <= selectiveGateMax.
-        final int probeCap = selectiveGateMax + 1;
-        // Trigram gate calibration (contract anchor): word_similarity >= 0.6, pg_trgm's
-        // default - typo-probe candidates sit at ~0.9 and pass, no-signal rows at ~0.1
-        // do not. Pinned per-transaction so the gate is independent of cluster config --
-        // every schema function below is LANGUAGE sql and cannot SET LOCAL its own GUC.
-        PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
-        // nexus-seo4k / nexus-bbtc2: which form of the trigram half every gated statement below uses: 'off' (more than
-        // LEXICAL_TRGM_MAX_WORDS words) drops it, 'substring' (one token) replaces it with a substring match, 'on' keeps
-        // word_similarity. The probe (vectors-058-1) reads all three; the row-gating functions (vectors-058-2: the
-        // chash_allow rank, the manifest paths, HNSW-first) read 'substring' only. They run in the chash_allow branch
-        // too, so it is set before that branch, and set either way so
-        // a second hybridRank in one transaction never inherits the first one's value (transaction-local: a pooled
-        // connection never carries it further).
-        PgSession.setLocal(ctx, LEXICAL_TRGM_GUC, trgmMode);
+        final int probeCap = LexicalGateProbe.probeCap(selectiveGateMax);
+        LexicalGateProbe.setGateGucs(ctx, trgmMode);
         // nexus-6nkn3: a custom plan per execution so the planner sees the
         // collection set's selectivity (a cached generic HNSW plan on a tiny
         // collection ran ~30s and returned EMPTY in production).
@@ -4074,30 +4142,38 @@ public final class PgVectorRepository {
         // for the selective case, supplies the exact chash set the rank query below
         // reuses via a cheap chash = ANY(...) PK filter, never re-running the
         // expensive `<%` trigram gate a second time.
-        org.jooq.Table<?> probeFn = switch (dim) {
-            case 384  -> TEXT_GATE_PROBE_384.call(
-                gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
-            case 768  -> TEXT_GATE_PROBE_768.call(
-                gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
-            case 1024 -> TEXT_GATE_PROBE_1024.call(
-                gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), probeCap, model, tenant);
-            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
-        };
-        Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
-        int matches = probeResult.size();
-        if (rebind) {
-            PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
+        // nexus-bbtc2: a fan-out lexical arm whose collection the request's shared probe already answered for
+        // (SharedLexicalProbe) skips its own probe: the shared answer is the chash set this probe would have
+        // returned for colls, or that the collection is dense. Either way the rank below is the one this probe's
+        // result would have chosen, so the arm's rows are the same. No probe ran, so the bound set above is current.
+        final byte[][] chashes;
+        if (shared instanceof SharedLexicalProbe.RankChashes ranked) {
+            chashes = ranked.chashes();
+        } else if (shared instanceof SharedLexicalProbe.RankDense) {
+            chashes = null;
+        } else {
+            org.jooq.Table<?> probeFn = LexicalGateProbe.textGateProbeFn(dim, gateQueryText, colls, wherePlan, probeCap, model, tenant);
+            Result<? extends Record> probeResult = ctx.selectFrom(probeFn).fetch();
+            int matches = probeResult.size();
+            if (rebind) {
+                PgSession.setSearchStatementTimeout(ctx, statementTimeoutMs.getAsInt());
+            }
+            if (matches <= selectiveGateMax) {
+                byte[][] probed = new byte[matches][];
+                for (int i = 0; i < matches; i++) {
+                    probed[i] = probeResult.get(i).get(0, byte[].class);
+                }
+                chashes = probed;
+            } else {
+                chashes = null;
+            }
         }
 
-        if (matches <= selectiveGateMax) {
+        if (chashes != null) {
             // Selective: rank ONLY the probe's own chash set + scope, no text-gate
             // re-evaluation -- text_gated_search_by_chash_<dim> (vectors-011).
             // matches == 0 needs no special empty-gate case: chash = ANY('{}') is
             // false for every row, so the rank query naturally returns zero rows.
-            byte[][] chashes = new byte[probeResult.size()][];
-            for (int i = 0; i < probeResult.size(); i++) {
-                chashes[i] = probeResult.get(i).get(0, byte[].class);
-            }
             // nexus-p89h4, nexus-f3yqd.8: the candidate set is already materialised (at most selectiveGateMax
             // chashes), so the rank is made exact outright, with or without a manifest predicate. Left to the
             // planner, a table whose statistics say the chash set is a large share of the leaf takes the leaf's
@@ -8748,11 +8824,12 @@ FROM scope s
                 // nexus-8ptg4: ask the manifest, bounded, whether the page already holds every chunk the predicate
                 // admits. The count runs BEFORE index scans are turned off, so it reads the manifest by its keys.
                 counting = true;
-                if (rebindTimeoutMs != null) {
-                    PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
-                }
-                int hits = qualifyingHits(ctx, qualifyingUpTo, first.size() + 1, taken[0], rebindTimeoutMs != null,
+                // nexus-h7kw2: the count has its own budget; one it spends answers "unknown" and the page re-runs.
+                ShortPageCountBudget.Bound bound = ShortPageCountBudget.apply(ctx, rebindTimeoutMs);
+                int hits = qualifyingHits(ctx, ShortPageCountBudget.watch(bound, qualifyingUpTo, tenant, collection),
+                                          first.size() + 1, taken[0], rebindTimeoutMs != null && !bound.budgetBinds(),
                                           tenant, collection);
+                ShortPageCountBudget.restore(ctx, bound);
                 if (hits <= first.size()) {
                     SHORT_PAGE_SKIPS.incrementAndGet();
                     log.info("event=vector_short_page_complete tenant={} collection={} page_rows={} qualifying={} n_results={}",
@@ -8819,10 +8896,10 @@ FROM scope s
         java.sql.Savepoint[] taken = new java.sql.Savepoint[1];
         ctx.connection(conn -> taken[0] = conn.setSavepoint());
         try {
-            if (rebindTimeoutMs != null) {
-                PgSession.setLocal(ctx, "statement_timeout", Integer.toString(rebindTimeoutMs.getAsInt()));
-            }
-            int hits = qualifyingHits(ctx, qualifyingUpTo, 1, taken[0], rebindTimeoutMs != null, tenant, collection);
+            ShortPageCountBudget.Bound bound = ShortPageCountBudget.apply(ctx, rebindTimeoutMs);
+            int hits = qualifyingHits(ctx, ShortPageCountBudget.watch(bound, qualifyingUpTo, tenant, collection), 1,
+                                      taken[0], rebindTimeoutMs != null && !bound.budgetBinds(), tenant, collection);
+            ShortPageCountBudget.restore(ctx, bound);
             if (hits == 0) {
                 SHORT_PAGE_SKIPS.incrementAndGet();
                 log.info("event=vector_short_page_complete tenant={} collection={} page_rows=0 qualifying=0 n_results={}",

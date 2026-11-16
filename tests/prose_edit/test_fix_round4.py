@@ -35,7 +35,7 @@ from tests.prose_edit.test_acceptance_tools import (
     _verdict,
     _verdicts,
 )
-from tests.prose_edit.test_brief import NAMES_A_REPAIR, SKILL, brief_ok, run_brief, seed
+from tests.prose_edit.test_brief import NAMES_A_REPAIR, SKILL, skill_text, brief_ok, run_brief, seed
 from tests.prose_edit.test_fix_round1 import _step
 from tests.prose_edit.test_fix_round3 import ESSAY, PLAIN_ENGLISH_RULE, STALE_OPEN, _sheet_of, _treat
 from tests.prose_edit.test_teach_acceptance import (
@@ -55,7 +55,7 @@ from tests.prose_edit.test_teach_acceptance import (
     _write,
 )
 
-SKILL_TEXT = SKILL.read_text(encoding="utf-8")
+SKILL_TEXT = skill_text()
 MEMORY_PY = ROOT / "prose-edit" / "skills" / "prose-edit" / "scripts" / "memory.py"
 PREFIXES = {
     "BRIEF": "python3 ${CLAUDE_PLUGIN_ROOT}/skills/prose-edit/scripts/brief.py",

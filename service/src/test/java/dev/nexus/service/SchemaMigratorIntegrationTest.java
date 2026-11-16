@@ -90,7 +90,8 @@ class SchemaMigratorIntegrationTest {
         "memory_summaries",
         "plans",
         "relevance_log", "search_telemetry", "tier_writes", "nx_answer_runs",
-        "hook_failures", "frecency",
+        "hook_failures",
+        // ("frecency" left the end-state -- nexus-6pfgb.42, telemetry-019-1 DROP)
         "topics", "taxonomy_meta", "topic_assignments", "topic_links",
         "document_aspects", "document_highlights",
         // ("aspect_extraction_queue" left the end-state -- nexus-hbnml, aspects-005-2 DROP)

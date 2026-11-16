@@ -117,7 +117,7 @@ class ManifestInsertGateTest {
      *   grep -rnoE '\.update\(\s*CATALOG_DOCUMENT_CHUNKS' src/main/java
      *   grep -rniE 'update[[:space:]]+(nexus\.)?catalog_document_chunks' src/main/java
      * </pre>
-     * Result: exactly THREE sites, all three confirmed (by reading, this
+     * Result at that date: exactly THREE sites, all three confirmed (by reading, this
      * session) to call {@code acquireSweepGateShared} before their UPDATE:
      * <ul>
      *   <li>{@code CatalogRepository.renameCollectionTxn} — bulk re-homes
@@ -142,7 +142,12 @@ class ManifestInsertGateTest {
         // nexus-f3yqd (R2): the manifest fill job's two UPDATEs write section labels and span columns of existing rows;
         // they re-point and re-home nothing. Their caller, ManifestFill.apply, takes the shared gate for every collection
         // of the batch's key range before either runs (ManifestFillConcurrencyTest holds it exclusive and shows the batch wait).
-        "ManifestFill.java", Set.of("applyLabels", "applySpans"));
+        "ManifestFill.java", Set.of("applyLabels", "applySpans"),
+        // nexus-z0o2p.29: the manifest replace writes the difference, and its one UPDATE rewrites the payload columns
+        // of a position the document already holds. It re-points no row to another document. Its only caller is
+        // CatalogRepository.writeManifestRows, which has taken the shared sweep gate for the collection (and the
+        // index-run lock) before it runs; it takes the caller's DSLContext and takes no gate of its own.
+        "ManifestReplace.java", Set.of("update"));
 
     @Test
     void exactlyOneInsertIntoCatalogDocumentChunksSite() throws IOException {

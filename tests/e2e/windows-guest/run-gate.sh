@@ -7,10 +7,14 @@
 # (executed=N declared=N)" with N equal, N above zero, and the gate's own line
 # "gate script sha256 <sha> (...; the setup phase ran the same file)" in the same
 # verdict.txt carries the sha256 of the gate script this run staged; every other
-# outcome exits non-zero.
+# outcome exits non-zero. The one exception is --build-signed-in, which runs no
+# gate: it exits 0 only after its checkpoint is taken, the guest's CheckpointType
+# is back as found and the end step finished clean, prints its own line ("SIGNED-IN
+# CHECKPOINT BUILT (no gate was run; this is not a gate verdict)") and never a
+# verdict line.
 #
 #   tests/e2e/windows-guest/run-gate.sh --version X.Y.Z --engine A.B.C \
-#       [--wheel PATH] [--out DIR] [--keep-guest] [--cache on|off] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]
+#       [--wheel PATH] [--out DIR] [--keep-guest] [--cache on|off] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow] [--build-signed-in NAME | --signed-in NAME]]
 #
 # --version and --engine are the gate's ExpectedVersion and ExpectedEngine; there
 # is no default for either. --wheel installs that candidate wheel instead of
@@ -22,7 +26,7 @@
 # --standard-user runs the install, the setup phase, the Claude Code session and
 # the verify phase as a local account that is a member of Users only
 # (NX_GUEST_STD_USER, default nxstd), which the stduser step creates after the
-# restore and the next restore erases. The administrator account ($GUSER) then
+# restore and the next restore of the baseline erases (a --signed-in run resumes it). The administrator account ($GUSER) then
 # only orchestrates, and installs Git for all users first, because winget's Git
 # package needs elevation: the run is a standard user on a machine that already
 # has Git. driver/stduser.ps1 lists everything the administrator does.
@@ -82,6 +86,60 @@
 # cache (2026-10-15), 1.30 GB with it before the models were cached (2026-10-16,
 # at the host's Default Switch). --cache off downloads everything
 # and leaves Windows Update alone, for a run whose subject is the download path.
+# --build-signed-in NAME (nexus-y3y8d; needs --standard-user) builds, and does not
+# run the gate: the first sign-in of the standard user costs about 300 MiB of
+# network a run, so one running (Standard, memory-state) checkpoint of the guest
+# after that sign-in is taken once, and --signed-in resumes from it. The run is the
+# usual hostcheck, restore (to the baseline checkpoint, as always) and stduser
+# steps; then step 01k checkpoint waits a settle period (NX_GUEST_SETTLE_S seconds,
+# default 600; the host's Default Switch byte counter is printed once a minute, for
+# the record only) and takes the checkpoint NAME as a child of the baseline, and the
+# run goes straight to the end step (the guest is shut down, the staged files
+# removed): no install, setup, gate, launch, verdict or harvest, and no verdict line.
+# NAME must match stduser-signed-in-<8 digits>. The checkpoint holds the default
+# standard-user state only, so the flag refuses --applocker*, --wdac*, --no-admin-git,
+# --wheel and --cache off (the quiet block the checkpoint carries is applied only
+# with the cache on).
+# Sam's exception (2026-11-13) is ONE running child checkpoint of the gate guest,
+# and the code holds to exactly that, here and without this wrapper in hostcheck.ps1,
+# checkpoint.ps1 and restore.ps1: --build-signed-in is refused unless the VM is
+# nx-clean-win11 and the baseline checkpoint is clean-baseline-2026-10-06; it is
+# refused, before anything is restored, when ANY checkpoint whose name matches
+# ^stduser-signed-in- exists already (one checkpoint only: a rebuild needs Sam to
+# delete the old one by hand, and the refusal says so); NX_GUEST_CHECKPOINT matching
+# ^stduser-signed-in- is refused in every mode, and only --signed-in names such a
+# checkpoint. No script removes, renames or replaces a checkpoint: the baseline is
+# never removed, renamed or replaced.
+# Account secret: the stduser step writes the account secret to Winlogon for its one restart and removes it before the checkpoint,
+# and the build fails unless that step printed "winlogon secret removed=True"; no
+# script keeps it after that. The checkpoint's
+# MEMORY IMAGE (the .vmrs) does hold the signed-in session, with whatever the
+# session keeps in memory, and the build's CheckpointType change is undone on every
+# exit path: checkpoint.ps1 writes the type it found to a file in the run directory
+# first, and end.ps1, which runs on every exit, puts it back from that file.
+# --signed-in NAME (needs --standard-user; the same refusals) runs the gate from that
+# checkpoint instead of the baseline's: hostcheck additionally refuses unless the guest
+# has a checkpoint NAME whose parent is the baseline checkpoint (and prints its type,
+# which is a reading and not a test: the baseline is also Standard); restore restores NAME and
+# resumes the guest (restore.ps1 -Resume yes: the guest must be Saved after the restore,
+# which is the real test of a running checkpoint; there is no offline boot, and the quiet
+# block and the network wait run as always, with one `ipconfig /renew` in the guest when
+# the network has not answered by the third try, and the guest's clock checked against
+# the host's and resynced once); and the stduser step runs with -Existing yes: it creates
+# no account, sets no policy, installs no Git, stores no secret and does not restart, but
+# checks that the account exists, is a member of Users only, is signed in at the console
+# with its desktop shell running, that the quiet-guest policy reads back, that Git is
+# installed for all users and that Winlogon holds no secret, then stages the gate script
+# in the account's profile. Every later step is as in a plain --standard-user run.
+# Only this path may use that checkpoint; every other path restores the baseline.
+#
+# A --signed-in RUN IS A DIFFERENT CLAIM from a run restored to clean-baseline-2026-10-06.
+# It does not exercise the standard user's first sign-in (the account, its profile and its
+# first-logon work are already in the checkpoint) and it does not exercise the boot after a
+# restore (the guest resumes from saved memory instead of booting; the offline boot and the
+# fresh network start are skipped). A gate record that cites clean-baseline-2026-10-06 as
+# its starting state must not cite a --signed-in run; cite the checkpoint name and this
+# limit. The run says so itself, at its start and in its summary.
 #
 # What it does, in order (driver/ holds the host-side scripts, each staged under
 # a per-run directory C:/build/guest/nxg-<UTC time>-<pid>/, so two runs cannot
@@ -97,6 +155,9 @@
 #                collects from it and powers it off at the end) only when that
 #                line is in the step's output.
 #   1s stduser   (--standard-user only) driver/stduser.ps1
+#   1k checkpoint (--build-signed-in only) driver/checkpoint.ps1: settle, then take the
+#                running checkpoint NAME; the run then skips to the end step (no gate
+#                verdict, no collection)
 #   1c seed      (--cache on) driver/cache.ps1 -Mode seed
 #   2 install    uv, conexus, Claude Code, Git, the plugin
 #   3 setup      the gate's setup phase, a one-shot Interactive scheduled task
@@ -118,7 +179,8 @@
 # Environment overrides (the names launch.sh reads, plus the checkpoint):
 #   NX_GUEST_HOST, NX_GUEST_VM, NX_GUEST_USER, NX_GUEST_KEYCHAIN_SERVICE,
 #   NX_GUEST_CHECKPOINT. NX_GUEST_TIMEOUT_<STEP> (seconds) changes a step's bound;
-#   see "Bounds" below.
+#   see "Bounds" below. NX_GUEST_SETTLE_S (seconds, default 600, leading zeros read as decimal)
+#   is --build-signed-in's settle period.
 #
 # Result channel: the remote login shell is PowerShell, so a non-zero exit of a
 # host script reaches this side as 1 whatever it was. Only zero versus non-zero
@@ -159,7 +221,7 @@ gate="$repo/tests/e2e/windows-phase5-gate.ps1"
 driver="$here/driver"
 
 usage() {
-    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--cache on|off] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow]]" >&2
+    echo "usage: run-gate.sh --version X.Y.Z --engine A.B.C [--wheel PATH] [--out DIR] [--keep-guest] [--cache on|off] [--standard-user [--no-admin-git] [--applocker | --applocker-audit | --applocker-allow | --applocker-allow-dll-audit | --applocker-allow-dll | --wdac-audit | --wdac-allow] [--build-signed-in NAME | --signed-in NAME]]" >&2
 }
 die() {
     local code="$1"; shift
@@ -177,6 +239,8 @@ admin_git=yes
 applocker=no
 wdac=no
 cache=on
+signed_in_build=''
+signed_in=''
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) [[ $# -ge 2 ]] || { usage; exit 2; }; version="$2"; shift 2 ;;
@@ -194,6 +258,8 @@ while [[ $# -gt 0 ]]; do
         --applocker-allow-dll) applocker=allow-dll; shift ;;
         --wdac-audit) wdac=audit; shift ;;
         --wdac-allow) wdac=allow; shift ;;
+        --build-signed-in) [[ $# -ge 2 ]] || { usage; exit 2; }; signed_in_build="$2"; shift 2 ;;
+        --signed-in) [[ $# -ge 2 ]] || { usage; exit 2; }; signed_in="$2"; shift 2 ;;
         *) usage; exit 2 ;;
     esac
 done
@@ -209,6 +275,28 @@ done
 [[ "$applocker" == no || $standard_user -eq 1 ]] || { usage; die 2 "the --applocker modes need --standard-user"; }
 [[ "$wdac" == no || ( $standard_user -eq 1 && "$admin_git" == no ) ]] || { usage; die 2 "the --wdac modes need --standard-user --no-admin-git"; }
 [[ "$wdac" == no || "$applocker" == no ]] || { usage; die 2 "a --wdac mode and an --applocker mode are separate runs"; }
+# nexus-y3y8d: the checkpoint after the standard user's first sign-in. Both flags hold the default
+# standard-user state only. NX_GUEST_CHECKPOINT never names a signed-in checkpoint, in any mode: only
+# --signed-in names one, and it names it itself.
+[[ ! "$CHECKPOINT" =~ ^stduser-signed-in- ]] || die 2 "NX_GUEST_CHECKPOINT must not be a stduser-signed-in-* checkpoint: only --signed-in NAME names one"
+SETTLE_S="${NX_GUEST_SETTLE_S:-600}"
+[[ "$SETTLE_S" =~ ^[0-9]+$ ]] || die 2 "NX_GUEST_SETTLE_S must be a number of seconds"
+SETTLE_S=$((10#$SETTLE_S))
+[[ -z "$signed_in_build" || -z "$signed_in" ]] || { usage; die 2 "--build-signed-in and --signed-in are separate runs"; }
+signed_in_name="${signed_in_build:-$signed_in}"
+if [[ -n "$signed_in_name" ]]; then
+    [[ "$signed_in_name" =~ ^stduser-signed-in-[0-9]{8}$ ]] || { usage; die 2 "the checkpoint name must match stduser-signed-in-<8 digits>"; }
+    [[ $standard_user -eq 1 ]] || { usage; die 2 "--build-signed-in and --signed-in need --standard-user"; }
+    [[ "$applocker" == no && "$wdac" == no ]] || { usage; die 2 "--build-signed-in and --signed-in hold the default standard-user state: no --applocker* or --wdac* mode"; }
+    [[ "$admin_git" == yes ]] || { usage; die 2 "--build-signed-in and --signed-in hold Git for all users: no --no-admin-git"; }
+    [[ -z "$wheel" ]] || { usage; die 2 "--build-signed-in and --signed-in take no --wheel"; }
+    [[ "$cache" == on ]] || { usage; die 2 "--build-signed-in and --signed-in need --cache on (the default): the checkpoint carries the cache-on quiet block, and a resumed run would not be a cache-off run"; }
+fi
+# Sam's exception (2026-11-13): ONE running child checkpoint of nx-clean-win11's baseline, nothing else.
+if [[ -n "$signed_in_build" ]]; then
+    [[ "$VM" == nx-clean-win11 ]] || die 2 "--build-signed-in is allowed only for the VM nx-clean-win11 (NX_GUEST_VM is $VM)"
+    [[ "$CHECKPOINT" == clean-baseline-2026-10-06 ]] || die 2 "--build-signed-in is allowed only as a child of the baseline checkpoint clean-baseline-2026-10-06 (NX_GUEST_CHECKPOINT is $CHECKPOINT)"
+fi
 install_doc="$repo/docs/windows-install.md"
 [[ "$STD_USER" != "$GUSER" ]] || die 2 "NX_GUEST_STD_USER must not be the administrator account"
 [[ -f "$gate" ]] || die 2 "no gate script at $gate"
@@ -279,6 +367,7 @@ bound() {
 bound NX_GUEST_TIMEOUT_HOSTCHECK 300 T_HOSTCHECK
 bound NX_GUEST_TIMEOUT_RESTORE 900 T_RESTORE
 bound NX_GUEST_TIMEOUT_STDUSER 1200 T_STDUSER
+bound NX_GUEST_TIMEOUT_CHECKPOINT $((SETTLE_S + 900)) T_CHECKPOINT
 bound NX_GUEST_TIMEOUT_INSTALL 1800 T_INSTALL
 bound NX_GUEST_TIMEOUT_CACHE 900 T_CACHE
 bound NX_GUEST_TIMEOUT_SETUP 1800 T_SETUP
@@ -461,6 +550,15 @@ if [[ "$applocker" == allow-dll ]]; then git_note="$git_note; AppLocker default 
 if [[ "$wdac" == audit ]]; then git_note="$git_note; WDAC DefaultWindows policy in audit mode (nothing is blocked)"; fi
 if [[ "$wdac" == allow ]]; then git_note="$git_note; WDAC DefaultWindows policy enforced, with path rules for this install's folders; script enforcement off"; fi
 if [[ $standard_user -eq 1 ]]; then say "standard user $STD_USER (not an administrator); $git_note"; fi
+# What a resumed run no longer proves (nexus-y3y8d), said at the start and again in the summary.
+signed_in_limit=''
+if [[ -n "$signed_in" ]]; then
+    signed_in_limit="resumed from checkpoint $signed_in, not restored to $CHECKPOINT: this run does not exercise $STD_USER's first sign-in or the boot after a restore, so it is a different claim from a run restored to the baseline and must not be cited as one"
+    say "$signed_in_limit"
+fi
+if [[ -n "$signed_in_build" ]]; then
+    say "building the one running checkpoint $signed_in_build as a child of $CHECKPOINT on $VM: its memory image holds $STD_USER's signed-in session; the account secret is removed from Winlogon before the checkpoint; no gate is run"
+fi
 say "engine $engine, gate script sha256 $gate_sha, run $RUN, logs in $out"
 
 # --- stage ------------------------------------------------------------------
@@ -482,21 +580,41 @@ fi
 [[ ${PIPESTATUS[0]} -eq 0 ]] || die 1 "cannot copy the gate script to $HOST:$HOST_DIR/stage"
 
 # --- run --------------------------------------------------------------------
-run_step 00 hostcheck "$T_HOSTCHECK" 1 host_ps hostcheck.ps1 -VMName "$VM" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR"
+# --signed-in: the guest resumes from the signed-in checkpoint (hostcheck has checked it), --build-signed-in and every
+# other run restore the baseline checkpoint.
+hostcheck_extra=''
+restore_checkpoint="$CHECKPOINT"
+restore_resume=''
+if [[ -n "$signed_in" ]]; then
+    hostcheck_extra="-SignedIn $signed_in"
+    restore_checkpoint="$signed_in"
+    restore_resume='-Resume yes'
+fi
+if [[ -n "$signed_in_build" ]]; then
+    hostcheck_extra="-NewCheckpoint $signed_in_build"
+    # The build runs no gate and collects nothing: the on-exit collection (which opens the guest with the
+    # keychain secret) has nothing to fetch, whatever step the run stops at.
+    collected=1
+fi
+# shellcheck disable=SC2086
+run_step 00 hostcheck "$T_HOSTCHECK" 1 host_ps hostcheck.ps1 -VMName "$VM" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" $hostcheck_extra
 
+# shellcheck disable=SC2086
 if [[ -n "$wheel_name" ]]; then
-    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" -Wheel "$wheel_name" -Cache "$restore_cache"
+    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$restore_checkpoint" -RunDir "$HOST_WIN_DIR" -Wheel "$wheel_name" -Cache "$restore_cache" $restore_resume
     grep -qF "wheel sha256=$wheel_sha" "$out/01-restore.txt" || die 1 "the wheel in the guest does not have sha256 $wheel_sha"
 else
-    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$CHECKPOINT" -RunDir "$HOST_WIN_DIR" -Cache "$restore_cache"
+    run_step 01 restore "$T_RESTORE" 1 host_ps_pw restore.ps1 -VMName "$VM" -GuestUser "$GUSER" -Checkpoint "$restore_checkpoint" -RunDir "$HOST_WIN_DIR" -Cache "$restore_cache" $restore_resume
 fi
 grep -qF "gate sha256=$gate_sha" "$out/01-restore.txt" || die 1 "the gate script in the guest does not have sha256 $gate_sha"
 
 if [[ $standard_user -eq 1 ]]; then
     wheel_arg=''
     if [[ -n "$wheel_name" ]]; then wheel_arg="-Wheel $wheel_name"; fi
+    existing_arg=''
+    if [[ -n "$signed_in" ]]; then existing_arg='-Existing yes'; fi
     # shellcheck disable=SC2086
-    run_step 01s stduser "$T_STDUSER" 1 host_ps_pw stduser.ps1 -VMName "$VM" -GuestUser "$GUSER" -StdUser "$STD_USER" -RunDir "$HOST_WIN_DIR" -AdminGit "$admin_git" -AppLocker "$applocker" -Wdac "$wdac" $wheel_arg
+    run_step 01s stduser "$T_STDUSER" 1 host_ps_pw stduser.ps1 -VMName "$VM" -GuestUser "$GUSER" -StdUser "$STD_USER" -RunDir "$HOST_WIN_DIR" -AdminGit "$admin_git" -AppLocker "$applocker" -Wdac "$wdac" $wheel_arg $existing_arg
     grep -qF "std gate sha256=$gate_sha" "$out/01s-stduser.txt" || die 1 "the gate script in $STD_USER's profile does not have sha256 $gate_sha"
     if [[ -n "$wheel_name" ]]; then
         grep -qF "std wheel sha256=$wheel_sha" "$out/01s-stduser.txt" || die 1 "the wheel in $STD_USER's profile does not have sha256 $wheel_sha"
@@ -504,6 +622,19 @@ if [[ $standard_user -eq 1 ]]; then
     # From here every step works in the standard user's profile, and the install runs as that account.
     home_user="$STD_USER"
     run_as="-RunAs $STD_USER"
+fi
+
+# --build-signed-in (nexus-y3y8d): take the one running checkpoint of the signed-in guest, then the normal end step. The
+# gate is not run, so there is no verdict and nothing to collect from the guest. The stduser step must have removed the
+# account secret from Winlogon before the guest's memory is saved.
+if [[ -n "$signed_in_build" ]]; then
+    grep -qF 'winlogon secret removed=True' "$out/01s-stduser.txt" || die 1 "the stduser step did not print 'winlogon secret removed=True'; no checkpoint is taken; log: $out/01s-stduser.txt"
+    # shellcheck disable=SC2153
+    run_step 01k checkpoint "$T_CHECKPOINT" 1 host_ps checkpoint.ps1 -VMName "$VM" -Baseline "$CHECKPOINT" -Name "$signed_in_build" -RunDir "$HOST_WIN_DIR" -SettleSeconds "$SETTLE_S"
+    finish
+    [[ -z "$end_warning" ]] || die 1 "the checkpoint $signed_in_build was taken, but the end step did not finish clean (the guest's CheckpointType may not be back as it was): $end_warning"
+    echo "run-gate.sh: SIGNED-IN CHECKPOINT BUILT (no gate was run; this is not a gate verdict): the running checkpoint $signed_in_build is a child of the baseline checkpoint $CHECKPOINT on $VM (settled $SETTLE_S s); its memory image holds $STD_USER's signed-in session and the account secret was removed from Winlogon before the checkpoint; the guest is shut down; logs in $out"
+    exit 0
 fi
 as_user="${run_as:+-AsUser yes}"
 
@@ -566,4 +697,5 @@ else
     echo "run-gate.sh: conexus==$version from PyPI; $cache_note; gate script sha256 $gate_sha; logs in $out"
 fi
 if [[ $standard_user -eq 1 ]]; then echo "run-gate.sh: run as standard user $STD_USER (not an administrator); $git_note"; fi
+if [[ -n "$signed_in_limit" ]]; then echo "run-gate.sh: NOTE $signed_in_limit"; fi
 exit "$rc"

@@ -18,10 +18,10 @@ from pathlib import Path
 import pytest
 
 from tests.prose_edit.conftest import ROOT, Prose, git
-from tests.prose_edit.test_brief import SKILL, _module, brief_ok, run_brief
+from tests.prose_edit.test_brief import skill_text, _module, brief_ok, run_brief
 
 README = ROOT / "prose-edit" / "README.md"
-SKILL_TEXT = SKILL.read_text(encoding="utf-8")
+SKILL_TEXT = skill_text()
 ALL_GENRES = (
     "rdr",
     "reference-doc",

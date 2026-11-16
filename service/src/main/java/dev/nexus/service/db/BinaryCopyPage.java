@@ -11,12 +11,12 @@ import java.util.List;
 
 /**
  * Collects one export page from a PostgreSQL binary {@code COPY ... TO STDOUT} stream and cuts it by bytes
- * (RDR-248, bead nexus-csayy.2). The stream is the driver's {@code CopyManager.copyOut} sink: this class
+ * (RDR-248, bead nexus-csayy.2). The stream is the sink of the page's COPY read: this class
  * walks the binary format as the bytes arrive, so it always knows where the last COMPLETE row ends, and
- * once that offset reaches {@code targetBytes} it throws {@link PageFull}, which makes the driver cancel
- * the copy. The page is then the header, every complete row so far, and a fresh trailer: a valid binary
- * COPY stream of its own, so a client can feed each page to {@code COPY ... FROM STDIN (FORMAT binary)}
- * as it is.
+ * once that offset reaches {@code targetBytes} it throws {@link PageFull}, which ends the read; the rest of
+ * the COPY is never read, and the read aborts its connection (nexus-csayy.9). The page is then the header,
+ * every complete row so far, and a fresh trailer: a valid binary COPY stream of its own, so a client can feed
+ * each page to {@code COPY ... FROM STDIN (FORMAT binary)} as it is.
  *
  * <p>Binary COPY format (PostgreSQL docs, COPY, "Binary Format"): an 11-byte signature, an int32 flags
  * word, an int32 header-extension length and that many bytes; then per row an int16 field count and per
@@ -28,7 +28,7 @@ import java.util.List;
  */
 final class BinaryCopyPage extends OutputStream {
 
-    /** The copy was cut at the byte target; thrown out of {@link #write} so the driver cancels the copy. */
+    /** The copy was cut at the byte target; thrown out of {@link #write} so the read stops reading the copy. */
     static final class PageFull extends IOException {
         PageFull() {
             super("export page reached its byte target", null);

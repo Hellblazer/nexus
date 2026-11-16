@@ -77,20 +77,20 @@ class TelemetryHandlerChunkIdValidationTest {
     }
 
     @Test
-    void frecencyUpsert_malformedChunkId_returns400() throws Exception {
-        CapturingExchange ex = post("/v1/telemetry/frecency/upsert",
-            "{\"chunk_id\":\"not-a-chash\"}");
-        handleWithTenant(ex);
-        assertThat(ex.status).as("non-canonical chunk_id must 400 at the handler").isEqualTo(400);
-        assertThat(ex.bodyString()).contains("chunk_id");
-    }
-
-    @Test
-    void frecencyUpsert_validChunkId_doesNotFailValidation() throws Exception {
+    void frecencyUpsert_routeIsRetired_returns404() throws Exception {
+        // nexus.frecency was dropped (telemetry-019-1, nexus-6pfgb.42): the route went with it.
         CapturingExchange ex = post("/v1/telemetry/frecency/upsert",
             "{\"chunk_id\":\"" + VALID_64_HEX + "\"}");
         handleWithTenant(ex);
-        assertThat(ex.status).as("canonical chunk_id must not 400 the validation gate").isNotEqualTo(400);
+        assertThat(ex.status).as("the retired frecency upsert route is not registered").isEqualTo(404);
+    }
+
+    @Test
+    void frecencyGet_routeIsRetired_returns404() throws Exception {
+        CapturingExchange ex = new CapturingExchange("GET",
+            URI.create("/v1/telemetry/frecency/get?chunk_id=" + VALID_64_HEX), "");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("the retired frecency get route is not registered").isEqualTo(404);
     }
 
     @Test
@@ -104,20 +104,12 @@ class TelemetryHandlerChunkIdValidationTest {
     }
 
     @Test
-    void importFrecency_malformedChunkId_returns400() throws Exception {
-        CapturingExchange ex = post("/v1/telemetry/import",
-            "{\"table\":\"frecency\",\"chunk_id\":\"not-a-chash\"}");
-        handleWithTenant(ex);
-        assertThat(ex.status).as("non-canonical chunk_id must 400 on /import too").isEqualTo(400);
-        assertThat(ex.bodyString()).contains("chunk_id");
-    }
-
-    @Test
-    void importFrecency_validChunkId_doesNotFailValidation() throws Exception {
+    void importFrecency_kindIsRetired_returns400() throws Exception {
         CapturingExchange ex = post("/v1/telemetry/import",
             "{\"table\":\"frecency\",\"chunk_id\":\"" + VALID_64_HEX + "\"}");
         handleWithTenant(ex);
-        assertThat(ex.status).as("canonical chunk_id must not 400 the validation gate").isNotEqualTo(400);
+        assertThat(ex.status).as("the retired frecency import kind is an unknown table").isEqualTo(400);
+        assertThat(ex.bodyString()).contains("Unknown table");
     }
 
     // ── Helpers (mirrors TelemetryHandlerJsonValidationTest's CapturingExchange) ─

@@ -24,7 +24,8 @@ What the driver does on each answer (the csayy.2 review gate's client rules):
   ``export_page_busy`` or 409 ``page_in_flight`` is not a failure: it waits the ``Retry-After`` the engine gives, on
   its own budget (:data:`BUSY_WAIT_BUDGET_S` per request, which one last wait can overshoot), not the tries. When
   the tries or the budget run out the session is closed, the partial file removed, and the message says to run again.
-* A 503 ``export_page_over_budget`` is the engine cancelling the page at its page time budget (20 s by default). It
+* A 503 ``export_page_over_budget`` is the engine cancelling the page at its page time budget (20 s by default) or
+  cutting it at its 25 s page wall (``page_budget_ms`` carries whichever fired). It
   is a FAILED page, never a busy one: it takes the tries and the backoff ladder like any failure, and never the busy
   budget, because a statement that ran out of its budget is likely to run out again. When the tries run out the run
   fails naming the budget and saying to report it.
@@ -82,7 +83,7 @@ _RETRY_AFTER_CAP_S = 120.0
 _DELETE_TIMEOUT_S = 3.0
 _PAGE_TIMEOUT = httpx.Timeout(connect=10.0, read=90.0, write=60.0, pool=10.0)
 _PROBE_TIMEOUT_S = 5.0
-_AGAIN = "The backup was not kept; run nx backup again."
+_AGAIN = "The backup was not kept; run the backup again."
 
 #: How long a page request keeps waiting through 409 ``page_in_flight`` and 503 ``export_page_busy`` answers (each
 #: asks for a short ``Retry-After``) before it gives up. A separate budget from :data:`PAGE_ATTEMPTS`, which counts
@@ -160,8 +161,10 @@ class ManagedCredentials:
     """The cloud client's token: a minted data token when ``mint_token`` is configured, else the static
     ``service_token`` re-read from env and config on every call (so a rotated token is picked up)."""
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, restore: bool = False) -> None:
         self._base_url = base_url
+        #: ``nx backup restore`` uses the same credentials; only the words of its refusals differ
+        self._restore = restore
 
     def bearer(self) -> str:
         from nexus.db.data_token import DataTokenMintError, get_data_token_manager  # noqa: PLC0415 - deferred, heavy
@@ -171,7 +174,8 @@ class ManagedCredentials:
         try:
             minted = manager.bearer_for(self._base_url, DEFAULT_TENANT) if manager.is_configured() else None
         except DataTokenMintError as exc:
-            raise ExportRefused(f"cannot get a data token to read the export with: {exc}") from None
+            what = "restore with" if self._restore else "read the export with"
+            raise ExportRefused(f"cannot get a data token to {what}: {exc}") from None
         return minted or self._static()
 
     def _static(self) -> str:
@@ -182,9 +186,10 @@ class ManagedCredentials:
         except RuntimeError as exc:
             raise ExportRefused(str(exc)) from None
         if not token:
+            action = "a restore" if self._restore else "an export"
             raise ExportRefused(
-                "no service_token is configured, and an export needs a tenant or data token. Set one with "
-                "`nx config set service_token <token>` (or export NX_SERVICE_TOKEN) and run nx backup again."
+                f"no service_token is configured, and {action} needs a tenant or data token. Set one with "
+                f"`nx config set service_token <token>` (or export NX_SERVICE_TOKEN) and run the {'restore' if self._restore else 'backup'} again."
             )
         return token
 
@@ -365,7 +370,7 @@ class ExportClient:
                             continue
                         raise ExportRefused(
                             f"the service at {self._shown} rejected the token (401) and no fresh one is available. "
-                            "Set a current tenant or data token with `nx config set service_token <token>`, then run nx backup again."
+                            "Set a current tenant or data token with `nx config set service_token <token>`, then run the backup again."
                         )
                     if status == 403:
                         if reason == "export_scope_forbidden":
@@ -434,7 +439,7 @@ class ExportClient:
             except httpx.HTTPError as exc:
                 raise ExportRefused(
                     f"the nexus service at {self._shown} is unreachable ({type(exc).__name__}: "
-                    f"{scrub_transport_error(exc, self._base)}). Check connectivity, then run nx backup again."
+                    f"{scrub_transport_error(exc, self._base)}). Check connectivity, then run the backup again."
                 ) from None
             if resp.status_code in (502, 503, 504) and attempt < 2:  # an edge or a restarting engine, briefly
                 self._sleep(BACKOFF_LADDER[attempt])
@@ -482,7 +487,7 @@ class ExportClient:
                 if exists_waits >= len(BACKOFF_LADDER):
                     raise ExportRefused(
                         f"the tenant already has an export session on the engine at {self._shown} that this run cannot "
-                        "clear (the engine closes an idle one after 10 minutes). Wait, then run nx backup again."
+                        "clear (the engine closes an idle one after 10 minutes). Wait, then run the backup again."
                     ) from None
                 self._sleep(BACKOFF_LADDER[exists_waits])
                 exists_waits += 1

@@ -74,8 +74,12 @@ import java.util.regex.Pattern;
  * {@code export_page_busy} with {@code Retry-After: 1} when a read (a page, or the header of a POST) waited out
  * its lock bound behind a tenant create (retry it; a POST that answers it opened nothing); 503 {@code
  * export_page_over_budget}, with no {@code Retry-After} and a {@code page_budget_ms} field, when a read was cancelled
- * at its time budget (below): another try may meet the same limit, so a client repeats it a few times and then reports
- * it. The engine logs {@code event=export_page_over_budget} with the tenant, the table and the elapsed time.
+ * at its database time budget, or cut by the page wall (both below): another try may meet the same limit, so a client
+ * repeats it a few times and then reports it. {@code page_budget_ms} is the limit that fired: the database budget for a
+ * cancelled statement (the engine logs {@code event=export_page_over_budget} with the tenant, the table, the elapsed time
+ * and {@code budget_ms}), the wall (25,000) for a wall cut (it logs {@code event=export_page_wall_deadline} with the
+ * tenant, the table, the elapsed time and {@code wall_ms}). Also 503 {@code export_page_busy} with {@code Retry-After: 1}
+ * for a page asked of a session whose earlier page read outlived its wall and has not ended (see the wall, below).
  *
  * <p><b>The page cut and its time budget, against the edge limits.</b> The cloud edge ends an exchange at 60
  * seconds (RDR-248 A1) and the bead's gate N1 wants a page to START its response inside 30 seconds. A page is
@@ -88,9 +92,14 @@ import java.util.regex.Pattern;
  * nexus/rdr248-local-spike-r2-2026-11-11}), so the budget bounds a pathological page and is not the expected
  * time. The budget does NOT include the pool borrow: that is bounded by the pool's own connection timeout
  * (HikariCP's 30 s default; {@code Main} does not change it for the engine's pool) and runs before the budget
- * starts. With a free pool connection a page starts its response well inside 30 s; on an exhausted pool the
- * borrow can take up to 30 s first, so a page may start up to about 50 s after the request, inside the 60 s
- * exchange limit but past the 30 s bound, and an exhausted pool answers 503 (see below). The header read of a
+ * starts. With a free pool connection a page starts its response well inside 30 s. The budget is capped at 20 s
+ * ({@code NX_EXPORT_PAGE_BUDGET_SECONDS} above 20 is refused at boot) so it always ends before the wall: whatever the
+ * borrow, the database or the driver does, a page holds its session's page gate at most 25 s plus a 1.5 s join of its
+ * interrupted reader ({@code TenantExportSessions#withPage}'s wall, nexus-csayy.9), and then answers. A wall hit
+ * answers 503 {@code export_page_over_budget} (the wall in {@code page_budget_ms}) once the read's pool borrow has
+ * returned, and the exhausted-pool answer (below) when it had not, so a page answers inside the 30 s bound. A reader
+ * that ignores its interrupt keeps its pool connection until it ends; the session refuses the next page as
+ * {@code export_page_busy} meanwhile, so it never has two page reads at once. The header read of a
  * POST gives each of its statements the full budget, not a shared one (they are catalog reads). A page is
  * buffered whole before its first byte is sent (its hash is a header), so the transfer is outside the
  * response-start bound and the database transaction is already closed while the client reads. Measured at 500,000
@@ -101,7 +110,8 @@ import java.util.regex.Pattern;
  * worst, in proportion to the tenant's size (about 30 s near 5 million chunks). A table keyed by {@code id} alone costs
  * its rows divided by the tenant's share of the table: see the Performance Expectations.
  *
- * <p><b>Other answers.</b> An exhausted pool answers 503 {@code {"error":"database connection pool exhausted,
+ * <p><b>Other answers.</b> An exhausted pool (a borrow that failed at the pool's own 30 s timeout, or that had not
+ * returned when a page's 25 s wall fired) answers 503 {@code {"error":"database connection pool exhausted,
  * retry"}} with no reason code and no {@code Retry-After}: the client backs off on its own ladder. The auth filter
  * answers 401, and 403 {@code forbidden} for a token confined to its own route; an unknown path under the prefix
  * is 404 {@code not_found}, a wrong method 405 {@code method_not_allowed}, and anything unexpected 500 {@code
@@ -218,6 +228,7 @@ public final class TenantExportHandler implements HttpHandler {
         } catch (TenantExportSessions.SessionExistsException e) {
             ObjectNode body = errorBody("export_session_exists", e.getMessage());
             if (e.sessionId() != null) body.put("session_id", e.sessionId());
+            if (e.kind() != null) body.put("session_kind", e.kind());   // an import session is closed on /v1/tenant/import/{id}
             HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(body));
             return;
         } catch (TenantExportSessions.CapacityFullException e) {
@@ -382,17 +393,28 @@ public final class TenantExportHandler implements HttpHandler {
     }
 
     /**
-     * A read cancelled at its time budget: 503 {@code export_page_over_budget}, no {@code Retry-After} (a repeat is
-     * likely to meet the same limit, so the client does not wait it out as it does a lock), the budget in the body, and
-     * a warn line that names the tenant, the table and the time the read ran, so an operator can see which page it was.
+     * A read cancelled at its database time budget, or cut by the page wall: 503 {@code export_page_over_budget}, no
+     * {@code Retry-After} (a repeat is likely to meet the same limit, so the client does not wait it out as it does a lock),
+     * the limit that fired in {@code page_budget_ms} (the wall's value for a wall cut, the budget's otherwise), and a warn
+     * line that names the tenant, the table and the time the read ran, so an operator can see which page it was.
      */
     private static void overBudget(HttpExchange exchange, String tenant, String table, long startNanos, int budgetMs,
                                    TenantExportReads.PageOverBudgetException e) throws IOException {
         long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
-        log.warn("event=export_page_over_budget tenant={} table={} elapsed_ms={} budget_ms={}", tenant, table, elapsedMs, budgetMs);
-        ObjectNode body = errorBody("export_page_over_budget", "the export page for " + table
-            + " was cancelled at its " + budgetMs + " ms time budget");
-        body.put("page_budget_ms", budgetMs);
+        ObjectNode body;
+        if (e.wallMs() > 0) {
+            log.warn("event=export_page_wall_deadline tenant={} table={} elapsed_ms={} wall_ms={}", tenant, table, elapsedMs,
+                e.wallMs());
+            body = errorBody("export_page_over_budget", "the export page for " + table + " passed its " + e.wallMs()
+                + " ms wall deadline");
+            body.put("page_budget_ms", e.wallMs());
+        } else {
+            log.warn("event=export_page_over_budget tenant={} table={} elapsed_ms={} budget_ms={}", tenant, table, elapsedMs,
+                budgetMs);
+            body = errorBody("export_page_over_budget", "the export page for " + table
+                + " was cancelled at its " + budgetMs + " ms time budget");
+            body.put("page_budget_ms", budgetMs);
+        }
         HttpUtil.send(exchange, 503, MAPPER.writeValueAsString(body));
     }
 

@@ -1,0 +1,91 @@
+{
+  "blocks" : [
+    {
+      "hash" : "10d667fb7b2967",
+      "index" : 0,
+      "kind" : "heading",
+      "markdown" : "# Serializer cases",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "1a5df09677ffb3",
+      "index" : 1,
+      "kind" : "paragraph",
+      "markdown" : "The worker is *really* quite slow, and **very** old, per \\[sic\\] the notes.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "15228ae630e78e",
+      "index" : 2,
+      "kind" : "paragraph",
+      "markdown" : "When a \\< b and c > d, the queue uses a \\~tilde\\~ and an under_score in plain text.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "0b917b4d33a8c3",
+      "index" : 3,
+      "kind" : "paragraph",
+      "markdown" : "See [the docs](https:\/\/example.com\/docs) and the [inline link](https:\/\/example.com\/x) for details, with `inline code` too.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "10f67c9a80c418",
+      "index" : 4,
+      "kind" : "paragraph",
+      "markdown" : "Tom & Jerry use \\* as a bullet and \\_ as a literal underscore.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "1b8ba35fe6dd32",
+      "index" : 5,
+      "kind" : "numbered-list",
+      "markdown" : "1. First numbered item with *emphasis* inside.\n\n2. Second item, plainly.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "1488f1ea2d0822",
+      "index" : 6,
+      "kind" : "quote",
+      "markdown" : "> A quoted line that is basically fine.",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "0bfc5ee8e095b5",
+      "index" : 7,
+      "kind" : "table",
+      "markdown" : "| Name | Note |\n| --- | --- |\n| alpha | basically first |\n| beta | second |",
+      "warnings" : [
+
+      ]
+    },
+    {
+      "hash" : "0eafa9b5168c71",
+      "index" : 8,
+      "kind" : "paragraph",
+      "markdown" : "A line with a hard break at the end\\\nand its continuation.",
+      "warnings" : [
+
+      ]
+    }
+  ],
+  "documentType" : "md",
+  "firstEditable" : 0,
+  "hasChanges" : false,
+  "selectionBlock" : 0,
+  "url" : "\/private\/tmp\/me-t1\/serializer.md",
+  "view" : "editor"
+}

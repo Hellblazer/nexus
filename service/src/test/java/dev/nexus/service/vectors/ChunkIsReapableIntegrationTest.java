@@ -2,25 +2,16 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgActivityProbe;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
-import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
-import org.jooq.types.DayToSecond;
-import org.jooq.types.YearToMonth;
-import org.jooq.types.YearToSecond;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.time.Duration;
@@ -33,7 +24,6 @@ import java.util.concurrent.TimeUnit;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -65,173 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * from RDR-223 Phase 3 refuse an ownerless write.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class ChunkIsReapableIntegrationTest {
-
-    private static final String SVC_ROLE = "svc_reapable_test";
-    private static final String SVC_PASS = "svc_reapable_test_pass";
-
-    private static final String KNOWLEDGE = "knowledge__reap-k__minilm-l6-v2-384__v1";
-    private static final String DOCS = "docs__reap-d__minilm-l6-v2-384__v1";
-    private static final String CODE = "code__reap-c__minilm-l6-v2-384__v1";
-    private static final String RDR = "rdr__reap-r__minilm-l6-v2-384__v1";
-    private static final String OTHER = "knowledge__reap-o__minilm-l6-v2-384__v1";
-
-    private static final Duration DAYS_40 = Duration.ofDays(40);
-
-    private PostgreSQLContainer<?> pg;
-    private HikariDataSource svcDs;
-    private TenantScope tenantScope;
-
-    @BeforeAll
-    void startAll() throws Exception {
-        pg = PgContainerHelper.start();
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.applyProductSchema(su);
-        }
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
-        }
-        var cfg = new HikariConfig();
-        cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername(SVC_ROLE);
-        cfg.setPassword(SVC_PASS);
-        cfg.setMaximumPoolSize(6);
-        cfg.setAutoCommit(true);
-        svcDs = new HikariDataSource(cfg);
-        tenantScope = new TenantScope(svcDs);
-    }
-
-    @AfterAll
-    void stopAll() {
-        if (svcDs != null) svcDs.close();
-        if (pg != null) pg.stop();
-    }
-
-    // ── fixture ─────────────────────────────────────────────────────────────
-
-    private static String ch(String seed) {
-        return Chash.ofText(seed).toHex();
-    }
-
-    private static byte[] bytes(String chashHex) {
-        return Chash.fromHex(chashHex).toBytes();
-    }
-
-    private void su(java.util.function.Consumer<DSLContext> work) throws Exception {
-        try (Connection c = pg.createConnection("")) {
-            work.accept(DSL.using(c, SQLDialect.POSTGRES));
-        }
-    }
-
-    private void register(String tenant, String collection) throws Exception {
-        su(ctx -> PgContainerHelper.insertCollection(ctx, tenant, collection));
-    }
-
-    /** Inserts one chunk through substrate SQL, last written {@code age} ago. No manifest row. */
-    private String orphan(String tenant, String collection, String seed, Duration age) throws Exception {
-        String hex = ch(tenant + "/" + collection + "/" + seed);
-        su(ctx -> {
-            PgContainerHelper.insertChunks(ctx, tenant, collection, List.of(hex), List.of(seed + " text"),
-                List.of(new float[384]), List.of(Map.of()));
-            ageTo(ctx, tenant, collection, hex, age);
-        });
-        return hex;
-    }
-
-    /** Makes the chunk old in every respect: its write time, and its orphaning record if it has one. */
-    private static void ageTo(DSLContext ctx, String tenant, String collection, String hex, Duration age) {
-        OffsetDateTime then = OffsetDateTime.now().minus(age);
-        ctx.update(CHUNKS).set(CHUNKS.CREATED_AT, then).set(CHUNKS.LAST_WRITTEN_AT, then)
-           .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.eq(bytes(hex))))
-           .execute();
-        ctx.update(CHUNK_ORPHANED_AT).set(CHUNK_ORPHANED_AT.ORPHANED_AT, then)
-           .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant).and(CHUNK_ORPHANED_AT.COLLECTION.eq(collection))
-                  .and(CHUNK_ORPHANED_AT.CHASH.eq(bytes(hex))))
-           .execute();
-    }
-
-    /** Writes (or overwrites) the chunk's orphaning record, {@code age} ago. A fixture for the predicate's tests. */
-    private void recordOrphaning(String tenant, String collection, String hex, Duration age) throws Exception {
-        OffsetDateTime then = OffsetDateTime.now().minus(age);
-        // RDR-225: the record carries its chunk's embedding model (the four-column chunk foreign key).
-        su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
-                CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
-            .values(tenant, collection, bytes(hex), then, PgContainerHelper.collectionModel(ctx, tenant, collection))
-            .onConflict(CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH)
-            .doUpdate().set(CHUNK_ORPHANED_AT.ORPHANED_AT, then).execute());
-    }
-
-    private static YearToSecond interval(Duration d) {
-        if (d == null) return null;
-        return new YearToSecond(new YearToMonth(0, 0), DayToSecond.valueOf(d));
-    }
-
-    /** The one call shape every consumer uses: EXISTS over the function, correlated on the chunk row. */
-    private static org.jooq.Condition reapable(Duration grace) {
-        return DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
-            CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT,
-            DSL.val(interval(grace), SQLDataType.INTERVAL))));
-    }
-
-    /** True when {@code reapable(c)} holds for the chunk, evaluated as the RLS-subject service role. */
-    private boolean isReapable(String tenant, String collection, String hex, Duration grace) {
-        return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(
-            ctx.selectOne().from(CHUNKS)
-               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
-                      .and(CHUNKS.CHASH.eq(bytes(hex))))
-               .and(reapable(grace))));
-    }
-
-    private boolean isReapable(String tenant, String collection, String hex) {
-        return isReapable(tenant, collection, hex, null);
-    }
-
-    private void document(String tenant, String tumbler, String collection, boolean tombstoned) throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.DELETED_AT)
-            .values(tenant, tumbler, "doc " + tumbler, collection, tombstoned ? OffsetDateTime.now().minusDays(1) : null)
-            .onConflictDoNothing().execute());
-    }
-
-    private void manifestRow(String tenant, String docId, String collection, String hex, int position)
-            throws Exception {
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(tenant, docId, position, bytes(hex), collection,
-                PgContainerHelper.collectionModel(ctx, tenant, collection)).execute());
-    }
-
-    private OffsetDateTime lastWrittenAt(String tenant, String collection, String hex) throws Exception {
-        OffsetDateTime[] out = new OffsetDateTime[1];
-        su(ctx -> out[0] = ctx.select(CHUNKS.LAST_WRITTEN_AT).from(CHUNKS)
-            .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.eq(bytes(hex))))
-            .fetchOne(0, OffsetDateTime.class));
-        return out[0];
-    }
-
-    /** The chunk's orphaning record, or null when it has none. */
-    private OffsetDateTime orphanedAt(String tenant, String collection, String hex) throws Exception {
-        OffsetDateTime[] out = new OffsetDateTime[1];
-        su(ctx -> out[0] = ctx.select(CHUNK_ORPHANED_AT.ORPHANED_AT).from(CHUNK_ORPHANED_AT)
-            .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant).and(CHUNK_ORPHANED_AT.COLLECTION.eq(collection))
-                   .and(CHUNK_ORPHANED_AT.CHASH.eq(bytes(hex))))
-            .fetchOne(0, OffsetDateTime.class));
-        return out[0];
-    }
-
-    /** True when the chunk has an orphaning record written within the last ten minutes. */
-    private boolean orphanRecordedRecently(String tenant, String collection, String hex) throws Exception {
-        OffsetDateTime at = orphanedAt(tenant, collection, hex);
-        return at != null && at.isAfter(OffsetDateTime.now().minusMinutes(10));
-    }
-
-    private long recordCount(String tenant) throws Exception {
-        long[] n = new long[1];
-        su(ctx -> n[0] = ctx.fetchCount(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID.eq(tenant)));
-        return n[0];
-    }
+class ChunkIsReapableIntegrationTest extends ChunkReapableTestBase {
 
     /** The physical tuple id and creating transaction of the chunk row: both change on any UPDATE of it. */
     private String rowVersion(String tenant, String collection, String hex) throws Exception {
@@ -621,41 +445,6 @@ class ChunkIsReapableIntegrationTest {
         assertThat(orphanedAt(t, KNOWLEDGE, incoming)).isNull();
     }
 
-    /** The one-hour margin: a chunk written moments ago is not recorded (it is inside its grace). */
-    @Test
-    void aChunkWrittenWithinTheLastHourIsNotRecorded() throws Exception {
-        String t = "reap-stamp-guard";
-        register(t, KNOWLEDGE);
-        String hex = orphan(t, KNOWLEDGE, "recent", Duration.ofMinutes(5));
-        document(t, "stamp-g1", KNOWLEDGE, false);
-        manifestRow(t, "stamp-g1", KNOWLEDGE, hex, 0);
-
-        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
-            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-g1"))).execute());
-
-        assertThat(orphanedAt(t, KNOWLEDGE, hex)).as("written 5 minutes ago: no record").isNull();
-        assertThat(isReapable(t, KNOWLEDGE, hex)).isFalse();
-    }
-
-    /** The same margin on the record itself: a drop within the hour of the previous one does not move it. */
-    @Test
-    void aChunkRecordedWithinTheLastHourIsNotRecordedAgain() throws Exception {
-        String t = "reap-stamp-guard-record";
-        register(t, KNOWLEDGE);
-        String hex = orphan(t, KNOWLEDGE, "rerecorded", DAYS_40);
-        recordOrphaning(t, KNOWLEDGE, hex, Duration.ofMinutes(20));
-        OffsetDateTime before = orphanedAt(t, KNOWLEDGE, hex);
-        document(t, "stamp-gr1", KNOWLEDGE, false);
-        manifestRow(t, "stamp-gr1", KNOWLEDGE, hex, 0);
-        su(ctx -> ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now().minus(DAYS_40))
-            .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(KNOWLEDGE)).and(CHUNKS.CHASH.eq(bytes(hex)))).execute());
-
-        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
-            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-gr1"))).execute());
-
-        assertThat(orphanedAt(t, KNOWLEDGE, hex)).as("recorded 20 minutes ago: left as it was").isEqualTo(before);
-    }
-
     // ── a record that is no longer true is harmless, and cleaned ───────────────
 
     @Test
@@ -707,21 +496,6 @@ class ChunkIsReapableIntegrationTest {
 
         assertThat(orphanedAt(t, from, hex)).as("nothing left under the old name").isNull();
         assertThat(orphanedAt(t, to, hex)).as("the record moved with its chunk").isNotNull();
-    }
-
-    /** A stale record of a chunk that is owned again can never make it reapable: condition 1 fails. */
-    @Test
-    void aStaleRecordOfAReOwnedChunkIsHarmless() throws Exception {
-        String t = "reap-record-reowned";
-        register(t, KNOWLEDGE);
-        String hex = orphan(t, KNOWLEDGE, "reowned", DAYS_40);
-        recordOrphaning(t, KNOWLEDGE, hex, DAYS_40);
-        assertThat(isReapable(t, KNOWLEDGE, hex)).as("precondition: orphaned 40 days ago, reapable").isTrue();
-
-        document(t, "record-reowned-doc", KNOWLEDGE, false);
-        manifestRow(t, "record-reowned-doc", KNOWLEDGE, hex, 0);
-
-        assertThat(isReapable(t, KNOWLEDGE, hex)).as("owned again: the old record means nothing").isFalse();
     }
 
     // ── the paths the triggers do not cover, and what is true of the roles ─────
@@ -850,19 +624,6 @@ class ChunkIsReapableIntegrationTest {
     }
 
     // ── what the trigger functions are, pinned in the live definition ──────────
-
-    private String functionDefinition(String signature) throws Exception {
-        String[] out = new String[1];
-        su(ctx -> out[0] = PgCatalogProbes.routineDefinition(ctx, signature));
-        assertThat(out[0]).as("%s must resolve", signature).isNotNull();
-        return out[0];
-    }
-
-    private static int occurrences(String haystack, String needle) {
-        int n = 0;
-        for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + 1)) n++;
-        return n;
-    }
 
     /**
      * The ordered pre-lock, pinned in the live function bodies (a definition pin, the style of

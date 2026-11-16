@@ -549,6 +549,123 @@ class PciBuilderTerminationIntegrationTest {
         }
     }
 
+    // -- REINDEX (RDR-230 Technical Design 4, nexus-4lnn1.1.10) --------------------------------------------
+
+    /** The leaf's index {@code name}, valid or not, or null. */
+    PciCatalog.Index indexNamed(String name) {
+        return leaf().indexes().stream().filter(i -> name.equals(i.name())).findFirst().orElse(null);
+    }
+
+    /** The leaf's REINDEX CONCURRENTLY leftovers of {@code base}: invalid, named {@code base_ccnew}/{@code base_ccold}. */
+    List<PciCatalog.Index> leftoversOf(String base) {
+        return leaf().indexes().stream().filter(i -> i.leftover() && i.name().startsWith(base + "_cc")).toList();
+    }
+
+    void awaitLeftover(String base) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() < deadline && leftoversOf(base).isEmpty()) {
+            Thread.sleep(50);
+        }
+        assertThat(leftoversOf(base)).as("the REINDEX's invalid copy is in the catalog").isNotEmpty();
+    }
+
+    /**
+     * The router's set never loses the collection while its index is reindexed: the old index keeps serving, valid and
+     * under its own name, until the swap; the read half counts the invalid {@code _ccnew} as a reindex leftover and not
+     * as an index, and a refreshed {@link PciIndexSweep} still answers true for the collection throughout. A snapshot
+     * held open keeps the REINDEX in its last wait (older snapshots) with the copy visible.
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void reindex_keepsTheCollectionInTheRoutersSet_andTheCopyIsCountedAsALeftoverNotAnIndex() throws Exception {
+        String nonce = "c0ffee10";
+        String coll = "code__pcitrm-reindex-set__voyage-code-3__v1";
+        String index = PciCatalog.indexName(M1024, T1, coll);
+        PciCatalog.Leaf leaf = leaf();
+        PciIndexSweep sweep = PciIndexSweep.create(svcDs, ON);
+
+        try (PciBuilderSession.Pass pass = builderSession(nonce).open()) {
+            assertThat(pass.build(leaf, 1024, coll)).isEqualTo(DdlOutcome.DONE);
+            PciCatalog.Index built = indexNamed(index);
+            assertThat(built).isNotNull();
+            CompletableFuture<DdlOutcome> reindex;
+            try (SnapshotHolder snapshot = new SnapshotHolder()) {
+                reindex = CompletableFuture.supplyAsync(() -> pass.reindex(leaf, built));
+                awaitLeftover(index);
+
+                assertThat(reindex.isDone()).as("the REINDEX waits for the older snapshot").isFalse();
+                PciCatalog.Snapshot during = catalog.read();
+                assertThat(during.leaves().stream().filter(l -> T1.equals(l.tenant()) && M1024.equals(l.model()))
+                    .flatMap(l -> l.indexes().stream()).filter(i -> index.equals(i.name())).toList())
+                    .as("the old index is still there, valid and parsed")
+                    .singleElement().satisfies(i -> {
+                        assertThat(i.valid()).isTrue();
+                        assertThat(i.parsed()).isTrue();
+                        assertThat(i.collection()).isEqualTo(coll);
+                    });
+                assertThat(leftoversOf(index)).as("the copy is a leftover, not an index").singleElement()
+                    .satisfies(i -> {
+                        assertThat(i.valid()).isFalse();
+                        assertThat(i.parsed()).isFalse();
+                        assertThat(i.leftoverOf()).isEqualTo(coll);
+                    });
+                assertThat(during.reindexLeftoverCount()).isGreaterThanOrEqualTo(1);
+                assertThat(sweep.refresh()).isTrue();
+                assertThat(sweep.hasValidIndex(M1024, T1, coll)).as("the router still sees the index").isTrue();
+            }
+
+            assertThat(reindex.get(120, TimeUnit.SECONDS)).isEqualTo(DdlOutcome.DONE);
+        }
+
+        assertThat(indexValid(index)).as("same name, valid, after the swap").isTrue();
+        assertThat(leftoversOf(index)).as("the old graph was dropped by the REINDEX itself").isEmpty();
+        assertThat(sweep.refresh()).isTrue();
+        assertThat(sweep.hasValidIndex(M1024, T1, coll)).isTrue();
+    }
+
+    /**
+     * A migration ends the builder's backend in the middle of a REINDEX. The statement's own failure is not charged
+     * ({@link DdlOutcome#CONNECTION_LOST}, not {@code FAILED}), the original index is untouched and valid, and the
+     * next pass drops the invalid {@code _ccnew} through the existing leftover path (nexus-rn1yd).
+     */
+    @Test
+    @Timeout(value = 300, unit = TimeUnit.SECONDS)
+    void migrate_terminatesAnInFlightReindex_theOriginalStays_andTheNextPassDropsTheLeftover() throws Exception {
+        String nonce = "c0ffee11";
+        String coll = "code__pcitrm-reindex-cut__voyage-code-3__v1";
+        String index = PciCatalog.indexName(M1024, T1, coll);
+        PciCatalog.Leaf leaf = leaf();
+
+        try (HikariDataSource migrationDs = migrationPool();
+             PciBuilderSession.Pass pass = builderSession(nonce).open()) {
+            assertThat(pass.build(leaf, 1024, coll)).isEqualTo(DdlOutcome.DONE);
+            PciCatalog.Index built = indexNamed(index);
+            try (SnapshotHolder snapshot = new SnapshotHolder()) {
+                var reindex = CompletableFuture.supplyAsync(() -> pass.reindex(leaf, built));
+                awaitLeftover(index);
+                forgetAChangeset();
+
+                captureLogs(SchemaMigrator.class, () -> migrateWithin(migrationDs, 120));
+
+                assertThat(reindex.get(30, TimeUnit.SECONDS))
+                    .as("a terminated backend says nothing about the statement: not charged to backoff")
+                    .isEqualTo(DdlOutcome.CONNECTION_LOST);
+                assertThat(pass.live()).as("the pass is over").isFalse();
+            }
+        }
+
+        assertThat(indexValid(index)).as("the original index serves throughout").isTrue();
+        List<PciCatalog.Index> leftovers = leftoversOf(index);
+        assertThat(leftovers).as("the cut-off REINDEX left its invalid copy").hasSize(1);
+
+        try (PciBuilderSession.Pass next = builderSession(nonce).open()) {
+            assertThat(next.drop(leaf(), leftovers.get(0))).as("the existing leftover rule drops it")
+                .isEqualTo(DdlOutcome.DONE);
+        }
+        assertThat(leftoversOf(index)).isEmpty();
+        assertThat(indexValid(index)).isTrue();
+    }
+
     // -- a self-retrying changeset is not schema work (nexus-f3yqd.3) -------------------------------------
 
     static final String RETIRE_CHANGESET = "aspects-005-2";

@@ -27,9 +27,9 @@ from click.testing import CliRunner
 
 from nexus.backup import cloud_export as ce
 from nexus.backup.pg_backup import BackupRefused
-from nexus.backup.tenant_file import iter_copy_tuples, verify_file
+from nexus.backup.tenant_file import index_file, iter_copy_tuples, verify_file
 from nexus.cli import main
-from tests._engine_substrate import ensure_engine
+from tests._engine_substrate import ensure_engine, minted_test_tenant
 
 _NOTES = {
     "roundtrip-note-one": "HNSW indexes approximate nearest neighbour search with a layered proximity graph.",
@@ -149,6 +149,8 @@ def _case_the_session_was_closed_so_a_second_export_succeeds(runner: CliRunner, 
     again = runner.invoke(main, ["backup", "--to", str(second)])
     assert again.exit_code == 0, again.output
     assert [t.rows for t in verify_file(second).tables] == [t.rows for t in verify_file(dest).tables]
+    # the restore marker names a file by its header SHA-256: two exports of one tenant must not share it
+    assert index_file(second).header_sha256 != index_file(dest).header_sha256
     assert {p.name for p in dest.parent.iterdir()} == {"tenant.nxtenant", "second.nxtenant"}
 
 
@@ -169,6 +171,67 @@ def _case_an_interrupted_export_frees_the_engines_session_slot(tenant: str, tmp_
     client.close_http()
 
 
+def _roundtrip_compare():
+    """tests/e2e/backup_roundtrip_compare.py, the offline comparison the cloud round trip runs (nexus-csayy.10)."""
+    import importlib.util  # noqa: PLC0415
+
+    path = Path(__file__).resolve().parent / "e2e" / "backup_roundtrip_compare.py"
+    spec = importlib.util.spec_from_file_location("backup_roundtrip_compare", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+#: Tables whose row count may differ between a tenant and its restore, with why. Everything else must be equal.
+_RESTORE_COUNT_EXCEPTIONS = {
+    "catalog_meta": "the restore writes its own marker row (rdr248_restore), and the tenant's first request seeds another",
+}
+
+
+def _case_a_restore_into_a_second_tenant_round_trips_with_equal_counts(
+    runner: CliRunner, dest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole verb against the real engine: the file the export wrote restores into a fresh tenant, and an
+    export of that tenant holds the same rows (counts per table, and the content columns that survive id
+    reassignment)."""
+    state = ensure_engine()
+    original = verify_file(dest)
+    with minted_test_tenant(state) as (second, token):
+        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+        restored = runner.invoke(main, ["backup", "restore", str(dest)])
+        assert restored.exit_code == 0, restored.output
+        out = " ".join(restored.output.split())
+        assert f"Restore committed: {dest}" in out and "data:" in out and "rows loaded" in out, out
+        # a second restore into the now non-empty tenant is refused, and says this file is the one that is in it
+        again = runner.invoke(main, ["backup", "restore", str(dest)])
+        assert again.exit_code != 0 and "already restored" in " ".join(again.output.split()), again.output
+
+        second_file = tmp_path / "restored.nxtenant"
+        exported = runner.invoke(main, ["backup", "--to", str(second_file)])
+        assert exported.exit_code == 0, exported.output
+        copy = verify_file(second_file)
+        assert copy.header["tenant_id"] == second != original.header["tenant_id"]
+        before, after = {t.name: t.rows for t in original.tables}, {t.name: t.rows for t in copy.tables}
+        assert set(before) == set(after)
+        differing = {n: (before[n], after[n]) for n in before if before[n] != after[n] and n not in _RESTORE_COUNT_EXCEPTIONS}
+        assert not differing, f"row counts differ after a restore: {differing}"
+        assert after["memory"] >= 1 and after["chunks"] >= len(_NOTES) and after["catalog_documents"] >= len(_NOTES)
+        columns = {t["name"]: [c["name"] for c in t["columns"]] for t in original.header["tables"]}
+
+        def column(path: Path, table: str, name: str) -> list[bytes | None]:
+            return sorted((r[columns[table].index(name)] for r in _rows(path, table)), key=lambda v: v or b"")
+
+        # ids are reassigned, so the check is on what the rows say, not on what they are numbered
+        for table, name in (("memory", "title"), ("catalog_documents", "title"), ("chunks", "chash")):
+            assert column(dest, table, name) == column(second_file, table, name), f"{table}.{name} differs after the restore"
+        # the comparison the cloud round trip runs (nexus-csayy.10), against a real restore: every table, every column
+        report = _roundtrip_compare().compare(dest, second_file)
+        assert report["verdict"] == "PASS", (report["failures"], report["review"])
+        marker = httpx.get(f"{state['base_url']}/v1/tenant/import-marker", headers={"Authorization": f"Bearer {token}"}, timeout=10).json()
+        assert marker["present"] is True and marker["marker"]["header_sha256"], marker
+
+
 def _case_the_engines_root_token_is_refused_saying_which_token_to_use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     state = ensure_engine()
     monkeypatch.setenv("NX_SERVICE_TOKEN", state["bearer"])
@@ -181,9 +244,41 @@ def _case_the_engines_root_token_is_refused_saying_which_token_to_use(monkeypatc
     assert list(refused.iterdir()) == []
 
 
+class _Held:
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def bearer(self) -> str:
+        return self.token
+
+    def rejected(self, sent: str) -> bool:
+        return False
+
+
+def _case_a_local_root_token_is_swapped_for_a_default_tenant_token_the_import_routes_accept() -> None:
+    """RDR-248 ask ``rdr248-local-root``: against the real engine, the supervisor's root token is refused by an import
+    route, and the credentials a local restore uses mint a ``default``-tenant token through the real token route that the
+    same route accepts, then revoke it when released. (The default tenant is not empty in a shared substrate, so this case stops at the marker read.)"""
+    from nexus.backup.local_token import LocalRestoreCredentials  # noqa: PLC0415
+
+    state = ensure_engine()
+    marker = f"{state['base_url']}/v1/tenant/import-marker"
+    root = httpx.get(marker, headers={"Authorization": f"Bearer {state['bearer']}"}, timeout=10)
+    assert root.status_code == 403 and root.json().get("reason") == "import_scope_forbidden", root.text
+    creds = LocalRestoreCredentials(_Held(state["bearer"]), state["base_url"], root_token=lambda: state["bearer"])
+    minted = creds.bearer()
+    assert minted and minted != state["bearer"] and creds.bearer() == minted, "one mint, reused"
+    ok = httpx.get(marker, headers={"Authorization": f"Bearer {minted}"}, timeout=10)   # the request shape ImportClient sends: a bearer, no tenant header
+    assert ok.status_code == 200 and "present" in ok.json(), ok.text
+    creds.release()   # the run is over: the real revoke route takes the token back, and the engine stops accepting it
+    gone = httpx.get(marker, headers={"Authorization": f"Bearer {minted}"}, timeout=10)
+    assert gone.status_code == 401, gone.text
+
+
 def _case_the_engine_advertises_the_routes_the_client_gates_on() -> None:
     state = ensure_engine()
     body = httpx.get(f"{state['base_url']}/version", timeout=10).json()
+    assert body["tenant_import_supported"] is True
     assert body["tenant_export_supported"] is True
     assert body["tenant_export_format_version"] in ce.ENGINE_FORMAT_VERSIONS
 
@@ -208,4 +303,6 @@ def test_cloud_backup_against_the_real_engine(t2_tenant: str, monkeypatch: pytes
     _case_the_session_was_closed_so_a_second_export_succeeds(runner, dest)
     _case_an_interrupted_export_frees_the_engines_session_slot(t2_tenant, tmp_path)
     _case_the_engine_advertises_the_routes_the_client_gates_on()
+    _case_a_local_root_token_is_swapped_for_a_default_tenant_token_the_import_routes_accept()
+    _case_a_restore_into_a_second_tenant_round_trips_with_equal_counts(runner, dest, tmp_path, monkeypatch)
     _case_the_engines_root_token_is_refused_saying_which_token_to_use(monkeypatch, tmp_path)  # last: it swaps the token

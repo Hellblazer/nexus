@@ -280,16 +280,49 @@ public final class PciQueryRing {
         }
     }
 
+    /** The length of a query's id in {@link #queryIds}: the first 8 bytes of its {@link #digest}, in hex. */
+    public static final int QUERY_ID_HEX = 16;
+
+    /**
+     * The ids of a set of query vectors, sorted and distinct: each is the first {@value #QUERY_ID_HEX} hex digits of the
+     * vector's {@link #digest}. A query keeps its id whatever else is in the set, which is what lets a red canary that a
+     * REINDEX did not cure be held while its red queries are still among the recorded ones (nexus-4lnn1.1.10).
+     */
+    public static java.util.List<String> queryIds(java.util.Collection<float[]> vectors) {
+        java.util.TreeSet<String> ids = new java.util.TreeSet<>();
+        for (float[] v : vectors) {
+            ids.add(java.util.HexFormat.of().formatHex(digest(v)).substring(0, QUERY_ID_HEX));
+        }
+        return java.util.List.copyOf(ids);
+    }
+
     /**
      * The exception's class and a bounded message with every bracketed run of numbers masked: PostgreSQL quotes the
-     * offending value in some errors, and the value here would be a vector.
+     * offending value in some errors, and the value here would be a vector. When the chain holds a
+     * {@link java.sql.SQLException}, the message is its SQLState and its own message, never jOOQ's: jOOQ's opens with
+     * the whole SQL text ({@code SQL [...]; cause}), and the cap then ended inside the select list, so the cause and the
+     * SQLState were never logged (nexus-4lnn1.1.10, the cloud's canary failures). Without one, jOOQ's SQL prefix is
+     * dropped.
      */
     static String sanitize(Throwable e) {
-        String msg = e.getMessage() == null ? "" : e.getMessage().replace('\n', ' ').replace('"', '\'');
-        msg = NUMBER_RUN.matcher(msg).replaceAll("[vector]");
-        if (msg.length() > MAX_ERROR_CHARS) {
-            msg = msg.substring(0, MAX_ERROR_CHARS);
+        String top = e.getClass().getSimpleName() + ": ";
+        Throwable t = e;
+        for (int depth = 0; t != null && depth < 16; depth++, t = t.getCause()) {   // bounded: a cause chain can loop
+            if (t instanceof java.sql.SQLException sql) {
+                return top + "sqlstate=" + sql.getSQLState() + " " + bounded(sql.getMessage());
+            }
         }
-        return e.getClass().getSimpleName() + ": " + msg;
+        String msg = e.getMessage() == null ? "" : e.getMessage();
+        if (msg.startsWith("SQL [")) {
+            int end = msg.indexOf("]; ");
+            msg = end < 0 ? "" : msg.substring(end + 3);
+        }
+        return top + bounded(msg);
+    }
+
+    private static String bounded(String raw) {
+        String msg = raw == null ? "" : raw.replace('\n', ' ').replace('"', '\'');
+        msg = NUMBER_RUN.matcher(msg).replaceAll("[vector]");
+        return msg.length() > MAX_ERROR_CHARS ? msg.substring(0, MAX_ERROR_CHARS) : msg;
     }
 }

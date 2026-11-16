@@ -736,11 +736,14 @@ public final class StatusHandler implements HttpHandler {
      */
     private static void appendMaintenance(StringBuilder body, dev.nexus.service.vectors.PciMaintenanceStatus m) {
         body.append(",\"maintenance\":{\"reindex\":").append(HttpUtil.jsonString(m.reindex()))
-            .append(",\"reindexing\":").append(m.reindexing() == null ? "null" : HttpUtil.jsonString(m.reindexing()))
+            // The status route is unauthenticated and names no pci_ index (Sam, 2026-11-06): a name is an unsalted hash of
+            // tenant and collection. The wire says only that one is in flight; the name is in the log line.
+            .append(",\"reindexing\":").append(m.reindexing() == null ? "null" : HttpUtil.jsonString("in_flight"))
             .append(",\"last_reindex_at\":");
         appendSeconds(body, m.lastReindexAt());
         var c = m.canary();
         body.append(",\"reindexes\":").append(m.reindexes())
+            .append(",\"unanchored\":").append(m.unanchored())
             .append(",\"canary\":{\"green\":").append(c.green())
             .append(",\"red\":").append(c.red())
             .append(",\"unmeasured\":").append(c.unmeasured())

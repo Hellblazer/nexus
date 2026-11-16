@@ -287,6 +287,13 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheTenantImportRoutesAsTheirOwnBooleanFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendTenantImportCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"tenant_import_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheManifestFillJobAsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogManifestFillJobCapabilityField(body);

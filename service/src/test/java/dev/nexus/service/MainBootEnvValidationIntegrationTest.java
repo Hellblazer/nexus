@@ -183,6 +183,12 @@ class MainBootEnvValidationIntegrationTest {
         assertRefusedAtValidation(boot("NX_SEARCH_PCI", "yes"), "NX_SEARCH_PCI must be 1");
     }
 
+    /** nexus-h7kw2: 0 would disable the short-page count's bound, so it is refused at boot, not at the first page. */
+    @Test
+    void aZeroShortPageCountBudget_exitsOne_andTheLogNamesTheVariable() throws Exception {
+        assertRefusedAtValidation(boot("NX_SHORT_PAGE_COUNT_BUDGET_MS", "0"), "NX_SHORT_PAGE_COUNT_BUDGET_MS must be in 1..");
+    }
+
     @Test
     void aMalformedSweepSeconds_pastTheNewMaximum_exitsOne() throws Exception {
         assertRefusedAtValidation(boot("NX_SEARCH_PCI_SWEEP_SECONDS", "3601"), "NX_SEARCH_PCI_SWEEP_SECONDS");

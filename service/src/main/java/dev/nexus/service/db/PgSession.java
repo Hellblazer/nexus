@@ -43,6 +43,10 @@ public final class PgSession {
         // nexus-seo4k / nexus-bbtc2: the text gate's switch (vectors-057, vectors-058): "off" skips the trigram half in
         // the probe, "substring" replaces it with a substring match (see PgVectorRepository.LEXICAL_TRGM_GUC).
         "nexus.lexical_trgm",
+        // nexus-bbtc2: the shared text-gate probe's workers (LexicalGateProbe#runShared sets it for that statement's
+        // transaction alone, from NX_SEARCH_ROUTE_PROBE_WORKERS; that value replaces a role or database setting for the
+        // statement, so the operator's lever is the env var, 0 for serial).
+        "max_parallel_workers_per_gather",
         "statement_timeout",
         // nexus-r0vkh: the taxonomy assign transaction bounds its lock WAIT as
         // well as its run time, so a caller queued behind a slow head on the
@@ -433,7 +437,7 @@ public final class PgSession {
      * {@code statement_timeout=0} and {@code lock_timeout=0} both mean
      * DISABLED, the unbounded state the setting exists to end.
      */
-    static int boundedTimeoutMs(String envName, String raw, int defaultMs) {
+    public static int boundedTimeoutMs(String envName, String raw, int defaultMs) {
         if (raw == null || raw.isBlank()) {
             return defaultMs;
         }
@@ -886,12 +890,19 @@ public final class PgSession {
      * @param maxPerLeaf     {@code NX_SEARCH_PCI_MAX_PER_LEAF}
      * @param buildMemMb     {@code NX_SEARCH_PCI_BUILD_MEM_MB}: the builder session's maintenance_work_mem in MB,
      *                       or {@code null} when unset
+     * @param reindex        {@code NX_SEARCH_PCI_REINDEX} (RDR-230 Technical Design 8): REINDEX and the post-delete
+     *                       VACUUM; false stops them alone, builds, drops and the canary continue. Default true.
      */
     public record PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf,
-                              Integer buildMemMb) {
+                              Integer buildMemMb, boolean reindex) {
+        /** The five settings that predate the REINDEX switch, with it on. */
+        public PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf, Integer buildMemMb) {
+            this(enabled, buildMinRows, sweepSeconds, maxPerLeaf, buildMemMb, true);
+        }
+
         /** The four settings that predate the build memory, with it unset. */
         public PciSettings(boolean enabled, int buildMinRows, int sweepSeconds, int maxPerLeaf) {
-            this(enabled, buildMinRows, sweepSeconds, maxPerLeaf, null);
+            this(enabled, buildMinRows, sweepSeconds, maxPerLeaf, null, true);
         }
     }
 
@@ -907,7 +918,25 @@ public final class PgSession {
             searchPciBuildMinRows(env.apply("NX_SEARCH_PCI_BUILD_MIN_ROWS")),
             searchPciSweepSeconds(env.apply("NX_SEARCH_PCI_SWEEP_SECONDS")),
             searchPciMaxPerLeaf(env.apply("NX_SEARCH_PCI_MAX_PER_LEAF")),
-            searchPciBuildMemMb(env.apply("NX_SEARCH_PCI_BUILD_MEM_MB")));
+            searchPciBuildMemMb(env.apply("NX_SEARCH_PCI_BUILD_MEM_MB")),
+            searchPciReindex(env.apply("NX_SEARCH_PCI_REINDEX")));
+    }
+
+    /**
+     * Parse {@code NX_SEARCH_PCI_REINDEX} (RDR-230 Technical Design 8). Null or blank means on; the only other accepted
+     * values are exactly {@code "1"} (on) and {@code "0"} (off) after trimming, as for {@link #searchPci}: a switch that
+     * guards DDL does not guess.
+     */
+    static boolean searchPciReindex(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return true;
+        }
+        return switch (raw.trim()) {
+            case "1" -> true;
+            case "0" -> false;
+            default -> throw new IllegalArgumentException(
+                "NX_SEARCH_PCI_REINDEX must be 1 (on) or 0 (off), got: " + raw);
+        };
     }
 
     /**
@@ -995,9 +1024,9 @@ public final class PgSession {
      * Called from {@code Main} inside the boot try block that refuses on a bad value.
      */
     public static void logPciBootSettings(PciSettings s, int routerMaxRows) {
-        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={} build_mem_mb={}",
-            s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf(),
-            s.buildMemMb() == null ? "auto" : s.buildMemMb());
+        log.info("event=pci_settings enabled={} build_min_rows={} sweep_seconds={} max_per_leaf={} build_mem_mb={} "
+            + "reindex={}", s.enabled(), s.buildMinRows(), s.sweepSeconds(), s.maxPerLeaf(),
+            s.buildMemMb() == null ? "auto" : s.buildMemMb(), s.reindex());
         // Nothing builds when the switch is off or the per-leaf cap is 0, so B above T strands nothing new.
         boolean builds = s.enabled() && s.maxPerLeaf() > 0;
         if (builds && pciBuildThresholdAboveRouter(s.buildMinRows(), routerMaxRows)) {

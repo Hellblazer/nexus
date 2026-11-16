@@ -488,6 +488,9 @@ public final class PgContainerHelper {
      *   <li>{@code WalkLockPreflightIntegrationTest} -- starts a cluster with a lowered
      *       {@code max_locks_per_transaction} and {@code max_connections} ({@link #startDedicated(List)}), postmaster
      *       settings a running cluster cannot take, to walk the largest tenant count the lock preflight admits.</li>
+     *   <li>{@code TenantExportTlsPageTest} -- starts a cluster with {@code ssl=on} ({@link #startDedicated(List)}), a
+     *       postmaster setting a running cluster cannot take, so export pages are read over TLS the way the managed cloud
+     *       connects (nexus-csayy.9).</li>
      *   <li>{@code PlpgsqlCheckGateTest} (a different image) and {@code PgBouncerTenantIsolationTest}
      *       (network-attached) build their own container through {@link #newContainer}.</li>
      * </ul>
@@ -2500,6 +2503,18 @@ public final class PgContainerHelper {
         requireTestIdentifier(index);
         runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-wrong-version.xml",
             "databasechangelog_test_index_comment_wrong_version", Map.of("schema", schema, "index", index));
+    }
+
+    /**
+     * {@code COMMENT ON INDEX schema.index} with a well-formed PCI anchor that has no relfilenode
+     * (nexus-4lnn1.1.10), through {@code db.changelog-test-index-comment-no-relfilenode.xml}. The text is fixed in the
+     * changelog; both names go through {@link #requireTestIdentifier}.
+     */
+    public static void commentIndexAnchorWithoutRelfilenode(Connection su, String schema, String index) throws Exception {
+        requireTestIdentifier(schema);
+        requireTestIdentifier(index);
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-index-comment-no-relfilenode.xml",
+            "databasechangelog_test_index_comment_no_relfilenode", Map.of("schema", schema, "index", index));
     }
 
     /**

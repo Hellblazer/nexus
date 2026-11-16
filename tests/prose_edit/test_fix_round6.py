@@ -11,10 +11,10 @@ import re
 from pathlib import Path
 
 from tests.prose_edit.conftest import Prose
-from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok
+from tests.prose_edit.test_brief import AGENT, skill_text, brief_ok
 from tests.prose_edit.test_fix_round1 import _step
 
-SKILL_TEXT = SKILL.read_text(encoding="utf-8")
+SKILL_TEXT = skill_text()
 AGENT_TEXT = AGENT.read_text(encoding="utf-8")
 DISPATCH = re.compile(r"^DISPATCH=(?P<prompt>.+)$", re.MULTILINE)
 PROMPT = re.compile(r'Read (?P<path>/\S+/brief\.md) in full with Read and follow it\. '
@@ -32,7 +32,7 @@ def test_a_path_run_build_prints_the_dispatch_prompt_with_the_absolute_brief_pat
     work = Path(lines[0].removeprefix("WORK="))
     try:
         assert lines[0].startswith("WORK=") and lines[1].startswith("DISPATCH="), lines
-        assert [ln.split("=", 1)[0] for ln in lines] == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS"], lines
+        assert [ln.split("=", 1)[0] for ln in lines] == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS", "BLOCKS", "PROPOSED", "STATUSES"], lines
         assert brief.startswith("# Editing brief")
         m = PROMPT.fullmatch(DISPATCH.search(out).group("prompt"))  # type: ignore[union-attr]
         assert m, lines[1]

@@ -544,6 +544,7 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("EngineJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
                 + "job that holds it is evicted under EngineJobs.jobs");
             notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
+            notKeyed.put("TenantImportSessions.servedModels", "the router's served-model supplier; holds no tenant's data");
             notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
             notKeyed.put("EngineJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
                 + "settable by a test): no tenant's data");
@@ -559,7 +560,8 @@ public class TenantKeyedStateGateTest {
             for (String f : List.of("NexusService.TUPLE_SWEEP_MAX_BATCHES_PER_TENANT_ENV",
                 "NexusService.DEFAULT_TUPLE_SWEEP_MAX_BATCHES_PER_TENANT", "NexusService.DEFAULT_TENANT",
                 "HttpUtil.TENANT_PARTITION_MISSING_REASON", "HttpUtil.TENANT_CREATION_BUSY_REASON",
-                "HttpUtil.TENANT_CREATION_RETRY_AFTER_SECONDS", "AuthFilter.BOOTSTRAP_ANY_TENANT",
+                "HttpUtil.TENANT_CREATION_RETRY_AFTER_SECONDS", "HttpUtil.TENANT_CREATION_RESTORE_RETRY_AFTER_SECONDS",
+                "AuthFilter.BOOTSTRAP_ANY_TENANT",
                 "AuthFilter.TENANT_HEADER", "TenantConstants.DEFAULT_TENANT", "TenantConstants.BOOTSTRAP_ANY_TENANT",
                 "ChunksIsolationCheck.TENANT_POLICY", "TokenStore.SCOPE_TENANT", "TenantScope.DEFAULT_TENANT_GUC",
                 "TenantScope.T1_TENANT_GUC", "ScratchRepository.T1_TENANT_GUC", "PciReconciler.SET_LOCAL_TENANT",
@@ -662,17 +664,18 @@ public class TenantKeyedStateGateTest {
                 notKeyed.put(f, "a field of the audit trail of ONE sweep request (built per request, dropped with "
                     + "its response); the handler holds no reference to it afterwards");
             }
-            // nexus-6pfgb.44: the catalog TTL CHECK routes hold nothing between requests.
-            notKeyed.put("CatalogTtlCheckAdmin.TenantCensus.tenant", "a component of one table-wide census row (the "
-                + "tenant name beside its counts), built for that request and dropped with its response");
-            notKeyed.put("CatalogTtlCheckHandler.tenants", "a supplier of the known tenant names (TokenStore#"
-                + "listKnownTenants), read on each request; it caches nothing");
-            notKeyed.put("CatalogTtlCheckHandler.Survey.checked", "a component of one request's survey (the tenants "
-                + "that request covered), built for that request and dropped with its response");
-            notKeyed.put("CatalogTtlCheckHandler.Survey.census", "a component of one request's survey (the census rows "
-                + "it read), built for that request and dropped with its response");
-            notKeyed.put("NexusService.catalogTtlCheckAdmin", "the admin-connection DDL object bound once at boot; "
-                + "table-wide, it opens a connection per call and holds no per-tenant state");
+            // nexus-6pfgb.44 and .42: the catalog TTL and manifest chunk-index CHECK routes hold nothing between requests.
+            for (String f : List.of("CatalogTtlCheckAdmin.TenantCensus.tenant", "CatalogTtlCheckHandler.tenants",
+                    "CatalogTtlCheckHandler.Survey.checked", "CatalogTtlCheckHandler.Survey.census",
+                    "ManifestCheckAdmin.TenantCensus.tenant", "ManifestCheckHandler.tenants",
+                    "ManifestCheckHandler.Survey.checked", "ManifestCheckHandler.Survey.census")) {
+                notKeyed.put(f, "a component of one request's census or survey, or the supplier of known tenant names "
+                    + "(TokenStore#listKnownTenants) read on each request; built for that request, dropped with its response");
+            }
+            for (String f : List.of("NexusService.catalogTtlCheckAdmin", "ManifestCheckWiring.admins")) {
+                notKeyed.put(f, "the admin-connection DDL object(s) bound once at boot (the wiring holds one per manifest "
+                    + "CHECK); table-wide, each opens a connection per call and holds no per-tenant state");
+            }
             notKeyed.put("NexusService.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("AuthFilter.tokenCache", TOKEN_CACHE_REF);
             notKeyed.put("TokenAdminHandler.cache", TOKEN_CACHE_REF);
@@ -692,14 +695,7 @@ public class TenantKeyedStateGateTest {
                 + "tenant-independent");
             notKeyed.put("HttpUtil.BEFORE_SEND", "send hook per in-flight HttpExchange, removed when the response "
                 + "is sent; request-scoped");
-            notKeyed.put("PgVectorRepository.FanoutMerger.worstOnTop", "the merge heap of one fan-out search; "
-                + "dies with the request");
-            notKeyed.put("PgVectorRepository.LexicalLeg.rows", "the lexical arms' rows of one fan-out search "
-                + "(nexus-xd2rc); dies with the request");
-            notKeyed.put("PgVectorRepository.LexicalLeg.Union.extras", "the lexical rows one fan-out search "
-                + "returns beside its vector rows; dies with the request");
-            notKeyed.put("PgVectorRepository.LexicalLeg.Union.stats", "per-collection lexical stats of one "
-                + "fan-out search; dies with the request");
+            FanoutSearchKeyedStateTable.fill(notKeyed);   // nexus-xd2rc, nexus-bbtc2: one fan-out search's state
             notKeyed.put("TupleWaitRegistry.MultiWaiter.pendingSubspaces", "wake bookkeeping of one parked wait; "
                 + "dies when that request ends");
             notKeyed.put("TupleWaitRegistry.MultiWaiter.tenant", "the tenant of one parked wait, immutable; "
@@ -830,6 +826,7 @@ public class TenantKeyedStateGateTest {
                 "RequestLedgerActivity.KEY_REUSED",
                 "RequestLedgerActivity.REPLAYS",
                 "RequestLedgerActivity.TAKEOVERS",
+                "ShortPageCountBudget.SPENT",
                 "SuppliedVectorMismatchActivity.MISMATCHES_TOTAL",
                 "TupleWaitRegistry.claimantRefused",
                 "TupleWaitRegistry.globalParked",
@@ -904,6 +901,7 @@ public class TenantKeyedStateGateTest {
                 "ChunksIsolationCheck.StructureReport.gaps",
                 "ChunksLeafAutovacuumCheck.Report.autovacuumDisabled",
                 "ChunksLeafAutovacuumCheck.Report.policyUnset",
+                "CombinedWriteService.ChunkSplit.relevant",
                 "CombinedWriteService.CombinedWriteResult.response",
                 "CombinedWriteService.MetadataMode.deleteKeys",
                 "CombinedWriteService.ResolvedBatch.mismatchedChashes",
@@ -1108,12 +1106,15 @@ public class TenantKeyedStateGateTest {
             notKeyed.put("PciReconciler.failures", PCI_OFF);
             // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
             // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
-            // AnchorReads fields are one counting transaction's result, applied once it commits.
-            notKeyed.put("PciReconciler.lastStats", PCI_OFF);
-            notKeyed.put("PciReconciler.readings", PCI_OFF);
-            notKeyed.put("PciReconciler.AnchorReads.readings", PCI_OFF);
-            notKeyed.put("PciReconciler.AnchorReads.adoptions", PCI_OFF);
+            // The Reads fields are one counting transaction's result, applied once it commits. They live in
+            // PciAnchorLedger since nexus-4lnn1.1.10 (moved out of PciReconciler to keep it under its size cap).
+            notKeyed.put("PciAnchorLedger.lastStats", PCI_OFF);
+            notKeyed.put("PciAnchorLedger.readings", PCI_OFF);
+            notKeyed.put("PciAnchorLedger.Reads.readings", PCI_OFF);
+            notKeyed.put("PciAnchorLedger.Reads.writes", PCI_OFF);
             notKeyed.put("PciReconciler.tenantBinder", PCI_OFF);
+            // nexus-4lnn1.1.10 (RDR-230 Phase 2): the REINDEX phase's in-memory fields; the list and why.
+            PciReindexNotKeyedFields.FIELDS.forEach(f -> notKeyed.put(f, PCI_OFF));
             // nexus-f3yqd.3: GET /v1/status's boot_work. The registry lists the heavy work this engine is doing
             // (an index build, by id), names no tenant, and a process-wide piece of work is not carried across a reset.
             notKeyed.put("BootWorkRegistry.entries", "the engine's heavy work in flight, by work id (pci-reconcile); "
@@ -1144,6 +1145,7 @@ public class TenantKeyedStateGateTest {
                 "PciCanary.Target.tenant",
                 "PciCanary.Leg.hits",
                 "PciCanary.Result.redSample",
+                "PciCanary.Result.redQueries",
                 "PciReconciler.Tally.droppedIndexes",
                 "PciReconciler.Tally.builtTargets")) {
                 notKeyed.put(f, PCI_OFF);

@@ -37,6 +37,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from nexus.commands.ask import ask_group
+from nexus.commands.aura_cmd import aura_group
 from nexus.commands.backup_cmd import backup
 from nexus.commands.catalog import catalog
 from nexus.commands.collection import collection
@@ -314,6 +315,7 @@ def _reraise_config_error(exc: BaseException) -> None:
 
 
 main.add_command(ask_group, name="ask")
+main.add_command(aura_group, name="aura")
 main.add_command(backup)
 main.add_command(catalog)
 main.add_command(ci_group, name="ci")

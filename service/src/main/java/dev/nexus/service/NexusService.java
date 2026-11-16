@@ -319,10 +319,12 @@ public final class NexusService {
     private volatile dev.nexus.service.vectors.ChunkConstraintAdmin chunkConstraintAdmin;
     /** nexus-6pfgb.44: the admin-connection DDL behind {@code /v1/admin/catalog-ttl-check/*}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.db.CatalogTtlCheckAdmin catalogTtlCheckAdmin;
+    private final ManifestCheckWiring manifestChecks = new ManifestCheckWiring();   // nexus-6pfgb.42: the admins and routes of /v1/admin/manifest-chunk-index-check/* and manifest-labels-check/*
     /** nexus-f3yqd: the admin-connection VALIDATE behind {@code /v1/admin/validate-constraints}; null until {@code Main} binds it. */
     private volatile dev.nexus.service.db.ChashConstraintValidator chashConstraintValidator;
     /** nexus-csayy.2 (RDR-248): the tenant export sessions behind {@code /v1/tenant/export}; swapped whole by a test. */
     private volatile dev.nexus.service.db.TenantExportSessions exportSessions;
+    private final TenantImportWiring importWiring = new TenantImportWiring();
     /** nexus-f3yqd: the engine-wide validate job, one at a time and never tenant-scoped, so no tenant reset reaches it. */
     private final dev.nexus.service.http.EngineJobs<dev.nexus.service.http.ValidateConstraintsJobs.Progress> validateConstraintsJobs =
         dev.nexus.service.http.ValidateConstraintsJobs.registry(System::currentTimeMillis);
@@ -902,13 +904,11 @@ public final class NexusService {
                                 : tokenCache.resolve(hash).isPresent()));
         chunkKeysCtx.getFilters().addAll(authFilter);
 
-        // /v1/admin/catalog-ttl-check/* — RDR-236 (nexus-6pfgb.44): the census, add-NOT-VALID and VALIDATE of the
-        // catalog TTL CHECK, a step of its own (not the chunk routes above). Nothing in the engine calls them; the
-        // admin connection they run on is bound late, from Main (catalogTtlCheckAdmin).
-        var catalogTtlCtx = server.createContext(dev.nexus.service.http.CatalogTtlCheckHandler.PATH,
+        // /v1/admin/catalog-ttl-check/* (nexus-6pfgb.44) and the manifest CHECK routes (nexus-6pfgb.42), RDR-236: operator steps; nothing calls them, Main binds their admin connections late.
+        server.createContext(dev.nexus.service.http.CatalogTtlCheckHandler.PATH,
                 new dev.nexus.service.http.CatalogTtlCheckHandler(
-                        () -> catalogTtlCheckAdmin, tokenStore::listKnownTenants, tenantScope));
-        catalogTtlCtx.getFilters().addAll(authFilter);
+                        () -> catalogTtlCheckAdmin, tokenStore::listKnownTenants, tenantScope)).getFilters().addAll(authFilter);
+        manifestChecks.register(server, authFilter, tokenStore::listKnownTenants, tenantScope);
 
         // /v1/admin/validate-constraints — the user-started VALIDATE CONSTRAINT job of the chash width CHECKs (nexus-f3yqd),
         // root token only; never started by the engine. The admin connection it runs on is bound late, from Main.
@@ -1090,6 +1090,7 @@ public final class NexusService {
         server.createContext(dev.nexus.service.http.TenantExportHandler.PATH,
                 new dev.nexus.service.http.TenantExportHandler(() -> exportSessions, versionHandler::engineVersion,
                         versionHandler::schemaChangesetCount)).getFilters().addAll(authFilter);
+        importWiring.register(server, authFilter, dataSource, () -> exportSessions, versionHandler::schemaChangesetCount, () -> docEmbedderRouter == null ? null : docEmbedderRouter.availableModels());
 
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
@@ -1135,18 +1136,18 @@ public final class NexusService {
                 t -> dataSweepFailuresByTenant.remove(t) != null ? 1 : 0),
             dev.nexus.service.db.TenantKeyedState.of("ChunkKeysSweepJobs", chunkKeysJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("TenantExportSessions", t -> exportSessions.evictTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("TenantImportSessions", importWiring::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs",
                 t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
     }
 
+    public TenantImportWiring importWiring() { return importWiring; }   // nexus-csayy.6: the import sessions and the singleton-lock fact
+    public dev.nexus.service.db.TenantExportSessions exportSessions() { return exportSessions; }   // an import test builds its sessions over these
+
     /** Test seam (nexus-csayy.2): replace the export sessions (a test's own bounds and clock); the old ones close. */
-    public void exportSessions(dev.nexus.service.db.TenantExportSessions replacement) {
-        var old = this.exportSessions;
-        this.exportSessions = replacement;
-        old.close();
-    }
+    public void exportSessions(dev.nexus.service.db.TenantExportSessions replacement) { var old = exportSessions; exportSessions = replacement; old.close(); }
 
     /** The evictors the tenant reset route runs, in order; empty-safe, built whether or not the route is enabled. */
     List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState() {
@@ -1314,13 +1315,13 @@ public final class NexusService {
         this.chunkConstraintAdmin = admin;
     }
 
-    /**
-     * Bind the admin-connection DDL behind the catalog TTL CHECK routes (nexus-6pfgb.44). {@code Main} calls it once,
-     * with the same {@code NX_DB_ADMIN_*} values; until then the routes answer 503.
-     */
+    /** Bind the admin-connection DDL behind the catalog TTL CHECK routes (nexus-6pfgb.44); {@code Main} calls it once, until then they answer 503. */
     public void catalogTtlCheckAdmin(dev.nexus.service.db.CatalogTtlCheckAdmin admin) {
         this.catalogTtlCheckAdmin = admin;
     }
+
+    /** The manifest CHECK routes' admin binding (nexus-6pfgb.42); {@code Main} binds it once, until then they answer 503. */
+    public ManifestCheckWiring manifestChecks() { return manifestChecks; }
 
     /**
      * Bind the admin-connection VALIDATE behind {@code POST /v1/admin/validate-constraints} (nexus-f3yqd). {@code Main} calls
@@ -2245,6 +2246,7 @@ public final class NexusService {
         reconcileJobs.shutdown();
         manifestFillJobs.shutdown();
         validateConstraintsJobs.shutdown();
+        importWiring.close();   // a held import transaction must not outlive the engine's pool
         exportSessions.close();   // a held export snapshot must not outlive the engine's pool
         if (chashConstraintValidator != null) {
             chashConstraintValidator.cancelRunning();   // a VALIDATE must not outlive the engine that asked for it

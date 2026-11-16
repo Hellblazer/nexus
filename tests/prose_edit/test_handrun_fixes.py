@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_titles
-from tests.prose_edit.test_brief import ORDER, SKILL, _module, brief_ok, fenced, proposal, run_brief
+from tests.prose_edit.test_brief import ORDER, skill_text, _module, brief_ok, fenced, proposal, run_brief
 from tests.prose_edit.test_review import DOC, review_ok, start, status
 
 
@@ -70,7 +70,7 @@ def test_when_every_exemplar_is_from_the_document_the_brief_says_so(prose: Prose
     shown = _exemplars(brief_ok(prose, "build", "docs/x.md", "--genre", "reference-doc"))
     assert "EXEMPLAR FROM" not in shown
     assert "all come from this document" in shown and "No exemplars are stored" not in shown
-    assert "all come from this document" in SKILL.read_text(encoding="utf-8")  # step 6 tells the author
+    assert "all come from this document" in skill_text()  # step 6 tells the author
 
 
 def test_a_range_run_on_the_exemplar_document_also_leaves_it_out(prose: Prose) -> None:
@@ -90,7 +90,7 @@ def test_a_stdin_run_keeps_every_exemplar(prose: Prose, tmp_path: Path) -> None:
 
 
 def _step(n: int) -> str:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     start = text.index(f"\n{n}. ")
     return text[start:text.index(f"\n{n + 1}. ", start)]
 

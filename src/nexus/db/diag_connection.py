@@ -17,8 +17,15 @@ it is never laundered again):
   is enforced ONLY here at the choke point. VIEW era (the superuser
   provisioning path has created ``nexus.diag_chash_conformance``): the
   engine's ``grants-nexus-diag-2`` changeset REVOKES the role's direct table
-  SELECT — the boundary becomes COUNT-BY-CONSTRUCTION at the DB level, and
-  this choke point remains as defense in depth. In BOTH eras
+  SELECT. ``grants-nexus-diag-3`` then grants back only the column of each
+  table the view reads (content hashes and ids, nexus-edchb). ``-5`` grants
+  the columns of ``nexus.tuples`` the doctor's lock check reads, never a
+  payload column; ``-4`` grants every ``gc_audit`` column but ``details``
+  (document titles and paths); and ``-4`` and ``-5`` grant three whole tables
+  (``search_telemetry``, ``tuple_claim_log``, ``tuple_tenants``). So chunk
+  text, tuple payloads and audit samples are out of reach at the DB level,
+  but the boundary is not count-only there, and this choke point is what
+  keeps every statement aggregate-only. In BOTH eras
   :func:`run_diagnostic_sql` refuses any statement failing
   :func:`nexus.remediation.sql_lint.assert_read_only_diagnostics` — BEFORE
   any DB contact — and wraps execution in ``SET TRANSACTION READ ONLY``.

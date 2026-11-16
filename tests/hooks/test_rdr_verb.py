@@ -1055,3 +1055,67 @@ def test_the_t2_cap_is_the_hook_budget() -> None:
     """Derived, not a second number: raising the budget alone must raise the
     T2 cap with it."""
     assert rdr_hook_module._T2_DEADLINE_S == rdr_hook_module._HOOK_BUDGET_S
+
+
+# ── nexus-3jjkg: a gate keyed to the RDR file's blob survives a rebase ──────
+
+
+def _git_t(root, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout.strip()
+
+
+def test_gated_blobs_key_on_the_bare_number_and_skip_commit_only_records(rdr_hook_mod, monkeypatch) -> None:
+    mod = rdr_hook_mod
+    rows = [
+        {"title": "RDR-105-gate-latest", "content": "commit: abc1234\nblob: 0123456789ab\n"},
+        {"title": "097-gate-latest", "content": "outcome: PASSED\ncommit: \"def5678\"\n"},
+        {"title": "204", "content": "status: draft\n"},
+    ]
+    monkeypatch.setattr(mod, "_fetch_rdr_rows", lambda repo: rows)
+    assert mod._load_gated_blobs("nexus") == {"105": "0123456789ab"}
+    assert mod._load_gated_commits("nexus") == {"105": "abc1234", "97": "def5678"}
+
+
+def test_a_rebase_that_keeps_the_text_is_silent_and_an_edit_is_not(rdr_hook_mod, tmp_path) -> None:
+    mod = rdr_hook_mod
+    root = tmp_path
+    (root / "docs" / "rdr").mkdir(parents=True)
+    f = root / "docs" / "rdr" / "rdr-204-example.md"
+    f.write_text("---\nstatus: draft\n---\n# x\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    _git_t(root, "add", ".")
+    _git_t(root, "commit", "-q", "-m", "gated")
+    c1 = _git_t(root, "log", "-1", "--format=%h")
+    blob = _git_t(root, "rev-parse", "--short=12", "HEAD:docs/rdr/rdr-204-example.md")
+
+    _git_t(root, "commit", "-q", "--amend", "-m", "rebased")  # same tree, new commit
+    assert _git_t(root, "log", "-1", "--format=%h") != c1
+    # Commit key alone: the rewritten tip reads as an edit (the bug).
+    assert mod._unchecked_fix_edits(root, [f], {"204": "draft"}, {"204": c1}), "control: commit key must misfire"
+    # Blob key: silent.
+    assert mod._unchecked_fix_edits(root, [f], {"204": "draft"}, {"204": c1}, {"204": blob}) == []
+
+    f.write_text("---\nstatus: draft\n---\n# x fixed\n", encoding="utf-8")
+    _git_t(root, "commit", "-q", "-am", "fix")
+    out = mod._unchecked_fix_edits(root, [f], {"204": "draft"}, {"204": c1}, {"204": blob})
+    assert len(out) == 1 and "RDR-204: edits since the gated blob " + blob in out[0], out
+    assert "/conexus:rdr-fix 204" in out[0]
+
+
+def test_the_hook_never_raises_when_relpath_cannot_be_computed(rdr_hook_mod, tmp_path, monkeypatch) -> None:
+    """Review item 5: os.path.relpath raises ValueError across drives on
+    Windows; the hook skips the file and carries on."""
+    from tests._module_seam import setattr_in
+
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    files = [root / "docs" / "rdr" / "rdr-001-x.md"]
+
+    def cross_drive(*_a, **_k):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    setattr_in(monkeypatch, mod, "os.path.relpath", cross_drive)
+    assert mod._unchecked_fix_edits(root, files, {"1": "draft"}, {}, {"1": "0123456789ab"}) == []

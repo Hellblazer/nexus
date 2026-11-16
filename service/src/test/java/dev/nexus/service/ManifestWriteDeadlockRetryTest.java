@@ -46,14 +46,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Bead nexus-wbfpw.66: the catalog manifest writers run each transaction under
  * {@link DeadlockRetry}, so a 40P01 against a concurrent chunk writer is retried instead of surfacing.
  *
- * <p><strong>The deadlock.</strong> A manifest change that drops an owner row fires the vectors-021-3
- * statement triggers, which lock the dropped chunk rows ({@code FOR NO KEY UPDATE}) after the manifest
- * rows are already locked by the same statement. A concurrent writer that holds one of those chunk rows
- * and then wants one of the manifest rows closes a cycle. Every test here builds exactly that, with a
+ * <p><strong>The deadlock.</strong> A manifest replace that drops or re-points an owner row locks the chunk
+ * rows it drops ({@code FOR NO KEY UPDATE}: the replace's own pre-lock of them, nexus-z0o2p.29, and again
+ * the vectors-021-3 statement triggers) after the document's manifest rows are already locked. A concurrent
+ * writer that holds one of those chunk rows and then wants one of the manifest rows closes a cycle. Every test here builds exactly that, with a
  * genuine, unmocked 40P01:
  * <ol>
  *   <li>the "other writer" (a superuser connection) locks a chunk row the manifest change will drop;</li>
- *   <li>the manifest write starts and blocks in the trigger (waited for through {@code pg_stat_activity});</li>
+ *   <li>the manifest write starts and blocks on that chunk row (waited for through {@code pg_stat_activity});</li>
  *   <li>the other writer then asks for a lock on the document's manifest rows, which the blocked write
  *       holds, closing the cycle;</li>
  *   <li>Postgres kills the victim after {@code deadlock_timeout}. The other writer's own timeout is set
@@ -74,7 +74,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p><strong>What the completion-stamp assertions cannot show.</strong> The per-attempt reset of the
  * refusal list is not exercised: the stamp is the last statement of the transaction, so the deadlock this
- * test provokes (in the manifest statement's trigger) always comes BEFORE any refusal is collected, and the
+ * test provokes (on the dropped chunk's lock) always comes BEFORE any refusal is collected, and the
  * list is empty at every retry. A 40P01 raised at commit, after a refusal was collected, could repeat it;
  * no test builds that. The {@code complete_refused_count} assertions pin the committed attempt's value only.
  */
@@ -236,7 +236,10 @@ class ManifestWriteDeadlockRetryTest {
               .forNoKeyUpdate().fetch();
 
             Future<T> writer = pool.submit(write);
-            assertThat(PgActivityProbe.waitsOnALock(pg, "%catalog_document_chunks%"))
+            // The statement that waits is the manifest write's lock of the chunk rows it drops (nexus-z0o2p.29: the
+            // replace's own pre-lock on nexus.chunks, formerly the DELETE's trigger), so any statement that names
+            // a chunks table counts.
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%chunks%"))
                 .as("the manifest write must block on the chunk row the other writer holds (else no race happened)")
                 .isTrue();
 
@@ -266,9 +269,10 @@ class ManifestWriteDeadlockRetryTest {
             return null;
         });
         assertThat(manifest(s)).containsExactly(Map.entry(0, s.c1()), Map.entry(1, s.c3()));
-        // The DELETE trigger records every chash the statement removed, once; the discarded attempt's
-        // records rolled back with it and the retried attempt wrote them again.
-        assertThat(orphanRecords(s)).containsOnly(Map.entry(s.c1(), 1), Map.entry(s.c2(), 1));
+        // The replace drops c2 (position 1 goes to c3), which the UPDATE trigger records; c1 is kept in place, so it
+        // is never recorded (nexus-z0o2p.29). The discarded attempt's records rolled back with it and the retried
+        // attempt wrote them again, so one record, c2's, remains.
+        assertThat(orphanRecords(s)).containsOnly(Map.entry(s.c2(), 1));
         su(ctx -> assertThat(ctx.select(CATALOG_DOCUMENTS.CHUNK_COUNT).from(CATALOG_DOCUMENTS)
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq(s.doc())))
             .fetchOne().value1()).isEqualTo(2));
@@ -294,8 +298,9 @@ class ManifestWriteDeadlockRetryTest {
         assertThat(result.get("swept")).isEqualTo(1);
         assertThat(chunkExists(s, s.c2())).as("the sweep ran, once, after the commit").isFalse();
         assertThat(gcAuditRows(s)).as("exactly one sweep audit row").isEqualTo(1);
-        // c1 was recorded as dropped by the DELETE trigger; c2's record went with the chunk the sweep deleted.
-        assertThat(orphanRecords(s)).containsOnly(Map.entry(s.c1(), 1));
+        // c1 is kept in place (the replace rewrites position 1 only), so it has no record; c2's record went
+        // with the chunk the sweep deleted.
+        assertThat(orphanRecords(s)).isEmpty();
     }
 
     @Test

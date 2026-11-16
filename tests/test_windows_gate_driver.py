@@ -36,7 +36,7 @@ RUN_GATE: Path = GUEST_DIR / "run-gate.sh"
 GATE: Path = REPO / "tests" / "e2e" / "windows-phase5-gate.ps1"
 
 PW_SCRIPTS = ("restore.ps1", "guest-run.ps1", "stduser.ps1", "cache.ps1")
-NO_PW_SCRIPTS = ("hostcheck.ps1", "end.ps1")
+NO_PW_SCRIPTS = ("hostcheck.ps1", "end.ps1", "checkpoint.ps1")
 INNER_SCRIPTS = ("inst.ps1", "setup-run.ps1", "gaterun.ps1", "waitv.ps1", "as-user.ps1")
 ALL_PS = PW_SCRIPTS + NO_PW_SCRIPTS + INNER_SCRIPTS
 
@@ -168,13 +168,32 @@ def test_the_retry_is_bounded_and_stops_for_a_guest_that_is_not_running() -> Non
 
 
 def test_no_script_takes_deletes_or_renames_a_checkpoint() -> None:
-    forbidden = re.compile(
-        r"Checkpoint-VM|Remove-VMSnapshot|Remove-VMCheckpoint|Rename-VMSnapshot|Rename-VMCheckpoint|"
-        r"Set-VMSnapshot|Export-VMSnapshot|Convert-VHD|Remove-VM\b|Set-VM\b",
+    """The driver never removes, renames or replaces a checkpoint, the baseline least of all (aliases included:
+    the Hyper-V module spells every one of these twice, as Snapshot and as Checkpoint). The one exception to
+    "takes none" is checkpoint.ps1 (nexus-y3y8d, run-gate.sh --build-signed-in), pinned in its own tests, and the
+    one exception to "changes no VM setting" is the CheckpointType put back by end.ps1 and checkpoint.ps1."""
+    never = re.compile(
+        r"Remove-VMSnapshot|Remove-VMCheckpoint|Rename-VMSnapshot|Rename-VMCheckpoint|"
+        r"Set-VMSnapshot|Set-VMCheckpoint|Export-VMSnapshot|Export-VMCheckpoint|Import-VM\b|Snapshot-VM|"
+        r"Remove-VMSavedState|Merge-VHD|Remove-VHD|Convert-VHD|Remove-VM\b",
         re.I,
     )
+    taking = re.compile(r"Checkpoint-VM|Snapshot-VM|Set-VM\b", re.I)
     for text in [_sh(), *(_read(n) for n in ALL_PS)]:
-        assert not forbidden.search(text)
+        assert not never.search(text)
+    assert not taking.search(_sh())
+    for name in ALL_PS:
+        if name in ("checkpoint.ps1", "end.ps1", "hostcheck.ps1"):
+            continue
+        assert not taking.search(_read(name)), name
+    # end.ps1: ONE Set-VM, and it sets back what checkpoint.ps1 recorded, never a value of its own
+    end_lines = [ln.strip() for ln in _code_lines(_read("end.ps1")) if taking.search(ln)]
+    assert len(end_lines) == 1 and end_lines[0].startswith("try { Set-VM -VMName $vm -CheckpointType $recorded -ErrorAction Stop;"), end_lines
+    # hostcheck.ps1 only READS the two cmdlets' parameter lists
+    for ln in (ln.strip() for ln in _code_lines(_read("hostcheck.ps1")) if taking.search(ln)):
+        assert re.match(
+            r"\$(setVm|takeVm) = Get-Command (Set-VM|Checkpoint-VM) -ErrorAction SilentlyContinue$|\"cmdlets: |if \(-not \(\$setVm ", ln
+        ), ln
     restores = [(n, ln.strip()) for n in ALL_PS for ln in _code_lines(_read(n)) if "Restore-VM" in ln]
     assert restores == [
         ("restore.ps1", "Restore-VMSnapshot -VMName $vm -Name $cp -Confirm:$false -ErrorAction Stop")
@@ -182,10 +201,15 @@ def test_no_script_takes_deletes_or_renames_a_checkpoint() -> None:
     restore = _read("restore.ps1")
     assert "$cp = $Checkpoint" in restore
     # the checkpoint name is a parameter: no script spells one out, and bash only as the override default
+    # (nexus-y3y8d: except where Sam's exception of one running child checkpoint of that baseline on nx-clean-win11
+    # is enforced in code: hostcheck.ps1 and checkpoint.ps1 spell it, once each, and run-gate.sh spells it twice more)
     for name in ALL_PS:
-        assert "clean-baseline" not in _read(name)
-    assert len(re.findall(r"clean-baseline", _sh())) == 1  # only the override default
+        spelled = [ln.strip() for ln in _code_lines(_read(name)) if "clean-baseline" in ln]
+        assert len(spelled) == (1 if name in ("hostcheck.ps1", "checkpoint.ps1") else 0), (name, spelled)
+    sh_spelled = [ln.strip() for ln in _code_lines(_sh()) if "clean-baseline" in ln]
+    assert len(sh_spelled) == 2, sh_spelled  # the override default, and the build's pin
     assert 'CHECKPOINT="${NX_GUEST_CHECKPOINT:-clean-baseline-2026-10-06}"' in _sh()
+    assert '[[ "$CHECKPOINT" == clean-baseline-2026-10-06 ]] || die 2' in _sh()
 
 
 def test_the_restore_refuses_a_guest_that_is_not_off_before_it_restores() -> None:
@@ -499,6 +523,7 @@ case "$cmd" in
         echo "NXG-RESULT: ok" ;;
       stduser.ps1)
         if [[ "${FAKE_FAIL_STEP:-}" == stduser ]]; then echo "NXG-RESULT: FAIL nxstd did not sign in at the console"; exit 7; fi
+        if [[ "$cmd" != *" -Existing yes"* && -z "${FAKE_SECRET_STAYS:-}" ]]; then echo "winlogon secret removed=True"; fi
         echo "std gate sha256=$(shasum -a 256 "$rundir/stage/windows-phase5-gate.ps1" | cut -d' ' -f1)"
         if [[ "$cmd" == *" -Wheel "* ]]; then
           w="${cmd#* -Wheel }"; w="${w%% *}"
@@ -522,6 +547,10 @@ case "$cmd" in
         m="${cmd#* -Mode }"; m="${m%% *}"
         echo "$m :: $cmd" >> "$FAKE_ROOT/cache.log"
         if [[ "${FAKE_FAIL_STEP:-}" == "$m" ]]; then echo "NXG-RESULT: FAIL cache $m broke"; exit 1; fi
+        echo "NXG-RESULT: ok" ;;
+      checkpoint.ps1)
+        echo "$cmd" >> "$FAKE_ROOT/checkpoint.log"
+        if [[ "${FAKE_FAIL_STEP:-}" == checkpoint ]]; then echo "NXG-RESULT: FAIL the checkpoint was not taken: broke"; exit 7; fi
         echo "NXG-RESULT: ok" ;;
       end.ps1)
         echo "$cmd" >> "$FAKE_ROOT/end.log"

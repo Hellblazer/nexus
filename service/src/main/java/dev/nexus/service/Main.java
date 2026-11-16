@@ -207,6 +207,9 @@ public final class Main {
             log.info("event=taxonomy_assign_bounds statement_timeout_ms={} lock_timeout_ms={}",
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignStatementTimeoutMs(),
                      dev.nexus.service.db.PgSession.startupTaxonomyAssignLockTimeoutMs());
+            // nexus-h7kw2: same fail-fast for NX_SHORT_PAGE_COUNT_BUDGET_MS.
+            log.info("event=short_page_count_budget budget_ms={}",
+                     dev.nexus.service.vectors.ShortPageCountBudget.startupBudgetMs());
             // nexus-u9zkn: same fail-fast for NX_PG_SOCKET_TIMEOUT_MARGIN_SECONDS.
             log.info("event=pg_network_bound margin_ms={} tcp_keep_alive=true",
                      dev.nexus.service.db.PgSession.startupNetworkBoundMarginMs());
@@ -573,6 +576,9 @@ public final class Main {
         // RDR-210 Step 4 (nexus-un7vj): /version and /v1/status report the profile, the reranker and any
         // degraded-boot description beside the embedding mode. Bound before the listener starts.
         service.embedPosture(dev.nexus.service.http.EmbedPosture.of(plan, reranker));
+        // nexus-csayy.6 (RDR-248): the import routes open a session only on an engine that holds the singleton lock
+        // (null: NX_ENGINE_SINGLETON_LOCK=off, or a pooler, where the lock is skipped).
+        service.importWiring().declareSingletonLockHeld(singletonLock != null);
         service.start();
         // The read half runs in every engine, whatever NX_SEARCH_PCI says: one read now, then one per
         // NX_SEARCH_PCI_SWEEP_SECONDS. Started after the service so the pool is serving; stopped in the
@@ -621,6 +627,8 @@ public final class Main {
         service.chunkConstraintAdmin(new dev.nexus.service.vectors.ChunkConstraintAdmin(adminConnection));
         // nexus-6pfgb.44: the same for the catalog TTL CHECK census/add/validate routes; nothing calls them.
         service.catalogTtlCheckAdmin(new dev.nexus.service.db.CatalogTtlCheckAdmin(adminConnection));
+        // nexus-6pfgb.42: and for the manifest CHECK census/add/validate routes (chunk_index, labels); nothing calls them.
+        service.manifestChecks().bind(adminConnection);
         // nexus-f3yqd: the same for the user-started chash VALIDATE CONSTRAINT job; bound here, started only by a user's POST.
         service.chashConstraintValidator(adminConnection);
         // nexus-hbnml: a retired aspect_extraction_queue table that still holds rows (aspects-005-2 keeps it) is

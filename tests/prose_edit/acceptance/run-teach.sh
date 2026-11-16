@@ -40,8 +40,13 @@ OUT="${OUT_DIR:?set OUT_DIR}"
 runner_lock run-teach.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose0206_}"
-export PROSE_EDIT_TEST=1  # PROSE_EDIT_OPEN is ignored without it
-export PROSE_EDIT_OPEN="${PROSE_EDIT_OPEN:-true}"
+# Every flow below is a path run, reviewed in the MarkupEditor app, which a headless session cannot drive
+# (nexus-scmcs.2.13): NOT-RUN, recorded in $OUT/not-run.txt, exit 3. PROSE_EDIT_APP_RUNNER=1, set only by a
+# harness that answers the MarkupEditor tools, runs the flows.
+if [ "${PROSE_EDIT_APP_RUNNER:-0}" != 1 ]; then
+  runner_not_run "$OUT" teach "$RUNNER_NO_APP_REASON"
+  exit 3
+fi
 DIR=docs/zz-teach
 DOC=$DIR/scenario.md
 S6DOC=tests/prose_edit/fixtures/user-entry.md
@@ -52,7 +57,6 @@ runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"
 cp tests/prose_edit/fixtures/review-scenario.md "$DOC" || exit 1
 git status --short > "$OUT/repo-status-before.txt"
-"${MEM[@]}" viewer --set Typora > "$OUT/seed-viewer.json" || exit 1
 
 run() { OUT_DIR="$OUT" "$HERE/run-scenario.sh" "$@"; }
 

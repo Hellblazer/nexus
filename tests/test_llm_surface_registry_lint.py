@@ -76,6 +76,7 @@ HTTPX_ATTRS: frozenset[str] = HTTPX_REQUEST_ATTRS | HTTPX_CLIENT_ATTRS
 #: modules". These carry store traffic, not LLM or third-party traffic. Dotted module names.
 ENGINE_CLIENT_MODULES: frozenset[str] = frozenset({
     "nexus.backup.cloud_export",         # the tenant export session routes (nx backup, RDR-248)
+    "nexus.backup.cloud_import",         # the tenant import session routes (nx backup restore, RDR-248)
     "nexus.db.http_engine_status",       # GET /v1/status
     "nexus.db.http_scratch_store",       # T1 over the engine
     "nexus.db.inmemory_pipeline",        # httpx.MockTransport onto an in-process fake engine

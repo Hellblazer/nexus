@@ -8,7 +8,8 @@ OUT_DIR holds the files run-scenario.sh writes: NAME.jsonl (stream-json), NAME.r
 run-canaries.sh also work-dirs-before.txt and work-dirs-after.txt. A run's kind is its name
 without a trailing -N. Exit 1 when any run fails; exit 3 when none failed but a run was
 NOT-MEASURABLE or VACUOUS (it proves nothing, so it is never a pass) or a scenario was NOT-RUN (a runner skipped it on
-purpose and wrote "NAME: reason" to not-run.txt; it has no transcript); 0 only when every run passed.
+purpose and wrote "NAME: reason" to not-run.txt, as run-scenario.sh does for a path run with no MarkupEditor harness;
+it has no transcript); 0 only when every run passed.
 
 The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range, compression) are scored on
 the post-filter proposal: the last `brief.py filter` output in the transcript, which is what the author sees.
@@ -1163,7 +1164,7 @@ def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str],
     if kind == "stdin":
         # The turn ends with the question to the author, so one work directory is waiting for the answer.
         filtered = any('"edits"' in v and '"dropped"' in v for v in results.values())
-        rendered = any('"copy"' in v and '"opened"' in v for v in results.values())
+        rendered = any('"counts"' in v and '"unplaced"' in v for v in results.values())
         unread = brief_read_problem(events) if dispatched else None
         ok = (dispatched and filtered and rendered and len(new_work_dirs) <= 1 and c["denied"] == 0
               and not c["off_list_bash"] and unread is None)
@@ -1182,8 +1183,9 @@ def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str],
 
 
 def not_run_rows(out_dir: Path) -> list[tuple[str, str]]:
-    """[(name, reason)] from not-run.txt: the scenarios a runner skipped on purpose (run-cut.sh writes one there through
-    runner_not_run when a scenario cannot run). A name that also has a transcript was run, so it is not listed."""
+    """[(name, reason)] from not-run.txt: the scenarios a runner skipped on purpose through runner_not_run (run-cut.sh
+    when a scenario cannot run, run-scenario.sh for a path run with no MarkupEditor harness). A name that also has a
+    transcript was run, so it is not listed."""
     path = out_dir / "not-run.txt"
     if not path.is_file():
         return []

@@ -1,0 +1,31 @@
+{
+  "request" : [
+    {"block": 1, "expected": "1a5df09677ffb3", "find": "per [sic] the", "replace": "per the"},
+    {"block": 2, "expected": "15228ae630e78e", "find": "a < b", "replace": "a below b"},
+    {"block": 2, "expected": "15228ae630e78e", "find": "~tilde~", "replace": "tilde"},
+    {"block": 4, "expected": "10f67c9a80c418", "find": "Tom & Jerry", "replace": "Tom and Jerry"},
+    {"block": 4, "expected": "10f67c9a80c418", "find": "use * as", "replace": "use + as"},
+    {"block": 5, "expected": "1b8ba35fe6dd32", "find": "Second item, plainly", "replace": "Second item"},
+    {"block": 6, "expected": "1488f1ea2d0822", "find": "basically fine", "replace": "fine"},
+    {"block": 7, "expected": "0bfc5ee8e095b5", "find": "basically first", "replace": "first"},
+    {"block": 8, "expected": "0eafa9b5168c71", "find": "the end and its", "replace": "the end, and its"},
+    {"block": 3, "expected": "0b917b4d33a8c3", "find": "the docs", "replace": "the manual"},
+    {"block": 1, "expected": "1a5df09677ffb3", "find": "really", "replace": "truly"}
+  ],
+  "reply" : {
+    "ok" : true,
+    "results" : [
+      {"block" : 1, "id" : "s17", "index" : 0, "status" : "proposed"},
+      {"block" : 2, "id" : "s18", "index" : 1, "status" : "proposed"},
+      {"block" : 2, "id" : "s19", "index" : 2, "status" : "proposed"},
+      {"block" : 4, "id" : "s20", "index" : 3, "status" : "proposed"},
+      {"block" : 4, "id" : "s21", "index" : 4, "status" : "proposed"},
+      {"block" : 5, "id" : "s22", "index" : 5, "status" : "proposed"},
+      {"block" : 6, "id" : "s23", "index" : 6, "status" : "proposed"},
+      {"block" : 7, "id" : "s24", "index" : 7, "status" : "proposed"},
+      {"index" : 8, "reason" : "find not found in block 8; matching is exact and case-sensitive against the visible text of one paragraph, list item or table cell, without Markdown syntax (leave out ** _ ` ~~ [ ]( ) ![]( ) # list markers and backslash escapes; inline code matches without its backticks)", "status" : "refused"},
+      {"block" : 3, "id" : "s25", "index" : 9, "status" : "proposed"},
+      {"block" : 1, "id" : "s26", "index" : 10, "status" : "proposed"}
+    ]
+  }
+}

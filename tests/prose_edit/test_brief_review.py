@@ -17,6 +17,7 @@ from tests.prose_edit.test_brief import (
     NAMES_A_REPAIR,
     ORDER,
     SKILL,
+    skill_text,
     _frontmatter,
     _module,
     brief_ok,
@@ -410,7 +411,7 @@ def _agent() -> str:
 
 
 def _skill() -> str:
-    return SKILL.read_text(encoding="utf-8")
+    return skill_text()
 
 
 def test_the_protected_region_bullets_are_the_ones_the_filter_enforces() -> None:
@@ -659,9 +660,9 @@ def test_build_work_makes_the_directory_only_after_the_brief_exists(prose: Prose
     failed = run_brief(prose, "build", "notes.txt", "--work")  # no genre: nothing may be created
     assert failed.returncode == 1 and _work_dirs(prose) == before
     out = brief_ok(prose, "build", "docs/x.md", "--work")
-    first, dispatch, *ready, blank, rest = out.split("\n", 7)
+    first, dispatch, *ready, blank, rest = out.split("\n", 10)
     assert first.startswith("WORK=") and dispatch.startswith("DISPATCH=") and blank == ""
-    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS", "ANSWERS"]
+    assert [r.split("=", 1)[0] for r in ready] == ["REPLY", "FILTERED", "REASONS", "ANSWERS", "BLOCKS", "PROPOSED", "STATUSES"]
     assert rest.startswith("# Editing brief") and "BRIEF_SHA" not in out
     work = Path(first[len("WORK="):])
     try:

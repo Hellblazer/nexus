@@ -21,7 +21,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * non-conformant, so a reader may take that answer for the table's poison count instead of counting rows.
  *
  * <p><b>What it replaces, and what it does not.</b> It speaks to the two poison tables' width CHECKs only. The client's
- * legacy-debt legs ({@code topic_assignments}, {@code frecency}, {@code relevance_log}: anti-joins with no CHECK behind
+ * legacy-debt legs ({@code topic_assignments}, {@code relevance_log}: anti-joins with no CHECK behind
  * them) are unchanged, and the migrations leave both CHECKs NOT VALID until a user starts the VALIDATE job ({@code POST
  * /v1/admin/validate-constraints}), so on a
  * fresh or never-validated store the answer is {@code all_validated: false} and nothing is saved. The payoff begins where a
@@ -32,7 +32,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * crash-loops an upgrade): {@code chunks_chash_octet_check} on {@code nexus.chunks} and
  * {@code catalog_document_chunks_chash_octet_check} on {@code nexus.catalog_document_chunks}, both
  * {@code CHECK (octet_length(chash) = 32)}, both added NOT VALID (rdr180-001, vectors-004) and validated by that
- * job. The debt tables ({@code topic_assignments.doc_id}, {@code frecency.chunk_id},
+ * job. The debt tables ({@code topic_assignments.doc_id},
  * {@code relevance_log.chunk_id}) carry no width CHECK and are NOT reported: a client that wants them counts them. A
  * same-named constraint on another relation (the retired {@code chunks_retired_225} carries its own
  * {@code chunks_chash_octet_check}) is not one of these and is never read: a constraint counts only through the table it

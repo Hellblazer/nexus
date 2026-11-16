@@ -28,7 +28,6 @@ from tests._platform import IS_WINDOWS
 from tests.hooks.test_compact_checkpoint import NAME, SID, env, mod, pre_payload, run  # noqa: F401 -- fixtures
 
 FACTS = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "_session_facts.py"
-POSIX_ONLY = pytest.mark.skipif(IS_WINDOWS, reason="process listing is POSIX-only; Windows says so (pinned below)")
 SNAP = "/bin/zsh -c source /Users/x/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval '{}' < /dev/null"
 
 
@@ -198,39 +197,6 @@ class TestCheckpointShowsEachSlip:
         world["board"] = f"## Main\nref: nexus-ct74m\nworktree: {other}\n"
         assert _chosen(world["write"](cwd=str(primary))) == "release-v9"
 
-    @POSIX_ONLY
-    def test_background_shells_are_listed_with_start_and_command(self, world, mod) -> None:
-        sf = mod._session_facts
-        world["table"] = [sf.Proc(4242, 1, "Fri Nov 13 01:00:00 2026", "claude"),
-                          sf.Proc(5000, 4242, "Fri Nov 13 01:05:00 2026", SNAP.format("nx ci wait abc > /tmp/ci.log 2>&1")),
-                          sf.Proc(5001, 5000, "Fri Nov 13 01:05:00 2026", "python nx ci wait abc"),
-                          sf.Proc(5100, 4242, "Fri Nov 13 01:06:00 2026", SNAP.format("nx tuple wait mailbox/x")),
-                          sf.Proc(6000, 4242, "Fri Nov 13 01:00:01 2026", "node mcp-server.js")]
-        running = _section(world["write"](), "Running for this session")
-        assert "- background task pid 5000, started Fri Nov 13 01:05:00 2026: `nx ci wait abc > /tmp/ci.log 2>&1`" in running
-        assert "- background task pid 5100, started Fri Nov 13 01:06:00 2026 (standing mail wait)" in running
-        assert "mcp-server" not in running
-
-    @POSIX_ONLY
-    def test_no_background_shell_says_none_only_on_proof(self, world, mod) -> None:
-        world["table"] = [mod._session_facts.Proc(4242, 1, "Fri Nov 13 01:00:00 2026", "claude")]
-        assert "- background tasks: none running" in world["write"]()
-
-    @POSIX_ONLY
-    def test_processes_in_the_sessions_worktrees(self, world, mod, env, monkeypatch, tmp_path) -> None:
-        _repo(tmp_path, {NAME: True})
-        wt = tmp_path / "wt" / NAME
-        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
-        sf = mod._session_facts
-        me = os.getpid()
-        world["table"] = [sf.Proc(7000, 1, "Sat Nov 8 03:00:00 2026", "mineru-api --port 0"),
-                          sf.Proc(me, 1, "Fri Nov 13 01:00:00 2026", "python compact_checkpoint.py pre"),
-                          sf.Proc(7100, me, "Fri Nov 13 01:00:01 2026", "nx command-context continuation")]
-        world["cwds"] = {7000: str(wt / "sub"), 7100: str(wt)}
-        text = world["write"](cwd=str(tmp_path / "primary"))
-        assert "- process pid 7000 in " in text and "`mineru-api --port 0`" in text
-        assert "pid 7100" not in text  # the hook's own continuation child is not the session's work
-
     def test_crons_durable_ones_listed_and_the_session_ones_named_as_invisible(self, world, mod, env, monkeypatch, tmp_path) -> None:
         _repo(tmp_path, {NAME: True})
         wt = tmp_path / "wt" / NAME
@@ -341,21 +307,6 @@ class TestNoFalseClaim:
         page.write_text("x", encoding="utf-8")
         world["board"] = f"## Page\nworktree: {page}\n"
         assert "no such" not in world["write"]()
-
-    @POSIX_ONLY
-    def test_a_lookup_that_failed_is_not_none_running(self, world, mod, env) -> None:
-        (env.claude / "sessions" / "4242.json").unlink()  # the session file is gone (a /clear, a layout change)
-        world["table"] = [mod._session_facts.Proc(1, 0, "Fri Nov 13 01:00:00 2026", "init")]
-        text = world["write"]()
-        assert "none running" not in text and "- background tasks: not listed (no " in text
-
-    @POSIX_ONLY
-    def test_unreadable_working_directories_are_not_no_processes(self, world, mod, env, monkeypatch, tmp_path) -> None:
-        _repo(tmp_path, {NAME: True})
-        monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
-        world["table"] = [mod._session_facts.Proc(4242, 1, "Fri Nov 13 01:00:00 2026", "claude")]
-        world["cwds"] = None
-        assert "processes in this session's worktrees: not listed" in world["write"](cwd=str(tmp_path / "primary"))
 
     def test_without_the_board_no_worktree_is_called_unnamed(self, world, mod, env, monkeypatch, tmp_path) -> None:
         primary = _repo(tmp_path, {NAME: True})

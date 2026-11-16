@@ -269,7 +269,7 @@ rdr_skills:
   rdr-fix-checklist:
     slash_command: /rdr-fix
     command_file: commands/rdr-fix.md
-    description: "Fix a gated RDR's findings: sites, diff since the gated commit, pre-edit research entry, fix check"
+    description: "Fix a gated RDR's findings: sites, diff since the gate, pre-edit research entry, fix check"
     triggers:
       - "fix the gate findings"
       - "address the critique"

@@ -73,4 +73,15 @@ final class PciCanaryPolicy {
 
     /** How long a canary statement waits for its search permit before the run ends as unmeasured (reason error). */
     static final Duration PERMIT_WAIT = Duration.ofSeconds(10);
+
+    /**
+     * The statement bound of a canary leg. The HNSW leg is the serving statement and keeps the serving search bound. The
+     * exact leg is the recall oracle (index scans off) and gets {@link #RUN_LIMIT}: on a production copy it ran 25.6 s
+     * cold for code__1-87 against the 30 s serving bound. The cloud's canary failures after a boot and after a REINDEX
+     * (stage=statement) are taken to be this timeout: inferred from that timing, since their SQLState was not logged
+     * (nexus-4lnn1.1.10, P2.4 fork 2026-11-15). It still holds one search permit.
+     */
+    static java.util.function.IntSupplier statementTimeoutMs(boolean exact) {
+        return exact ? () -> (int) RUN_LIMIT.toMillis() : dev.nexus.service.db.PgSession::startupSearchStatementTimeoutMs;
+    }
 }

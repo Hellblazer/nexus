@@ -809,7 +809,8 @@ class TenantExportSessionsTest {
             Map.entry(TenantExportSessions.ENV_TOTAL_SECONDS, "9223372036854775807"),
             Map.entry(TenantExportSessions.ENV_TOTAL_SECONDS, "604801"),
             Map.entry(TenantExportSessions.ENV_IDLE_SECONDS, "-5"),
-            Map.entry(TenantExportSessions.ENV_PAGE_BUDGET_SECONDS, "301"))) {
+            Map.entry(TenantExportSessions.ENV_PAGE_BUDGET_SECONDS, "21"),
+            Map.entry(TenantExportSessions.ENV_PAGE_BUDGET_SECONDS, "0"))) {
             assertThatThrownBy(() -> Config.fromEnv(Map.of(bad.getKey(), bad.getValue())::get))
                 .as(bad.getKey() + "=" + bad.getValue()).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(bad.getKey());
@@ -819,6 +820,14 @@ class TenantExportSessionsTest {
         assertThat(top.pageBytes()).isEqualTo(19_000_000);
         assertThat(Instant.parse("2026-11-12T00:00:00Z").plus(top.totalBound())).isAfter(Instant.parse("2026-11-12T00:00:00Z"));
         assertThat(Config.defaults().pageBudgetMs()).as("20 s, inside the stricter 30 s response-start limit").isEqualTo(20_000);
+        assertThat(Config.fromEnv(Map.of(TenantExportSessions.ENV_PAGE_BUDGET_SECONDS, "20")::get).pageBudgetMs())
+            .as("the top of the budget range sits under the 25 s page wall").isEqualTo(20_000);
+        assertThatThrownBy(() -> Config.fromEnv(Map.of(TenantExportSessions.ENV_PAGE_BUDGET_SECONDS, "25")::get))
+            .as("a budget at the wall is refused: the wall would answer for it")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining(TenantExportSessions.ENV_PAGE_BUDGET_SECONDS).hasMessageContaining("20");
+        assertThat(TenantExportSessions.MAX_PAGE_BUDGET_SECONDS * 1000)
+            .as("the budget cap leaves the wall room for auth and the borrow").isLessThan(TenantExportSessions.PAGE_WALL_MS);
     }
 
     @Test
@@ -931,7 +940,7 @@ class TenantExportSessionsTest {
         List<ExportTable> unpinned = TenantExport.TABLES.stream().filter(ExportTable::exported)
             .filter(t -> !"tenant_id".equals(t.primaryKey().get(0).name())).toList();
         // not vacuous: the registry's tenant-led tables are many, and the id-keyed ones are the minority left to the planner
-        assertThat(pinned.size()).as("tenant-led exported tables").isGreaterThanOrEqualTo(15);
+        assertThat(pinned.size()).as("tenant-led exported tables").isGreaterThanOrEqualTo(14);
         assertThat(unpinned.stream().map(ExportTable::name)).contains("memory");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

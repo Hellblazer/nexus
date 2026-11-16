@@ -27,14 +27,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * after. Mirrors {@link TaxonomySchemaLiquibaseTest#docCountTrigger_functionsTriggersAndComment}'s
  * {@code pg_description} join pattern.
  *
- * <p>Asserts each of the eleven columns named in D7 (seven) / D8 (four) has
+ * <p>Asserts each of the ten columns that survive of those named in D7 (seven, six after
+ * {@code nexus.frecency} was dropped, nexus-6pfgb.42) / D8 (four) has
  * a non-empty comment carrying a keyword specific to its own reason. Each
  * needle below was hand-verified NOT to occur in any sibling column's
  * comment text (checked pairwise for the near-identical groups: the two
  * BIGSERIAL-PK id columns, the four D8 accepted-sentinel columns, and the
  * frecency/relevance_log grain-argument pair whose cross-references to each
- * other made a naive shared keyword — e.g. "GRAIN" — insufficient), so a
- * copy-paste swap of comment text between any two of the eleven columns
+ * other made a naive shared keyword — e.g. "GRAIN" — insufficient; the
+ * frecency half is gone with its table), so a
+ * copy-paste swap of comment text between any two of the ten columns
  * fails this test, not merely a blank or missing comment. Falsified by
  * direct execution (code-review-expert / substantive-critic round,
  * 2026-08-20): the SQL comments for {@code gc_audit.id} and
@@ -60,12 +62,8 @@ class Rdr194P4ColumnCommentsIntegrationTest {
                 // Needle "idx_hook_failures_etl_dedup" appears ONLY here.
                 assertColumnComment(c, "hook_failures", "doc_id",
                     "THREE identity spaces", "idx_hook_failures_etl_dedup");
-                // "frecency has no collection column" does not occur in
-                // relevance_log.chunk_id's comment (which says "relevance_log
-                // has no collection column" instead) — asymmetric on purpose,
-                // this is the pair a naive shared "GRAIN" needle missed.
-                assertColumnComment(c, "frecency", "chunk_id",
-                    "frecency has no collection column", "ACROSS collections by design");
+                // (nexus.frecency.chunk_id left the end-state with the table --
+                // nexus-6pfgb.42, telemetry-019-1 DROP.)
                 assertColumnComment(c, "relevance_log", "chunk_id",
                     "relevance_log has no collection column, so an FK is not expressible");
                 assertColumnComment(c, "pdf_chunks", "chunk_id",

@@ -1,5 +1,7 @@
 package dev.nexus.service;
 
+import org.jooq.Field;
+import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
@@ -36,7 +38,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
-import static dev.nexus.service.jooq.nexus.Tables.FRECENCY;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static dev.nexus.service.jooq.nexus.Tables.PLANS;
 import static dev.nexus.service.jooq.nexus.Tables.REQUEST_LEDGER;
@@ -961,11 +962,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("FORCE RLS must hide both seeded catalog_links rows from the "
                             + "non-BYPASSRLS owner — catalog-032-1's own toggle-wrap target")
                         .isEqualTo(0);
-                    assertThat(dsl(admin).fetchCount(FRECENCY))
-                        .as("FORCE RLS must hide all four seeded frecency rows from the "
-                            + "non-BYPASSRLS owner — legacy-001-1's own toggle-wrap target "
-                            + "(2 rows) plus telemetry-006-1's own toggle-wrap target (2 more)")
-                        .isEqualTo(0);
+                    // (nexus.frecency is gone at HEAD, telemetry-019-1 / nexus-6pfgb.42: its four seeded
+                    // rows were discarded by that DROP, so there is nothing left to count under FORCE RLS.)
                     assertThat(dsl(admin).fetchCount(RELEVANCE_LOG))
                         .as("FORCE RLS must hide both seeded relevance_log rows from the "
                             + "non-BYPASSRLS owner — legacy-001-2's own toggle-wrap target")
@@ -1875,20 +1873,9 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // constraint-existence assertion is needed the way catalog-032's
                     // FK VALIDATEs required one — the row-level effect below is the
                     // whole proof.
-                    assertThat(dsl(su).fetchCount(FRECENCY,
-                            FRECENCY.TENANT_ID.eq("t1")
-                                .and(FRECENCY.CHUNK_ID.eq("e".repeat(32)))))
-                        .as("legacy-001-1's shape-agnostic DELETE must actually remove the "
-                            + "legacy-width frecency row under FORCE-RLS, proving the DELETE "
-                            + "arm fires, not just the KEEP arm")
-                        .isEqualTo(0);
-                    assertThat(dsl(su).fetchCount(FRECENCY,
-                            FRECENCY.TENANT_ID.eq("t1")
-                                .and(FRECENCY.CHUNK_ID.eq("d".repeat(64)))))
-                        .as("the canonical-width frecency row must survive legacy-001-1's "
-                            + "remediation — a shape-agnostic-gone-wrong DELETE would wrongly "
-                            + "remove this too")
-                        .isEqualTo(1);
+                    // (The frecency half of this leg -- the legacy-width row gone, the canonical one kept -- can
+                    // no longer be read: telemetry-019-1 (nexus-6pfgb.42) drops nexus.frecency later in this
+                    // same walk. The relevance_log half below still proves the DELETE shape.)
                     assertThat(dsl(su).fetchCount(RELEVANCE_LOG,
                             RELEVANCE_LOG.TENANT_ID.eq("t1")
                                 .and(RELEVANCE_LOG.CHUNK_ID.eq("9".repeat(32)))))
@@ -2197,48 +2184,26 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "plans-003-1's own toggle-wrap")
                         .isEqualTo(1);
 
-                    // telemetry-006-1 leg (nexus-tk070.p6b, RDR-194 § D5, seed-coverage
-                    // lint follow-up): the ttl_days=0 CONVERSION arm must actually fire
-                    // under FORCE-RLS (converted to NULL, not deleted -- this is an
-                    // UPDATE, not a DELETE, unlike memory-003-1/plans-003-1 above), the
-                    // NULL-ttl_days KEEP arm must survive untouched, and the CHECK must
-                    // exist at HEAD. Also covers legacy-001-1's own "d"x64 KEEP-arm row
-                    // (seeded with the table's DEFAULT ttl_days=0, since seedFrecencyRow
-                    // never set it explicitly) -- it too gets converted here, proving
-                    // the UPDATE reaches every ttl_days=0 row in this hop, not merely
-                    // the dedicated fixture.
-                    assertThat(dsl(su).fetchCount(FRECENCY,
-                            FRECENCY.TENANT_ID.eq("t1")
-                                .and(FRECENCY.CHUNK_ID.eq("6".repeat(64)))
-                                .and(FRECENCY.TTL_DAYS.isNull())))
-                        .as("telemetry-006-1's counted UPDATE must convert the seeded "
-                            + "ttl_days=0 row to NULL -- the CONVERSION arm (not deleted, "
-                            + "unlike memory-003-1/plans-003-1's DELETE arms)")
-                        .isEqualTo(1);
-                    assertThat(dsl(su).fetchCount(FRECENCY,
-                            FRECENCY.TENANT_ID.eq("t1")
-                                .and(FRECENCY.CHUNK_ID.eq("7".repeat(64)))
-                                .and(FRECENCY.TTL_DAYS.eq(45))))
-                        .as("the positive-ttl_days decoy row must survive telemetry-006-1's "
-                            + "UPDATE unchanged -- the KEEP arm, proving the UPDATE's "
-                            + "WHERE ttl_days = 0 predicate is selective")
-                        .isEqualTo(1);
-                    assertThat(dsl(su).fetchCount(FRECENCY,
-                            FRECENCY.TENANT_ID.eq("t1")
-                                .and(FRECENCY.CHUNK_ID.eq("d".repeat(64)))
-                                .and(FRECENCY.TTL_DAYS.isNull())))
-                        .as("legacy-001-1's own canonical-width KEEP-arm row (DEFAULT "
-                            + "ttl_days=0) must ALSO be converted to NULL by "
-                            + "telemetry-006-1 -- the UPDATE is unconditional across every "
-                            + "row in this hop, not scoped to the dedicated fixture")
-                        .isEqualTo(1);
+                    // telemetry-006-1 leg (nexus-tk070.p6b) and telemetry-019-1 (nexus-6pfgb.42): the four
+                    // frecency rows seeded at OLD_TAG (legacy-001-1's two, telemetry-006-1's two) went through
+                    // telemetry-006-1's counted ttl_days UPDATE under FORCE-RLS (the walk would have aborted
+                    // there otherwise), and telemetry-019-1 then dropped the table with those rows in it.
+                    // That drop is the effect to assert: the table, its CHECK and its policy are gone, and the
+                    // diag counts view (which read the table until that changeset re-pointed it) answers with
+                    // exactly its four remaining legs.
+                    assertThat(PgCatalogProbes.tableExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "frecency"))
+                        .as("telemetry-019-1 must have dropped nexus.frecency with its seeded rows in it")
+                        .isFalse();
                     assertThat((PgCatalogProbes.constraintExists(DSL.using(su, SQLDialect.POSTGRES), "frecency_ttl_days_positive_chk") ? 1 : 0))
-                        .as("frecency_ttl_days_positive_chk must exist at HEAD")
-                        .isEqualTo(1);
-                    assertThat(PgCatalogProbes.forcedRowSecurityCount(DSL.using(su, SQLDialect.POSTGRES), "nexus.frecency"))
-                        .as("FORCE ROW LEVEL SECURITY restored on nexus.frecency after "
-                            + "telemetry-006-1's own toggle-wrap")
-                        .isEqualTo(1);
+                        .as("frecency_ttl_days_positive_chk goes with the table")
+                        .isEqualTo(0);
+                    assertThat(DSL.using(su, SQLDialect.POSTGRES)
+                            .select(DSL.field(DSL.name("table_name"), String.class))
+                            .from(DSL.table(DSL.name("nexus", "diag_chash_conformance")))
+                            .fetch(DSL.field(DSL.name("table_name"), String.class)))
+                        .as("the diag counts view was re-pointed at its four remaining legs, not dropped")
+                        .containsExactlyInAnyOrder("nexus.chunks", "nexus.catalog_document_chunks",
+                            "nexus.topic_assignments", "nexus.relevance_log");
 
                     // telemetry-006-2 leg (nexus-tk070.p6b) + staging-6-drop-landing-schema
                     // (nexus-z0o2p.27): staging.frecency has NO fresh seed data (see the
@@ -3278,15 +3243,24 @@ class SchemaUpgradeRehearsalIntegrationTest {
     }
 
     /**
+     * {@code nexus.frecency} as it was at OLD_TAG and through the hop until telemetry-019-1 dropped it
+     * (nexus-6pfgb.42). The generated jOOQ schema is HEAD's and has no such table, so the seeds name it.
+     */
+    private static final Table<?> FRECENCY_AT_OLD_TAG = DSL.table(DSL.name("nexus", "frecency"));
+    private static final Field<String> FRECENCY_TENANT = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> FRECENCY_CHUNK = DSL.field(DSL.name("chunk_id"), String.class);
+    private static final Field<Integer> FRECENCY_TTL = DSL.field(DSL.name("ttl_days"), Integer.class);
+
+    /**
      * A legacy- or canonical-width {@code nexus.frecency} row (nexus-lgdel.l1,
      * legacy-001-1). {@code chunkId} is passed through verbatim — the caller
      * chooses legacy-width (a 32-hex string) or canonical (64-hex) to exercise
      * either the DELETE or the KEEP arm of legacy-001-1's anti-shape DELETE.
      */
     private static void seedFrecencyRow(Connection c, String tenant, String chunkId) throws Exception {
-        dsl(c).insertInto(FRECENCY)
-            .set(FRECENCY.TENANT_ID, tenant)
-            .set(FRECENCY.CHUNK_ID, chunkId)
+        dsl(c).insertInto(FRECENCY_AT_OLD_TAG)
+            .set(FRECENCY_TENANT, tenant)
+            .set(FRECENCY_CHUNK, chunkId)
             .execute();
     }
 
@@ -3296,16 +3270,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * arm (rewritten to {@code NULL}); {@code null} seeds the KEEP arm
      * (already permanent, must survive untouched). Distinct from {@link
      * #seedFrecencyRow}, which relies on the column's own DEFAULT
-     * {@code ttl_days=0} — that row (legacy-001-1's canonical-width KEEP
-     * fixture) is ALSO converted by telemetry-006-1, effect-asserted
-     * separately alongside this method's own dedicated fixture.
+     * {@code ttl_days=0}.
      */
     private static void seedFrecencyTtlRow(Connection c, String tenant, String chunkId, Integer ttlDays)
             throws Exception {
-        dsl(c).insertInto(FRECENCY)
-            .set(FRECENCY.TENANT_ID, tenant)
-            .set(FRECENCY.CHUNK_ID, chunkId)
-            .set(FRECENCY.TTL_DAYS, ttlDays)
+        dsl(c).insertInto(FRECENCY_AT_OLD_TAG)
+            .set(FRECENCY_TENANT, tenant)
+            .set(FRECENCY_CHUNK, chunkId)
+            .set(FRECENCY_TTL, ttlDays)
             .execute();
     }
 

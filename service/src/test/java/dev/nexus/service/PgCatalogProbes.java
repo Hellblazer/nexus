@@ -97,6 +97,16 @@ public final class PgCatalogProbes {
             : new ColumnInfo(r.get(dataType), r.get(isNullable), r.get(columnDefault), r.get(udtName));
     }
 
+    /** {@code pg_views.definition} of {@code schema.view}, or null when the view is absent. */
+    public static String viewDefinition(DSLContext ctx, String schema, String view) {
+        Field<String> definition = DSL.field(DSL.name("definition"), String.class);
+        return ctx.select(definition)
+            .from(DSL.table(DSL.name("pg_views")))
+            .where(DSL.field(DSL.name("schemaname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("viewname"), String.class).eq(view))
+            .fetchOne(definition);
+    }
+
     /** {@code pg_tables.tablename} for every table in {@code schema}. */
     public static List<String> tablesInSchema(DSLContext ctx, String schema) {
         Field<String> tablename = DSL.field(DSL.name("tablename"), String.class);
@@ -916,6 +926,26 @@ public final class PgCatalogProbes {
                 .and(DSL.field(DSL.name("cl", "relnamespace")).eq(DSL.field(DSL.name("n", "oid"))))
             .where(schema.in(schemas))
             .fetch(r -> new TableGrant(r.get(grantee), r.get(privilege), r.get(schema), r.get(table), r.get(relkind)));
+    }
+
+    /**
+     * Column SELECT grants a role holds on {@code schema.table}, as {@code table.column}, sorted
+     * (nexus-edchb). Read from {@code information_schema.column_privileges}, which also lists every
+     * column of a table the role holds table-level SELECT on, so a table-level grant shows here as
+     * all of its columns.
+     */
+    public static List<String> columnSelectGrants(DSLContext ctx, String grantee, String schema,
+                                                  Collection<String> tables) {
+        Field<String> g = DSL.field(DSL.name("cp", "grantee"), String.class);
+        Field<String> priv = DSL.field(DSL.name("cp", "privilege_type"), String.class);
+        Field<String> sch = DSL.field(DSL.name("cp", "table_schema"), String.class);
+        Field<String> tbl = DSL.field(DSL.name("cp", "table_name"), String.class);
+        Field<String> col = DSL.field(DSL.name("cp", "column_name"), String.class);
+        return ctx.selectDistinct(tbl, col)
+            .from(DSL.table(DSL.name("information_schema", "column_privileges")).as("cp"))
+            .where(g.eq(grantee)).and(priv.eq("SELECT")).and(sch.eq(schema)).and(tbl.in(tables))
+            .fetch(r -> r.get(tbl) + "." + r.get(col))
+            .stream().sorted().toList();
     }
 
     /** One {@code pg_policies} row with its schema and table. */

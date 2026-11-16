@@ -657,12 +657,11 @@ class CatalogRepositoryTest {
         var counts = repo.relationCounts(TENANT_A, List.of(
             "nexus.relevance_log",
             "nexus.search_telemetry",
-            "nexus.tier_writes",
-            "nexus.frecency"
+            "nexus.tier_writes"
         ));
         assertThat(counts).containsKeys(
             "nexus.relevance_log", "nexus.search_telemetry",
-            "nexus.tier_writes", "nexus.frecency");
+            "nexus.tier_writes");
     }
 
     @Test @Order(41)

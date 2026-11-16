@@ -1,6 +1,6 @@
 # conexus-prose-edit
 
-A line editor for your own prose. `/conexus-prose-edit:prose-edit <path>` reads a document, proposes up to ten numbered sentence edits with a reason each, and opens a marked-up copy. You accept, reject or leave each edit undecided by ticking choices in a short list; only accepted edits change the file. A rejection is stored for that document so the editor does not propose it again, and the editor's description of the document's voice can be kept as its voice card for later runs.
+A line editor for your own prose. `/conexus-prose-edit:prose-edit <path>` reads a document, proposes up to ten numbered sentence edits with a reason each, and shows them as suggestions in the MarkupEditor app. You accept or reject each suggestion in the app; only accepted edits change the file, and prose-edit writes them, not the app. A rejection is stored for that document so the editor does not propose it again, and the editor's description of the document's voice can be kept as its voice card for later runs.
 
 It is not installed with `conexus`. Nothing changes for anyone who does not install it.
 
@@ -38,7 +38,18 @@ The `nexus-plugins` marketplace is the one `conexus` and `sn` come from; add it 
 
 prose-edit keeps its memory (rejections, voice cards, example passages, the run log) in Nexus T2 through the `nx` command, so it needs Nexus installed and its service reachable: install the `conexus` plugin first (`/plugin install conexus@nexus-plugins`) and run its `/conexus:setup`, and keep the two plugins on the same release. Each person's memory lives in the T2 that person's `nx` points at; two people on one Nexus tenant share the user-level style sheet.
 
-It runs on macOS and Linux, not Windows. The marked-up copy of a document opens in a viewer on macOS; elsewhere the run prints its path.
+It runs on macOS and Linux, not Windows.
+
+### The MarkupEditor requirement
+
+A run on a file reviews its edits in the MarkupEditor app, so it needs:
+
+- MarkupEditor 0.9.11 or later, the first release with suggestions (published 2026-11-07 on the releases page of `stevengharris/MarkupEditorApp`). The Unlimited release keeps working without renewal once you have installed it, and so does a build from source. The Evaluation build stops after two weeks.
+- The app running, with Assistants turned on in its settings at read-write access and this program allowed to talk to it. Without read-write access the app refuses to show suggestions.
+- One MarkupEditor server. If two are registered in Claude Code, the run uses every tool from the one server that offers `propose_edits` and tells you which it is.
+- "Always allow" for the MarkupEditor tools: Claude Code asks the first time each one is used.
+
+A run that finds the app missing or silent stops before it pays for the editor, and tells you how to start it. A run on pasted text (`-`) has no file and needs no app: it asks you in the chat, as before.
 
 ## Set up
 
@@ -53,7 +64,8 @@ Setup is a short guided session. It checks what is already in place, asks only a
 1. Nexus is installed and answers. If not, it says so and points you to `/conexus:setup`.
 2. Two permission rules for the temp folder where a run keeps its work files are in `~/.claude/settings.json`. A plugin cannot ship permission rules, so setup offers to add them (Claude Code asks you to approve that edit), or to print the JSON for you to add. Without them every read and write of a work file asks you, and the editor cannot read its brief.
 3. Which genre each documentation folder holds. The built-in map knows `docs/rdr/`, `docs/exploration/`, top-level `docs/*.md`, `web/*.html` and `CHANGELOG.md`. For up to eight other folders that look like documentation, setup suggests a genre for each and asks once: use all the suggestions, go through the folders one by one (pick the suggestion, pick another, or leave the folder unmapped), or map nothing and be asked when you edit. Folders such as tests, fixtures, scripts, build output and hidden folders, and root files other than `README.md`, are not offered. A file no genre reaches makes a run ask which genre it is, and offers to remember the answer for its folder.
-4. One or two example passages per genre in use. The editor imitates them; a genre with none runs on the style sheet alone. You can add them later.
+4. Whether the MarkupEditor tools are there. Setup looks for the app's suggestions tool and, when it is missing, says what to start or install (see the MarkupEditor requirement above). It does not stop for it: a run on pasted text works without the app.
+5. One or two example passages per genre in use. The editor imitates them; a genre with none runs on the style sheet alone. You can add them later.
 
 Setup ends with "Ready." and a command to try on one of your own documents.
 
@@ -61,12 +73,14 @@ Setup ends with "Ready." and a command to try on one of your own documents.
 
 Each question a run asks, which genre a file is, which edits to accept, which to reject, is a short list of choices; typing your own answer is always one of them.
 
+On a file, the app collects your decisions and the chat asks about everything the app cannot show (an edit across formatting, a query, a paragraph proposal). While you review in the app, do not type in the document, do not use Undo and do not save: saving from the app rewrites the whole file, and anything you type there is not kept. When you say done, prose-edit shows what you decided, asks about what is left, writes the accepted edits itself (after a dry run you confirm), stores the rejections, and returns the app to the file.
+
 | Command | Does |
 |---|---|
-| `/conexus-prose-edit:prose-edit docs/guide.md` | Edit run on the whole file. |
+| `/conexus-prose-edit:prose-edit docs/guide.md` | Edit run on the whole file. The edits appear as suggestions in the MarkupEditor app: accept or reject each one there, then say done in the chat. |
 | `/conexus-prose-edit:prose-edit docs/guide.md:40-90 --budget 5` | Proposals only inside lines 40-90, at most five. |
 | `/conexus-prose-edit:prose-edit /abs/path/in/a/worktree.md` | A document in another checkout: the edit lands there. |
-| `/conexus-prose-edit:prose-edit - --genre commit-message` then the text on the next lines | Edit pasted text; nothing is written. |
+| `/conexus-prose-edit:prose-edit - --genre commit-message` then the text on the next lines | Edit pasted text; nothing is written. You review the edits in the chat. |
 | `/conexus-prose-edit:prose-edit rejections docs/guide.md` | List the stored rejections, `--remove N` to drop one. |
 | `/conexus-prose-edit:prose-edit exemplar reference-doc docs/guide.md:3-8` | Store a passage as an example of the genre. |
 

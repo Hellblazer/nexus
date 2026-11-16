@@ -2135,6 +2135,46 @@
     <include file="db/changelog/vectors-058-short-lexical-substring-gate.xml"/>
 
     <!--
+        Bead nexus-csayy.6 (RDR-248 Step 5): nexus.create_tenant_partitions gains p_check_restore boolean DEFAULT true; on
+        its slow path (the DDL path) it refuses with lock_not_available while a tenant restore load holds the restore-load
+        advisory key, so a tenant create is never queued behind a load. The three-argument function is dropped and the
+        four-argument one created (CREATE OR REPLACE cannot add a parameter); privileges as before. See the included
+        file's own header. No DATA EFFECT: a function definition only. After vectors-058, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/vectors-059-create-tenant-partitions-restore-check.xml"/>
+
+    <!--
+        Bead nexus-6pfgb.42: retire nexus.frecency, a table with no live writer or reader. telemetry-019-1 drops the table, after
+        a guard that names the remedy if a view the migrating role does not own still reads it (taxonomy-011-8, runAlways,
+        has already re-pointed the nexus_diag counts view nexus.diag_chash_conformance at four legs); its rollback recreates
+        the table empty in the shape the older changesets left, because their own rollbacks alter it. DATA EFFECT: discards the table's rows. TenantExport.RETIRED names the
+        changeset so an older tenant backup's frecency section is skipped, not refused. After vectors-059, before the
+        grants-nexus-svc.xml runAlways block, so the grants loop never sees the table.
+    -->
+    <include file="db/changelog/telemetry-019-drop-frecency.xml"/>
+
+    <!--
+        Bead nexus-bbtc2: nexus.text_gate_probe_by_collection_384/768/1024, one scan of the leaf that returns (collection, chash)
+        for the rows the text gate admits, capped per collection (a collection at the cap returns one (collection, NULL) row).
+        The per-collection route's lexical leg runs it once over all its collections instead of one probe per collection; a
+        leaf too dense to share (more than 2,000,000 gated rows) makes it raise and the arms run their own probes. See the
+        included file's own header. Posture read from the existing probes.
+        No DATA EFFECT: function definitions only. After telemetry-019, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-060-text-gate-probe-by-collection.xml"/>
+
+    <!--
+        Bead nexus-z0o2p.29: a chunk that loses its last manifest owner is always recorded in nexus.chunk_orphaned_at, in the
+        dropping transaction. stamp_chunks_on_manifest_delete and _update lose their one-hour last_written_at filter (it skipped a
+        chunk inserted within the hour and dropped by the next replace, leaving it ownerless with no record), and a new AFTER INSERT
+        statement trigger (the UPDATE trigger inline) clears the record of a key a statement inserts, so a replace that keeps its
+        chunks leaves none. See the included file's own header. No DATA EFFECT: function and trigger definitions only. After
+        vectors-060, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-061-manifest-drop-records-every-chunk.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

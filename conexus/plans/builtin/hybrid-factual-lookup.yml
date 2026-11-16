@@ -71,7 +71,11 @@ default_bindings:
   corpus: all
   limit: 40
   depth: 2
-  vector_budget_chunks: 6
+  # 20, not 6 (RDR-250; Sam, 2026-11-15, ask rdr250-lever option 2): at 6 a
+  # multi-hop question saw half the evidence it retrieved (HERB issue5 F1
+  # 0.500); at 20 it measured F1 0.764, precision 0.967 (one paid run). The
+  # vector/graph split is no longer the 60/40 of RF-6 above.
+  vector_budget_chunks: 20
   graph_budget_chunks: 4
 # RDR-232 Phase 2: the answer kind this template serves, declared (not inferred from the verb).
 answer_kind: lookup

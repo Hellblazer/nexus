@@ -127,11 +127,27 @@ def resolve_session_name(
     pid_alive: Callable[[int], bool] | None = None,
     log_miss: bool = True,
 ) -> str | None:
-    """The name Claude Code shows for the live interactive session whose id
+    """The name of :func:`resolve_session_entry`'s entry, or None."""
+    entry = resolve_session_entry(session_id, sessions_dir=sessions_dir, pid_alive=pid_alive, log_miss=log_miss)
+    return entry[0] if entry is not None else None
+
+
+def resolve_session_entry(
+    session_id: str,
+    *,
+    sessions_dir: Path | None = None,
+    pid_alive: Callable[[int], bool] | None = None,
+    log_miss: bool = True,
+) -> tuple[str, int] | None:
+    """The name and pid of the registry entry for *session_id* (RDR-249 reads the pid to tell a ``claude -p``
+    child carrying its parent's session id from the session itself, nexus-mdbds.11.1).
+
+    The name Claude Code shows for the live interactive session whose id
     is *session_id*, read from ``<config>/sessions/<pid>.json`` (fields
     ``sessionId``, ``name``, ``kind``, ``pid``, ``updatedAt``). None for any
     miss: no directory, an unreadable or malformed file, no matching entry,
-    a non-interactive entry (a ``claude -p`` child), a dead pid, or no name.
+    a non-interactive entry (a ``claude -p`` child writes its own entry under its own session id, so it never
+    matches a parent's id; observed 2026-11-15 with kind ``interactive``), a dead pid, or no name.
     Never raises. Several live entries for one id (a resumed session beside
     its old process's file) resolve to the most recently updated, whichever
     file name sorts first.
@@ -151,7 +167,7 @@ def resolve_session_name(
     if pid_alive is None:
         from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — the one liveness probe (test_pid_alive_single_probe_lint); deferred, stdlib-heavy module
     base = sessions_dir if sessions_dir is not None else _claude_sessions_dir()
-    best: tuple[float, str] | None = None
+    best: tuple[float, str, int] | None = None
     read = 0
     try:
         files = sorted(base.glob("*.json"))
@@ -178,7 +194,7 @@ def resolve_session_name(
         except (OSError, ValueError, TypeError, OverflowError, RecursionError):
             continue
         if best is None or rank >= best[0]:
-            best = (rank, name.strip())
+            best = (rank, name.strip(), pid)
     if best is None:
         if log_miss and _dir_exists(base):
             _log.info(
@@ -186,7 +202,7 @@ def resolve_session_name(
                 session_id=session_id, sessions_dir=str(base), files_read=read,
             )
         return None
-    return best[1]
+    return best[1], best[2]
 
 
 def _dir_exists(path: Path) -> bool:
@@ -404,6 +420,12 @@ class SubscriptionSet:
     #: :meth:`entries` -- see the class docstring.
     leased_name: str | None = None
     _board: dict[str, str | None] = field(default_factory=dict)
+    #: RDR-249 TD3 (S7, nexus-mdbds.11.1): aura-owned board topics, each
+    #: mapped to its start position and the names of the auras holding it.
+    #: Delivered (:meth:`entries`) and counted against MAX_BOARD_TOPICS, but
+    #: never in :meth:`board_topics`, never removed by :meth:`unsubscribe`
+    #: and never persisted: the server makes them again at each load.
+    _aura_board: dict[str, tuple[str, set[str]]] = field(default_factory=dict, repr=False, compare=False)
     version: int = 0
     _listeners: list[Callable[["SubscriptionSet"], None]] = field(default_factory=list, repr=False)
     _lease_thread: threading.Thread | None = field(default=None, repr=False, compare=False)
@@ -521,16 +543,66 @@ class SubscriptionSet:
         see a covering ``board/ci/*--done`` subscription)."""
         return sorted(self._board)
 
+    def aura_topics(self) -> list[str]:
+        """The aura-owned board subspaces, sorted (RDR-249 TD3)."""
+        return sorted(self._aura_board)
+
+    def session_owns(self, topic: str) -> bool:
+        """Whether the session itself subscribes *topic*: its rows are then
+        announced to the agent (RDR-249 TD3)."""
+        return topic in self._board
+
+    def aura_only(self, topic: str) -> bool:
+        """Whether only an aura holds *topic*: its rows are evaluated and not
+        announced (RDR-249 TD3)."""
+        return topic in self._aura_board and topic not in self._board
+
+    def _delivered_topic_count(self) -> int:
+        return len(self._board.keys() | self._aura_board.keys())
+
     def _subscribe_board(self, topic: str) -> None:
         if topic in self._board:
             return  # idempotent
-        if len(self._board) >= MAX_BOARD_TOPICS:
+        if topic not in self._aura_board and self._delivered_topic_count() >= MAX_BOARD_TOPICS:
+            held = len(self._aura_board.keys() - self._board.keys())
             raise SchemaViolationError(
-                f"at most {MAX_BOARD_TOPICS} board topics may be subscribed at once; "
-                f"refused before adding {topic!r}"
+                f"at most {MAX_BOARD_TOPICS} board topics may be subscribed at once"
+                + (f" ({held} held by auras)" if held else "")
+                + f"; refused before adding {topic!r}"
             )
         self._board[topic] = datetime.now(UTC).isoformat()
         self._bump()
+
+    def subscribe_aura(self, aura: str, topic: str) -> None:
+        """Hold *topic* for the aura named *aura* (RDR-249 TD3, S7). The
+        topic is delivered and counts against :data:`MAX_BOARD_TOPICS`, and
+        an aura that would pass the cap is refused naming it. Idempotent per
+        (aura, topic). The session's own subscription to the same topic is
+        separate: neither removes the other."""
+        if not topic.startswith("board/") or topic == "board/":
+            raise SchemaViolationError(f"aura {aura!r}: {topic!r} is not a board topic; refused")
+        held = self._aura_board.get(topic)
+        if held is not None:
+            held[1].add(aura)
+            return
+        if topic not in self._board and self._delivered_topic_count() >= MAX_BOARD_TOPICS:
+            raise SchemaViolationError(
+                f"aura {aura!r} refused: at most {MAX_BOARD_TOPICS} board topics may be "
+                f"subscribed at once, and {topic!r} would pass that"
+            )
+        self._aura_board[topic] = (datetime.now(UTC).isoformat(), {aura})
+        if topic not in self._board:
+            self._bump()
+
+    def release_auras(self) -> None:
+        """Drop every aura-owned hold (a reload or a session handoff makes
+        them again). The session's own subscriptions are untouched."""
+        if not self._aura_board:
+            return
+        dropped_delivered = any(t not in self._board for t in self._aura_board)
+        self._aura_board.clear()
+        if dropped_delivered:
+            self._bump()
 
     def _arm_name_lease(
         self,
@@ -665,11 +737,21 @@ class SubscriptionSet:
         wait on (:meth:`~nexus.mcp.channel.ChannelWaiter._build_specs`),
         so leaving it out here is what stops push delivery for it."""
         out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
-        for topic, since in self._board.items():
+        # Copies: a tool thread reads this while the loop can add an aura topic.
+        for topic, since in list(self._board.items()):
             entry: dict[str, Any] = {"subspace": topic}
+            held = self._aura_board.get(topic)
+            if since and held is not None:
+                # One delivered entry for a topic both hold: the earlier start
+                # position, so neither owner misses a row (both share the
+                # session's per-subscriber stamp, so nothing is delivered twice).
+                since = min(since, held[0])
             if since:
                 entry["since"] = since
             out.append(entry)
+        for topic, (since, _owners) in list(self._aura_board.items()):
+            if topic not in self._board:
+                out.append({"subspace": topic, "since": since, "held_by": "aura"})
         return out
 
     # ── Lease thread lifecycle ───────────────────────────────────────────

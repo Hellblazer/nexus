@@ -85,6 +85,11 @@ import java.util.TreeSet;
  *       {@code DROP INDEX CONCURRENTLY} needs the same lock on the leaf first, so the drop waits and ends at the
  *       drop's {@code lock_timeout} (5 s), the index stays, and the next pass judges it again. A leftover whose
  *       reindex has ended takes the lock at once and drops.</li>
+ *   <li>RDR-230 (nexus-4lnn1.1.10): the same carve-out for the leaf's own HNSW index. An invalid
+ *       {@code <own index>_ccnew}/{@code _ccold[N]} in {@link Leaf#leafLeftovers()} (an unpredicated hnsw index of a
+ *       leaf the builder resolved, named from the leaf's identified index; see {@link PciCatalog.LeafIndex}) is dropped
+ *       as {@link DropReason#LEAF_REINDEX_LEFTOVER}, with a null collection, through the same executor and drop path
+ *       as a {@code pci_} leftover. It is never charged against the cap and never blocks a build.</li>
  *   <li>{@code NX_SEARCH_PCI=0}: an empty plan, so no builds and no drops.</li>
  * </ul>
  *
@@ -142,7 +147,13 @@ public final class PciReconcilePlanner {
          * An invalid {@code _ccnew}/{@code _ccold} left by a failed REINDEX CONCURRENTLY of a builder index
          * ({@link Index#leftover()}); dropped whatever the registry and the counts say (nexus-rn1yd).
          */
-        REINDEX_LEFTOVER("reindex_leftover");
+        REINDEX_LEFTOVER("reindex_leftover"),
+        /**
+         * An invalid {@code _ccnew}/{@code _ccold} left by a failed REINDEX CONCURRENTLY of a leaf's own HNSW index
+         * ({@link Index#leafLeftover()}); dropped through the same path as {@link #REINDEX_LEFTOVER} (RDR-230,
+         * nexus-4lnn1.1.10).
+         */
+        LEAF_REINDEX_LEFTOVER("leaf_reindex_leftover");
 
         private final String label;
 
@@ -156,12 +167,61 @@ public final class PciReconcilePlanner {
     }
 
     /** One step of a plan. */
-    public sealed interface Action permits Build, Drop, SkipCountSuspect { }
+    public sealed interface Action permits Build, Drop, SkipCountSuspect, Reindex { }
+
+    /**
+     * Why an index is reindexed (RDR-230 Technical Design 3); {@link #label()} is the value for the log line. The
+     * thresholds are {@link PciReindexPolicy}'s.
+     */
+    public enum Trigger {
+        /** Bytes per row grew to {@link PciReindexPolicy#SIZE_RATIO} of the anchor's (or of the install reference). */
+        SIZE("size"),
+        /** Deletes since build reached {@link PciReindexPolicy#DELETES_SINCE_BUILD_FRACTION} of the rows. */
+        DELETES_SINCE_BUILD("deletes_since_build"),
+        /** The row count fell by {@link PciReindexPolicy#BULK_DELETE_FRACTION} since the previous check: REINDEX, then VACUUM. */
+        BULK_DELETE("bulk_delete"),
+        /** The recall canary is red on at least {@link PciReindexPolicy#RED_CANARY_MIN_QUERIES} queries. */
+        RED_CANARY("red_canary"),
+        /** A leaf's own HNSW index grew to {@link PciReindexPolicy#LEAF_SIZE_RATIO} of the reference (RDR-230 P2.3). */
+        LEAF_SIZE("leaf_size");
+
+        private final String label;
+
+        Trigger(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
+
+    /**
+     * {@code REINDEX INDEX CONCURRENTLY} of the existing index {@code name}, which serves {@code collection} (null for
+     * a leaf's own HNSW index, which serves none). {@code bytes} is the index's size when it was read: the order of the
+     * pass's REINDEXes is largest first. After the REINDEX the executor writes a fresh anchor and re-measures the
+     * canary; after a {@link Trigger#BULK_DELETE} REINDEX it also runs {@code VACUUM (ANALYZE)} on the index's leaf
+     * ({@link #vacuumAfter()}).
+     */
+    public record Reindex(String name, String collection, Trigger trigger, long bytes) implements Action {
+        public Reindex {
+            Objects.requireNonNull(name, "name");
+            Objects.requireNonNull(trigger, "trigger");
+        }
+
+        /** True when the leaf is vacuumed after the REINDEX: only the bulk-delete trigger. */
+        public boolean vacuumAfter() {
+            return trigger == Trigger.BULK_DELETE;
+        }
+    }
 
     /** Build {@code name} on the leaf for {@code collection}; {@code name} is {@link PciCatalog#indexName}. */
     public record Build(String name, String collection) implements Action { }
 
-    /** Drop the existing index {@code name}, which serves (or, for a leftover, was made from) {@code collection}. */
+    /**
+     * Drop the existing index {@code name}, which serves (or, for a leftover, was made from) {@code collection};
+     * {@code collection} is null for a {@link DropReason#LEAF_REINDEX_LEFTOVER}, which belongs to the leaf's own index.
+     */
     public record Drop(String name, String collection, DropReason reason) implements Action { }
 
     /**
@@ -236,6 +296,14 @@ public final class PciReconcilePlanner {
             }
         }
 
+        // RDR-230 (nexus-4lnn1.1.10): a leftover of the leaf's own HNSW index. Like a pci_ leftover it is no cap slot, no
+        // served collection and no build block, so it only adds a drop. Its collection is null: it serves none.
+        for (Index leftover : leaf.leafLeftovers()) {
+            if (leftover.leafLeftover() && !leftover.valid()) {
+                drops.put(leftover.name(), new Drop(leftover.name(), null, DropReason.LEAF_REINDEX_LEFTOVER));
+            }
+        }
+
         List<Action> plan = new ArrayList<>(drops.values());
         for (String collection : suspects) {
             plan.add(new SkipCountSuspect(collection));
@@ -253,5 +321,29 @@ public final class PciReconcilePlanner {
                     row.name())));
         }
         return List.copyOf(plan);
+    }
+
+    /**
+     * The REINDEXes the triggers call for, largest index first (then name): one per candidate whose
+     * {@link PciReindexPolicy#trigger} fires. Not limited: the caller adds any leaf-index REINDEX and then
+     * {@link #firstPerPass}. A pure function of its arguments.
+     */
+    static List<Reindex> reindexes(Collection<PciReindexPolicy.Candidate> candidates, java.time.Instant now) {
+        List<Reindex> out = new ArrayList<>();
+        for (PciReindexPolicy.Candidate c : candidates) {
+            PciReindexPolicy.trigger(c, now)
+                .ifPresent(t -> out.add(new Reindex(c.name(), c.collection(), t, c.bytes())));
+        }
+        out.sort(BY_SIZE_THEN_NAME);
+        return List.copyOf(out);
+    }
+
+    /** Largest first, then name: the order a pass runs its REINDEXes in. */
+    static final Comparator<Reindex> BY_SIZE_THEN_NAME =
+        Comparator.comparingLong(Reindex::bytes).reversed().thenComparing(Reindex::name);
+
+    /** The first {@link PciReindexPolicy#MAX_PER_PASS} of {@code ordered}, which is already in pass order. */
+    static List<Reindex> firstPerPass(List<Reindex> ordered) {
+        return List.copyOf(ordered.subList(0, Math.min(ordered.size(), PciReindexPolicy.MAX_PER_PASS)));
     }
 }

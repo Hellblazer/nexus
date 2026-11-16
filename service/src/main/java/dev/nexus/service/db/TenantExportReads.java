@@ -68,7 +68,9 @@ public final class TenantExportReads {
     }
 
     /**
-     * A read could not take a table lock inside its lock bound; retryable (the lock clears when its holder ends).
+     * A page cannot be read now; retryable. A read could not take a table lock inside its lock bound (the lock clears
+     * when its holder ends), or an earlier page read of the same session is still alive after its wall
+     * ({@code TenantExportSessions#withPage}, nexus-csayy.9).
      */
     public static final class PageBusyException extends RuntimeException {
         public PageBusyException(Throwable cause) {
@@ -82,19 +84,42 @@ public final class TenantExportReads {
 
     /**
      * A read was cancelled at its time budget (SQLSTATE 57014 from the budget's {@code statement_timeout}, or the budget
-     * spent before the next statement). Not the same as {@link PageBusyException}: a lock wait clears when the other
+     * spent before the next statement), or passed the page's wall ({@code TenantExportSessions#withPage}, nexus-csayy.9;
+     * {@link #wallMs()} then says so). Not the same as {@link PageBusyException}: a lock wait clears when the other
      * transaction ends, and a statement that ran out of its budget is likely to run out again, so a client repeats it
      * a few times and then reports it, instead of waiting it out.
      */
     public static final class PageOverBudgetException extends RuntimeException {
+        private final int wallMs;
+
         public PageOverBudgetException(Throwable cause) {
             super("export read cancelled at its page time budget", cause);
+            this.wallMs = 0;
         }
 
         PageOverBudgetException(String message) {
             super(message);
+            this.wallMs = 0;
+        }
+
+        /** The page was cut by the session's wall deadline ({@code wallMs}), not cancelled at the database budget. */
+        PageOverBudgetException(String message, int wallMs) {
+            super(message);
+            this.wallMs = wallMs;
+        }
+
+        /** The wall deadline that cut the page, milliseconds; 0 when the database budget cancelled it. */
+        public int wallMs() {
+            return wallMs;
         }
     }
+
+    /**
+     * Set by {@code TenantExportSessions#withPage} on the page's own reader thread: {@link #inSnapshot} runs it right after
+     * its pool borrow returns, so the wall can tell a pool that could not answer from a read that ran long. Unset (null) for
+     * a read outside a page, the header included.
+     */
+    static final ThreadLocal<Runnable> BORROW_RETURNED = new ThreadLocal<>();
 
     /** A table's name, class, key and the columns of its rows, as the header reports them. */
     public record TableHeader(String name, TenantExport.ExportClass exportClass, List<String> primaryKey,
@@ -197,16 +222,17 @@ public final class TenantExportReads {
                 copyOut(txn.conn, copy, target);
                 finished = true;
             } catch (BinaryCopyPage.PageFull cut) {
-                // the byte target: the copy was cancelled, the page ends at its last whole row
+                // the byte target: the page ends at its last whole row, and the rest of the COPY is left unread on
+                // a connection release() aborts (copyOut's javadoc says why it is never cancelled and drained)
                 finished = true;
-                txn.discard = true;   // the cancel leaves the driver behind the server: see release()
+                txn.discard = true;
             } catch (IOException | SQLException e) {
                 RuntimeException limited = timeLimited(e);
                 throw limited != null ? limited : new IllegalStateException(
                     "export page copy failed for " + table.name(), e);
             } finally {
                 // any other way out (a failed copy, a sink that threw, a cancelled statement) leaves the connection
-                // in a protocol state nobody checked, and the driver's cancel may still be in flight: not reusable
+                // in a protocol state nobody checked: not reusable
                 if (!finished) txn.discard = true;
             }
             int[] keyIndexes = table.primaryKey().stream()
@@ -231,7 +257,7 @@ public final class TenantExportReads {
      * the tenant before the first goes out, so a page cost time in proportion to the tenant's size, not the page's (gate
      * N1 scale run, nexus-csayy.4: a mid-table page of 100,000 rows, 918 ms with the sort and 233 ms as Merge Append).
      * With the sort off the planner takes the per-leaf index scans under Merge Append, which emit in key order and stop at
-     * the LIMIT or when the COPY is cancelled at the byte target. Such a scan reads only the tenant's rows, so no sort can
+     * the LIMIT or when the COPY is cut at the byte target. Such a scan reads only the tenant's rows, so no sort can
      * beat it.
      *
      * <p>A table keyed by {@code id} alone ({@code memory}, {@code plans}, ...) is left to the planner: its key order
@@ -328,8 +354,26 @@ public final class TenantExportReads {
         return "COPY (" + ctx.renderInlined(query) + ") TO STDOUT (FORMAT binary)";
     }
 
+    /**
+     * Streams the COPY into {@code sink}; whatever the sink throws ({@link BinaryCopyPage.PageFull} at the byte target)
+     * leaves the copy active and unread, and the caller discards the connection, which {@link #release} aborts.
+     *
+     * <p>Not {@code CopyManager.copyOut(sql, OutputStream)} (nexus-csayy.9): on a sink's IOException that one sends a
+     * cancel request on a new connection to the server (up to the driver's {@code cancelSignalTimeout}, 10 s, to connect
+     * and 10 s more to read), and the rows the server goes on sending until the cancel lands stay in the stream. Closing
+     * the connection then made Hikari's proxy roll it back, and the rollback skips every leftover CopyData message, while
+     * {@code evictConnection} closed the same physical connection on Hikari's own close thread. Over TLS a socket closed
+     * by another thread reads as end of stream, {@code SSLSocket}'s {@code skip} returns 0, and PgJDBC 42.7.4's
+     * {@code PGStream.skip} loops on {@code s += 0} for ever: the page thread spun at full CPU holding the session's
+     * page gate (cloud, 2026-11-14; reproduced locally with a TLS server on both the native image and the JVM, with a
+     * thread dump of the spin). Plain TCP throws "Socket closed" there instead, which is why loopback runs never saw it.
+     */
     private static void copyOut(Connection conn, String copy, java.io.OutputStream sink) throws IOException, SQLException {
-        conn.unwrap(PGConnection.class).getCopyAPI().copyOut(copy, sink);
+        org.postgresql.copy.CopyOut cp = conn.unwrap(PGConnection.class).getCopyAPI().copyOut(copy);
+        byte[] buf;
+        while ((buf = cp.readFromCopy()) != null) {
+            sink.write(buf);
+        }
     }
 
     /**
@@ -431,6 +475,8 @@ public final class TenantExportReads {
         Txn txn = null;
         try {
             conn = dataSource.getConnection();
+            Runnable borrowed = BORROW_RETURNED.get();
+            if (borrowed != null) borrowed.run();
             conn.setAutoCommit(false);
             conn.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
             conn.setReadOnly(true);
@@ -453,7 +499,9 @@ public final class TenantExportReads {
             RuntimeException limited = timeLimited(e);
             throw limited != null ? limited : new IllegalStateException("export read failed", e);
         } finally {
-            release(conn, txn != null && txn.discard);
+            // an interrupted reader (the wall's) may have its socket closed under it mid-statement: its stream is in a state
+            // nobody checked, whatever the sticky interrupt flag does to the pool's own close
+            release(conn, (txn != null && txn.discard) || Thread.currentThread().isInterrupted());
         }
     }
 
@@ -472,17 +520,50 @@ public final class TenantExportReads {
         }
     }
 
+    /**
+     * Ends the read's transaction and returns its connection. A discarded connection (a cut or failed copy: its stream
+     * may hold unread rows, or a reply nobody waited for) is ABORTED first: its socket is closed on this thread and
+     * nothing reads from it again, so the server's backend ends when its next write fails, the proxy's rollback fails at
+     * once on the closed connection, and Hikari's own close of it finds nothing left to do (see
+     * {@link #copyOut} for the spin that a rollback on such a stream ran into).
+     */
     private void release(Connection conn, boolean discard) {
         if (conn == null) return;
         if (discard) {
-            if (dataSource instanceof com.zaxxer.hikari.HikariDataSource pool) {
-                pool.evictConnection(conn);   // the pool closes it on its next pass instead of handing it out again
-            }
+            boolean aborted = false;
+            boolean alreadyClosed = false;
             try {
-                conn.close();
+                alreadyClosed = conn.isClosed();
             } catch (SQLException | RuntimeException e) {
-                log.debug("event=export_read_close_after_discard error={}", e.getMessage());
+                log.debug("event=export_read_isclosed_failed error={}", e.toString());
             }
+            if (alreadyClosed) {
+                // an interrupt closed its socket, or an earlier abort did: nothing left to abort
+                log.debug("event=export_read_abort_skipped reason=already_closed");
+            } else {
+                try {
+                    // the driver's network-level abort: no Terminate, no read. Not Connection.abort(Executor): PgJDBC 42.7.4
+                    // guards it with SQLPermission.checkGuard, which throws on JDK 24 and later ("checking permissions is
+                    // not supported"), so on this engine's JDK it never closes anything
+                    conn.unwrap(org.postgresql.core.BaseConnection.class).getQueryExecutor().abort();
+                    aborted = true;
+                } catch (SQLException | RuntimeException e) {
+                    log.warn("event=export_read_abort_failed error={}", e.toString());
+                }
+            }
+            if (dataSource instanceof com.zaxxer.hikari.HikariDataSource pool) {
+                pool.evictConnection(conn);   // never handed out again; the pool closes the physical connection itself
+            }
+            if (aborted || alreadyClosed) {
+                try {
+                    conn.close();
+                } catch (SQLException | RuntimeException e) {
+                    log.debug("event=export_read_close_after_discard error={}", e.getMessage());
+                }
+            }
+            // else the abort failed: NOT conn.close(). The proxy's close rolls the connection back, which reads the stream
+            // (it skips leftover CopyData), and on a socket another thread is closing that read is the TLS skip spin of
+            // nexus-csayy.9. The eviction above already took the connection out of the pool's accounting.
             return;
         }
         try {

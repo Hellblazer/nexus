@@ -27,7 +27,6 @@ Usage (all commands run inside the repo, from any subdirectory or worktree):
   memory.py log TARGET|- [--genre G] [--stamp S] # session JSON on stdin; S fixes the record's name and time
   memory.py genre-put NAME [--replace]         # {"exemplars": [...], "notes": [...]} on stdin
   memory.py exemplar-add GENRE PATH:START-END [--rev SHA]
-  memory.py viewer [--set V]
   memory.py status                             # projects, genre_map entries, exemplars per genre
 
 Site-page section 3 treatments (what a repo or one document does with a rule of the site-page style sheet):
@@ -65,7 +64,7 @@ with an empty style sheet.
 Records (T2 project, title), with PREFIX empty unless overridden by --prefix or
 PROSE_EDIT_PROJECT_PREFIX (tests use it so they never touch the live projects):
 
-  user   project  PREFIX + "prose"                stylesheet, viewer, not-a-defect
+  user   project  PREFIX + "prose"                stylesheet, not-a-defect
   repo   project  PREFIX + "<repo>_prose"         stylesheet, not-a-defect,
                                                   genre/<name>, doc/<path>,
                                                   log/<path>/<utc ts> (90-day TTL)
@@ -80,7 +79,6 @@ style sheet. All record bodies are JSON:
   not-a-defect:            {"entries": [{"old", "new", "from", "at"}]}
   genre/<name>:            {"exemplars": [{"text", "path", "start", "end", "rev"?}],
                             "notes": [str]}
-  viewer:                  {"viewer": str}
   log/...:                 {"path", "range", "genre", "at", "session": <caller's JSON>}
 
 A stored record that does not have this shape stops the command with
@@ -155,7 +153,7 @@ key. Three limits, all deliberate: the key has no position, so a stored cut of "
 quite " also drops that cut in another sentence; a pure insertion (no old text) matches
 the same insertion anywhere in the document; and a case or apostrophe difference inside a
 shared word is not part of the change, so a fix that also re-capitalises a word next to the
-stored words is taken for the stored fix. Dropped edits stay visible: the review copy
+stored words is taken for the stored fix. Dropped edits stay visible: the review
 lists them with their cause. The key is computed from "old" and "new" every time it is
 needed, never stored, so records written before the key existed are read the same way.
 
@@ -163,10 +161,10 @@ needed, never stored, so records written before the key existed are read the sam
 for that document, and every edit whose change key equals that of a promoted not-a-defect entry at user or
 repo level (a general entry, so it applies to a stdin run and to every document; overlap alone is not a match
 there either). Every other key passes through unchanged. Edit numbers "n" are kept, so dropped edits leave GAPS
-in the numbering: the marks in the marked-up copy keep their meaning. The output gains "dropped":
+in the numbering: edit numbers keep their meaning across the review. The output gains "dropped":
 [{"n", "old", "cause"}] (cause is "rejected" for the document's own rejection, "not-a-defect" for a promoted
 entry; an edit that matches both is "rejected"; any "dropped" in the input is overwritten). The skill runs `brief.py filter`, which calls this and returns each dropped
-edit as {"n", "old", "new", "cause"}: it adds "new" (the proposed text, so the review copy
+edit as {"n", "old", "new", "cause"}: it adds "new" (the proposed text, so the review
 can show what was dropped) and drops further edits with its own causes.
 
 Rejections are one per change key: rejecting a change that is already stored REPLACES that
@@ -209,7 +207,7 @@ builder puts it in the brief as the anchor for the next run, in place of a card 
 not a scalar or a list, so it takes no part in the merge.
 
 Concurrency. Every read-modify-write (add-entry, reject, rejections --remove, voice-card,
-promote, not-a-defect --remove, genre-put, exemplar-add, viewer --set) holds an
+promote, not-a-defect --remove, genre-put, exemplar-add) holds an
 exclusive flock on a lock file, keyed by project and title, from the read through
 the write. Repo records (repo project) lock under the git common directory, which
 every worktree of that clone shares. User records (the "prose" project) are shared
@@ -464,7 +462,7 @@ def _is_str_dicts(value: Any, keys: tuple[str, ...]) -> bool:
 
 
 def check_record(kind: str, rec: Any, what: str) -> Obj:
-    """Validate a record body of the given kind ("sheet", "doc", "nad", "genre", "viewer")."""
+    """Validate a record body of the given kind ("sheet", "doc", "nad", "genre")."""
     body = _obj(rec)
     if body is None:
         raise _bad(what, "not a JSON object")
@@ -497,8 +495,6 @@ def check_record(kind: str, rec: Any, what: str) -> Obj:
             raise _bad(what, '"exemplars" is not a list of {text, path, start, end}')
         if notes is None or not all(isinstance(n, str) for n in notes):
             raise _bad(what, '"notes" is not a list of strings')
-    if kind == "viewer" and not isinstance(body.get("viewer", ""), str):
-        raise _bad(what, '"viewer" is not a string')
     return body
 
 
@@ -1449,16 +1445,6 @@ def cmd_exemplar_add(ctx: Ctx, a: argparse.Namespace) -> None:
            "duplicate": duplicate})
 
 
-def cmd_viewer(ctx: Ctx, a: argparse.Namespace) -> None:
-    if a.set is not None:
-        with ctx.locked(ctx.user_project, "viewer"):
-            ctx.t2.put(ctx.user_project, "viewer", {"viewer": a.set})
-        _emit({"viewer": a.set})
-        return
-    rec = ctx.t2.get_json(ctx.user_project, "viewer", "viewer")
-    _emit({"viewer": (rec or {}).get("viewer")})
-
-
 def cmd_status(ctx: Ctx, _a: argparse.Namespace) -> None:
     """What setup needs to know: the repository's projects, its genre_map entries at each level, and how many
     exemplars each genre holds. Reading the user style sheet first is the T2 check: an unreachable T2 exits 3."""
@@ -1553,7 +1539,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("genre")
     sp.add_argument("where", metavar="PATH:START-END")
     sp.add_argument("--rev", help="read the passage from this revision (git show REV:PATH)")
-    add("viewer", cmd_viewer).add_argument("--set")
     add("status", cmd_status)
     return p
 

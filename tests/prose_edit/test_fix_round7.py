@@ -24,7 +24,7 @@ import pytest
 from tests._child_process import kill_if_identity
 from tests.prose_edit.conftest import ROOT, Prose
 from tests.prose_edit.test_acceptance_tools import ACC, _verdicts
-from tests.prose_edit.test_brief import AGENT, SKILL, brief_ok, run_brief, seed
+from tests.prose_edit.test_brief import AGENT, skill_text, brief_ok, run_brief, seed
 from tests.prose_edit.test_fix_round1 import _step
 from tests.prose_edit.test_fix_round3 import (
     ESSAY,
@@ -35,7 +35,7 @@ from tests.prose_edit.test_fix_round3 import (
 from tests.prose_edit.test_fix_round5 import GUARD, _bash, _plant_holder, box  # noqa: F401  (box is a fixture)
 
 AGENT_TEXT = AGENT.read_text(encoding="utf-8")
-SKILL_TEXT = SKILL.read_text(encoding="utf-8")
+SKILL_TEXT = skill_text()
 README = (ACC / "README.md").read_text(encoding="utf-8")
 
 
@@ -331,7 +331,7 @@ def test_a_path_run_build_prints_ready_reply_filtered_and_reasons_paths(prose: P
     fields = _fields(head)
     work = Path(fields["WORK"])
     try:
-        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS"], list(fields)
+        assert list(fields) == ["WORK", "DISPATCH", "REPLY", "FILTERED", "REASONS", "ANSWERS", "BLOCKS", "PROPOSED", "STATUSES"], list(fields)
         assert Path(fields["REPLY"]) == work / "reply.txt"
         assert Path(fields["FILTERED"]) == work / "filtered.json"
         assert Path(fields["REASONS"]) == work / "reasons.json"

@@ -111,6 +111,49 @@ class PgSessionPciSettingsTest {
             "-1", "1001", "99999999999", "many", "16x", "1.5");
     }
 
+    // ---- NX_SEARCH_PCI_REINDEX (RDR-230 Technical Design 8, nexus-4lnn1.1.10) ----------------
+
+    @Test
+    void searchPciReindex_defaultsToOn_whenUnsetOrBlank() {
+        assertThat(PgSession.searchPciReindex(null)).isTrue();
+        assertThat(PgSession.searchPciReindex("  ")).isTrue();
+    }
+
+    @Test
+    void searchPciReindex_takesOnlyOneAndZero() {
+        assertThat(PgSession.searchPciReindex("1")).isTrue();
+        assertThat(PgSession.searchPciReindex(" 1 ")).isTrue();
+        assertThat(PgSession.searchPciReindex("0")).isFalse();
+        assertThat(PgSession.searchPciReindex(" 0 ")).isFalse();
+    }
+
+    @Test
+    void searchPciReindex_refusesEveryOtherValue_namingTheVariable() {
+        for (String bad : new String[] {"true", "yes", "TRUE", "on", "off", "2", "-1", "01", "1.0", "false"}) {
+            assertThatThrownBy(() -> PgSession.searchPciReindex(bad))
+                .as("value %s", bad)
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("NX_SEARCH_PCI_REINDEX")
+                .hasMessageContaining(bad);
+        }
+    }
+
+    @Test
+    void resolvePciSettings_readsTheReindexSwitch_andAnOtherValueRefusesBoot() {
+        assertThat(PgSession.resolvePciSettings(java.util.Map.of("NX_SEARCH_PCI_REINDEX", "0")::get).reindex())
+            .isFalse();
+        assertThat(PgSession.resolvePciSettings(java.util.Map.of("NX_SEARCH_PCI_REINDEX", "1")::get).reindex())
+            .isTrue();
+        assertThat(PgSession.resolvePciSettings(java.util.Map.<String, String>of()::get).reindex()).isTrue();
+        // The switch is its own: NX_SEARCH_PCI stays on and the other settings keep their defaults.
+        PgSession.PciSettings off = PgSession.resolvePciSettings(java.util.Map.of("NX_SEARCH_PCI_REINDEX", "0")::get);
+        assertThat(off.enabled()).isTrue();
+        assertThat(off.maxPerLeaf()).isEqualTo(PgSession.DEFAULT_SEARCH_PCI_MAX_PER_LEAF);
+        assertThatThrownBy(() -> PgSession.resolvePciSettings(java.util.Map.of("NX_SEARCH_PCI_REINDEX", "maybe")::get))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("NX_SEARCH_PCI_REINDEX");
+    }
+
     // ---- the record and the boot touch -----------------------------------------------------
 
     @Test

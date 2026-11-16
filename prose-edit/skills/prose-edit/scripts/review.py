@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The review loop of the prose-edit skill (RDR-221 Steps 1.1 and 1.5): marked-up copy, accept, apply.
+"""The review loop of the prose-edit skill (RDR-221 Steps 1.1 and 1.5): session, MarkupEditor translation, accept, apply.
 
 The skill hands every mechanical job to this script so the model's instructions carry none of
 it. Stdlib only; T2 is reached only by running memory.py beside it (through brief.py's child
@@ -10,10 +10,27 @@ to stderr with exit 1; memory.py's exit code 3 (T2 unavailable) passes through.
   review.py render TARGET --work WORK [--file F] [--genre G]
   review.py apply --work WORK [--accept SPEC] [--hold SPEC] [--reject SPEC] [--reasons-file F] [--reason N=TEXT]... [--dry-run]
   review.py log-retry --work WORK
+  review.py translate --work WORK --blocks-file F [--blocks-file F2 ...]
+  review.py proposed --work WORK --from-file F
+  review.py decisions --work WORK [--from-file F] [--accept SPEC] [--reject SPEC] [--hold SPEC]
 
-A cut-only session (RDR-221 Step 3.1, nexus-ger02.10; the prose-cut skill) is a model's run, with no author to read
-the copy: its filtered.json carries "mode": "cut-only" or its work directory holds a cut-only run's brief or card
-(brief.py cut_only_work), `render` opens no viewer and records `cut_only` in session.json, and from then on an html page also protects its nav, heading, button and samp
+The MarkupEditor review (nexus-scmcs.2): the author decides in the app's suggestions and never saves there, so
+`apply` stays the only writer of the document, the only store of rejections and the only session logger. `translate`
+reads get_document's blocks (F, written inside WORK; a long document's pages are one --blocks-file each, in order, and
+must join up: each page's `next` is the next page's first block) and writes WORK/propose.json, the payload of one propose_edits
+call plus the refused edits (cause: not-found, ambiguous, formatting, code-block, metadata, spans-lines, no-change);
+it prints {edits, sent, refused}. `proposed` reads propose_edits' reply (F), checks it holds one result per edit
+sent, and writes WORK/suggestions.json (edit number, suggestion id, find, replace) and adds the app's refusals
+(cause app-refused) to the refused list. `decisions` reads list_suggestions' reply (F), maps THIS run's ids
+(accepted -> accept, rejected -> reject, pending, stale or missing -> hold; ids of other documents are ignored),
+merges the author's chat decisions for the leftovers (edits the script or the app refused, the author's own
+answers) and prints the flags for `apply`: {accept, reject, hold, apply_args, app, chat, leftover, undecided,
+warnings}. None of the three writes the document or T2. Every file named is a file directly inside WORK
+(the BLOCKS=, PROPOSED= and STATUSES= header paths).
+
+A cut-only session (RDR-221 Step 3.1, nexus-ger02.10; the prose-cut skill) has no app: its filtered.json carries
+"mode": "cut-only" or its work directory holds a cut-only run's brief or card (brief.py cut_only_work), `render`
+records `cut_only` in session.json, and from then on an html page also protects its nav, heading, button and samp
 elements (a normal html run does not) and `apply` refuses (exit 1, nothing written) an accepted edit that is not a cut
 (it adds, replaces or reorders a word, or adds markup), which a hand-edited filtered.json could hold. The session log
 then carries `cut_only`, `word_budget` and `words` {document, budget, removed (the applied cuts' words), after,
@@ -25,45 +42,24 @@ PATH:START-END or "-" (a stdin run; --file names the saved text). WORK is a dire
 `brief.py tmpdir` (or `build --work`); every path this script reads or writes is inside it
 except the document itself and the temp file described under `apply`.
 
-`render` writes WORK/<name>.review.md, the marked-up copy, which lives outside the repository
-because WORK does. Its format (Step 1.1):
+`render` sets the session up and writes nothing the author reads: it places each edit against the file and writes
+WORK/session.json (the target, the genre, whether it is a stdin run and the edits that cannot be placed), which
+`apply`, `answer`, `translate` and `decisions` need. It prints {genre, counts, unplaced, dropped, dropped_queries,
+dropped_paragraphs, warnings}. The review itself is in the MarkupEditor app for a path run (`translate`, `proposed`
+and `decisions`, below) and in the chat for a stdin run.
 
-  - a header line naming the file and the genre, then one line on how to answer
-  - an index of links right after that line, one per proposal (`[E1](#e1)`, `[P1](#p1)`, `[Q1](#q1)`) with a
-    one-line gist, because Typora's rendered view shows no line numbers; each proposal site holds the matching
-    `<a id="e1" name="e1"></a>` (an edit's at the start of its mark, a note's at the end of its first line,
-    an unplaced proposal's in its listing). A copy with no proposal has no index; a dropped edit has no link.
-    There is no changes-only copy.
-  - the editor's note as a blockquote, then the voice card as a blockquote
-  - each sentence edit inline as <del>old</del><ins>new</ins><sup>N</sup> (a cut has no ins)
-  - paragraph proposals as `> **[P1] action.** advice` before their paragraph, queries as
-    `> **[Q1]** "anchor": text` after theirs
-  - the reasons as numbered footnotes, `<sup>N</sup> reason`, one per paragraph at the end;
-    edits the filter dropped keep their number there ("dropped before this copy: cause")
-  - what the filter dropped, with old and new text and the cause, in a blockquote after the note
-
-An edit that cannot be placed (its old string is absent, occurs more than once, or overlaps
-another edit) is not marked inline; it is listed after the note with its cause. One whose old
-string is absent or occurs more than once is skipped if accepted; two that overlap are both
-skipped when both are accepted, and either is applied when accepted alone. An edit the copy could
-not show inline cannot be decided in it, so it is never stored as a rejection. For an .html or
-.htm target the copy is flat excerpts: only the sections a mark or note belongs to, as text with
-no head, style, script or tags, each note beside its section. Entities show as the characters they
-stand for (`&lt;` as `<`); a mark keeps the source text its edit matched, since matching is against
-the source.
-
-The copy is opened in the viewer stored at T2 prose/viewer (an application name, run as
-`open -a NAME FILE` on macOS). With no record, or off macOS, or when the open fails, the copy is
-not opened and its path is the answer. PROSE_EDIT_OPEN replaces `open -a` with a command (the
-viewer name and the path are appended); like PROSE_EDIT_NOW it needs PROSE_EDIT_TEST=1 and is
-ignored without it. `render` also writes WORK/session.json; `apply` needs it.
+An edit that cannot be placed (its old string is absent, occurs more than once, or overlaps another edit) is
+listed with its cause. One whose old string is absent or occurs more than once is skipped if accepted; two that
+overlap are both skipped when both are accepted, and either is applied when accepted alone. An edit the review
+could not show cannot be decided there, so it is never stored as a rejection. For an .html or .htm target an edit
+is matched against the raw source, entities and all.
 
 `apply` takes the author's answer. --accept (default "none") is the numbers to apply, --reject the numbers to store
 as rejections for the document, and --hold the numbers left undecided: a comma or space separated
 list of numbers and ranges ("1, 3-5"), or "all" or "none"; --reject also takes "rest", which is
 every edit not accepted, held or named otherwise (the author's "reject the rest"). An edit the
 author does not name is HELD: neither applied nor stored. Only --reject stores a rejection, so
-silence, or "accept 1", never does. An edit the copy could not show inline is left alone by "rest"
+silence, or "accept 1", never does. An edit the review could not show is left alone by "rest"
 and by being unnamed; the author may still name it in --reject. --reason N=TEXT (repeatable) keeps
 the author's one line on why edit N is rejected; N must be a rejected edit and TEXT not empty.
 --reasons-file F is the same thing as a file, for words that must not ride a shell string: a JSON object
@@ -110,7 +106,7 @@ the dry run each need the dry run again. Otherwise, in order:
      and "log_retry" and the exit status is 0, and the payload waits in WORK/log-pending.json:
      `log-retry --work WORK` sends it, so the session still reaches the accept-rate evidence. An
      apply run again over such a WORK is refused and names log-retry.
-  6. WORK is deleted, so the copy is gone even when nothing was accepted. A run that stops
+  6. WORK is deleted, even when nothing was accepted. A run that stops
      before step 5 keeps WORK so the author can run apply again; a run whose log failed keeps it
      for log-retry. A work directory idle for two hours is swept by the next `brief.py tmpdir`; `render`,
      `apply` (a dry run, a refused answer, a failed run) and `log-retry` each renew it.
@@ -143,9 +139,9 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
-from html import unescape as _unescape
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import unquote, urlparse
 
 Obj = dict[str, Any]
 Span = tuple[int, int]
@@ -165,7 +161,18 @@ def _load_brief() -> Any:
     return mod
 
 
+def _load_suggest() -> Any:
+    spec = importlib.util.spec_from_file_location("prose_edit_suggest_lib", HERE / "suggest.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {HERE / 'suggest.py'}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 _BRIEF = _load_brief()
+_SUGGEST = _load_suggest()
 UserError: type[Exception] = _BRIEF.UserError
 Passthrough: type[Exception] = _BRIEF.Passthrough
 
@@ -273,7 +280,7 @@ def plan_edits(text: str, edits: list[Obj], rng: Obj | None, html: bool, cut_onl
 
     A plan is {"n", "old", "new", "span", "cause", "detail"}. `span` is (start, end) when the
     edit can be applied, else None with a `cause`. Overlap is judged among the edits given,
-    so the caller decides which edits count (all of them for the copy, the accepted ones to apply). `cut_only` (a
+    so the caller decides which edits count (all of them to place, the accepted ones to apply). `cut_only` (a
     cut-only session) protects the nav, heading, button and samp elements of an html page too.
     """
     window = cast("Span | None", _BRIEF._range_span(text, rng))
@@ -328,378 +335,7 @@ def apply_plan(text: str, plans: list[Obj]) -> str:
     return "".join(out)
 
 
-# ---------------------------------------------------------------------------
-# The marked-up copy
-# ---------------------------------------------------------------------------
-
-
-def _block(text: str, offset: int, protected: list[Span]) -> Span:
-    """The paragraph holding `offset` (lines up to a blank line), grown to cover any protected region it touches."""
-    starts: list[int] = []
-    pos = 0
-    lines = text.split("\n")
-    for line in lines:
-        starts.append(pos)
-        pos += len(line) + 1
-    idx = max(i for i, s in enumerate(starts) if s <= offset)
-    if not lines[idx].strip():
-        return offset, offset
-    lo = hi = idx
-    while lo > 0 and lines[lo - 1].strip():
-        lo -= 1
-    while hi + 1 < len(lines) and lines[hi + 1].strip():
-        hi += 1
-    start, end = starts[lo], starts[hi] + len(lines[hi])
-    grown = True
-    while grown:
-        grown = False
-        for a, b in protected:
-            if a < end and start < b and (a < start or b > end):
-                start, end, grown = min(start, a), max(end, b), True
-    return start, end
-
-
-def _quote(body: str) -> str:
-    return "> " + body.replace("\n", "\n> ")
-
-
-def _first(text: str, needle: str, window: Span | None) -> int | None:
-    for i in _occurrences(text, needle):
-        if _within(window, i, i + len(needle)):
-            return i
-    return None
-
-
-# An .html page is shown as flat text: what a reader sees, in sections, with no tags.
-_SKIP_OR_TAG = re.compile(
-    r"(?P<skip><!--.*?-->|<(?P<name>script|style|head|svg|noscript|template)\b.*?</(?P=name)\s*>)|(?P<tag><[^<>]*>)",
-    re.IGNORECASE | re.DOTALL)
-_BLOCK_TAG = re.compile(
-    r"</?(?:p|div|h[1-6]|li|ul|ol|dl|dt|dd|section|article|header|footer|nav|main|aside|table|thead|tbody|tr|td|th|"
-    r"blockquote|pre|figure|figcaption|br|hr|body|html|details|summary|form)\b", re.IGNORECASE)
-_HEADING_TAG = re.compile(r"<h[1-6]\b", re.IGNORECASE)
-
-
-def html_blocks(text: str) -> list[tuple[list[Span], bool]]:
-    """The text nodes of an HTML page grouped into sections: ([(start, end) of each node], is_heading).
-
-    Comments, head, style, script, svg, noscript and template contribute nothing; a block-level tag
-    ends a section; inline tags (a, em, span) do not.
-    """
-    blocks: list[tuple[list[Span], bool]] = []
-    state: dict[str, Any] = {"segs": [], "heading": False}
-
-    def flush(next_heading: bool) -> None:
-        segs = cast("list[Span]", state["segs"])
-        if any(text[a:b].strip() for a, b in segs):
-            blocks.append((segs, bool(state["heading"])))
-        state["segs"], state["heading"] = [], next_heading
-
-    last = 0
-    for m in _SKIP_OR_TAG.finditer(text):
-        if m.start() > last:
-            state["segs"].append((last, m.start()))
-        last = m.end()
-        tag = m.group("tag")
-        if tag and _BLOCK_TAG.match(tag):
-            flush(_HEADING_TAG.match(tag) is not None)
-    if last < len(text):
-        state["segs"].append((last, len(text)))
-    flush(False)
-    return blocks
-
-
-def _flat(text: str, segs: list[Span], marks: list[tuple[int, int, str]]) -> str:
-    """The text of the segments, entities shown as the characters they stand for (`&lt;` as `<`). A mark
-    is put in as it is: it holds the source text its edit matched, which is what apply matches against."""
-    out: list[str] = []
-    for a, b in segs:
-        pos = a
-        for ms, me, piece in marks:
-            if a <= ms and me <= b and ms >= pos:
-                out += [_unescape(text[pos:ms]), piece]
-                pos = me
-        out.append(_unescape(text[pos:b]))
-    return re.sub(r"\s+", " ", "".join(out)).strip()
-
-
-def _html_excerpts(text: str, marks: list[tuple[int, int, str]], p_notes: list[tuple[int, str]],
-                   q_notes: list[tuple[int, str]]) -> tuple[str, list[str]]:
-    """(the flat excerpts, the marks and notes that fell in no section). Marks must be sorted."""
-    blocks = html_blocks(text)
-
-    def block_of(offset: int, end: int | None = None) -> int | None:
-        for i, (segs, _) in enumerate(blocks):
-            if any(a <= offset and (offset if end is None else end) <= b for a, b in segs):
-                return i
-        return None
-
-    want: dict[int, dict[str, list[str]]] = {}
-    lost: list[str] = []
-    for ms, me, piece in marks:
-        i = block_of(ms, me)
-        if i is None:
-            lost.append(piece)
-        else:
-            want.setdefault(i, {"p": [], "q": []})
-    for offset, note in p_notes:
-        i = block_of(offset)
-        if i is None:
-            lost.append(note)
-        else:
-            want.setdefault(i, {"p": [], "q": []})["p"].append(note)
-    for offset, note in q_notes:
-        i = block_of(offset)
-        if i is None:
-            lost.append(note)
-        else:
-            want.setdefault(i, {"p": [], "q": []})["q"].append(note)
-    parts: list[str] = []
-    shown_heading: int | None = None
-    for i in sorted(want):
-        segs, is_heading = blocks[i]
-        if is_heading:
-            parts += [*want[i]["p"], "### " + _flat(text, segs, marks), *want[i]["q"]]
-            shown_heading = i
-            continue
-        head = max((j for j in range(i) if blocks[j][1]), default=None)
-        if head is not None and head != shown_heading:
-            parts.append("### " + _flat(text, blocks[head][0], []))
-            shown_heading = head
-        parts += [*want[i]["p"], _flat(text, segs, marks), *want[i]["q"]]
-    return "\n\n".join(parts), lost
-
-
-def _dropped_lines(prop: Obj) -> list[str]:
-    """One line per thing the filter dropped: the old and new text and the cause."""
-    lines: list[str] = []
-    for d in cast("list[Obj]", prop.get("dropped") or []):
-        new = f' -> "{d["new"]}"' if d.get("new") is not None else ""
-        lines.append(f'- E{d.get("n")} "{d.get("old")}"{new} ({d.get("cause", "")})')
-    for d in cast("list[Obj]", prop.get("dropped_queries") or []):
-        lines.append(f'- [Q{d.get("n")}] "{d.get("anchor")}" ({d.get("cause", "")})')
-    for d in cast("list[Obj]", prop.get("dropped_paragraphs") or []):
-        lines.append(f'- [P{d.get("n")}] {d.get("paragraphs")} ({d.get("cause", "")})')
-    return lines
-
-
-def change_core(old: str, new: str) -> tuple[str, str, str, str]:
-    """(shared head, old part, new part, shared tail) of an edit, cut at word edges (nexus-ger02.19).
-
-    The copy strikes only the part that changes: a whole sentence struck and re-inserted hides a one-character
-    change in two near-identical lines. The changed part grows to whole words, so a word is never split.
-    """
-    p = 0
-    while p < min(len(old), len(new)) and old[p] == new[p]:
-        p += 1
-    s = 0
-    while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
-        s += 1
-    lo, hi_old, hi_new = p, len(old) - s, len(new) - s
-
-    def word(c: str) -> bool:
-        return c.isalnum() or c in "_'"
-
-    def starts_word(part: str) -> bool:
-        return bool(part) and word(part[0])
-
-    while lo > 0 and word(old[lo - 1]) and (starts_word(old[lo:hi_old]) or starts_word(new[lo:hi_new])):
-        lo -= 1
-    tail = len(old) - hi_old
-    while tail > 0 and word(old[hi_old]) and (old[lo:hi_old][-1:].isalnum() or new[lo:hi_new][-1:].isalnum()):
-        hi_old += 1
-        hi_new += 1
-        tail -= 1
-    return old[:lo], old[lo:hi_old], new[lo:hi_new], old[hi_old:]
-
-
-def _show(part: str) -> str:
-    return f"`{part}`" if part.strip() else ("a space" if part == " " else "whitespace" if part else "nothing")
-
-
-def change_note(old: str, new: str) -> str:
-    """A footnote line naming a change no reader would spot by eye: punctuation or whitespace only."""
-    _, a, b, _ = change_core(old, new)
-    if any(c.isalnum() for c in a + b):
-        return ""
-    kind = "whitespace only" if not (a + b).strip() else "punctuation only"
-    return f" ({kind}: {_show(a)} → {_show(b)})"
-
-
-def _anchor(kind: str, n: object) -> str:
-    """An explicit HTML anchor for the index links: `id` for a browser, `name` for older HTML readers. Both
-    render as nothing. Typora's bundled Markdown Reference documents only heading targets for internal links,
-    but a hand check in Typora's rendered view (nexus-ger02.29, 2026-10-18) jumped to this anchor for an edit,
-    an edit inside Markdown link text, an unplaced proposal, a paragraph note and a query."""
-    key = f"{kind.lower()}{n}"
-    return f'<a id="{key}" name="{key}"></a>'
-
-
-def _anchored(body: str, kind: str, n: object) -> str:
-    """`body` with the anchor at the end of its first line, so the quoted text a reader and a test match is
-    unbroken and a jump still lands on the note."""
-    first, nl, rest = body.partition("\n")
-    return first + _anchor(kind, n) + nl + rest
-
-
-INDEX_GIST = 90
-
-
-def _gist(text: object, fallback: str) -> str:
-    """One line: whitespace collapsed, cut at INDEX_GIST characters; `fallback` when nothing is left. Markdown
-    and HTML specials are escaped after the cut, so a reason with `<del>`, a backtick or a bracket is shown as
-    text and cannot open a construct the cut leaves unclosed."""
-    one = " ".join(str(text).split()) or fallback
-    if len(one) > INDEX_GIST:
-        one = one[:INDEX_GIST - 1].rstrip() + "…"
-    return "".join(_GIST_ESCAPES.get(c, c) for c in one)
-
-
-_GIST_ESCAPES: dict[str, str] = {"<": "&lt;", "&": "&amp;", "`": "\\`", "[": "\\[", "]": "\\]", "*": "\\*", "_": "\\_"}
-
-
-def _index(edits: list[Obj], paragraphs: list[Obj], queries: list[Obj]) -> list[str]:
-    """The copy's index: one link per proposal in the copy (a dropped one is not a proposal here) with a
-    one-line gist. A Typora reader has no line numbers, so the links are the way around a long copy."""
-    rows = [f"- [E{e['n']}](#e{e['n']}) {_gist(e.get('reason') or '', 'edit')}"
-            for e in sorted(edits, key=lambda x: int(x["n"]))]
-    rows += [f"- [P{p['n']}](#p{p['n']}) "
-             f"{_gist(': '.join(x for x in (str(p.get('action', '')).strip(), str(p.get('advice', '')).strip()) if x), 'paragraph')}"
-             for p in sorted(paragraphs, key=lambda x: int(x["n"]))]
-    rows += [f"- [Q{q['n']}](#q{q['n']}) {_gist(q.get('text') or '', 'query')}"
-             for q in sorted(queries, key=lambda x: int(x["n"]))]
-    return ["## Index", "", *rows] if rows else []
-
-
-def _unplaced_note(p: Obj) -> str:
-    tail = (" Accepted together they are both skipped; accepted alone it is applied."
-            if p["cause"] == "overlap" else " It is skipped if accepted.")
-    return _quote(_anchored(
-        f"**[E{p['n']}]** Cannot be placed: {p['detail']}.{tail}\n\"{p['old']}\" -> \"{p['new']}\"", "E", p["n"]))
-
-
-def build_copy(text: str, prop: Obj, *, label: str, genre: str, rng: Obj | None, html: bool, stdin: bool) -> str:
-    """The marked-up copy of `text` for the filtered proposal `prop` (Step 1.1)."""
-    edits = cast("list[Obj]", prop.get("edits") or [])
-    paragraphs = cast("list[Obj]", prop.get("paragraphs") or [])
-    queries = cast("list[Obj]", prop.get("queries") or [])
-    dropped = cast("list[Obj]", prop.get("dropped") or [])
-    plans = plan_edits(text, edits, rng, html)
-    window = cast("Span | None", _BRIEF._range_span(text, rng))
-    protected = cast("list[Span]", _BRIEF.protected_spans(text, html=html))
-    replaced = [cast(Span, p["span"]) for p in plans if p["span"] is not None]
-
-    def settle(offset: int) -> int:
-        for a, b in replaced:
-            if a < offset < b:
-                return b
-        return offset
-
-    edit_marks: list[tuple[int, int, str]] = []
-    for p in plans:
-        if p["span"] is not None:
-            start, end = cast(Span, p["span"])
-            head, gone, put, tail = change_core(str(p["old"]), str(p["new"]))
-            mark = (f"<del>{gone}</del>" if gone else "") + (f"<ins>{put}</ins>" if put else "")
-            edit_marks.append((start, end, f"{_anchor('E', p['n'])}{head}{mark}{tail}<sup>{p['n']}</sup>"))
-    unplaced = [_unplaced_note(p) for p in plans if p["span"] is None]
-    p_notes: list[tuple[int, str]] = []
-    for pr in sorted(paragraphs, key=lambda x: int(x["n"])):
-        spots = [s for ph in cast("list[str]", _BRIEF._quoted_phrases(str(pr.get("paragraphs", ""))))
-                 if (s := _first(text, ph, window)) is not None]
-        head = f"**[P{pr['n']}] {pr.get('action', '')}.**"
-        if spots:
-            p_notes.append((min(spots), _quote(_anchored(f"{head} {pr.get('advice', '')}", "P", pr["n"]))))
-        else:
-            unplaced.append(_quote(_anchored(f"{head} {pr.get('paragraphs', '')}: {pr.get('advice', '')}", "P", pr["n"])))
-    q_notes: list[tuple[int, str]] = []
-    for q in sorted(queries, key=lambda x: int(x["n"])):
-        at = _first(text, str(q["anchor"]), window)
-        body = _quote(_anchored(f"**[Q{q['n']}]** \"{q['anchor']}\": {q.get('text', '')}", "Q", q["n"]))
-        if at is None:
-            unplaced.append(body)
-        else:
-            q_notes.append((at, body))
-
-    if html:
-        body_text, lost = _html_excerpts(text, sorted(edit_marks), p_notes, q_notes)
-        unplaced += [_quote(f"Not in any section of the page text: {piece}") for piece in lost]
-        if not body_text:
-            body_text = "No edit, paragraph proposal or query falls in the page text."
-    else:
-        marks = list(edit_marks)
-        for offset, note in p_notes:
-            start = settle(_block(text, offset, protected)[0])
-            marks.append((start, start, note + "\n\n"))
-        for offset, note in q_notes:
-            end = settle(_block(text, offset, protected)[1])
-            marks.append((end, end, "\n\n" + note))
-        marks.sort(key=lambda m: (m[0], m[1]))
-        body_out: list[str] = []
-        pos = 0
-        for start, end, piece in marks:
-            body_out += [text[pos:start], piece]
-            pos = max(pos, end)
-        body_out.append(text[pos:])
-        body_text = "".join(body_out)
-
-    counts = f"{len(edits)} sentence edits, {len(paragraphs)} paragraph proposals, {len(queries)} queries"
-    where = f"Lines {rng['start']}-{rng['end']} only. " if rng else ""
-    head_lines = [f"# Line edit: {label}", "", f"Genre: {genre}. {where}{counts}.", ""]
-    answer = "Answer with the numbers to accept, for example `1, 3-5`, `all` or `none`."
-    if stdin:
-        head_lines.append(f"Nothing is applied to a file; the accepted text is printed. {answer} "
-                          "Edits you do not accept are not stored: a stdin run keeps no rejections.")
-    else:
-        head_lines.append(f"{answer} An edit you do not name stays undecided and nothing is stored for it. "
-                          "To store a rejection for this document say `reject 2` or `reject the rest`, and give a "
-                          "reason if you like (`reject 2 because it changes my meaning`). An edit listed below as "
-                          "cannot be placed is left alone by `reject the rest`; name it to reject it.")
-    index = _index(edits, paragraphs, queries)
-    if index:
-        head_lines += ["", *index]
-    for w in cast("list[str]", prop.get("warnings") or []):
-        head_lines += ["", f"Warning: {w}"]
-    for key, title in (("note", "Editor's note"), ("voice_card", "Voice card")):
-        if str(prop.get(key) or "").strip():
-            head_lines += ["", _quote(f"**{title}.** {str(prop[key]).strip()}")]
-    for block in unplaced:
-        head_lines += ["", block]
-    gone = _dropped_lines(prop)
-    if gone:
-        head_lines += ["", _quote("**Dropped before this copy.**\n" + "\n".join(gone))]
-    notes: list[tuple[int, str]] = [
-        (int(e["n"]), str(e.get("reason", "")) + change_note(str(e["old"]), str(e.get("new") or ""))) for e in edits]
-    notes += [(int(d["n"]), f"dropped before this copy: {d.get('cause', '')}") for d in dropped if d.get("n") is not None]
-    foot = "\n\n".join(f"<sup>{n}</sup> {why}" for n, why in sorted(notes))
-    return "\n".join(head_lines) + "\n\n---\n\n" + body_text.rstrip("\n") + "\n\n---\n\n" + foot + "\n"
-
-
-# ---------------------------------------------------------------------------
-# The viewer
-# ---------------------------------------------------------------------------
-
-
-def _run_open(argv: list[str]) -> int:
-    return subprocess.run(argv, capture_output=True, timeout=30).returncode
-
-
-def open_copy(viewer: str | None, copy: Path, *, platform: str | None = None, override: str | None = None,
-              run: Callable[[list[str]], int] = _run_open) -> Obj:
-    """Open the copy in the stored viewer; say why when it is not opened (the caller prints the path)."""
-    if not viewer:
-        return {"opened": False, "reason": "no viewer is stored at prose/viewer"}
-    if override:
-        argv = [*shlex.split(override), viewer, str(copy)]
-    elif (platform or sys.platform) != "darwin":
-        return {"opened": False, "reason": f"not macOS ({platform or sys.platform}); the viewer is opened with `open -a`"}
-    else:
-        argv = ["open", "-a", viewer, str(copy)]
-    try:
-        code = run(argv)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"opened": False, "reason": f"{argv[0]}: {exc}"}
-    return {"opened": code == 0, "reason": "" if code == 0 else f"{argv[0]} exited {code}"}
+change_core = _SUGGEST.change_core  # one copy, in suggest.py
 
 
 # ---------------------------------------------------------------------------
@@ -924,22 +560,14 @@ def cmd_render(a: argparse.Namespace) -> Obj:
     text, _eol = read_source(source)
     # a work directory that holds a cut-only run is one whatever its proposal says: the proposal can be rewritten
     cut_only = prop.get("mode") == "cut-only" or bool(_BRIEF.cut_only_work(work))
-    # a cut-only run is a model's (the prose-cut skill): no author reads the copy, so no viewer is asked for or opened
-    viewer = None if cut_only else cast("str | None", _BRIEF.memory_json(["viewer"]).get("viewer"))
-    copy = work / f"{Path(rel).stem if rel else 'stdin'}.review.md"
-    copy.write_text(build_copy(text, prop, label=rel or "stdin", genre=genre, rng=rng, html=html, stdin=stdin),
-                    encoding="utf-8")
-    opened = (open_copy(viewer, copy, override=os.environ.get("PROSE_EDIT_OPEN") if _test_mode() else None)
-              if not cut_only else {"opened": False, "reason": "a cut-only run has no reader for the copy"})
     plans = plan_edits(text, cast("list[Obj]", prop.get("edits") or []), rng, html, cut_only)
     unplaced = [{"n": p["n"], "cause": p["cause"], "detail": p["detail"]} for p in plans if p["span"] is None]
-    session: Obj = {"target": a.target, "genre": genre, "stdin": stdin, "file": a.file, "copy": str(copy),
-                    "unplaced": unplaced}
+    session: Obj = {"target": a.target, "genre": genre, "stdin": stdin, "file": a.file, "unplaced": unplaced}
     if cut_only:
         session["cut_only"] = True
     (work / "session.json").write_text(json.dumps(session), encoding="utf-8")
     return {
-        "copy": str(copy), "genre": genre, "viewer": viewer, **opened,
+        "genre": genre,
         "counts": {"edits": len(plans), "paragraphs": len(prop.get("paragraphs") or []),
                    "queries": len(prop.get("queries") or []), "dropped": len(prop.get("dropped") or [])},
         "unplaced": unplaced,
@@ -1082,7 +710,7 @@ def _load_answers(raw: str, work: Path) -> list[Obj]:
 def cmd_answer(a: argparse.Namespace) -> Obj:
     """Add the author's answers to queries and paragraph proposals as numbered edits (nexus-ger02.21).
 
-    They are the author's own changes, so they go through the same copy, dry run and apply as the editor's
+    They are the author's own changes, so they go through the same dry run and apply as the editor's
     edits: the document changes only through apply. They are marked `by: author`, and apply never stores one
     as a rejection. Nothing is written when any answer cannot be placed.
     """
@@ -1137,8 +765,207 @@ def cmd_answer(a: argparse.Namespace) -> Obj:
         added.append({"n": n, "old": e["old"], "new": e["new"], "reason": f"the author's answer to {e['answers']}",
                       "by": "author", "answers": e["answers"]})
     prop["edits"] = edits + added
+    before = _sha(read_bytes(work / "filtered.json"))
     (work / "filtered.json").write_text(json.dumps(prop, indent=1, ensure_ascii=False), encoding="utf-8")
+    sent = work / "propose.json"
+    if sent.is_file():  # an answer only appends, so the numbers translate read still mean the same edits
+        payload = _load_json(sent, "WORK/propose.json")
+        if payload.get("filtered_sha") == before:
+            payload["filtered_sha"] = _sha(read_bytes(work / "filtered.json"))
+            _write_json(sent, payload)
     return {"added": [{"n": x["n"], "answers": x["answers"], "old": x["old"], "new": x["new"]} for x in added]}
+
+
+def _work_input(raw: str, work: Path, flag: str) -> Path:
+    """A file the skill wrote directly inside WORK (one of the header paths), or a refusal."""
+    try:
+        path = cast(Path, _BRIEF.work_file(raw))
+    except UserError as exc:
+        raise _user(f"{flag} {raw!r}: {exc}") from exc
+    if path.parent != work:
+        raise _user(f"{flag} {raw!r}: must sit directly inside this work directory")
+    return path
+
+
+def _read_json_value(path: Path, flag: str, raw: str, what: str) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise _user(f"{flag} {raw!r}: {what}: cannot read it as JSON ({exc})") from exc
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _same_file(url: str, expected: Path) -> bool:
+    """True when get_document's `url` names `expected`: compared by realpath (macOS reports /private/tmp for /tmp)."""
+    if url.startswith("file://"):
+        url = unquote(urlparse(url).path)
+    return os.path.realpath(url) == os.path.realpath(expected)
+
+
+def _load_blocks(raws: list[str], work: Path, target: Path) -> list[Obj]:
+    """The blocks of get_document's reply: one reply, or the pages of a long document one after another.
+
+    `raws` are the --blocks-file paths in page order (the skill copies each page the harness saved to its own file);
+    a file holds one reply or a JSON list of replies, and the pages of every file are joined in the order given.
+
+    The blocks must be the whole of THIS run's document, unchanged: `translate` claims an old text occurs exactly
+    once in them. So the read is refused when a page says the buffer has unsaved changes, when `url` is not `target`
+    (open_document can report "Opened" while the previous document is still shown), when a page's `next` is not the
+    first block of the page that follows it (gaps, overlaps, pages out of order), when the last page still has `next`
+    (the reply was cut), or when the block indexes are not contiguous from 0 or `firstEditable`.
+    """
+    pages: list[Any] = []
+    for raw in raws:
+        path = _work_input(raw, work, "--blocks-file")
+        value = _read_json_value(path, "--blocks-file", raw, "the blocks")
+        pages.extend(value if isinstance(value, list) and value and all(isinstance(v, dict) and "blocks" in v for v in value)
+                     else [value])
+    blocks: list[Obj] = []
+    by_page: list[list[Obj]] = []
+    for number, page in enumerate(pages, start=1):
+        at = f" (page {number} of {len(pages)})" if len(pages) > 1 else ""
+        if not isinstance(page, dict):
+            raise _user("--blocks-file: expected get_document's reply, with a `blocks` list, `url` and `hasChanges`")
+        if page.get("view") == "source":
+            raise _user(f"--blocks-file: the app is in its source view{at}, which has no blocks; "
+                        "ask the author to switch back to the document view, then read the document again")
+        items = page.get("blocks")
+        if not isinstance(items, list):
+            raise _user("--blocks-file: expected get_document's reply, with a `blocks` list")
+        if page.get("hasChanges") is True:
+            raise _user(f"--blocks-file: the app's buffer has unsaved changes{at} (hasChanges is true), so these blocks "
+                        "are not the file's text; undo the changes or reopen the file, then read the document again")
+        url = page.get("url")
+        if not isinstance(url, str) or not url:
+            raise _user(f"--blocks-file: the reply{at} names no `url`, so it cannot be checked against this run's file; "
+                        "write get_document's reply as it came back")
+        if not _same_file(url, target):
+            raise _user(f"--blocks-file: the app shows {url}{at}, not this run's file {target} (url); open the file, wait "
+                        "until get_document's url is the file's, then read the document again")
+        if not items:
+            raise _user(f"--blocks-file: the reply{at} holds no blocks")
+        for b in items:
+            if (not isinstance(b, dict) or not isinstance(b.get("index"), int) or not isinstance(b.get("hash"), str)
+                    or not isinstance(b.get("markdown"), str)):
+                raise _user(f"--blocks-file: every block{at} needs an integer index, a hash and its markdown")
+        by_page.append(cast("list[Obj]", items))
+        blocks.extend(cast("list[Obj]", items))
+    if not blocks:
+        raise _user("--blocks-file: the reply holds no blocks")
+    if pages[-1].get("next") is not None:
+        raise _user(f"--blocks-file: the last page still has `next` ({pages[-1]['next']}): the reply was cut short, so "
+                    "blocks are missing; read on from `next` and give every page, one --blocks-file each, in order")
+    for number, (page, following) in enumerate(zip(pages, by_page[1:]), start=1):
+        if page.get("next") != following[0]["index"]:
+            raise _user(f"--blocks-file: the pages are not contiguous: page {number} says `next` is {page.get('next')} but "
+                        f"page {number + 1} starts at block {following[0]['index']}; give the pages in order, each read "
+                        "from the previous page's `next`, none twice and none missing")
+    seen: set[int] = set()
+    for b in blocks:
+        if b["index"] in seen:
+            raise _user(f"--blocks-file: block {b['index']} appears twice (pages that overlap)")
+        seen.add(b["index"])
+    first = pages[0].get("firstEditable")
+    starts = {0, first} if isinstance(first, int) else {0}
+    indexes = [int(b["index"]) for b in blocks]
+    if indexes[0] not in starts or any(y != x + 1 for x, y in zip(indexes, indexes[1:])):
+        raise _user(f"--blocks-file: the block indexes are not contiguous from {' or '.join(str(x) for x in sorted(starts))} "
+                    f"(they run {indexes[:6]}{'...' if len(indexes) > 6 else ''}): blocks are missing or out of order; "
+                    "read the whole document and give every page, one --blocks-file each, in order")
+    return blocks
+
+
+_PROPOSE_KEYS = ("block", "expected", "find", "replace", "note")
+
+
+def cmd_translate(a: argparse.Namespace) -> Obj:
+    """The placed edits as one propose_edits payload (WORK/propose.json); the edits the app could not show wait in the chat.
+
+    Nothing is written but WORK/propose.json, and a suggestions.json from an earlier translate is dropped (its ids
+    named the earlier payload). The edits `render` could not place, and the author's own answers, are not sent.
+    propose.json records the sha256 of filtered.json as read here (`filtered_sha`): `decisions` refuses when the
+    proposal has changed since, because the edit numbers in suggestions.json would name other edits.
+    """
+    work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
+    sess_file = work / "session.json"
+    if not sess_file.is_file():
+        raise _user("no session in the work directory: run `review.py render` first")
+    session = _load_json(sess_file, "WORK/session.json")
+    prop = _load_json(work / "filtered.json", "WORK/filtered.json")
+    _, _, target, _, _ = _source_of(str(session["target"]), cast("str | None", session.get("file")), work)
+    blocks = _load_blocks(a.blocks_file, work, target)
+    unplaced = {int(u["n"]) for u in cast("list[Obj]", session.get("unplaced") or [])}
+    edits = [e for e in cast("list[Obj]", prop.get("edits") or [])
+             if e.get("by") != "author" and int(e["n"]) not in unplaced]
+    proposals, refused = _SUGGEST.translate_edits(blocks, edits)
+    payload: Obj = {"edits": [{k: p[k] for k in _PROPOSE_KEYS} for p in proposals],
+                    "order": [int(p["n"]) for p in proposals], "refused": refused,
+                    "filtered_sha": _sha(read_bytes(work / "filtered.json"))}
+    _write_json(work / "propose.json", payload)
+    (work / "suggestions.json").unlink(missing_ok=True)
+    return {"edits": payload["edits"], "sent": len(proposals), "refused": refused}
+
+
+def cmd_proposed(a: argparse.Namespace) -> Obj:
+    """Record the app's reply to propose_edits: the suggestion id of each edit sent (WORK/suggestions.json) and the app's refusals.
+
+    The reply must hold exactly one result for each edit sent, indexes 0..k-1 once each, each proposed result naming
+    the block it was sent for and its own id; anything else stops the run with nothing written. An edit the app refused joins the refused list of WORK/propose.json (cause
+    app-refused, the app's reason as detail) and goes to the chat like a local refusal.
+    """
+    work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
+    propose = _load_json(work / "propose.json", "WORK/propose.json (run `review.py translate` first)")
+    path = _work_input(a.from_file, work, "--from-file")
+    reply = _read_json_value(path, "--from-file", a.from_file, "the propose_edits reply")
+    sent = cast("list[Obj]", propose["edits"])
+    order = [int(n) for n in cast("list[Any]", propose["order"])]
+    results = reply.get("results") if isinstance(reply, dict) else None
+
+    def bad(why: str) -> Exception:
+        return _user(f"propose_edits reply: {why}; nothing was written. Write the app's reply as it came back, "
+                     "or run `review.py translate` again")
+
+    if not isinstance(results, list):
+        raise bad("no `results` list" + (f" (the app said: {reply.get('error') or reply.get('reason')})"
+                                         if isinstance(reply, dict) and (reply.get("error") or reply.get("reason")) else ""))
+    if len(results) != len(sent):
+        raise bad(f"it holds {len(results)} results for {len(sent)} edits sent")
+    by_index: dict[int, Obj] = {}
+    for r in cast("list[Any]", results):
+        if not isinstance(r, dict) or not isinstance(r.get("index"), int) or r["index"] in by_index:
+            raise bad("every result needs its own integer `index`")
+        by_index[r["index"]] = cast(Obj, r)
+    if set(by_index) != set(range(len(sent))):
+        raise bad(f"the result indexes are not 0..{len(sent) - 1}")
+    suggestions: list[Obj] = []
+    app_refused: list[Obj] = []
+    ids: set[str] = set()
+    for i in range(len(sent)):
+        r = by_index[i]
+        if r.get("status") == "proposed":
+            if not isinstance(r.get("id"), str) or not r["id"]:
+                raise bad(f"result {i} is proposed but has no id")
+            if r.get("block") != sent[i]["block"]:
+                raise bad(f"result {i} is for block {r.get('block')!r} but edit {order[i]} was sent for block "
+                          f"{sent[i]['block']}; this reply is not for these edits")
+            if r["id"] in ids:
+                raise bad(f"two results share the id {r['id']}")
+            ids.add(r["id"])
+            suggestions.append({"n": order[i], "id": r["id"], "find": sent[i]["find"], "replace": sent[i]["replace"]})
+        elif r.get("status") == "refused":
+            app_refused.append({"n": order[i], "cause": "app-refused", "detail": str(r.get("reason") or "no reason given")})
+        else:
+            raise bad(f"result {i} has status {r.get('status')!r}")
+    kept = [x for x in cast("list[Obj]", propose.get("refused") or []) if x.get("cause") != "app-refused"]
+    propose["refused"] = kept + app_refused
+    _write_json(work / "suggestions.json", suggestions)
+    _write_json(work / "propose.json", propose)
+    return {"suggested": len(suggestions), "refused": app_refused}
 
 
 def _both(flags: list[tuple[str, set[int]]]) -> None:
@@ -1147,6 +974,89 @@ def _both(flags: list[tuple[str, set[int]]]) -> None:
         for second, b in flags[i + 1:]:
             if a & b:
                 raise _user(f"{first} and {second} both name edit {min(a & b)}")
+
+
+def _spec(numbers: set[int]) -> str:
+    return ",".join(str(n) for n in sorted(numbers)) or "none"
+
+
+def cmd_decisions(a: argparse.Namespace) -> Obj:
+    """The author's decisions in the app, plus any made in the chat for the leftovers, as the flags `apply` takes.
+
+    list_suggestions' reply (--from-file) is mapped for THIS run's suggestion ids only: accepted -> accept,
+    rejected -> reject, pending, stale or missing -> hold. --accept/--reject/--hold name the edits the app never
+    held (refused by the script or by the app, the author's own answers): `reject` also takes `rest`. An edit the
+    app held cannot be decided in the chat. Nothing is written: `apply` stays the only writer of the document, the
+    only store of rejections and the only session logger.
+    """
+    work = cast(Path, _BRIEF.work_dir(a.work))
+    _BRIEF.touch_work(work)
+    sess_file = work / "session.json"
+    if not sess_file.is_file():
+        raise _user("no session in the work directory: run `review.py render` first")
+    session = _load_json(sess_file, "WORK/session.json")
+    prop = _load_json(work / "filtered.json", "WORK/filtered.json")
+    edits = cast("list[Obj]", prop.get("edits") or [])
+    if (work / "propose.json").is_file():
+        propose = _load_json(work / "propose.json", "WORK/propose.json (run `review.py translate` first)")
+        if propose.get("filtered_sha") != _sha(read_bytes(work / "filtered.json")):
+            raise _user("WORK/filtered.json changed since translate, so the edit numbers in the app's suggestions may "
+                        "no longer be these edits; run `review.py translate` again and ask the author to decide again")
+    else:
+        # Step 10 skips translate when the proposal has no `edits`, and the answer route may then add the run's only
+        # edits (the author's own): nothing was sent to the app, so there is nothing to map. An editor edit that is
+        # placed and was never translated is a skipped step, not that case.
+        shown = {int(u["n"]) for u in cast("list[Obj]", session.get("unplaced") or [])}
+        if any(e.get("by") != "author" and int(e["n"]) not in shown for e in edits):
+            raise _user("WORK/propose.json is missing (run `review.py translate` first): the editor's placed edits "
+                        "have not been sent to the app")
+        propose = {"order": [], "refused": []}
+    valid = {int(e["n"]) for e in edits}
+    mapped: Obj = {"accept": [], "reject": [], "hold": [], "warnings": []}
+    held_by_app: set[int] = set()
+    if propose.get("order"):
+        sugg_file = work / "suggestions.json"
+        if not sugg_file.is_file():
+            raise _user("the app's reply to propose_edits is not recorded: run `review.py proposed` first")
+        if not a.from_file:
+            raise _user("--from-file is required: write list_suggestions' reply to the STATUSES= path")
+        path = _work_input(a.from_file, work, "--from-file")
+        reply = _read_json_value(path, "--from-file", a.from_file, "the list_suggestions reply")
+        listed = reply.get("suggestions") if isinstance(reply, dict) else reply
+        if not isinstance(listed, list):
+            raise _user("--from-file: expected list_suggestions' reply, with a `suggestions` list")
+        sent = cast("list[Obj]", json.loads(sugg_file.read_text(encoding="utf-8")))
+        mapped = _SUGGEST.map_statuses(sent, cast("list[Obj]", listed))
+        held_by_app = {int(s["n"]) for s in sent}
+    leftover_n = valid - held_by_app
+    unshown = {int(u["n"]) for u in cast("list[Obj]", session.get("unplaced") or [])}
+    mine = {int(e["n"]) for e in edits if e.get("by") == "author"}
+    named = {"--accept": a.accept, "--hold": a.hold, "--reject": a.reject}
+    for flag, spec in named.items():
+        for token in re.findall(r"[0-9]+", spec or ""):
+            if int(token) in held_by_app:
+                raise _user(f"{flag}: edit {token} is with the app; its decision is the one made there")
+    c_accept = parse_numbers(a.accept, leftover_n, "--accept") if a.accept else set()
+    c_hold = parse_numbers(a.hold, leftover_n, "--hold") if a.hold else set()
+    rest = leftover_n - unshown - c_accept - c_hold - mine
+    c_reject = parse_numbers(a.reject, leftover_n, "--reject", rest=rest) if a.reject else set()
+    _both([("--accept", c_accept), ("--hold", c_hold), ("--reject", c_reject)])
+    accept = set(mapped["accept"]) | c_accept
+    reject = set(mapped["reject"]) | c_reject
+    hold = set(mapped["hold"]) | c_hold
+    args: list[str] = []
+    for flag, group in (("--accept", accept), ("--reject", reject), ("--hold", hold)):
+        if group:
+            args += [flag, _spec(group)]
+    refused = cast("list[Obj]", propose.get("refused") or [])
+    return {
+        "accept": sorted(accept), "reject": sorted(reject), "hold": sorted(hold), "apply_args": args,
+        "app": {k: mapped[k] for k in ("accept", "reject", "hold")},
+        "chat": {"accept": sorted(c_accept), "reject": sorted(c_reject), "hold": sorted(c_hold)},
+        "leftover": [r for r in refused if int(r["n"]) in leftover_n],
+        "undecided": sorted(leftover_n - unshown - accept - reject - hold),
+        "warnings": list(mapped["warnings"]),
+    }
 
 
 def cmd_apply(a: argparse.Namespace) -> Obj:
@@ -1173,7 +1083,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
             raise _user(f"--accept: edit {adds[0]} is not a cut (it adds, replaces or reorders a word, or adds "
                         "markup); a cut-only session applies edits that remove words only")
     hold: set[int] = parse_numbers(a.hold, valid, "--hold") if a.hold else set()
-    # an edit the copy could not show inline: `reject the rest` leaves it alone, naming it rejects it
+    # an edit the review could not show: `reject the rest` leaves it alone, naming it rejects it
     unshown = {int(u["n"]): u for u in cast("list[Obj]", session.get("unplaced") or [])}
     mine = {n for n, e in by_n.items() if e.get("by") == "author"}  # the author's own answers: never a rejection
     rest = valid - set(unshown) - accept - hold - mine
@@ -1230,7 +1140,7 @@ def cmd_apply(a: argparse.Namespace) -> Obj:
                 for n in rejected]))
             stored = True
         elif staged is not None:
-            _BRIEF.memory_json(["viewer"])  # nothing to store: ask T2 anyway, so a service that is down stops us before the write
+            _BRIEF.memory_json(["status"])  # nothing to store: ask T2 anyway, so a service that is down stops us before the write
         if staged is not None:
             staged.commit(raw, before_replace=_before_replace_hook())
     except BaseException as exc:
@@ -1333,7 +1243,7 @@ def cmd_log_retry(a: argparse.Namespace) -> Obj:
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="review.py")
     sub = p.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("render", help="write the marked-up copy and open it")
+    r = sub.add_parser("render", help="set the session up")
     r.add_argument("target")
     r.add_argument("--work", required=True)
     r.add_argument("--file")
@@ -1354,6 +1264,21 @@ def _parser() -> argparse.ArgumentParser:
     an.add_argument("--work", required=True)
     an.add_argument("--from-file", required=True, metavar="FILE",
                     help='a JSON list [{"answers": "Q4", "old": "...", "new": "..."}] inside WORK (written with Write)')
+    tr = sub.add_parser("translate", help="turn the placed edits into one propose_edits payload")
+    tr.add_argument("--work", required=True)
+    tr.add_argument("--blocks-file", required=True, action="append", metavar="FILE",
+                    help="get_document's reply, written to the BLOCKS= path; once more for each further page, in order")
+    pr = sub.add_parser("proposed", help="record the app's reply to propose_edits")
+    pr.add_argument("--work", required=True)
+    pr.add_argument("--from-file", required=True, metavar="FILE",
+                    help="propose_edits' reply, written with Write to the PROPOSED= path")
+    de = sub.add_parser("decisions", help="the app's decisions (and the chat's, for the leftovers) as apply's flags")
+    de.add_argument("--work", required=True)
+    de.add_argument("--from-file", metavar="FILE",
+                    help="list_suggestions' reply, written with Write to the STATUSES= path (needed when edits went to the app)")
+    de.add_argument("--accept", help="leftover edits the author accepted in the chat")
+    de.add_argument("--hold", help="leftover edits the author left undecided in the chat")
+    de.add_argument("--reject", help="leftover edits the author rejected in the chat, or `rest`")
     lr = sub.add_parser("log-retry", help="send the session log of an apply whose log failed, then delete WORK")
     lr.add_argument("--work", required=True)
     return p
@@ -1365,7 +1290,9 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8")
     args = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        commands = {"render": cmd_render, "apply": cmd_apply, "answer": cmd_answer, "log-retry": cmd_log_retry}
+        commands = {"render": cmd_render, "apply": cmd_apply, "answer": cmd_answer, "log-retry": cmd_log_retry,
+                    "translate": cmd_translate, "proposed": cmd_proposed,
+                    "decisions": cmd_decisions}
         _emit(commands[args.cmd](args))
     except Passthrough as exc:
         sys.stderr.write(f"{exc}\n")

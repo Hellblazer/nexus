@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.prose_edit.conftest import REPO_PROJECT, Prose, t2_get, t2_json, t2_put, t2_titles
-from tests.prose_edit.test_brief import SKILL, brief_ok, edit, fenced, proposal, run_brief
+from tests.prose_edit.test_brief import skill_text, brief_ok, edit, fenced, proposal, run_brief
 from tests.prose_edit.test_memory import _module as memory_module
 from tests.prose_edit.test_review import E1, E2, _review, review_ok, run_review, start
 
@@ -415,11 +415,7 @@ def test_a_stdin_run_stores_no_rejection_even_when_the_author_rejects(prose: Pro
     assert not any(t.startswith("doc/") for t in t2_titles(REPO_PROJECT))
 
 
-def test_the_copy_header_names_held_and_reject_in_the_answer_grammar(prose: Prose, repo: Path) -> None:
-    _, rendered = start(prose, repo, [E1, E2])
-    copy = Path(rendered["copy"]).read_text(encoding="utf-8")
-    assert "An edit you do not name stays undecided and nothing is stored for it." in copy
-    assert "`reject 2`" in copy and "`reject the rest`" in copy
+def test_the_answer_grammar_takes_reject_and_rest() -> None:
     mod = _review()
     for spec, expected in (("1, 3-5", {1, 3, 4, 5}), ("all", {1, 2, 3, 4, 5}), ("none", set())):
         assert mod.parse_numbers(spec, {1, 2, 3, 4, 5}, "--reject") == expected
@@ -429,7 +425,7 @@ def test_the_copy_header_names_held_and_reject_in_the_answer_grammar(prose: Pros
 
 
 def test_the_skill_says_unnamed_edits_are_held_and_how_to_reject_with_a_reason() -> None:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     step11 = text[text.index("\n11. "):text.index("\n12. ")]
     step12 = text[text.index("\n12. "):text.index("\n13. ")]
     assert "left undecided" in step11 and "nothing is stored for it" in step11

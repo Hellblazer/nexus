@@ -1827,6 +1827,10 @@ def _per_repo_config_path(repo_root: Path | None) -> Path | None:
         return None
 
 
+#: Public name of :func:`_per_repo_config_path`, for callers that read the per-repo layer on its own.
+per_repo_config_path = _per_repo_config_path
+
+
 def _validate_entity_layer(layer: dict[str, Any], path: Path | None) -> None:
     """RDR-147 Step 1 (nexus-fai28): raise ``EntityConfigError`` for a malformed ``entity`` section in
     one config layer, naming *path* (the file the entry came from) when there is one. Checked per file

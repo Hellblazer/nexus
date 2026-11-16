@@ -1093,7 +1093,8 @@ _ALL_TENANT_TABLES = [
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.embedding_profile",  # RDR-204 Phase 1 (nexus-ft04v.2, catalog-036-3; mirrors health._RLS_TENANT_TABLES)
-    "nexus.frecency",
+    # ("nexus.frecency" removed — nexus-6pfgb.42: dropped table
+    # (telemetry-019-drop-frecency.xml), mirrors health._RLS_TENANT_TABLES)
     "nexus.gc_audit",  # nexus-jqvzk: destructive-T3-op audit record (catalog-018)
     "nexus.hook_failures",
     "nexus.index_failures",  # nexus-nukn3: telemetry-009-index-failures.xml (mirrors health._RLS_TENANT_TABLES)
@@ -1523,21 +1524,6 @@ class TestCheckRlsPresent:
         assert r.ok is False
         assert r.fatal is True
 
-    def test_rls_disabled_on_frecency_is_fatal(self, tmp_path):
-        """nexus.frecency with RLS disabled -> FATAL (was missing from original list)."""
-        creds = _make_creds_file(tmp_path)
-        psql = Path("/fake/psql")
-
-        results = _check_rls_present(
-            creds_path=creds,
-            psql_bin=psql,
-            psql_runner=_psql_rls_one_table_disabled("nexus.frecency"),
-        )
-        assert len(results) == 1
-        r = results[0]
-        assert r.ok is False
-        assert r.fatal is True
-
     def test_rls_disabled_on_any_tenant_table_is_fatal(self, tmp_path):
         """Parameterized: RLS off on ANY tenant table -> fatal.
 
@@ -1552,7 +1538,6 @@ class TestCheckRlsPresent:
             "nexus.document_aspects",
             "nexus.catalog_documents",
             "nexus.catalog_meta",
-            "nexus.frecency",
             "nexus.tier_writes",
             "nexus.hook_failures",
         ]
@@ -1610,6 +1595,7 @@ class TestRlsTableCompleteness:
             "nexus.chash_alias",  # legacy-001-drop-chash-alias.xml (nexus-lgdel.l1)
             "nexus.migration_jobs",  # migration-002-tenant-pk.xml, reworked (nexus-tk070.p5b)
             "nexus.aspect_extraction_queue",  # aspects-005-retire-aspect-queue-table.xml (nexus-hbnml)
+            "nexus.frecency",  # telemetry-019-drop-frecency.xml (nexus-6pfgb.42)
         }
         return frozenset(found - dropped)
 
@@ -1778,12 +1764,12 @@ class TestChashProbeViewFallback:
     def test_debt_over_zero_emits_nongating_warn(self, tmp_path):
         """critic-180-foundation finding 1 coverage: a positive debt count
         surfaces as a WARN under its own label, never gating."""
-        # 4 poison statements return 0 (clean; post-RDR-187 set), then 3
-        # debt statements return 2 each -> debt 6. Deriving the mock-call
+        # 4 poison statements return 0 (clean; post-RDR-187 set), then 2
+        # debt statements return 2 each -> debt 4. Deriving the mock-call
         # count from the registry is ALIGNMENT MECHANICS only — the
         # cardinality pin itself is hardcoded in test_diag_conformance_view
         # (explicit 4-tuple + chash_index-never-returns assertion).
-        counts = [0] * len(chash_tables.POISON_CHASH_TABLES) + [2, 2, 2]
+        counts = [0] * len(chash_tables.POISON_CHASH_TABLES) + [2, 2]
         state = {"i": 0}
 
         def runner(argv, env):
@@ -1801,7 +1787,7 @@ class TestChashProbeViewFallback:
         debt = [r for r in results if r.label == "Chash legacy debt"]
         assert len(debt) == 1
         assert debt[0].ok is False and debt[0].warn is True and debt[0].fatal is False
-        assert "6" in debt[0].detail
+        assert "4" in debt[0].detail
         # the poison gate result must stay clean/absent (no cross-count)
         poison = [r for r in results if r.label == "Chunk chash conformance"]
         assert not poison  # zero poison rows -> no poison result emitted
@@ -1924,7 +1910,7 @@ def _content_diag_runner(
             return _ok(legacy_chunks_1024)
         if "catalog_document_chunks" in stmt:
             return _ok(catalog_document_chunks)
-        if "topic_assignments" in stmt or "frecency" in stmt or "relevance_log" in stmt:
+        if "topic_assignments" in stmt or "relevance_log" in stmt:
             return _ok(debt)
         if "nexus.chunks" in stmt:
             # View-path form: "...diag_chash_conformance WHERE table_name

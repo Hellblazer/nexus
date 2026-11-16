@@ -109,12 +109,13 @@ _BEFORE_ROW: dict[str, tuple[str, str | None, str | None]] = {
     "document-default.yml": ('cf5058035213', '7d0587b5acc4', None),
     "document-discovery.yml": ('9e573813441e', 'f4c503fae815', None),
     "find-by-author.yml": ('77b33f7be6df', '7d0587b5acc4', None),
-    "hybrid-factual-lookup.yml": ('19689799e542', 'f71db903c830', None),
+    # bindings moved on purpose: vector_budget_chunks 6 -> 20 (RDR-250; Sam, 2026-11-15, ask rdr250-lever option 2).
+    "hybrid-factual-lookup.yml": ('19689799e542', 'bec2e263208d', None),
     "research-default.yml": ('7a87d6cc0664', '7d0587b5acc4', None),
     "review-default.yml": ('2534dd636291', 'a4f389eb2c29', None),
     "type-scoped-search.yml": ('f20f6848e2a3', '7d0587b5acc4', None),
     # FREEZE PIN, as in _BEFORE: tags now carry `cosine-only`; the bindings are hybrid-factual-lookup's.
-    "entity-resolution.yml": ('dcbdb52917d7', 'f71db903c830', None),
+    "entity-resolution.yml": ('dcbdb52917d7', 'bec2e263208d', None),
 }
 
 

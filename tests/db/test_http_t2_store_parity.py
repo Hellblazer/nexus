@@ -333,7 +333,7 @@ _ETL_DYING_WITH_THE_WAVE: dict[str, set[str]] = {
         'import_topic', 'import_topic_link',
     },
     'telemetry': {
-        'import_frecency_row', 'import_hook_failure', 'import_nx_answer_run',
+        'import_hook_failure', 'import_nx_answer_run',
         'import_relevance_row', 'import_rows_batch', 'import_search_row',
         'import_tier_write', 'probe_ids',
     },

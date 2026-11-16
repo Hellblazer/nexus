@@ -425,6 +425,24 @@ class TestPre:
             if target.exists():
                 os.utime(target, (stamp, stamp))
 
+    @staticmethod
+    def _same_reflog_time(tmp_path: Path, *wts: str) -> None:
+        """Give every reflog entry of each worktree in *wts* the same time. The reflog stamps whole
+        seconds, so two worktrees made one after the other tie only when git is quick enough to make
+        both in one second; on Windows the second ``git worktree add`` often lands in the next, and the
+        reflog work time (ranked above a board ref) then picks the newer worktree."""
+        stamp = str(int(time.time()) - 60)
+        for wt in wts:
+            pointer = (tmp_path / "wt" / wt / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip()
+            log = Path(pointer) / "logs" / "HEAD"
+            lines = []
+            for line in log.read_text(encoding="utf-8").splitlines():
+                head, tab, msg = line.partition("\t")
+                parts = head.split(" ")
+                parts[-2] = stamp
+                lines.append(" ".join(parts) + tab + msg)
+            log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     def test_a_topic_named_worktree_is_the_sessions(self, mod, env, monkeypatch, tmp_path) -> None:
         """Sessions name worktrees ``<name>-<topic>`` (``marlowe-owner-onestmt``); 7.92.0 matched only ``<name>``."""
         primary = self._repo_with_worktrees(tmp_path, {"linda_2": "feature/x", f"{NAME}-3mdmp": "feature/nexus-3mdmp-lease"})
@@ -438,6 +456,8 @@ class TestPre:
         primary = self._repo_with_worktrees(tmp_path, {
             f"{NAME}-old": "feature/nexus-3lqxv-auto-continuation", f"{NAME}-new": "feature/nexus-aaaaa-other",
         })
+        # The same work time in both reflogs, so the board ref is what decides, over the newer activity.
+        self._same_reflog_time(tmp_path, f"{NAME}-old", f"{NAME}-new")
         self._age(tmp_path, f"{NAME}-old", 3600)
         monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
         run(mod, monkeypatch, "pre", pre_payload(cwd=str(primary)))

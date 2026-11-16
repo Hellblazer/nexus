@@ -453,12 +453,18 @@ live as long as its index, which a comment already does.
 setting, same per-statement 30 s timeout):
 
 - the leaf's `pg_stat_user_tables` row: `n_tup_del`, `n_tup_upd`,
-  `n_tup_hot_upd`, `n_live_tup`, `last_autovacuum`, `last_vacuum`;
+  `n_tup_hot_upd`, `n_live_tup`, `last_autovacuum`, `last_vacuum` (the leaf size
+  rule's own row estimate, `max(n_live_tup, reltuples)`, is not taken here: the
+  REINDEX phase reads it, as the leaf paragraph of item 3 says);
 - for each `pci_` index, its anchor and `pg_relation_size`;
 - only when the leaf's deletes or non-HOT updates (`n_tup_upd - n_tup_hot_upd`)
   advanced since this engine last looked, or a stats reset moved them backward,
-  or the index's anchor changed, or the index's last check is older than 24
-  hours: the collection's uncapped
+  or the index's anchor changed, or the index's size changed and the size bound
+  on the stale row count reaches the size trigger (the true count can only be
+  higher after ingest, so `bytes_now` over the stale rows is an upper bound on
+  bytes per row, and the count is retaken only when that bound reaches the
+  trigger; with a stale count of zero it is retaken), or the index's last check
+  is older than 24 hours: the collection's uncapped
   row count and `written_since`, the count of its rows whose `last_written_at`
   is later than the anchor's `built_at`. `last_written_at` is set on insert and
   refreshed by every client re-write of a chunk, never by maintenance updates
@@ -468,7 +474,9 @@ setting, same per-statement 30 s timeout):
 Both counts carry the same explicit `tenant_id` predicate as the existing count,
 for the reason RDR-227 records (the admin role reads every tenant's chunks).
 Their cost is that of an exact scan of the collection's rows (0.3 to 0.6 s at
-60k), paid only when something was deleted, the anchor changed or a day passed.
+60k), paid only when something was deleted, the anchor changed, a size change
+could have reached the size trigger or a day passed. Ingest that cannot have made
+the index bigger per row costs no count.
 
 **3. REINDEX triggers (Phase 2).** For a parsed, valid `pci_` index on the
 holder's pass:
@@ -478,17 +486,33 @@ holder's pass:
 | Size | `bytes_now / rows_now >= 1.4 x anchor.bytes / anchor.rows`; for an adopted index, against the install reference for its dimension | REINDEX |
 | Deletes since build | `max(0, anchor.rows + written_since - rows_now) >= 0.25 x rows_now` | REINDEX |
 | Bulk delete | `rows_now` fell by at least 10% since this engine's previous check of the index | REINDEX, then `VACUUM (ANALYZE)` of the leaf |
-| Red canary | item 5 | REINDEX, then re-measure with the same queries |
+| Red canary | item 5: red on a run that had at least 10 queries (`RED_CANARY_MIN_QUERIES`), and not within 24 hours of the anchor's `built_at` or of the index's last red-canary REINDEX | REINDEX, then re-measure with the same queries |
 
 For a leaf's own HNSW index: the size rule at 1.5 times the install reference
-for its dimension, with the leaf's rows read from `n_live_tup` (an estimate is
-enough for a ratio). The *install reference* for a dimension is the median
+for its dimension. The leaf's rows are `max(n_live_tup, reltuples)` (an estimate
+is enough for a ratio), floored at the rows this pass counted exactly in the
+leaf's indexed collections (`PciLeafReindexRule.scan`). The floor is there
+because the statistics lag the writes and only ever err low, which reads as a
+bloated index: a leaf just loaded, or one whose `n_live_tup` an unclean restart
+reset to 0, would otherwise be rebuilt. One consequence: bloat from deletes shows
+in the leaf rule only after a vacuum or analyze refreshes `reltuples`. The
+catalog read does not size leaf indexes, because `pg_relation_size` takes a lock
+and that read must take none. The REINDEX phase reads each candidate's size and
+anchor comment itself (`PciLeafIndexReads.facts`), one transaction per index
+under a 5 s `lock_timeout`; a locked index is skipped for that pass. A leaf
+index is size-reindexed at most once per 24 hours after its anchor's `built_at`
+(`LEAF_SIZE_MIN_INTERVAL`, restart-safe like the red-canary limit); with no
+anchor there is no cooldown. The per-pass limit and the failure backoff apply as
+for `pci_` indexes. The *install reference* for a dimension is the median
 bytes per row over this install's anchors with `"origin":"built"` at that
 dimension; with none, 8.2 KB per row for 1024 dimensions (RDR-227 A3, measured
 on fresh builds; it is the 8 KB page each element takes at that dimension, A3
 here) and no reference for any other dimension, in which case the
-leaf rule is inactive and the status says `unanchored`. After a leaf REINDEX the
-builder anchors the leaf index the same way.
+leaf rule is inactive and the status counts it in `maintenance.unanchored`. After a leaf REINDEX the
+builder anchors the leaf index the same way (`PciLeafIndexReads.anchorAfterReindex`). An anchor that is not
+written (a statement failure, a lock timeout on the COMMENT, an exception, a pass that ended) leaves the leaf
+index owed it, as a `pci_` index is: the next pass retries it first, and the index is not a LEAF_SIZE
+candidate until it lands, so the cooldown always has an anchor to read.
 
 *Deletes since build is an estimate, deliberately low.* Worked through, it
 equals the rows present at build that have since been deleted plus those that a
@@ -527,15 +551,39 @@ and a walk that rewrites leaves rebuilds every index fresh, with a fresh anchor.
 
 *Limits on how often.* REINDEXes run after the pass's drops and builds, one at
 a time, at most two per pass (provisional), largest index first; the rest wait
-for the next pass. A red-canary REINDEX runs at most once per index per 24
-hours; if the re-measure is still red, the index is reported
-`red_after_reindex` and not rebuilt again until a later canary run is green or
-the 24 hours pass. The size and deletes rules reset themselves, because the
-REINDEX writes a fresh anchor.
+for the next pass. A red-canary REINDEX runs only on a run that had at least ten
+queries (Sam, 2026-11-14: a red below ten is recorded and shown and triggers
+nothing, because a young ring reads red on three to five queries and green on ten
+with no rebuild between), and at most once per index per 24 hours. The
+24 hours are read from the anchor as well as from the engine's memory
+(`PciReindexPolicy.redCanary`: `now` must be at or after the anchor's `built_at`
+plus 24 hours), so the limit holds across a restart or a change of holder, and a
+persistent red is not rebuilt on every restart. If the re-measure is still red,
+the index is reported `red_after_reindex`, logged as
+`event=pci_red_after_reindex` and shown on `canary_indexes` (item 7). A later
+canary run that is green clears the flag but does not lift the 24-hour floor: the
+floor is read from the anchor, and holds whatever the canary reads, because a
+REINDEX of a graph under a day old rebuilds essentially the same graph. When
+several triggers fire for one index, the label is the first of bulk delete, red
+canary, deletes since build, size (`PciReindexPolicy.trigger`); a REINDEX that
+a red canary was behind keeps the red's 24-hour limit and `red_after_reindex`
+whatever its label (`PciReindexState.finished`'s `canaryWasRed`), when that red
+met the ten-query floor. A bulk delete
+stays owed until its REINDEX has run or the index leaves the snapshot, even if
+the per-pass limit or a failure backoff defers it (`bulkOwed`). A REINDEX that
+finishes but whose fresh anchor is not written is owed its anchor: the pass
+retries the write first (`PciReindexPhase.retryOwedAnchors`), and the index is
+not a candidate until it lands, because the old anchor would fire the deletes
+rule again (the size rule would not: a fresh graph is no bigger per row than the
+old anchor's). The REINDEX phase never fails the pass (a runtime error is
+logged as `event=pci_reindex_phase_failed` and the rest of the pass still runs).
+Once the anchor is written, the size and deletes rules reset themselves, because
+it is a fresh one.
 
 **4. The REINDEX itself.** On the pass's admin session, with the build's
-settings (no `lock_timeout`, 30-minute `statement_timeout`; the statement waits
-for older transactions the way a concurrent build does):
+settings (no `lock_timeout`, and the build's 6-hour `statement_timeout`,
+`PciBuilderSession.BUILD_STATEMENT_TIMEOUT`, nexus-f3yqd 2026-11-09; the
+statement waits for older transactions the way a concurrent build does):
 
 ```text
 REINDEX INDEX CONCURRENTLY <leaf schema>.<index>
@@ -792,18 +840,23 @@ catalog query on the route, RDR-227's rule):
 ```json
 "maintenance": {
   "reindex": "on", "reindexing": null,
-  "last_reindex_at": "2026-10-20T08:00:00Z", "reindexes": 2,
+  "last_reindex_at": "2026-10-20T08:00:00Z", "reindexes": 2, "unanchored": 0,
   "canary": {
     "green": 4, "red": 0, "unmeasured": 1, "last_run_at": "2026-10-20T08:01:10Z"
   }
 }
 ```
 
-`reindex` is `on` or `off`; `reindexing` is the index name in flight on the
-holder or null. `/v1/status` is unauthenticated, so it carries counts only and
-names no `pci_` index (Sam, 2026-10-19, `StatusHandler`; and 2026-11-06, ask
-`pci-names-on-status`, option b): a `pci_` name is an unsalted hash of tenant and
-collection, so a caller who guesses a pair could confirm it exists. The
+`reindex` is `on` or `off`; `reindexing` is the string `in_flight` while the
+holder runs a REINDEX and null otherwise; `unanchored` counts the leaf indexes
+whose size rule is inactive for want of an install reference (item 3), and is 0
+with `NX_SEARCH_PCI_REINDEX=0`, where the rule is off and not inactive.
+`/v1/status` is unauthenticated, so it carries counts only and
+names no `pci_` index, which is why `reindexing` never says which index (Sam,
+2026-10-19, `StatusHandler`; and 2026-11-06, ask `pci-names-on-status`, option
+b): a `pci_` name is an unsalted hash of tenant and
+collection, so a caller who guesses a pair could confirm it exists. The name is
+in the `event=pci_reindex_started` log line. The
 per-index list goes on the operator-only `GET /v1/admin/chunks-leaves` as
 `canary_indexes`, absent when no canary source is wired:
 
@@ -812,13 +865,18 @@ per-index list goes on the operator-only `GET /v1/admin/chunks-leaves` as
   {"index": "pci_3f9c0a1b2c3d4e5f6a7b8c9d", "state": "green", "reason": null,
    "queries": 10, "min_recall": 0.983, "mean_recall": 0.998, "top1_misses": 0,
    "trigger": "daily", "measured_at": "2026-10-20T08:01:10Z",
-   "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.03}
+   "anchor": "built", "size_ratio": 1.07, "deletes_since_build": 0.03,
+   "red_after_reindex": false}
 ]
 ```
 
 Entries carry no collection or tenant name; the log lines carry the names for
 operators. The list is capped at 64 entries, red first, then unmeasured, then
-green. `size_ratio` is null for an adopted index (its anchor is not a build
+green. `trigger` is `after_build`, `vacuum`, `daily` or `after_reindex`, the last
+for the re-measure that follows a REINDEX. `red_after_reindex` is a boolean: true
+while the index's last red-canary REINDEX re-measured red and neither a later green
+run nor 24 hours have passed (item 3); it is on the operator route only.
+`size_ratio` is null for an adopted index (its anchor is not a build
 figure), and `deletes_since_build` counts from the anchor, so for an adopted
 index it counts since adoption. Results are
 this engine's own history and stay after it becomes a standby, like
@@ -1010,11 +1068,13 @@ near-tie noise.
   one class.
 - **Risk**: the canary goes red because of ordinary approximation on far
   queries, and REINDEX loops. **Mitigation**: own-topic admission, the
-  once-per-24-hours limit and the `red_after_reindex` state, which ends the
-  loop and is itself the evidence that the cause is not graph age.
+  ten-query floor and the 24-hour floor from the anchor, which holds across a
+  restart and whatever the canary reads; `red_after_reindex` marks the case where a
+  REINDEX did not turn the red green, and is itself the evidence that the cause is
+  not graph age.
 - **Risk**: a leaf REINDEX on the managed instance takes long enough to matter
   (unmeasured; A4 measured the leaf state but not this). **Mitigation**: the Phase 2 fork rehearsal measures it; the
-  builder runs it one at a time under the 30-minute statement timeout; the
+  builder runs it one at a time under the build's 6-hour statement timeout; the
   migrator terminates it like a build.
 - **Risk**: a REINDEX cut off mid-way leaves an invalid duplicate that costs
   write amplification. **Mitigation**: the leftover rule drops it (nexus-rn1yd for
@@ -1207,7 +1267,7 @@ after P1.4.
 | --- | --- | --- | --- | --- | --- |
 | Anchor comments | `obj_description` on `pci_` indexes | the `canary_indexes` entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
 | Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the doctor row (nexus-dxsjc) | logs |
-| REINDEX | status `reindexing`, `last_reindex_at` | `event=pci_ddl_done op=reindex took_ms=` | N/A | `reindex_leftover` returns to 0 | N/A |
+| REINDEX | status `reindexing` (`in_flight`), `last_reindex_at` | `event=pci_ddl_done op=reindex took_ms=` | N/A | `reindex_leftover` returns to 0 | N/A |
 | Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the `canary_indexes` entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
 
 To stop maintenance without stopping builds, set `NX_SEARCH_PCI_REINDEX=0` and
@@ -1340,9 +1400,10 @@ deferred.
 ### Cross-Cutting Concerns
 
 - **Multi-engine**: only the builder-lock holder runs REINDEX, VACUUM and the
-  canary. Retry state, previous counts and canary results are in that engine's
-  memory and are lost on restart or when the holder changes; the anchor, which
-  survives both, carries the deletes-since-build backstop. The ring is in the
+  canary. Retry state, previous counts, owed bulk deletes, owed anchors and canary
+  results are in that engine's memory and are lost on restart or when the holder
+  changes; the anchor, which survives both, carries the deletes-since-build
+  backstop and the 24-hour floor on a red-canary REINDEX (item 3). The ring is in the
   database and every engine writes it, so it survives both too and the holder
   sees every engine's queries. Each engine reports its own canary history.
 - **Local and cloud parity**: the same engine code in both modes. The local
@@ -1424,3 +1485,4 @@ bulk delete, both on an existing session under an existing lock.
 - 2026-11-03: Gate round 1 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); commit `95d6388ef`; critique `nexus_rdr/230-gate-critique-2026-11-03-r1`.
 - 2026-11-06: Wording brought to the reviewed Phase 1 code (nexus-4lnn1.1.7): the seven admitting routes and the single-collection rule for the filtered scoped routes; the 30-day delete's typed per-tenant statement and its tenant source, leaf tenants included; a cross-model re-home deletes the source's ring; the anchor-changed recount trigger; the canary error retry wait.
 - 2026-11-06: Technical Design 7 follows Sam's answer to ask `pci-names-on-status` (option b): `/v1/status` carries the canary counts only, and the per-index list is `canary_indexes` on `GET /v1/admin/chunks-leaves`; adopted-index `size_ratio` is null and `deletes_since_build` counts since adoption.
+- 2026-11-15: Wording brought to the reviewed Phase 2 code (nexus-4lnn1.1.10): the REINDEX `statement_timeout` is the build's 6 hours; `reindexing` reads `in_flight` on `/v1/status`, `unanchored` joins `maintenance`, and `canary_indexes` gains `red_after_reindex` and the `after_reindex` trigger; the red-canary REINDEX needs ten queries (Sam, 2026-11-14) and a 24-hour floor read from the anchor; the size-change recount in Technical Design 2; the leaf rule's row floor; the trigger-label precedence, owed bulk deletes and owed anchors, and the REINDEX phase never failing the pass.

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""review.py (RDR-221 Steps 1.1 and 1.5, nexus-ger02.4): marked-up copy, accept by number, exact-match apply.
+"""review.py (RDR-221 Steps 1.1 and 1.5, nexus-ger02.4): placement, accept by number, exact-match apply.
 
 Pure pieces are imported and called. Everything that touches T2 runs brief.py and review.py as
 subprocesses against the real engine substrate (the `prose` fixture), with the project prefix
@@ -22,7 +22,7 @@ import pytest
 from tests.prose_edit.conftest import REPO_PROJECT, ROOT, Prose, git, t2_get, t2_json, t2_titles
 from tests.prose_edit.test_brief import (
     NAMES_A_REPAIR,
-    SKILL,
+    skill_text,
     brief_ok,
     edit,
     fenced,
@@ -94,83 +94,12 @@ def start(prose: Prose, repo: Path, edits: list[dict], text: str = DOC, rel: str
 
 
 # ---------------------------------------------------------------------------
-# The marked-up copy (Step 1.1)
+# Placement (the review is in the MarkupEditor app or the chat; no copy is written, nexus-scmcs.2.11)
 # ---------------------------------------------------------------------------
 
 
 def _plans(text: str, edits: list[dict], rng: dict | None = None) -> list[dict]:
     return _review().plan_edits(text, edits, rng, False)
-
-
-def test_an_edit_is_inline_del_ins_then_a_superscript_number_and_its_reason_is_a_numbered_footnote() -> None:
-    mod = _review()
-    copy = mod.build_copy(DOC, proposal([E1, edit(2, "Basically ", "", "filler")]), label="docs/s.md",
-                          genre="reference-doc", rng=None, html=False, stdin=False)
-    assert "It <del>really is quite</del><ins>is</ins> simple.<sup>1</sup>" in copy
-    assert "<del>Basically </del><sup>2</sup>it is ordered." in copy  # a pure cut has no ins
-    assert "<sup>1</sup> filler" in copy and "<sup>2</sup> filler" in copy
-    body, notes = copy.split("\n---\n")[-2:]
-    assert "<del>" in body and "<del>" not in notes
-
-
-def test_the_note_is_a_blockquote_at_the_top_before_the_document_and_the_header_names_the_genre() -> None:
-    mod = _review()
-    copy = mod.build_copy(DOC, proposal([E1], note="Two paragraphs restate each other.", voice_card="Plain, first person."),
-                          label="docs/s.md", genre="rdr", rng=None, html=False, stdin=False)
-    lines = copy.splitlines()
-    assert lines[0] == "# Line edit: docs/s.md"
-    assert "Genre: rdr" in copy
-    note = next(i for i, ln in enumerate(lines) if ln.startswith("> **Editor's note.**"))
-    assert "Two paragraphs restate each other." in lines[note]
-    assert note < next(i for i, ln in enumerate(lines) if "First paragraph is plain." in ln)
-    assert any(ln.startswith("> **Voice card.**") and "Plain, first person." in ln for ln in lines)
-
-
-def test_paragraph_proposals_sit_before_their_paragraph_and_queries_after_theirs() -> None:
-    mod = _review()
-    prop = proposal(
-        [], paragraphs=[{"n": 1, "action": "cut", "paragraphs": 'the paragraph opening "Third paragraph"',
-                         "advice": "It restates itself."}],
-        queries=[{"n": 1, "anchor": "queue drains in order", "text": "Which queue?"}],
-    )
-    copy = mod.build_copy(DOC, prop, label="docs/s.md", genre="rdr", rng=None, html=False, stdin=False)
-    p = copy.index("> **[P1] cut.** It restates itself.")
-    q = copy.index('> **[Q1]** "queue drains in order": Which queue?')
-    assert copy.index("Second paragraph") < q < copy.index("Third paragraph repeats") and q < p
-    assert p < copy.index("Third paragraph repeats")
-    assert copy.index("Basically it is ordered.") < q  # after the whole paragraph, not after the anchor
-
-
-def test_a_query_anchored_inside_a_code_fence_lands_after_the_fence_not_inside_it() -> None:
-    mod = _review()
-    text = "Intro sentence.\n\n```sh\nline one\n\nline two\n```\n\nTail sentence.\n"
-    prop = proposal([], queries=[{"n": 1, "anchor": "line one", "text": "Why?"}])
-    copy = mod.build_copy(text, prop, label="docs/s.md", genre="rdr", rng=None, html=False, stdin=False)
-    assert copy.index("line two\n```") < copy.index("> **[Q1]**") < copy.index("Tail sentence.")
-
-
-def test_an_edit_that_cannot_be_placed_is_listed_with_its_cause_instead_of_marked_inline() -> None:
-    mod = _review()
-    dup = edit(3, "Third paragraph repeats itself.", "Third repeats.")
-    copy = mod.build_copy(DOC, proposal([E1, dup]), label="docs/s.md", genre="rdr", rng=None, html=False, stdin=False)
-    assert "<del>Third paragraph repeats itself.</del>" not in copy
-    assert "> **[E3]** Cannot be placed: the old string occurs 2 times. It is skipped if accepted." in copy
-    assert "It <del>really is quite</del><ins>is</ins> simple." in copy
-
-
-def test_dropped_edits_keep_their_numbers_in_the_footnotes() -> None:
-    mod = _review()
-    copy = mod.build_copy(DOC, proposal([E2], dropped=[{"n": 1, "old": "x", "cause": "rejected"}]),
-                          label="docs/s.md", genre="rdr", rng=None, html=False, stdin=False)
-    assert "<sup>1</sup> dropped before this copy: rejected" in copy
-    assert "<sup>2</sup> filler opener" in copy
-
-
-def test_a_stdin_copy_says_nothing_is_written_to_a_file() -> None:
-    mod = _review()
-    copy = mod.build_copy("fix: a thing basically\n", proposal([edit(1, " basically", "", "filler")]),
-                          label="stdin", genre="commit-message", rng=None, html=False, stdin=True)
-    assert "Nothing is applied to a file" in copy and "<del> basically</del><sup>1</sup>" in copy
 
 
 # ---------------------------------------------------------------------------
@@ -256,28 +185,6 @@ def test_a_bad_answer_is_refused_and_names_the_flag(spec: str) -> None:
     assert "--accept" in str(caught.value)
 
 
-def test_the_viewer_is_opened_only_on_macos_with_a_record_and_otherwise_the_path_is_printed(tmp_path: Path) -> None:
-    mod = _review()
-    copy = tmp_path / "c.md"
-    copy.write_text("x")
-    calls: list[list[str]] = []
-
-    def run(argv: list[str]) -> int:
-        calls.append(argv)
-        return 0
-
-    assert mod.open_copy("Typora", copy, platform="darwin", override=None, run=run)["opened"] is True
-    assert calls == [["open", "-a", "Typora", str(copy)]]
-    for viewer, platform in ((None, "darwin"), ("", "darwin"), ("Typora", "linux")):
-        calls.clear()
-        got = mod.open_copy(viewer, copy, platform=platform, override=None, run=run)
-        assert got["opened"] is False and calls == [] and got["reason"]
-    assert mod.open_copy("Typora", copy, platform="darwin", override=None, run=lambda argv: 1)["opened"] is False
-    calls.clear()
-    assert mod.open_copy("Typora", copy, platform="linux", override="myopen --flag", run=run)["opened"] is True
-    assert calls == [["myopen", "--flag", "Typora", str(copy)]]
-
-
 # ---------------------------------------------------------------------------
 # Counting, markup, links (mutations the first review's tests could not kill)
 # ---------------------------------------------------------------------------
@@ -299,6 +206,14 @@ HTML = (
     "<p>Unmarked paragraph stays out of the copy.</p>\n"
     "<p>Fourth paragraph closes the page.</p>\n</body></html>\n"
 )
+
+
+def test_an_html_edit_is_matched_against_the_raw_source_entity_and_all() -> None:
+    mod = _review()
+    prop = proposal([edit(1, "it really is quite simple", "it is simple"),
+                     edit(2, "Fish &amp; chips are good.", "Fish and chips are good.")])
+    plans = {p["n"]: p for p in mod.plan_edits(HTML_ENTITIES, prop["edits"], None, True)}
+    assert plans[1]["span"] is not None and plans[2]["span"] is not None
 
 
 def test_an_html_edit_that_overlaps_markup_is_refused_but_text_between_tags_is_placed() -> None:
@@ -369,92 +284,16 @@ HTML_ENTITIES = (
 )
 
 
-def test_an_html_copy_shows_entities_as_characters_but_marks_keep_the_source_text_they_matched() -> None:
-    mod = _review()
-    prop = proposal([edit(1, "it really is quite simple", "it is simple"),
-                     edit(2, "Fish &amp; chips are good.", "Fish and chips are good.")])
-    plans = {p["n"]: p for p in mod.plan_edits(HTML_ENTITIES, prop["edits"], None, True)}
-    assert plans[2]["span"] is not None  # matching is against the raw source, entity and all
-    copy = mod.build_copy(HTML_ENTITIES, prop, label="web/e.html", genre="exploration-essay", rng=None,
-                          html=True, stdin=False)
-    copy = re.sub(r'<a id="[^"]+" name="[^"]+"></a>', "", copy)  # the index anchors sit inside the marks; see test_review_index
-    assert "Use <b> tags & say it <del>really is quite</del><ins>is</ins> simple<sup>1</sup>." in copy
-    assert "Fish <del>&amp;</del><ins>and</ins> chips are good.<sup>2</sup>" in copy
-    assert "&lt;" not in copy and "tags &amp;" not in copy
-
-
-def test_an_html_copy_is_flat_excerpts_with_marks_and_notes_beside_their_section() -> None:
-    mod = _review()
-    prop = proposal(
-        [edit(1, "It really is quite simple.", "It is simple.", "filler"),
-         edit(2, "basically nothing", "nothing", "filler")],
-        paragraphs=[{"n": 1, "action": "cut", "paragraphs": 'the paragraph opening "Second paragraph links"',
-                     "advice": "It says nothing."}],
-        queries=[{"n": 1, "anchor": "Fourth paragraph closes", "text": "Closes what?"}],
-        note="Two paragraphs are padding.",
-    )
-    copy = mod.build_copy(HTML, prop, label="web/page.html", genre="exploration-essay", rng=None, html=True, stdin=False)
-    for markup in ("<style", "<script", "<head", "<!doctype", "goatcounter", "color: red", "<p>", "<h1>", "<body>",
-                   "href", "example.com", "<title"):
-        assert markup not in copy, markup
-    assert "It <del>really is quite</del><ins>is</ins> simple.<sup>1</sup>" in copy
-    assert "<del>basically </del>nothing<sup>2</sup>" in copy
-    assert "Second paragraph links to the long page and says" in copy  # the link text stays, its URL does not
-    assert "Unmarked paragraph" not in copy  # an excerpt holds only sections a mark or note belongs to
-    assert "The queue" in copy  # the heading the excerpt sits under
-    p = copy.index("> **[P1] cut.** It says nothing.")
-    q = copy.index('> **[Q1]** "Fourth paragraph closes": Closes what?')
-    assert copy.index("Intro paragraph") < p < copy.index("Second paragraph links")
-    assert copy.index("Fourth paragraph closes the page.") < q
-    assert "<sup>1</sup> filler" in copy and "<sup>2</sup> filler" in copy and "Two paragraphs are padding." in copy
-    assert not re.findall(r"<a (?!id=)", copy)  # the only anchors left are the index's own `<a id>` ones
-
-
 def test_an_html_target_renders_a_flat_copy_and_applies_to_the_real_markup(prose: Prose, repo: Path) -> None:
     git_add = repo / "web" / "page.html"
     work, out = start(prose, repo, [edit(1, "It really is quite simple.", "It is simple.", "filler"),
                                     edit(2, "basically nothing", "nothing", "filler")],
                       text=HTML, rel="web/page.html", genre="exploration-essay")
-    copy = Path(out["copy"]).read_text(encoding="utf-8")
-    assert "<style" not in copy and "<script" not in copy and "<del>basically </del>nothing" in copy
+    assert "copy" not in out and [u["n"] for u in out["unplaced"]] == []
     done = review_ok(prose, "apply", "--work", str(work), "--accept", "all")
     assert [a["n"] for a in done["applied"]] == [1, 2]
     assert git_add.read_text(encoding="utf-8") == HTML.replace("It really is quite simple.", "It is simple.").replace(
         "basically nothing", "nothing")
-
-
-def test_the_copy_header_example_is_in_the_answer_grammar_and_the_unplaceable_wording_matches_apply() -> None:
-    mod = _review()
-    dup = edit(3, "Third paragraph repeats itself.", "T")
-    text = DOC + "Fourth paragraph says the queue drains in order and more.\n"
-    edits = [dup, edit(4, "Fourth paragraph says the queue", "F"), edit(5, "the queue drains in order and", "Q")]
-    for stdin in (False, True):
-        copy = mod.build_copy(text, proposal(edits), label="docs/s.md", genre="rdr", rng=None, html=False, stdin=stdin)
-        example = re.search(r"for example `([^`]+)`", copy)
-        assert example, copy
-        assert mod.parse_numbers(example.group(1), {1, 2, 3, 4, 5}, "--accept") == {1, 3, 4, 5}
-    assert "> **[E3]** Cannot be placed: the old string occurs 2 times. It is skipped if accepted." in copy
-    # two overlapping edits: accepting both skips both, accepting one applies it
-    assert ("it overlaps edit 5. Accepted together they are both skipped; accepted alone it is applied."
-            in copy)
-    assert "skipped if accepted" not in copy.split("[E4]")[1].split("\n\n")[0]
-
-
-def test_dropped_edits_queries_and_paragraphs_are_listed_with_their_text_and_cause() -> None:
-    mod = _review()
-    prop = proposal(
-        [E2],
-        dropped=[{"n": 1, "old": "a rejected span", "new": "its fix", "cause": "rejected"},
-                 {"n": 3, "old": "not here", "new": "x", "cause": "not-found"}],
-        dropped_queries=[{"n": 2, "anchor": "Gone anchor", "cause": "anchor-not-found"}],
-        dropped_paragraphs=[{"n": 4, "paragraphs": 'the paragraph opening "Elsewhere"', "cause": "outside-range"}],
-    )
-    copy = mod.build_copy(DOC, prop, label="docs/s.md", genre="rdr", rng=None, html=False, stdin=False)
-    assert '"a rejected span" -> "its fix" (rejected)' in copy
-    assert '"not here" -> "x" (not-found)' in copy
-    assert '[Q2] "Gone anchor" (anchor-not-found)' in copy
-    assert '[P4] the paragraph opening "Elsewhere" (outside-range)' in copy
-    assert "<sup>1</sup> dropped before this copy: rejected" in copy  # the footnotes keep their numbers
 
 
 # ---------------------------------------------------------------------------
@@ -462,59 +301,23 @@ def test_dropped_edits_queries_and_paragraphs_are_listed_with_their_text_and_cau
 # ---------------------------------------------------------------------------
 
 
-def test_copy_location_is_outside_the_repo_and_the_repo_status_is_unchanged(prose: Prose, repo: Path) -> None:
+def test_render_writes_its_session_outside_the_repo_and_the_repo_status_is_unchanged(prose: Prose, repo: Path) -> None:
     (repo / "docs" / "s.md").write_text(DOC, encoding="utf-8")
     before = status(repo)
     work = Path(brief_ok(prose, "tmpdir").strip())
     assert run_brief(prose, "filter", "docs/s.md", "--save", str(work / "filtered.json"),
                      stdin=fenced(proposal([E1, E2]))).returncode == 0
     out = review_ok(prose, "render", "docs/s.md", "--work", str(work), "--genre", "reference-doc")
-    copy = Path(out["copy"])
+    session = work / "session.json"
     try:
-        assert copy.is_file() and work in copy.parents
-        assert repo.resolve() not in copy.resolve().parents
+        assert session.is_file() and repo.resolve() not in session.resolve().parents
+        assert not list(work.glob("*.review.md")) and "copy" not in out
         assert status(repo) == before
-        assert "It <del>really is quite</del><ins>is</ins> simple." in copy.read_text(encoding="utf-8")
-        assert out["viewer"] is None and out["opened"] is False  # no viewer record: the path is printed
         assert (repo / "docs" / "s.md").read_text(encoding="utf-8") == DOC  # render never edits the file
     finally:
         run_review(prose, "apply", "--work", str(work), "--accept", "none")
     assert not work.exists()
     assert status(repo) == before
-
-
-def test_the_copy_opens_in_the_stored_viewer(prose: Prose, repo: Path, tmp_path: Path) -> None:
-    prose.ok("viewer", "--set", "Typora")
-    rec = tmp_path / "opener.py"
-    log = tmp_path / "opened.json"
-    rec.write_text(f"import json, sys\nopen({str(log)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-    env = {**prose.env, "PROSE_EDIT_OPEN": f"{sys.executable} {rec}"}
-    (repo / "docs" / "s.md").write_text(DOC, encoding="utf-8")
-    work = Path(brief_ok(prose, "tmpdir").strip())
-    run_brief(prose, "filter", "docs/s.md", "--save", str(work / "filtered.json"), stdin=fenced(proposal([E1])))
-    proc = run_review(prose, "render", "docs/s.md", "--work", str(work), "--genre", "reference-doc", env=env)
-    assert proc.returncode == 0, proc.stderr
-    out = json.loads(proc.stdout)
-    assert out["viewer"] == "Typora" and out["opened"] is True
-    assert json.loads(log.read_text()) == ["Typora", out["copy"]]
-    run_review(prose, "apply", "--work", str(work), "--accept", "none")
-
-
-def test_prose_edit_open_runs_only_when_the_test_gate_is_set(prose: Prose, repo: Path, tmp_path: Path) -> None:
-    prose.ok("viewer", "--set", "ZzNoSuchViewerApp")  # if the override were ignored this stays a harmless failed open
-    rec = tmp_path / "opener.py"
-    log = tmp_path / "opened.json"
-    rec.write_text(f"import json, sys\nopen({str(log)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
-    env = {k: v for k, v in prose.env.items() if k != "PROSE_EDIT_TEST"}
-    env["PROSE_EDIT_OPEN"] = f"{sys.executable} {rec}"
-    (repo / "docs" / "s.md").write_text(DOC, encoding="utf-8")
-    work = Path(brief_ok(prose, "tmpdir").strip())
-    run_brief(prose, "filter", "docs/s.md", "--save", str(work / "filtered.json"), stdin=fenced(proposal([E1])))
-    proc = run_review(prose, "render", "docs/s.md", "--work", str(work), "--genre", "reference-doc", env=env)
-    assert proc.returncode == 0, proc.stderr
-    assert not log.exists(), "PROSE_EDIT_OPEN ran without PROSE_EDIT_TEST=1"
-    assert json.loads(proc.stdout)["opened"] is False
-    run_review(prose, "apply", "--work", str(work), "--accept", "none")
 
 
 def test_render_reports_the_dropped_edits_queries_and_paragraphs_with_their_text(prose: Prose, repo: Path) -> None:
@@ -529,8 +332,7 @@ def test_render_reports_the_dropped_edits_queries_and_paragraphs_with_their_text
     out = review_ok(prose, "render", "docs/s.md", "--work", str(work), "--genre", "reference-doc")
     assert out["dropped"] == [{"n": 2, "old": "not in the file at all", "new": "x", "cause": "not-found"}]
     assert out["dropped_queries"] == [{"n": 1, "anchor": "Gone anchor", "cause": "anchor-not-found"}]
-    copy = Path(out["copy"]).read_text(encoding="utf-8")
-    assert '"not in the file at all" -> "x" (not-found)' in copy and '[Q1] "Gone anchor" (anchor-not-found)' in copy
+    assert out["dropped_paragraphs"] == []
     run_review(prose, "apply", "--work", str(work), "--accept", "none")
 
 
@@ -633,7 +435,7 @@ def test_a_stdin_run_keeps_no_document_record_applies_nothing_prints_the_text_an
     before = status(repo)
     out = review_ok(prose, "render", "-", "--work", str(work), "--file", str(work / "input.txt"),
                     "--genre", "commit-message")
-    assert "Nothing is applied to a file" in Path(out["copy"]).read_text(encoding="utf-8")
+    assert out["counts"]["edits"] == 2 and "copy" not in out
     done = review_ok(prose, "apply", "--work", str(work), "--accept", "1", "--reject", "2")
     assert done["applied"] == [] and [a["n"] for a in done["accepted"]] == [1]
     assert done["text"] == "fix: make the queue drain in order\n\nThe loop is in fact ordered.\n"
@@ -695,7 +497,7 @@ def test_a_service_that_is_down_stops_the_apply_with_exit_three_and_leaves_file_
     run_review(prose, "apply", "--work", str(work), "--accept", "none")
 
 
-def test_apply_refuses_a_directory_that_is_not_a_work_directory_and_a_work_dir_with_no_copy(
+def test_apply_refuses_a_directory_that_is_not_a_work_directory_and_a_work_dir_with_no_session(
     prose: Prose, repo: Path
 ) -> None:
     proc = run_review(prose, "apply", "--work", str(repo), "--accept", "all")
@@ -776,14 +578,14 @@ def test_the_saved_filter_output_is_the_machine_format_filter_prints(prose: Pros
 
 
 def test_the_skill_runs_render_then_apply_and_deletes_work_only_after_the_answer() -> None:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text()
     assert "scripts/review.py" in text and "| REVIEW |" in text
     assert "`BRIEF filter <target> --budget <budget> --save '<filtered>' [--file '<input>'] < '<reply>'`" in text
     assert "REVIEW render <target> --work '<work>'" in text and "REVIEW apply --work '<work>' --accept" in text
     assert "A successful apply has already deleted WORK (unless it reports `log_error`, below); do not delete it again." in text
     assert "--work WORK < WORK/reply.txt" not in text  # filter no longer deletes the copy's directory
     for verb in re.findall(r"REVIEW ([\w-]+)", text):
-        assert verb in {"render", "apply", "answer", "log-retry"}
+        assert verb in {"render", "apply", "answer", "log-retry", "translate", "proposed", "decisions"}
     # a failed log keeps WORK and the skill says what the author does: log-retry, never a second apply
     assert "REVIEW log-retry --work '<work>'" in text and "Never run apply again for it" in text
     # the script refuses an apply with no matching dry run; the skill says so and never skips it
