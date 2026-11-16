@@ -293,14 +293,17 @@ release, which carries the bytea key support. At boot, before nexus's own
 changelog runs, it applies dml_utils' bundled changelog. That changelog keeps
 its own tracking tables in the `liquibase` schema, separate from nexus's.
 Installing it is schema only and costs the same whatever the data size.
-It does need pg_background at boot, not just when a move first runs:
-dml_utils' plpgsql functions declare variables of pg_background's types
-(`pg_background_handle`, `pg_background_run_result`), and with
-`check_function_bodies` on (the default) creating them resolves those types,
-so the changelog fails on a database without the extension (inferred from
-the source, not yet run; Phase 1 Step 3 confirms it). The engine release
-that first carries dml_utils therefore requires pg_background on every
-database it boots against, the cloud host included.
+It cannot be created without pg_background: dml_utils' plpgsql functions
+declare variables of pg_background's types (`pg_background_handle`,
+`pg_background_run_result`), and dml_utils' own test base installs the
+extension first because the routines "declare its types, so the extension must
+exist when Liquibase creates them" (PostgresTestBase.java). So the engine
+applies the dml_utils and ddl_utils changelogs only when `pg_extension` holds
+pg_background. When it does not, the engine skips them, serves, and reports
+every registered move as blocked; the next boot that finds the extension
+applies them. A database without the extension therefore never fails a boot,
+and the cloud install only has to land before the first registered move is
+expected to run.
 
 **The registry.** One table, `nexus.data_moves`, has one row per registered
 move:
@@ -426,16 +429,16 @@ launcher that upstream does not test.
   max_worker_processes and the slots in use before it launches, and backs off
   when none are free.
 - **Risk**: the cloud host lacks pg_background until its image is rebuilt.
-  **Mitigation**: Phase 2 Activation installs it on the host (conexus, on
-  Sam's go) before the engine release that carries dml_utils' changelog is
-  deployed; that changelog cannot be created without the extension, so this
-  precedes the first engine with dml_utils, not the first registered move. The engine
-  refuses to start a move when the extension is missing, and reports that in
-  boot_work. It does not fall back to a boot-time move.
+  **Mitigation**: the engine applies dml_utils' changelog only when the
+  extension is present (Technical Design), so an engine without it serves and
+  reports its moves blocked in boot_work. Phase 2 Activation installs it on the
+  host (conexus, on Sam's go) before the first registered move is expected to
+  run there. Nothing falls back to a boot-time move.
 
 ### Failure Modes
 
-- **pg_background missing**: the worker does not start the move. boot_work
+- **pg_background missing**: the engine skips the dml_utils changelogs and
+  serves; the worker does not start the move. boot_work
   reports it as `blocked: pg_background is not installed`, and nx doctor shows
   a red line. Nothing falls back to a boot-time move.
 - **A chunk fails** (a constraint, a bad template): dml_utils stops launching
@@ -488,10 +491,13 @@ a built bundle.
 
 #### Step 3: Spike the open assumptions
 
-On a local engine with live-like data, check two things: that a
-pg_background worker under the schema-walk role rewrites rows across tenants
-under FORCE RLS, and that dml_utils drives the partitioned nexus.chunks. The
-results are recorded in this RDR before it locks.
+Check two things: how a pg_background worker under the schema-walk role
+reaches rows under FORCE RLS, and that dml_utils drives a table partitioned and
+keyed like nexus.chunks. Done 2026-11-16 on a throwaway cluster from the
+released bundle (T2 nexus_rdr/246-research-1, -2): a worker inherits the
+caller's role and tenant setting, so a move runs once per tenant (Technical
+Design, Row-level security), and dml_utils processed every row exactly once
+across a killed coordinator.
 
 #### Step 4: The engine side
 
@@ -519,9 +525,11 @@ This is a conexus host change on Sam's go, carried out by bob. The PGDG
 pg_background package goes into the db-host golden image or db-configure,
 because the host has no general egress. Then `CREATE EXTENSION pg_background`
 runs as superuser in the nexus and conexus databases. The package version must
-match the bundle's pinned version. This step lands before any engine release
-that carries dml_utils' changelog (see Technical Design), whether or not it
-registers a move.
+match the bundle's pinned version. Sam ruled 2026-11-15 that it waits until
+the first job that uses it lands in an engine, or until PGDG ships 2.0.4. An
+engine without it serves and reports its moves blocked (Technical Design), so
+this step lands before the first registered move is expected to run in the
+cloud.
 
 #### Activation Step 2: the first registered move
 
@@ -548,16 +556,53 @@ from /v1/status on the live engine.
 
 - **Scenario**: a move over a table with a (text, text, bytea) key, 100k rows. **Verify**: every row is processed exactly once, and progress rises monotonically to the total.
 - **Scenario**: the engine is killed after some chunks commit. **Verify**: the next boot serves at once and resumes at the next chunk, and the final state equals an uninterrupted run.
-- **Scenario**: pg_background is absent. **Verify**: the engine serves, the move is reported blocked, and no row changes.
+- **Scenario**: pg_background is absent. **Verify**: the engine skips the dml_utils changelogs and serves, the move is reported blocked, and no row changes; after the extension is created, the next boot applies the changelogs and the move runs.
 - **Scenario**: a chunk fails. **Verify**: the move is reported failed with the error, the committed chunks stay, and a later boot retries.
-- **Scenario**: tenants under FORCE RLS. **Verify**: the move rewrites every tenant's rows, and no nexus_svc session ever sees another tenant's rows.
+- **Scenario**: tenants under FORCE RLS. **Verify**: the move runs once per registered tenant, rewrites every tenant's rows, and no run touches a row of a tenant other than its own; no nexus_svc session ever sees another tenant's rows.
 - **Scenario**: a new changeset with an UPDATE on chunks. **Verify**: DataMoveChangesetGateTest is red. Registering the same move through nexus.data_moves is green.
 - **Scenario**: an upgrade boot on a copy of a live-like store, measured by f3yqd.1's write gate. **Verify**: no row-move writes occur during the boot.
 
 ## Finalization Gate
 
-To be completed at /conexus:rdr-gate, after Phase 1 Steps 1 to 3 have
-reported.
+Phase 1 Steps 1 to 3 have reported: the bytea change is merged in dml_utils
+(a release to pin is the open prerequisite, ask dml-utils-pin), pg_background
+2.0 is in engine-service-v0.1.194's released bundles, and the spikes are in T2
+nexus_rdr/246-research-1 and -2.
+
+### Contradiction Check
+
+The spikes overturned one premise, that a pg_background worker inherits no
+setting from its caller. The Row-level security design, the critical
+assumption, Step 3 and the RLS test scenario now all say a move runs once per
+tenant with the tenant set by the worker. The install-order statements (Technical
+Design, Risks, Failure Modes, Activation Step 1, the absent-extension test)
+all say the engine applies dml_utils' changelog only when pg_background is
+present.
+
+### Assumption Verification
+
+Five of the six critical assumptions are verified by spike or by the
+extension's own control file. The cloud host's pg_background is checked and
+absent; installing it is Activation Step 1, on Sam's ruling of 2026-11-15.
+
+### Scope Verification
+
+The RDR changes how a new data move runs. It does not rewrite the moves that
+already shipped (Consequences), and it names no first move: Activation Step 2
+ships whichever move comes first in its own engine cut.
+
+### Cross-Cutting Concerns
+
+Tenant isolation (per-tenant runs under FORCE RLS), roles and grants (the
+library's fixed owner role and its leaf grants), worker slots on the cloud host
+(one move, one thread), progress and stop answers (boot_work), and deploy order
+(the extension check at boot) are each covered above.
+
+### Proportionality
+
+The engine adopts Sam's library as is, at one thread, behind one registry table
+and one worker; the only new mechanism nexus owns is the worker loop and its
+reporting.
 
 ## References
 
@@ -568,3 +613,4 @@ reported.
 ## Revision History
 
 - 2026-11-16: Phase 1 Step 3 spikes reported (T2 nexus_rdr/246-research-1, -2) on engine-service-v0.1.194's released bundle. pg_background workers inherit the caller's role and tenant setting, so moves run once per tenant; dml_utils and ddl_utils install as a non-superuser `dml_utils_owner`, whose SELECT on every chunk leaf the partition grant loop now carries; partition-wise and plain runs over a FORCE-RLS (text, text, bytea) table processed every row exactly once across a killed coordinator. Step 2 is done. Step 1's bytea change is merged; a dml_utils release to pin is still open.
+- 2026-11-16: dml_utils' changelogs are applied only when pg_background is installed, so an engine without it serves and reports its moves blocked; the cloud install lands before the first registered move runs. Finalization Gate responses written.
