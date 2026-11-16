@@ -622,8 +622,10 @@ lifetime: push and owner records share the CI posts' three-day retention.
 ### Proportionality
 
 The two new engine templates and one stamper serve every red; the alternative
-of convention only (Alternative 3) was tried today and two late posts misled
-the block in one afternoon. Attestation level 2 is evaluated before it is
+of convention only (Alternative 3) leaves every reader to catch a late post,
+and `ci_develop_red`'s live run on 2026-11-16 saw two in one afternoon (a red
+for 3b580d898 after a newer green, and a red for a708b957e after a newer
+green). Attestation level 2 is evaluated before it is
 built.
 
 ## Open Questions for Sam
