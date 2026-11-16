@@ -89,7 +89,8 @@ are in T3 collection `writing-craft` and T2 project `nexus_rdr`
 - `conexus:substantive-critic`: the structural reviewer; unchanged here.
 - T2 memory (`nx memory`, `mcp__plugin_conexus_nexus__memory_*`): the store
   for everything the editor remembers.
-- Sam reads drafts in Typora.
+- Sam reviews proposed edits as suggestions in the MarkupEditor app (Typora
+  until the MarkupEditor review, nexus-scmcs).
 
 ## Research Findings
 
@@ -233,7 +234,8 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
   Phase 1 test, Phase 2 observation
 - [x] **Readable in Typora.** Typora renders inline `<del>` and `<ins>` in a
   Markdown file, and Sam finds the marked-up copy workable. — **Status**:
-  Verified — **Method**: Spike (2026-09-28)
+  Verified — **Method**: Spike (2026-09-28). No longer load-bearing: the
+  MarkupEditor review (nexus-scmcs) replaced the marked-up copy and the viewer.
 - [ ] **Unpacking is accepted (Amendment A1).** The editor finds the
   compression features in a seeded document without touching the decoys, and
   on Sam's published docs, for each reason prefix, at least half of the
@@ -358,14 +360,16 @@ query-only list is not that mechanism: it is keyed on section 3 bullets. The
 entry's mechanism, if the brief cannot carry one for a line-editor row, is
 built under its own bead (nexus-b0b40), not in Phase 1a.
 
-**Review loop.** The skill writes a marked-up copy of the document outside
-the repo (so it cannot be committed by accident): each proposed sentence edit
-inline as `<del>old</del><ins>new</ins>` with its number, paragraph proposals
-and queries as numbered notes where they apply, the editor's note at the top.
-It opens the copy in the author's viewer (a user preference; Typora for Sam).
-The author answers with the numbers to accept and any corrections. The skill
-applies accepted sentence edits to the real file with exact-match
-replacement, in file order. An edit is applied only when its old string occurs
+**Review loop.** A path run opens the document in the MarkupEditor app
+(0.9.11 or later, the first release with suggestions) and sends each proposed
+sentence edit there as a suggestion, its reason as the suggestion's note. The
+editor's note, paragraph proposals, queries and any edit the app refuses are
+shown in the chat. The author accepts or rejects each suggestion in the app and
+says done; the skill reads the decisions back from the app (a suggestion left
+pending is held), returns the app to a clean buffer, and never saves the
+document there. A stdin run shows its edits in the chat and the author answers
+with the numbers to accept. Either way the skill applies accepted sentence
+edits to the real file with exact-match replacement, in file order. An edit is applied only when its old string occurs
 exactly once in the file (or in the range, for a range run) and overlaps no
 other accepted edit; when two accepted edits overlap, both are skipped and
 reported. Then it records the session.
@@ -381,7 +385,7 @@ range it came from, so a later edit to the source file does not change it.
 
 | Record | T2 project | Title |
 | --- | --- | --- |
-| User style sheet, viewer preference | `prose` | `stylesheet`, `viewer` |
+| User style sheet | `prose` | `stylesheet` |
 | Repo style sheet | `<repo>_prose` | `stylesheet` |
 | Genre: exemplars and notes | `<repo>_prose` | `genre/<name>` |
 | General "not a defect" entries | `prose` or `<repo>_prose` | `not-a-defect` |
@@ -616,8 +620,8 @@ Agent and skill: brief assembly, the diagnostic questions, the output format.
 
 #### Step 1.5: The review loop
 
-Marked-up copy, viewer, the rejection filter before display, accept by
-number, exact-match apply, session record, the offer to add a correction to
+Suggestions in the MarkupEditor app (the chat for a stdin run), the rejection
+filter before display, accept in the app or by number, exact-match apply, session record, the offer to add a correction to
 the style sheet.
 
 **Exit**: the Test Plan scenarios below pass.
@@ -807,7 +811,7 @@ Phase 1a tests whether it finds the features anyway.
 
 ### Assumption Verification
 
-Readable in Typora is verified. Memory helps is measured in Phase 1 (nexus-ger02.16:
+Readable in Typora is verified, and no longer load-bearing since the MarkupEditor review. Memory helps is measured in Phase 1 (nexus-ger02.16:
 the rate at which a rejected fix is shown again, against a threshold fixed before the
 runs; the counts are in `tests/prose_edit/acceptance/README.md`); Worth accepting and
 Voice kept in Phase 2. Unpacking is accepted (Amendment A1) is tested by the
@@ -867,3 +871,4 @@ one, is a separate bead (nexus-b0b40).
 - 2026-10-25: Step 1a.2 text aligned with the fixture as built: no seeded sentence comes from the paper's Table 2, and `run-scenario.sh` has no kind registry (stacked review B4/B5). The section 6 heading stays unconditional; the brief drops the unpack clause for changelog and commit-message.
 - 2026-10-25: Phase 2 PASSED (Sam): 10 of 10 editor edits accepted across the four documents, the essay still in Sam's voice, yes to reaching for it again on all four, comparison accept rates tied at 100% (editor 6/6, brief 14/14). Record: T2 `nexus_rdr/221-phase2-results`. Phase 1a lands on `develop` after this.
 - 2026-11-01: Step 3.1 aligned with cut-only as shipped in conexus 7.91.0 (nexus-ger02.10, amended on Sam's go, nexus-scmcs.5): a second skill, `prose-cut`, in place of a `/prose-edit` mode; the word budget a target, not a cap; the gate fixes first and then applies the cuts with `prose-cut decide`, in place of applying them alongside the other findings. The stale `site-page` line cites are gone from the step. Discovery 12's line cites are left as they read when verified. The review-loop text (marked-up copy, viewer) still matches `develop`; the MarkupEditor review is amended with its branch (nexus-scmcs.4).
+- 2026-11-16: Review loop aligned with the MarkupEditor review as shipped in conexus 8.3.0 (nexus-scmcs, landed at `f2542acfa`; amended under grant 3, nexus-scmcs.2): a path run sends its sentence edits to the MarkupEditor app as suggestions and reads the author's decisions back from it; a stdin run answers in the chat; the Typora viewer, the marked-up copy and the `prose/viewer` record are gone. "Readable in Typora" stays verified and is no longer load-bearing. Step 1.5 and the Technical Environment follow.
