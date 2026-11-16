@@ -126,6 +126,8 @@ CHANGESET_ALLOWLIST: dict[str, str] = {
     "fk-003-0": "rdr-164: prefix of changeSet id fk-003-0-backfill-stubs",
     "taxonomy-013-topics-tenant-unique": "rdr-194: design-time name; shipped as taxonomy-014-topics-tenant-unique",
     "fk-004-1": "post-mortem rdr-191: prefix of changeSet id fk-004-1-reconcile",
+    "taxonomy-022-serverside-projection-links": "rdr-193 Part B / rdr-251: design-time name, never written; "
+    "taxonomy-022 shipped as the coverage counts (nexus-7fku2.1.2)",
 }
 
 #: (artifact, identifier) attributions whose identifier is absent from the
