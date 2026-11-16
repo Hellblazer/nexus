@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from contextvars import copy_context
 from dataclasses import dataclass, field
 
 import structlog
@@ -497,7 +498,8 @@ class ChunkBatcher:
         if self._flush_pool is None:
             self._flush_batch(collection, pend)
             return
-        fut = self._flush_pool.submit(self._flush_batch, collection, pend)
+        # RDR-167: a fresh Context per submit carries the correlation id into the worker.
+        fut = self._flush_pool.submit(copy_context().run, self._flush_batch, collection, pend)
         with self._lock:
             # Prune settled, exception-free futures so ``_futures`` tracks
             # genuinely outstanding work — unpruned it grew to "every flush

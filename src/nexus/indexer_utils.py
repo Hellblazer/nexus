@@ -1776,11 +1776,14 @@ def run_file_loop(
         return _finish_ok()
 
     from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait  # noqa: PLC0415 — leaf module keeps import surface minimal
+    from contextvars import copy_context  # noqa: PLC0415 — leaf module keeps import surface minimal
 
     with ThreadPoolExecutor(
         max_workers=concurrency, thread_name_prefix="nx-index",
     ) as pool:
-        futures = [pool.submit(_process, score, file) for score, file in files]
+        # RDR-167: a fresh Context per submit carries the correlation id into the worker; one
+        # Context cannot be entered by two threads at once.
+        futures = [pool.submit(copy_context().run, _process, score, file) for score, file in files]
         done, not_done = wait(futures, return_when=FIRST_EXCEPTION)
         if not not_done and not any(f.exception() for f in done):
             return _finish_ok()
