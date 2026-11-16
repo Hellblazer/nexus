@@ -425,42 +425,33 @@ class TopicSetSearchIntegrationTest {
     @Test
     void oneFunctionPerDimension_withTheGrantsAndTheSignatureTheCallerReads() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            var proc = DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p");
-            var nsp = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
-            Field<String> name = DSL.field(DSL.name("p", "proname"), String.class);
-            Field<Object> oid = DSL.field(DSL.name("p", "oid"), Object.class);
-            Field<String> args = DSL.function("pg_get_function_arguments", String.class, oid);
-            Field<Boolean> svcExec = DSL.function("has_function_privilege", Boolean.class,
-                DSL.inline("nexus_svc"), oid, DSL.inline("EXECUTE"));
-            Field<String> acl = DSL.field("p.proacl::text", String.class);
-            Field<String> lang = DSL.field("(SELECT l.lanname FROM pg_catalog.pg_language l WHERE l.oid = p.prolang)",
-                String.class);
-            Field<String> volatility = DSL.field("p.provolatile::text", String.class);
-            Field<Boolean> definer = DSL.field(DSL.name("p", "prosecdef"), Boolean.class);
-            var rows = DSL.using(su, SQLDialect.POSTGRES)
-                .select(name, args, svcExec, acl, lang, volatility, definer)
-                .from(proc)
-                .join(nsp).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("p", "pronamespace"))))
-                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus")
-                    .and(name.likeRegex("^search_topic_set_(384|768|1024)$")))
-                .orderBy(name)
-                .fetch();
-            assertThat(rows.getValues(name)).containsExactly(
-                "search_topic_set_1024", "search_topic_set_384", "search_topic_set_768");
-            for (var rec : rows) {
-                String fn = rec.get(name);
-                assertThat(rec.get(args)).as(fn)
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var all = PgCatalogProbes.functionDefinitionsIn(ctx, "nexus");
+            var defs = all.values().stream()
+                .filter(d -> d.identity().matches("search_topic_set_(384|768|1024)\\(.*"))
+                .toList();
+            assertThat(defs).as("exactly one signature per dimension, no overload").hasSize(3);
+            assertThat(defs.stream().map(d -> d.identity().substring(0, d.identity().indexOf('('))).toList())
+                .containsExactlyInAnyOrder("search_topic_set_384", "search_topic_set_768", "search_topic_set_1024");
+            for (var d : defs) {
+                String fn = d.identity();
+                assertThat(d.arguments()).as(fn)
                     .contains("p_topic_ids bigint[]")
                     .contains("p_collection text")
                     .contains("p_n integer")
                     .doesNotContain("threshold")
                     .endsWith("p_exclude_sensitive boolean DEFAULT false");
-                assertThat(rec.get(svcExec)).as(fn + " nexus_svc EXECUTE").isTrue();
-                assertThat(rec.get(acl)).as(fn + " has an explicit ACL (a NULL one leaves EXECUTE to PUBLIC)").isNotNull()
-                    .as(fn + " EXECUTE is not left to PUBLIC").doesNotContainPattern("(^\\{|,)=X/");
-                assertThat(rec.get(lang)).as(fn).isEqualTo("sql");
-                assertThat(rec.get(volatility)).as(fn + " STABLE").isEqualTo("s");
-                assertThat(rec.get(definer)).as(fn + " SECURITY INVOKER, so row-level security applies").isFalse();
+                // an explicit ACL: a NULL one is the schema default, which leaves EXECUTE to PUBLIC
+                assertThat(d.acl()).as(fn + " has an explicit ACL").isNotNull()
+                    .as(fn + " EXECUTE is not left to PUBLIC (an aclitem with an empty grantee reads =X/)")
+                    .doesNotContainPattern("(^\\{|,)=X/")
+                    .as(fn + " nexus_svc holds an explicit EXECUTE grant").contains("nexus_svc=X/");
+                assertThat(PgCatalogProbes.canExecuteFunction(ctx, "nexus_svc",
+                        "nexus." + fn.substring(0, fn.indexOf('(')) + "(nexus.vector,bigint[],text,integer,text,text,boolean)"))
+                    .as(fn + " nexus_svc can execute").isTrue();
+                assertThat(d.language()).as(fn).isEqualTo("sql");
+                assertThat(d.volatility()).as(fn + " STABLE").isEqualTo("s");
+                assertThat(d.securityDefiner()).as(fn + " SECURITY INVOKER, so row-level security applies").isFalse();
             }
         }
     }
