@@ -281,9 +281,15 @@ roles = ["pusher", "leader"]
 ```
 
 Load is evaluated when the session's MCP server starts, the only time auras
-and config are read today. A session that joins a group later loads the aura at
-its next start, or through one re-load hook (open question 3). Unknown keys are
-refused by `nx aura check`.
+and config are read today (Sam's answer 3). A server start is not a new
+session: the session id survives an MCP reconnect (`/mcp`) and a restart, as
+the 8.3.0 restart round on 2026-11-16 showed. So to join or leave a group, a
+session writes or removes its membership tuple and then reconnects its MCP
+server; its identity, board entry and other memberships are unchanged. Only
+`/clear` gives a session a new id. Memberships then move the way the threads
+board's `session:` line does: the hook that rewrites that line also re-points
+the session's membership tuples to the new id. Unknown keys are refused by
+`nx aura check`.
 
 **Typed displays and noise.** `ci_develop_red` triggers on the owner post, not
 the raw CI post, and shows one of three states, each with its own urgency, in
@@ -481,6 +487,10 @@ Load removes the aura from non-members. A fire costs about 50 ms today
 Not yet run.
 
 ## Open Questions for Sam
+
+Answered 2026-11-16 by Sam ("your recom look good"): 1 from the record, 3 load
+at server start, 5 the stamper in the engine beside the CI adapter, 6 through
+the leader, 7 the aura stays off until this lands. Open: 2 and 4.
 
 1. **Owner source.** From the record (the pusher, as designed), or always the
    group's leader?
