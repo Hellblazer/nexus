@@ -25,8 +25,8 @@ claim against CoIR. Epic nexus-2k66t is closed (7/7). The memory-capture child
 nexus-2k66t.1 is deferred on RDR-209 and does not block.
 
 The close critique (T2 `nexus/critique-d76add41d-nexus-2k66t.2-2026-11-16-r1`)
-came back partial, with two documentation findings. Both were fixed before close
-(47030d594, 1fe11b5ad), and the confirmation round
+came back partial, with two documentation findings. Both were fixed before close, in
+the same change that closes the RDR, and the confirmation round
 (`nexus/confirm-47030d594-nexus-2k66t.2-2026-11-16-r2`) found one more bug in
 the new run recipe, also fixed.
 

@@ -53,7 +53,7 @@ The harness is `scripts/bench/coir_run.py` (sampling `coir_sample.py`, scoring `
 - `NX_VOYAGE_API_KEY` unset. The run embeds with local bge-base-en-v1.5 at no cost and refuses to start if the engine would use Voyage.
 - Time: each dataset's ingest is capped at 30 minutes, then 50 queries run.
 
-Fetch the data at the pinned revisions. Each dataset has two Hugging Face repositories, `CoIR-Retrieval/<name>-queries-corpus` and `CoIR-Retrieval/<name>-qrels`, at the revisions in the table in `preregistration.md` (full hashes in `coir_run.py`'s `POOL`). The harness reads the parquet files directly under `DATA/<name>-queries-corpus/` (`corpus-*.parquet`, `queries-*.parquet`) and `DATA/<name>-qrels/` (`test-*.parquet`). The repositories keep them in a `data/` folder, so move them up one level:
+Fetch the data at the pinned revisions. Each dataset has two Hugging Face repositories, `CoIR-Retrieval/<name>-queries-corpus` and `CoIR-Retrieval/<name>-qrels`, at the revisions in the table in `preregistration.md` (full hashes in `coir_run.py`'s `POOL`, which the commands below read). The harness reads the parquet files directly under `DATA/<name>-queries-corpus/` (`corpus-*.parquet`, `queries-*.parquet`) and `DATA/<name>-qrels/` (`test-*.parquet`). The repositories keep them in a `data/` folder, so move them up one level:
 
 ```bash
 DATA=$HOME/coir-data   # outside the checkout: the harness refuses a dirty tree
@@ -61,9 +61,9 @@ fetch() {  # fetch NAME KIND REVISION
   hf download "CoIR-Retrieval/$1-$2" --repo-type dataset --revision "$3" --local-dir "$DATA/$1-$2"
   mv "$DATA/$1-$2"/data/*.parquet "$DATA/$1-$2"/
 }
-fetch codetrans-dl queries-corpus 328b6b6870fce952a3d5d49a8672518a0e6f6f58
-fetch codetrans-dl qrels 3c26def7e3903a50c219584fedc85d3ad77fac43
-# ...and the same for each dataset you run, with its two revisions from POOL
+# every dataset's two repositories at the revisions pinned in coir_run.py's POOL
+uv run python -c 'from scripts.bench.coir_run import POOL; [print(n, k, r) for n, d in POOL.items() for k, r in d.revisions.items()]' |
+  while read -r name kind rev; do fetch "$name" "$kind" "$rev"; done
 ```
 
 Then run from the checkout, writing outside it:
