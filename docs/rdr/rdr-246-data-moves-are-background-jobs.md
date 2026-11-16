@@ -259,10 +259,21 @@ ranges:
   (embedding model, then tenant, vectors-030 lines 530 and 675) — **Status**:
   Unverified; the spikes used a three-column, one-level stand-in —
   **Method**: Spike with the four-column change (bead nexus-f3yqd.2.21)
-- [ ] Liquibase applies the vendored ddl_utils and dml_utils changelogs as
+- [x] Liquibase applies the vendored ddl_utils and dml_utils changelogs as
   `nexus_admin` with the session role `dml_utils_owner` — **Status**:
-  Unverified; 246-research-5 applied the same files with psql in Liquibase's
-  order — **Method**: Spike in Phase 1 Step 3b
+  Verified 2026-11-16 (T2 nexus_rdr/246-research-7): Liquibase 4.29.0, the
+  engine's version, on one connection as `nexus_admin` ran `SET ROLE
+  dml_utils_owner` as a statement, applied ddl_utils (77 changesets) then
+  dml_utils (132, the committing-entry-point head) and then, after `SET ROLE
+  NONE`, nexus's master changelog (vectors-029 EXECUTED). Every object in
+  the library schemas and the library tracking tables in schema
+  `liquibase` are owned by `dml_utils_owner`; vectors-029's functions and
+  its `chunks_gate_probe_owner_read` policy bind `nexus_admin`. One backend
+  pid served every statement and the server log holds exactly one `SET ROLE`
+  and one `SET ROLE NONE`. One constraint for Step 4: `Liquibase.close()`
+  closes the JDBC connection, so the walks must not close the first
+  `Liquibase` object before the last walk on that connection finishes —
+  **Method**: Spike with real Liquibase in Phase 1 Step 3b
 - [ ] The cloud host's PostgreSQL loads pg_background and has spare
   max_worker_processes — **Status**: Checked 2026-11-10, NOT available
   today (bob's read-only check on Sam's go, SSM command 60942485, T2
@@ -537,8 +548,10 @@ nexus_rdr/246-research-5):
    database role (no separate `NX_DB_ADMIN_*`, so the admin connection is the
    service role) has no `nexus_admin` holding these grants; it skips the
    libraries and reports moves `blocked:`. That Liquibase, not only psql in
-   Liquibase's order, applies the libraries this way is a critical assumption
-   (unverified), spiked in Phase 1 Step 3b.
+   Liquibase's order, applies the libraries this way is verified (Phase 1
+   Step 3b, T2 nexus_rdr/246-research-7). The libraries' `Liquibase` objects
+   share the one migration connection, so none may be closed before the walk
+   that follows it: `Liquibase.close()` closes the connection.
 3. If the extension or a role is missing, or either library's changelog
    fails, the engine skips the libraries, serves, and reports every
    registered move `blocked:` with the reason. No library install failure
@@ -852,6 +865,18 @@ user), then `SET ROLE NONE` and nexus's changelog, and check the owners and that
 `nexus_admin`. The result closes or reopens the Liquibase critical assumption
 before Step 4 starts.
 
+Done 2026-11-16 (T2 nexus_rdr/246-research-7): the assumption holds. A
+throwaway cluster from the engine-service-v0.1.194 bundle, the roles and
+grants of Install sequence step 1 made by hand, and Liquibase 4.29.0 driven
+from a throwaway Java main. Every library object and both libraries'
+tracking tables (`liquibase.ddl_utils_databasechangelog`,
+`liquibase.dml_utils_databasechangelog` and their lock tables) belong to
+`dml_utils_owner`; nexus's tracking table, `nexus.chunks`, vectors-029's
+three probe functions and the policy's `polroles` belong to or name
+`nexus_admin`. A second boot on the same cluster was a clean no-op. The one
+thing Step 4 must respect: closing a `Liquibase` object closes the shared
+connection, so the walks share it and close it once, at the end.
+
 #### Step 3c: A test image with pg_background
 
 The engine suite's Testcontainers image (`pgvector/pgvector:pg17`) has no
@@ -996,11 +1021,11 @@ tenant on `nexus.chunks` through vectors-029's policy.
 
 ### Assumption Verification
 
-Six of the nine critical assumptions are verified by spike or by the
+Seven of the nine critical assumptions are verified by spike or by the
 extension's own control file. The cloud host's pg_background is checked and
 absent; installing it is Activation Step 1, on Sam's ruling of 2026-11-15.
 That Liquibase, not only psql, applies the libraries with the session role
-set is unverified and is spiked in Phase 1 Step 3b, before Step 4.
+set was verified in Phase 1 Step 3b (T2 nexus_rdr/246-research-7).
 
 ### Scope Verification
 
