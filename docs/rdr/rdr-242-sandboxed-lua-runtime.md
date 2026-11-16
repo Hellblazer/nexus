@@ -101,17 +101,23 @@ is no record of which scripts exist, who wrote them, what they may call,
 whether anyone has read them, or how to stop one. Sam's direction (2026-11-03):
 no arbitrary Lua; scripts are registered, evaluated, approved by Sam only, and
 then run. On 2026-11-07 Sam withdrew the hardware-key approval that direction
-had been designed around (`nexus_rdr/242-research-30`). This RDR now closes
-Gap 5 for version 1 by origin alone: a run takes a name from a procedure
-library, never source (Technical Design 2). Registration and approval, which
+had been designed around (`nexus_rdr/242-research-30`). By origin, this RDR
+closes Gap 5 for the shipped root and bounds it for the repo root: a run
+takes a name from a procedure library, never source (Technical Design 2).
+The shipped root is the package's own reviewed files. The repo root
+`.nexus/procedures` is off by default, and a repo that turns it on carries
+the residual Technical Design 2 states. Registration and approval, which
 close it for scripts outside the libraries, move to their own document.
 
 ## Relationship to Prior RDRs
 
 - RDR-239 (closed scope, stage 1): the dictionary is the description of
-  the tuple surface this runtime exposes. A tuple verb in the runtime is
-  callable only for a subspace whose template the dictionary describes.
-- RDR-240 (draft): the first consumer. Its Technical Design item 4 lists
+  the tuple surface a tuple verb would expose. A tuple verb in the runtime
+  would be callable only for a subspace whose template the dictionary
+  describes. None is built: the aura stage (RDR-249, epic nexus-mdbds
+  closed 2026-11-16) shipped no tuple verb, no consumer needs one, and a future consumer
+  opens its own RDR.
+- RDR-240 (accepted): the first consumer. Its Technical Design item 4 lists
   the host verbs it needs; its A1 depends on this RDR's write-grant rule.
   Its premise stands as written: a run reads a procedure file from one of
   its two library roots (its Technical Design 1). The edit the 2026-11-03
@@ -389,8 +395,10 @@ interpreter's process, because the hook cannot interrupt one pattern match
 
 - A1: A `lupa` wheel exists for every platform and CPython version
   conexus supports, so adding it needs no compiler. Verification: the wheel
-  list on PyPI and an install on native Windows. Status: the wheel lists hold
-  and a Linux aarch64 install ran; the native Windows install is not yet run.
+  list on PyPI and an install on native Windows. Status: verified. The wheel
+  lists hold, a Linux aarch64 install ran, and the native Windows install ran
+  on qwent on 2026-11-07 (`lupa` 2.8, Lua 5.4; `nexus_rdr/242-research-35`,
+  `bd show nexus-mdbds.3`).
 - A2: A script can be held to an instruction or time limit and a memory
   limit that it cannot disable from inside. Verification: escape tests in the
   Test Plan, run against the chosen runtime. Status: holds for Lua 5.4 with
@@ -406,7 +414,10 @@ interpreter's process, because the hook cannot interrupt one pattern match
   `max_memory` cannot stop it. The overrun is unbounded, so every run
   runs in a worker process whose kill timer enforces wall time
   (Technical Design 6 and 11, Alternative 2). Status for wall time: the kill
-  timer is not built; the worker-process tests in the Test Plan verify it.
+  timer is built (`_KillTimer` in `src/nexus/lua_runtime/supervisor.py`) and
+  tested by `tests/lua_runtime/test_worker_process.py`, which kills a
+  pathological pattern at the wall limit and checks that the caller keeps
+  serving.
 - A3: The read verbs RDR-240 needs can be served from the client without
   new engine routes. Verification: map each verb to an existing client call.
   Status: no engine route is needed for the verbs, but four of the seven need
@@ -448,9 +459,11 @@ version has no write verb.
 
 The surface is built for one consumer. Version 1 carries exactly the read
 verbs RDR-240's first four procedures need (its Technical Design item 4).
-Tuple-space verbs, described by the dictionary (RDR-239), arrive with the
-consumer that needs them, the aura stage of nexus-mdbds, through the same
-grant rule.
+Tuple-space verbs, described by the dictionary (RDR-239), are not built. The
+aura stage of nexus-mdbds (RDR-249; the epic closed 2026-11-16) shipped none
+(`src/nexus/lua_runtime/verbs*.py` holds only the memory, transcripts, git and
+tables verbs), and no consumer needs one now. A future consumer opens its own
+RDR, and the verb arrives through the same grant rule.
 
 ### Technical Design
 
@@ -478,7 +491,19 @@ grant rule.
    2026-11-02 draft said. And the static check of item 3 passes it, in the
    worker, before it runs. Its grants are the host verbs its header names
    (RDR-240 Technical Design 1). No registered, unapproved script can run,
-   because there is no registry. Residual: an agent that can write to
+   because there is no registry. A test pins the rule:
+   `tests/lua_runtime/test_runtime_origin.py` scans every function under
+   `src/nexus` for a script-source parameter. `supervisor.supervise` takes the
+   source as the `"source"` key of its start mapping, which that parameter
+   scan cannot see, so the same test also pins every caller of `supervise`
+   under `src/nexus`. Only `run_script`'s chain
+   (`nexus.lua_runtime.run:_run_script_with_stats`) calls it, with the bytes
+   `library.find` read. The slot-holding wrapper inside `supervisor.py` is the
+   only other name the scan allows.
+   The repo root `.nexus/procedures` is off by default: it is on only when
+   `NX_PROCEDURES_REPO_ROOT` is exactly `1` (`src/nexus/lua_runtime/library.py`).
+   The nexus repo turns it on in its project `.claude/settings.json`.
+   Residual, for any repo that turns the root on: an agent that can write to
    `.nexus/procedures/` in a checkout can run a file nobody has reviewed yet.
    Version 1 bounds that only by the sandbox and the read-only verbs, whose
    worst case is a read the caller could already make. Approval (item 1) is
@@ -899,9 +924,11 @@ The threat model names who might try what, and what stops them.
 
 - A prompt-injected agent, with MCP tools and possibly a shell. Through
   MCP it can only name a procedure that is already in a library and pass it
-  arguments; no run path takes source. With write access to a checkout it
-  can add a file under `.nexus/procedures/` and run it before anyone reviews
-  it (Technical Design 2). Version 1 bounds that by the sandbox and the
+  arguments; no run path takes source. In a repo that has turned the repo
+  root on (it is off by default, and the nexus repo turns it on in its
+  project `.claude/settings.json`), write access to a checkout lets it add a
+  file under `.nexus/procedures/` and run it before anyone reviews it
+  (Technical Design 2). Version 1 bounds that by the sandbox and the
   read-only verbs; the approval document is what closes it. Residual: a
   reviewer merging a script whose purpose they misread.
 - A compromised MCP client holding a tenant token. It gains nothing new
@@ -942,7 +969,8 @@ The threat model names who might try what, and what stops them.
   and the run fails with `ScriptLimitError` naming it; the OS CPU limit
   backs the timer (Technical Design 6 and 11).
 - Native Windows install fails. Mitigation: Phase 1 Step 1 installs it
-  on qwent's Windows side before anything else lands.
+  on qwent's Windows side before anything else lands. It did, on 2026-11-07,
+  and the install worked (`nexus_rdr/242-research-35`).
 
 ## Implementation Plan
 
@@ -1011,7 +1039,7 @@ name-to-file map.
 #### Step 3: The run path
 
 `run_script(name, args)` over the two library roots (Technical Design 2
-and 4), replacing the test-only entry point.
+and 4).
 
 ### Phase 4: Hand-off
 
@@ -1095,6 +1123,15 @@ procedure, a reviewed file in a library root, runs through it.
 
 ## Finalization Gate
 
+This section is the gate-time snapshot of 2026-11-07. Three of its statuses
+changed in implementation, and the text above records the later facts: A1 is
+verified on native Windows (`nexus_rdr/242-research-35`, nexus-mdbds.3); A2's
+kill timer is built and tested (`src/nexus/lua_runtime/supervisor.py`,
+`tests/lua_runtime/test_worker_process.py`, nexus-mdbds.4); and the worker OS
+limits of record 33 (Linux `RLIMIT_AS`, the Windows job's memory limit and
+kill-on-close) were verified per platform in nexus-mdbds.4 (`bd show
+nexus-mdbds.4`, Assumption Verification below).
+
 ### Contradiction Check
 
 No contradictions found between the research findings, the design and the
@@ -1123,7 +1160,10 @@ nothing here (Technical Design 1).
 
 ### Assumption Verification
 
-Research records: 34 in T2, `nexus_rdr/242-research-1` to `-34`: one for
+Research records: 37 in T2, `nexus_rdr/242-research-1` to `-37`. At the gate
+there were 34 (1 to 34); 35 (A1 verified on native Windows), 36 (the Phase 1
+Step 2 measurements) and 37 (their fix round r1) came with implementation.
+The 34 at the gate: one for
 each of the 21 Key Discoveries of 2026-11-02 and 2026-11-03 (1 to 21), one
 for each of A1 to A7 (22 to 28), the gate round 1 measurement of A2 (29),
 Sam's scope change of 2026-11-07 (30), the source text for the version 1
@@ -1140,13 +1180,14 @@ fails on a change.
 
 Open, not resolved:
 
-- A1: the native Windows install has not run. Phase 1 Step 1 runs it on
-  qwent before anything else lands.
+- A1: verified. The native Windows install ran on qwent on 2026-11-07
+  (`nexus_rdr/242-research-35`, `bd show nexus-mdbds.3`).
 - A2: the wall-time overrun of one long C call is measured and unbounded
   (`nexus_rdr/242-research-29`: one pattern match ran 10.56 s in one
   instruction, two others did not return in 60 s and 20 s, the hook never
   fired). The in-process hook cannot hold wall time; the worker's kill timer
-  does, and it is not built. Phase 1 Step 2 builds it and its tests. The
+  does. It is built in `src/nexus/lua_runtime/supervisor.py` and tested by
+  `tests/lua_runtime/test_worker_process.py` (Phase 1 Step 2). The
   instruction and memory limits hold for Lua 5.4 by spike.
 - The worker facts of record 33, tested in Phase 1 Step 2 (nexus-mdbds.4):
   Linux `RLIMIT_AS` verified (on WSL2); the Windows job's memory limit and
@@ -1159,9 +1200,9 @@ Open, not resolved:
 A5, A6 and A7 no longer apply (`nexus_rdr/242-research-30`). They were
 premises of the hardware-key approval layer, and this RDR no longer builds
 it. Records 26 to 28 carry Sam's acknowledgement of 2026-11-07 (ask
-`rdr242-assumptions`); the Layer 2 census still lists them as assumed. A1
-and A2 (records 22 and 23) are assumed and not acknowledged, so the census
-lists them too.
+`rdr242-assumptions`); the Layer 2 census still lists them as assumed. At
+the gate A1 and A2 (records 22 and 23) were assumed and not acknowledged, so
+the census listed them too. A1 is verified since (record 35).
 
 #### API Verification
 
@@ -1171,14 +1212,16 @@ lists them too.
 | `load(src, name, "t", env)`, `string.dump`, `debug.sethook` count hook | Lua 5.4 bundled in `lupa` 2.8 | Spike |
 | `resource.setrlimit(RLIMIT_AS)` raises `ValueError`; `RLIMIT_CPU` ends a child with SIGXCPU | CPython 3.13, macOS | Spike (`nexus_rdr/242-research-32`) |
 | `subprocess` start with `-I`, an empty environment and `close_fds=True` | CPython 3.13, macOS | Spike (`nexus_rdr/242-research-32`) |
-| `RLIMIT_AS` on Linux; Job Object kill-on-close, time and memory limits | Linux; Win32 | Not verified (inferred, `nexus_rdr/242-research-33`) |
+| `RLIMIT_AS` on Linux; Job Object kill-on-close, time and memory limits | Linux; Win32 | Not verified at the gate (inferred, `nexus_rdr/242-research-33`); verified per platform in nexus-mdbds.4 (Linux `RLIMIT_AS` on WSL2, the Windows job's memory limit and kill-on-close) |
 | `db.resolve_title`, `db.list_entries`, `db.search` | nexus T2 store | Source Search |
 | `load_packaged_table` | `nexus.tables` | Source Search |
 
 ### Scope Verification
 
 The five gaps map to deliverables. Gap 1 to Technical Design 5, 7 and 8 and
-Phase 1. Gap 2 to items 9 and 10 and Phase 3. Gap 3 to items 11 and 12, the
+Phase 1. Gap 2 to items 9 and 10 and Phase 3, closed for the named read
+verbs only (memory, transcripts, git and tables); the dictionary-described
+tuple verbs the gap also names are not built. Gap 3 to items 11 and 12, the
 worker process and kill timer of item 6, and Phase 1 Steps 2 and 3. Gap 4
 to the end of item 10: a write verb is its own entry in the verb table,
 granted only when declared and covered by an approval, and version 1 ships
@@ -1190,7 +1233,8 @@ proof in scope is Phase 4: RDR-240's first procedure, a reviewed file in a
 library root, runs through `run_script`. It is in scope, not deferred.
 
 Out of scope as written: approval and everything Technical Design 1 lists,
-write verbs, tuple-space verbs (the aura stage of nexus-mdbds), and
+write verbs, tuple-space verbs (not built; a future consumer opens its own
+RDR, see Approach), and
 `coroutine`. The worker process of Alternative 2 is in scope
 (`nexus_rdr/242-research-29`).
 
@@ -1203,7 +1247,7 @@ write verbs, tuple-space verbs (the aura stage of nexus-mdbds), and
   check re-runs before every run, so a stricter checker refuses a script an
   older one passed. The bundled Lua 5.4 patch release is not recorded (A4).
 - **Build tool compatibility**: `lupa` installs from wheels with no
-  compiler on the platforms checked; native Windows is open (A1).
+  compiler on the platforms checked, native Windows included (A1, verified).
 - **Licensing**: `lupa` 2.8's package metadata says "MIT style" (read
   2026-11-07). The license of the bundled Lua was not read for this
   response.
@@ -1297,3 +1341,4 @@ scope change and the round 2 findings named.
 - 2026-11-08: Technical Design 10 amended to match reviewed code (nexus-qo7ie.31, the verb's reviews `nexus/review-nexus-qo7ie.31-fields-r2` and the wiring's `nexus/review-nexus-qo7ie.31-fields-wiring-r1`; standing grant 3): `transcripts.sessions` takes a fifth argument, `fields`, and `project` may be `repo`.
 - 2026-11-08: Technical Design 5, 6 and the Implementation Plan's Steps 1 and 2, Finalization Gate A4 and record 33, and Cross-Cutting Versioning amended to match reviewed code (nexus-mdbds.4 review; standing grant 3): lupa pinned to 2.8 exactly; the worker's OS limits travel as argv flags; the parent-to-worker verb-result cap is 20 MiB from the measured JSON-to-Lua ratio, with a protected Lua table build (gate r3 S3); each verb runs on a helper thread the run loop stops waiting on at the deadline (gate r3 S2); the 50 MB measurement times transport only and the fit question is the cap's pass line; record 33's facts tested per platform.
 - 2026-11-08: Open Question S5 resolved (Sam, ask baton/s5-repo-root, option a, "Off; nexus repo on"; standing grant 3, recorded after review of nexus-qo7ie.32 `nexus/critique-nexus-qo7ie.32-run-script-r2`): the repo root `.nexus/procedures` stays off by default (on only when `NX_PROCEDURES_REPO_ROOT` is exactly `1`), and the nexus repo turns it on in its project `.claude/settings.json` env. The cloned-repo residual in Technical Design 2 and the threat model stands for any repo that turns the root on.
+- 2026-11-16: Amended to match reviewed code before close (standing grant 3, close critique T2 `nexus/critique-d76add41d-nexus-mdbds.1-2026-11-16`): A1 marked verified on native Windows (`nexus_rdr/242-research-35`, nexus-mdbds.3); A2's kill timer marked built (`supervisor.py`, `test_worker_process.py`); the Problem Statement says the RDR closes Gap 5 for the shipped root and bounds it for the repo root (gate r3 S5); Technical Design 2 and the threat model state that the repo root is off by default, on only when `NX_PROCEDURES_REPO_ROOT` is exactly `1`, and on in the nexus repo's project `.claude/settings.json`; Technical Design 2 records that `tests/lua_runtime/test_runtime_origin.py` also pins every caller of `supervise` (gate r3 S1); Phase 3 Step 3 no longer says it replaces a test-only entry point (gate r3 S1); RDR-240 is listed as accepted. Confirmation critique round 2 (`nexus/critique-d1c26b643-nexus-mdbds.1-2026-11-16-r2`): the Finalization Gate opens with a note that it is the gate-time snapshot of 2026-11-07 and that A1, A2's kill timer and the worker OS limits were verified later (`nexus_rdr/242-research-35`, nexus-mdbds.3 and nexus-mdbds.4); the research record count is 37 (records 35 to 37 added); the A1 census sentence, the API Verification row for the OS limits, the native Windows risk row and Cross-Cutting Build tool compatibility carry the later status; the tuple verbs the dictionary describes are stated as not built, the aura stage (RDR-249) having shipped none and no consumer needing one, in Relationship to Prior RDRs, the Approach and Scope Verification, and Scope Verification narrows Gap 2's closure to the named read verbs.
