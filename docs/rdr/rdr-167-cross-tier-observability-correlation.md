@@ -2,12 +2,12 @@
 title: "Request Correlation Across Tiers: X-Correlation-ID Propagation and an SLF4J MDC Bridge for the Service Stack"
 id: RDR-167
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-06-25
-accepted_date:
+accepted_date: 2026-11-16
 related_issues: [nexus-7y0ab]
 related: [RDR-030, RDR-087, RDR-152, RDR-155, RDR-161, RDR-166, RDR-168, RDR-222]
 ---
