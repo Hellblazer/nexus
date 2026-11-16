@@ -4,7 +4,9 @@
 ``src/nexus/tables/walk-sites.toml`` lists every function in ``src/nexus`` that
 calls ``all_documents``, with how many calls it holds. This test parses every
 ``src/nexus/**/*.py`` with ``ast`` and holds the source and the table to an
-exact match, so the count of whole-catalog walks can fall and cannot rise: a
+exact match, so the count of whole-catalog walks cannot rise without an edit to
+the table in the same change (the table is the review point; the lint runs after
+a push to develop, so it records the rise rather than refusing it): a
 call in an unlisted function, a listed function with no call, a ``calls`` value
 that differs from the scan (up or down), and a ``class`` outside the closed set
 each fail.
@@ -19,15 +21,24 @@ names (``ManifestSectionLabelsRung._scan``; a nested function is
 
 Blind spots, stated (RDR-241 section "The ratchet"):
 
-- A call through an alias or ``getattr`` (``f = cat.all_documents; f()``,
-  ``getattr(cat, "all_documents")()``) is invisible to an AST scan.
-- A new caller of a helper that wraps a walk is invisible too. The four wrappers
+- Only a call whose callee is ``all_documents`` is counted. A call through an
+  alias or ``getattr`` (``f = cat.all_documents; f()``,
+  ``getattr(cat, "all_documents")()``, ``from m import all_documents as ad``) and
+  a bound method passed rather than called (``asyncio.to_thread(cat.all_documents,
+  ...)``, ``functools.partial``, an executor ``submit``) are invisible.
+- The scan counts calls, not their arguments: an existing call edited from a page
+  (``limit=n``) to a whole read (no limit, or ``limit=0``) keeps its count, so the
+  BOUNDED class is a label, not a check.
+- A new caller of a helper that wraps a walk is not seen. The four wrappers
   (``enumerate_all_documents``, ``_all_entries``, ``_entries_of_type``,
-  ``reference_only_candidates``) are listed as ordinary sites and name their
-  callers in their ``reason``.
-- Whole-tenant shapes that are not ``all_documents`` calls (``find_all``'s
-  grow-until-short loop, ``link_audit``'s page loop, ``bulk_unlink``'s dry-run
-  count) are outside this scanner.
+  ``reference_only_candidates``) are listed as sites and their reasons name
+  today's callers, but nothing checks those names: a new caller rests on review.
+  The same holds for any other listed helper a new function calls.
+- Whole-tenant shapes that are not ``all_documents`` calls are outside this
+  scanner: ``find_all``'s grow-until-short loop, ``link_audit``'s page loop,
+  ``bulk_unlink``'s dry-run count, and the read-then-slice of
+  ``by_content_type``, ``by_corpus`` and an unscoped ``by_owner`` in
+  ``catalog_list`` and ``catalog_search``.
 
 A file that fails to parse is a failure, never a skip, and a scan that examines
 no file or finds no call fails (the nexus-moht0 rule).

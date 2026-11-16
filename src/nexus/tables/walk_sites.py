@@ -6,8 +6,8 @@ One row per function in ``src/nexus`` that calls ``all_documents``, keyed
 call exists, how many calls the function holds, one sentence on what it does
 with the rows, and, for a site that is going away, the bead that removes or
 lowers it. ``tests/test_walk_site_ratchet.py`` holds the source and this table
-to an exact match, so the number of whole-catalog walks can fall and cannot
-rise. This module loads the table through the house loader and closes the
+to an exact match, so the number of whole-catalog walks cannot rise without an
+edit to this table; the test's docstring states what the scan does not see. This module loads the table through the house loader and closes the
 class vocabulary.
 """
 from __future__ import annotations

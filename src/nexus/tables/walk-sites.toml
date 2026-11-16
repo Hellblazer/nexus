@@ -169,7 +169,7 @@ emit = { class = "AGGREGATE", calls = 1, reason = "Wants the non-file:// rows; t
 [[row]]
 id = "mcp/catalog.py::catalog_list"
 match = { site = "mcp/catalog.py::catalog_list" }
-emit = { class = "BOUNDED", calls = 2, reason = "Reads one page of limit + 1 documents; stays." }
+emit = { class = "BOUNDED", calls = 2, reason = "Its all_documents calls read one page of limit + 1 documents and stay; its owner and content_type branches read the whole owner or type and slice, which this table does not count." }
 
 [[row]]
 id = "mcp/catalog.py::catalog_search"
