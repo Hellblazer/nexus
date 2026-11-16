@@ -328,7 +328,7 @@ def test_concurrency_workers_see_the_opt_in_and_it_is_restored(monkeypatch):
 def test_lexical_searches_see_the_opt_in_and_it_is_restored(monkeypatch):
     engine, cols, make_client = _world(monkeypatch, route=True)
     engine.serve_lexical = True
-    monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "")
+    monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "0")
     monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV, raising=False)
     seen: list[tuple[bool, str | None]] = []
     drv.measure_lexical(
@@ -349,8 +349,8 @@ def test_the_lexical_mode_times_the_field_against_the_hybrid_fallback(monkeypatc
     paths are recorded per round, with each arm's lexical_error_kind."""
     engine, cols, make_client = _world(monkeypatch, route=True)
     engine.serve_lexical = True
-    # the mode opts itself in (nexus-n51v1); setenv, not delenv, so the "1" it writes is undone
-    monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "")
+    # an inherited off ("0") is overridden by the mode (nexus-n51v1, nexus-bbtc2); setenv, not delenv, so the "1" it writes is undone
+    monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, "0")
     engine.lexical_errors = {cols[0]: ("statement_timeout", "the statement bound")}
     out: list[str] = []
     res = drv.measure_lexical(

@@ -2117,9 +2117,12 @@ def search_cross_corpus(
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
                 # nexus-xd2rc: the lexical arms can ride the same request; absent keeps it byte-identical.
-                # nexus-n51v1: only on opt-in. One lexical arm per collection cost the engine 0.3 to 0.65 s
-                # each, so the field made a --lexical search 1.74x slower than the batched /hybrid-search
-                # leg the code below runs when the engine served no lexical.
+                # nexus-bbtc2: sent by default, NX_SEARCH_ROUTE_LEXICAL=0 turns it off. Before the engine's
+                # shared text-gate probe (v0.1.192) each collection's lexical arm probed on its own, 0.3 to
+                # 0.65 s apiece, and the field made a --lexical search 1.74x slower than the batched
+                # /hybrid-search leg the code below runs when the engine served no lexical (nexus-n51v1).
+                # With the shared probe and two workers the route won two of three measured queries at
+                # v0.1.194 and tied the third.
                 **({"lexical": True} if lexical and route_lexical_enabled() else {}),
                 # Only when needed: a request without the field is byte-identical to
                 # what an engine that predates it expects.

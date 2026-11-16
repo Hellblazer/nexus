@@ -3498,8 +3498,10 @@ def route_lexical_enabled() -> bool:
     engine since runs the arms' text-gate probe once for the whole request (v0.1.192, with
     ``NX_SEARCH_ROUTE_PROBE_WORKERS`` defaulting to 2 workers), and at v0.1.194 the route won
     the measured queries (6.08 s against 7.36 s, 4.37 s against 5.41 s, a tie on the third). The
-    engine pin (``REQUIRED_ENGINE_VERSION``) is past v0.1.192 in every mode, local and cloud, so
-    no version gate sits here. Read on every search.
+    engine pin (``REQUIRED_ENGINE_VERSION``) is past v0.1.192, so no version gate sits here: the
+    pin is a hard gate for managed engines (``managed_endpoint.py`` refuses one below it) and a
+    converged one for local engines (a local engine below the pin can run until convergence; the
+    cost there is performance only, the per-arm probes of the old default). Read on every search.
     """
     return os.environ.get(ROUTE_LEXICAL_ENV, "").strip().lower() not in {"0", "false", "off", "no"}
 
