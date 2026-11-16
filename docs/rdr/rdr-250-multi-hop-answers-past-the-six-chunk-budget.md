@@ -255,12 +255,15 @@ exactly as today.
 
 **The precision filter.** A key found only in the pool is a candidate. It is
 kept only when the coverage assessment cites its chunk as support. The pool
-chunks that carry a candidate key are packed with the existing `_pack` and sent
-through `BoundaryView.check`, the same assessment call the boundary already
-makes, against the question's facets. A candidate key is kept when its chunk's
-`item_id` appears in the `evidence_ids` of a facet the reply marks `covered`.
-Keys found in the anchors are not filtered, so the measured budget-20 behaviour
-is the floor. The filter adds one assessment call per pack. A distance cutoff
+chunks that carry a candidate key go through `CoverageBoundary._assess`, the
+boundary's own assessment pass (its instruction, facet groups, `_pack` packing,
+reply parsing and allowance checks), against the question's facets. A candidate
+key is kept when a `supports` record cites its chunk's `item_id`. A chunk cited
+only as contradicting does not keep its key, even when another item covers the
+same facet (a covered facet's `evidence_ids` holds contradicting ids too, so it
+is not the test). Only the cited chunk is joined; another pool chunk carrying
+the same kept key is not. Keys found in the anchors are not filtered, so the measured budget-20 behaviour
+is the floor. The filter adds one assessment pass, one call per pack. A distance cutoff
 was rejected: it scored F1 at most 0.825 in simulation, and citation alone caps
 precision near 0.83 (250-research-5). Whether support-citation reaches 0.95 is
 unmeasured, so the MVV measures it.
@@ -272,14 +275,21 @@ a pool key uses the pool chunk's text as its anchor text, so it enters the
 generator the way an anchor key's joined item does today. The generator's own
 input of 20 chunks does not change.
 
-**Failure is closed.** If the fetch fails, the filter call fails or returns
-malformed records, or the remaining deadline or USD allowance is below one
-assessment call's mean cost (`assessment_cost_estimate`), no candidate key is
-kept and the branch runs on the anchors alone, as today. The reason is named in
-the report.
+**Failure is closed.** No candidate key is kept, and the branch runs on the
+anchors alone as today, when the fetch fails; when the assessment raises, every
+call replies unusably, or any call fails (a partial verdict keeps nothing); when
+the USD allowance is spent or below one call's mean cost
+(`assessment_cost_estimate`, unknown proceeds); when less than the boundary's
+minimum call time is left; or when the filter outlives its share of the repair's
+retrieval allowance (`FILTER_TIME_SHARE`, half the time left, at least 1 s, so
+it cannot leave `resolve` short). Every candidate is then named in
+`pool_keys_rejected`, and `pool_reason` names the cause.
 
 **Switch.** `NX_ANSWER_POOL_KEY_SCAN`, default off. Off, the code path is not
-entered and the report carries no pool fields. Turning it on by default is a
+entered and the report carries no pool fields. On, the scan runs only where the
+resolution branch runs: `NX_ANSWER_RESOLUTION_REPAIR` on, a facet left
+unsupported, and an `entity.collections` pattern for the scope. A pool key can
+resolve when the anchors name no key. Turning it on by default is a
 later decision, after the MVV.
 
 **Report.** The resolution fields gain `pool_scanned` (pool chunks fetched),
