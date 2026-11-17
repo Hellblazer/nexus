@@ -161,3 +161,107 @@ def test_progress_counts_only_the_moves_own_boot_work_entry():
     assert m.move_in_boot_work([{"name": "data-move:mvv-chunks-stamp", "done": 3, "total": 87}], m.MOVE_LABEL)
     assert not m.move_in_boot_work([{"name": "pci:knowledge__1-1__bge__v1"}], m.MOVE_LABEL)
     assert not m.move_in_boot_work(None, m.MOVE_LABEL)
+
+
+class TestPgLogReading:
+    """S3 (critique 2026-11-17): the daemon's PostgreSQL logs to <pgdata>/pg.log (pg_provision: ``pg_ctl -l pg.log``),
+    not to <pgdata>/log/. A read of the wrong place found 0 lines and called it a pass."""
+
+    def test_the_daemons_pg_log_is_found(self, tmp_path):
+        (tmp_path / "pg.log").write_text("x\n")
+        assert [p.name for p in mvv.pg_log_files(tmp_path)] == ["pg.log"]
+
+    def test_a_collector_directory_is_read_too(self, tmp_path):
+        (tmp_path / "pg.log").write_text("x\n")
+        (tmp_path / "log").mkdir()
+        (tmp_path / "log" / "postgresql-1.log").write_text("y\n")
+        assert sorted(p.name for p in mvv.pg_log_files(tmp_path)) == ["pg.log", "postgresql-1.log"]
+
+    def test_no_log_at_all_is_an_empty_list_not_a_pass(self, tmp_path):
+        assert mvv.pg_log_files(tmp_path) == []
+
+    def test_lines_with_reads_only_what_was_written_after_the_start_offsets(self, tmp_path):
+        log = tmp_path / "pg.log"
+        log.write_text("old SECRET line\n")
+        start = mvv.log_sizes([log])
+        with log.open("a") as f:
+            f.write("ERROR: invalid input syntax for type integer: \"SECRET\"\nunrelated\n")
+        assert mvv.lines_with([log], "SECRET", start) == ['ERROR: invalid input syntax for type integer: "SECRET"']
+        assert len(mvv.lines_with([log], "SECRET", {})) == 2
+
+
+class TestMaskingVerdict:
+    def _v(self, **kw):
+        base = dict(pg_log_lines=2, engine_log_lines=0, failure_column_hits=0, masking_installed=True, masked_line_seen=True)
+        base.update(kw)
+        return mvv.masking_verdict(**base)
+
+    def test_the_password_in_the_pg_log_and_nowhere_in_the_engines_output_passes(self):
+        v = self._v()
+        assert v["ok"] is True and v["checks"]["control_pg_log_carries_the_password"] is True
+
+    def test_no_password_in_the_pg_log_means_the_control_did_not_fire(self):
+        v = self._v(pg_log_lines=0)
+        assert v["ok"] is False and "control" in v["why"]
+
+    def test_a_password_in_an_engine_log_line_fails(self):
+        v = self._v(engine_log_lines=1)
+        assert v["ok"] is False and v["checks"]["no_engine_log_line_carries_the_password"] is False
+
+    def test_a_password_in_a_failure_column_fails(self):
+        v = self._v(failure_column_hits=1)
+        assert v["ok"] is False and v["checks"]["no_failure_column_carries_the_password"] is False
+
+    def test_masking_not_installed_or_no_masked_line_fails(self):
+        assert self._v(masking_installed=False)["ok"] is False
+        assert self._v(masked_line_seen=False)["ok"] is False
+
+
+class TestPostmasterPid:
+    def test_the_first_line_is_the_pid(self):
+        assert mvv.postmaster_pid("12345\n/path/data\n1700000000\n5432\n") == 12345
+
+    def test_an_unreadable_file_is_refused(self):
+        with pytest.raises(mvv.MvvError):
+            mvv.postmaster_pid("")
+        with pytest.raises(mvv.MvvError):
+            mvv.postmaster_pid("not-a-pid\n")
+
+
+class TestCrashVerdict:
+    def _v(self, **kw):
+        base = dict(in_flight_at_kill=1, done_before_kill=35, done_after_recovery=35, moved_after_recovery=35000,
+                    chunk_size=1000, total_chunks=87, rows_total=86040, rows_once=86040, rows_twice=0, rows_missing=0,
+                    completed=True, recovery_logged=True)
+        base.update(kw)
+        return mvv.crash_verdict(**base)
+
+    def test_an_aborted_chunk_rolled_back_and_the_move_finished(self):
+        v = self._v()
+        assert v["ok"] is True, v["why"]
+
+    def test_no_chunk_in_flight_at_the_kill_proves_nothing(self):
+        v = self._v(in_flight_at_kill=0)
+        assert v["ok"] is False and "in flight" in v["why"]
+
+    def test_rows_beyond_the_committed_chunks_mean_a_partial_chunk_survived(self):
+        v = self._v(moved_after_recovery=35500)
+        assert v["ok"] is False and "committed" in v["why"]
+
+    def test_fewer_rows_than_committed_chunks_fails_too(self):
+        assert self._v(moved_after_recovery=34000)["ok"] is False
+
+    def test_chunks_that_went_backwards_fail(self):
+        assert self._v(done_after_recovery=34, moved_after_recovery=34000)["ok"] is False
+
+    def test_the_last_chunk_is_partial_and_the_rule_caps_at_the_total(self):
+        v = self._v(done_before_kill=86, done_after_recovery=87, moved_after_recovery=86040)
+        assert v["ok"] is True, v["why"]
+
+    def test_a_crash_that_left_no_recovery_line_in_the_pg_log_fails(self):
+        assert self._v(recovery_logged=False)["ok"] is False
+
+    def test_a_row_twice_or_missing_or_an_unfinished_move_fails(self):
+        assert self._v(rows_twice=1, rows_once=86039)["ok"] is False
+        assert self._v(rows_missing=1, rows_once=86039)["ok"] is False
+        assert self._v(completed=False)["ok"] is False

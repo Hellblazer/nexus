@@ -27,8 +27,13 @@ Subcommands:
                      went on from the last committed chunk with every row moved exactly once.
     ``load``         a steady search load, with the move paused and then running, at one ``--sleep-ms``.
     ``no-pgbg``      boot on a bundle without pg_background.
-    ``masking``      after the move, register a move that errors with the admin password in its message; the engine
-                     log must carry ``<redacted>`` and never the password.
+    ``crash-resume`` stop PostgreSQL itself with ``pg_ctl stop -m immediate`` while a chunk's UPDATE is in flight (the
+                     engine and supervisor are killed right after), recover it, and check the aborted chunk rolled
+                     back (moved rows = committed chunks x chunk size), then let the move finish: every row once.
+    ``masking``      after the move, register a move that errors with the admin password in its message. Positive
+                     control first: PostgreSQL's own log (``<pgdata>/pg.log``) must carry the password; then the
+                     engine log must carry ``<redacted>`` and never the password, and no failure column in
+                     nexus.data_moves or the dml_utils run tables may carry it.
 
 Every scenario prints one JSON object on stdout (and to ``--json``). Exit 0 when its checks pass, 1 when one fails,
 2 when the run could not measure.
@@ -143,6 +148,88 @@ def resume_verdict(*, done_at_kill: int, done_after_restart_first_seen: int, tot
     if not completed:
         why.append("the move did not complete")
     return {"ok": not why, "why": "; ".join(why) or "resumed from the last committed chunk, every row moved once"}
+
+
+def pg_log_files(pgdata: Path) -> list[Path]:
+    """The PostgreSQL server log files of an install. The daemon starts PG with ``pg_ctl -l <pgdata>/pg.log``
+    (``nexus.db.pg_provision``), so the log is ``pg.log``, not a ``log/`` directory; a collector directory is read
+    too when a cluster has one."""
+    out = [pgdata / "pg.log"] if (pgdata / "pg.log").is_file() else []
+    for d in ("log", "pg_log"):
+        if (pgdata / d).is_dir():
+            out += sorted(p for p in (pgdata / d).iterdir() if p.is_file())
+    return out
+
+
+def log_sizes(paths: list[Path]) -> dict[Path, int]:
+    return {p: p.stat().st_size for p in paths if p.exists()}
+
+
+def lines_with(paths: list[Path], needle: str, start: dict[Path, int]) -> list[str]:
+    """Lines containing ``needle`` that each file gained after its ``start`` offset (0 for a file not in ``start``)."""
+    out: list[str] = []
+    for p in paths:
+        try:
+            with p.open("rb") as f:
+                f.seek(start.get(p, 0))
+                out += [ln.rstrip("\n") for raw in f if needle in (ln := raw.decode("utf-8", "replace"))]
+        except OSError:
+            continue
+    return out
+
+
+def masking_verdict(*, pg_log_lines: int, engine_log_lines: int, failure_column_hits: int, masking_installed: bool,
+                    masked_line_seen: bool) -> dict:
+    """The masking probe. ``pg_log_lines >= 1`` is the positive control: PostgreSQL logged the password, so an engine
+    log without it shows the engine's output was masked, and a probe that read the wrong log (0 lines) is not a pass."""
+    checks = {"control_pg_log_carries_the_password": pg_log_lines >= 1,
+              "masking_installed_ge_1": masking_installed,
+              "a_masked_line_with_redacted": masked_line_seen,
+              "no_engine_log_line_carries_the_password": engine_log_lines == 0,
+              "no_failure_column_carries_the_password": failure_column_hits == 0}
+    why = []
+    if not checks["control_pg_log_carries_the_password"]:
+        why.append("the control did not fire: PostgreSQL's log holds no line with the password, so the probe read "
+                   "the wrong place or PostgreSQL did not log it, and 0 engine lines proves nothing")
+    why += [k for k, v in checks.items() if not v and k != "control_pg_log_carries_the_password"]
+    return {"ok": not why, "checks": checks, "why": "; ".join(why) or "the control fired and the engine's output was clean"}
+
+
+def postmaster_pid(text: str) -> int:
+    """The postmaster's pid, the first line of ``postmaster.pid``."""
+    first = text.splitlines()[0].strip() if text.strip() else ""
+    if not first.isdigit():
+        raise MvvError(f"postmaster.pid does not start with a pid: {text[:60]!r}")
+    return int(first)
+
+
+def crash_verdict(*, in_flight_at_kill: int, done_before_kill: int, done_after_recovery: int, moved_after_recovery: int,
+                  chunk_size: int, total_chunks: int, rows_total: int, rows_once: int, rows_twice: int, rows_missing: int,
+                  completed: bool, recovery_logged: bool) -> dict:
+    """Did a PostgreSQL crash in the middle of a chunk roll that chunk back, and did the move still finish once per row.
+    ``moved_after_recovery`` is read right after crash recovery, before the engine runs again: it must equal the
+    committed chunks x chunk_size (capped by the row count, the last chunk being partial)."""
+    why: list[str] = []
+    if in_flight_at_kill <= 0:
+        why.append("no chunk UPDATE was in flight at the kill, so a rollback was not exercised")
+    if not recovery_logged:
+        why.append("PostgreSQL's log shows no crash recovery after the restart")
+    if done_after_recovery < done_before_kill:
+        why.append(f"committed chunks went backwards ({done_before_kill} before the kill, {done_after_recovery} after recovery)")
+    expected = min(done_after_recovery * chunk_size, rows_total)
+    if moved_after_recovery != expected:
+        why.append(f"{moved_after_recovery} rows moved after recovery but {done_after_recovery} committed chunks x "
+                   f"{chunk_size} = {expected}: the aborted chunk did not roll back cleanly")
+    if rows_twice:
+        why.append(f"{rows_twice} row(s) moved twice")
+    if rows_missing:
+        why.append(f"{rows_missing} row(s) never moved")
+    if rows_once + rows_twice + rows_missing != rows_total:
+        why.append("the row counts do not add up")
+    if not completed:
+        why.append("the move did not complete")
+    return {"ok": not why, "why": "; ".join(why) or
+            "the aborted chunk rolled back, the move finished, every row moved once"}
 
 
 # ── the install ──────────────────────────────────────────────────────────────
@@ -438,6 +525,92 @@ def scenario_kill_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool
     return out, verdict["ok"]
 
 
+def in_flight_snapshot(eng: Engine) -> dict:
+    """One statement: the move's committed chunks and every active chunk UPDATE / run_migration_chunks CALL, so the
+    two numbers come from one snapshot."""
+    r = sql(eng, "select d.n, a.pid, a.backend_type, a.state, regexp_replace(left(a.query, 90), '\\s+', ' ', 'g'), a.age_s, "
+                 "(select count(*) from pg_stat_activity where state = 'active' and pid <> pg_backend_pid() "
+                 "and query ilike 'call %run_migration_chunks%') "
+                 "from (select coalesce(sum(total_chunks_completed), 0) as n from dml_utils_data.migration_run "
+                 f"where label = '{MOVE_LABEL}' or starts_with(label, '{MOVE_LABEL}/')) d "
+                 "left join (select pid, backend_type, state, query, extract(epoch from now() - xact_start)::int as age_s "
+                 "from pg_stat_activity where state = 'active' and pid <> pg_backend_pid() "
+                 "and query ilike 'update %' and query ilike '%mvv_n%') a on true")
+    # one row per active UPDATE (or one with null pid when none)
+    updates = [{"pid": x[1], "backend_type": x[2], "state": x[3], "query": x[4], "xact_age_s": x[5]} for x in r if x[1]]
+    return {"done_chunks": int(r[0][0]), "updates_in_flight": updates, "calls_in_flight": int(r[0][6])}
+
+
+def scenario_crash_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
+    """PostgreSQL itself is stopped with ``pg_ctl stop -m immediate`` (no checkpoint, no clean shutdown: the next
+    start is crash recovery) while a chunk's UPDATE is running. The engine and supervisor are killed straight
+    after, so nothing else touches the cluster. PostgreSQL is started alone and read before the engine runs again:
+    the moved rows must equal the committed chunks x chunk size, the aborted chunk having rolled back."""
+    inst = eng.inst
+    out: dict = {"marks_first": eng.start("first")}
+    c = inst.creds
+    pgdata = inst.pgdata
+    total_rows = row_counts(eng)["rows_total"]
+    # the postmaster the stop will signal: the pid and its command line, checked now, never found by a pattern
+    pid_file = pgdata / "postmaster.pid"
+    pm = postmaster_pid(pid_file.read_text(encoding="utf-8"))
+    try:
+        cmd = Path(f"/proc/{pm}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError as exc:
+        raise MvvError(f"cannot read the postmaster's command line (pid {pm}): {exc}") from exc
+    if str(pgdata) not in cmd:
+        raise MvvError(f"pid {pm} does not name {pgdata}; not stopping it")
+    out["postmaster"] = {"pid": pm, "cmdline": cmd[:200]}
+    logs0 = pg_log_files(pgdata)
+    pg_start = log_sizes(logs0)
+    deadline = time.monotonic() + a.move_timeout
+    snap: dict
+    while True:
+        if (move_row(eng) or {}).get("completed") or time.monotonic() > deadline:
+            raise MvvError("the move finished or stalled before a chunk was caught in flight")
+        snap = in_flight_snapshot(eng)
+        if snap["done_chunks"] * 1000 >= total_rows * a.kill_at and snap["updates_in_flight"]:
+            break
+        time.sleep(0.1)
+    t_kill = time.monotonic()
+    inst.pg_ctl("stop", "-m", "immediate", "-w")
+    engine, supervisor = eng.kill()
+    out["killed"] = {"snapshot": snap, "pg_stop": "immediate", "engine": engine, "supervisor": supervisor,
+                     "seconds_from_snapshot_to_both_dead": round(time.monotonic() - t_kill, 2)}
+    time.sleep(a.settle_s)
+    if inst.sql("select 1") is not None:
+        raise MvvError("PostgreSQL accepts connections after an immediate stop (something restarted it); the crash "
+                       "recovery below would not be the one this scenario forced")
+    # Crash recovery with only PostgreSQL up: read the cluster before the engine can move anything.
+    t_rec = time.monotonic()
+    subprocess.run([str(inst.bundle / "bin" / "pg_ctl"), "-D", str(pgdata), "start", "-w", "-t", "900", "-l",
+                    str(pgdata / "pg.log"), "-o", f"-p {c['PG_PORT']}"], env=inst._bin_env(), check=True,  # noqa: SLF001
+                   capture_output=True, text=True, timeout=1000)
+    recovery_s = round(time.monotonic() - t_rec, 1)
+    prog = run_progress(eng)
+    moved = moved_rows(eng)
+    rec_lines = lines_with(pg_log_files(pgdata), "automatic recovery in progress", pg_start)
+    redo = lines_with(pg_log_files(pgdata), "redo", pg_start)
+    out["recovered"] = {"seconds": recovery_s, **prog, "moved_rows": moved, "move": move_row(eng),
+                        "moved_rows_mod_chunk_size": moved % max(1, (move_row(eng) or {}).get("chunk_size", 1000)),
+                        "recovery_log_lines": [ln[:200] for ln in rec_lines[:3]], "redo_log_lines": [ln[:200] for ln in redo[:4]]}
+    # the second boot, PostgreSQL already running; the registry and the run tables hold the state
+    eng.proc = None
+    out["marks_second"] = eng.start("second")
+    out["first_seen_after_restart"] = run_progress(eng)
+    row = wait_move(eng, a.move_timeout)
+    final = run_progress(eng)
+    counts = row_counts(eng)
+    out |= {"move": row, "final_progress": final, "row_counts": counts, "events": collect_events(eng)}
+    verdict = crash_verdict(in_flight_at_kill=len(snap["updates_in_flight"]), done_before_kill=snap["done_chunks"],
+                            done_after_recovery=prog["done_chunks"], moved_after_recovery=moved, chunk_size=row["chunk_size"],
+                            total_chunks=final["total_chunks"] or 1, rows_total=counts["rows_total"],
+                            rows_once=counts["rows_once"], rows_twice=counts["rows_twice"], rows_missing=counts["rows_missing"],
+                            completed=row["completed"], recovery_logged=bool(rec_lines))
+    out["verdict"] = verdict
+    return out, verdict["ok"]
+
+
 def scenario_no_pgbg(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     """A bundle that cannot create pg_background: its control and script files are moved aside. That is a PG
     without the extension, the cloud's posture under Sam's 8.4 ruling."""
@@ -473,10 +646,32 @@ def scenario_no_pgbg(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     return out, all(out["checks"].values())
 
 
+_FAILURE_COLUMN = re.compile(r"fail|error|message|sqlstate|detail|reason", re.I)
+
+
+def secret_column_hits(eng: Engine, secret: str) -> dict[str, int]:
+    """Rows carrying ``secret`` in each text-like column of nexus.data_moves and every dml_utils_data table, keyed
+    ``schema.table.column``. Only columns holding something (a hit) are listed."""
+    lit = secret.replace("'", "''")
+    cols = sql(eng, "select table_schema, table_name, column_name from information_schema.columns "
+                    "where (table_schema = 'dml_utils_data' or (table_schema = 'nexus' and table_name = 'data_moves')) "
+                    "and data_type in ('text', 'character varying', 'json', 'jsonb') order by 1, 2, 3")
+    hits: dict[str, int] = {}
+    for schema, table, col in cols:
+        n = int(sql(eng, f'select count(*) from "{schema}"."{table}" where position(\'{lit}\' in "{col}"::text) > 0')[0][0])
+        if n:
+            hits[f"{schema}.{table}.{col}"] = n
+    return hits
+
+
 def scenario_masking(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     eng.start("masking")
     row = wait_move(eng, a.move_timeout)
     pw = eng.inst.creds["NX_DB_ADMIN_PASS"]
+    pg_logs = pg_log_files(eng.inst.pgdata)
+    if not pg_logs:
+        raise MvvError(f"no PostgreSQL server log under {eng.inst.pgdata}: the positive control cannot be read")
+    pg_start = log_sizes(pg_logs)
     # A move whose chunk error carries the admin password: PostgreSQL echoes the literal it cannot cast.
     sql(eng, "insert into nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, "
              "statement_timeout_ms, verification, changeset_id) values ('mvv-poison', "
@@ -484,28 +679,31 @@ def scenario_masking(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
              "60000, 'SELECT 1 FROM nexus.chunks t WHERE false AND (t.tenant_id = $1 OR $1 IS NULL)', 'mvv-poison')")
     deadline = time.monotonic() + 180
     carried: list[str] = []
-    while time.monotonic() < deadline and not carried:
+    recorded = False
+    while time.monotonic() < deadline and not (carried and recorded):
         time.sleep(3)
         carried = [ln for ln in eng.events("<redacted>") if "mvv-poison" in ln or "invalid input syntax" in ln]
+        recorded = bool(sql(eng, "select 1 from nexus.data_moves where label = 'mvv-poison' and failed_at is not null"))
     raw = eng.events(pw)
-    pg_lines = []
-    for p in sorted((eng.inst.pgdata / "log").glob("*")) if (eng.inst.pgdata / "log").is_dir() else []:
-        try:
-            pg_lines += [ln for ln in p.read_text(errors="replace").splitlines() if pw in ln]
-        except OSError:
-            pass
+    pg_lines = lines_with(pg_logs, pw, pg_start)
+    # the password is in the redacted text's place everywhere the engine wrote: scan what it stored, too
+    column_hits = secret_column_hits(eng, pw)
+    failure_hits = sum(n for k, n in column_hits.items() if _FAILURE_COLUMN.search(k.rsplit(".", 1)[-1]))
     installed = eng.events("event=log_masking_installed")
     masking = [int(m.group(1)) for ln in installed if (m := re.search(r"masking=(\d+)", ln))]
+    verdict = masking_verdict(pg_log_lines=len(pg_lines), engine_log_lines=len(raw), failure_column_hits=failure_hits,
+                              masking_installed=bool(masking) and max(masking) >= 1, masked_line_seen=bool(carried))
     out = {"first_move": row, "install_lines": installed[:2], "masked_lines": [ln[:300] for ln in carried[:3]],
-           "engine_log_lines_with_the_password": len(raw), "pg_server_log_lines_with_the_password": len(pg_lines),
-           "checks": {"masking_installed_ge_1": bool(masking) and max(masking) >= 1,
-                      "a_masked_line_with_redacted": bool(carried),
-                      "no_engine_log_line_carries_the_password": not raw}}
-    # the line existed (PostgreSQL logged the raw text) or the proof says nothing about the encoder
-    out["note"] = ("the PostgreSQL server log carries the password in those lines" if pg_lines else
-                   "the PostgreSQL server log does not hold the password either (log_min_error_statement), so the "
-                   "masked line shows the engine wrote <redacted> where the driver's message held the literal")
-    return out, all(out["checks"].values())
+           "failure_recorded_in_data_moves": recorded,
+           "pg_log_files_read": [str(p) for p in pg_logs],
+           "pg_log_lines_with_the_password": len(pg_lines),
+           "pg_log_sample": [ln.replace(pw, "<PASSWORD>")[:300] for ln in pg_lines[:3]],
+           "engine_log_lines_with_the_password": len(raw),
+           "stored_columns_with_the_password": column_hits, "failure_column_hits": failure_hits,
+           "checks": verdict["checks"], "verdict": verdict,
+           "note": "nexus.data_moves.template holds the password because the probe's own INSERT put it there; it is the "
+                   "input, not an output of the engine"}
+    return out, verdict["ok"]
 
 
 # ── the load ─────────────────────────────────────────────────────────────────
@@ -647,7 +845,8 @@ def scenario_load(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     return out, ok
 
 
-SCENARIOS = {"upgrade": scenario_upgrade, "kill-resume": scenario_kill_resume, "load": scenario_load,
+SCENARIOS = {"upgrade": scenario_upgrade, "kill-resume": scenario_kill_resume, "crash-resume": scenario_crash_resume,
+             "load": scenario_load,
              "no-pgbg": scenario_no_pgbg, "masking": scenario_masking}
 
 
@@ -663,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--orig", type=Path, required=True)
     sc.add_argument("--jar", type=Path, required=True)
     sc.add_argument("--sleep-ms", type=int, default=None, help="NX_DATA_MOVE_SLEEP_MS for the engine (default: the registered 0)")
-    sc.add_argument("--kill-at", type=float, default=0.4, help="kill-resume: fraction of rows moved at the kill")
+    sc.add_argument("--kill-at", type=float, default=0.4, help="kill-resume, crash-resume: fraction of rows moved at the kill")
     sc.add_argument("--settle-s", type=float, default=5.0)
     sc.add_argument("--move-timeout", type=float, default=1800.0)
     sc.add_argument("--rate", type=float, default=20.0, help="load: requests a second")
