@@ -24,10 +24,14 @@ from __future__ import annotations
 import re as _re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from nexus.catalog.tumbler import Tumbler
+
+if TYPE_CHECKING:
+    from nexus.catalog.catalog_protocol import CatalogReader
 
 # Default file extensions the remediator considers candidates. Mirrors the
 # set of types the catalog tracks: PDFs (papers / docs__), markdown (RDR /
@@ -45,7 +49,7 @@ _REMEDIATE_DEFAULT_EXTENSIONS: frozenset[str] = frozenset({
 _RDR_PREFIX_RE = _re.compile(r"^(rdr-\d{3,}-)")
 
 
-def _collection_entries(cat: object, collection: str) -> list:
+def _collection_entries(cat: CatalogReader, collection: str) -> list:
     """The live documents whose ``physical_collection`` is exactly *collection*, in tumbler order.
 
     One ``GET /list?collection=...`` (``list_by_collection``) instead of a walk of the whole catalog
@@ -55,7 +59,7 @@ def _collection_entries(cat: object, collection: str) -> list:
     """
     if not collection.strip():
         return []
-    return cat.list_by_collection(collection)  # type: ignore[attr-defined]
+    return cat.list_by_collection(collection)
 
 
 def _build_basename_index(

@@ -228,7 +228,9 @@ class TestOutputEqualsTheWalks:
 # ── a whitespace-only name: no entries, no /list request ────────────────────
 
 
-@pytest.mark.parametrize("blank", [" ", "   ", "\t", " \n "])
+# ASCII spaces and controls, and the Unicode spaces Java's isBlank also reads as blank (U+3000, U+2003,
+# U+2028, U+001C): Python's str.strip covers every one, so none reaches the engine's blank branch.
+@pytest.mark.parametrize("blank", [" ", "   ", "\t", " \n ", "\u3000", "\u2003", "\u2028", "\u001c"])
 class TestWhitespaceOnlyCollection:
     def test_prune_stale_considers_nothing_and_sends_no_list(
         self, engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch, blank: str,
@@ -253,5 +255,33 @@ class TestWhitespaceOnlyCollection:
         _use(monkeypatch, cat, walk=False)
         out = _run(*_remediate(source_dir, "--collection", blank)).stdout
         assert out == walked
+        assert "No catalog entries to consider." in out
+        assert engine.requests == []
+
+    def test_prune_stale_confirmed_deletes_nothing(
+        self, engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch, blank: str,
+    ) -> None:
+        """The destructive run, not only the dry run: --no-dry-run --confirm with a blank name deletes nothing."""
+        cat = _client(engine, monkeypatch)
+        _use(monkeypatch, cat, walk=False)
+        deleted: list = []
+
+        def _delete_many(tumblers, *_a, **_k):
+            deleted.extend(tumblers)
+            return list(tumblers)
+
+        monkeypatch.setattr(cat, "delete_many", _delete_many, raising=False)
+        out = _run("prune-stale", "--no-dry-run", "--confirm", "--collection", blank).stdout
+        assert out.startswith("0 stale entries.")
+        assert deleted == []  # no tumbler reached the writer
+        assert [r for r in engine.requests if r[0] == "/list"] == []
+
+    def test_remediate_paths_applied_rewrites_nothing(
+        self, engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch, source_dir: Path, blank: str,
+    ) -> None:
+        """The rewriting run, without --dry-run: a blank name sends no request and rewrites nothing."""
+        cat = _client(engine, monkeypatch)
+        _use(monkeypatch, cat, walk=False)
+        out = _run("remediate-paths", str(source_dir), "--collection", blank).stdout
         assert "No catalog entries to consider." in out
         assert engine.requests == []
