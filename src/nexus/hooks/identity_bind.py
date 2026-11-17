@@ -123,9 +123,11 @@ def _run(result: IdentityResult, session_id: str, source: str, env: Mapping[str,
 
     proc_start = normalise_instant(procs.os_start(claude_pid))
     try:
-        from nexus.db.client_identity import client_version  # noqa: PLC0415
+        # importlib.metadata, not nexus.db.client_identity: importing nexus.db runs its package init
+        # on every hook call (tests/test_z0o2p24_client_version_header.py).
+        from importlib.metadata import version as _dist_version  # noqa: PLC0415
 
-        version = client_version()
+        version = _dist_version("conexus")
     except Exception:  # noqa: BLE001
         version = None
     facts = LaunchFacts(source=source, session_id=session_id, host=host, claude_pid=claude_pid, proc_start=proc_start,

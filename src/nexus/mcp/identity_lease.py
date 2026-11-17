@@ -60,7 +60,7 @@ CLAUDE_EXIT_WAIT_S: float = 1.5
 
 @dataclass
 class TickReport:
-    """What one heartbeat did, for tests and the log."""
+    """What one lease tick did, for tests and the log."""
 
     adopted: bool = False
     pending_bound: bool = False
@@ -414,14 +414,14 @@ def start() -> IdentityLease | None:
         if os.environ.get("NX_IDENTITY_LEASE", "1") == "0":
             return None
         from nexus import config as _nx_config  # noqa: PLC0415 — deferred: server start cost; a module attribute so a patched config dir reaches it
-        from nexus.db.client_identity import client_version  # noqa: PLC0415
+        from importlib.metadata import PackageNotFoundError, version as _dist_version  # noqa: PLC0415
         from nexus.session import _command_name_of, find_immediate_claude_pid  # noqa: PLC0415
 
         pid = find_immediate_claude_pid(start_pid=os.getpid())
         if pid <= 0 or not _command_name_of(pid).lower().startswith("claude"):
             return None
         lease = IdentityLease(client_factory=IdentityClient.from_config, config_dir=_nx_config.nexus_config_dir(), claude_pid=pid,
-                              client_version=client_version(), close_client=True)
+                              client_version=_conexus_version(PackageNotFoundError, _dist_version), close_client=True)
         _STOP.clear()
         from nexus.identity import token_header  # noqa: PLC0415 — deferred: server start cost
 
@@ -462,3 +462,12 @@ def shutdown() -> None:
 
 def current() -> IdentityLease | None:
     return _LEASE
+
+
+def _conexus_version(missing: type[Exception], read: Callable[[str], str]) -> str:
+    """The installed conexus version, ``unknown`` in a bare source tree. Read through importlib.metadata,
+    not nexus.db.client_identity, which only an HTTP sender may import (tests/test_z0o2p24_client_version_header.py)."""
+    try:
+        return read("conexus")
+    except missing:
+        return "unknown"

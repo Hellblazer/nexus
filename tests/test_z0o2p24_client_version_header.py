@@ -449,6 +449,9 @@ def test_the_identity_headers_carry_the_bound_id_and_the_version() -> None:
 _NOT_SENDERS: dict[str, str] = {
     # hooks: latency on every prompt / tool call
     "nexus/hooks/mailbox_drain.py": "hook",
+    # RDR-253 Step 3: the SessionStart hook's identity client; client_version rides in the bind and
+    # renew bodies, and importing nexus.db would put its package init on every hook call
+    "nexus/identity/bind_client.py": "identity bind: the version is in the request body",
     # probes and admin calls of the engine; none writes a chunk
     "nexus/commands/daemon.py": "engine probe: GET /health",
     "nexus/commands/doctor.py": "probes: health and the MinerU server",
