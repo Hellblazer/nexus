@@ -48,6 +48,9 @@ engine lines cannot join them (see Background). RDR-222's research hit the same 
 
 ### Enumerated gaps to close
 
+Gaps 1, 2, 4 and 5 describe the tree at develop `2e09b8cfc`, before Phase 1 shipped. Phase 1 addresses
+Gaps 1, 2 and 5; the Technical Design below describes what was built.
+
 #### Gap 1: No cross-tier request correlation
 
 No identifier flows from the client to the engine. The Python HTTP clients send
@@ -64,11 +67,11 @@ this also risks attributing a log line to the wrong tenant.
 #### Gap 2: The engine's per-request principal never reaches the log lines
 
 `AuthFilter` resolves a per-request principal (tenant, session, operator flag) and
-publishes it in a `ThreadLocal` (`service/src/main/java/dev/nexus/service/http/AuthFilter.java:320`,
-cleared at `:336-337`; `RequestContext.java:67-73`). Nothing in `service/src/main`
-calls SLF4J's `MDC` (the per-thread key/value map Logback can print on every line),
-and the log pattern has no MDC field
-(`service/src/main/resources/logback.xml:8`). So a log line carries a tenant only
+publishes it in a `ThreadLocal` (set at `service/src/main/java/dev/nexus/service/http/AuthFilter.java:392`,
+cleared in the `finally` at `:218-219`; `RequestContext.java:67-73`). As found, before
+Phase 1, nothing in `service/src/main` called SLF4J's `MDC` (the per-thread key/value
+map Logback can print on every line), and the log pattern had no MDC field (it was at
+`service/src/main/resources/logback.xml:8`, and is at `:9` now). So a log line carries a tenant only
 when a call site wrote `tenant={}` into the message by hand, which many do and some
 do not (`CatalogHandler.java:593` logs the field and value but no tenant). A
 correlation id from Gap 1 is useless unless it lands on every engine line.
@@ -81,7 +84,7 @@ no longer belongs to this RDR (`nexus_rdr/167-research-6`):
 - `GET /livez` is liveness with no dependency (`NexusService.java:719`,
   `LivezHandler.java:8-43`; nexus-hubc0) and `GET /health` is readiness with a
   `SELECT 1` probe that answers 503 on failure (`NexusService.java:714`,
-  `HealthHandler.java:36-57`).
+  `HealthHandler.java:32-58`).
 - The process does not bind its HTTP port until Liquibase has migrated the schema
   (`Main.java:245-248`) and the local bge-768 model is loaded (`Main.java:450`
   precedes `new NexusService` at `:574` and `service.start()` at `:582`). A process
@@ -90,14 +93,15 @@ no longer belongs to this RDR (`nexus_rdr/167-research-6`):
   (`src/nexus/daemon/readiness.py:1-30`; nexus-8vp0i), and `/v1/status` reports boot
   work (`NexusService.java:742`).
 - "Token registry warm" has no state to gate on: `AuthFilter` resolves each token
-  through a cache per request (`AuthFilter.java:205`).
+  through a cache per request (`AuthFilter.java:270`).
 
-One leftover is a stale comment: `HealthHandler.java:16` still says "liveness + DB
-probe". It is corrected in Step 5 below.
+One leftover was a stale comment: `HealthHandler.java:16` said "liveness + DB
+probe". Step 5 (nexus-dngtz.1.12) corrected it to say that `/health` is readiness
+(a `SELECT 1` probe, 503 on failure) and that liveness is `/livez`.
 
 #### Gap 4: Java logs are plain text on a synchronous appender (DEFERRED: optional later phase)
 
-Logback writes plain text to stdout (`logback.xml:3-10`). For a managed deployment a
+Logback writes plain text to stdout (`logback.xml:3-11`). For a managed deployment a
 log aggregator would prefer JSON with MDC fields as keys. This is kept, but only as
 Phase 3, tied to the managed deployment, because the local case does not need it
 and Gaps 1 and 2 are useful without it.
@@ -124,7 +128,7 @@ at a time, against the design below (`nexus_rdr/167-research-9`):
   `project` on `/v1/plans/get` (commit `3da30e2af`: "The Java plan handler rejected a
   blank `project` query param as 'missing required query param'"). Today the
   engine's handler for that 400 logs at DEBUG (`PlanHandler.java:97-98`), below the
-  root level INFO (`logback.xml:12`), so no line existed. The failure line added in
+  root level INFO (`logback.xml:13`), so no line existed. The failure line added in
   Phase 1 (see Technical Design) would carry the id and tie it to the client's line.
 - **The chash-backfill AttributeError: not joined.** `1db06147c`: "In service mode t3
   is an HttpVectorClient (no _client), so the loop raised AttributeError". That is a
@@ -145,10 +149,10 @@ created; it does not reopen the local design.
 
 ### Technical Environment
 
-- **Python:** `structlog` configured in `src/nexus/logging_setup.py:176-186` (key=value
+- **Python:** `structlog` configured in `src/nexus/logging_setup.py:176-190` (key=value
   renderer, rotating files per entry-point mode). The CLI group callback is
-  `src/nexus/cli.py:175-181`; the MCP server's per-call hook is the `tools/call`
-  middleware `_logged` in `src/nexus/mcp/_tool_call_log.py:266`.
+  `main` in `src/nexus/cli.py:176-194`; the MCP server's per-call hook is the `tools/call`
+  middleware `_logged` in `src/nexus/mcp/_tool_call_log.py:270`.
 - **Engine:** SLF4J 2.0.16 and Logback 1.5.18 (`service/pom.xml:23-24`), Java 25
   (`pom.xml:13`), a GraalVM native image whose reflection entries are listed by hand
   (`service/src/main/resources/META-INF/native-image/reflect-config.json`). The HTTP
@@ -180,10 +184,10 @@ source reads of the working tree.
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| Logback `logback-classic` 1.5.18 | Yes | `%X{key:-default}` is a constructor reference, `DEFAULT_CONVERTER_SUPPLIER_MAP.put("X", MDCConverter::new)` (`PatternLayout.java:107`), so it needs no native-image reflection entry; a run rendered `- - hi` with no MDC and `abc - hi` with the key set. `JsonEncoder` ships in logback-classic with an MDC block (`JsonEncoder.java:65,117,174-175`), so the JSON phase needs no `logstash-logback-encoder`. |
+| Logback `logback-classic` 1.5.18 | Yes | `%X{key:-default}` is a constructor reference, `DEFAULT_CONVERTER_SUPPLIER_MAP.put("X", MDCConverter::new)` (`PatternLayout.java:107`), so it needs no native-image reflection entry; a run rendered `- - hi` with no MDC and `abc - hi` with the key set. `JsonEncoder` ships in logback-classic with an MDC block (`JsonEncoder.java:65,117,174-175`), so the JSON phase needs no `logstash-logback-encoder`. Those were JVM runs and source reads. No native binary has printed the pattern yet: `service/native-smoke.sh` now checks it (nexus-dngtz.1.9), and its first native run is the engine-service 0.1.195 release smoke on its linux and mac legs (Sam's ruling, 2026-11-17), so until then the native result is pending. |
 | SLF4J `MDC` (`LogbackMDCAdapter`) | Yes, and spiked | `ThreadLocal`-backed; correct under the engine's server shape (research-1). Not inherited by child threads. |
-| `structlog.contextvars` | Yes, and spiked | `bind_contextvars` plus `merge_contextvars` stamps every line; an event's own keyword overrides a bound value (research-5). |
-| `anyio` / `asyncio` thread hops | Spiked | `anyio.to_thread.run_sync`, `asyncio.to_thread` and `copy_context().run` carry the context; a bare `ThreadPoolExecutor.submit` does not (research-4). |
+| `structlog.contextvars` | Yes, and spiked | `bind_contextvars` plus `merge_contextvars` stamps every line; an event's own keyword overrides a bound value (research-5). Not used in the shipped design: one `ContextVar` and a structlog processor that reads it (see Technical Design). |
+| `anyio` / `asyncio` thread hops | Spiked; live MCP server path run in nexus-dngtz.1.11 | `anyio.to_thread.run_sync`, `asyncio.to_thread` and `copy_context().run` carry the context; a bare `ThreadPoolExecutor.submit` does not (research-4). |
 | W3C `traceparent` | No | Not adopted; see Decision Rationale. |
 
 ### Key Discoveries
@@ -202,35 +206,40 @@ source reads of the working tree.
 - **✅ Verified** (source search) The engine runs a request's filter chain and
   handler on one virtual thread (`NexusService.java:931`; `RequestContext.java:13-15`
   states the same invariant). Two request-path fan-outs start threads of their own
-  and will not carry MDC: `PgVectorRepository.java:3182-3184` (search arms) and
-  `CceEmbedder.java:573` (embed batches). `AuthFilter` has early returns before its
-  `try/finally` (`AuthFilter.java:191,196,207`), so an MDC put at the top must wrap
-  the whole method body.
+  and will not carry MDC: `PgVectorRepository.java:3187-3189` (search arms) and
+  `CceEmbedder.java:573` (embed batches). As found, `AuthFilter` had early returns before its
+  `try/finally`, so an MDC put at the top had to wrap the whole method body; the shipped
+  `doFilter` (`AuthFilter.java:194-222`) does.
   *Source: `nexus_rdr/167-research-2`.*
 - **✅ Verified** (source search) The client inventory for CA-2. Running the census in
   `tests/test_z0o2p24_client_version_header.py` found 36 modules under `src/nexus`
   that make an HTTP call. Six import `nexus.db.client_identity` and send its header:
   the T3 client (`http_vector_client.py:803`), the shared httpx mixin used by the T2
   stores, the catalog client and the pipeline client (`_refreshable_client.py:809`),
-  `HttpTokenStore` (`http_token_store.py:185`), `HttpScratchStore`
-  (`http_scratch_store.py:216`) and the two cloud backup modules
-  (`backup/cloud_export.py:349,533`, `backup/cloud_import.py:230,675`). Thirty are
+  `HttpTokenStore` (`http_token_store.py:186`), `HttpScratchStore`
+  (`http_scratch_store.py:217`) and the two cloud backup modules
+  (`backup/cloud_export.py:349,436,533`, `backup/cloud_import.py:230,311,675`; ten call sites in all). Thirty are
   named non-senders, 13 of them engine-bound probes, admin, token-mint or hook
   modules. The mixin and the T3 client build headers per request. `HttpScratchStore`
   and `HttpTokenStore` bake headers into their `httpx.Client` at construction
-  (`http_scratch_store.py:642`, `http_token_store.py:192`), so a context variable read
-  there would freeze at construction and each needs a per-request merge. The test
-  file passes 78 of 79 without an engine; the one failure needs the engine substrate
-  and is an environment gap.
+  (as found, at `http_scratch_store.py:643` and `http_token_store.py:193`), so a context
+  variable read there would freeze at construction. Each is now built with a per-request
+  request hook (`stamp_request`: `http_scratch_store.py:648`, `http_token_store.py:198`)
+  instead. At research time the test file passed 78 of 79 without an engine (it now
+  collects 142 tests); the one failure needed the engine substrate and was an environment
+  gap.
   *Source: `nexus_rdr/167-research-3`.*
 - **✅ Verified** (spike) The Python id survives the MCP tool path: with 50 concurrent
   coroutines each bound to a distinct id, sync bodies reached through
   `anyio.to_thread.run_sync`, `asyncio.to_thread` and `copy_context().run` all saw
   their own id (0 mismatches); a bare `ThreadPoolExecutor.submit` saw none. The
-  spike drove `anyio` directly, not the live MCP server, which is read from the
-  SDK-patch docstring (`src/nexus/mcp/_sdk_patches.py:28`), not run. The tree has 46
+  spike drove `anyio` directly, not the live MCP server. The live server path was run
+  later: `tests/test_correlation_id_mcp_stack.py` (nexus-dngtz.1.11) drives a real
+  `MCPServer` through `mcp.client.Client` with the logging middleware installed, for one
+  sync and one async tool, and checks that each call sees a fresh id and that nothing is
+  left bound afterwards. It uses the `mcp` 2.x middleware API, which is provisional. The tree has 46
   modules that start threads (115 sites), so worker paths need `copy_context`, as
-  `search_engine.py:757,3123` and `operators/llm_backend.py:548` already do.
+  `search_engine.py:757,3126` and `operators/llm_backend.py:548` already do.
   *Source: `nexus_rdr/167-research-4`.*
 - **✅ Verified** (source search and run) A naming collision. RDR-222 already uses
   `request_id` for the idempotency key, the identifier that stays the same across
@@ -246,8 +255,9 @@ source reads of the working tree.
   *Source: `nexus_rdr/167-research-7`.*
 - **❓ Assumed** That a client-sent `X-Correlation-ID` reaches the managed engine
   unchanged through whatever sits in front of it (an edge, CDN or load balancer), and
-  what that edge does with an id of its own. Nothing in the tree says. No run took a
-  client through a live engine to a log line. The local case has no edge and does
+  what that edge does with an id of its own. Nothing in the tree says. A local run now
+  takes a client through a live engine to a log line (nexus-dngtz.1.10, see CA-2), but no run
+  goes through a managed edge. The local case has no edge and does
   not depend on this.
   *Source: `nexus_rdr/167-research-8`.*
 
@@ -260,16 +270,21 @@ source reads of the working tree.
   follow work into threads the engine starts itself (two request-path fan-outs), and
   requests rejected before the id is put are unattributed unless the put moves to the
   top of the filter, which this design does.
-- [~] **CA-2: A propagated `X-Correlation-ID` threaded through the Python clients reaches
+- [x] **CA-2: A propagated `X-Correlation-ID` threaded through the Python clients reaches
   the engine and lands on its log lines.**
-  **Status**: Partly verified. **Method**: Source search plus spike for the parts;
-  the whole chain is not yet run. Verified: the client sites are enumerated and
-  covered by one shared function plus two per-request merges (`167-research-3`); the
-  id survives the Python thread hops (`167-research-4`); the engine side works
-  (`167-research-1`). Assumed: the end-to-end path on a live engine, and
-  pass-through at a managed edge (`167-research-8`). The end-to-end path is the
-  Phase 1 minimum validation and is the gate for implementation, not for accepting
-  this RDR.
+  **Status**: Verified for a local engine, which is the case Phase 1 covers. The managed
+  edge and the native image are not covered (below). **Method**: source search, spikes
+  and a live run. The client sites are enumerated and covered by one shared function plus
+  two per-request request hooks (`167-research-3`); the id survives the Python thread hops
+  (`167-research-4`) and the live MCP server path
+  (`tests/test_correlation_id_mcp_stack.py`, nexus-dngtz.1.11); the engine side works
+  (`167-research-1`). The cross-tier run is done (nexus-dngtz.1.10,
+  `tests/test_correlation_cross_tier.py`): `nx -v memory list` with a bearer the engine
+  never minted leaves the same id in the client's stderr and in the engine log's
+  `request_failed` line. Still assumed: pass-through at a managed edge
+  (`167-research-8`; Phase 2). Native evidence is pending: `service/native-smoke.sh`
+  checks the id and the failure line on a native binary (nexus-dngtz.1.9), and its first
+  native run is the engine-service 0.1.195 release smoke (Sam's ruling, 2026-11-17).
 - [ ] **CA-3: A JSON Logback appender does not regress the engine's contract tests or
   its native image.**
   **Status**: Unverified, deliberately. **Method**: needed only if Phase 3 is taken
@@ -286,16 +301,16 @@ Two pieces ship first, in this order, each useful without the other; a third is
 optional and later.
 
 1. **Request id at the client (Gap 1).** Mint one id per CLI invocation (in the click
-   group callback) and one per MCP tool call (in the `tools/call` middleware), bind it
-   in a `ContextVar` and into `structlog` contextvars so Python log lines carry it, and
-   send it as the `X-Correlation-ID` header on engine requests through the six sender
-   sites found in research-3.
+   group callback) and one per MCP tool call (in the `tools/call` middleware), keep it
+   in one `ContextVar` that a structlog processor reads, so Python log lines carry it
+   (structlog's own contextvars are not used), and send it as the `X-Correlation-ID` header
+   on engine requests through the six sender modules found in research-3.
 2. **MDC bridge at the engine (Gap 2).** At the top of `AuthFilter.doFilter`, read the
-   inbound header (accept a well-formed one, otherwise generate one), put
+   inbound header (accept a well-formed one, otherwise generate one starting `nxe-`), put
    `correlation_id` in MDC, add `tenant` when the bearer token resolves and `session`
-   once the session token is verified, and
+   once the session token is verified (both escaped by `LogText.mdcValue`), and
    clear everything in a `finally` that wraps the whole method. In that `finally`,
-   write one `request_failed` line (WARN; a sent 404 with nothing thrown at INFO) for every response with status 400 or above,
+   write one `request_failed` line (WARN; a sent 404 with nothing thrown at INFO) for every response of an authenticated route with status 400 or above,
    for a request that sent no response, and for a request whose chain threw.
    Add the three keys to the log pattern. Echo the id in the response so a caller that sent none can still
    learn the id the engine made.
@@ -309,7 +324,7 @@ optional and later.
 because RDR-222's idempotency key already owns `request_id` in both tiers
 (research-5), and proxies and load balancers are commonly said to generate or
 overwrite `X-Request-ID` (inferred, not read in this tree; research-9). Neither new
-name appears anywhere in `src` or `service/src` today (a case-insensitive `grep`
+name appeared anywhere in `src` or `service/src` before Phase 1 (a case-insensitive `grep`
 for `x-correlation-id` found nothing). `correlation_id` is also a field of the
 mailbox tuple template (`service/src/main/resources/tuples/templates/mailbox.yaml:23,57`,
 where it pairs a reply with its request), but no log call in either tier uses it as a
@@ -320,39 +335,65 @@ across retries of one keyed write and is sent as `Idempotency-Key`
 
 **Python.**
 
-- A new leaf module (standard library only, like `nexus/db/client_identity.py`, which
-  documents why it must stay a leaf) holds the `ContextVar`, `new_correlation_id()`
-  (a UUID4 as 32 hex characters) and `current_correlation_id()`.
-- `cli.py:main` calls `bind_contextvars(correlation_id=...)` beside
-  `configure_logging`; the `_logged` MCP middleware does the same per `tools/call`
-  before `await call_next`. `logging_setup.configure_logging` adds
-  `structlog.contextvars.merge_contextvars` first in the processor chain
-  (`logging_setup.py:176-186`).
-- `client_identity_headers()` (the one function all six sender sites already call)
-  adds `X-Correlation-ID` only when an id is bound, so hook processes and probes that do
-  not bind one send exactly what they send today and the exact-dictionary assertion at
-  `tests/test_z0o2p24_client_version_header.py:50` still holds when no id is bound.
+- A new leaf module, `src/nexus/correlation.py` (standard library only, outside `nexus.db`,
+  like `nexus/db/client_identity.py`, which documents why it must stay a leaf), holds the
+  one `ContextVar`, `new_correlation_id()` (a UUID4 as 32 hex characters),
+  `current_correlation_id()`, `bind` and `reset` (by token), `correlation_headers()`, the
+  `stamp_request` httpx request hook and the `add_correlation_id` structlog processor.
+- Binding. `cli.py:main` binds a fresh id beside `configure_logging` and registers
+  `ctx.call_on_close` to reset it by token. A `try/finally` in the group callback would not
+  cover the subcommand, because click returns from the callback before the subcommand runs;
+  `call_on_close` fires when the context closes, after it. The `_logged` MCP middleware does
+  the same per `tools/call` (a `finally` resets the token), so concurrent calls, each in its
+  own task context, bind separate ids. `logging_setup.configure_logging` puts
+  `add_correlation_id` first in the processor chain; it adds `correlation_id` unless the
+  event already has that key. The first draft of this design called `bind_contextvars` and
+  added `merge_contextvars`. It was replaced by this single store and a processor, so a reset
+  leaves nothing bound and no second copy can drift.
+- `client_identity_headers()` (the one function the six sender modules call, ten call sites in
+  all) adds `X-Correlation-ID` only when an id is bound, so hook processes and probes that do
+  not bind one send exactly what they send today and the exact-dictionary assertion in
+  `tests/test_z0o2p24_client_version_header.py` (`:60`) still holds when no id is bound.
   The mixin and the T3 client call it per request and need no further change.
-  `HttpScratchStore` and `HttpTokenStore` evaluate it once at construction, so each
-  gets a per-request merge (scratch already passes per-call headers at
-  `http_scratch_store.py:918`; the token store has five call sites at
-  `http_token_store.py:258-306`).
-- Thread pools that carry engine calls on behalf of a bound operation submit through
-  `contextvars.copy_context().run`, as `search_engine.py:757` does. A bare
-  `submit` loses the id (research-4); such lines go out without a correlation id and
-  the engine generates one, so correlation degrades and nothing breaks.
+  `HttpScratchStore` and `HttpTokenStore` bake their headers into one long-lived
+  `httpx.Client`, so each builds that client with `event_hooks={"request": [stamp_request]}`.
+  The hook sets the header to the bound id on every request and removes it when none is
+  bound, so a client built during one call never sends that call's id on a later one.
+- The client's own failure line. `RefreshableHttpStoreMixin._raise_for_status`
+  (`src/nexus/db/t2/_refreshable_client.py:1460`) logs `engine_request_failed` with `status=`
+  and `path=` for every non-2xx response, and the processor stamps the bound id on it. It is
+  logged at DEBUG, so it shows only with `nx -v`: it runs on every attempt, before a 401
+  re-mint and before callers that treat a 400, 404 or 409 as control flow, so a louder level
+  would be noise. An operator holding a failed default-level CLI command therefore reruns it
+  with `-v` to read the id. Only clients built on the mixin write the line (the T2 stores, the
+  catalog client and the pipeline client); the T3 vector client, `HttpScratchStore` and
+  `HttpTokenStore` write no failure line, so for those the id reaches the client log only on
+  lines the call sites already write.
+- Thread pools. Four engine-bound pools on the `nx index repo` path submit through a fresh
+  `contextvars.copy_context().run` per submit (a Context cannot be entered by two threads at
+  once), as `search_engine.py:757` already does: `nx-index` (`indexer_utils.py`), `nx-flush`
+  (`chunk_batcher.py`), the PDF pipeline's extractor, chunker and uploader submits
+  (`pipeline_stages.py`) and `aspect-enqueue` (`db/t2/http_aspect_queue.py`). An AST pin
+  (a test that parses the source into its syntax tree and fails when a pattern appears)
+  over those four files (`tests/test_correlation_indexer_pools.py`) fails on a bare `submit`, a
+  pool `map` or a shared Context. Other pools do not carry the id: the fan-out pools in
+  `search_engine.py` (`:1920`, `:2008`, `:2261`, `:2330`, `:2366`) send none, so a multi-batch
+  `nx search` joins nothing, and the same is true of any pool not listed. A bare `submit` loses
+  the id (research-4); such calls go out without a correlation id and the engine generates
+  one, so correlation degrades and nothing breaks.
 
 **Engine.**
 
 ```text
-// Illustrative; the real change wraps AuthFilter.doFilter (AuthFilter.java:187).
+// Illustrative; the real change wraps AuthFilter.doFilter (AuthFilter.java:194).
 doFilter(exchange, chain):
-    cid = accept(exchange.header("X-Correlation-ID")) or generate()
-    MDC.put("correlation_id", cid); exchange.responseHeaders.set("X-Correlation-ID", cid)
+    cid = accept(exchange.header("X-Correlation-ID")) or generate()   // generated: "nxe-" + 32 hex
     start = nanoTime(); thrown = null
     try:
-        ... existing steps 1 to 4; MDC.put("tenant", tenant) as soon as the bearer token resolves;
-        after step 3 verifies the session: if (sessionId != null) MDC.put("session", sessionId)
+        MDC.put("correlation_id", cid); exchange.responseHeaders.set("X-Correlation-ID", cid)
+        ... existing steps 1 to 4; MDC.put("tenant", LogText.mdcValue(tenant)) as soon as the bearer token resolves;
+        after step 3 verifies the session: if (sessionId != null) MDC.put("session", LogText.mdcValue(sessionId))
+        // mdcValue escapes only the printed text; the token store and routing keep the raw values
         RequestContext.set(...); chain.doFilter(exchange)
     catch (Throwable t): thrown = t; throw t         // precise rethrow, the exception is unchanged
     finally:
@@ -366,18 +407,27 @@ doFilter(exchange, chain):
         RequestContext.clear(); RequestContext.clearDeadline(); MDC.clear()
 ```
 
-- **Failure line.** One line per response with status 400 or above, per request
+- **Failure line.** For a request that goes through `AuthFilter` (not a path with no
+  route, which the JDK server answers itself, and not the five unauthenticated routes),
+  one line per response with status 400 or above, per request
   that sent no response, and per request whose chain threw, written in
   that `finally` before MDC is cleared, so the pattern prints the id, tenant and
   session on it. The tenant is there from the moment the bearer token resolves; a
   missing, non-Bearer or unknown token has no tenant, so the pattern prints `-`.
   Fields: `event=request_failed`, method, path (no query string, as the
   existing `event=auth_rejected` line already logs the path only,
-  `AuthFilter.java:411-412`), status, exception and duration. Method and path are
+  `AuthFilter.java:413-416`), status, exception and duration. Method and path are
   client text, so both are escaped with `LogText.escapeControl`: `getPath()` is the
   decoded path, so a `%0A` would otherwise write a second line, and the method token
   can carry control characters. A backslash is doubled and a control character is
-  written as `\xNN`. Where a handler threw
+  written as `\xNN`. The tenant and session values in the `[cid=... tenant=... session=...]`
+  prefix are escaped too, by `LogText.mdcValue` (`escapeControl` plus space, `[`, `]` and
+  `=`, each as `\xNN`), and so are the same two values in the `session_token_minted`,
+  `session_token_closed` and `t1_session_closed` lines (`TokenStore`, `ScratchRepository`):
+  `/v1/sessions/start` takes any non-blank session id from the client, and printed raw one
+  could end the prefix early, write a second line or add a field such as
+  `event=schema_migration_pending`. Raw values stay in the token store and in routing; only
+  the printed text changes. Where a handler threw
   and no status was sent, `getResponseCode()` is -1 and the client sees a dropped
   connection; the line then says `status=none` and names the exception class, and the
   exception is rethrown unchanged. A handler that sent 200 and then threw while
@@ -389,24 +439,34 @@ doFilter(exchange, chain):
   (`MemoryHandler.java:610`, `TenantExportHandler.java:357`) and a thrown handler
   never reaches it. The status read was run on the engine's server shape: 200, 404,
   chunked 503 and body-less 400 all read back correctly, and a throw read -1
-  (research-9). WARN is the right level: root is INFO (`logback.xml:12`), so WARN is
+  (research-9). WARN is the right level: root is INFO (`logback.xml:13`), so WARN is
   printed, while the lines that exist today for these failures are DEBUG
-  (`AuthFilter.java:342`, `PlanHandler.java:98`) and are not. A sent 404 with nothing thrown logs at INFO instead, still printed: the Step 3 measurement found 404 was 16 of 18 failure lines, and Sam ruled on 2026-11-17 that 404 goes at INFO and every other failure stays WARN. Cost: 404 is an
+  (the `auth_rejected` lines at `AuthFilter.java:298,318,414`, `PlanHandler.java:98`) and are not. A sent 404 with nothing thrown logs at INFO instead, still printed: the Step 3 measurement found 404 was 16 of 18 failure lines, and Sam ruled on 2026-11-17 that 404 goes at INFO and every other failure stays WARN. Cost: 404 is an
   ordinary answer on some routes (the `PlanHandlerTest` contract returns 404 for an
   empty project with no row, commit `3da30e2af`), so ordinary misses will be
-  logged; the rate was not measured (inferred, not read, to be low outside
-  indexing) and Step 3 measures it on the engine-substrate run.
+  logged. Step 3 measured 52 failure lines per 1000 client calls on a scenario run of about
+  350 calls (404 was 16 of the 18 lines). That is a scenario figure, not an indexing-volume
+  one: the rate under `nx index repo` is not measured (inferred, not read, to be low there).
 
 - **Accepting an id.** The header is client-controlled text that goes into a log
   line, so the engine accepts it only when it matches `[A-Za-z0-9._-]{1,64}`;
-  anything else is replaced by a generated UUID. This blocks log-line injection.
-  `MDC` keys never carry a token or its hash (`credentialHash` stays out), only
+  anything else is replaced by an id the engine generates: `nxe-` and 32 lowercase hex
+  characters (a UUID4 without hyphens). The `nx` client mints 32 hex characters with no prefix,
+  so its ids never carry the marker, and the Phase 2 probe can tell a stripped inbound header
+  from an overwritten one. This blocks log-line injection through the id. It covers only the
+  id: the tenant and session values are not limited to that character set, so they are
+  escaped when printed (see Failure line), not rejected. `MDC` keys never carry a token or its hash (`credentialHash` stays out), only
   `correlation_id`, `tenant` and `session`.
 - **Pattern.** Insert `[cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}]`
-  after `%logger{36}` and before ` - %msg%n` in `logback.xml:8`. The date, time and
+  after `%logger{36}` and before ` - %msg%n` in `logback.xml:9`. The date, time and
   level stay at the front of the line and `event=...` stays in the message, so the
   supervisor's recognisers (`storage_service_daemon.py:986-987`,
-  `readiness.py:105-106`) keep matching. A test pins both.
+  `readiness.py:105-106`) keep matching. The escape of the tenant and session values keeps the
+  prefix at exactly three fields, so a recogniser that anchors on the date, time and level or
+  matches `event=...` in the message is unaffected. The Java test holds a literal copy of the
+  supervisor's line regex (it must be re-confirmed there if the supervisor's regex moves); the
+  Python tests pin sample lines of the new format against the real recognisers
+  (`tests/daemon/test_storage_service_daemon.py`, `tests/daemon/test_readiness.py`).
 - **Not covered, by design.** The five contexts outside `AuthFilter` carry no tenant
   and their lines stay without an id. Lines logged from the two engine-started fan-out
   threads (research-2) show `-`. Neither is worth a copy-the-MDC change now; both are
@@ -421,11 +481,12 @@ doFilter(exchange, chain):
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Correlation `ContextVar` and structlog binding | `src/nexus/logging_setup.py`, `src/nexus/cli.py`, `src/nexus/mcp/_tool_call_log.py` | New leaf module for the id; extend the three call sites |
-| Outbound `X-Correlation-ID` | `client_identity_headers()` in `src/nexus/db/client_identity.py`, six sender sites | Extend the one function; add a per-request merge to scratch and token stores |
-| Pin that every engine client sends it | `tests/test_z0o2p24_client_version_header.py` census (`_census`, `_NOT_SENDERS`) | Extend the same census so a new client must send or be named |
-| MDC bridge | `AuthFilter.java:187-338`, `RequestContext.java` | Extend: put at the top, clear in a `finally` over the whole method |
-| Log pattern | `service/src/main/resources/logback.xml:8` | Extend with three `%X{...:--}` fields |
+| Correlation `ContextVar` and structlog processor | `src/nexus/logging_setup.py`, `src/nexus/cli.py`, `src/nexus/mcp/_tool_call_log.py` | New leaf module `nexus.correlation` for the id, a structlog processor and a request hook; extend the three call sites |
+| Outbound `X-Correlation-ID` | `client_identity_headers()` in `src/nexus/db/client_identity.py`, six sender modules (ten call sites) | Extend the one function; add the `stamp_request` request hook to the scratch and token stores |
+| Client failure line | `RefreshableHttpStoreMixin._raise_for_status` in `src/nexus/db/t2/_refreshable_client.py` | Extend: one DEBUG `engine_request_failed` line with status and path; the T3, scratch and token clients have none |
+| Pin that every engine client sends it | `tests/test_z0o2p24_client_version_header.py` census (`_census`, `_NOT_SENDERS`) | Extend the same census so a new client must send or be named, and drive each of the ten call sites on the wire |
+| MDC bridge | `AuthFilter.java:194-`, `CorrelationId.java`, `LogText.java`, `RequestContext.java` | Extend: accept or generate at the top, put inside a `try`, clear in a `finally` over the whole method |
+| Log pattern | `service/src/main/resources/logback.xml:9` | Extend with three `%X{...:--}` fields |
 | Log-capture test pattern | `ListAppender` in 56 test files, e.g. `OwnerlessWriteRefusalTest.java:657` | Reuse |
 | JSON appender (Phase 3) | `logback-classic` `JsonEncoder` | Reuse; add its reflect-config entry |
 
@@ -475,12 +536,17 @@ entry. Most operations (searches, T2 and catalog reads) have none.
 
 ### Consequences
 
-- (+) One id finds a client operation's lines in the engine log, and the same id is
-  on the client's own lines.
+- (+) One id finds a client operation's lines in the engine log, for the work that carries it.
+  The four engine-bound indexer pools carry it (`nx-index`, `nx-flush`, the pipeline's
+  extractor, chunker and uploader submits, and `aspect-enqueue`); the `search_engine.py`
+  fan-out pools and any other pool do not, so a multi-batch `nx search` joins nothing, and a
+  long-lived `nx` daemon command carries one id for its whole process. The same id is on the
+  client's own structlog lines, but a failed request's client line exists only for the clients
+  built on the shared HTTP store mixin, and only with `nx -v`.
 - (+) Every engine line a handler already logs gains tenant, session and id.
 - (−) A new engine client must send the header; the extended census test makes that
   a failing test and not a convention.
-- (+) Every engine response of 400 or above leaves one line with the id, so a client
+- (+) Every response of 400 or above from a route behind `AuthFilter` leaves one line with the id, so a client
   failure of that kind can be joined to the engine.
 - (−) On a successful request the id is useful only where a handler already logs (see
   "No line for successful requests").
@@ -494,19 +560,30 @@ entry. Most operations (searches, T2 and catalog reads) have none.
 - **Risk**: a pattern change breaks a log reader. **Mitigation**: the new field goes
   after the logger name, and a test asserts the supervisor's two recognisers still
   match a real engine line.
-- **Risk**: a worker thread drops the id. **Mitigation**: `copy_context().run` at
-  engine-bound pools; a missing id degrades to an engine-generated one.
+- **Risk**: a worker thread drops the id. **Mitigation**: `copy_context().run` at the four
+  engine-bound indexer pools, pinned by an AST test over four files; a missing id degrades
+  to an engine-generated one. The `search_engine.py` fan-out pools and other pools are not
+  covered, by choice.
 - **Risk**: a managed edge rewrites or strips the header. **Mitigation**: unverified
   (research-8); the Phase 2 probe tests overwrite and strip as well as pass-through.
 - **Risk**: the failure line is noisy, because 404 is a normal answer on some routes
   and a bad token repeats 401. **Mitigation**: the line carries no body or query
-  string; Step 3 counts failure lines per 1000 requests on the engine-substrate run
-  and brings the 404 level back to the gate if they dominate.
+  string; Step 3 counted 52 failure lines per 1000 client calls on a scenario run of about
+  350 calls, not at indexing volume, and Sam ruled that a sent 404 logs at INFO. The rate
+  under heavy indexing is unmeasured; if lines dominate there, bring the level back to the gate.
+- **Risk**: the raw client-chosen session id is still stored and sent. The engine escapes it
+  only when it prints it; the id still goes into `session_tokens.session_id` (a bound
+  parameter, so no injection). The client sends it in request bodies (`/v1/sessions/start`
+  and the scratch routes such as `/v1/t1/get`); the `X-Nexus-T1-Session` header carries the
+  minted session token, not the id. `/v1/sessions/start` does not reject an id outside a safe character set, because a server-side
+  400 would be a wire change for older clients and for ids that come from outside our code (the
+  Claude Code hook's `session_id`). **Mitigation**: the escape. A charset check, run first in
+  log-only mode to measure real ids, is a candidate for a later release, after the 8.4 cut (nexus-dngtz.1.11).
 
 ### Failure Modes
 
-- Missing, blank or malformed id: the engine generates one; correlation degrades and
-  the request is never refused.
+- Missing, blank or malformed id: the engine generates one (`nxe-` and 32 hex); correlation
+  degrades and the request is never refused.
 - The engine echoes the id in `X-Correlation-ID` on the response, so a client with none
   can still read it.
 
@@ -515,8 +592,8 @@ entry. Most operations (searches, T2 and catalog reads) have none.
 ### Prerequisites
 
 - [x] CA-1 verified (research-1, -2).
-- [ ] CA-2's end-to-end run is the Phase 1 minimum validation below, run before
-  Phase 1 is called done, not before this RDR is accepted.
+- [x] CA-2's end-to-end run is the Phase 1 minimum validation below, run before
+  Phase 1 is called done, not before this RDR is accepted. Done in nexus-dngtz.1.10.
 
 ### Minimum Viable Validation
 
@@ -524,43 +601,66 @@ One service-backed operation from an `nx` command produces, in the client's
 `structlog` output and in the engine's log, lines carrying the same `correlation_id`,
 asserted by an automated test on the engine substrate and not by hand. The engine
 line is the `event=request_failed` line, triggered by a request the engine answers
-with a 4xx. The candidate trigger is a malformed document tumbler, which
-`CatalogHandler.java:584-598` already rejects with a 400; whether a client path can
-send one to the engine is not shown, and Step 4 confirms it or picks another 4xx.
+with a 4xx.
+
+Outcome (nexus-dngtz.1.10, `tests/test_correlation_cross_tier.py`): the trigger is a 401
+from a bearer the engine never minted. The test runs `nx -v memory list` in a subprocess with
+`NX_SERVICE_TOKEN` set to a well-formed token the engine never issued, which `AuthFilter`
+answers 401 (`unresolved_token`). The first candidate, a malformed document tumbler that
+`CatalogHandler.rejectIfBadDocumentTumbler` (`CatalogHandler.java:615-621`) rejects with a
+400, cannot be reached from `nx`: `register` sends no document tumbler (the engine mints it),
+`show` and `update` resolve their argument first, a malformed one becoming a title search,
+and `--alias-of` is parsed on the client. The client half is the DEBUG `engine_request_failed`
+line, so the command runs with `-v`. The test reads the id from the client's stderr only, and
+then looks for it in the engine log, so a missing client line cannot be hidden by whatever
+id the engine made itself.
 
 ### Phase 1: Request id and MDC
 
 #### Step 1: Python id leaf module and `structlog` binding
-Create the leaf module; add `merge_contextvars` to the chain; bind at `cli.py:main`
-and in the MCP `_logged` middleware. Add `copy_context` at the engine-bound thread
-pools found by grep of the 46 thread-starting modules.
+Create the leaf module; add the `add_correlation_id` processor first in the chain; bind at
+`cli.py:main` (with `ctx.call_on_close` to reset) and in the MCP `_logged` middleware. Submit
+through a fresh `copy_context().run` at the four engine-bound pools on the `nx index repo`
+path: `nx-index`, `nx-flush`, the PDF pipeline stages and `aspect-enqueue`.
 
 #### Step 2: Send the header
-Extend `client_identity_headers()`; add the per-request merge to `HttpScratchStore`
-and `HttpTokenStore`; extend the census test so a sender must send it.
+Extend `client_identity_headers()`; add the `stamp_request` request hook to
+`HttpScratchStore` and `HttpTokenStore`; add the DEBUG `engine_request_failed` line to
+`RefreshableHttpStoreMixin._raise_for_status` (nexus-dngtz.1.10); extend the census test so a
+sender must send it.
 
 #### Step 3: MDC bridge in the engine
-Wrap `AuthFilter.doFilter`; validate and generate the id; put `correlation_id`,
-`tenant` (when the token resolves), `session`; echo on the response; in the
+Wrap `AuthFilter.doFilter`; validate the id and generate an `nxe-` one when needed; put
+`correlation_id`, `tenant` (when the token resolves) and `session`, the last two through
+`LogText.mdcValue`; echo on the response; in the
 `finally`, write the `request_failed` line (WARN; a sent 404 at INFO) for a status of 400 or above, none or a
 thrown chain (naming the exception class) and clear. Update
 `logback.xml`. On the engine-substrate run, count failure lines per 1000 requests and
-record the number in the bead.
+record the number in the bead (done in nexus-dngtz.1.6: 52 per 1000 client calls on a scenario
+run of about 350 calls, which is not indexing volume).
 
 #### Step 4: Tests
 The Java and Python tests in the Test Plan, ending with the cross-tier test.
 
 #### Step 5: Doc fixes
 Correct the `HealthHandler.java:16` comment; add the field to the engine and logging
-docs; keep the RDR-222 `request_id` fields unchanged and say so beside them.
+docs; keep the RDR-222 `request_id` fields unchanged and say so beside them. Done in
+nexus-dngtz.1.12 (`docs/configuration.md` Logging, `docs/architecture.md` Request
+correlation), which also matched this RDR's Technical Design and Phase 2 text to the reviewed
+code.
 
 ### Phase 2: Managed-deployment check (only with the managed deployment)
 
 Extend `nx doctor --probe-edge` (`src/nexus/doctor_edge_probe.py`) to send a known
 `X-Correlation-ID` and read back the id the engine echoes, the way the existing probe
 compares the echoed `Idempotency-Key` with the one sent (`doctor_edge_probe.py:214-226`).
-It reports three outcomes, not one: **pass-through** (echo equals sent), **overwrite**
-(echo present and different, so an edge replaced the id) and **strip** (echo absent).
+It reports four outcomes, not one, which the engine's `nxe-` prefix on an id it generates makes
+distinguishable. The probe sends a valid id P without that prefix and reads the echo:
+**pass-through** (echo equals P), **inbound strip** (the echo starts with `nxe-`: the engine
+received no valid header and made its own), **overwrite** (an echo that is present, is not P
+and has no `nxe-` prefix, so something on the path replaced the id) and **response strip** (no
+echo, so the response header was removed on the way back). The engine side is built
+(`CorrelationId.java`); the probe is not.
 This closes the assumption in research-8.
 
 ### Phase 3 (optional, later): JSON logs
@@ -584,12 +684,13 @@ None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7).
 
 - **Java, MDC on a line.** Through the real `AuthFilter` and a handler that logs, a
   `ListAppender` sees `correlation_id`, `tenant` and `session` in
-  `getMDCPropertyMap()`.
+  `getMDCPropertyMap()` (`AuthFilterCorrelationTest`).
 - **Java, concurrency.** 400 concurrent requests with two tenants: each log event
   carries its own id and tenant; MDC is empty after the request. This is the shape of
   the spike.
-- **Java, id handling.** A valid id is kept; an over-long or malformed one is replaced;
-  a request with none gets a generated one; the response header echoes it.
+- **Java, id handling.** A valid id is kept; an over-long or malformed one (a space, a trailing
+  newline) is replaced; a request with none gets a generated `nxe-` id; the response header
+  echoes it (`CorrelationIdTest`, `AuthFilterCorrelationTest`).
 - **Java, failure line.** With the real filter list: a handler answering 400, 404 and
   503 (fixed length and chunked), `IdempotencyKeyGuard`'s 400, a 401 from a bad token,
   and a synthetic handler that calls `exchange.sendResponseHeaders(409, -1)` directly,
@@ -600,18 +701,47 @@ None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7).
   and the exception still propagates; a handler that returns without sending logs
   `status=none exception=none`; a handler that sends 200 and then throws logs
   `status=200` and the class. No line holds an exception message.
+- **Java, escaping.** `AuthFilterLogEscapeTest`: a newline in the request path stays on
+  one line in both the `request_failed` and `auth_rejected` lines; a control character in the
+  method and in the claimed tenant header is escaped; the board-ci and mint-scope refusal lines
+  are escaped. The rendered-prefix forgery test runs the shipped `logback.xml` pattern: a
+  client-chosen session id carrying a newline, `]`, space and `=` cannot forge a line or add
+  fields to the prefix, and the `session_token_minted` line prints it escaped. The close-line
+  tests pin the same for `session_token_closed` (`TokenStoreSessionSweepTest`) and
+  `t1_session_closed` (`ScratchRepositoryTest`), and `LogTextTest` pins `mdcValue`.
 - **Java, pattern.** A formatted engine line starts with date, time and level and
-  still matches `_ENGINE_LOGBACK_LINE` and the readiness `event=` pattern.
-- **Python, binding.** The CLI callback and the MCP middleware bind an id; two
-  concurrent tool calls see different ids; `copy_context().run` carries it into a pool.
-- **Python, header.** Each of the six sender sites puts `X-Correlation-ID` on the wire when
-  an id is bound and omits it when none is; the extended census fails on a client that
-  does neither.
+  still matches the supervisor's line regex (`_ENGINE_LOGBACK_LINE`) and keeps its `event=...`
+  in the message. The Java test holds a literal copy of that regex, so it must be re-confirmed
+  in `storage_service_daemon.py` if the regex moves; the Python tests pin sample lines of the
+  new format against the real recognisers (`tests/daemon/test_storage_service_daemon.py`,
+  `tests/daemon/test_readiness.py`).
+- **Python, binding.** The CLI callback and the MCP middleware bind an id and leave nothing
+  bound; two concurrent tool calls see different ids; `copy_context().run` carries it into a
+  pool (`tests/test_correlation_id.py`). The binding is also pinned on a real `MCPServer`,
+  through `mcp.client.Client`, for a sync and an async tool
+  (`tests/test_correlation_id_mcp_stack.py`; the `mcp` 2.x middleware API is provisional).
+- **Python, pools.** Each of the four engine-bound indexer pools shows the bound id inside
+  its worker threads, and an AST pin over four files fails on a bare `submit`, a pool `map` or
+  a shared Context (`tests/test_correlation_indexer_pools.py`). The `search_engine.py`
+  fan-out pools are not in it.
+- **Python, header.** Six sender modules call `client_identity_headers()` at ten sites; each of
+  the ten has a driver (eleven wire drivers in all, since the catalog client shares the mixin's
+  site; a wire driver is a test that runs the real client against a recording fake transport (an `httpx.MockTransport`, or a fake urllib opener for the T3 client)
+  and reads the request headers it sent) that puts `X-Correlation-ID` on the wire when an id is bound and omits it when none is,
+  including a baked client (the scratch or token store, whose `httpx.Client` fixes its headers
+  at construction) built before or under a different id. The extended census fails on
+  a client that does neither (`tests/test_z0o2p24_client_version_header.py`).
 - **Python, collision.** The `keyed_sweep_*` lines in `http_vector_client.py` still
   show their idempotency key as `request_id` and the operation's id as `correlation_id`.
 - **Cross-tier (MVV).** One real command against the engine substrate that the engine
-  answers with a 4xx: the same id in the client's structlog output and in the engine's
-  `request_failed` line.
+  answers with a 4xx: `nx -v memory list` with a bearer the engine never minted (401). The same
+  id is in the client's `engine_request_failed` line (DEBUG, so `-v`) and in the engine's
+  `request_failed` line (`tests/test_correlation_cross_tier.py`).
+- **Native image.** `service/native-smoke.sh` sends a bad bearer with `X-Correlation-ID`, expects
+  a 401 that echoes it and a `request_failed` line with that `cid=`, and sends a malformed
+  document tumbler to `/v1/catalog/register` and expects a 400 whose line carries a resolved
+  `tenant=`. It has passed on the JVM jar; its first native run is the engine-service 0.1.195
+  release smoke (nexus-dngtz.1.9, native-pending).
 
 ## Validation
 
@@ -645,13 +775,17 @@ plan.
 
 ### Assumption Verification
 
-CA-1 is Verified by a spike and a source read (research-1, -2). CA-2 is partly
-verified: the site inventory, the Python thread behaviour and the engine side are
-verified; the run through a live engine and the managed edge are assumed
-(research-3, -4, -8), and the live-engine run is the MVV. CA-3 is unverified by
-design and belongs to the optional phase. CA-4 is struck with Gap 3. Nothing is
-presented as measured that was not: the Python spike used `anyio` directly, not the
-live MCP server, and no native image was built.
+CA-1 is Verified by a spike and a source read (research-1, -2). CA-2 is
+verified for a local engine: the site inventory, the Python thread behaviour, the live MCP
+server path and the engine side are verified (research-3, -4, -1; nexus-dngtz.1.11), and the
+live-engine run is done as the MVV (nexus-dngtz.1.10). The managed edge is still assumed
+(research-8; Phase 2). CA-3 is unverified by design and belongs to the optional phase. CA-4 is
+struck with Gap 3. Nothing is presented as measured that was not: the Python spike used `anyio`
+directly (the live MCP server path was added later, in nexus-dngtz.1.11, as
+`tests/test_correlation_id_mcp_stack.py` on a provisional `mcp` 2.x API), and no
+native image has printed the pattern yet. The native check exists in `service/native-smoke.sh`,
+and its first native run is the engine-service 0.1.195 release smoke, so that part is
+native-pending (Sam's ruling, 2026-11-17).
 
 #### API Verification
 
@@ -659,7 +793,7 @@ live MCP server, and no native image was built.
 | --- | --- | --- |
 | `MDC.put/clear` under virtual threads | SLF4J / Logback 1.5.18 | Spike (research-1) |
 | `%X{key:--}` pattern | Logback | Source read and run (research-7) |
-| `bind_contextvars`, `merge_contextvars` | structlog 25.5.0 | Spike and run (research-4, -5) |
+| `bind_contextvars`, `merge_contextvars` | structlog 25.5.0 | Spike and run (research-4, -5); not used in the shipped design, which reads its own `ContextVar` in a processor (`tests/test_correlation_id.py`) |
 | `anyio.to_thread.run_sync`, `copy_context().run` | anyio 4.15.1 | Spike (research-4) |
 | `JsonEncoder` | Logback 1.5.18 | Source read (research-7), Phase 3 only |
 
@@ -668,8 +802,7 @@ live MCP server, and no native image was built.
 The MVV is in scope for Phase 1. Struck from scope with the reason recorded: the
 readiness endpoint (shipped), the T2 daemon hop (retired). Deferred with a named
 trigger: JSON logs (the managed deployment takes up observability shipping).
-Not in scope: a line per successful request (failures of 400 or above get one), an id
-on the five unauthenticated contexts, and an id on lines logged from the two engine fan-out threads.
+Not in scope: a line per successful request (failures of 400 or above get one), an id on the five unauthenticated contexts, and an id on lines logged from the two engine fan-out threads. Also not in scope, on the client: a failure line from the T3 vector client, `HttpScratchStore` and `HttpTokenStore` (only the mixin's clients write `engine_request_failed`, so a failure there is joined to the engine only through the engine line and the id the request sent), an id on the fan-out pools in `search_engine.py`, and an id on the threads a long-lived `nx` daemon command starts (the command carries one id for its whole process, and its threads carry none).
 
 ### Cross-Cutting Concerns
 
@@ -680,7 +813,12 @@ on the five unauthenticated contexts, and an id on lines logged from the two eng
 - **Deployment model**: the local engine needs no edge change; the managed edge is
   Phase 2.
 - **Secret and credential lifecycle**: the id is client text; it is validated before
-  it is logged, and no token or token hash enters MDC.
+  it is logged, the tenant and session values are escaped when printed, and no token or token
+  hash enters MDC.
+- **Cloud backup clients**: the export and import clients (`backup/cloud_export.py`,
+  `backup/cloud_import.py`, three `client_identity_headers()` call sites each) send the id to
+  the cloud engine too. It is a random per-invocation token that names no tenant data, and the
+  engine logs it so a failed backup call can be tied to its client line.
 - **Memory management**: MDC is cleared per request; the id is not stored.
 - **Compatibility with RDR-222**: the two ids are separate headers (`Idempotency-Key`
   and `X-Correlation-ID`) and separate log fields (`request_id` and `correlation_id`).
@@ -688,7 +826,7 @@ on the five unauthenticated contexts, and an id on lines logged from the two eng
 ### Proportionality
 
 Right-sized: about two to three days for the two pieces (a leaf module, one function
-and two merges on the client; one filter, one pattern line and tests on the engine),
+and two request hooks on the client; one filter, one pattern line and tests on the engine),
 over seams that already exist. The heavy option, full OpenTelemetry, stays rejected,
 and the JSON appender is not built until something needs it.
 
@@ -698,12 +836,13 @@ and the JSON appender is not built until something needs it.
 - RDR-152, RDR-155, RDR-161, RDR-166 (service stack, native install, managed
   journeys); RDR-168 (closed; resolved `nexus-7y0ab`); RDR-222 (closed; owns the
   idempotency key and the name `request_id`).
-- Engine: `service/src/main/resources/logback.xml`, `AuthFilter.java`,
-  `RequestContext.java`, `HealthHandler.java`, `LivezHandler.java`, `NexusService.java`,
-  `Main.java`.
-- Client: `src/nexus/logging_setup.py`, `src/nexus/cli.py`,
+- Engine: `service/src/main/resources/logback.xml`, `AuthFilter.java`, `CorrelationId.java`,
+  `LogText.java`, `RequestContext.java`, `HealthHandler.java`, `LivezHandler.java`,
+  `NexusService.java`, `Main.java`, `service/native-smoke.sh`.
+- Client: `src/nexus/correlation.py`, `src/nexus/logging_setup.py`, `src/nexus/cli.py`,
   `src/nexus/mcp/_tool_call_log.py`, `src/nexus/db/client_identity.py`,
-  `tests/test_z0o2p24_client_version_header.py`.
+  `src/nexus/db/t2/_refreshable_client.py`, `tests/test_z0o2p24_client_version_header.py`.
+- Operator docs: `docs/configuration.md` (Logging), `docs/architecture.md` (Request correlation).
 - T2: `nexus_rdr/167-research-1` to `-9`; `nexus/draft-rdr-triage-2026-11-16`.
 
 ## Revision History
@@ -723,3 +862,10 @@ and the JSON appender is not built until something needs it.
   pass-through. Research `nexus_rdr/167-research-9`.
 - 2026-11-16: Accepted (Sam, by dialog in halcyon's session: "Accept"). Fix check `nexus_rdr/167-fix-check-b5b0e4bbeab4` PASS. Epic nexus-dngtz. Residual dispositions: gate S2 nexus-dngtz.1.9, S4 nexus-dngtz.1.1, S5 nexus-dngtz.1.2; fix-check probe outcomes nexus-dngtz.1.4, exception naming nexus-dngtz.1.6, synthetic 4xx test nexus-dngtz.1.7, path escaping nexus-dngtz.1.8.
 - 2026-11-17: Step 3 measured (nexus-dngtz.1.6): 52 failure lines per 1000 client calls on the engine-substrate scenario run, 404 16 of 18. Sam's ruling (by dialog in halcyon's session): a sent 404 logs at INFO, every other failure stays WARN. Step 3 text and sketch amended to the reviewed code: tenant at token resolution, the thrown arm, the `exception=` field.
+- 2026-11-17: Phase 1 code-match amendment (nexus-dngtz.1.12, standing grant 3: wording matched to reviewed code; status unchanged). Technical Design, Phase 1 steps and Test Plan now describe the merged code:
+  - Client: one `ContextVar` read by a structlog processor in place of `bind_contextvars` and `merge_contextvars`; `call_on_close` at the CLI; a `stamp_request` hook in the scratch and token stores; the DEBUG `engine_request_failed` line (shown by `-v`, written only by the mixin's clients); the four named indexer pools (the `search_engine.py` fan-out pools and long-lived daemon commands carry no id).
+  - Engine: the `nxe-` prefix and the four Phase 2 outcomes; `LogText` escaping of the path, method, tenant and session; the synthetic-handler, escape and close-line Java tests.
+  - Tests: the live MCP server test; ten call sites and eleven wire drivers, including the cloud export and import clients; the cross-tier MVV (a 401 from a bearer the engine never minted; the malformed-tumbler 400 is unreachable from `nx`).
+  - Risks and figures: the raw client-chosen session id as a risk; the 52-per-1000 figure scoped to a scenario run of about 350 calls.
+  - Status: CA-2 is verified for a local engine. The native check (`service/native-smoke.sh`) is native-pending until the engine-service 0.1.195 release smoke (Sam's ruling, 2026-11-17).
+  - Review round 1 (same bead): the `request_failed` scope (authenticated routes only), the session header (`X-Nexus-T1-Session` carries the token, not the id), stale sentences and line cites corrected.

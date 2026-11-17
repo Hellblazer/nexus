@@ -13,7 +13,8 @@ import java.io.IOException;
 import java.sql.Connection;
 
 /**
- * GET /health — liveness + DB probe. No authentication required.
+ * GET /health — readiness: a {@code SELECT 1} probe of the database, answering 503 when it fails.
+ * Liveness, which needs no database, is {@code GET /livez} ({@link LivezHandler}). No authentication required.
  *
  * Returns 200 {"status":"ok","db":"up"} on success,
  *         503 {"status":"error","db":"down","detail":"..."} on DB failure.

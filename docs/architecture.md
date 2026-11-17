@@ -994,6 +994,22 @@ and `MintRateLimiter`'s burst ceiling now only binds a genuine COLD-START
 STORM (many `nx` processes launched concurrently before any lease exists)
 rather than ordinary sequential CLI usage.
 
+### Request correlation (RDR-167)
+
+One id ties a client operation to the engine lines it causes.
+
+The client mints it in `nexus.correlation`, which keeps it in one `ContextVar` (a Python variable whose value is separate for each thread and async task) as 32 lowercase hex characters. It binds a fresh id in the `nx` group callback and in the MCP `tools/call` middleware. When the invocation or call ends it resets by token: `bind` returns a token, and handing that token back to `reset` restores whatever was bound before. A structlog processor (a function in the logger's chain that edits each event before it prints) writes the id on every line emitted while it is bound.
+
+Six modules call `client_identity_headers()` and put the id on the wire as `X-Correlation-ID`: the T3 client; the shared HTTP store client (`_refreshable_client.py`, which the T2 stores, the catalog client and the pipeline client all use); the token store; the scratch store; and the cloud export and cloud import clients. The scratch and token stores bake their headers into one long-lived `httpx.Client`, so a request hook (an httpx callback that runs on each request before it is sent) sets or removes the header per request.
+
+The pools that carry engine calls for `nx index repo` (`nx-index`, `nx-flush`, the PDF pipeline's three stage threads and `aspect-enqueue`) submit through a fresh `copy_context().run`, which runs the function inside a copy of the caller's context so the worker thread sees the caller's id. `tests/test_correlation_indexer_pools.py` pins that in four files. A worker started without it carries no id and the engine makes one.
+
+`AuthFilter` is the seam at the engine, the same filter that already resolves the per-request principal. At the top of `doFilter` it accepts the inbound header when the whole value matches `[A-Za-z0-9._-]{1,64}` (`CorrelationId.acceptOrGenerate`) and otherwise generates `nxe-` plus 32 lowercase hex characters, sets it on the response, and puts `correlation_id` in the SLF4J MDC (the per-thread key and value map that Logback can print on every line). The tenant goes in once the bearer token resolves and the session once it is verified, each through `LogText.mdcValue`, which escapes control characters, space, `[`, `]` and `=`; routing keeps the raw values. A `finally` writes the `event=request_failed` line and then clears the MDC and the `RequestContext`, so no early 401 or 403 return and no throwing handler leaves a value behind. `logback.xml` prints `[cid=... tenant=... session=...]` between the logger name and the message, after the date, time and level that the supervisor's log readers anchor on.
+
+The `nxe-` prefix lets a probe that sends a valid id P (without that prefix) tell four outcomes apart from the echo: an echo equal to P is a pass-through; one that starts with `nxe-` means the engine received no valid header (stripped, or replaced by an invalid value); any other value is an overwrite; no echo is a response strip. The engine side is built; the probe that reads the four outcomes (`nx doctor --probe-edge`, RDR-167 Phase 2) is not.
+
+What the id does not cover: the five contexts outside `AuthFilter` (`/health`, `/livez`, `/version`, `/v1/status`, `/v1/install-ping`), the two engine threads that fan a request out (`PgVectorRepository`'s search arms and `CceEmbedder`'s embed batches), which print `-`, and a request that succeeds, for which the engine writes no line of its own. On the client, the fan-out pools in `search_engine.py` and the pools outside the four above carry no id, and a long-lived `nx` daemon command carries one id for its whole process. For the operator-facing description (what the lines look like, why the client's own failure line needs `nx -v`, how to join the two logs) see [Configuration § Logging](configuration.md#correlation-id-across-the-client-and-the-engine-rdr-167). `request_id` on the `keyed_sweep_*` lines is RDR-222's idempotency key and is a different identifier.
+
 ### Dev-checkout production-write guard (nexus-a2qhz)
 
 Three incidents (2026-08-19, 2026-08-21 x2 — recorded on the bead) reached
