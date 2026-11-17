@@ -1787,27 +1787,35 @@ def _sweep_surviving_stack(
 
 
 def _unverified_candidate_note(unreadable: Sequence[int]) -> str:
-    """The sweep note for flagless ``daemon service start`` candidates whose
-    environment could not be read (nexus-qwn3p), or ``""`` when none is left.
+    """The sweep note for flagless ``daemon service start`` candidates (and a
+    ``NEXUS_SERVICE_JAR`` engine) whose environment could not be read (nexus-qwn3p), or ``""`` when none is left.
 
     Such a pid is never signalled: it may serve another directory. It is named
     here because the listing the sweep ran against was therefore incomplete,
     and "nothing left running" would be a claim this module cannot make. A pid
     that has exited, is a zombie, or now runs something that is not a
     ``daemon service start`` (a recycled pid) is dropped."""
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred: the daemon module imports from this package at load time
+        jar_launch_command_matches,
+        jar_launch_stack_marker,
+    )
+
+    marker = jar_launch_stack_marker()  # a NEXUS_SERVICE_JAR engine is placed by its environment too (nexus-f3yqd.2.22)
     live: list[int] = []
     for pid in unreadable:
         if not _pid_alive(pid) or process_state(pid) == "Z":
             continue
         current = process_command(pid)
-        if current and "daemon service start" not in current:
+        if current and "daemon service start" not in current and not (
+            marker is not None and jar_launch_command_matches(current, marker)
+        ):
             continue
         live.append(pid)
     if not live:
         return ""
     return (
         f"[stop-sweep] UNVERIFIED: pid(s) {', '.join(str(p) for p in live)} look like "
-        "a bare `nx daemon service start` whose environment could not be read, so "
+        "a bare `nx daemon service start` or a jar engine whose environment could not be read, so "
         "it is not known whether they serve this config dir; they were left running. "
         "If one is this stack's supervisor, stop it by hand before relying on the restart"
     )

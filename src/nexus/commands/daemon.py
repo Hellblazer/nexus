@@ -1658,12 +1658,13 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     if outcome.unreadable:
         click.echo(
             f"Warning: pid(s) {', '.join(str(p) for p in outcome.unreadable)} "
-            "could not be identified: a bare 'nx daemon service start' whose "
+            "were NOT signalled and may still be running. Either they could not "
+            "be identified (a bare 'nx daemon service start' or an engine whose "
             "environment could not be read, or the service lease's pid whose "
-            "command line could not be read. It is unknown whether they "
-            "serve this config directory. They were NOT signalled and may "
-            "still be running; stop them by hand if they are this "
-            "directory's service.",
+            "command line could not be read), so it is unknown whether they "
+            "serve this config directory, or both signals failed because "
+            "another user owns them (EPERM). Stop them by hand if they are "
+            "this directory's service.",
             err=True,
         )
     if (

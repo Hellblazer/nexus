@@ -123,6 +123,8 @@ class TestSweepWithRealProcesses:
             engine = popen_in_group(
                 [str(java), "-c", "import time; time.sleep(120)", "-Duser.timezone=UTC",
                  f"-XX:ErrorFile={tmp_path / 'hs_err_%p.log'}", "-jar", str(jar)],
+                # the supervisor's env copy carries the directory, and the member check reads it (nexus-f3yqd.2.22)
+                env={**os.environ, "NEXUS_CONFIG_DIR": str(cfg)},
             )
             self._visible(driver.pid)
             self._visible(engine.pid)
