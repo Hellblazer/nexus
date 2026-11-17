@@ -1,0 +1,47 @@
+name: Maven local repository cache
+description: >-
+  Restores ~/.m2/repository and ~/.m2/wrapper (the Maven distribution
+  service/mvnw downloads) on a GitHub-hosted runner before a Maven step,
+  and saves them at the end of a job that succeeded, so a build resolves
+  from the cache instead of Maven Central. Every job class keeps its own
+  entry: under the one key that setup-java/setup-graalvm `cache: maven`
+  shared, the first job to save defined the content and a hit never saved
+  again, so the native trip-wire fetched the plugins only it uses (the
+  shade plugin's asm-commons, the native-image plugin) from Central on
+  every run. A pom change restores the same class's last entry, then any
+  class's, rather than starting empty.
+  Also sets MAVEN_ARGS for the rest of the job so the resolver retries a
+  transient Central error (connection reset, 429, 5xx) with back-off.
+  A self-hosted runner keeps its own warm ~/.m2, so the cache is skipped
+  there; the retry settings still apply.
+
+inputs:
+  job-class:
+    description: >-
+      Which set of artifacts the job resolves: `package` (shaded jar),
+      `native` (-Pnative package), `codegen` (generate-sources) or `test`
+      (the Java test suites). Jobs with one class share an entry.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Restore the Maven local repository
+      if: runner.environment == 'github-hosted'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      with:
+        path: |
+          ~/.m2/repository
+          ~/.m2/wrapper
+        key: m2-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
+        restore-keys: |
+          m2-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.job-class }}-
+          m2-v1-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Retry transient Maven Central errors
+      shell: bash
+      # Maven 3.9 (service/.mvn/wrapper) reads MAVEN_ARGS on every mvn call, and resolver 1.9 names these
+      # properties (maven.apache.org/resolver-archives/resolver-1.9.22/configuration.html). The default is 3
+      # retries of an I/O error and back-off only on 429/503. A 500/502/504 from Central is transient too.
+      run: |
+        echo "MAVEN_ARGS=${MAVEN_ARGS:+$MAVEN_ARGS }-Daether.connector.http.retryHandler.count=6 -Daether.connector.http.retryHandler.serviceUnavailable=429,500,502,503,504 -Daether.connector.http.retryHandler.intervalMax=120000" >> "$GITHUB_ENV"

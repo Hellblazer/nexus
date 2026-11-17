@@ -316,9 +316,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          # Cache Maven local repo across runs; bust when pom.xml changes.
-          # Not on the pool: its ~/.m2 is already warm and persistent.
-          cache: ${{ runner.environment == 'github-hosted' && 'maven' || '' }}
+
+      - name: Restore the Maven cache and set Central retries
+        # Hosted only (the action skips the cache on the pool, whose ~/.m2 is warm and persistent).
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: test
 
       - name: Cache MiniLM ONNX model
         if: runner.environment == 'github-hosted'

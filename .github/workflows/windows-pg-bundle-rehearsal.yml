@@ -283,7 +283,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: codegen
+
       - name: Run jOOQ codegen
         working-directory: service
         run: ./mvnw -q generate-sources

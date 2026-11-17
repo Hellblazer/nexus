@@ -486,7 +486,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        if: steps.jar-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
 
       - name: Build shaded jar (no tests, no native)
         if: steps.jar-cache.outputs.cache-hit != 'true'
@@ -2767,7 +2772,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        if: steps.changes.outputs.svc == 'true'
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: native
 
       - name: Generate jOOQ sources (codegen runner, Docker)
         if: steps.changes.outputs.svc == 'true'
@@ -2943,7 +2953,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        if: steps.changes.outputs.seam == 'true'
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
 
       - uses: astral-sh/setup-uv@v7
         if: steps.changes.outputs.seam == 'true'

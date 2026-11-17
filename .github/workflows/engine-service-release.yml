@@ -96,7 +96,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: codegen
+
       - name: Run jOOQ codegen
         working-directory: service
         # generate-sources triggers the generate-jooq-sources exec of service/src/build/java/JooqCodegen.java
@@ -329,7 +334,11 @@ jobs:
           # use GraalVM's unified reachability-metadata schema (nexus-lp2qo).
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: native
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # RDR-160: in local mode the native binary constructs Bge768Embedder,
