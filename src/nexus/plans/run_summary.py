@@ -77,6 +77,7 @@ from typing import Any, Literal
 import structlog
 
 from nexus.plans.answer_text_class import ANSWER_CLASSES, CLASS_VERSION, classify_answer_text
+from nexus.plans.coverage_repair import WIRE_FILTER_LOG_CAP
 
 _log = structlog.get_logger(__name__)
 
@@ -330,6 +331,10 @@ def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
             "pool_keys_rejected": len(r.pool_keys_rejected), "pool_filter_calls": r.pool_filter_calls,
             "pool_filter_cost_usd": r.pool_filter_cost_usd, "pool_reason": r.pool_reason,
             "pool_need_s": r.pool_need_s, "pool_room_s": r.pool_room_s,
+            # nexus-w8d30: hashes, ids and closed names per filter call, cut at WIRE_FILTER_LOG_CAP
+            "pool_filter_empty_calls": r.pool_filter_empty_calls,
+            "pool_filter_log": [dict(c) for c in r.pool_filter_log[:WIRE_FILTER_LOG_CAP]],
+            "pool_filter_log_truncated": max(0, len(r.pool_filter_log) - WIRE_FILTER_LOG_CAP),
         })
     return counts
 

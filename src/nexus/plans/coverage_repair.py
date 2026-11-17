@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -95,6 +95,7 @@ __all__ = [
     "repair_reason",
     "unresolved_note",
     "usd_affordable",
+    "WIRE_FILTER_LOG_CAP",
     "WIRE_KEY_LIST_CAP",
 ]
 
@@ -256,6 +257,9 @@ JOINED_DROP_REASONS: tuple[str, ...] = ("cap", "no_text", "out_of_scope", "held"
 RESOLVED_RECORD_MAX_CHUNKS: int = 3
 #: Entries of one key list that the wire form carries; the rest is counted in ``<list>_truncated``.
 WIRE_KEY_LIST_CAP: int = 50
+#: Entries of ``pool_filter_log`` (one per filter call) that the wire form and the run summary carry; the rest is counted in
+#: ``pool_filter_log_truncated``.
+WIRE_FILTER_LOG_CAP: int = 20
 
 RepairOutcome = Literal[
     "not_attempted", "completed", "no_new_evidence", "not_merged", "retrieval_failed", "no_target",
@@ -343,6 +347,11 @@ class RepairReport:
     #: When the pool was skipped for time or budget: the seconds one assessment call needs and the seconds the filter had.
     pool_need_s: float | None = None
     pool_room_s: float | None = None
+    #: nexus-w8d30: the filter calls that replied with no evidence record (a failed call, never a reject), and one entry per
+    #: call (``call``, ``prompt_sha256``, ``reply_chars``, ``reply_sha256``, ``output_tokens``, ``supports`` as item and
+    #: facet ids, ``outcome``): hashes, ids and closed names, no chunk text.
+    pool_filter_empty_calls: int = 0
+    pool_filter_log: tuple[Mapping[str, Any], ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -369,6 +378,9 @@ class RepairReport:
             wire.update({
                 "pool_scanned": self.pool_scanned, "pool_filter_calls": self.pool_filter_calls, "pool_reason": self.pool_reason,
                 "pool_filter_cost_usd": self.pool_filter_cost_usd, "pool_need_s": self.pool_need_s, "pool_room_s": self.pool_room_s,
+                "pool_filter_empty_calls": self.pool_filter_empty_calls,
+                "pool_filter_log": [dict(c) for c in self.pool_filter_log[:WIRE_FILTER_LOG_CAP]],
+                "pool_filter_log_truncated": max(0, len(self.pool_filter_log) - WIRE_FILTER_LOG_CAP),
             })
             for name in ("pool_candidate_keys", "pool_keys_kept", "pool_keys_rejected"):
                 pool_values: tuple[str, ...] = getattr(self, name)

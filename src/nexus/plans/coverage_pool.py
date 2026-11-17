@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -50,7 +51,7 @@ from typing import Any
 
 import structlog
 
-from nexus.plans.coverage_ledger import AssessmentReport, BoundaryView, CoverageResult, EvidenceAnchor, FacetFinding
+from nexus.plans.coverage_ledger import _TAG, AssessmentReport, BoundaryView, CoverageResult, EvidenceAnchor, FacetFinding
 from nexus.plans.coverage_repair import MIN_REPAIR_QUERY_S, RepairHit
 from nexus.plans.request_coverage import Facet
 from nexus.plans.reserved_stream import strip_source_note
@@ -71,6 +72,7 @@ POOL_REASONS: tuple[str, ...] = (
     "filter_skipped_deadline",  # the time left cannot carry one assessment call
     "filter_timeout",  # a filter call outlived its slice (or the whole filter did): nothing completed
     "filter_failed",  # no filter call completed: it raised, or every reply was unusable
+    "filter_empty_reply",  # no filter call completed, and every one of them replied with no evidence record: not a reject
     "filter_partial_failure",  # some filter calls failed or were skipped; the completed calls' verdicts stand
     "filter_unread",  # the pack size cap left some candidate chunks unread: their keys are rejected
     "pool_resolve_failed",  # the second resolve or its record fetch failed: kept keys joined nothing
@@ -110,26 +112,91 @@ class PoolEnv:
     usd_reserve: float | None = None
 
 
+#: The ``supports`` records one call's log entry lists; the rest are counted in ``supports_truncated``.
+_CALL_SUPPORTS_CAP = 50
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _call_record(ordinal: int, args: Mapping[str, Any], reply: Any, outcome: str) -> dict[str, Any]:
+    """What one filter call sent and got back, as closed names, hashes and ids: no chunk text, no quote.
+
+    *outcome* is ``supports`` (a record cites an item as support), ``no_support`` (records, none of them ``supports``: a
+    genuine reject), ``empty`` (an evidence list with no record), ``malformed`` (not the check shape), ``raised`` or
+    ``timeout``. The payload hash covers the items and the instruction, which is all the boundary sends; the check's own
+    prompt wrapper is a constant of the operator and is not hashed."""
+    payload = f"{args.get('items', '')}\n{args.get('check_instruction', '')}"
+    record: dict[str, Any] = {
+        "call": ordinal, "prompt_sha256": _digest(payload), "reply_chars": None, "reply_sha256": None, "output_tokens": None,
+        "supports": [], "supports_truncated": 0, "outcome": outcome,
+    }
+    if outcome in ("raised", "timeout"):
+        return record
+    raw = json.dumps(reply, sort_keys=True, default=str, ensure_ascii=False)
+    record["reply_chars"], record["reply_sha256"] = len(raw), _digest(raw)
+    usage = reply.get("usage") if isinstance(reply, Mapping) else None
+    tokens = usage.get("output_tokens") if isinstance(usage, Mapping) else None
+    record["output_tokens"] = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
+    cited: list[dict[str, str]] = []
+    evidence = reply.get("evidence") if isinstance(reply, Mapping) else None
+    for rec in evidence if isinstance(evidence, list) else ():
+        if not isinstance(rec, Mapping) or rec.get("role") != "supports":
+            continue
+        quote = rec.get("quote")
+        tag = _TAG.match(quote) if isinstance(quote, str) else None
+        cited.append({"item_id": str(rec.get("item_id")), "facet_id": tag.group(1) if tag else ""})
+    record["supports"] = cited[:_CALL_SUPPORTS_CAP]
+    record["supports_truncated"] = max(0, len(cited) - _CALL_SUPPORTS_CAP)
+    return record
+
+
+def _outcome(reply: Any) -> str:
+    evidence = reply.get("evidence") if isinstance(reply, Mapping) else None
+    if not isinstance(evidence, list):
+        return "malformed"
+    records = [r for r in evidence if isinstance(r, Mapping)]
+    if not records:
+        return "empty"
+    return "supports" if any(r.get("role") == "supports" for r in records) else "no_support"
+
+
 class _Tally:
     """The filter's own count of its calls: a call that started is counted whether it replied, raised or was cut."""
 
     def __init__(self) -> None:
         self.calls = 0
-        self.empty = 0  # calls answered with no evidence record: a reject verdict
+        self.empty = 0  # calls answered with no evidence record: a failed assessment, never a reject (nexus-w8d30)
         self.timed_out = False
         self.cost: float | None = None
+        self.log: list[dict[str, Any]] = []
+
+    def counts(self) -> dict[str, Any]:
+        return {"calls": self.calls, "cost": self.cost, "empty": self.empty, "log": tuple(self.log)}
+
+    def _note(self, ordinal: int, args: Mapping[str, Any], reply: Any, outcome: str) -> None:
+        record = _call_record(ordinal, args, reply, outcome)
+        self.log.append(record)
+        _log.info("nx_answer_pool_filter_call", **record)
 
     def counting(self, check: Callable[..., Awaitable[Mapping[str, Any]]]) -> Callable[..., Awaitable[Mapping[str, Any]]]:
         async def counted(args: dict[str, Any], *, timeout: float) -> Mapping[str, Any]:
             self.calls += 1
+            ordinal = self.calls  # calls run side by side: the count may have moved on by the time this one ends
             try:
                 reply = await check(args, timeout=timeout)
             except (TimeoutError, asyncio.CancelledError):
                 self.timed_out = True
+                self._note(ordinal, args, None, "timeout")
                 raise
-            evidence = reply.get("evidence") if isinstance(reply, Mapping) else None
-            if isinstance(evidence, list) and not any(isinstance(r, Mapping) for r in evidence):
+            except Exception:
+                self._note(ordinal, args, None, "raised")
+                raise
+            outcome = _outcome(reply)
+            if outcome == "empty":
                 self.empty += 1
+            self._note(ordinal, args, reply, outcome)
             return reply
 
         return counted
@@ -137,13 +204,14 @@ class _Tally:
 
 def _fields(
     *, scanned: int = 0, candidates: Sequence[str] = (), kept: Sequence[str] = (), calls: int = 0, cost: float | None = None,
-    reason: str = "", need_s: float | None = None, room_s: float | None = None,
+    reason: str = "", need_s: float | None = None, room_s: float | None = None, empty: int = 0, log: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     kept_set = set(kept)
     return {
         "pool_key_scan": True, "pool_scanned": scanned, "pool_candidate_keys": tuple(candidates), "pool_keys_kept": tuple(kept),
         "pool_keys_rejected": tuple(k for k in candidates if k not in kept_set), "pool_filter_calls": calls,
         "pool_filter_cost_usd": cost, "pool_reason": reason, "pool_need_s": need_s, "pool_room_s": room_s,
+        "pool_filter_empty_calls": empty, "pool_filter_log": tuple(log),
     }
 
 
@@ -190,10 +258,12 @@ def _short(view: BoundaryView, env: PoolEnv, need_s: float) -> tuple[str, float]
 
 
 def _verdict(report: AssessmentReport, tally: _Tally) -> str:
-    """The reason for a filter that did not run clean, or ``""``. An empty reply is a verdict, so it is not a failure."""
-    bad = report.raised_calls + report.unusable_calls - tally.empty
+    """The reason for a filter that did not run clean, or ``""``. A call that judged its chunks and cited none is a verdict
+    (its reply held a record, none of them ``supports``); an empty reply is a failed call, as the assessment's instruction
+    says, and ``filter_empty_reply`` names it when every call that did not complete was empty."""
+    bad = report.raised_calls + report.unusable_calls
     skipped = report.skipped_budget_calls + report.skipped_deadline_calls
-    verdicts = report.calls - report.raised_calls - report.unusable_calls + tally.empty
+    verdicts = report.calls - bad
     if bad <= 0 and skipped == 0:
         return ""
     if verdicts > 0:
@@ -202,6 +272,8 @@ def _verdict(report: AssessmentReport, tally: _Tally) -> str:
         return "filter_timeout"
     if report.calls == 0:
         return "filter_skipped_budget" if report.skipped_budget_calls else "filter_skipped_deadline"
+    if tally.empty and report.raised_calls == 0 and report.unusable_calls == tally.empty:
+        return "filter_empty_reply"
     return "filter_failed"
 
 
@@ -229,7 +301,7 @@ async def run_pool_phase(view: BoundaryView, first: CoverageResult, base: Any, e
         return await _phase(view, first, base, env, anchor_keys, tally)
     except Exception as exc:  # noqa: BLE001 — a failed pool phase leaves phase A's result as it was
         _log.warning("nx_answer_pool_phase_error", error=type(exc).__name__)
-        return _with(base, _fields(calls=tally.calls, cost=tally.cost, reason="pool_error"))
+        return _with(base, _fields(reason="pool_error", **tally.counts()))
 
 
 async def _phase(
@@ -283,8 +355,8 @@ async def _phase(
     def closed(reason: str, room_s: float | None = None) -> Any:
         need = None if room_s is None else round(need_s, 3)
         return _with(base, _fields(
-            scanned=scanned, candidates=candidates, calls=tally.calls, cost=tally.cost, reason=reason, need_s=need,
-            room_s=None if room_s is None else round(room_s, 3)))
+            scanned=scanned, candidates=candidates, reason=reason, need_s=need,
+            room_s=None if room_s is None else round(room_s, 3), **tally.counts()))
 
     if not env.facets:
         return closed("no_facets")
@@ -328,7 +400,9 @@ async def _phase(
     kept_chunks = [(a, keys) for a, keys in pool if a.item_id in supported]
     kept_keys = {k for _, keys in kept_chunks for k in keys if k in cand_set}
     kept = tuple(k for k in candidates if k in kept_keys)
-    fields = _fields(scanned=scanned, candidates=candidates, kept=kept, calls=tally.calls, cost=tally.cost, reason=reason)
+    if tally.empty:
+        _log.warning("nx_answer_pool_filter_empty_reply", empty_calls=tally.empty, calls=tally.calls, reason=reason)
+    fields = _fields(scanned=scanned, candidates=candidates, kept=kept, reason=reason, **tally.counts())
     if not kept:
         return _with(base, fields)
     order = {k: i for i, k in enumerate(kept)}
@@ -338,6 +412,5 @@ async def _phase(
         view, pairs, {}, cap=room, resolve_until=env.fetch_until - 2 * MIN_REPAIR_QUERY_S, fetch_until=env.fetch_until)
     if joined.failure:  # the kept keys joined nothing: none is kept, and the reason overrides an earlier one
         _log.warning("nx_answer_pool_resolve_failed", why=joined.failure[:80])
-        return _with(base, _fields(
-            scanned=scanned, candidates=candidates, calls=tally.calls, cost=tally.cost, reason="pool_resolve_failed"))
+        return _with(base, _fields(scanned=scanned, candidates=candidates, reason="pool_resolve_failed", **tally.counts()))
     return _merge(base, joined, fields)

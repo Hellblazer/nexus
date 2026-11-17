@@ -451,13 +451,68 @@ async def test_scenario_4_a_request_with_no_facet_has_nothing_to_filter_by() -> 
     assert res.fields["pool_keys_rejected"] == (_tok(7), _tok(8))
 
 
+def _truncated(items: str, instruction: str) -> dict:  # noqa: ARG001
+    return {"ok": False, "evidence": ['{"item_id": "p1", "quo']}  # a cut-off record: no mapping survived
+
+
+def _neutral_only(items: str, instruction: str) -> dict:  # noqa: ARG001
+    """A genuine reject: the assessor read the pack, judged its chunks, and cited none as support."""
+    first = json.loads(items)[0]["id"]
+    return {"ok": False, "evidence": [{"item_id": first, "quote": "[f1] only mentions the topic", "role": "neutral"}]}
+
+
+@pytest.fixture
+def info_logs():
+    """structlog's filtering wrapper reads WARNING in the suite; the per-call event is info, so lower it and put it back."""
+    import logging  # noqa: PLC0415
+
+    import structlog  # noqa: PLC0415
+    from structlog.testing import capture_logs  # noqa: PLC0415
+
+    before = structlog.get_config()["wrapper_class"]
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    try:
+        with capture_logs() as logs:
+            yield logs
+    finally:
+        structlog.configure(wrapper_class=before)
+
+
+def _filter_log(r: Any) -> list[dict]:
+    return [dict(c) for c in r.pool_filter_log]
+
+
 @pytest.mark.asyncio
-async def test_an_empty_evidence_reply_on_a_filter_pack_is_a_reject_verdict_not_a_failure() -> None:
-    d = _fixture(check=_on_pool(_no_records))
+@pytest.mark.parametrize(("inner", "reason", "outcome", "empty"), [
+    (_no_records, "filter_empty_reply", "empty", 1),
+    (_truncated, "filter_empty_reply", "empty", 1),
+    (_malformed, "filter_failed", "malformed", 0),
+    (_raise, "filter_failed", "raised", 0),
+    (_neutral_only, "", "no_support", 0),
+])
+async def test_each_reply_class_of_the_filter_is_named_and_only_a_judged_pack_is_a_reject_verdict(inner, reason: str, outcome: str, empty: int) -> None:
+    """nexus-w8d30: an empty reply is a failed assessment (the instruction says so), never the reject verdict it was read as
+    in review round 1. A reply that held a record and cited none as support is the reject: no reason."""
+    d = _fixture(check=_on_pool(inner))
     r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
-    assert r.pool_reason == "" and r.pool_filter_calls == 1, "the assessor read the pack and found nothing: ok"
-    assert r.pool_keys_kept == () and r.pool_keys_rejected == (_tok(7), _tok(8))
+    assert r.pool_reason == reason and r.pool_filter_calls == 1
+    assert r.pool_keys_kept == () and r.pool_keys_rejected == (_tok(7), _tok(8)), "every class fails closed"
+    assert r.pool_filter_empty_calls == empty
+    assert [c["outcome"] for c in _filter_log(r)] == [outcome]
     assert d.resolve_calls() == [[_tok(1), _tok(2)]]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_reply_is_warned_about_and_a_judged_reject_is_not() -> None:
+    from structlog.testing import capture_logs  # noqa: PLC0415
+
+    with capture_logs() as empty_logs:
+        _cov(await _run(_fixture(check=_on_pool(_no_records)), pool_on(), plan=POOL_PLAN))
+    warned = [e for e in empty_logs if e["event"] == "nx_answer_pool_filter_empty_reply"]
+    assert len(warned) == 1 and warned[0]["log_level"] == "warning" and warned[0]["reason"] == "filter_empty_reply"
+    with capture_logs() as reject_logs:
+        _cov(await _run(_fixture(check=_on_pool(_neutral_only)), pool_on(), plan=POOL_PLAN))
+    assert not [e for e in reject_logs if e["event"] == "nx_answer_pool_filter_empty_reply"]
 
 
 @pytest.mark.asyncio
@@ -479,7 +534,7 @@ async def test_a_two_pack_filter_with_one_failed_pack_keeps_what_the_completed_p
 @pytest.mark.asyncio
 async def test_a_request_of_two_facet_groups_keeps_a_key_either_group_cites() -> None:
     """Seven facets make two groups (six and one) of the one pack. Group one says nothing (an empty reply, a verdict), group
-    two cites the CUST-0007 chunk for f7: the key is kept and the empty reply is no failure."""
+    two cites the CUST-0007 chunk for f7: the key is kept, and the empty reply is a failed call, so the filter is partial."""
     def check(items: str, instruction: str) -> Any:
         payload = json.loads(items)
         if not payload[0]["id"].startswith("p"):
@@ -492,7 +547,7 @@ async def test_a_request_of_two_facet_groups_keeps_a_key_either_group_cites() ->
     d = _fixture(check=check)
     boundary = CoverageBoundary(request=_request(7), resolution_repair=True, pool_key_scan=True)
     r = _cov(await _run(d, boundary, plan=POOL_PLAN)).repair
-    assert r.pool_filter_calls == 2 and r.pool_reason == ""
+    assert r.pool_filter_calls == 2 and r.pool_reason == "filter_partial_failure" and r.pool_filter_empty_calls == 1
     assert r.pool_keys_kept == (_tok(7),) and r.pool_keys_rejected == (_tok(8),)
 
 
@@ -727,5 +782,104 @@ def test_the_wire_cuts_a_long_pool_list_at_the_shared_cap_and_counts_what_it_lef
 
 def test_the_pool_reasons_are_a_closed_list() -> None:
     assert "no_search_step" in coverage_pool.POOL_REASONS and "filter_failed" in coverage_pool.POOL_REASONS
+    assert "filter_empty_reply" in coverage_pool.POOL_REASONS
     assert len(set(coverage_pool.POOL_REASONS)) == len(coverage_pool.POOL_REASONS)
     assert RECORD_COLL  # the catalog fixture's collection is the one the resolved records live in
+
+
+# ── nexus-w8d30: the filter logs what it sent and got back ─────────────────────────────────────────────────
+
+
+def _supports_7(items: str, instruction: str) -> dict:
+    """The pool call cites the CUST-0007 chunk for f1, and says how many tokens the reply took."""
+    payload = json.loads(items)
+    if not any(i["id"].startswith("p") for i in payload):
+        return CHECK(items, instruction)
+    seven = next(i["id"] for i in payload if _tok(7) in i["text"])
+    return {"ok": True, "evidence": [{"item_id": seven, "quote": "[f1] it supports", "role": "supports"}], "usage": {"output_tokens": 41}}
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_on_each_filter_call_is_one_event_and_one_log_entry_of_hashes_ids_and_a_parse_outcome(info_logs: list) -> None:
+    logs = info_logs
+    d = _fixture(check=_on_pool(_supports_7))
+    r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
+    (entry,) = _filter_log(r)
+    filter_call = next(a for a in d.args_of("operator_check") if any(i["id"].startswith("p") for i in json.loads(a["items"])))
+    sent = f"{filter_call['items']}\n{filter_call['check_instruction']}"
+    reply = json.dumps(_supports_7(filter_call["items"], filter_call["check_instruction"]), sort_keys=True, default=str, ensure_ascii=False)
+    import hashlib  # noqa: PLC0415
+
+    assert entry["prompt_sha256"] == hashlib.sha256(sent.encode()).hexdigest()
+    assert entry["reply_chars"] == len(reply) and entry["reply_sha256"] == hashlib.sha256(reply.encode()).hexdigest()
+    assert entry["output_tokens"] == 41 and entry["outcome"] == "supports" and entry["call"] == 1
+    assert len(entry["supports"]) == 1 and entry["supports"][0]["facet_id"] == "f1" and entry["supports"][0]["item_id"].startswith("p")
+    assert entry["supports_truncated"] == 0
+    events = [e for e in logs if e["event"] == "nx_answer_pool_filter_call"]
+    assert len(events) == 1 and {k: v for k, v in events[0].items() if k not in ("event", "log_level")} == entry
+    # never chunk text: no pool chunk's words reach the entry
+    text = json.dumps(entry)
+    assert not any(t in text for t in (_cited(7, _tok(7)), _uncited(8, _tok(8)), "decision message"))
+    wire = r.to_wire()
+    assert wire["pool_filter_log"] == [entry] and wire["pool_filter_log_truncated"] == 0 and wire["pool_filter_empty_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_carries_no_usage_has_a_null_output_token_count() -> None:
+    r = _cov(await _run(_fixture(), pool_on(), plan=POOL_PLAN)).repair
+    (entry,) = _filter_log(r)
+    assert entry["output_tokens"] is None and entry["reply_chars"] > 0 and entry["supports"], "the stub's check carries no usage"
+
+
+@pytest.mark.asyncio
+async def test_a_raised_and_a_cut_call_are_logged_with_no_reply_hash() -> None:
+    raised = _cov(await _run(_fixture(check=_on_pool(_raise)), pool_on(), plan=POOL_PLAN)).repair
+    (a,) = _filter_log(raised)
+    assert a["outcome"] == "raised" and a["reply_chars"] is None and a["reply_sha256"] is None and len(a["prompt_sha256"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_with_the_switch_off_there_is_no_filter_event_log_or_summary_field(info_logs: list) -> None:
+    from nexus.plans.run_summary import _resolution_counts  # noqa: PLC0415
+
+    cov = _cov(await _run(_fixture(check=_on_pool(_supports_7)), pool_off(), plan=POOL_PLAN))
+    assert not [e for e in info_logs if e["event"].startswith("nx_answer_pool_")]
+    assert cov.repair.pool_filter_log == () and not [k for k in cov.repair.to_wire() if k.startswith("pool_")]
+    assert not [k for k in _resolution_counts(cov) if k.startswith("pool_")]
+    on = _resolution_counts(_cov(await _run(_fixture(check=_on_pool(_supports_7)), pool_on(), plan=POOL_PLAN)))
+    assert [e for e in info_logs if e["event"] == "nx_answer_pool_filter_call"], "non-vacuity: the same capture sees the event with the switch on"
+    assert on["pool_filter_empty_calls"] == 0 and len(on["pool_filter_log"]) == 1 and on["pool_filter_log_truncated"] == 0
+    assert on["pool_filter_log"][0]["outcome"] == "supports"
+
+
+@pytest.mark.asyncio
+async def test_the_hashes_are_stable_for_identical_input_and_move_when_the_input_does() -> None:
+    def hashes(r: Any) -> list[tuple[str, str]]:
+        return [(c["prompt_sha256"], c["reply_sha256"]) for c in _filter_log(r)]
+
+    one = _cov(await _run(_fixture(check=_on_pool(_supports_7)), pool_on(), plan=POOL_PLAN)).repair
+    two = _cov(await _run(_fixture(check=_on_pool(_supports_7)), pool_on(), plan=POOL_PLAN)).repair
+    assert hashes(one) == hashes(two) and len(hashes(one)) == 1
+    other = PoolDispatcher(
+        [_anchor(1, _tok(1)), _anchor(2, _tok(2))], [KEYLESS, _cited(7, _tok(7)), _uncited(8, _tok(8)) + " and more", _cited(9, _tok(1))],
+        _on_pool(_supports_7))
+    three = _cov(await _run(other, pool_on(), plan=POOL_PLAN)).repair
+    assert hashes(three)[0][0] != hashes(one)[0][0], "a different chunk is a different payload hash"
+
+
+def test_the_filter_log_is_cut_at_the_wire_cap_and_says_how_many_it_left_out() -> None:
+    from nexus.plans.coverage_repair import WIRE_FILTER_LOG_CAP  # noqa: PLC0415
+
+    calls = tuple({"call": n} for n in range(1, WIRE_FILTER_LOG_CAP + 4))
+    wire = RepairReport(resolution_entered=True, pool_key_scan=True, pool_filter_log=calls).to_wire()
+    assert len(wire["pool_filter_log"]) == WIRE_FILTER_LOG_CAP and wire["pool_filter_log_truncated"] == 3
+
+
+def test_a_filter_that_only_replied_empty_maps_to_filter_empty_reply_and_a_mixed_failure_to_filter_failed() -> None:
+    tally = coverage_pool._Tally()
+    tally.empty = 1
+    verdict = coverage_pool._verdict
+    assert verdict(AssessmentReport(outcome="failed", calls=1, unusable_calls=1), tally) == "filter_empty_reply"
+    assert verdict(AssessmentReport(outcome="failed", calls=2, unusable_calls=1, raised_calls=1), tally) == "filter_failed"
+    assert verdict(AssessmentReport(outcome="failed", calls=2, unusable_calls=2), tally) == "filter_failed", "one unusable reply was not empty"
+    assert verdict(AssessmentReport(outcome="partial_failure", calls=2, unusable_calls=1), tally) == "filter_partial_failure"
