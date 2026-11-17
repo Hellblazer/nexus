@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -31,7 +32,7 @@ class MoveSqlParityIntegrationTest extends DataMoveIntegrationBase {
     @Test
     void theWorkerGivesEveryRowItsVerdict() throws Exception {
         List<Row> rows = VerificationParityFixture.rows();
-        assertThat(rows).as("rows read (a file that read as empty would pass vacuously)").hasSizeGreaterThanOrEqualTo(40);
+        assertThat(rows).as("rows read (a file that read as empty would pass vacuously)").hasSizeGreaterThanOrEqualTo(VerificationParityFixture.MIN_ROWS);
 
         List<String> wrong = new ArrayList<>();
         Map<Verdict, Integer> examined = new EnumMap<>(Verdict.class);
@@ -39,6 +40,8 @@ class MoveSqlParityIntegrationTest extends DataMoveIntegrationBase {
             for (Row row : rows) {
                 Outcome outcome;
                 String detail;
+                String sqlState = null;
+                boolean permanent = false;
                 try {
                     detail = "ran, " + MoveSql.countRows(conn.connection(), row.text(), "acme", 10) + " rows";
                     outcome = Outcome.RAN;
@@ -46,7 +49,11 @@ class MoveSqlParityIntegrationTest extends DataMoveIntegrationBase {
                     detail = "refused: " + e.getMessage();
                     outcome = Outcome.REFUSED;
                 } catch (SQLException e) {
-                    detail = "the server rejected it: sqlstate=" + e.getSQLState() + " " + e.getMessage();
+                    sqlState = e.getSQLState();
+                    // the failure classifier must call the state permanent: a transient one (08, 42883, 42501, 57014) would
+                    // retry a text that can never run
+                    permanent = DataMoveFailureClassifier.classify(FailureHandler.Stage.VERIFICATION, e, List.of(), "x").permanent();
+                    detail = "the server rejected it: sqlstate=" + sqlState + " (permanent: " + permanent + ") " + e.getMessage();
                     outcome = Outcome.SERVER_REJECTED;
                 }
                 Outcome want = switch (row.verdict()) {
@@ -54,10 +61,11 @@ class MoveSqlParityIntegrationTest extends DataMoveIntegrationBase {
                     case REFUSE -> Outcome.REFUSED;
                     case REFUSE_LOUD -> Outcome.SERVER_REJECTED;
                 };
-                if (outcome == want) {
+                boolean stateOk = outcome != Outcome.SERVER_REJECTED || (permanent && Objects.equals(sqlState, row.sqlState()));
+                if (outcome == want && stateOk) {
                     examined.merge(row.verdict(), 1, Integer::sum);
                 } else {
-                    wrong.add(row + ": want " + want + ", the worker " + detail
+                    wrong.add(row + ": want " + want + (row.sqlState() == null ? "" : " sqlstate " + row.sqlState()) + ", the worker " + detail
                         + "  text=[" + row.text().replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "]");
                 }
             }

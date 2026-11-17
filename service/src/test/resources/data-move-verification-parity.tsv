@@ -3,9 +3,11 @@
 # and by MoveSqlParityIntegrationTest (worker: MoveSql.countRows on a real server).
 #   accept       the gate lets it register, the worker runs it.
 #   refuse       the gate refuses it, the worker throws MoveSql.Refused (its own rule or the bind-count check).
-#   refuse-loud  the gate refuses it, the worker does not run it either, but no worker rule says so: the server's describe rejects it
-#                (a SQLException). Two kinds: text that is not SQL at all (adjacent dollar quotes, an E-string at the start), and a
-#                non-ASCII dollar tag the rewrite of $1 to CAST(? AS text) breaks. A row moves to refuse when the worker gets a rule.
+#   refuse-loud:SQLSTATE  the gate refuses it, the worker does not run it either, but no worker rule says so: the server rejects it
+#                (a SQLException) with that SQLSTATE, and the state must be one the failure classifier calls permanent. The rows are
+#                text that is not SQL at all (adjacent dollar quotes, an E-string at the start, an e' after a quote, a $, a backslash
+#                or a non-ASCII letter) and E-strings the driver ends early (a doubled quote then an escaped one). A row moves to
+#                refuse when the worker gets a rule for it.
 # A row is valid PostgreSQL unless it is refuse-loud: a lexer difference on text the server rejects is the server's to report.
 # Format: verdict TAB name TAB text. In text: \\ is a backslash, \n a newline, \r a carriage return, \t a tab, {VTAB} a one-row
 # derived table (the @vtab line below), so an accept row is real SQL the worker's test runs on a server.
@@ -64,11 +66,21 @@ accept	identifier-with-a-dollar	SELECT 1 AS a$b, 2 AS x$ FROM {VTAB} WHERE a = $
 refuse	edge-nested-comment-opener-overlap	SELECT 1 FROM {VTAB} /*/* $1 */ */ WHERE a = $1
 refuse	edge-comment-opener-overlap-plain	SELECT 1 FROM {VTAB} /*/ x */ WHERE a = $1
 accept	edge-dollar-directly-after-a-dollar	SELECT 1 AS x$$t$ FROM {VTAB} WHERE a = $1 AND b <> '$t$'
-refuse-loud	edge-adjacent-dollar-quotes	SELECT $a$ x $a$$t$ $1 $t$ FROM {VTAB} WHERE a = $1
-refuse-loud	edge-e-string-at-the-start	e'\\'IS NULLB'=$1\\'B'
+refuse-loud:42601	edge-adjacent-dollar-quotes	SELECT $a$ x $a$$t$ $1 $t$ FROM {VTAB} WHERE a = $1
+refuse-loud:42601	edge-e-string-at-the-start	e'\\'IS NULLB'=$1\\'B'
 refuse	edge-comment-opener-overlap-hides-a-placeholder	SELECT 1 FROM {VTAB} /*/ $1 */ WHERE a = $1
 refuse	edge-non-ascii-dollar-quote-tag	SELECT $é$ $1 $é$ FROM {VTAB} WHERE a = $1
 accept	edge-line-comment-ended-by-a-carriage-return	SELECT 1 FROM {VTAB} -- c\r WHERE a = $1
-accept	edge-currency-sign-before-a-dollar-tag	SELECT 1 AS €$t$ FROM {VTAB} WHERE a = $1 AND b <> '$t$'
+refuse	edge-currency-sign-before-a-dollar-tag	SELECT 1 AS €$t$ FROM {VTAB} WHERE a = $1 AND b <> '$t$'
 accept	edge-e-string-after-a-paren	SELECT 1 FROM {VTAB} WHERE a IN (E'\\'', $1)
-refuse-loud	edge-non-ascii-tag-directly-before-a-placeholder	SELECT $é$1 text$é$ FROM {VTAB} WHERE a = $1
+refuse	edge-non-ascii-tag-directly-before-a-placeholder	SELECT $é$1 text$é$ FROM {VTAB} WHERE a = $1
+refuse	edge-non-ascii-tag-multiplication-sign	SELECT $×$ $1 $×$ FROM {VTAB} WHERE a = $1
+refuse	edge-supplementary-plane-dollar-tag	SELECT $😀$ $1 $😀$ FROM {VTAB} WHERE a = $1
+refuse	edge-placeholder-followed-by-a-non-ascii-letter	SELECT 1 FROM {VTAB} WHERE a = $1é
+refuse	edge-placeholder-after-a-non-ascii-letter	SELECT 1 FROM {VTAB} WHERE a = é$1
+accept	edge-non-ascii-text-away-from-any-dollar	SELECT 1 AS é FROM {VTAB} WHERE a <> 'é€😀' AND tenant_id = $1
+refuse-loud:42601	edge-e-string-after-a-closing-quote	SELECT 1 FROM {VTAB} WHERE a = 'q'e'\\'' AND b = $1
+refuse-loud:42601	edge-e-string-after-a-dollar	SELECT 1 FROM {VTAB} WHERE a = x$e'\\'' AND b = $1
+refuse-loud:42601	edge-e-string-after-a-backslash	SELECT 1 FROM {VTAB} WHERE a = \\e'\\'' AND b = $1
+refuse-loud:42601	edge-e-string-after-a-non-ascii-letter	SELECT 1 FROM {VTAB} WHERE a = éE'\\'' AND b = $1
+refuse-loud:42601	zz-e-string-doubled-quote-then-escaped-quote	SELECT E'a''\\'' FROM {VTAB} WHERE a = $1

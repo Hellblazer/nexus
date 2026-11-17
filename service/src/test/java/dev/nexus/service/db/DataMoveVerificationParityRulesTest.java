@@ -3,6 +3,7 @@
 package dev.nexus.service.db;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import dev.nexus.service.VerificationParityFixture;
 import dev.nexus.service.VerificationParityFixture.Row;
@@ -20,7 +21,7 @@ class DataMoveVerificationParityRulesTest {
     @Test
     void theGateGivesEveryRowItsVerdict() {
         List<Row> rows = VerificationParityFixture.rows();
-        assertThat(rows).as("rows read (a file that read as empty would pass vacuously)").hasSizeGreaterThanOrEqualTo(40);
+        assertThat(rows).as("rows read (a file that read as empty would pass vacuously)").hasSizeGreaterThanOrEqualTo(VerificationParityFixture.MIN_ROWS);
         assertThat(rows).as("the file holds both verdicts").anyMatch(Row::accept).anyMatch(r -> !r.accept());
         assertThat(rows).extracting(Row::name).as("names are unique").doesNotHaveDuplicates();
 
@@ -34,6 +35,15 @@ class DataMoveVerificationParityRulesTest {
         }
         assertThat(accepted).as("accept rows examined").isEqualTo((int) rows.stream().filter(Row::accept).count());
         assertThat(refused).as("refuse rows examined").isEqualTo((int) rows.stream().filter(r -> !r.accept()).count());
+    }
+
+    @Test
+    void aDollarQuoteLeftOpenAtTheEndOfTheText_isReadNotCrashedOn() {
+        for (String text : new String[] {"x = $1 $$", "x = $1 $a$", "x = $1 $a$ y", "$$", "$a$", "$", "x = $1 $"}) {
+            assertThatCode(() -> DataMoveChangesetRules.badPlaceholders(text)).as(text).doesNotThrowAnyException();
+        }
+        assertThat(DataMoveChangesetRules.badPlaceholders("x = $1 $$")).as("the empty body hides nothing").isFalse();
+        assertThat(DataMoveChangesetRules.badPlaceholders("x = $1 $a$ $1")).as("an open quote hides the rest, a $1 with it").isTrue();
     }
 
     private static String show(String text) {

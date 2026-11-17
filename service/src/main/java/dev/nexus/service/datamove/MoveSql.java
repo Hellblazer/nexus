@@ -34,7 +34,10 @@ final class MoveSql {
 
     private MoveSql() { /* static */ }
 
-    /** A verification text the worker will not run, and why. Unchecked: the finisher reports it as a {@code VERIFICATION} failure. */
+    /**
+     * A verification text the worker will not run, and why. Unchecked: the finisher reports it as a {@code VERIFICATION_REFUSED}
+     * failure, a bind-count mismatch found while preparing included.
+     */
     static final class Refused extends RuntimeException {
         private static final long serialVersionUID = 1L;
 
@@ -44,10 +47,17 @@ final class MoveSql {
     }
 
     /**
-     * A {@code $1} standing alone: no word character or {@code $} before or after it. The boundary of the registration gate
+     * A {@code $1} standing alone: no word character, {@code $} or non-ASCII character before or after it. The boundary of the registration gate
      * ({@code DataMoveChangesetRules.STANDALONE_FIRST_PLACEHOLDER}), so the worker and the gate agree.
      */
-    private static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$])\\$1(?![\\w$])");
+    private static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$\\P{ASCII}])\\$1(?![\\w$\\P{ASCII}])");
+
+    /**
+     * A {@code $} directly next to a character outside ASCII. PostgreSQL reads every such character as part of an identifier, the
+     * driver only the ones Java calls identifier parts, so they disagree on where a dollar-quote tag ends ({@code $×$ $1 $×$}),
+     * and the {@code $1} rewrite below would cut a tag in two. The gate's {@code DataMoveChangesetRules.NON_ASCII_DOLLAR}.
+     */
+    private static final Pattern NON_ASCII_DOLLAR = Pattern.compile("\\P{ASCII}\\$|\\$\\P{ASCII}");
 
     /** A block-comment opener whose star is also the closer's: the one place the driver's lexer and PostgreSQL's read a comment differently. */
     private static final String OPENER_OVERLAP = "/*/";
@@ -55,8 +65,8 @@ final class MoveSql {
     private static final Pattern DOLLAR_DIGIT = Pattern.compile("\\$\\d");
 
     /**
-     * Why the verification text is not run, or empty when it may be: it is blank, it contains {@code /*}{@code /} (the
-     * registration gate refuses both too, nexus-f3yqd.2.19), it contains a {@code ?} (the driver would read it as
+     * Why the verification text is not run, or empty when it may be: it is blank, it contains {@code /*}{@code /}, or it has a {@code $} next to a non-ASCII
+     * character (the registration gate refuses all three too, nexus-f3yqd.2.19), it contains a {@code ?} (the driver would read it as
      * a parameter, and cannot be told otherwise inside a literal), or a {@code $} followed by a digit is left once the
      * standalone {@code $1}s are removed ({@code $2}, {@code $10}, {@code my$1}, {@code $1x}, {@code $$1 x$$}).
      */
@@ -73,6 +83,11 @@ final class MoveSql {
         if (verification.indexOf('?') >= 0) {
             return Optional.of("the verification text contains a '?'. The driver reads a '?' as a bind parameter, so the text "
                 + "must not carry one (write the tenant as $1 and spell a jsonb or pattern '?' another way)");
+        }
+        if (NON_ASCII_DOLLAR.matcher(verification).find()) {
+            return Optional.of("the verification text has a '$' directly next to a character outside ASCII. PostgreSQL and the "
+                + "driver disagree on where a dollar-quote tag or a parameter ends there, so the bind parameters cannot be counted. "
+                + "Keep the characters beside a '$' ASCII, or move the non-ASCII text into a string literal away from any '$'");
         }
         Matcher left = DOLLAR_DIGIT.matcher(STANDALONE_FIRST_PLACEHOLDER.matcher(verification).replaceAll(""));
         if (left.find()) {

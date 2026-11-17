@@ -273,7 +273,8 @@ final class DataMoveChangesetRules {
                     char d = body.charAt(j);
                     if (escapes && d == '\\' && j + 1 < n) { lit.append(body, j, j + 2); j += 2; continue; }
                     if (d == '\'') {
-                        if (j + 1 < n && body.charAt(j + 1) == '\'') { lit.append('\''); j += 2; continue; }
+                        // pgjdbc ends a literal at the first quote and starts the next one, E-string or not: a doubled quote continues nothing
+                        if (!asTheDriverReads && j + 1 < n && body.charAt(j + 1) == '\'') { lit.append('\''); j += 2; continue; }
                         break;
                     }
                     lit.append(d);
@@ -291,11 +292,11 @@ final class DataMoveChangesetRules {
             } else if (c == '$' && (i == 0 || !(asTheDriverReads ? Character.isJavaIdentifierPart(body.charAt(i - 1)) : identChar(body.charAt(i - 1))))) {
                 String tag = asTheDriverReads ? driverDollarTag(body, i) : dollarTag(body, i);
                 if (tag != null) {
-                    int end = body.indexOf(tag, i + tag.length());
-                    if (end < 0) end = Math.max(i + tag.length(), n - tag.length());   // unterminated: the rest is the body (an opener at the very end has none)
+                    int close = body.indexOf(tag, i + tag.length());
+                    int end = close < 0 ? n : close;   // unterminated: the rest is the body (an opener at the very end has none)
                     literals.add(body.substring(i + tag.length(), end));
                     masked.append("'#").append(literals.size() - 1).append("#'");
-                    i = end + tag.length();
+                    i = close < 0 ? n : close + tag.length();
                 } else {
                     masked.append(c);
                     i++;
@@ -585,9 +586,16 @@ final class DataMoveChangesetRules {
      * A standalone {@code $1}: no word character and no {@code $} on either side. This is the boundary of the data-move worker's
      * check of the verification query (MoveSql, bead nexus-f3yqd.2.14), which binds the tenant as the one parameter {@code $1}. The gate checks this boundary and the
      * raw-versus-masked count of {@link #badPlaceholders}; it does not parse the verification as SQL and does not check anything else
-     * the worker checks. Exact regex: {@code (?<![\w$])\$1(?![\w$])}.
+     * the worker checks. Exact regex: {@code (?<![\w$\P{ASCII}])\$1(?![\w$\P{ASCII}])}.
      */
-    static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$])\\$1(?![\\w$])");
+    static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$\\P{ASCII}])\\$1(?![\\w$\\P{ASCII}])");
+
+    /**
+     * A {@code $} directly next to a character outside ASCII. PostgreSQL reads every such character as part of an identifier, the
+     * JDBC driver only the ones Java calls identifier parts, so they disagree on where a dollar-quote tag or a parameter ends
+     * ({@code $×$ $1 $×$}); MoveSql refuses the same text.
+     */
+    static final Pattern NON_ASCII_DOLLAR = Pattern.compile("\\P{ASCII}\\$|\\$\\P{ASCII}");
 
     /**
      * The gate's whole verdict on a registered verification text: refused when it is blank (r1.verification-empty) or has a bad
@@ -620,6 +628,7 @@ final class DataMoveChangesetRules {
      */
     static boolean badPlaceholders(String verification) {
         if (verification.indexOf('?') >= 0) return true;
+        if (NON_ASCII_DOLLAR.matcher(verification).find()) return true;   // MoveSql refuses it too: PostgreSQL and the driver read a non-ASCII tag differently
         if (verification.contains("/*/")) return true;   // the driver ends a block comment at that '/', PostgreSQL does not: MoveSql refuses it too
         if (Pattern.compile("\\$\\d").matcher(STANDALONE_FIRST_PLACEHOLDER.matcher(verification).replaceAll(" ")).find()) return true;
         long raw = STANDALONE_FIRST_PLACEHOLDER.matcher(verification).results().count();

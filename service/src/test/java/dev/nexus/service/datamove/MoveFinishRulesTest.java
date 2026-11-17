@@ -83,11 +83,26 @@ class MoveFinishRulesTest {
     }
 
     @Test
-    void aBlankText_orOneWithAnOpenerThatOverlapsItsCloser_isRefused() {
+    void aBlankText_aCommentOpenerThatOverlapsItsCloser_orADollarNextToANonAsciiCharacter_isRefused() {
         assertThat(MoveSql.refusal("")).hasValueSatisfying(r -> assertThat(r).contains("empty"));
         assertThat(MoveSql.refusal(" \n\t ")).hasValueSatisfying(r -> assertThat(r).contains("empty"));
         assertThat(MoveSql.refusal("select 1 /*/ note */ where a = $1")).hasValueSatisfying(r -> assertThat(r).contains("'/*/'"));
         assertThat(MoveSql.refusal("select 1 /* note */ where a = $1")).as("a comment opened with a space").isEmpty();
+        for (String text : new String[] {"select $\u00d7$ $1 $\u00d7$", "select $\ud83d\ude00$ $1 $\ud83d\ude00$", "select 1 as x\u20ac$t$ where a = $1",
+            "select 1 where a = \u00e9$1", "select 1 where a = $1\u00e9", "select $\u00e9$1 text$\u00e9$ where a = $1"}) {
+            assertThat(MoveSql.refusal(text)).as(text).isPresent();
+        }
+        assertThat(MoveSql.refusal("select 1 as \u00e9 where a <> '\u00e9\u20ac' and t = $1")).as("non-ASCII away from any $").isEmpty();
+        assertThat(MoveSql.placeholders("select 1 where a = \u00e9$1 or b = $1")).as("a $1 beside a non-ASCII character is not standalone").isEqualTo(1);
+    }
+
+    @Test
+    void theNewRefusals_readInTheOperatorsBoard_asTheRefusedVerificationPhrase() {
+        String phrase = "the verification text was not run (see the engine log)";
+        for (String text : new String[] {"", "select 1 /*/ x */ where a = $1", "select $\u00d7$ $1 $\u00d7$", "select 1 where a = $2", "select 1 where a ? 'k'"}) {
+            String reason = "the verification of m1 was not run: " + MoveSql.refusal(text).orElseThrow();
+            assertThat(MoveReasons.publicForm(reason)).as(text).isEqualTo(phrase);
+        }
     }
 
     // ── on_complete's lock wait ────────────────────────────────────────────────────────────────────────────

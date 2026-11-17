@@ -14,7 +14,7 @@ import java.util.List;
  * ({@code MoveSqlParityIntegrationTest}).
  *
  * <p>File format: one row per line, {@code verdict TAB name TAB text}; a blank line or one starting with {@code #} is skipped, and the one {@code @vtab TAB text} line defines {@code {VTAB}}.
- * {@code verdict} is a {@link Verdict}, written {@code accept}, {@code refuse} or {@code refuse-loud}. In {@code text}, {@code \\} is a backslash, {@code \n} a newline,
+ * {@code verdict} is a {@link Verdict}, written {@code accept}, {@code refuse} or {@code refuse-loud:<SQLSTATE>}. In {@code text}, {@code \\} is a backslash, {@code \n} a newline,
  * {@code \r} a carriage return, {@code \t} a tab, and {@code {VTAB}} expands to the file's {@code @vtab} line, a derived table every row can select from, so that an
  * {@code accept} row is real SQL the worker's test runs on a server. A row's text is the value the registry column stores (what the
  * gate reads after the registering INSERT's own literal is decoded), which is what the worker is given.
@@ -35,7 +35,7 @@ public final class VerificationParityFixture {
     public enum Verdict { ACCEPT, REFUSE, REFUSE_LOUD }
 
     /** One row: {@code verdict} is what both rules must give. */
-    public record Row(int line, Verdict verdict, String name, String text) {
+    public record Row(int line, Verdict verdict, String sqlState, String name, String text) {
         public boolean accept() {
             return verdict == Verdict.ACCEPT;
         }
@@ -45,6 +45,33 @@ public final class VerificationParityFixture {
             return "line " + line + " " + name;
         }
     }
+
+    /** The rows in the file today. A shorter file is a deletion, and the tests refuse it; a row added raises this. */
+    public static final int MIN_ROWS = 64;
+
+    /** The lexer-edge rows: each pins a place where the gate's lexer, the driver's and PostgreSQL's differ, and none may be dropped. */
+    public static final List<String> REQUIRED_ROWS = List.of(
+        "edge-nested-comment-opener-overlap",
+        "edge-comment-opener-overlap-plain",
+        "edge-dollar-directly-after-a-dollar",
+        "edge-adjacent-dollar-quotes",
+        "edge-e-string-at-the-start",
+        "edge-comment-opener-overlap-hides-a-placeholder",
+        "edge-non-ascii-dollar-quote-tag",
+        "edge-line-comment-ended-by-a-carriage-return",
+        "edge-currency-sign-before-a-dollar-tag",
+        "edge-e-string-after-a-paren",
+        "edge-non-ascii-tag-directly-before-a-placeholder",
+        "edge-non-ascii-tag-multiplication-sign",
+        "edge-supplementary-plane-dollar-tag",
+        "edge-placeholder-followed-by-a-non-ascii-letter",
+        "edge-placeholder-after-a-non-ascii-letter",
+        "edge-non-ascii-text-away-from-any-dollar",
+        "edge-e-string-after-a-closing-quote",
+        "edge-e-string-after-a-dollar",
+        "edge-e-string-after-a-backslash",
+        "edge-e-string-after-a-non-ascii-letter",
+        "zz-e-string-doubled-quote-then-escaped-quote");
 
     public static List<Row> rows() {
         String file;
@@ -76,13 +103,26 @@ public final class VerificationParityFixture {
             if (cells.length != 3) {
                 throw new IllegalStateException(RESOURCE + " line " + (i + 1) + ": want verdict TAB name TAB text");
             }
-            Verdict verdict = switch (cells[0]) {
+            String[] verdictAndState = cells[0].split(":", 2);
+            Verdict verdict = switch (verdictAndState[0]) {
                 case "accept" -> Verdict.ACCEPT;
                 case "refuse" -> Verdict.REFUSE;
                 case "refuse-loud" -> Verdict.REFUSE_LOUD;
-                default -> throw new IllegalStateException(RESOURCE + " line " + (i + 1) + ": verdict is accept, refuse or refuse-loud, not " + cells[0]);
+                default -> throw new IllegalStateException(RESOURCE + " line " + (i + 1) + ": verdict is accept, refuse or refuse-loud:<SQLSTATE>, not " + cells[0]);
             };
-            rows.add(new Row(i + 1, verdict, cells[1], decode(cells[2]).replace("{VTAB}", vtab)));
+            String sqlState = verdictAndState.length == 2 ? verdictAndState[1] : null;
+            if ((verdict == Verdict.REFUSE_LOUD) != (sqlState != null) || sqlState != null && !sqlState.matches("[0-9A-Z]{5}")) {
+                throw new IllegalStateException(RESOURCE + " line " + (i + 1) + ": refuse-loud, and only refuse-loud, names its SQLSTATE: " + cells[0]);
+            }
+            rows.add(new Row(i + 1, verdict, sqlState, cells[1], decode(cells[2]).replace("{VTAB}", vtab)));
+        }
+        if (rows.size() < MIN_ROWS) {
+            throw new IllegalStateException(RESOURCE + " has " + rows.size() + " rows, fewer than the " + MIN_ROWS + " it holds today");
+        }
+        List<String> missing = new ArrayList<>(REQUIRED_ROWS);
+        rows.forEach(r -> missing.remove(r.name()));
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException(RESOURCE + " lost required rows " + missing);
         }
         return rows;
     }
