@@ -184,6 +184,41 @@ final class DataMoveChangesetRules {
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
+    private static String dollarTag(String body, int at) {
+        Matcher m = DOLLAR_TAG.matcher(body).region(at, body.length());
+        return m.lookingAt() ? m.group() : null;
+    }
+
+    /** The first {@code \r} or {@code \n} at or after {@code from}, or -1; where pgjdbc ends a {@code --} comment. */
+    private static int lineEnd(String body, int from) {
+        for (int j = from; j < body.length(); j++) {
+            if (body.charAt(j) == '\n' || body.charAt(j) == '\r') return j;
+        }
+        return -1;
+    }
+
+    /** pgjdbc's {@code Parser.parseDollarQuotes} tag: {@code $$}, or {@code $} a Java identifier start, identifier parts, and {@code $}; null when there is none. */
+    private static String driverDollarTag(String body, int at) {
+        int n = body.length();
+        if (at + 1 >= n) return null;
+        int end = -1;
+        if (body.charAt(at + 1) == '$') {
+            end = at + 1;
+        } else if (body.charAt(at + 1) != '$' && Character.isJavaIdentifierStart(body.charAt(at + 1))) {
+            for (int d = at + 2; d < n; d++) {
+                char x = body.charAt(d);
+                if (x == '$') { end = d; break; }
+                if (!Character.isJavaIdentifierPart(x)) break;
+            }
+        }
+        return end < 0 ? null : body.substring(at, end + 1);
+    }
+
+    /** pgjdbc's {@code Parser.charTerminatesIdentifier}: a double quote, a space character or an operator character. */
+    private static boolean charTerminatesIdentifier(char c) {
+        return c == '"' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || ",()[].;:+-*/%^<>=~!@#&|`?".indexOf(c) != -1;
+    }
+
     /**
      * Splits a SQL body into statements, each lowercased, whitespace-collapsed, double quotes dropped, with comments removed
      * and every string literal, escape string and dollar-quoted body replaced by a {@code '#n#'} placeholder (the literal's
@@ -195,6 +230,21 @@ final class DataMoveChangesetRules {
 
     /** As {@link #statements(String)}; with {@code maskQuotedNames} a double-quoted identifier is masked too (a {@code ""} escape ends one span and starts the next, so both are hidden). */
     static List<Stmt> statements(String body, boolean maskQuotedNames) {
+        return statements(body, maskQuotedNames, false);
+    }
+
+    /**
+     * As {@link #statements(String, boolean)}; with {@code asTheDriverReads} the four places where pgjdbc's {@code Parser} (the
+     * lexer that counts the data-move worker's bind parameters) differs from PostgreSQL's are read the driver's way, so that
+     * what the mask hides here is what the driver does not count (nexus-f3yqd.2.19): a {@code --} comment ends at a carriage
+     * return as well as a newline, a {@code $} starts a dollar quote only when the character before it is not a Java identifier
+     * part (a letter of any script, a digit, {@code _}, {@code $}, a currency sign), the tag is a Java identifier without a
+     * {@code $}, and an {@code e'} is an escape string only from the third character on and after a space or an operator
+     * character. Block comments keep PostgreSQL's nesting: the driver ends one at a closer that overlaps its opener (slash,
+     * star, slash), so a text with a {@code $1} hidden that way is refused here and rejected by the server's describe
+     * (SQLSTATE 42P18), never run.
+     */
+    static List<Stmt> statements(String body, boolean maskQuotedNames, boolean asTheDriverReads) {
         StringBuilder masked = new StringBuilder();
         List<String> literals = new ArrayList<>();
         int n = body.length();
@@ -202,7 +252,7 @@ final class DataMoveChangesetRules {
         while (i < n) {
             char c = body.charAt(i);
             if (body.startsWith("--", i)) {
-                int end = body.indexOf('\n', i);
+                int end = asTheDriverReads ? lineEnd(body, i) : body.indexOf('\n', i);
                 i = end < 0 ? n : end;
                 masked.append(' ');
             } else if (body.startsWith("/*", i)) {
@@ -216,7 +266,7 @@ final class DataMoveChangesetRules {
                 masked.append(' ');
             } else if (c == '\'') {
                 boolean escapes = i > 0 && (body.charAt(i - 1) == 'e' || body.charAt(i - 1) == 'E')
-                    && (i < 2 || !identChar(body.charAt(i - 2)));
+                    && (asTheDriverReads ? i >= 2 && charTerminatesIdentifier(body.charAt(i - 2)) : i < 2 || !identChar(body.charAt(i - 2)));
                 StringBuilder lit = new StringBuilder();
                 int j = i + 1;
                 while (j < n) {
@@ -238,12 +288,11 @@ final class DataMoveChangesetRules {
                 if (maskQuotedNames) masked.append("\"q\"");
                 else masked.append(body, i, end + 1);
                 i = end + 1;
-            } else if (c == '$' && (i == 0 || !identChar(body.charAt(i - 1)))) {
-                Matcher m = DOLLAR_TAG.matcher(body).region(i, n);
-                if (m.lookingAt()) {
-                    String tag = m.group();
+            } else if (c == '$' && (i == 0 || !(asTheDriverReads ? Character.isJavaIdentifierPart(body.charAt(i - 1)) : identChar(body.charAt(i - 1))))) {
+                String tag = asTheDriverReads ? driverDollarTag(body, i) : dollarTag(body, i);
+                if (tag != null) {
                     int end = body.indexOf(tag, i + tag.length());
-                    if (end < 0) end = n - tag.length();
+                    if (end < 0) end = Math.max(i + tag.length(), n - tag.length());   // unterminated: the rest is the body (an opener at the very end has none)
                     literals.add(body.substring(i + tag.length(), end));
                     masked.append("'#").append(literals.size() - 1).append("#'");
                     i = end + tag.length();
@@ -496,12 +545,15 @@ final class DataMoveChangesetRules {
                 } else {
                     for (Registration r : regs) {
                         moves.register(r);
+                        if (!refusesVerification(r.verification())) {
+                            continue;
+                        }
                         if (r.verification().isBlank()) {
                             findings.add(new Finding("r1.verification-empty", "the verification of move " + r.label()
                                 + " is empty; it is a SELECT of the rows still in the old shape, and the worker cannot run an empty one (the move would fail permanently after it registered)"));
-                        } else if (badPlaceholders(r.verification())) {
+                        } else {
                             findings.add(new Finding("r1.verification-placeholder", "the verification of move " + r.label()
-                                + " has a '?' or a $-digit placeholder the worker refuses (a permanent failure). Write jsonb_exists, "
+                                + " has a '?', a '/*/' or a $-digit placeholder the worker refuses (a permanent failure). Write jsonb_exists, "
                                 + "jsonb_exists_any or jsonb_exists_all for the jsonb ?, ?| and ?& operators, and chr(63) or E'\\x3f' for a ? in a "
                                 + "pattern. The tenant is the one standalone $1, never in a comment, string literal, dollar quote or quoted name"));
                         }
@@ -538,7 +590,17 @@ final class DataMoveChangesetRules {
     static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$])\\$1(?![\\w$])");
 
     /**
-     * True when a verification query has a {@code ?}, a {@code $}-digit form that is not a standalone {@code $1} ({@code $2},
+     * The gate's whole verdict on a registered verification text: refused when it is blank (r1.verification-empty) or has a bad
+     * placeholder (r1.verification-placeholder). The one verdict {@code data-move-verification-parity.tsv} holds the data-move
+     * worker's {@code MoveSql} to (nexus-f3yqd.2.19).
+     */
+    static boolean refusesVerification(String verification) {
+        return verification.isBlank() || badPlaceholders(verification);
+    }
+
+    /**
+     * True when a verification query has a {@code ?}, a slash-star-slash (the driver ends a block comment there and PostgreSQL does
+     * not), a {@code $}-digit form that is not a standalone {@code $1} ({@code $2},
      * {@code $10}, {@code my$1}, {@code $1x}, {@code $$1}), or a standalone {@code $1} that sits in a comment, a string literal or a
      * dollar-quoted body or a double-quoted name.
      *
@@ -558,10 +620,11 @@ final class DataMoveChangesetRules {
      */
     static boolean badPlaceholders(String verification) {
         if (verification.indexOf('?') >= 0) return true;
+        if (verification.contains("/*/")) return true;   // the driver ends a block comment at that '/', PostgreSQL does not: MoveSql refuses it too
         if (Pattern.compile("\\$\\d").matcher(STANDALONE_FIRST_PLACEHOLDER.matcher(verification).replaceAll(" ")).find()) return true;
         long raw = STANDALONE_FIRST_PLACEHOLDER.matcher(verification).results().count();
         long visible = 0;
-        for (Stmt st : statements(verification, true)) visible += STANDALONE_FIRST_PLACEHOLDER.matcher(st.text()).results().count();
+        for (Stmt st : statements(verification, true, true)) visible += STANDALONE_FIRST_PLACEHOLDER.matcher(st.text()).results().count();
         return raw != visible;
     }
 

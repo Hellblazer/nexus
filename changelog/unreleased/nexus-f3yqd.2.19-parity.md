@@ -1,0 +1,3 @@
+### Fixed
+
+- **The data-move worker and the changeset gate now agree on which verification texts can run.** The worker refuses a blank verification and any text containing `/*/` (the driver and PostgreSQL disagree on where such a comment ends), as the gate already did, and the gate now reads a verification the way the JDBC driver does (non-ASCII dollar-quote tags, a `$` after a `$`, a `--` comment ended by a lone carriage return, where an E-string may start), so it no longer passes a text the worker refuses or refuses one the server runs correctly. A shared fixture of 54 verification texts is run against both. The gate also no longer crashes on a dollar quote left open at the end of the text (nexus-f3yqd.2.19).

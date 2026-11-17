@@ -49,14 +49,27 @@ final class MoveSql {
      */
     private static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$])\\$1(?![\\w$])");
 
+    /** A block-comment opener whose star is also the closer's: the one place the driver's lexer and PostgreSQL's read a comment differently. */
+    private static final String OPENER_OVERLAP = "/*/";
+
     private static final Pattern DOLLAR_DIGIT = Pattern.compile("\\$\\d");
 
     /**
-     * Why the verification text is not run, or empty when it may be: it contains a {@code ?} (the driver would read it as
+     * Why the verification text is not run, or empty when it may be: it is blank, it contains {@code /*}{@code /} (the
+     * registration gate refuses both too, nexus-f3yqd.2.19), it contains a {@code ?} (the driver would read it as
      * a parameter, and cannot be told otherwise inside a literal), or a {@code $} followed by a digit is left once the
      * standalone {@code $1}s are removed ({@code $2}, {@code $10}, {@code my$1}, {@code $1x}, {@code $$1 x$$}).
      */
     static Optional<String> refusal(String verification) {
+        if (verification.isBlank()) {
+            return Optional.of("the verification text is empty. It is a SELECT of the rows still in the old shape; the driver "
+                + "cannot run an empty statement");
+        }
+        if (verification.contains(OPENER_OVERLAP)) {
+            return Optional.of("the verification text contains '/*/'. The driver ends a block comment at that '/', PostgreSQL does "
+                + "not (it nests), so the two disagree about which text is a comment and the bind parameters cannot be counted. "
+                + "Write the comment with a space after '/*'");
+        }
         if (verification.indexOf('?') >= 0) {
             return Optional.of("the verification text contains a '?'. The driver reads a '?' as a bind parameter, so the text "
                 + "must not carry one (write the tenant as $1 and spell a jsonb or pattern '?' another way)");

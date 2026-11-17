@@ -82,6 +82,14 @@ class MoveFinishRulesTest {
         }
     }
 
+    @Test
+    void aBlankText_orOneWithAnOpenerThatOverlapsItsCloser_isRefused() {
+        assertThat(MoveSql.refusal("")).hasValueSatisfying(r -> assertThat(r).contains("empty"));
+        assertThat(MoveSql.refusal(" \n\t ")).hasValueSatisfying(r -> assertThat(r).contains("empty"));
+        assertThat(MoveSql.refusal("select 1 /*/ note */ where a = $1")).hasValueSatisfying(r -> assertThat(r).contains("'/*/'"));
+        assertThat(MoveSql.refusal("select 1 /* note */ where a = $1")).as("a comment opened with a space").isEmpty();
+    }
+
     // ── on_complete's lock wait ────────────────────────────────────────────────────────────────────────────
 
     @Test
