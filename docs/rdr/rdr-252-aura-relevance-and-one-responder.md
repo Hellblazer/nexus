@@ -288,7 +288,7 @@ not lock-flagged is clamped to its creation time plus the retention
 identities do (`252-research-6` F3, `252-research-7` F1). A group name follows the
 engine's address-segment pattern (`[A-Za-z0-9][A-Za-z0-9._-]*`, at most 64
 characters, the bound RDR-253 Step 1's membership routes already apply;
-`nexus_rdr/252-research-7` F1). The first write is an insert that fails if a live record has
+`nexus_rdr/252-research-8` F3). The first write is an insert that fails if a live record has
 the name, so two concurrent formations leave one; it also writes the
 leader's membership, in the same transaction. A disband removes every
 membership of the group, the leader's included. A disbanded name is
