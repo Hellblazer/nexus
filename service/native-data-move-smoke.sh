@@ -33,7 +33,7 @@
 # Needs: bash, tar with xz, curl, python3, and `uv` with the nexus package synced at the repo root (`uv sync`).
 # Exit: 0 both boots passed, 1 an assertion failed, 2 the setup failed (never a pass).
 #
-# The database passwords of these throwaway clusters appear in the engine's process arguments for the length of
+# The database passwords of these throwaway clusters are in the engine's environment for the length of
 # the run; the clusters live in a per-run private directory and are stopped at exit.
 # SC2329: cleanup is invoked via trap.
 # shellcheck disable=SC2329
@@ -45,6 +45,22 @@ CHECKER="$REPO_ROOT/scripts/check_native_data_move_boot.py"
 PROVISION="$SCRIPT_DIR/smoke-probes/provision_bundle_cluster.py"
 # The probe route the checker looks for (check_native_data_move_boot.PROBE_PATH_PREFIX); a test pins that they agree.
 PROBE_PATH_PREFIX="/v1/_whoami/"
+
+# The bundle's root under an extraction dir: the release packs it with its top directory (tar -C parent basename,
+# engine-service-release.yml), so initdb sits at <dir>/<top>/bin/initdb, depth 3. Prints the root, or nothing.
+locate_bundle() {
+  local hit
+  hit=$(find "$1" -mindepth 3 -maxdepth 3 -type f -name initdb -path '*/bin/initdb' | head -1)
+  [ -n "$hit" ] && dirname "$(dirname "$hit")"
+}
+
+# Test hook: extract a bundle and print where its root landed, nothing else (tests/test_native_data_move_smoke_wiring.py).
+if [ "${1:-}" = "--locate-bundle" ]; then
+  [ $# -eq 3 ] || { echo "usage: $0 --locate-bundle <bundle.txz> <empty dir>"; exit 2; }
+  tar -xJf "$2" -C "$3" || exit 2
+  locate_bundle "$3" || { echo "FAIL: no bin/initdb in the extracted bundle"; exit 2; }
+  exit 0
+fi
 
 BIN="${BIN:-target/nexus-service}"
 case "$BIN" in
@@ -109,9 +125,7 @@ run_mode() {
   echo "== $mode =="
   mkdir -p "$d/jtmp" "$d/home" "$d/ort" "$d/models" "$d/cfg" "$d/x" || return 2
   tar -xJf "$PG_BUNDLE" -C "$d/x" || { echo "FAIL: cannot extract $PG_BUNDLE"; return 2; }
-  bundle=$(find "$d/x" -mindepth 1 -maxdepth 2 -type f -name initdb -path '*/bin/initdb' | head -1)
-  [ -n "$bundle" ] || { echo "FAIL: no bin/initdb in the extracted bundle"; return 2; }
-  bundle="$(dirname "$(dirname "$bundle")")"
+  bundle=$(locate_bundle "$d/x") || { echo "FAIL: no bin/initdb in the extracted bundle"; return 2; }
 
   # Non-vacuity: a bundle that lacks pg_background cannot be the 'with' case, and the 'without' case must have
   # removed something.

@@ -98,3 +98,52 @@ def test_the_labels_the_script_probes_are_the_labels_the_checker_is_given() -> N
     text = SMOKE.read_text()
     for label in ("svc", "admin"):
         assert f"${{PROBE_PATH_PREFIX}}{label}-" in text
+
+
+def _pack_like_the_release(tmp_path: Path) -> Path:
+    """A txz packed the way build-publish-pg-bundle packs it: tar -cJf -C <parent> <basename>, top directory kept."""
+    import shutil
+    import subprocess
+
+    if shutil.which("xz") is None and sys.platform != "darwin":
+        import pytest
+
+        pytest.skip("tar here cannot write .txz without xz")
+    bundle = tmp_path / "src" / "pgsql"
+    (bundle / "bin").mkdir(parents=True)
+    (bundle / "bin" / "initdb").write_text("#!/bin/sh\n")
+    (bundle / "share" / "extension").mkdir(parents=True)
+    (bundle / "share" / "extension" / "pg_background.control").write_text("")
+    txz = tmp_path / "nexus-pg-linux-amd64.txz"
+    subprocess.run(["tar", "-cJf", str(txz), "-C", str(bundle.parent), bundle.name], check=True)
+    return txz
+
+
+def test_the_script_finds_the_bundle_root_in_the_release_layout(tmp_path):
+    """The release keeps the bundle's top directory, so initdb is three levels below the extraction dir; a lookup
+    that stops at two finds nothing and fails the job on every tag (review of 9a334f58c)."""
+    import subprocess
+
+    txz = _pack_like_the_release(tmp_path)
+    out = tmp_path / "x"
+    out.mkdir()
+    r = subprocess.run(["bash", str(SMOKE), "--locate-bundle", str(txz), str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    root = Path(r.stdout.strip())
+    assert root == out / "pgsql", r.stdout
+    assert (root / "bin" / "initdb").is_file()
+    assert (root / "share" / "extension" / "pg_background.control").is_file()
+
+
+def test_the_script_fails_loud_on_a_bundle_with_no_initdb(tmp_path):
+    import subprocess
+
+    empty = tmp_path / "src" / "pgsql" / "lib"
+    empty.mkdir(parents=True)
+    txz = tmp_path / "b.txz"
+    subprocess.run(["tar", "-cJf", str(txz), "-C", str(empty.parent.parent), "pgsql"], check=True)
+    out = tmp_path / "x"
+    out.mkdir()
+    r = subprocess.run(["bash", str(SMOKE), "--locate-bundle", str(txz), str(out)], capture_output=True, text=True)
+    assert r.returncode == 2
+    assert "no bin/initdb" in r.stdout

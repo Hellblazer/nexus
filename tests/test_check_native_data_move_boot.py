@@ -294,3 +294,15 @@ def test_cli_exit_2_on_a_missing_log(tmp_path: Path) -> None:
                         str(tmp_path / "absent.log"), *ARGS], capture_output=True, text=True,
                        env={"PATH": "/usr/bin:/bin", **ENV}, check=False)
     assert r.returncode == 2
+
+
+def test_cli_never_prints_a_secret_a_quoted_log_line_carries(tmp_path: Path) -> None:
+    """A failure's detail quotes engine lines; when masking is broken a quoted line can hold a secret, and the
+    checker's output (a public workflow log) must not (review of 9a334f58c)."""
+    leaked = _P.format(lvl="ERROR", cls=_INSTALLER) + (
+        f"event=data_move_libraries_failed library=ddl_utils error=password authentication failed for {ADMIN}")
+    text = log(L_NOISE, L_MASKING, leaked, L_DML, L_WALK, L_READY, L_PROBE_SVC, L_PROBE_ADMIN)
+    r = _run(tmp_path, text, "with-pg-background", ENV, *ARGS)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert ADMIN not in r.stdout and ADMIN not in r.stderr
+    assert SVC not in r.stdout

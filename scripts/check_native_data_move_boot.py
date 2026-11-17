@@ -195,6 +195,15 @@ def check_masked_lines(text: str, secrets: Mapping[str, str]) -> list[CheckResul
     return results
 
 
+def redact(text: str, secrets: Mapping[str, str]) -> str:
+    """A failure's detail quotes engine log lines as they were written; if the masking under test is broken, one can
+    hold a secret, so every secret is replaced before anything is printed."""
+    for label, secret in secrets.items():
+        if secret:
+            text = text.replace(secret, f"<{label}-redacted>")
+    return text
+
+
 def run_checks(text: str, mode: str, secrets: Mapping[str, str]) -> Report:
     """Every check for ``mode`` on the log ``text``. An unknown mode or a log with no lines fails."""
     n = len(_lines(text))
@@ -248,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"check_native_data_move_boot: {args.log} is empty", file=sys.stderr)
         return 2
     report = run_checks(text, args.mode, secrets)
-    print(report.render())
+    print(redact(report.render(), secrets))
     return 0 if report.ok else 1
 
 
