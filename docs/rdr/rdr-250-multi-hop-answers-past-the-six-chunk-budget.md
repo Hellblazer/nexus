@@ -273,7 +273,8 @@ exactly as the switch-off path does, before any pool work, so the switch-on
 result is never below the switch-off one. Phase B then fetches the pool, runs
 the filter, and resolves the kept pool keys in a second `resolve` call. Pool
 keys get what the `max_repair_items` cap (12, `coverage_repair.py:110`) leaves
-after the anchors' tokens, and overflow is named in `tokens_dropped`. The cap
+after phase A's tokens and joined items (the larger of the two), and overflow is
+named in `tokens_dropped`. The cap
 does not bind on HERB at 40 (at most 11 keys, 250-research-6). A joined item for
 a pool key uses the pool chunk's text as its anchor text, so it enters the
 generator the way an anchor key's joined item does today. The generator's own
@@ -305,7 +306,8 @@ unsupported, and an `entity.collections` pattern for the scope. A pool key can
 resolve when the anchors name no key. Turning it on by default is a
 later decision, after the MVV.
 
-**Report.** The resolution fields gain `pool_scanned` (pool chunks fetched),
+**Report.** The resolution fields gain `pool_scanned` (pool texts scanned:
+fetched, non-empty, deduplicated and in scope),
 `pool_candidate_keys`, `pool_keys_kept` and `pool_keys_rejected` (both by name),
 `pool_filter_calls` (calls started, counted on every path, a cut call included),
 `pool_filter_cost_usd` (the known assessment cost spent during the filter, read
@@ -450,8 +452,10 @@ A widened pool with no filter answers more companies and loses precision. The
 MVV's precision gate is the visible check; the MVV reports precision split by
 `generated_on_join`, so a loss shows as a gate failure, not a silent change.
 
-A failed pool fetch or filter call keeps no candidate key, so the answer falls
-back to today's anchors-only behaviour and the report names `pool_reason`.
+A failed pool fetch, a filter whose every call failed, or a failed second
+`resolve` keeps no pool key, so the answer is phase A's, today's anchors-only
+result, and the report names `pool_reason`. A partial filter failure keeps only
+the keys completed calls cited as support.
 
 ## Implementation Plan
 
@@ -478,6 +482,12 @@ The questions are chosen and frozen before the run. They must not be used to
 pick N or the filter threshold. The 20 valid held-out questions of the RDR-147
 MVV (branch entered 0) are one candidate. The record does not say whether they
 were used for tuning, so that needs checking before use.
+
+Stop rule: if the first two questions skip phase B on time
+(`filter_skipped_deadline`, with `pool_need_s` above `pool_room_s`), the run
+stops before more spend and the window is widened first. The budget-20 rows
+record about 41 s per answer and no per-call assessment latency, so whether one
+filter call fits is read from the first rows, not assumed.
 
 The paid run is spend and it calls the cloud, so it needs Sam's explicit go and
 an announced window. For scale, the two-run RDR-147 MVV cost 1.20 USD
@@ -529,7 +539,7 @@ None.
 ## Test Plan
 
 - **Scenario**: Switch off. **Verify**: On a fixed fixture whose search step returns 40 ids, the resolution fields equal today's and carry no pool field.
-- **Scenario**: Switch on, a pool key the assessment cites. **Verify**: The key is resolved and joined; `pool_scanned` is the non-anchor id count, `pool_keys_kept` names it, and `anchors_scanned` still counts the anchors only.
+- **Scenario**: Switch on, a pool key the assessment cites. **Verify**: The key is resolved and joined; `pool_scanned` counts the in-scope pool texts, `pool_keys_kept` names it, and `anchors_scanned` still counts the anchors only.
 - **Scenario**: Switch on, a pool key the assessment does not cite. **Verify**: The key is not resolved and is named in `pool_keys_rejected`. This is the non-vacuity check: the filter must be able to reject.
 - **Scenario**: The filter call fails, returns malformed records, or the allowance is short. **Verify**: No candidate key is kept, the anchors' keys still resolve, and `pool_reason` names the cause.
 - **Scenario**: A slow pool fetch or a filter cut by its deadline. **Verify**: The anchors' keys still resolve (no `failure`), and `pool_filter_calls` counts the cut call.
