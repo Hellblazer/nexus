@@ -301,28 +301,50 @@ class TestPartitionAndReport:
         assert part["not_measurable_by_status"] == {"no_chunks": 1, "no_taxonomy": 1, "error": 1}
 
     def test_the_partition_line_and_the_range_are_stated(self) -> None:
-        part = partition(self.rows, spike_routed=36)
+        part = partition(self.rows, spike_routed=6)
         assert part["line"] == (
             "7 candidates: 2 routed by the gate; 1 definite coverage misses; 1 uncertain; "
             "3 not measurable or never routable (error 1, no_chunks 1, no_taxonomy 1)")
         assert (part["unrouted_low"], part["unrouted_high"]) == (1, 2)
-        assert part["with_taxonomy"] == 4
         text = part["statement"]
-        assert "Of 7 candidates (36 routed by the spike)" in text
+        assert "Of 7 candidates (6 routed by the spike)" in text
         assert "would leave 1 to 2 of the spike-routed collections unrouted" in text
         assert GATE_UNRESOLVED in text
-        assert "has_taxonomy was not read for no_chunks, multi_dim and error rows" in text
+
+    def test_the_reconciliation_names_the_measured_taxonomy_and_every_unread_status(self) -> None:
+        part = partition(self.rows, spike_routed=6)
+        assert part["with_taxonomy"] == 4 == part["routed_by_gate"] + part["definite_miss"] + part["uncertain"]
+        assert part["no_taxonomy"] == 1
+        assert part["taxonomy_not_read"] == {"no_chunks": 1, "multi_dim": 0, "error": 1, "unregistered": 0}
+        text = part["statement"]
+        assert "With a measured taxonomy: 4; spike-routed: 6." in text
+        assert "Candidates with no taxonomy at their dimension: 1 (read, so not spike-routable)" in text
+        assert "has_taxonomy was not read for no_chunks 1, multi_dim 0, error 1, unregistered 0" in text
+
+    def test_candidates_less_spike_routed_equal_to_no_taxonomy_plus_unregistered_is_confirmed(self) -> None:
+        part = partition(self.rows + [_row("f", 5, None, status="unregistered", has_tax=None)], spike_routed=6)
+        assert part["reconciles"] is True  # 8 - 6 = 2 = no_taxonomy 1 + unregistered 1
+        assert "equals no_taxonomy plus unregistered (2), as expected" in part["statement"]
+
+    def test_a_reconciliation_that_fails_is_said_in_the_statement(self) -> None:
+        part = partition(self.rows, spike_routed=36)
+        assert part["reconciles"] is False
+        assert "RECONCILIATION MISMATCH: candidates minus spike-routed is -29" in part["statement"]
 
     def test_an_unknown_spike_count_is_not_invented(self) -> None:
-        assert "(? routed by the spike)" in partition(self.rows)["statement"]
+        part = partition(self.rows)
+        assert "(? routed by the spike)" in part["statement"]
+        assert part["reconciles"] is None
+        assert "was not checked" in part["statement"]
 
     def test_the_report_carries_the_partition_the_engine_and_the_host(self) -> None:
         report = build_report(self.rows, engine="release 0.1.194", date="2026-11-17",
-                              rebuild={"drift": False, "spike_per_question_routed": 36},
+                              rebuild={"drift": False, "spike_per_question_routed": 6},
                               host="engine.example")
         assert report["engine"] == "release 0.1.194"
         assert report["base_url_host"] == "engine.example"
         assert report["complete"] is True
+        assert not report["spike_statement"].startswith("PARTIAL")
         assert report["measured"] == 7
         assert report["errors"] == 1
         assert report["above_0_9"] == 2
@@ -375,6 +397,27 @@ class TestErrorRows:
         row = measure_collection("docs__c", chunk_rows=self.ROWS, taxonomy=_Boom())
         assert row["status"] == "error"
         assert "statement timeout" in row["error"]
+
+    def test_a_bearer_token_in_the_transport_text_is_redacted(self) -> None:
+        class _Leaky:
+            def unassigned_chashes(self, collection, *, limit=1000, after=None):
+                raise httpx.LocalProtocolError("Illegal header value b'Bearer tok-SECRET-123.abc\\n'")
+
+        row = measure_collection("docs__c", chunk_rows=self.ROWS, taxonomy=_Leaky())
+        assert row["status"] == "error"
+        assert "tok-SECRET-123" not in row["error"]
+        assert "Bearer <redacted>" in row["error"]
+
+    def test_a_bearer_token_is_redacted_through_main_into_the_written_report(self, tmp_path: Path) -> None:
+        coll = "docs__a__m__v1"
+
+        class _Leaky(_MainTaxonomy):
+            def unassigned_chashes(self, collection, *, limit=1000, after=None):
+                raise httpx.LocalProtocolError("Illegal header value b'Bearer tok-SECRET-123'")
+
+        env = _env(prose=[coll], tax=_Leaky({}, [coll]), stats=[{"name": coll, "dim": 768, "count": 4}])
+        _, out = _run(tmp_path, env, _saved(tmp_path, 1, [coll]))
+        assert "tok-SECRET-123" not in out.read_text()
 
     def test_a_transport_failure_is_recorded(self) -> None:
         class _Down:
@@ -558,9 +601,27 @@ class TestMainRun:
         out = tmp_path / "out.json"
         with pytest.raises(EngineTooOld):
             main(["--saved", str(_saved(tmp_path, 3, self.COLLS)), "--out", str(out), "--date", "2026-11-17"], env=env)
-        report = json.loads(out.read_text())
+        assert not out.exists()  # a partial run never takes the dated path
+        report = json.loads((tmp_path / "out.json.partial").read_text())
         assert report["complete"] is False
         assert [r["collection"] for r in report["collections"]] == [a]
+        assert report["spike_statement"].startswith("PARTIAL RUN, 1 of 3 measured: ")
+
+    def test_a_partial_run_does_not_overwrite_a_complete_report(self, tmp_path: Path) -> None:
+        a, b, _ = self.COLLS
+
+        class _OldEngine(_MainTaxonomy):
+            def unassigned_chashes(self, collection, *, limit=1000, after=None):
+                request = httpx.Request("POST", "https://x/y")
+                raise httpx.HTTPStatusError("nope", request=request, response=httpx.Response(404, request=request))
+
+        out = tmp_path / "out.json"
+        out.write_text('{"complete": true, "kept": 1}')
+        env = _env(prose=self.COLLS, tax=_OldEngine({}, self.COLLS), stats=self._stats())
+        with pytest.raises(EngineTooOld):
+            main(["--saved", str(_saved(tmp_path, 3, self.COLLS)), "--out", str(out), "--date", "2026-11-17"], env=env)
+        assert json.loads(out.read_text()) == {"complete": True, "kept": 1}
+        assert (tmp_path / "out.json.partial").exists()
 
     def test_an_empty_rebuilt_set_exits_non_zero(self, tmp_path: Path, capsys) -> None:
         tax = _MainTaxonomy({}, [])  # nothing has topics

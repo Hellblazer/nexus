@@ -63,6 +63,7 @@ import click
 import httpx
 
 from bench.manifest import engine_build
+from nexus._log_safe_url import scrub_transport_error
 from nexus.db.http_vector_client import VectorServiceError
 
 GATE_THRESHOLD = 0.9
@@ -158,11 +159,14 @@ def live_chunks(stats_rows: list[dict[str, Any]], collection: str) -> tuple[int,
     return sum(int(r.get("count") or 0) for r in rows), sorted(int(r["dim"]) for r in rows if r.get("dim"))
 
 
-def _describe(exc: BaseException) -> str:
-    """The error for a row: type, HTTP status when there is one, and the message with every URL
-    replaced, so a committed report never carries the engine's address."""
+def _describe(exc: BaseException, base_url: str = "") -> str:
+    """The error for a row: type, HTTP status when there is one, and the message with the
+    transport's own redaction applied (a bearer token httpx quotes in an "Illegal header
+    value" is replaced; text that quotes the URL's credentials is withheld) and every URL
+    replaced, so a committed report carries neither a token nor the engine's address."""
     status = f" (HTTP {exc.response.status_code})" if isinstance(exc, httpx.HTTPStatusError) else ""
-    return re.sub(r"https?://[^\s'\"]+", "<url>", f"{type(exc).__name__}{status}: {exc}")[:300]
+    text = scrub_transport_error(exc, base_url or "http://engine.invalid/")
+    return re.sub(r"https?://[^\s'\"]+", "<url>", f"{type(exc).__name__}{status}: {text}")[:300]
 
 
 def non_live_chunks(stats_rows: list[dict[str, Any]], collection: str) -> int:
@@ -175,7 +179,7 @@ def non_live_chunks(stats_rows: list[dict[str, Any]], collection: str) -> int:
 
 
 def measure_collection(
-    collection: str, *, chunk_rows: list[dict[str, Any]], taxonomy: _TaxonomyReader,
+    collection: str, *, chunk_rows: list[dict[str, Any]], taxonomy: _TaxonomyReader, base_url: str = "",
 ) -> dict[str, Any]:
     """One collection's row. A failed read (``httpx.HTTPError``, ``VectorServiceError``) is
     status ``error`` with the message, so one 5xx does not lose the rest of the run;
@@ -197,7 +201,7 @@ def measure_collection(
         result = count_unassigned(taxonomy, collection)
     except (httpx.HTTPError, VectorServiceError) as exc:
         row["status"] = "error"
-        row["error"] = _describe(exc)
+        row["error"] = _describe(exc, base_url)
         return row
     if not result.registered:
         row["status"] = "unregistered"
@@ -253,7 +257,7 @@ def rebuild_set(prose: list[str], taxonomy: Any) -> list[str]:
 def measure_collections(
     collections: list[str], *, vector_client: Any, taxonomy: _TaxonomyReader,
     progress: Callable[[dict[str, Any]], None] | None = None,
-    rows_out: list[dict[str, Any]] | None = None,
+    rows_out: list[dict[str, Any]] | None = None, base_url: str = "",
 ) -> list[dict[str, Any]]:
     """Measure each collection against the engine behind the injected clients: one
     ``vector_client.collection_stats()`` read, then the unassigned pages per collection.
@@ -265,7 +269,7 @@ def measure_collections(
     stats = vector_client.collection_stats()
     rows: list[dict[str, Any]] = rows_out if rows_out is not None else []
     for c in collections:
-        rows.append(measure_collection(c, chunk_rows=stats, taxonomy=taxonomy))
+        rows.append(measure_collection(c, chunk_rows=stats, taxonomy=taxonomy, base_url=base_url))
         if progress is not None:
             progress(rows[-1])
     return rows
@@ -290,6 +294,25 @@ def partition(rows: list[dict[str, Any]], *, spike_routed: int | None = None) ->
     n = len(rows)
     lo, hi = len(b), len(b) + len(c)
     spike = "?" if spike_routed is None else str(spike_routed)
+    unread_statuses = ("no_chunks", "multi_dim", "error", "unregistered")
+    unread = {k: by_status.get(k, 0) for k in unread_statuses}
+    unread_text = ", ".join(f"{k} {v}" for k, v in unread.items())
+    no_tax = by_status.get("no_taxonomy", 0)
+    with_tax = len(a) + len(b) + len(c)
+    # The candidates the spike could not route are the ones with no taxonomy at their dimension
+    # (read: no_taxonomy) or that the engine does not know (unregistered), so the two sides agree.
+    gap = None if spike_routed is None else n - spike_routed
+    not_spike_routable = no_tax + by_status.get("unregistered", 0)
+    reconciles = None if gap is None else gap == not_spike_routable
+    if gap is None:
+        check = "The spike-routed count is unknown, so candidates minus spike-routed was not checked."
+    elif reconciles:
+        check = (f"Candidates minus spike-routed ({gap}) equals no_taxonomy plus unregistered "
+                 f"({not_spike_routable}), as expected.")
+    else:
+        check = (f"RECONCILIATION MISMATCH: candidates minus spike-routed is {gap}, but no_taxonomy plus "
+                 f"unregistered is {not_spike_routable}; the set or the spike count has drifted, so read "
+                 "the range with care.")
     return {
         "candidates": n,
         "routed_by_gate": len(a),
@@ -297,17 +320,21 @@ def partition(rows: list[dict[str, Any]], *, spike_routed: int | None = None) ->
         "uncertain": len(c),
         "not_measurable": len(d),
         "not_measurable_by_status": by_status,
-        "with_taxonomy": len(a) + len(b) + len(c),
+        "with_taxonomy": with_tax,
+        "no_taxonomy": no_tax,
+        "taxonomy_not_read": unread,
+        "reconciles": reconciles,
         "unrouted_low": lo,
         "unrouted_high": hi,
         "line": (f"{n} candidates: {len(a)} routed by the gate; {len(b)} definite coverage misses; "
                  f"{len(c)} uncertain; {len(d)} not measurable or never routable ({detail})"),
         "statement": (
             f"Of {n} candidates ({spike} routed by the spike), the 0.9 gate would leave {lo} to {hi} "
-            f"of the spike-routed collections unrouted, over the {len(a) + len(b) + len(c)} candidates "
-            f"with a taxonomy and a measured coverage: {lo} definite, {len(c)} {GATE_UNRESOLVED}. "
-            f"The other {len(d)} candidates ({detail}) could not be measured; has_taxonomy was not "
-            f"read for no_chunks, multi_dim and error rows, so any of them the spike routed adds to this range."
+            f"of the spike-routed collections unrouted: {lo} definite, {len(c)} {GATE_UNRESOLVED}. "
+            f"With a measured taxonomy: {with_tax}; spike-routed: {spike}. "
+            f"Candidates with no taxonomy at their dimension: {no_tax} (read, so not spike-routable). "
+            f"has_taxonomy was not read for {unread_text}, so any of those the spike routed adds to the range. "
+            f"{check}"
         ),
     }
 
@@ -319,6 +346,10 @@ def build_report(
     kept = set(routed_by_gate(rows))
     not_routed = [r["collection"] for r in rows if r["collection"] not in kept]
     part = partition(rows, spike_routed=rebuild.get("spike_per_question_routed"))
+    statement = part["statement"]
+    if not complete:
+        total = rebuild.get("rebuilt_set_size")
+        statement = f"PARTIAL RUN, {len(rows)} of {'?' if total is None else total} measured: {statement}"
     return {
         "bead": "nexus-7fku2.1.7",
         "date": date,
@@ -333,7 +364,7 @@ def build_report(
         "rebuild": rebuild,
         "partition": part,
         "partition_line": part["line"],
-        "spike_statement": part["statement"],
+        "spike_statement": statement,
         "measured": len(rows),
         "errors": sum(1 for r in rows if r["status"] == "error"),
         "above_0_9": len(kept),
@@ -468,7 +499,7 @@ def main(argv: list[str] | None = None, *, env: Env | None = None) -> int:
             if check["drift"]:
                 click.echo(f"DRIFT: {check}", err=True)
             measure_collections(
-                rebuilt, vector_client=vector_client, taxonomy=tax, rows_out=rows,
+                rebuilt, vector_client=vector_client, taxonomy=tax, rows_out=rows, base_url=pin.base_url,
                 progress=lambda r: click.echo(
                     f"{r['collection']} {r['status']} {r['live_chunks']} {r['unassigned']} {r['coverage']}",
                     err=True),
@@ -476,6 +507,8 @@ def main(argv: list[str] | None = None, *, env: Env | None = None) -> int:
         complete = True
     finally:
         report = build_report(rows, engine=pin.build, date=date, rebuild=check, host=pin.host, complete=complete)
+        if not complete:
+            out = out.with_name(out.name + ".partial")  # never over a complete report at the dated path
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(report, indent=1) + "\n")
     click.echo(report["table_markdown"])
