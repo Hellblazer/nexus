@@ -644,8 +644,8 @@ names the new call site and its `path:line`.
 
 - [ ] Critical Assumptions that gate Phase 2 verified: the engine spike
   (statement time at 50,000 documents) and the equivalence test of the metadata
-  route. Phase 1 has no open assumption except the `--check-references`
-  behaviour change, which its own test checks.
+  route. Phase 1 has no open assumption; the `--check-references` behaviour
+  change moved to Phase 2 with nexus-uwggq.1.5 (option C).
 - [x] RDR-193 closed 2026-11-16: no prerequisite remains with it.
 - Not a prerequisite: nexus-f3yqd.2. This plan does not depend on its job
   mechanism; only the deferred Gap 2 does.
@@ -699,7 +699,8 @@ the table in the same commit:
   (code 3, distinct from pass, fail and a usage error) when its row reads "not
   checked", and the general `nx doctor` sweep keeps those rows non-gating.
 
-Expected count after this phase: 21 calls.
+Expected count after this phase: 22 calls in 21 sites (the 21 forecast less
+the `--check-references` switch, which moved to Phase 2).
 
 ### Phase 2: Engine routes, then client (days, with an engine release)
 
@@ -902,3 +903,4 @@ the next one without the ratchet.
 - 2026-11-17: `nx catalog list --sensitive` (nexus-uwggq.1.7) ships with a refusal on filtered or past-10,000 reads of a tenant over 10,000 sensitive documents (Sam, ask uwggq17-sensitive-cap, option C); Phase 2 closes it with the metadata route and a type filter on the sensitive route (standing grant 3).
 - 2026-11-17: The sensitive-document doctor rows (nexus-uwggq.1.8) read "not checked" with a reason that names the cause the engine's list reported and a next step; `nx catalog doctor --sensitive-with-aspects` exits 3 ("could not check") when its row reads "not checked", and `nx doctor` keeps the rows non-gating (standing grant 3).
 - 2026-11-17: Client rules and Phase 1 Step 2 record that scoped client reads and writes refuse a blank or whitespace value (nexus-uwggq.1.9, after nexus-uwggq.1.6). The engine-side 400 and the `descendants` LIKE escape are not yet planned in this RDR; they are recorded in the nexus-uwggq.1.9 notes.
+- 2026-11-17: Phase 1's expected count reads 22 calls in 21 sites, the live walk-site scan on e0d833c58, because the `--check-references` switch (nexus-uwggq.1.5) moved to Phase 2; Phase 2's 18 is unchanged (standing grant 3).

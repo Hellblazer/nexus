@@ -140,7 +140,7 @@ emit = { class = "BULK JOB", calls = 1, reason = "Serves nx catalog sensitive wi
 [[row]]
 id = "doctor_references.py::reference_only_candidates"
 match = { site = "doctor_references.py::reference_only_candidates" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Wants the non-file:// rows; the wrapper's one caller is run_check_references (doctor_references.py:288), and Phase 1 makes one list_scoped read per registered scheme.", next = "nexus-uwggq.1.5" }
+emit = { class = "AGGREGATE", calls = 1, reason = "Wants the non-file:// rows; the wrapper's one caller is run_check_references (doctor_references.py:288), and Phase 2 reads registered schemes, in any case, through the scheme-prefix route.", next = "nexus-uwggq.1.5" }
 
 [[row]]
 id = "mcp/catalog.py::catalog_list"
