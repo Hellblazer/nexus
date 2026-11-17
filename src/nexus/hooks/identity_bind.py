@@ -19,9 +19,8 @@ Not bound here, by design:
   ``current_session`` file alone);
 * a process with no Claude ancestor (``nx hook session-start`` typed in a shell).
 
-On Windows the holder check cannot read a process start time (:mod:`nexus.identity.holder`), so the hook binds and
-sweeps but never sends a ``holder_gone`` it could not prove, and the in-place ``/restart`` rebind, which needs the
-process's own start time, does not run.
+On Windows the start time is the process creation time (:mod:`nexus.identity.holder`), so the holder check, the
+pending file and the in-place ``/restart`` rebind work there as on POSIX.
 """
 from __future__ import annotations
 
