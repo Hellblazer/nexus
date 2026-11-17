@@ -349,12 +349,35 @@ def scenario_upgrade(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     out["libraries_after"] = library_state(eng)
     out["events"] = collect_events(eng)
     out["wal_after_move_bytes"] = wal_lsn(eng) - ubw.lsn_bytes(base)
+    if a.reboot:
+        out["reboot"] = reboot_after(eng, ubw)
     ok = (row["completed"] and out["boot_work_seen_in_status"] and out["row_counts"]["rows_missing"] == 0
           and out["row_counts"]["rows_twice"] == 0)
     out["checks"] = {"move_completed": row["completed"], "progress_in_v1_status": out["boot_work_seen_in_status"],
                      "every_row_moved_once": out["row_counts"]["rows_missing"] == 0 and out["row_counts"]["rows_twice"] == 0,
                      "libraries_applied_lines": len(out["events"].get("event=data_move_library_applied", []))}
     return out, ok
+
+
+def reboot_after(eng: Engine, ubw) -> dict:
+    """Stop the engine and PG cleanly, wait until the cluster reads 'shut down' (a stop after a large move can
+    take minutes to checkpoint), then boot again and count the boot's WAL: a same-version reboot with the move done."""
+    eng.stop()
+    deadline = time.monotonic() + 900
+    while True:
+        try:
+            base = eng.inst.checkpoint_lsn()
+            break
+        except ubw.HarnessError as exc:
+            if time.monotonic() > deadline:
+                raise MvvError(f"the cluster never reached 'shut down' after the stop: {exc}") from exc
+            time.sleep(5)
+    eng.proc = None
+    marks = eng.start("reboot")
+    wal = wal_lsn(eng) - ubw.lsn_bytes(base)
+    row = move_row(eng)
+    return {"marks": marks, "boot_wal_bytes": wal, "move": row,
+            "library_applied_lines": len(eng.events("event=data_move_library_applied"))}
 
 
 def scenario_kill_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
@@ -624,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--threads", type=int, default=4)
     sc.add_argument("--warmup-s", type=float, default=20.0)
     sc.add_argument("--baseline-s", type=float, default=90.0)
+    sc.add_argument("--reboot", action="store_true", help="upgrade: after the move, a clean stop and a second boot, counted")
     sc.add_argument("--json", type=Path, default=None)
     a = ap.parse_args(argv)
     if a.cmd == "make-jar":
