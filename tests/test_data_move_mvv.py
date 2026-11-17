@@ -153,3 +153,11 @@ class TestResumeVerdict:
         v = mvv.resume_verdict(done_at_kill=40, done_after_restart_first_seen=40, total=100, rows_total=100,
                                rows_once=60, rows_twice=0, rows_missing=40, completed=False)
         assert v["ok"] is False
+
+
+def test_progress_counts_only_the_moves_own_boot_work_entry():
+    """Any boot_work entry used to count as the move's progress; only data-move:<label> does (critique S, check 3)."""
+    m = _load()
+    assert m.move_in_boot_work([{"name": "data-move:mvv-chunks-stamp", "done": 3, "total": 87}], m.MOVE_LABEL)
+    assert not m.move_in_boot_work([{"name": "pci:knowledge__1-1__bge__v1"}], m.MOVE_LABEL)
+    assert not m.move_in_boot_work(None, m.MOVE_LABEL)

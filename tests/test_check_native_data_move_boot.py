@@ -306,3 +306,14 @@ def test_cli_never_prints_a_secret_a_quoted_log_line_carries(tmp_path: Path) -> 
     assert r.returncode == 1, r.stdout + r.stderr
     assert ADMIN not in r.stdout and ADMIN not in r.stderr
     assert SVC not in r.stdout
+
+
+@pytest.mark.parametrize("line", ["L_DDL", "L_DML"])
+def test_an_applied_line_with_zero_changesets_fails(line: str) -> None:
+    """The installer logs the line after the walk even when nothing was pending; on the smoke's fresh cluster a
+    count of 0 means the library was not applied (critique of 9a334f58c, S4)."""
+    original = globals()[line]
+    zero = re.sub(r"changesets=\d+", "changesets=0", original)
+    text = GOOD_WITH.replace(original, zero)
+    lib = "ddl_utils" if line == "L_DDL" else "dml_utils"
+    assert failed(text, "with-pg-background") == [f"event=data_move_library_applied library={lib}"]

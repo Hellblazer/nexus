@@ -269,6 +269,11 @@ def moved_rows(eng: Engine) -> int:
     return int(sql(eng, "select count(*) from nexus.chunks where mvv_n is not null")[0][0])
 
 
+def move_in_boot_work(boot_work: object, label: str) -> bool:
+    """Whether /v1/status's boot_work names this move's own entry (``data-move:<label>``), not just any entry."""
+    return f"data-move:{label}" in json.dumps(boot_work)
+
+
 def wait_move(eng: Engine, timeout: float, sample: list | None = None) -> dict:
     """Until the move completes or fails; samples /v1/status boot_work and the progress as it goes."""
     t0 = time.monotonic()
@@ -351,7 +356,7 @@ def scenario_upgrade(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     out["move"] = row
     out["move_seconds_after_ready"] = round(time.monotonic() - t_start - marks["ready_s"], 1)
     out["progress_samples"] = samples[:: max(1, len(samples) // 25)]
-    out["boot_work_seen_in_status"] = any(s.get("boot_work") for s in samples)
+    out["boot_work_seen_in_status"] = any(move_in_boot_work(s.get("boot_work"), MOVE_LABEL) for s in samples)
     out["row_counts"] = row_counts(eng)
     out["libraries_after"] = library_state(eng)
     out["events"] = collect_events(eng)

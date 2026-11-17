@@ -110,17 +110,22 @@ def _lines(text: str) -> list[str]:
 def check_libraries_applied(text: str) -> list[CheckResult]:
     """BOTH library-applied lines, one per library, and no skipped or failed line (a bundle with pg_background)."""
     lines = _lines(text)
+    # The line is logged after the walk even when nothing was pending, so on the smoke's fresh cluster the line
+    # alone shows the walk ran, not that it applied the library: require a changeset count above zero.
     applied: dict[str, int] = {}
     for ln in lines:
         m = _APPLIED.search(ln)
         if m:
-            applied[m.group(1)] = applied.get(m.group(1), 0) + 1
+            applied[m.group(1)] = max(applied.get(m.group(1), 0), int(m.group(2)))
     results = []
     for lib in LIBRARIES:
-        n = applied.get(lib, 0)
-        results.append(CheckResult(
-            f"event=data_move_library_applied library={lib}", n >= 1, len(lines),
-            "" if n >= 1 else f"no such line; applied: {sorted(applied) or 'none'}"))
+        if lib not in applied:
+            ok, detail = False, f"no such line; applied: {sorted(applied) or 'none'}"
+        elif applied[lib] < 1:
+            ok, detail = False, "the line says changesets=0: on a fresh cluster the walk applied nothing"
+        else:
+            ok, detail = True, ""
+        results.append(CheckResult(f"event=data_move_library_applied library={lib}", ok, len(lines), detail))
     skipped = [ln for ln in lines if _SKIPPED.search(ln)]
     results.append(CheckResult("no event=data_move_libraries_skipped on a bundle with pg_background", not skipped,
                                len(lines), "" if not skipped else f"the engine skipped the libraries: {skipped[0].strip()[-200:]}"))
