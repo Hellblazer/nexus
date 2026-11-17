@@ -96,8 +96,10 @@ class DrivingTableIsolationCheckTest {
     }
 
     @Test
-    void aPolicyReachingTheRoleThroughPublicSaysPublic() {
-        assertThat(DrivingTableIsolationCheck.refusal("nexus_svc",
-            List.of(new Violation(ROWS, "rows_owner_read", "public")))).contains("through PUBLIC");
+    void aPolicyReachingTheRoleThroughPublicSaysPublic_andOffersNoMembershipToRevoke() {
+        String text = DrivingTableIsolationCheck.refusal("nexus_svc",
+            List.of(new Violation(ROWS, "rows_owner_read", "public")));
+        assertThat(text).contains("through PUBLIC").contains("names PUBLIC").contains("re-scope it")
+            .doesNotContain("inheriting").doesNotContain("INHERIT FALSE");
     }
 }

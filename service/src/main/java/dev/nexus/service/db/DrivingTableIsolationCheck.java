@@ -38,6 +38,13 @@ import java.util.function.LongConsumer;
  * until a changeset drops it, and stays in scope until then. A table that no longer exists has no policy and passes. The
  * list is read at boot, after the migration, which is the only time a changeset registers a move.
  *
+ * <p><b>Scope.</b> The pattern, and so this check, is for a table with one set of policies on its parent. It does not
+ * apply to a table partitioned one tenant per leaf (the shape of {@code nexus.chunks} and
+ * {@code nexus.taxonomy_centroids}): that needs {@code nexus.partition_sync_access} so each leaf carries the policy, and a
+ * walk of the leaves, which {@link ChunksIsolationCheck#structure} does for the two trees it knows and no check does for
+ * another. A non-chunks table partitioned some other way gets its policy on the parent only, because the worker runs
+ * such a move per tenant over the parent.
+ *
  * <p>Like the chunks check, a probe that cannot run is a refusal, and a transient failure (SQLState classes 08, 53, 57,
  * 40001, a pool timeout) is retried after each pause in {@link ChunksIsolationCheck#STARTUP_BACKOFF_MILLIS} first. A
  * role RLS does not bind (SUPERUSER, BYPASSRLS) is never a violation.
@@ -48,9 +55,6 @@ import java.util.function.LongConsumer;
 public final class DrivingTableIsolationCheck {
 
     private static final Logger log = LoggerFactory.getLogger(DrivingTableIsolationCheck.class);
-
-    /** The driving table nexus.chunks is checked by {@link ChunksIsolationCheck}, with its partition trees. */
-    private static final Table CHUNKS = new Table("nexus", "chunks");
 
     private static final int ADMIN_CONNECT_SECONDS = 15;
     private static final int ADMIN_SOCKET_SECONDS = 60;
@@ -81,7 +85,8 @@ public final class DrivingTableIsolationCheck {
     }
 
     /**
-     * Every distinct driving table {@code nexus.data_moves} names, in any state, except {@code nexus.chunks}; ordered by
+     * Every distinct driving table {@code nexus.data_moves} names, in any state, except the partition trees
+     * {@link ChunksIsolationCheck} covers ({@code nexus.chunks} and {@code nexus.taxonomy_centroids}); ordered by
      * schema, then name. Read on the admin connection.
      */
     public static List<Table> registeredDrivingTables(DSLContext admin) {
@@ -91,11 +96,16 @@ public final class DrivingTableIsolationCheck {
         for (var row : admin.selectDistinct(schema, table).from(DSL.table(DSL.name("nexus", "data_moves")))
                 .orderBy(schema, table).fetch()) {
             Table t = new Table(row.value1(), row.value2());
-            if (!t.equals(CHUNKS)) {
+            if (!coveredByChunksCheck(t)) {
                 out.add(t);
             }
         }
         return out;
+    }
+
+    /** The roots of the two partition trees {@link ChunksIsolationCheck} already checks, policy by policy and relation by relation. */
+    private static boolean coveredByChunksCheck(Table t) {
+        return t.schema().equals("nexus") && ChunksIsolationCheck.TREE_ROOTS.contains(t.name());
     }
 
     /** The policies that apply to the role {@code service} is connected as, on each of {@code tables}, tables in order. */
@@ -112,16 +122,20 @@ public final class DrivingTableIsolationCheck {
     /** What a refusal says: the table, the policy and the role it reaches, both remedies. */
     static String refusal(String connectedRole, List<Violation> violations) {
         var v = violations.get(0);
+        boolean everyone = v.role().equals("public");
         return "policy " + v.policy() + " on " + v.table().label() + " applies to role " + connectedRole
-            + " (through " + (v.role().equals("public") ? "PUBLIC" : "role " + v.role())
+            + " (through " + (everyone ? "PUBLIC" : "role " + v.role())
             + "), the role this service connects as, and it is not tenant_isolation: permissive policies are "
             + "OR-ed, so this role would read every tenant's rows of the table a data move runs over (nexus-f3yqd.2.16)."
             + (violations.size() > 1 ? " " + (violations.size() - 1) + " more violation(s) follow it." : "")
-            + " Either drop the policy as the table owner (DROP POLICY " + v.policy() + " ON " + v.table().label()
-            + "), or stop " + connectedRole + " inheriting " + v.role()
-            + " (REVOKE it, or GRANT ... WITH INHERIT FALSE). The owner-read policy of a data move is created for the"
-            + " migrating role: run migrations as a role the service does not inherit (NX_DB_ADMIN_URL,"
-            + " NX_DB_ADMIN_USER and NX_DB_ADMIN_PASS).";
+            + (everyone
+                ? " The policy names PUBLIC, so no membership can be revoked: drop it as the table owner (DROP POLICY "
+                    + v.policy() + " ON " + v.table().label() + "), or re-scope it to the migrating role."
+                : " Either drop the policy as the table owner (DROP POLICY " + v.policy() + " ON " + v.table().label()
+                    + "), or stop " + connectedRole + " inheriting " + v.role()
+                    + " (REVOKE it, or GRANT ... WITH INHERIT FALSE).")
+            + " The owner-read policy of a data move is created for the migrating role: run migrations as a role the "
+            + "service does not inherit (NX_DB_ADMIN_URL, NX_DB_ADMIN_USER and NX_DB_ADMIN_PASS).";
     }
 
     /**

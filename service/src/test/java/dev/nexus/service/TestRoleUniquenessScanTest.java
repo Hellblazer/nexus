@@ -393,6 +393,14 @@ class TestRoleUniquenessScanTest {
     private static final Pattern START_EMPTY = Pattern.compile("\\bstartEmptyDatabase\\s*\\(");
     private static final Pattern DEDICATED = Pattern.compile(
         "\\bPgContainerHelper\\s*(?:\\.|::)\\s*(?:startDedicated|newContainer|startDataMove|newDataMoveContainer)\\b");
+    /**
+     * Positive evidence that a class touches the shared cluster (nexus-f3yqd.2.16 review): a template clone
+     * ({@code PgContainerHelper.start}, {@code startMigratedByOwner}), {@code startEmptyDatabase} in any form (call, method
+     * reference, static import) or {@code SharedCluster} itself. A class with none of these and a dedicated container is
+     * the only kind excused from the shared-cluster collision rule.
+     */
+    private static final Pattern SHARED_CLUSTER = Pattern.compile(
+        "\\bPgContainerHelper\\s*(?:\\.|::)\\s*(?:start|startMigratedByOwner)\\b|\\bstartEmptyDatabase\\b|\\bSharedCluster\\s*\\.");
     /** A parameter declaration such as {@code String role}: the call-shaped text is a method declaration. */
     private static final Pattern DECLARATION =
         Pattern.compile("(?:final\\s+)?[A-Za-z_][\\w.<>?\\[\\]]*\\s+([A-Za-z_]\\w*)");
@@ -402,12 +410,14 @@ class TestRoleUniquenessScanTest {
      *  password values. */
     record Use(String clazz, String helper, int argc, Set<String> roles, Set<String> passwords) {}
 
-    record Census(List<Use> uses, Map<String, Set<String>> exclusive, Set<String> dedicated, List<String> problems) {}
+    record Census(List<Use> uses, Map<String, Set<String>> exclusive, Set<String> dedicated, Set<String> sharedCluster,
+                  List<String> problems) {}
 
     static Census collect(Map<String, Src> all, Set<String> scanned) {
         List<Use> uses = new ArrayList<>();
         Map<String, Set<String>> exclusive = new TreeMap<>();
         Set<String> dedicated = new TreeSet<>();
+        Set<String> sharedCluster = new TreeSet<>();
         List<String> problems = new ArrayList<>();
         for (String name : new TreeSet<>(scanned)) {
             Src s = all.get(name);
@@ -452,8 +462,11 @@ class TestRoleUniquenessScanTest {
             if (DEDICATED.matcher(s.code).find()) {
                 dedicated.add(name);
             }
+            if (SHARED_CLUSTER.matcher(s.code).find()) {
+                sharedCluster.add(name);
+            }
         }
-        return new Census(uses, exclusive, dedicated, problems);
+        return new Census(uses, exclusive, dedicated, sharedCluster, problems);
     }
 
     private static final Pattern METHOD_DECL = Pattern.compile(
@@ -568,13 +581,14 @@ class TestRoleUniquenessScanTest {
                     }
                 }
             }
-            // nexus-f3yqd.2.16: a class that only ever takes a dedicated container (and declares nothing exclusive, so
-            // never touches the shared cluster) creates its roles on a cluster of its own, where no other class's role of
+            // nexus-f3yqd.2.16: a class that takes a dedicated container and shows no sign of the shared cluster (no
+            // template clone, no startEmptyDatabase in any form, no SharedCluster, nothing declared exclusive) creates its roles on a cluster of its own, where no other class's role of
             // that name can collide. nexus_svc as the migrating role (the single-role posture) is created that way by
             // more than one class, each on its own container.
             Set<String> sharing = new TreeSet<>();
             for (String cls : users) {
-                if (!c.dedicated().contains(cls) || !c.exclusive().getOrDefault(cls, Set.of()).isEmpty()) {
+                if (!c.dedicated().contains(cls) || c.sharedCluster().contains(cls)
+                        || !c.exclusive().getOrDefault(cls, Set.of()).isEmpty()) {
                     sharing.add(cls);
                 }
             }
@@ -950,6 +964,15 @@ class TestRoleUniquenessScanTest {
             + " PgContainerHelper.bootstrapNonSuperuserOwner(su, \"owner_x\", \"pw\"); } }";
         assertThat(roles(fixture("A", a, "E", mixed, "C", shared1))).as("a class that also uses the shared cluster still counts")
             .singleElement().asString().contains("owner_x");
+        // each way to reach the shared cluster, beside startDedicated(), keeps the class counted
+        for (String shared : List.of("PgContainerHelper.start()", "PgContainerHelper.startEmptyDatabase()",
+                "PgContainerHelper.startMigratedByOwner(\"owner_x\")", "Supplier<Object> s = PgContainerHelper::startEmptyDatabase",
+                "SharedCluster.get()")) {
+            String both = "class E { void f() { PgContainerHelper.startDedicated(); " + shared + ";"
+                + " PgContainerHelper.bootstrapNonSuperuserOwner(su, \"owner_x\", \"pw\"); } }";
+            assertThat(roles(fixture("A", a, "E", both, "C", shared1))).as(shared).singleElement().asString()
+                .contains("owner_x");
+        }
     }
 
     @Test

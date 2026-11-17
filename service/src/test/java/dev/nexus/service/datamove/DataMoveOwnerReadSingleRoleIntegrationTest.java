@@ -160,7 +160,10 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
             Clock.systemUTC(), new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS, MoveFinisher.RUNS_ONLY, true);
         try {
             assertThat(worker.runCycle()).isEqualTo(1);
-            assertThat(worker.states().state("sr-move").orElseThrow().kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+            var blocked = worker.states().state("sr-move").orElseThrow();
+            assertThat(blocked.kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+            assertThat(blocked.reason()).as("the install gate, which comes first in a single-role boot, and no other cause")
+                .contains("the library install has not run");
             assertThat(ctx().fetchCount(DSL.table(DSL.name("dm_ownerread", "rows")),
                 DSL.field(DSL.name("n"), Integer.class).ne(0))).as("nothing moved").isZero();
         } finally {
