@@ -241,6 +241,60 @@ INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, ch
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="v-e-string-literal-decodes-to-a-question-mark" author="fixture">
+        <comment>v-e-string-literal-decodes-to-a-question-mark</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES ('v-e1', 't', 'nexus', 'vtab', 10, 0, 1000, E'SELECT 1 FROM nexus.vtab WHERE a LIKE ''%\x3f%'' AND t = $1');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="v-e-string-literal-octal-question-mark" author="fixture">
+        <comment>v-e-string-literal-octal-question-mark</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES ('v-e2', 't', 'nexus', 'vtab', 10, 0, 1000, E'SELECT 1 FROM nexus.vtab WHERE a LIKE ''%\077%'' AND t = $1');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="v-e-string-literal-unicode-question-mark" author="fixture">
+        <comment>v-e-string-literal-unicode-question-mark</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES ('v-e3', 't', 'nexus', 'vtab', 10, 0, 1000, E'SELECT 1 FROM nexus.vtab WHERE a LIKE ''%\u003f%'' AND t = $1');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="v-e-string-literal-decodes-to-a-second-placeholder" author="fixture">
+        <comment>v-e-string-literal-decodes-to-a-second-placeholder</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES ('v-e4', 't', 'nexus', 'vtab', 10, 0, 1000, E'SELECT 1 FROM nexus.vtab WHERE a = \x242');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-e-string-literal-with-no-decoded-question-mark" author="fixture">
+        <comment>g-e-string-literal-with-no-decoded-question-mark</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES ('g-e1', 't', 'nexus', 'vtab', 10, 0, 1000, E'SELECT 1\nFROM nexus.vtab WHERE a LIKE ''%\x25%'' AND t = $1');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-e-string-literal-whose-inner-escape-stays-an-escape" author="fixture">
+        <comment>g-e-string-literal-whose-inner-escape-stays-an-escape</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES ('g-e2', 't', 'nexus', 'vtab', 10, 0, 1000, E'SELECT 1 FROM nexus.vtab WHERE a LIKE E''%\\x3f%'' AND t = $1');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="g-tenant-or-null" author="fixture">
         <comment>g-tenant-or-null</comment>
         <sql splitStatements="false" stripComments="false">

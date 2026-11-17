@@ -229,7 +229,7 @@ final class DataMoveChangesetRules {
                     lit.append(d);
                     j++;
                 }
-                literals.add(lit.toString());
+                literals.add(escapes ? decodeEscapes(lit.toString()) : lit.toString());
                 masked.append("'#").append(literals.size() - 1).append("#'");
                 i = j + 1;
             } else if (c == '"') {
@@ -262,6 +262,59 @@ final class DataMoveChangesetRules {
             if (!text.isEmpty()) out.add(new Stmt(text, literals));
         }
         return out;
+    }
+
+    /**
+     * Decodes the backslash escapes of an E-string's content, as PostgreSQL stores them: {@code \b \f \n \r \t}, {@code \xH} or
+     * {@code \xHH}, octal {@code \o} to {@code \ooo}, a backslash, lowercase u and four hex digits, or an uppercase U and eight, and any other escaped character as
+     * itself ({@code \\}, {@code \'}). Only the OUTER literal is decoded, once; text inside it that is still an escape afterwards is not.
+     */
+    static String decodeEscapes(String raw) {
+        StringBuilder out = new StringBuilder();
+        int n = raw.length();
+        for (int i = 0; i < n; i++) {
+            char c = raw.charAt(i);
+            if (c != '\\' || i + 1 >= n) {
+                out.append(c);
+                continue;
+            }
+            char e = raw.charAt(++i);
+            switch (e) {
+                case 'b' -> out.append('\b');
+                case 'f' -> out.append('\f');
+                case 'n' -> out.append('\n');
+                case 'r' -> out.append('\r');
+                case 't' -> out.append('\t');
+                case 'x' -> i = hexEscape(raw, i, 1, 2, out);
+                case 'u' -> i = hexEscape(raw, i, 4, 4, out);
+                case 'U' -> i = hexEscape(raw, i, 8, 8, out);
+                default -> {
+                    if (e >= '0' && e <= '7') {
+                        int j = i;
+                        int value = 0;
+                        while (j < n && j < i + 3 && raw.charAt(j) >= '0' && raw.charAt(j) <= '7') value = value * 8 + (raw.charAt(j++) - '0');
+                        out.appendCodePoint(value);
+                        i = j - 1;
+                    } else {
+                        out.append(e);
+                    }
+                }
+            }
+        }
+        return out.toString();
+    }
+
+    /** Reads min..max hex digits after the escape letter at {@code at}; returns the index of the last character consumed. */
+    private static int hexEscape(String raw, int at, int min, int max, StringBuilder out) {
+        int j = at + 1;
+        int value = 0;
+        while (j < raw.length() && j < at + 1 + max && Character.digit(raw.charAt(j), 16) >= 0) value = value * 16 + Character.digit(raw.charAt(j++), 16);
+        if (j - (at + 1) < min || !Character.isValidCodePoint(value)) {
+            out.append(raw.charAt(at));
+            return at;
+        }
+        out.appendCodePoint(value);
+        return j - 1;
     }
 
     static String normalise(String s) {
@@ -389,7 +442,8 @@ final class DataMoveChangesetRules {
     }
 
     private static String literal(String value, List<String> literals) {
-        Matcher m = Pattern.compile("^'#(\\d+)#'$").matcher(value.trim());
+        // An E-string keeps its e prefix in the masked text; the stored literal is already decoded.
+        Matcher m = Pattern.compile("^[eE]?'#(\\d+)#'$").matcher(value.trim());
         return m.matches() ? literals.get(Integer.parseInt(m.group(1))) : null;
     }
 
@@ -488,9 +542,12 @@ final class DataMoveChangesetRules {
      * {@code $10}, {@code my$1}, {@code $1x}, {@code $$1}), or a standalone {@code $1} that sits in a comment, a string literal or a
      * dollar-quoted body or a double-quoted name.
      *
-     * <p>A {@code ?} is found only as the character. An E-string escape such as {@code E'\x3f'} is deliberately not decoded: the
-     * worker sees no {@code ?} in that text either, so it is the way to put a question mark in a pattern ({@code chr(63)} is the
-     * other).
+     * <p>A {@code ?} is found only as the character, in the value the column stores. Two layers differ. The OUTER literal is the
+     * registering INSERT's value for the column: when it is an E-string its escapes are decoded when the column is read (see
+     * {@link #decodeEscapes}), so {@code E'... LIKE ''%\x3f%'' ...'} stores a real {@code ?} and is red. The INNER text is what that
+     * value says to the verification query: an escape that is still an escape after the outer decode, such as the {@code E'\x3f'} in
+     * {@code '... LIKE E''%\x3f%'' ...'}, is deliberately not decoded, because the worker sees no {@code ?} in that text either, so it is
+     * the way to put a question mark in a pattern ({@code chr(63)} is the other).
      *
      * <p>The last case is why this scans two ways. The worker (MoveSql, nexus-f3yqd.2.14) rewrites every {@code $1} to
      * {@code CAST(? AS text)} by TEXT, comments and quotes included, while pgjdbc skips comments, literals and dollar quotes when it
