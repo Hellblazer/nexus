@@ -19,6 +19,8 @@ related_issues: ["nexus-io7tw", "nexus-bwct4"]
 > may not know the jargon; define terms on first use; simplified, never
 > simplistic.
 
+The title names the problem as found, at the old budget of 6; Step 1 raised the budget to 20, and Option E reads past it to the search step's 40 hits.
+
 ## Problem Statement
 
 HERB is the benchmark corpus this RDR measures against. It is 1,559 Slack-style
@@ -74,7 +76,7 @@ N=6 point exactly.
 | --- | --- | --- | --- | --- |
 | 6 | 0.407 | 0.800 | 0.500 | Measured, RDR-147 final run |
 | 10 | 0.507 | 0.800 | 0.582 | Projected |
-| 20 | 0.667 | 0.967 | 0.764 | Projected |
+| 20 | 0.667 | 0.967 | 0.764 | Projected; later measured, the same (250-research-2) |
 | 40 | 0.967 | 0.715 | 0.817 | Projected |
 | 80 | 1.000 | 0.657 | 0.791 | Projected; needs a search limit of at least 80 |
 
@@ -96,9 +98,12 @@ The bead's "4 to 6 of the 10 to 12 cited ids" overstates the target. The cited
 artifacts also name non-gold companies, so an oracle that keeps only cited hits
 caps precision near 0.83. This RDR measures company recall, not id recall.
 
-Gap 2 limits the script and any design that reads the hop-1 pool directly. It
-does not limit `nx_answer` in the way Gap 1 does. Fixing Gap 1 alone does not
-close Gap 2, and the reverse also holds.
+Gap 2 limits the script and any design that reads the hop-1 pool directly. At
+budget 6 it did not limit `nx_answer` the way Gap 1 did. At budget 20 the two
+meet: `nx_answer`'s anchors are the same hop-1 top 20, 76 of whose 100 issue5
+hits name no id, so Gap 2 now limits `nx_answer` too. Option E works around it
+by scanning past the top 20, not by improving hop-1 ranking; Gap 2 itself stays
+open (bead nexus-io7tw).
 
 ## Relationship to Prior RDRs
 
@@ -108,7 +113,7 @@ RDR index was not scanned for other overlapping budget or recall work.
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-097 | Origin of the 6/4 budget | RDR-097 set the defaults 6 and 4 as "a 60/40 split per RF-6", RF-6 dividing the model's input budget between the vector and graph streams (rdr-097 lines 81 and 107; 250-research-10). It did not size an anchor set for the coverage boundary. |
-| RDR-147 (closed 2026-11-06) | Origin of the resolution branch | Its branch reused the 6 without sizing. Its R6 left hop-1 recall as separate later work, which this RDR takes up. Its R5 names the precision risk of answering from every held id. |
+| RDR-147 (closed 2026-11-06) | Origin of the resolution branch | Its branch reused the 6 without sizing. Its R6 left hop-1 recall as separate later work; this RDR names it as Gap 2 and leaves it open. Its R5 names the precision risk of answering from every held id. |
 | RDR-232 | Adjacent | Owns the coverage boundary that reads the anchors. Option E below changes that boundary's input. |
 
 ## Context
@@ -252,7 +257,7 @@ needed no code: measured at F1 0.764 with precision 0.967, inside the gate
 (250-research-2, 250-research-3).
 
 This RDR's design is Option E with a precision filter (Phase 1 Steps 2 and 3). For
-Gap 1, Option E is the largest lever in the record: it widens the key scan from
+Gap 1, Option E widens the key scan from
 the generator's 20 inputs to the search step's 40 hits. The generator's 20
 chunks do not change; each kept pool key adds one joined item, within the
 `max_repair_items` cap. Unfiltered it is
@@ -346,8 +351,10 @@ entered and the report carries no pool fields. On, the scan runs only where the
 resolution branch runs: `NX_ANSWER_RESOLUTION_REPAIR` on, a facet left
 unsupported, and an `entity.collections` pattern for the scope. A pool key can
 resolve when the anchors name no key. Turning it on by default is a
-later decision. The MVV has passed, and this RDR sets no criteria for that
-decision; it stays off until one is made.
+later decision. The MVV has passed; the criteria for that decision are Sam's,
+adopted 2026-11-17 (T2 `nexus_rdr/250-turn-on-criteria`, Open Question 7), and
+one of them (a set outside HERB) cannot be measured on HERB. It stays off until
+they are met and the flip is approved.
 
 **Report.** The resolution fields gain `pool_scanned` (pool texts scanned:
 fetched, non-empty, deduplicated and in scope),
@@ -374,14 +381,17 @@ keep their meaning (the anchors only), so existing readers are unchanged.
 
 ### Decision Rationale
 
-Gap 1 and Gap 2 have separate binding limits, so one lever does not fix both.
-Gap 1 caps `nx_answer` at the anchor cut (6 before 4a25a7c5a, 20 since). Gap 2
-caps the script, and any design that reads the hop-1 pool directly. A lever for
-Gap 1 therefore does not need to improve hop-1 recall, and the reverse also
-holds. Option E is chosen because it is the largest Gap 1 lever and it reuses
-the boundary's fetch and assessment calls. Its precision depends on the filter,
-observed once in the MVV and not replicated (250-research-8), so the switch
-stays off; turning it on is a later decision with no criteria set here.
+Gap 1 caps `nx_answer` at the anchor cut (6 before 4a25a7c5a, 20 since). At 20
+the anchors are the hop-1 top 20, so Gap 2's ranking limit binds the same hits.
+A lever can widen past the cut (Option E) or improve the ranking (Options A and
+B). Inside `nx_answer` the record has Option A at F1 .866 with precision .853,
+unfiltered and failing the gate, and Option E at F1 .878 with precision .967,
+filtered (250-research-2, 250-research-8): comparable F1, and only E holds the
+precision gate. Option A with a filter was never measured. Option E is chosen
+(Sam, ask `rdr250-lever`) because it keeps every Gap 1 candidate under one
+filter and reuses the boundary's fetch and assessment calls. Its precision was
+observed once in the MVV and not replicated, so the switch stays off until the
+adopted turn-on criteria (`250-turn-on-criteria`) are met.
 
 ## Alternatives Considered
 
@@ -404,8 +414,9 @@ hits with the vector hits.
   gate: the lexical leg brings other companies' keys into the anchors
   (250-research-2).
 
-**Why not chosen**: It addresses Gap 2, not Gap 1, its precision fails the gate
-without a filter, and its generality is unproven.
+**Why not chosen**: Inside `nx_answer` its F1 (.866) is comparable to Option
+E's (.878), but its precision (.853) fails the gate without a filter, a filtered
+Option A was never measured, and its generality is unproven.
 
 ### Alternative 2: Option B, a key-bearing leg
 
@@ -454,7 +465,7 @@ pool key adds one joined item, within the `max_repair_items` cap.
 **Pros**:
 
 - Projected unfiltered issue5 F1 0.817 (recall 0.967, precision 0.715), against 0.500 at budget 6. Measured with the filter in the MVV: F1 .878 against the budget-20 control's .764, so of the gain from .500, Step 1 gave +.264 and Option E +.114 (250-research-8).
-- The largest projected lever for `nx_answer` in the record; the measured Option E gain came from 4 kept keys on 2 questions.
+- Comparable measured F1 to Option A (.878 against .866) at higher precision (.967 against .853); the measured Option E gain came from 4 kept keys on 2 questions, in one pass.
 - The generator's 20 chunks do not change. Each kept key adds one joined item, within the cap: 8 to 15 percent more rank-and-generate cost on the two MVV questions that kept keys (250-research-9, 250-research-10).
 
 **Cons**:
@@ -568,8 +579,8 @@ cap left after the anchors. Budget and failure as Technical Design states.
 #### Step 4: The MVV
 
 Done 2026-11-16, after Sam's go and his sign-off on the pass criteria: passed
-(250-research-8). Turning the switch on by default is a separate decision, with
-no criteria set in this RDR.
+(250-research-8). Turning the switch on by default is a separate decision,
+against the criteria Sam adopted 2026-11-17 (Open Question 7).
 
 ### Phase 2: Operational Activation
 
@@ -654,3 +665,4 @@ separately: the run records do not mark which assessment call was the filter's.
 - 2026-11-17: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); blob `238fe91bba26`; critique `nexus_rdr/250-gate-critique-2026-11-17-r2`.
 - 2026-11-17: Accepted (Sam). Grant 3 wording amend to match the reviewed build: Step 1 and its sites name plan 8 with plan 10, and the Problem Statement states RDR-097's 6/4 origin in RDR-097's words.
 - 2026-11-17: Close amend (grant 3; close critique partial, 3 Significant): Problem Statement states the post-Step-1 gap; the filter assumption unchecked and a held-out assumption added; overfit risk left open with the key8 result; Option E gain split from Step 1s; Open Question 7 records the adopted turn-on criteria and their owner; spend, "entered", RDR-232 citation and stale site lines corrected. Fix commits 0e4ee7dcb and fcf9d41d4 were the gate round 1 fixes.
+- 2026-11-17: Close amend 2 (grant 3; second close critique partial, 4 Significant): Gap 2 stated as binding `nx_answer` at budget 20; the Option E rationale compares measured figures instead of claiming the largest lever; the turn-on criteria cited at every site; title note added.
