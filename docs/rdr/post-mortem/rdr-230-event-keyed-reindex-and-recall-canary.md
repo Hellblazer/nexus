@@ -18,8 +18,10 @@ nexus-4lnn1.1.1 to .1.8). Phase 2 shipped as develop 7b727d07e (engine 0.1.192)
 with follow-ons on develop through 798c4e723 (canary fixes af47a7334, anchor v2 359276955 and f59e6ff37, the red_unfixed hold 1c4905e19, c721af09c and fd6cc1d46), and REINDEX was switched on
 in the cloud with engine-service-v0.1.194 on 2026-11-16 07:13Z (STEP-6 113/113).
 The phase-review gate is T2 `nexus/phase-review-rdr-230-phases-1-2-2026-11-16`.
-Assumptions A1, A3, A4 and A6 have readings; A2 is only partly verified (see the
-RDR's Critical Assumptions).
+A3, A4 and A6 have readings; A1 and A2 are only partly verified (see the RDR's
+Critical Assumptions). In production only the red-canary REINDEX has fired
+(`code__1-87`); the size, deletes, bulk-delete and leaf-size triggers have
+substrate-test and fork-rehearsal evidence only so far.
 
 ## What diverged
 
