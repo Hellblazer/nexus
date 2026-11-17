@@ -546,11 +546,11 @@ class TestSubtreeRefusalAtTheToolBoundary:
     """RDR-241 (nexus-uwggq.1.9): a subtree that is not a tumbler prefix is refused before the request (the SQL
     builds an unescaped ``LIKE subtree || '.%'``); the tool returns the refusal as its error text."""
 
-    @pytest.mark.t2_tenant
     @pytest.mark.parametrize("subtree", ["%", "1_0"])
     def test_search_metadata_scoped_returns_the_refusal_and_sends_nothing(self, monkeypatch, subtree):
         t3 = _GuardedT3()
         _wire(monkeypatch, t3, ["c1"])
+        monkeypatch.setattr(core, "collection_model", lambda name: None)  # model grouping reads the catalog; no tenant here
 
         out = core.search_metadata_scoped("q", corpus="knowledge", subtree=subtree)
 
