@@ -31,9 +31,10 @@ sessions, conducts it. A **red** is a develop CI run that failed. An
 **identity** is RDR-253's record for who a session is: a **seat** (such as
 `marginalia`) that one process after another holds, with an id `i<n>` that is
 never reused and an **alias**, its name; it survives `/clear`, restarts and
-renames. RDR-253 also has **ephemeral** identities (a session started with
-no seat name) and **delegated** ones (a `claude -p` child); both end with their
-process, so only a seat holds a lasting membership. A **group** is this RDR's new term: a named set of identities with a
+renames. RDR-253 also has **ephemeral** identities (a session given no seat,
+or whose named seat is held elsewhere) and **delegated** ones (a `claude -p`
+child); neither lasts beyond its process unless promoted, so only a seat
+joins a group. A **group** is this RDR's new term: a named set of identities with a
 leader, a roster and a lifetime, the counterpart of a raid in World of
 Warcraft.
 
@@ -258,11 +259,12 @@ session. A **lease** is a claim on a tuple that lapses unless renewed.
 
 ### Technical Design
 
-**Groups.** One engine record per group at `group/<name>`:
+**Groups.** One engine record per group, `group/<name>`, in a permanent
+Postgres table beside RDR-253's identity tables, not in the tuple space:
 
 ```
-dims:  kind=group  name=push-train  leader=<identity id>
-body:  {"purpose": "develop push order", "requested_by": "<sam or identity id>",
+fields: name=push-train  leader=<identity id>
+        {"purpose": "develop push order", "requested_by": "<sam or identity id>",
         "formed_at": "<UTC>", "ends": "<UTC or open>", "ended_at": null,
         "ack_deadline": 20, "ack_deadline_by_topic": {}}
 ```
@@ -272,40 +274,46 @@ optionally overrides it for one board topic, keyed by the topic's base name,
 the part before `--` (`nexus-develop` covers `--done`, `--push` and
 `--owner`). An aura triggers on one topic family, so this is the per-aura
 override in a form the engine stamper can read (Sam, 2026-11-16,
-`nexus_rdr/252-research-4` F9). Each value is a whole number of minutes from
-5 to 240; the template refuses others. The `push-train` record's deadline
-governs develop reds.
+`nexus_rdr/252-research-4` F9). `ack_deadline` and every
+`ack_deadline_by_topic` value is a whole number of minutes from 5 to 240; the
+group route refuses others (a tuple template could not check a body field;
+`252-research-6` F4). The `push-train` record's deadline governs develop reds.
 
-The template is keyed on the group name, with a retention of 30 days. The
-leader's MCP server refires the record at each binding renewal, which only
-moves its expiry (`nexus_rdr/252-research-5` F1), so a led group stays while
-its leader is alive. An update (a new leader, `ended_at`, a deadline) is a take
-of the current row and an `out` of the new one, by the current leader; the
-stamper and the load stage read the one current row. A group whose leader
-identity has ended stops being refreshed and expires 30 days later; Sam
-re-forms it by asking another seat to write a new first record after that.
+The group record is permanent: a tuple row cannot outlive its template's
+retention, since a re-send is clamped to its creation time plus the retention
+(`nexus_rdr/252-research-6` F1), so a group lives in a table, as RDR-253's
+identities do (`252-research-6` F3). The first write is an insert that fails
+if the name exists, so two concurrent formations leave one; it also writes
+the leader's membership, in the same transaction. An update (a new leader,
+`ended_at`, a deadline) changes the one row in place, by the current leader,
+under the level-1 check; a new leader must be a live, leased seat and a
+member of the group. If the leader identity has ended, Sam's tenant
+credential may set a new leader or `ended_at` on the record, written to the
+engine's audit sink, as RDR-253's operator `purge` is.
 
 Membership is RDR-253's `member/<id>` record, one per group the identity
 belongs to: `group=<name> role=<leader|member>` (`nexus_rdr/252-research-4`
 F1). `role` is informational; the group record's `leader` is the only
 authority on who leads, and nothing reads `role`. It is written when the
-identity joins and removed when it leaves. `member` is a tuple template, so it
-has a finite retention (`nexus_rdr/252-research-5` F1, F2); the identity's
-MCP server refires its memberships at each binding renewal, so a live seat
-never decays out of its group, and a lapsed seat keeps them for the
-template's retention. This is a requirement on RDR-253 Step 1's `member`
-template (a keyed template whose refire moves only the expiry, retention 7
-days), passed to that step's implementer on 2026-11-16. `nx group join`
-refuses an ephemeral or delegated identity, since its membership would end
-with its process. It needs no re-pointing across `/clear`: the identity stays and only its session
+identity joins and removed when it leaves, and it is permanent: like the
+group record, it is a row in a permanent table owned by RDR-253's identity
+repository, with no retention, so a member never decays out of its group
+(`nexus_rdr/252-research-6` F1, F3). RDR-253's pruning of an ephemeral or
+delegated identity removes its rows. This is a requirement on RDR-253 Step 1,
+where RDR-253's fence table puts `member/<id>` in the tuple space; it was
+passed to that step's implementer and its bead on 2026-11-16, and RDR-253's
+wording is amended to match once that code is reviewed. The repository lists
+memberships by identity and by group, in the order they were created.
+`nx group join` refuses an ephemeral or delegated identity, and `nx group
+leave` refuses the current leader, who hands the group on first. It needs no re-pointing across `/clear`: the identity stays and only its session
 id changes (Sam's answer on gate finding S3, "re-point and liveness", met by
 the identity). Keying it by identity makes "which groups am I in" one read at
-server start. One new engine template carries groups, `group/<name>`; the
-`member` template is RDR-253's. A group is disbanded by setting `ended_at`;
-the record stays until its retention ends. The stamper and the load stage
-treat a group as disbanded once `ended_at` is set or `ends` has passed, and
-treat a missing record the same way: with no live `push-train` record the
-stamper posts no owner rows, and no session loads the aura.
+server start. A group is disbanded by setting `ended_at`; the record stays
+as history. The stamper and the load stage treat a group as disbanded once
+`ended_at` is set or `ends` has passed, and treat a missing record the same
+way: with no live `push-train` record the stamper posts no owner rows and no
+session loads the aura. Clear rows are posted on a green whatever the group's
+state, so a block raised before a disband still clears.
 
 There are no typed assignments in this RDR (Sam's answer on gate finding S5:
 nothing read them; a later RDR can add them with a reader). The leader is the
@@ -322,6 +330,8 @@ member of group X, report ready".
 `live`. An `unleased` (Desktop) identity's liveness is unknown and its writes
 are unstamped, so it could neither be checked nor acknowledge; the stamper
 treats it as not live (`reason=owner_unleased`; `252-research-5` F4). A
+Desktop server does know its identity, since it binds `unleased` itself
+(`252-research-6` F5); it loads auras and sees blocks, and cannot own a red. A
 delegated identity is mapped to its `parent` before any of this, so a push by
 a `claude -p` child is owned by the seat that dispatched it
 (`252-research-5` F6). No other liveness source is added; the session
@@ -341,7 +351,7 @@ writes.
 | Level | What the engine checks | Guards against | Cost |
 |---|---|---|---|
 | 0 (today) | Nothing on these subspaces; readers see the stamp as a label | Nothing; a reader may notice a mismatch | None |
-| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, the writer is the `leader` it names and holds a membership in the group. A tokenless write is refused on both, except RDR-253's `unleased` case below | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state | One check on `group/*` beside RDR-253's four fenced families |
+| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, the writer is the `leader` it names, and the write adds its membership. A tokenless write is refused on both; RDR-253's `unleased` exception applies to `member/<id>` only | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state | One check on `group/*` beside RDR-253's four fenced families |
 | 2 (met by level 1) | Only the current process of the leader identity may write | A session that is not the current leader, including a stale process of the leader; not a tenant-token holder who binds the leader's seat | Was "leadership as a claim with `claim_id`, needing a heartbeat"; RDR-253's binding renewal and generation check deliver it, so this RDR adds no separate mechanism for it (`nexus_rdr/252-research-4` F10) |
 | 3 (later) | Per-principal identity, host-attested Desktop sessions (JDR-002's own revisit list) | A second human principal or an agent class the tenant does not trust | Engine and auth work beyond this RDR |
 
@@ -373,8 +383,8 @@ The stamper trusts the record's stamp, never `from` (Sam's answer on gate
 finding S4): it maps the stamped session id to an identity through the
 session index (`nexus_rdr/252-research-4` F4). A record with no stamp, or
 whose stamp the index does not map, counts as no record. A push from a plain
-shell with no Claude ancestor writes an unstamped record, which counts as no
-record. On the `--skip-lock` path the script resolves the installed `nx`
+shell with no Claude ancestor writes an unstamped record with `from=unknown`, which counts as no record
+for ownership. On the `--skip-lock` path the script resolves the installed `nx`
 for this write, as the lock path does (`nexus_rdr/252-research-5` F8); if
 none resolves, it writes no record and the push still succeeds. It writes a
 record only when the pushed branch is `develop`. An unstamped record still
@@ -425,15 +435,16 @@ with `suspects_total` giving the full count.
 - **Next up**, the first that applies: the pusher of the next suspect who is
   not the owner, is live and is a member of `push-train`; the leader, if live
   and not the owner; the first other live member by the time its membership
-  row was created. With none, `next` is null and the owner row is the last
-  for that red (see Escalation).
+  row was created. With none, `next` is null and the next row for that red
+  is the `escalated` one (see Escalation).
 - **Leader takes it**, with the reason named: the owner is not live
   (`owner_not_live`), is `unleased` (`owner_unleased`) or is not a member of
   `push-train` (`owner_not_member`; its aura would not load); the earliest
   suspect's record is unstamped or missing, or the red tip is in no push
   record at all, as for a hand push or a PR merged on GitHub
   (`no_record`); and across a chain gap (`chain_gap`). Ordering past a chain
-  gap uses the CI posts' times, so rows past a gap are best effort.
+  gap uses the CI posts' times, so rows past a gap are best effort. When
+  several reasons hold, the first in this list is posted.
 - **A stamper error** posts the leader as owner with `reason=stamper_error`.
   If the engine is down, no CI post lands either, so there is no separate
   "stamper down" path. A CI post that never lands (the adapter's write is
@@ -460,12 +471,13 @@ are refused by `nx aura check`.
 
 **Typed displays and noise.** `ci_develop_red` triggers on
 `board/ci/nexus-develop--owner` and clears on its `kind=clear` rows, so the
-commit-order logic lives only in the stamper. It shows one of three states,
+commit-order logic lives only in the stamper. It shows one of three states, plus a fourth for an escalated red,
 each with its own urgency, in the manner of DBM's typed warnings:
 
 | State | Display | Channel wake | Local action |
 |---|---|---|---|
-| Owner | "Develop is red at <sha>, first red in your push. Diagnose it." | Yes | Diagnose; acknowledge |
+| Owner | "Develop is red at <sha>, first red in your push. Diagnose it." (for a red the leader takes, the text names the `reason` instead) | Yes | Diagnose; acknowledge |
+| Escalated (the identity an `escalated` row names) | "Develop is red at <sha>; no one acknowledged. Raise an ask to Sam." | Yes | Raise an RDR-245 ask |
 | Next up | "Develop is red at <sha>; <owner> owns it. You are next up." | Yes | Stand by; take it if not acknowledged |
 | Everyone else in the group | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | No (block only) | Hold its own pushes until green |
 
@@ -478,11 +490,11 @@ and today an argument can come only from the tuple or a literal. So:
   procedure compares it with the owner post's `body.owner` and `body.next`.
   An id never changes across `/clear`, a restart or a rename. It does change
   when the process switches identity (a cross-seat `/resume`, a take-over;
-  `nexus_rdr/252-research-5` F5): when the MCP heartbeat adopts a different
-  identity, the host re-reads `[load]` and `self.identity`. Load waits for
-  the server's bind; a server that starts unbound loads no group-gated aura,
-  says so in `nx aura list`, and loads them when it binds. A Desktop server,
-  which cannot resolve its identity, loads none. It is a
+  `nexus_rdr/252-research-5` F5). Load stays at server start (Sam's answer
+  3; `252-research-6` F6), so after a switch the loaded auras and
+  `self.identity` are the old identity's until the MCP server reconnects;
+  `nx aura list` shows the mismatch and says to reconnect. A server that
+  starts unbound loads no group-gated aura and says so the same way. It is a
   source, not a reserved argument name, so RDR-242's header grammar is
   unchanged; `nx aura check` accepts it for any declared string argument.
 - `display.channel` accepts, besides `true` and `false`, the name of a
@@ -515,9 +527,11 @@ first 20 reds (or 30 days).
 **Escalation.** Owner, then next up, then Sam. The stamper hands a red on at
 most twice. When the second named identity also misses its deadline, or when
 `next` is null and the owner misses its deadline, the stamper posts a final
-owner row naming the leader with `reason=escalated`. The leader's display
-says to raise an RDR-245 ask to Sam, and the stamper stops re-issuing rows
-for that red. Unvalidated: the research found no protocol to copy.
+owner row with `reason=escalated`, naming the leader if live and otherwise the
+first live member, with `next` null. That row's display, a fourth state,
+says to raise an RDR-245 ask to Sam. The stamper re-issues no row after an
+`escalated` one, and the timer rebuild skips a red whose latest row is
+`escalated`. Unvalidated: the research found no protocol to copy.
 
 **Claims.** Only for work no owner post names, such as rerunning a flaky shard;
 RDR-211's queue as is.
@@ -613,7 +627,7 @@ A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
 - **Wrong group write**: at level 1 the engine refuses a member write not
   from the member's own identity at its current generation, a group write not
   from the leader's, and a tokenless write to either (bar RDR-253's
-  `unleased` exception). A tenant-token holder can still bind a seat and write
+  `unleased` exception, for memberships only). A tenant-token holder can still bind a seat and write
   as it (JDR-002, RDR-253); level 3 is later work.
 - **Wrong pusher**: the stamper uses the push record's stamp, never `from`; an
   unstamped or unmapped record counts as no record and the leader owns the red.
@@ -643,10 +657,11 @@ A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
 - [ ] The `push-train` group's shape agreed with halcyon.
 - [ ] RDR-253 Phase 1 Steps 1 to 3 landed: identity records and the session
   index, the `member` fence and identity tokens, and the client resolver
-  with Bash-child token files. Two requirements on them, passed to those
-  steps: the `member` template refires on binding renewal (Step 1), and an
-  identity-token write's stamp is a session id the session index maps
-  (Step 2).
+  with Bash-child token files. Requirements on them, passed to those steps:
+  memberships in a permanent table listed by identity and by group (Step 1);
+  an identity-token write's stamp is a session id the session index maps,
+  including a delegated child's session id, mapped to the delegated identity
+  (Steps 1 and 2; `252-research-6` F7).
 
 ### Minimum Viable Validation
 
@@ -667,14 +682,17 @@ Steps 1 and 3 are engine work and ship in one engine release, which Sam
 cuts; Steps 2 and 4 are client work and ship in a conexus release that pins
 that engine.
 
-#### Step 1: Group template, with the level-1 writer check
+#### Step 1: Group table and routes, with the level-1 writer check
 
-Engine, after RDR-253 Steps 1 and 2: the `group/<name>` template (keyed on
-the name, 30-day retention, refired by the leader, updated by take and
-replace, deadline values bounded to 5 to 240 minutes), and the level-1 check on it (the writer's identity is the stored
-record's leader at its current generation; the first write's writer is the
-leader it names), built on RDR-253's identity token and fence code.
-Memberships use RDR-253's `member/<id>` and its fence unchanged. The
+Engine, after RDR-253 Steps 1 and 2: a Liquibase table for groups and routes
+to form, update, disband and read a group and list its members in join
+order; the first write an insert that fails on an existing name and adds the
+leader's membership; updates in place; deadline values bounded to 5 to 240
+minutes; a new leader a live, leased member; the operator override with the
+tenant credential, audited; and the level-1 check (the writer's identity is
+the stored record's leader at its current generation; the first write's
+writer is the leader it names), built on RDR-253's identity token and fence
+code. Memberships use RDR-253's permanent membership rows and their fence. The
 `board/ci/<topic>` template's doc block (an engine resource) names the new
 writers (the push script, the stamper) and the body fields of push, owner,
 clear and ack rows. JDR-002's revision entry (Sam's edit) lands with it.
@@ -696,18 +714,17 @@ listed), owner and next up, the leader's cases, owner and clear rows with
 `from=engine`; the acknowledgement deadline (group default, per-topic
 override) as a timer rebuilt after a restart from unsuperseded owner rows; a
 stamper error posting the leader; the named reasons; at most two hand-offs,
-then the `escalated` row; no rows while `push-train` is missing or
-disbanded.
+then the `escalated` row; no owner rows while `push-train` is missing or
+disbanded (clear rows still posted).
 
 #### Step 4: `[load]`, `self.identity` and the result-driven wake; `ci_develop_red` moved onto the owner post
 
 Client, after RDR-253 Step 3: `[load]` read from `member/<id>` at server
-start, with one `group/<name>` read per named group, waiting for the bind and
-re-read when the heartbeat adopts a new identity; `nx group join <name>`
+start, with one `group/<name>` read per named group; `nx aura list` naming a
+switched or unbound identity; `nx group join <name>`
 (refused for an ephemeral or delegated identity) and `nx group leave
-<name>`; the MCP server refiring its memberships, and the group it leads, at
-each binding renewal; `nx group list <name>` showing the leader and members
-by alias (an ephemeral by its display name) with their RDR-253 state; the
+<name>`; `nx group list <name>` showing the leader and members by alias with
+their RDR-253 state; the
 `self.identity` argument source; `display.channel` naming a result field; `ci_develop_red`
 triggering on `kind=owner` and clearing on `kind=clear`; re-surfacing on a new
 owner row; the calibration read (time to acknowledge per red) for Day 2.
@@ -748,24 +765,30 @@ None.
 - Per-topic deadline: `ack_deadline_by_topic` overrides the group default.
 - Writer check: a membership written by another identity, a group write by a
   non-leader, a group write by a superseded process of the leader, and any
-  tokenless write to a leased target are refused; a write for an `unleased`
-  target is accepted and labelled unattested.
+  tokenless write to a leased target are refused; a membership write for an
+  `unleased` identity is accepted and labelled unattested; a tokenless group
+  write is refused even when the leader is `unleased`.
+- Group writes: two concurrent first writes leave one record; the first
+  write adds the leader's membership; a new leader that is not a live,
+  leased member is refused; a deadline outside 5 to 240 is refused; the
+  operator override with the tenant credential is accepted and audited.
 - Disbanded or missing group: with `ended_at` set, `ends` passed or no
-  record, the stamper posts no owner row and `[load]` does not load.
-- Retention: a seat's membership and its led group still read after a time
-  longer than the templates' retention, with renewals in between; without
-  renewals they expire.
+  record, the stamper posts no owner row and `[load]` does not load; a green
+  still posts a clear row.
+- Permanence: a membership and a group record still read 60 days after they
+  were written, with no renewals.
 - Liveness: a seat whose last renewal is over 300 seconds old reads as not
   live even though no lapse row was written; an `unleased` owner hands the
   red to the leader (`owner_unleased`).
 - Delegated pusher: a push by a `claude -p` child is owned by its parent
-  seat.
+  seat (an engine-level test with a delegated identity from RDR-253 Step 1's
+  route; the live case needs RDR-253 Step 4's dispatch).
 - Unrecorded tip: a red on a tip in no push record goes to the leader
   (`no_record`).
-- Escalation: two missed deadlines give one `escalated` row and no more.
-- Identity switch: after a cross-seat `/resume`, `self.identity` and the
-  loaded auras follow the new identity; an unbound start loads none until
-  it binds.
+- Escalation: two missed deadlines give one `escalated` row and no more,
+  also across an engine restart.
+- Identity switch: after a cross-seat `/resume`, `nx aura list` reports the
+  mismatch until a reconnect; an unbound start loads no group-gated aura.
 - `nx group join` refuses an ephemeral identity; `join`, `leave` and
   `list` round-trip.
 - Stamp mapping: the stamper maps a stamp to an identity through the
@@ -827,12 +850,12 @@ exercises the core path once; the Test Plan covers the rest.
 Trust: level 1 checks ownership and generation on `group/*`, beside
 RDR-253's fence on `member/*`, against JDR-002's "never a refusal"; Sam's
 revision entry there names it. A Desktop seat is `unleased` and writes on
-RDR-253's exception, labelled unattested.
+RDR-253's exception for its own membership, labelled unattested.
 Release: Steps 1 and 3 need an engine release, Steps 2 and 4 a conexus
 release that pins it. Noise: no wake for everyone else. Data lifetime: push,
-owner and clear rows share the CI posts' three-day retention; a group record
-lives until disbanded; a membership lives until its identity leaves the
-group, or with an ephemeral identity until RDR-253's retention removes it.
+owner and clear rows share the CI posts' three-day retention; group records
+and memberships are permanent rows, a membership removed when its seat
+leaves the group.
 Dependency: every step waits on RDR-253 Phase 1 Steps 1 to 3.
 
 ### Proportionality
@@ -891,3 +914,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-16: gate round 1 findings addressed (`nexus_rdr/252-research-3`; Sam's answers by picker): owner from the earliest suspect, since a replaced CI run leaves a pushed tip untested; the stamper posts clear rows as well as owner rows, and the aura triggers and clears on them; the acknowledgement deadline is a timer in the engine stamper, rebuilt after a restart; new fields live in the body of the existing `board/ci/<topic>` template; members named by session name, with liveness and re-pointing from the session directory; typed assignments and attestation level 2 cut; push records trusted by the engine's stamp only, written on every path of the push script; the leader owns a red across a chain gap, on a stamper error, or when the owner is gone or not a member.
 - 2026-11-16: re-keyed onto RDR-253 identities and the round 1 fix check's defects fixed (`nexus_rdr/252-research-4`; fix check `252-fix-check-cee51c460fc1`): members are RDR-253's `member/<id>`, permanent with the identity, so nothing decays; liveness from the identity state; push records and acks stamped through a Bash child's token file and mapped through the session index; owner, next up and leader as identity ids; `self.identity`; level 1 as an ownership and generation check on `group/*`, which also meets level 2's target; the per-topic deadline override (Sam, by picker); chain-gap wording; at most ten suspects in a 1024-byte body and `from=engine` on stamper rows; next up distinct and live; the timer rebuilt only from unsuperseded owner rows; best-effort CI posts stated; the group check reads the stored leader; disbanded groups enforced; the template doc edit moved to engine Step 1; Steps 1, 3 and 4 wait on RDR-253 Phase 1 Steps 1 to 3.
 - 2026-11-16: fix check `252-fix-check-96cc049e8c53` passed 2-1; its counted items fixed (`nexus_rdr/252-research-5`): memberships and the group record refired at binding renewal under finite template retention, a requirement passed to RDR-253 Step 1; liveness through RDR-253's lapse-applying read, `unleased` owners handed to the leader; `self.identity` and `[load]` follow an identity switch and wait for the bind; the group record's `leader` the one authority, its update by take and replace, a dead leader's group expiring; the stamp's meaning stated as a requirement on RDR-253 Step 2; the per-topic key as the base topic, values bounded; delegated pushers mapped to their parent; named reasons, next-up precedence, at most two hand-offs then `escalated`; unrecorded and unstamped tips; the skip-lock and non-develop push paths; `nx group join`, `leave` and `list` with tests.
+- 2026-11-16: fix check `252-fix-check-2c8be6194989` failed (3 of 3: a re-sent tuple row is clamped to its creation time plus retention, so the refire keep-alive could not work; `nexus_rdr/252-research-6`); fixed once: groups and memberships are permanent table rows beside RDR-253's identity tables (the membership requirement on RDR-253 Step 1 corrected the same day); first write an insert that adds the leader's membership; updates in place; deadline bounds in the group route; a new leader a live, leased member; an audited operator override for a dead leader; the `unleased` exception for memberships only; clear rows posted whatever the group state; load stays at server start (Sam's answer 3), a switch reported by `nx aura list`; Desktop servers load; `from=unknown` for an unstamped push; the escalated display state; reason precedence.
