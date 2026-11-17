@@ -57,6 +57,15 @@ class DataMoveOnCompleteIntegrationTest extends DataMoveIntegrationBase {
         return holdingChunks(adminLogin(BUILDER_NAME));
     }
 
+    /** A connection of the cluster's superuser, named as a builder: the migrating role may not signal it. */
+    private Connection superuserBuilderHoldingChunks() throws Exception {
+        var props = new Properties();
+        props.setProperty("user", pg.getUsername());
+        props.setProperty("password", pg.getPassword());
+        props.setProperty("ApplicationName", BUILDER_NAME + "-su");
+        return holdingChunks(DriverManager.getConnection(pg.getJdbcUrl(), props));
+    }
+
     private Connection adminLogin(String applicationName) throws Exception {
         var props = new Properties();
         props.setProperty("user", ADMIN);
@@ -228,6 +237,27 @@ class DataMoveOnCompleteIntegrationTest extends DataMoveIntegrationBase {
             assertThat(builder.isValid(2)).isTrue();
         }
         assertThat(completedAt("oc-chunks-pause")).isNull();
+    }
+
+    @Test
+    void aBuilderThatCannotBeEnded_failsTheSignalInsideTheTransaction_andOnCompleteAndTheCompletionLeaveNoTrace()
+            throws Exception {
+        register("oc-signal", "tenant_plain", 50, 0, "verification-tenant-plain.sql", 4_000, "on-complete-chunks-marker.sql");
+        runsOnly("oc-signal");
+        // the superuser's session: pg_terminate_backend raises 42501 for the migrating role, inside the completion transaction
+        try (Connection builder = superuserBuilderHoldingChunks()) {
+            var result = finish("oc-signal", "tenant_plain", List.of());
+
+            assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+            assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.ON_COMPLETE);
+            assertThat((Throwable) result.failure().raised()).isNotNull();
+            assertThat(result.failure().raised().getSQLState())
+                .as("the refused signal was contained by its savepoint (not 25P02, an aborted transaction); the ALTER then "
+                    + "waited behind the build it could not end and hit lock_timeout").isEqualTo("55P03");
+            assertThat(columnExists("marker")).as("on_complete did not run").isFalse();
+            assertThat(completedAt("oc-signal")).as("completed_at stays NULL").isNull();
+            assertThat(builder.isValid(2)).as("the builder it could not end is still there").isTrue();
+        }
     }
 
     @Test

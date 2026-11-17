@@ -35,8 +35,10 @@ final class ChunkFamily {
      */
     static final List<String> NAME_PATTERNS = List.of("\\bchunks\\b", "\\bchunks_m", "\\bpartition_", "\\bpci_");
 
-    private static final Pattern NAMES = Pattern.compile(
-        String.join("|", NAME_PATTERNS) + "|\\b(?:" + String.join("|", FOREIGN_KEY_TABLES) + ")\\b");
+    /** The lint's foreign-key entry: {@code \b(?:} the tables joined with {@code |} {@code )\b}. */
+    static final String FOREIGN_KEY_PATTERN = "\\b(?:" + String.join("|", FOREIGN_KEY_TABLES) + ")\\b";
+
+    private static final Pattern NAMES = Pattern.compile(String.join("|", NAME_PATTERNS) + "|" + FOREIGN_KEY_PATTERN);
 
     /** True when the move's driving table is in the family, or its {@code on_complete} names a table that is. */
     static boolean touches(DataMove move) {

@@ -269,7 +269,7 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
         var result = finish("v-qmark", "tenant_rows", List.of("acme"));
 
         assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
-        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION);
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION_REFUSED);
         assertThat((Throwable) result.failure().raised()).isNull();
         assertThat(result.reason()).contains("contains a '?'").contains("was not run");
         assertThat(completedAt("v-qmark")).isNull();
@@ -284,7 +284,7 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
         var result = finish("v-literal", "tenant_rows", List.of("acme"));
 
         assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
-        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION);
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION_REFUSED);
         assertThat((Throwable) result.failure().raised()).isNull();
         assertThat(result.reason()).contains("has 3 $1 but the driver sees 2 bind parameters");
         assertThat(completedAt("v-literal")).isNull();

@@ -47,9 +47,9 @@ import java.util.function.Consumer;
  * cancelled, it is bounded by {@code statement_timeout_ms}.
  *
  * <p>Nothing here decides blocked or failed: a failure goes back as a {@link FailureHandler.Failure} ({@link
- * FailureHandler.Stage#VERIFICATION}, {@link FailureHandler.Stage#VERIFICATION_NONEMPTY}, {@link
- * FailureHandler.Stage#ON_COMPLETE}) for the worker to hand to the {@link FailureHandler}. A verification text the worker
- * refuses to run ({@link MoveSql#refusal}) is a {@code VERIFICATION} failure with {@code raised} null and the rule in
+ * FailureHandler.Stage#VERIFICATION}, {@link FailureHandler.Stage#VERIFICATION_REFUSED}, {@link
+ * FailureHandler.Stage#VERIFICATION_NONEMPTY}, {@link FailureHandler.Stage#ON_COMPLETE}) for the worker to hand to the {@link FailureHandler}. A verification text the worker
+ * refuses to run ({@link MoveSql#refusal}) is a {@code VERIFICATION_REFUSED} failure with {@code raised} null and the rule in
  * {@code detail}.
  */
 final class VerifyingFinisher implements MoveFinisher {
@@ -92,7 +92,7 @@ final class VerifyingFinisher implements MoveFinisher {
 
         Optional<String> refused = MoveSql.refusal(move.verification());
         if (refused.isPresent()) {
-            return Result.report(failure(admin, move, FailureHandler.Stage.VERIFICATION, null, null,
+            return Result.report(failure(admin, move, FailureHandler.Stage.VERIFICATION_REFUSED, null, null,
                 "the verification of " + move.label() + " was not run: " + refused.get()));
         }
         Result verification = verify(context, move);
@@ -180,7 +180,7 @@ final class VerifyingFinisher implements MoveFinisher {
                     hook.accept(conn);
                 }
             } catch (SQLException | RuntimeException e) {
-                return Result.report(failure(context.admin(), move, FailureHandler.Stage.VERIFICATION, tenant, sqlOf(e),
+                return Result.report(failure(context.admin(), move, stageOf(e), tenant, sqlOf(e),
                     "the verification for tenant " + tenant + " could not run: " + describe(e)));
             }
         }
@@ -201,7 +201,7 @@ final class VerifyingFinisher implements MoveFinisher {
             }
             return null;
         } catch (SQLException | RuntimeException e) {
-            return Result.report(failure(context.admin(), move, FailureHandler.Stage.VERIFICATION, null, sqlOf(e),
+            return Result.report(failure(context.admin(), move, stageOf(e), null, sqlOf(e),
                 "the table-wide verification could not run: " + describe(e)));
         }
     }
@@ -292,6 +292,11 @@ final class VerifyingFinisher implements MoveFinisher {
                                                   String tenant, SQLException raised, String detail) {
         return new FailureHandler.Failure(move, stage, null, move.drivingSchema(), move.drivingTable(), tenant, 0, raised,
             detail, admin);
+    }
+
+    /** {@code VERIFICATION_REFUSED} for a text the worker will not run, {@code VERIFICATION} for anything that can pass. */
+    private static FailureHandler.Stage stageOf(Exception e) {
+        return e instanceof MoveSql.Refused ? FailureHandler.Stage.VERIFICATION_REFUSED : FailureHandler.Stage.VERIFICATION;
     }
 
     private static SQLException sqlOf(Exception e) {

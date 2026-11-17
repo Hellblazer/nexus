@@ -37,6 +37,13 @@ public interface FailureHandler {
          */
         VERIFICATION,
         /**
+         * The verification text itself is not one the worker will run (nexus-f3yqd.2.14): a {@code ?}, a {@code $}-digit that
+         * is not a standalone {@code $1}, or a {@code $1} the driver does not count as a parameter. {@link Failure#raised}
+         * is null and {@link Failure#detail} names the rule. Permanent by nature: no retry changes the text. Distinct from
+         * {@link #VERIFICATION}, whose causes (a timeout, a connection that carries a tenant) can pass.
+         */
+        VERIFICATION_REFUSED,
+        /**
          * Every verification ran and at least one returned rows (nexus-f3yqd.2.14): old-shape rows remain.
          * {@link Failure#raised} is null and {@link Failure#detail} carries the count per tenant and table-wide.
          */

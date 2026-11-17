@@ -50,6 +50,21 @@ class ChunkFamilyLintPinTest {
     }
 
     @Test
+    void theForeignKeyPattern_isBuiltTheWayTheLintBuildsIt() throws IOException {
+        Matcher table = Pattern.compile("(?s)_FORBIDDEN\\s*=\\s*\\{(.*?)\\n\\}").matcher(lint());
+        assertThat(table.find()).as("_FORBIDDEN is found in the lint").isTrue();
+        // re.compile(r"<prefix>" + "<separator>".join(_FK_TABLES) + r"<suffix>"): the one entry the literal scan cannot see
+        Matcher build = Pattern.compile(
+            "re\\.compile\\(r\"([^\"]*)\"\\s*\\+\\s*\"([^\"]*)\"\\.join\\(_FK_TABLES\\)\\s*\\+\\s*r\"([^\"]*)\"\\)")
+            .matcher(table.group(1));
+        assertThat(build.find()).as("the lint still builds its foreign-key regex as prefix + sep.join(_FK_TABLES) + suffix: "
+            + "if its construction changed, read it again and pin the new shape here").isTrue();
+
+        String lintPattern = build.group(1) + String.join(build.group(2), ChunkFamily.FOREIGN_KEY_TABLES) + build.group(3);
+        assertThat(ChunkFamily.FOREIGN_KEY_PATTERN).isEqualTo(lintPattern);
+    }
+
+    @Test
     void theNamePatterns_areTheLintsForbiddenPatterns() throws IOException {
         Matcher table = Pattern.compile("(?s)_FORBIDDEN\\s*=\\s*\\{(.*?)\\n\\}").matcher(lint());
         assertThat(table.find()).as("_FORBIDDEN is found in the lint").isTrue();
