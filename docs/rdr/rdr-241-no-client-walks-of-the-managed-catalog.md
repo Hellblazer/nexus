@@ -453,7 +453,7 @@ only), "P2" is Phase 2 (engine, then client):
 | `commands/catalog_cmds/remediation.py::prune_stale_cmd` | BULK JOB | 2 | File existence on disk. P1: the `--collection` branch uses `list_by_collection` (calls 2 to 1). |
 | `commands/catalog_cmds/remediation.py::remediate_paths_cmd` | BULK JOB | 2 | Per-row path resolution. P1: the `--collection` branch uses `list_by_collection` (calls 2 to 1). |
 | `commands/catalog_cmds/sensitivity.py::_targets` | BULK JOB | 1 | `nx catalog sensitive` with no tumbler, `--collection` or `--owner`. Stays. |
-| `commands/enrich.py::_aspect_bearing_collections` | AGGREGATE | 1 | Builds a set of collection names. P1: `distinct_doc_collections()`. |
+| `commands/enrich.py::_aspect_bearing_collections` | AGGREGATE | 1 | Builds a set of collection names. P1: `distinct_doc_collections()` (renamed `_catalog_collections`). |
 | `doctor_references.py::reference_only_candidates` | AGGREGATE | 1 | Wants non-`file://` rows. P2: the case-insensitive scheme-prefix route (moved from P1, option C). |
 | `mcp/catalog.py::catalog_list` | BOUNDED | 2 | One page of `limit + 1`. Stays. |
 | `mcp/catalog.py::catalog_search` | AGGREGATE | 1 | Author alone, unattended (Gap 3). P2: the author route. |
@@ -679,7 +679,7 @@ One change per site, each with a test that counts HTTP calls on a fake
 catalog and a test that the rows are the same as the walk's, and each lowering
 the table in the same commit:
 
-- `_aspect_bearing_collections` uses `distinct_doc_collections()`.
+- `_aspect_bearing_collections` (now `_catalog_collections`) uses `distinct_doc_collections()`.
 - `backfill_source_uri_cmd` and `backfill_etags_cmd` (no owner) use
   `list_scoped(source_uri_prefix=...)`.
 - `reference_only_candidates` is not switched here: Sam's option C moved it
