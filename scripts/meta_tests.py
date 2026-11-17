@@ -30,8 +30,8 @@ that enumerates a subtree holding it, or imports it directly (a ``src/nexus``
 or ``tests`` module). A test runs whatever the diff when the manifest does not
 hold it, that hash changed since the build, its traced run failed or skipped,
 the trace recorded no read, or it ran a subprocess whose reads the trace
-cannot see. Every such test is listed by reason, so a new meta-test
-cannot fall out unseen. A Java meta-test's surface is ``service/src/``.
+cannot see and declared no ``META_SCANS`` (the roots those subprocesses read).
+Every such test is listed by reason, so a new meta-test cannot fall out unseen. A Java meta-test's surface is ``service/src/``.
 
 Usage::
 
@@ -203,6 +203,23 @@ def java_meta_tests(repo: Path) -> list[str]:
     return out
 
 
+def declared_scans(repo: Path, test: str) -> list[str]:
+    """``META_SCANS``, a module-level tuple of repo paths a test file may declare: the roots its
+    subprocesses read, which the trace cannot see. Only a test that runs such a subprocess needs
+    one; a declared root counts as a subtree the test enumerates."""
+    try:
+        tree = ast.parse((repo / test).read_text())
+    except (SyntaxError, UnicodeDecodeError, FileNotFoundError):
+        return []
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(x, ast.Name) and x.id == "META_SCANS" for x in targets) and node.value is not None:
+                return sorted(c.value.rstrip("/") for c in ast.walk(node.value)
+                              if isinstance(c, ast.Constant) and isinstance(c.value, str))
+    return []
+
+
 # ── imports (the half of a surface the trace leaves out) ────────────────────
 
 
@@ -350,9 +367,12 @@ def select(repo: Path, changed: list[str], base: str, manifest: dict | None = No
         if entry.get("incomplete"):
             sel.always[test] = "its traced run did not complete cleanly: " + entry["incomplete"]
             continue
-        if entry.get("opaque"):
+        declared = declared_scans(repo, test)
+        if entry.get("opaque") and not declared:
             sel.always[test] = "runs a subprocess whose reads the trace cannot see: " + entry["opaque"][0]
             continue
+        if declared:
+            entry = {**entry, "prefixes": [*entry.get("prefixes", ()), *declared]}
         if not any(entry.get(k) for k in ("opened", "statted", "listed", "prefixes")):
             sel.always[test] = "the trace recorded no read (a cached or shared scan?): surface unknown"
             continue

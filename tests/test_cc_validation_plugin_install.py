@@ -32,6 +32,10 @@ import subprocess
 
 import pytest
 
+#: Roots this file's subprocesses read, which scripts/meta_tests.py's trace cannot see:
+#: the harness scripts its bash runs, the stage list the harness itself names.
+META_SCANS = ("tests/cc-validation", "tests/e2e/lib.sh", "tests/e2e/lib", "conexus", "sn")
+
 pytestmark = pytest.mark.lint
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
