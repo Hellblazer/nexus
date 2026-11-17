@@ -429,7 +429,7 @@ def test_tumblers_stable_across_delete_reindex(
 
 
 @pytest.mark.t2_tenant
-def test_link_with_line_span_resolves_text(tmp_path):
+def test_link_spans_resolve_text(tmp_path, monkeypatch):
     # PORT-VERIFY: line-range spans resolve CLIENT-side from
     # ``entry.file_path`` (catalog_spans.resolve_span_text_for_entry), so the
     # engine must store and echo the absolute path registered here verbatim.
@@ -441,6 +441,53 @@ def test_link_with_line_span_resolves_text(tmp_path):
     doc_b = cat.register(owner, "target.py", content_type="code", file_path="target.py")
     cat.link(doc_a, doc_b, "quotes", created_by="user", from_span="2-4", to_span="")
     assert cat.resolve_span_text(doc_a, "2-4") == "line2\nline3\nline4"
+
+    # RDR-171 Step 2, on the same tenant (tests/storage_touch_ceiling.toml):
+    # dchash spans read the source file through the real resolve_path, which
+    # is None for a curator (file:// source_uri) and repo_root for a repo,
+    # never the cwd; ``nx catalog show`` previews a good link once and lists
+    # a stale one without failing.
+    from click.testing import CliRunner  # noqa: PLC0415 — only this test uses the CLI
+
+    from nexus.catalog.dchash import dchash_status, text_hash  # noqa: PLC0415 — as above
+    from nexus.cli import main  # noqa: PLC0415 — as above
+
+    passage = "a sentence the link quotes"
+    body = f"First line.\n{passage}, then the rest.\n"
+    start = body.index(passage)
+    span = f"dchash:{text_hash(body)}:{start}-{start + len(passage)}"
+    stale = f"dchash:{'0' * 64}:{start}-{start + len(passage)}"
+    single = tmp_path / "single"
+    single.mkdir()
+    loose = single / "loose.md"
+    loose.write_text(body)
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "docs" / "a.md").write_text(body)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "docs").mkdir(parents=True)
+    (elsewhere / "docs" / "a.md").write_text("decoy\n")
+
+    curator = cat.register_owner("dchash-curator", "curator")
+    repo_owner = cat.register_owner(
+        "dchash-repo", "repo", repo_hash="feedbeef", repo_root=str(repo)
+    )
+    t_cur = cat.register(curator, "loose", file_path=str(loose), source_uri=f"file://{loose}")
+    t_repo = cat.register(repo_owner, "a", file_path="docs/a.md")
+    cat.link(doc_a, t_cur, "quotes", created_by="user", to_span=span)
+    cat.link(doc_a, t_cur, "cites", created_by="user", to_span=stale)
+
+    monkeypatch.chdir(elsewhere)
+    assert cat.resolve_path(t_cur) is None
+    for t in (t_cur, t_repo):
+        assert cat.resolve_span_text(t, span) == passage
+        assert dchash_status(cat.resolve(t), span, active_reader()) == "ok"
+
+    r = CliRunner().invoke(main, ["catalog", "show", str(doc_a)])
+    assert r.exit_code == 0, r.output
+    assert f"(quotes) [{span}]" in r.output
+    assert f"(cites) [{stale}]" in r.output
+    assert r.output.count(f'"{passage}"') == 1
 
 
 # ── chash span pipeline (RDR-053) ────────────────────────────────────────────
