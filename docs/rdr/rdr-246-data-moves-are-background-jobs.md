@@ -380,7 +380,8 @@ a *background worker* is a pg_background process in the database.
 
 - `label`, the primary key. The move worker names each dml_utils run
   `<label>/<tenant>`, `<label>/<tenant>/<leaf>` for a per-leaf run (The move
-  worker, step 2), or `<label>` alone for a table with no tenant column;
+  worker, step 2), or `<label>` alone for a table-wide run (a table with no tenant column,
+  or with row-level security off: Row-level security, below);
   a CHECK (`label !~ '/'`) keeps one move's runs from being read as
   another's;
 - the DML template;
@@ -443,18 +444,30 @@ only open and failed moves that no row supersedes.
 
 **The move worker.** `DataMoveWorker` is an engine background thread. It
 starts after the HTTP listener and handles one open move at a time, oldest
-`registered_at` first. Each pass over a move:
+`registered_at` first. Its call connections carry the application name
+`nexus-data-move-<nonce>`, one nonce per boot. When the engine holds its
+singleton lock, the move worker first terminates every backend named
+`nexus-data-move-` with another boot's nonce: a coordinator left mid-CALL by a
+hard-killed engine. Without the lock (an operator opt-out, or a pooler) it ends
+none, since the other backend may belong to a live engine. Each pass over a
+move:
 
 1. grants what the libraries need on the driving table (Roles and grants,
-   below), then checks that dml_utils is installed (`to_regprocedure` of the
-   committing entry point, not only the extension), that the admin connection
-   reads every row of the driving table (AdminDdlSession's
-   `requireUnrestrictedView`: superuser, BYPASSRLS, or a true-qual SELECT
-   policy), and that one `max_worker_processes` slot is free. If either is missing, the move is
+   below), then checks that dml_utils is installed (a `pg_proc` row for the
+   committing entry point in schema `dml_utils`, not only the extension;
+   `to_regprocedure` cannot name it, since its signature takes domain types),
+   that the admin connection reads every row of the driving table where row
+   security can hide rows from it (row-level security on and either FORCE or a
+   table the admin does not own: AdminDdlSession's `requireUnrestrictedView`,
+   superuser, BYPASSRLS, or a true-qual SELECT policy), and that one
+   `max_worker_processes` slot is free. If either is missing, the move is
    `blocked:` with the reason, and the move worker goes on to the next open
    move and comes back after the move's backoff (Retries, pause and
    cancelled runs, below);
-2. for each tenant, on a dedicated connection that no other code borrows,
+2. for each tenant of a tenant-scoped table (a tenant column and row-level
+   security on, FORCE or not: Row-level security, below), on a dedicated
+   connection that no other code borrows, re-reading the move's row before
+   each CALL,
    runs a session-level `SET nexus.tenant`, CALLs dml_utils' committing entry
    point (added upstream by this RDR; it takes `run_migration_chunks`'
    parameters, with threads 1 and the move's chunk size and `sleep_ms`), then
@@ -501,7 +514,8 @@ retried after the move's backoff with the move `blocked:`: no free slot; a
 missing install or role; an admin connection that cannot see every row; a
 verification run or `on_complete` that hits `statement_timeout_ms`, or an
 `on_complete` that hits its `lock_timeout` (SQLSTATE 55P03); a lost connection
-or a stopped engine;
+or a stopped engine; a CALL that returns with its run neither completed nor
+cancelled, which the next pass resumes;
 a chunk error dml_utils recorded with SQLSTATE 40001 (serialization), 40P01
 (deadlock), 55P03 (lock not available) or 57014 (statement cancelled), which
 live writers cause, or in class 53 (insufficient resources) or 57P01, 57P02
@@ -570,7 +584,8 @@ always reports how many times it has been retried:
   verification and again before `on_complete` (steps 2 and 3), so a pause
   takes effect at the next of those points: a run already in flight
   continues to its end, because one CALL of the committing entry point runs
-  every chunk of that run. A move on a table with no tenant column has one run,
+  every chunk of that run. A row superseded since the last read is no longer
+  open, so nothing more of it runs. A move with one table-wide run has one run,
   so a pause stops it only before that run starts, before its verification
   or before `on_complete`. boot_work reports the move `paused:` with `paused_by`; nx
   doctor shows it as a note, not red, since an operator chose it. It resumes
@@ -630,7 +645,13 @@ other policy. pg_background workers run as the caller and copy its settings
 (T2 nexus_rdr/246-research-1). A move over a tenant-scoped table therefore
 runs once per tenant, as in step 2 (on a table partitioned one tenant per
 leaf, such as `nexus.chunks`, once per leaf of the tenant, under that
-tenant's setting). A move over a table with no tenant column runs once. It does not run as nexus_svc.
+tenant's setting). A table is tenant-scoped when it has a tenant column and
+row-level security on, whether FORCE or not: `dml_utils_owner` does not own
+the table, so its SECURITY DEFINER boundary scan is bound by the policies even
+when the admin session, as an owner on a table without FORCE, is not; a single
+run there would find no rows and complete having moved none (found while
+building nexus-f3yqd.2.13; its `unforced_owned` test pins the per-tenant runs). A move over a table with no tenant
+column, or with row-level security off, runs once. It does not run as nexus_svc.
 
 Reads by `nexus_admin` differ by table. On `nexus.chunks`, vectors-029 gives
 the migrating role a permissive SELECT policy, `chunks_gate_probe_owner_read`
@@ -1307,3 +1328,4 @@ the first registered move.
 - 2026-11-16: per-leaf fix check passed (round 2: two of three critics PASS, no counted defect); its findings applied: the four-column Critical Assumption retargeted to a plain leaf, the assumption count (seven of ten, three open), the CHECK count, the `error_id` mark on a run with no error rows, the leaf list read as `nexus_admin` once per tenant per pass, and the new-leaf test scenario.
 - 2026-11-16: Sam approved the amendment (the retry, pause and cancelled-run rule; recorded and raised SQLSTATE classes; per-leaf runs on `nexus.chunks`; the registry access contract) into the accepted RDR, "Approve as written", asked in wren's session after halcyon's check that grant 3 does not cover new design.
 - 2026-11-16: Install sequence step 2 names where the install runs (inside SchemaMigrator.migrate, under the migration lock, after the index-builder decision), the SET-ROLE precondition, the per-walk Database, the lock_timeout and the finally; step 3 lists the failure kinds. Wording matched to the reviewed code of nexus-f3yqd.2.11.
+- 2026-11-16: worker wording to nexus-f3yqd.2.13's reviewed code (grant 3): a table is tenant-scoped when it has a tenant column and row-level security on, FORCE or not, since `dml_utils_owner`'s boundary scan is policy-bound even where the owning admin is exempt; `requireUnrestrictedView` applies only where row security can hide rows from the admin; the install check reads `pg_proc`; a CALL that returns with the run neither completed nor cancelled is transient; worker start ends another boot's `nexus-data-move-` coordinators, only under the singleton lock; the row is re-read before each CALL, and a superseded move runs no further.
