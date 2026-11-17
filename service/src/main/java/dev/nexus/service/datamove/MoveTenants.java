@@ -30,6 +30,9 @@ final class MoveTenants {
     /** The probe's statement bound, as {@code ChunkConstraintAdmin}'s probe has. */
     static final String PROBE_STATEMENT_TIMEOUT = "10min";
 
+    /** The GUC the probe bounds; set through {@code AdminDdlSession#setSession} only (NetworkBoundStatementTimeoutGateTest). */
+    private static final String STATEMENT_TIMEOUT_GUC = "statement_timeout";
+
     private static final Field<String> TENANT_ID = DSL.field(DSL.name("tenant_id"), String.class);
 
     /** True when the driving table has a {@code tenant_id} column. */
@@ -55,14 +58,14 @@ final class MoveTenants {
      */
     static List<String> byProbe(AdminDdlSession session, String schema, String table) {
         DSLContext admin = session.ctx();
-        String prior = admin.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("statement_timeout")))
+        String prior = admin.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val(STATEMENT_TIMEOUT_GUC)))
             .fetchOne(0, String.class);
-        session.setSession("statement_timeout", PROBE_STATEMENT_TIMEOUT);
+        session.setSession(STATEMENT_TIMEOUT_GUC, PROBE_STATEMENT_TIMEOUT);
         try {
             return list(admin, admin.selectDistinct(TENANT_ID).from(DSL.table(DSL.name(schema, table)))
                 .where(TENANT_ID.isNotNull()).fetch(TENANT_ID));
         } finally {
-            session.setSession("statement_timeout", prior);
+            session.setSession(STATEMENT_TIMEOUT_GUC, prior);
         }
     }
 
