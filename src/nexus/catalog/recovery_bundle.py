@@ -716,6 +716,8 @@ def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
     An old bundle carries ``chroma://`` (RDR-231): *uri* goes through
     :func:`canonical_note_uri` first, so the compare and the parse both see
     the stored ``nx-note://`` form (Test Plan rows 557 and 564)."""
+    if not uri or not uri.strip():
+        return None  # a blank URI names no document; the engine would read it as "no filter" (nexus-uwggq.1.9)
     uri = canonical_note_uri(uri)
     entry = reader.by_source_uri(uri)
     if entry is not None or not uri.startswith(NOTE_URI_SCHEME):

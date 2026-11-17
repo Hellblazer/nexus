@@ -495,7 +495,7 @@ nx catalog link-bulk-delete --type implements-heuristic --created-by indexer --d
 
 Preview and bulk-delete links by type and/or creator. Always use `--dry-run` first.
 
-For a single link pair, `nx catalog unlink <from> <to> [--type <link_type>]` removes it directly (both endpoints accept tumblers or titles; omit `--type` to remove every link type between the pair).
+For a single link pair, `nx catalog unlink <from> <to> --type <link_type>` removes it directly (both endpoints accept tumblers or titles; `--type` is required, there is no remove-all-types mode).
 
 ### Discovery and observability
 

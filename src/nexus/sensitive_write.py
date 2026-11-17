@@ -247,7 +247,7 @@ def catalog_flags_uri(*uris: str) -> bool:
     """
     from nexus.doc_sensitivity import SensitivityUnknown, sensitive_tumbler_for_uri  # noqa: PLC0415 — deferred: reads the catalog client
 
-    for uri in dict.fromkeys(u for u in uris if u):
+    for uri in dict.fromkeys(u for u in uris if u and u.strip()):
         try:
             if sensitive_tumbler_for_uri(uri):
                 return True

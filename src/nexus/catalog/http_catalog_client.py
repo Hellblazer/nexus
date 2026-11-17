@@ -100,7 +100,7 @@ from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
 from nexus.catalog.write_outcome import PreSendArgumentError
-from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused, refuse_whitespace_filters as _refuse_ws, require_nonblank_filter as _nonblank
+from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused, refuse_whitespace_filters as _refuse_ws, require_nonblank_filter as _nonblank, require_link_types as _link_types, require_tumbler_prefix as _tumbler_prefix, require_unlink_args as _unlink_args
 
 _log = structlog.get_logger(__name__)
 
@@ -2849,19 +2849,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         11 of the 12 largest cloud-catalog subtrees, reproduced against the
         live 19,824-document catalog). That is what this route replaced.
 
-        Do NOT read "one server-side query" as "one INDEX SEEK". The route's
-        predicate is ``tumbler LIKE prefix || '.%'``, which a B-tree can
-        accelerate only under a pattern-indexable collation (C locale, which
-        the bundled local PG uses — ``initdb --no-locale`` in
-        ``scripts/build_pg_bundle.sh``) and with no ``text_pattern_ops``
-        index present anywhere. The managed cloud deployment's collation is
-        not provisioned or verified anywhere in this repo, so on cloud this
-        may be a sequential scan. What the route guarantees unconditionally
-        is COMPLETENESS; index acceleration is unverified there. (Carried
-        forward from the deleted fallback's docstring, which corrected
-        ab7907fb's commit message for asserting more than was established.)
+        "One server-side query" is not "one index seek": the predicate is ``tumbler LIKE prefix || '.%'``, which
+        a B-tree serves only under a pattern-indexable collation (C locale, as the bundled local PG uses) and
+        with no ``text_pattern_ops`` index. Cloud collation is unverified here, so cloud may sequential-scan.
+        The route guarantees COMPLETENESS, not index acceleration.
+
+        *prefix* must be ASCII digits and dots: the engine does not escape ``%`` / ``_`` in the LIKE pattern, so
+        the client refuses anything else (engine-side escape is RDR-241 Phase 2).
         """
-        result = self._get("/descendants", prefix=prefix)
+        result = self._get("/descendants", prefix=_tumbler_prefix("descendants", prefix))
         return result.get("documents", []) if result else []
 
     def resolve_alias(self, tumbler: Tumbler | str, *, max_hops: int = 16) -> Tumbler:
@@ -3298,7 +3294,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         to_t: Tumbler | str,
         link_type: str,
     ) -> int:
-        """Delete one or all link types between *from_t* and *to_t*.
+        """Delete the *link_type* links between *from_t* and *to_t*; all three are required (no all-types mode).
 
         Return-shape parity with local ``Catalog.unlink`` (nexus-h8rf6.3 audit):
         the server already returns the exact rowcount (``{"deleted": N}``,
@@ -3308,6 +3304,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``{"removed": removed}`` response printed/returned ``True``/``False``
         instead of a count.
         """
+        _unlink_args(from_t, to_t, link_type)  # the engine runs a bulk delete unless all three are named
         result = self._post("/unlink", {
             "from_tumbler": str(from_t),
             "to_tumbler": str(to_t),
@@ -3325,7 +3322,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # njrcn.5: forward link_types to the server-side IN filter (no client-side
         # over-fetch). link_types takes precedence; else the single link_type.
         if link_types:
-            params["link_types"] = ",".join(_nonblank("links", "link_types entry", t) for t in link_types)
+            params["link_types"] = _link_types("links", link_types)
         elif link_type:
             params["link_type"] = _nonblank("links", "link_type", link_type)
         result = self._get("/links", **params)
@@ -3339,7 +3336,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "in"}
         if link_types:
-            params["link_types"] = ",".join(_nonblank("links", "link_types entry", t) for t in link_types)
+            params["link_types"] = _link_types("links", link_types)
         elif link_type:
             params["link_type"] = _nonblank("links", "link_type", link_type)
         result = self._get("/links", **params)

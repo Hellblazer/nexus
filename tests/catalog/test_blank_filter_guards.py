@@ -11,15 +11,22 @@ the test if it is called: the refusal comes before the request.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import click
 import pytest
 from click.testing import CliRunner
 
+import nexus.doc_sensitivity as ds
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.recovery_bundle import import_bundle
 from nexus.cli import _StorageBackendGuardGroup
+from nexus.commands import catalog as cat_cmd
+from nexus.commands.catalog_cmds.links import unlink_cmd
 from nexus.errors import BlankFilterError
+from nexus.mcp import catalog as mcp_cat
+from nexus.sensitive_write import catalog_flags_uri
 
 # "" (dropped by _get), whitespace of several kinds, and the ideographic space (U+3000), which Java's isBlank
 # reads as blank.
@@ -310,3 +317,152 @@ def test_a_named_optional_filter_is_sent(monkeypatch: pytest.MonkeyPatch) -> Non
     assert seen[1] == ("/links", {"tumbler": "1.2.3", "direction": "in", "link_types": "cites,quotes"})
     assert seen[2] == ("/gc_audit/list", {"collection": "c", "operation": "purge", "limit": 100, "offset": 0})
     assert seen[3] == ("/coverage", {"owner_prefix": "1.2"})
+
+
+# ── fix round 1 (nexus-uwggq.1.9): unlink, descendants, comma-only link types, recovery import, flags ───────
+
+
+@pytest.mark.parametrize("blank", [None, *BLANKS], ids=["None", *IDS])
+@pytest.mark.parametrize("param", ["from_t", "to_t", "link_type"])
+def test_unlink_refuses_a_blank_argument_before_any_post(param: str, blank: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine takes the exact branch only when from, to and type are all non-null; otherwise it runs the bulk
+    delete, which reads a blank value as "no filter" (every link)."""
+    cat, calls = _opt_client(monkeypatch)
+    args = {"from_t": "1.2.3", "to_t": "1.2.4", "link_type": "cites", param: blank}
+    with pytest.raises(BlankFilterError, match=f"unlink: {param} is blank"):
+        cat.unlink(args["from_t"], args["to_t"], args["link_type"])
+    assert calls == []
+
+
+def test_unlink_link_type_error_says_to_name_the_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    cat, _ = _opt_client(monkeypatch)
+    with pytest.raises(BlankFilterError, match="name the link type to remove"):
+        cat.unlink("1.2.3", "1.2.4", "")
+
+
+def test_unlink_named_triple_is_one_exact_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    cat = HttpCatalogClient(base_url="http://blank.fake", _token="t")
+    posts: list[Any] = []
+    monkeypatch.setattr(cat, "_post", lambda path, body=None, **k: posts.append((path, body)) or {"deleted": 1})
+    assert cat.unlink("1.2.3", "1.2.4", "cites") == 1
+    assert posts == [("/unlink", {"from_tumbler": "1.2.3", "to_tumbler": "1.2.4", "link_type": "cites"})]
+
+
+def _unlink_group(monkeypatch: pytest.MonkeyPatch) -> tuple[click.Group, list[Any]]:
+    """``nx catalog unlink`` under the CLI group, over a real client whose ``_post`` fails the test if reached."""
+    posts: list[Any] = []
+    writer = HttpCatalogClient(base_url="http://blank.fake", _token="t")
+    monkeypatch.setattr(writer, "_post", lambda *a, **k: posts.append(a) or (_ for _ in ()).throw(AssertionError("no POST")))
+    monkeypatch.setattr(cat_cmd, "_get_catalog", lambda: object())
+    monkeypatch.setattr(cat_cmd, "_get_catalog_writer", lambda: writer)
+    monkeypatch.setattr(cat_cmd, "_resolve_tumbler", lambda cat, v: v)
+
+    @click.group(cls=_StorageBackendGuardGroup)
+    def grp() -> None: ...
+
+    grp.add_command(unlink_cmd)
+    return grp, posts
+
+
+def test_cli_unlink_without_type_is_a_usage_error_and_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    grp, posts = _unlink_group(monkeypatch)
+    result = CliRunner().invoke(grp, ["unlink", "1.2.3", "1.2.4"])
+    assert result.exit_code == 2, result.output
+    assert "--type" in result.output
+    assert posts == []
+
+
+@pytest.mark.parametrize("blank", ["", " ", "\t"], ids=["empty", "space", "tab"])
+def test_cli_unlink_with_a_blank_type_is_a_usage_error_and_sends_nothing(blank: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    grp, posts = _unlink_group(monkeypatch)
+    result = CliRunner().invoke(grp, ["unlink", "1.2.3", "1.2.4", "--type", blank])
+    assert result.exit_code == 2, result.output
+    assert "Error: unlink: link_type is blank; name the link type to remove" in result.output
+    assert posts == []
+
+
+@pytest.mark.parametrize("link_type", ["", "  "], ids=["empty", "space"])
+def test_mcp_catalog_unlink_with_a_blank_type_returns_an_error_and_sends_nothing(link_type: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    posts: list[Any] = []
+    writer = HttpCatalogClient(base_url="http://blank.fake", _token="t")
+    monkeypatch.setattr(writer, "_post", lambda *a, **k: posts.append(a) or (_ for _ in ()).throw(AssertionError("no POST")))
+    monkeypatch.setattr(mcp_cat, "_require_catalog", lambda: (object(), ""))
+    monkeypatch.setattr(mcp_cat, "_get_catalog_writer", lambda: writer)
+    monkeypatch.setattr(mcp_cat, "_resolve_tumbler_mcp", lambda cat, v: (v, ""))
+    result = mcp_cat.catalog_unlink(from_tumbler="1.2.3", to_tumbler="1.2.4", link_type=link_type)
+    assert "unlink: link_type is blank; name the link type to remove" in result["error"]
+    assert "removed" not in result
+    assert posts == []
+
+
+BAD_PREFIXES = ["", " ", "%", "1.%", "1_0", "1.2_", "1.2.", ".1", "1..2", "1.2 ", " 1.2", "abc", "1.a", "１.２", "1.2.%", "-1", "+1"]
+GOOD_PREFIXES = ["1", "1.2", "1.2.3", "0.0", "10.200.3000"]
+
+
+@pytest.mark.parametrize("prefix", BAD_PREFIXES, ids=[repr(p) for p in BAD_PREFIXES])
+def test_descendants_refuses_a_prefix_that_is_not_digits_and_dots(prefix: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine builds ``LIKE prefix || '.%'`` without escaping: a ``%`` or ``_`` widens it to the tenant.
+    ``Tumbler.parse`` would accept ``1_0`` (``int()`` allows the underscore), so the client checks the shape."""
+    cat, calls = _client(monkeypatch)
+    with pytest.raises(BlankFilterError, match="descendants: prefix .* is not a tumbler prefix"):
+        cat.descendants(prefix)
+    assert calls == []
+
+
+@pytest.mark.parametrize("prefix", GOOD_PREFIXES)
+def test_descendants_sends_a_valid_prefix_unchanged(prefix: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    cat = HttpCatalogClient(base_url="http://blank.fake", _token="t")
+    seen = _recording(cat, monkeypatch, {"documents": [{"tumbler": f"{prefix}.1"}]})
+    assert cat.descendants(prefix) == [{"tumbler": f"{prefix}.1"}]
+    assert seen == [("/descendants", {"prefix": prefix})]
+
+
+COMMA_ONLY = [",", " , ", ",,", ", \t", " ,\n,"]
+
+
+@pytest.mark.parametrize("entry", COMMA_ONLY, ids=[repr(e) for e in COMMA_ONLY])
+@pytest.mark.parametrize("method", ["links_from", "links_to"])
+def test_links_refuse_a_link_types_entry_of_only_commas_and_spaces(method: str, entry: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine splits ``link_types`` on commas and drops empties; ``[]`` means "no type filter", so every edge."""
+    cat, calls = _client(monkeypatch)
+    with pytest.raises(BlankFilterError, match="names no link type"):
+        getattr(cat, method)("1.2.3", link_types=["cites", entry])
+    assert calls == []
+
+
+def test_links_accept_a_real_link_types_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    cat = HttpCatalogClient(base_url="http://blank.fake", _token="t")
+    seen = _recording(cat, monkeypatch, {"links_from": []})
+    cat.links_from("1.2.3", link_types=["cites", "quotes"])
+    assert seen == [("/links", {"tumbler": "1.2.3", "direction": "out", "link_types": "cites,quotes"})]
+
+
+@pytest.mark.parametrize("uri", ["", " ", "\t\n"], ids=["empty", "space", "tab-newline"])
+def test_a_blank_link_endpoint_in_a_recovery_bundle_is_unresolvable_not_an_abort(uri: str, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = tmp_path / "b.jsonl"
+    bundle.write_text("\n".join(json.dumps(r) for r in [
+        {"format": "nexus-recovery-bundle", "format_version": 1},
+        {"record": "link", "from_source_uri": uri, "to_source_uri": "file:///a/b.py", "link_type": "cites"},
+        {"record": "link", "from_source_uri": "file:///a/b.py", "to_source_uri": uri, "link_type": "cites"},
+    ]) + "\n")
+    reader = HttpCatalogClient(base_url="http://blank.fake", _token="t")
+    asked: list[dict] = []
+
+    def _get(path: str, **kw: Any) -> Any:
+        asked.append(kw)
+        known = kw.get("source_uri") == "file:///a/b.py"
+        return {"documents": [{"tumbler": "1.1.1", "title": "b", "source_uri": "file:///a/b.py"}] if known else []}
+
+    monkeypatch.setattr(reader, "_get", _get)
+    summary = import_bundle(reader, reader, object(), bundle, import_doc=lambda t3, rec: None)
+    assert [u["missing"] for u in summary.unresolvable_links] == ["from", "to"]
+    assert asked and all(kw.get("source_uri", "x").strip() for kw in asked), "a blank URI never reaches the engine"
+
+
+@pytest.mark.parametrize("uri", ["", " ", "\t"], ids=["empty", "space", "tab"])
+def test_catalog_flags_uri_skips_a_blank_uri_instead_of_raising(uri: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(u: str) -> bool:
+        raise AssertionError(f"a blank URI asks the catalog nothing: {u!r}")
+
+    monkeypatch.setattr(ds, "sensitive_tumbler_for_uri", _boom)
+    assert catalog_flags_uri(uri, "  ") is False

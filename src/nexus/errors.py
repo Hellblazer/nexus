@@ -3,6 +3,7 @@
 """Nexus exception hierarchy."""
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import Any, Iterable
 
@@ -817,6 +818,40 @@ def refuse_whitespace_filters(method: str, **filters: Any) -> None:
     for param, value in filters.items():
         if value is not None and value != "" and not str(value).strip():
             require_nonblank_filter(method, param, "")
+
+
+def require_link_types(method: str, link_types: Any) -> str:
+    """Join *link_types* for the engine's comma-split ``link_types`` param, refusing a blank entry.
+
+    The engine splits on ``,``, trims and drops empties, so an entry of only commas and spaces (``","``) leaves
+    ``[]``, which it reads as "no type filter" and answers with every edge."""
+    for t in link_types:
+        require_nonblank_filter(method, "link_types entry", t)
+        if not str(t).replace(",", "").strip():
+            raise BlankFilterError(f"{method}: link_types entry {t!r} names no link type; it would be read as no filter and return every link")
+    return ",".join(link_types)
+
+
+def require_unlink_args(from_t: Any, to_t: Any, link_type: Any) -> None:
+    """Refuse an ``unlink`` that does not name its pair and its link type.
+
+    The engine removes one exact link only when from, to and type are all non-null; otherwise it runs the bulk
+    delete, which reads a blank value as "no filter". There is no remove-all-types mode: name the type."""
+    for param, value in (("from_t", from_t), ("to_t", to_t), ("link_type", link_type)):
+        if value is None or not str(value).strip():
+            hint = "name the link type to remove (there is no remove-all-types mode)" if param == "link_type" else "name both documents"
+            raise BlankFilterError(f"unlink: {param} is blank; {hint}")
+
+
+def require_tumbler_prefix(method: str, prefix: Any) -> str:
+    """Return *prefix* when it is ASCII digits joined by dots (``1``, ``1.2``); raise :class:`BlankFilterError` otherwise.
+
+    The engine's ``/descendants`` builds ``LIKE prefix || '.%'`` without escaping, so a ``%`` or ``_`` in the
+    prefix widens the read to the whole tenant. ``Tumbler.parse`` is no help: ``int()`` accepts ``1_0``."""
+    s = str(prefix)
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", s):
+        raise BlankFilterError(f"{method}: prefix {s!r} is not a tumbler prefix (ASCII digits and dots, e.g. 1.2)")
+    return s
 
 
 class BatchWriteFailedError(NexusError):

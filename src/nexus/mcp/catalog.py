@@ -926,7 +926,8 @@ def catalog_unlink(
 ) -> dict:
     """Remove a specific link between two documents. Accepts tumblers or titles.
 
-    If link_type is empty, removes ALL link types between the pair. Returns {removed: count}.
+    link_type is required: an empty one is refused with an error (there is no remove-all-types mode).
+    Returns {removed: count}.
     """
     cat, err = _require_catalog()
     if err:

@@ -1098,10 +1098,10 @@ Span formats: `line-line` (positional), `chunk:char-char` (positional), `chash:<
 ### nx catalog unlink
 
 ```
-nx catalog unlink FROM TO [--type TYPE]
+nx catalog unlink FROM TO --type TYPE
 ```
 
-Remove link(s). Omit `--type` to remove all link types between the pair.
+Remove the links of one type between the pair. `--type` is required; there is no remove-all-types mode.
 
 ### nx catalog link-audit (hidden)
 

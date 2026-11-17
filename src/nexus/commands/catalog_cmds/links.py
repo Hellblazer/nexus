@@ -76,12 +76,12 @@ def link_cmd(
 @click.command("unlink")
 @click.argument("from_tumbler")
 @click.argument("to_tumbler")
-@click.option("--type", "link_type", default="")
+@click.option("--type", "link_type", required=True, help="Link type to remove (required; there is no remove-all-types mode).")
 def unlink_cmd(from_tumbler: str, to_tumbler: str, link_type: str) -> None:
-    """Remove link(s) between two documents.
+    """Remove the links of one type between two documents.
 
-    Both FROM and TO accept tumblers or titles. Omit --type to remove all
-    link types between the pair.
+    Both FROM and TO accept tumblers or titles. --type is required; a blank
+    value is refused.
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
