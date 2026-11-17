@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 import pytest
 
+from nexus._install.winproc_core import render_command_line
 from nexus.daemon.service_registry import (
     process_command,
     storage_service_member_check,
@@ -53,8 +54,8 @@ class TestJarArmOfTheMatcher:
             "-XX:ErrorFile=/home/u/cfg/logs/hs_err_%p.log -jar {jar}",
             "java -jar {jar}",
             "/usr/bin/java -Xmx1g -jar {jar} --port 8080",
-            # a JAVA_HOME with a space, as a quoted first argument
-            '"/opt/my jdk/bin/java" -Duser.timezone=UTC -jar {jar}',
+            # a JAVA_HOME with a space: process tables render it unquoted
+            "/opt/my jdk/bin/java -Duser.timezone=UTC -jar {jar}",
         ],
     )
     def test_the_engine_matches(self, tmp_path: Path, jar: Path, command: str) -> None:
@@ -135,3 +136,13 @@ class TestSweepWithRealProcesses:
                 if proc is not None:
                     proc.kill()
                     proc.wait(timeout=10)
+
+
+def test_a_windows_jdk_under_program_files_matches_as_the_process_table_renders_it(tmp_path: Path, jar: Path) -> None:
+    """The Windows table dequotes (winproc_core.render_command_line), so the spaced JDK path arrives as words; the
+    first version of the fix anchored on a no-space head and missed it (review of 3f549e254)."""
+    raw = (r'"C:\Program Files\Eclipse Adoptium\jdk-21.0.5.11-hotspot\bin\java.exe" '
+           rf'-Duser.timezone=UTC -Djava.net.preferIPv4Stack=true -jar "{jar}"')
+    rendered = render_command_line(raw)
+    assert '"' not in rendered and "Program Files" in rendered, rendered
+    assert storage_service_stack_matcher(tmp_path / "cfg")(rendered)

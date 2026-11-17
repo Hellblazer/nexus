@@ -537,20 +537,21 @@ def jar_launch_stack_marker() -> str | None:
     return f"-jar {Path(jar_override).resolve(strict=False)}"
 
 
-#: ``java``/``java.exe`` as the first argument: bare, under a path with no whitespace, or quoted.
-_JAVA_COMMAND_HEAD = re.compile(r'^(?:"[^"]*[/\\]java(?:\.exe)?"|(?:\S*[/\\])?java(?:\.exe)?)(?:\s|$)', re.I)
+#: The program names the JVM-fallback launch runs (``_resolve_java_executable``), case-folded.
+_JAVA_PROGRAM_NAMES = frozenset({"java", "java.exe"})
 
 
 def jar_launch_command_matches(command: str, marker: str) -> bool:
-    """True when *command* is a JVM running the jar *marker* names, not a command that only mentions it.
+    """True when *command* is a JVM running the jar *marker* names, not one that only names it (``--jar <jar>``).
 
-    nexus-f3yqd.2.22: this was ``marker in command``, and ``--jar <jar>`` / ``--new-jar <jar>`` contain the
-    marker's text, so the RDR-246 MVV driver and lab-run's root ``lab-hand-exec`` wrapper around it joined the
-    stop's sweep; both signals met EPERM and ``nx daemon service stop --with-pg`` exited 1 ("survived SIGKILL")
-    before its PostgreSQL step. Now the marker must be whole arguments and argv[0] must be java (strings arrive
-    case-folded on Windows). An unquoted java path with whitespace is not matched; its engine stops via its lease.
+    nexus-f3yqd.2.22: ``marker in command`` swept lab-run's root wrapper around the MVV driver (EPERM, stop exit 1
+    before PG). Process tables render argv unquoted, so the program is everything before the first `` -`` option
+    and its last path component must be java/java.exe; a spaced JDK path (``C:\\Program Files``) still matches.
     """
-    return f" {marker} " in f" {command} " and _JAVA_COMMAND_HEAD.match(command) is not None
+    if f" {marker} " not in f" {command} ":
+        return False
+    program = command.split(" -", 1)[0].strip()
+    return program.replace("\\", "/").rsplit("/", 1)[-1].lower() in _JAVA_PROGRAM_NAMES
 
 
 #: Minimum JDK for the JVM-fallback launch. MUST equal
