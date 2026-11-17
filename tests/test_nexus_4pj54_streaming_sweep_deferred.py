@@ -606,7 +606,8 @@ def test_run_summary_names_discarded_and_pending_sweeps(capsys) -> None:
     assert _emit_superseded_swept_info() is False
     out = capsys.readouterr().out
     assert "not run for 1 failed/fenced and 1 unfinished document(s)" in out
-    assert "t3 gc -c COLLECTION" in out
+    assert "engine reaper collects" in out
+    assert "t3 gc -c COLLECTION" not in out
     reset_superseded_sweep_stats()
 
 

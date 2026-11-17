@@ -295,9 +295,10 @@ def test_emit_identity_drop_summary_surfaces_swept_count_as_info_not_a_problem(c
 
 def test_emit_identity_drop_summary_surfaces_sweep_skips_as_a_problem(capsys):
     """nexus-39upx hazard 4: a sweep that could not run leaves the dropped
-    chunks in storage. They are not searchable (no live owner, RDR-192) and
-    the engine reaper collects them, so the line says so and gives no remedy
-    that does nothing (nx t3 gc has the same 30-day grace). It still counts
+    chunks in storage. Those no other document owns are out of search (no
+    live owner, RDR-192) but readable by chash until the engine reaper
+    collects them, so the line says so and gives no remedy
+    that does nothing (nx t3 gc has the reaper's grace). It still counts
     toward the non-zero exit like the other three collectors (uqq9z/7f5qj
     strictness)."""
     from nexus.mcp_infra import _record_superseded_sweep_skip
@@ -310,7 +311,8 @@ def test_emit_identity_drop_summary_surfaces_sweep_skips_as_a_problem(capsys):
     err = capsys.readouterr().err
     assert "WARNING: superseded-chunk sweep skipped for 1 document(s)" in err
     assert "note_lookup_failed" in err
-    assert "not searchable" in err
+    assert "out of search" in err
+    assert "readable by chash" in err
     assert "may still be searchable" not in err
     assert "nx t3 gc" not in err
 
@@ -324,13 +326,15 @@ def test_sweep_skips_log_one_counted_event_per_summary(capsys):
     _record_superseded_sweep_skip("1.2.3", "code__a", "gate_timeout")
     _record_superseded_sweep_skip("1.2.4", "code__a", "gate_timeout")
     _record_superseded_sweep_skip("1.2.5", "docs__b", "statement_timeout")
+    _record_superseded_sweep_skip("1.2.5", "docs__b", "before_read_failed")
 
     with capture_logs() as cap:
         assert emit_identity_drop_summary(indexed_count=3) is True
     events = [e for e in cap if e["event"] == "superseded_sweep_skipped"]
     assert len(events) == 1, cap
+    assert events[0]["skips"] == 4
     assert events[0]["documents"] == 3
-    assert events[0]["reasons"] == {"gate_timeout": 2, "statement_timeout": 1}
+    assert events[0]["reasons"] == {"before_read_failed": 1, "gate_timeout": 2, "statement_timeout": 1}
     assert events[0]["collections"] == ["code__a", "docs__b"]
     assert events[0]["log_level"] == "warning"
     assert "superseded-chunk sweep skipped for 3 document(s)" in capsys.readouterr().err
@@ -457,7 +461,8 @@ def test_raise_identity_drop_exception_sweep_skip_only_names_the_right_cause_and
     msg = str(exc_info.value)
 
     assert "a superseded-chunk sweep skip" in msg
-    assert "nx t3 gc -c COLLECTION" in msg
+    assert "engine reaper collects" in msg
+    assert "nx t3 gc -c COLLECTION" not in msg
     # Must NOT point at the write-class remedy — nothing wrote failed.
     assert "manifest-verify" not in msg
     assert "manifest write failures" not in msg
@@ -526,7 +531,8 @@ def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
     assert "manifest write failures" in msg
     assert "a superseded-chunk sweep skip" in msg
     assert "nx catalog reconcile" in msg
-    assert "t3 gc -c COLLECTION" in msg
+    assert "engine reaper collects" in msg
+    assert "t3 gc -c COLLECTION" not in msg
 
 
 def test_raise_identity_drop_exception_write_failed_and_identity_dropped_names_one_remedy():

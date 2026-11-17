@@ -702,15 +702,16 @@ def _emit_superseded_swept_info() -> bool:
     # nexus-4pj54: a multi-batch document's sweep is deferred to its
     # completion stamp. A failed or fenced run drops it (discarded); a run
     # that never reached either fence call leaves it held (pending). Either
-    # way superseded rows may remain in T3. The run's own failure already
+    # way superseded rows stay in T3 until the engine reaper collects them
+    # (see _emit_superseded_sweep_skipped_warning). The run's own failure already
     # drives the exit code, so this stays informational.
     discarded = stats.get("deferred_discarded", 0)
     pending = stats.get("deferred_pending", 0)
     if discarded or pending:
         click.echo(
             f"  superseded-chunk sweep not run for {discarded} failed/fenced "
-            f"and {pending} unfinished document(s); old T3 rows may remain "
-            f"until 'nx t3 gc -c COLLECTION' (nexus-4pj54)"
+            f"and {pending} unfinished document(s); their dropped chunks may stay "
+            f"in T3 until the engine reaper collects them (nexus-4pj54)"
         )
         pending_ids = stats.get("deferred_pending_doc_ids", [])
         if pending_ids:
@@ -720,20 +721,27 @@ def _emit_superseded_swept_info() -> bool:
 
 def _emit_superseded_sweep_skipped_warning() -> bool:
     """nexus-39upx hazard 4: the post-commit sweep did not delete the chunks one or
-    more documents dropped this run (a gate or statement timeout, a failed
-    before-read, a note lookup). Those chunks are not searchable: every engine read
-    path requires a live owner in the chunk's own collection (``chunk_live_owners``,
-    RDR-192 Steps 4-5, vectors-018/019). They hold storage until the engine reaper
-    (``ChunkReaper``, RDR-192 Step 9) finds them from the manifest, which it does
-    without any record of the skip: it quarantines an ownerless chunk past its
-    30-day grace and expires the quarantine after 14 days. ``nx t3 gc`` uses the
-    same grace, so nothing reclaims them sooner and no action is needed. Returns
-    ``True`` iff any skip was recorded, so it still counts toward the batch's
-    non-zero exit (uqq9z/7f5qj strictness, decided when the chunks were thought
-    searchable; unchanged here). Each call
-    with skips also logs one ``superseded_sweep_skipped`` event carrying the
-    document count and the count per reason, so the skips can be counted from the
-    log as well as read."""
+    more documents dropped this run (reasons: gate_timeout, a lock wait over 2 s in
+    the sweep's transaction, whether the per-collection sweep gate or a row lock,
+    since SQLSTATE 55P03 does not tell them apart; statement_timeout; sweep_failed;
+    before_read_failed; note_lookup_failed; delete_failed; no_catalog).
+
+    What is left: a dropped chunk that no other document owns is out of search and
+    the get/list reads, which require a live owner in the chunk's own collection
+    (``chunk_live_owners``, RDR-192 Steps 4-5, vectors-018/019). A lookup by chash
+    (``resolve_chash``, ``resolve_span``: a citation) still returns its text, as it
+    does for any chunk, until the engine reaper (``ChunkReaper``, RDR-192 Step 9)
+    takes it: the reaper finds ownerless chunks from the manifest with no record of
+    the skip, quarantines them after a 30-day grace and deletes them 14 days later,
+    when it is enabled and its checks pass (backfill gate, floor, census; a refusal
+    is a ``gc_audit`` row and an engine WARN). A dropped chunk another document
+    still owns stays searchable, as it should. ``nx t3 gc`` uses the reaper's grace,
+    so it reclaims nothing sooner.
+
+    Returns ``True`` iff any skip was recorded, so it still counts toward the
+    batch's non-zero exit (uqq9z/7f5qj strictness; unchanged here). Each call with
+    skips also logs one ``superseded_sweep_skipped`` event with the skip count, the
+    distinct document count, the count per reason and the collections."""
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
     import structlog  # noqa: PLC0415 — deliberate function-local import: rare branch
 
@@ -746,17 +754,20 @@ def _emit_superseded_sweep_skipped_warning() -> bool:
     for s in skips:
         by_reason[s["reason"]] = by_reason.get(s["reason"], 0) + 1
     reasons = sorted(by_reason)
+    documents = len({s["doc_id"] for s in skips})
     structlog.get_logger(__name__).warning(
         "superseded_sweep_skipped",
-        documents=len(skips),
+        skips=len(skips),
+        documents=documents,
         reasons={r: by_reason[r] for r in reasons},
         collections=sorted({s.get("collection", "") for s in skips}),
     )
     click.echo(
-        f"  WARNING: superseded-chunk sweep skipped for {len(skips)} "
-        f"document(s) ({', '.join(reasons)}): their dropped chunks are not "
-        f"searchable (no live owner) and stay in storage until the engine "
-        f"reaper collects them after its 30-day grace. No action is needed.",
+        f"  WARNING: superseded-chunk sweep skipped for {documents} "
+        f"document(s) ({', '.join(reasons)}): dropped chunks no other document "
+        f"owns are out of search but stay in T3, readable by chash, until the "
+        f"engine reaper collects them (quarantined after a 30-day grace, "
+        f"deleted 14 days later).",
         err=True,
     )
     return True
@@ -859,10 +870,10 @@ def raise_identity_drop_exception(
     safety, no write ever failed) joined the same fail-loud gate: a run
     tripping ONLY that condition would exit non-zero pointing an operator
     at ``manifest-verify`` for a document whose manifest was never in
-    question. The WARNING line ``_emit_superseded_sweep_skipped_warning``
-    prints above already names the correct remedy
-    (``nx t3 gc -c COLLECTION``); this exception now matches it instead
-    of contradicting it.
+    question. A sweep skip has no command remedy: the skipped chunks are
+    already out of every manifest, so a re-index does not drop them again,
+    and ``nx t3 gc`` uses the reaper's grace. The engine reaper collects
+    them (see ``_emit_superseded_sweep_skipped_warning``).
 
     Reads the SAME four collectors ``emit_identity_drop_summary`` just
     printed from — nothing resets between that call and this one, so the
@@ -970,8 +981,9 @@ def raise_identity_drop_exception(
         )
     if sweep_skipped:
         remedies.append(
-            "re-index, or run 'nx t3 gc -c COLLECTION' once the "
-            "underlying sweep issue clears"
+            "a skipped sweep needs no command: the engine reaper collects "
+            "the chunks it left (a re-index does not, and nx t3 gc uses the "
+            "reaper's grace)"
         )
     remedy_text = "; ".join(remedies) + "."
 
