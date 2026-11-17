@@ -6,6 +6,7 @@ import ch.qos.logback.classic.encoder.PatternLayoutEncoder;
 import ch.qos.logback.classic.joran.JoranConfigurator;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.classic.spi.LoggingEvent;
+import ch.qos.logback.core.UnsynchronizedAppenderBase;
 import ch.qos.logback.core.read.ListAppender;
 import com.sun.net.httpserver.Filter;
 import com.sun.net.httpserver.HttpExchange;
@@ -16,6 +17,7 @@ import dev.nexus.service.db.TokenCache;
 import dev.nexus.service.db.TokenHashing;
 import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AuthFilter;
+import dev.nexus.service.http.HttpUtil;
 import dev.nexus.service.http.IdempotencyKeyGuard;
 import dev.nexus.service.http.RequestContext;
 import org.jooq.SQLDialect;
@@ -26,6 +28,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -51,16 +55,22 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static dev.nexus.service.jooq.nexus.Tables.SESSION_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * RDR-167 Step 3 (bead nexus-dngtz.1.5): the engine MDC bridge.
+ * RDR-167 Step 3 (beads nexus-dngtz.1.5, .1.6, .1.7): the engine MDC bridge and the failure line.
  *
- * <p>{@link AuthFilter} puts {@code correlation_id}, {@code tenant} and {@code session} in the
- * SLF4J MDC, echoes the correlation id on every response (a 401 included), and clears the MDC on
- * every path; the shipped {@code logback.xml} pattern prints the three fields.
+ * <p>{@link AuthFilter} puts {@code correlation_id}, {@code tenant} (once the bearer token
+ * resolves) and {@code session} (once it is verified) in the SLF4J MDC, echoes the correlation id
+ * on every response (a 401 included), and clears the MDC and the {@code RequestContext} on every
+ * path, a throwing handler and a failing logger included; the shipped {@code logback.xml} pattern
+ * prints the three fields (sections 1 to 4). Section 5 covers the WARN {@code event=request_failed}
+ * line it writes before those clears: the ten-row status matrix, the thrown, unsent and
+ * sent-then-thrown handlers, no exception message in the line, and the tenant on early exits.
  *
  * <p>Server shape follows {@link AuthFilterTest}; log capture follows
  * {@code OwnerlessWriteRefusalTest}'s ListAppender, with one change: a logback event reads its MDC
@@ -80,6 +90,11 @@ class AuthFilterCorrelationTest {
     private static final String HEADER = "X-Correlation-ID";
     private static final Set<String> ALLOWED_MDC_KEYS = Set.of("correlation_id", "tenant", "session");
 
+    /** The context whose handler answers with the shape named by {@code ?shape=} (section 5). */
+    private static final String FAIL_PATH = "/v1/fail";
+    /** The text the throwing shapes carry; it must never reach a log line. */
+    private static final String THROWN_MESSAGE = "client-text-in-the-exception-message";
+
     /** Logger the test handler writes its one INFO line to. */
     private static final String HANDLER_LOGGER = "dev.nexus.service.AuthFilterCorrelationTest.handler";
 
@@ -97,6 +112,8 @@ class AuthFilterCorrelationTest {
     final AtomicInteger sent = new AtomicInteger();
     final AtomicInteger probeRuns = new AtomicInteger();
     final AtomicInteger probeDone = new AtomicInteger();
+    /** What the probe saw propagate out of the AuthFilter (the filter must rethrow unchanged). */
+    final ConcurrentLinkedQueue<Throwable> probeThrown = new ConcurrentLinkedQueue<>();
 
     @BeforeAll
     void startAll() throws Exception {
@@ -145,6 +162,10 @@ class AuthFilterCorrelationTest {
         ctx.getFilters().add(new MdcProbeFilter());
         ctx.getFilters().add(new AuthFilter(cache, store));
         ctx.getFilters().add(new IdempotencyKeyGuard());
+        var failCtx = server.createContext(FAIL_PATH, new ShapeHandler());
+        failCtx.getFilters().add(new MdcProbeFilter());
+        failCtx.getFilters().add(new AuthFilter(cache, store));
+        failCtx.getFilters().add(new IdempotencyKeyGuard());
         server.start();
         return new Srv(server, executor, server.getAddress().getPort(), handler);
     }
@@ -162,6 +183,7 @@ class AuthFilterCorrelationTest {
         sent.set(0);
         probeRuns.set(0);
         probeDone.set(0);
+        probeThrown.clear();
         shared.handler.reset();
     }
 
@@ -183,7 +205,7 @@ class AuthFilterCorrelationTest {
         assertThat(probeRuns.get()).as("the probe entered once per request sent").isEqualTo(sent.get());
         assertThat(probeDone.get()).as("the probe finished once per request sent").isEqualTo(sent.get());
         assertThat(mdcObservations)
-            .as("MDC empty on the handler thread at entry and after the AuthFilter returned, every request")
+            .as("MDC and RequestContext empty on the handler thread at entry and after the AuthFilter returned, every request")
             .isEmpty();
     }
 
@@ -415,6 +437,191 @@ class AuthFilterCorrelationTest {
         return elapsedMs;
     }
 
+    // ── 5. the request_failed line (nexus-dngtz.1.6, nexus-dngtz.1.7) ───────────
+
+    /** One row of the status matrix: a handler shape or trigger and what the line must say. */
+    record Row(String id, String shape, String token, Map<String, String> headers, int status, boolean line,
+               Level level) {
+        @Override
+        public String toString() {
+            return id;
+        }
+    }
+
+    static Stream<Row> failureRows() {
+        Map<String, String> none = Map.of();
+        return Stream.of(
+            new Row("send400", "send400", TOK_A, none, 400, true, Level.WARN),
+            new Row("send404", "send404", TOK_A, none, 404, true, Level.INFO),
+            new Row("send503Fixed", "send503", TOK_A, none, 503, true, Level.WARN),
+            new Row("send503Chunked", "chunked503", TOK_A, none, 503, true, Level.WARN),
+            new Row("guard400", "send200", TOK_A, Map.of("Idempotency-Key", "k-1"), 400, true, Level.WARN),
+            new Row("badToken401", "send200", "no-such-token", none, 401, true, Level.WARN),
+            new Row("direct409", "direct409", TOK_A, none, 409, true, Level.WARN),
+            new Row("direct204", "direct204", TOK_A, none, 204, false, null),
+            new Row("direct302", "direct302", TOK_A, none, 302, false, null),
+            new Row("send200", "send200", TOK_A, none, 200, false, null));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("failureRows")
+    void theRequestFailedLineAcrossResponseStatuses(Row row) throws Exception {
+        String cid = "cid-" + row.id();
+        var capture = new Capture(AuthFilter.class.getName(), Level.INFO);   // INFO so a 404 line is seen
+        HttpResponse<String> r;
+        try (capture) {
+            r = send(shared.port, FAIL_PATH + "?shape=" + row.shape(), row.token(), null, cid, row.headers());
+            awaitProbe();   // the line is written before the probe's finally runs: bounded poll, 10 s
+        }
+        assertThat(r.statusCode()).as("the status the client sees (the client does not follow redirects)")
+            .isEqualTo(row.status());
+        assertThat(r.headers().firstValue(HEADER)).contains(cid);
+        var lines = failureLines(capture);
+        if (!row.line()) {
+            assertThat(lines).as("no line for a status below 400 that was sent (204 and 302)").isEmpty();
+            return;
+        }
+        assertThat(lines).as("exactly one request_failed line").hasSize(1);
+        var e = lines.get(0);
+        assertThat(e.getLevel()).as("Sam 2026-11-17: a sent 404 logs at INFO, every other failure at WARN")
+            .isEqualTo(row.level());
+        assertThat(e.getFormattedMessage()).matches("event=request_failed method=GET path=" + FAIL_PATH
+            + " status=" + row.status() + " exception=none duration_ms=\\d+");
+        assertThat(e.getMDCPropertyMap()).containsEntry("correlation_id", cid).doesNotContainKey("session");
+        if (row.id().equals("badToken401")) {
+            assertThat(e.getMDCPropertyMap()).as("the principal never resolved").doesNotContainKey("tenant");
+        } else {
+            assertThat(e.getMDCPropertyMap()).containsEntry("tenant", "tenant-a");
+        }
+    }
+
+    @Test
+    void aHandlerThatThrowsBeforeSendingLogsStatusNoneAndTheExceptionClass_andTheThrowPropagates() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.WARN);
+        try (capture) {
+            // A POST: the JDK client retries an idempotent request whose connection closes with no
+            // response bytes, which would run the handler (and write the line) twice.
+            var get = request(shared.port, FAIL_PATH + "?shape=throwBeforeSend", TOK_A, SESS_A1,
+                "cid-throw-1", Map.of());
+            var post = java.net.http.HttpRequest.newBuilder(get, (k, v) -> true)
+                .timeout(TestHttp.REQUEST_TIMEOUT)
+                .POST(java.net.http.HttpRequest.BodyPublishers.noBody()).build();
+            assertThatThrownBy(() -> http.send(post, HttpResponse.BodyHandlers.ofString()))
+                .as("the client sees the connection close").isInstanceOf(IOException.class);
+            awaitProbe();   // the probe's after-check also proves the MDC is empty after the throw
+        }
+        var lines = failureLines(capture);
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage()).matches("event=request_failed method=POST path="
+            + FAIL_PATH + " status=none exception=java\\.lang\\.IllegalStateException duration_ms=\\d+");
+        assertThat(lines.get(0).getMDCPropertyMap())
+            .containsEntry("correlation_id", "cid-throw-1")
+            .containsEntry("tenant", "tenant-a")
+            .containsEntry("session", "session-a1");
+        assertThat(probeThrown).as("the exception left the AuthFilter unchanged")
+            .singleElement().isInstanceOf(IllegalStateException.class)
+            .extracting(Throwable::getMessage).isEqualTo(THROWN_MESSAGE);
+        assertNoExceptionTextInLine(lines.get(0));
+    }
+
+    @Test
+    void aHandlerThatReturnsWithoutSendingLogsStatusNoneAndNoException() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.WARN);
+        var pending = http.sendAsync(
+            request(shared.port, FAIL_PATH + "?shape=noSend", TOK_A, SESS_A1, "cid-nosend", Map.of()),
+            HttpResponse.BodyHandlers.ofString());
+        try (capture) {
+            awaitProbe();   // the handler returned, the exchange is still open, the client still waits
+        } finally {
+            pending.cancel(true);
+        }
+        var lines = failureLines(capture);
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage()).matches("event=request_failed method=GET path="
+            + FAIL_PATH + " status=none exception=none duration_ms=\\d+");
+        assertThat(lines.get(0).getMDCPropertyMap()).containsEntry("correlation_id", "cid-nosend");
+        assertThat(probeThrown).isEmpty();
+    }
+
+    @Test
+    void aHandlerThatSends200WithABodyAndThenThrowsLogsStatus200AndTheExceptionClass() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.WARN);
+        HttpResponse<String> r;
+        try (capture) {
+            r = send(shared.port, FAIL_PATH + "?shape=throwAfter200Body", TOK_A, null, "cid-throw-2", Map.of());
+            awaitProbe();
+        }
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(r.body()).isEqualTo("body-sent-before-the-throw");
+        var lines = failureLines(capture);
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage()).matches("event=request_failed method=GET path="
+            + FAIL_PATH + " status=200 exception=java\\.lang\\.IllegalStateException duration_ms=\\d+");
+        assertNoExceptionTextInLine(lines.get(0));
+    }
+
+    @Test
+    void theLineCarriesTheTenantOfAnEarlyExitThatFollowsTokenResolution() throws Exception {
+        // The tenant is put in MDC when the token resolves, so exits between resolution and the
+        // principal (a 403 scope refusal, a cross-tenant session, a session that was never minted)
+        // still print it. The session is never put on these exits.
+        var capture = new Capture(AuthFilter.class.getName(), Level.WARN);
+        try (capture) {
+            assertThat(send(shared.port, FAIL_PATH + "?shape=send200", TOK_MINT, null, "cid-t-403", Map.of())
+                .statusCode()).isEqualTo(403);
+            assertThat(send(shared.port, FAIL_PATH + "?shape=send200", TOK_B, SESS_A1, "cid-t-xtenant", Map.of())
+                .statusCode()).isEqualTo(401);
+            assertThat(send(shared.port, FAIL_PATH + "?shape=send200", TOK_A, "not-a-minted-session",
+                "cid-t-nomint", Map.of()).statusCode()).isEqualTo(401);
+            awaitProbe();
+        }
+        var byId = new java.util.HashMap<String, ILoggingEvent>();
+        for (var e : failureLines(capture)) byId.put(e.getMDCPropertyMap().get("correlation_id"), e);
+        assertThat(byId).containsOnlyKeys("cid-t-403", "cid-t-xtenant", "cid-t-nomint");
+        assertThat(byId.get("cid-t-403").getMDCPropertyMap()).containsEntry("tenant", "edge-tenant");
+        assertThat(byId.get("cid-t-xtenant").getMDCPropertyMap()).containsEntry("tenant", "tenant-b");
+        assertThat(byId.get("cid-t-nomint").getMDCPropertyMap()).containsEntry("tenant", "tenant-a");
+        for (var e : byId.values()) {
+            assertThat(e.getMDCPropertyMap()).doesNotContainKey("session");
+        }
+    }
+
+    @Test
+    void aLoggingFailureStillClearsTheMdcAndTheRequestContext() throws Exception {
+        // A logger call that throws must not skip the clears behind it. This appender throws out of
+        // Logger.callAppenders; the probe then proves the MDC was empty after the AuthFilter returned.
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(AuthFilter.class);
+        var previous = logger.getLevel();
+        var thrower = new ThrowingAppender();
+        thrower.setContext(logger.getLoggerContext());
+        thrower.start();
+        logger.addAppender(thrower);
+        logger.setLevel(Level.WARN);
+        try {
+            var r = send(shared.port, FAIL_PATH + "?shape=send400", TOK_A, null, "cid-logfail", Map.of());
+            assertThat(r.statusCode()).isEqualTo(400);
+            awaitProbe();
+        } finally {
+            logger.detachAppender(thrower);
+            logger.setLevel(previous);
+            thrower.stop();
+        }
+        assertThat(thrower.calls.get()).as("non-vacuity: the failure line reached the appender").isEqualTo(1);
+        assertThat(probeThrown).as("a logging failure does not fail the request").isEmpty();
+    }
+
+    private static List<ILoggingEvent> failureLines(Capture capture) {
+        return capture.appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("event=request_failed")).toList();
+    }
+
+    private static void assertNoExceptionTextInLine(ILoggingEvent e) {
+        assertThat(e.getFormattedMessage()).doesNotContain(THROWN_MESSAGE).doesNotContain("at dev.nexus");
+        assertThat(e.getThrowableProxy()).as("no exception object, hence no message or stack trace").isNull();
+        assertThat(e.getArgumentArray() == null ? "" : java.util.Arrays.toString(e.getArgumentArray()))
+            .doesNotContain(THROWN_MESSAGE);
+    }
+
     // ── 4. the pattern ───────────────────────────────────────────────────────
 
     @Test
@@ -481,13 +688,20 @@ class AuthFilterCorrelationTest {
 
     private HttpResponse<String> send(int port, String path, String token, String session, String cid,
                                       Map<String, String> extraHeaders) throws Exception {
+        return http.send(request(port, path, token, session, cid, extraHeaders),
+            HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** Builds one request and counts it as sent. */
+    private java.net.http.HttpRequest request(int port, String path, String token, String session,
+                                              String cid, Map<String, String> extraHeaders) {
         sent.incrementAndGet();
         var b = TestHttp.request("http://127.0.0.1:" + port + path).GET();
         if (token != null) b.header("Authorization", "Bearer " + token);
         if (session != null) b.header("X-Nexus-T1-Session", session);
         if (cid != null) b.header(HEADER, cid);
         extraHeaders.forEach(b::header);
-        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+        return b.build();
     }
 
     /** A started server, its executor and its handler. */
@@ -532,9 +746,10 @@ class AuthFilterCorrelationTest {
     }
 
     /**
-     * Sits before the AuthFilter on the same context. It sees the handler thread's MDC on entry
-     * (a leak from the previous request on this thread) and, in a finally so a throw is covered,
-     * after the AuthFilter has returned (a missed clear). {@code probeDone} counts finished checks so
+     * Sits before the AuthFilter on the same context. It sees the handler thread's MDC and
+     * RequestContext (principal and deadline) on entry (a leak from the previous request on this
+     * thread) and, in a finally so a throw is covered, after the AuthFilter has returned (a missed
+     * clear). {@code probeDone} counts finished checks so
      * the test can wait for the last request's check, which can run after the client has its response.
      */
     private final class MdcProbeFilter extends Filter {
@@ -547,11 +762,20 @@ class AuthFilterCorrelationTest {
                 if (entry != null && !entry.isEmpty()) {
                     mdcObservations.add("entry " + q + " " + entry);
                 }
+                if (RequestContext.current() != null || RequestContext.deadlineNanos() != null) {
+                    mdcObservations.add("entry " + q + " RequestContext left over");
+                }
                 chain.doFilter(exchange);
+            } catch (Throwable t) {
+                probeThrown.add(t);
+                throw t;
             } finally {
                 var after = MDC.getCopyOfContextMap();
                 if (after != null && !after.isEmpty()) {
                     mdcObservations.add("after " + q + " " + after);
+                }
+                if (RequestContext.current() != null || RequestContext.deadlineNanos() != null) {
+                    mdcObservations.add("after " + q + " RequestContext not cleared");
                 }
                 probeDone.incrementAndGet();
             }
@@ -599,6 +823,60 @@ class AuthFilterCorrelationTest {
             ex.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = ex.getResponseBody()) {
                 os.write(bytes);
+            }
+        }
+    }
+
+    /** An appender whose doAppend throws, which Logger.callAppenders does not catch. */
+    private static final class ThrowingAppender extends UnsynchronizedAppenderBase<ILoggingEvent> {
+        final AtomicInteger calls = new AtomicInteger();
+
+        @Override
+        public void doAppend(ILoggingEvent e) {
+            calls.incrementAndGet();
+            throw new IllegalStateException("the appender failed");
+        }
+
+        @Override
+        protected void append(ILoggingEvent e) {
+        }
+    }
+
+    /** Answers by the {@code shape} query parameter; the shapes are the rows of section 5. */
+    private static final class ShapeHandler implements com.sun.net.httpserver.HttpHandler {
+        @Override
+        public void handle(HttpExchange ex) throws IOException {
+            String q = ex.getRequestURI().getQuery();
+            String shape = q == null ? "" : q.substring(q.indexOf("shape=") + "shape=".length());
+            switch (shape) {
+                case "send400" -> HttpUtil.send(ex, 400, "{\"error\":\"bad_request\"}");
+                case "send404" -> HttpUtil.send(ex, 404, "{\"error\":\"not_found\"}");
+                case "send503" -> HttpUtil.send(ex, 503, "{\"error\":\"unavailable\"}");
+                case "chunked503" -> {
+                    ex.sendResponseHeaders(503, 0);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write("{\"error\":\"unavailable\"}".getBytes(StandardCharsets.UTF_8));
+                    }
+                }
+                case "send200" -> HttpUtil.send(ex, 200, "{}");
+                // The two synthetic direct senders: no HttpUtil.send, no body (-1).
+                case "direct409" -> ex.sendResponseHeaders(409, -1);
+                case "direct204" -> ex.sendResponseHeaders(204, -1);
+                case "direct302" -> {
+                    ex.getResponseHeaders().set("Location", "/v1/elsewhere");
+                    ex.sendResponseHeaders(302, -1);
+                }
+                case "noSend" -> { }
+                case "throwBeforeSend" -> throw new IllegalStateException(THROWN_MESSAGE);
+                case "throwAfter200Body" -> {
+                    byte[] bytes = "body-sent-before-the-throw".getBytes(StandardCharsets.UTF_8);
+                    ex.sendResponseHeaders(200, bytes.length);
+                    try (OutputStream os = ex.getResponseBody()) {
+                        os.write(bytes);
+                    }
+                    throw new IllegalStateException(THROWN_MESSAGE);
+                }
+                default -> throw new IllegalArgumentException("unknown shape " + shape);
             }
         }
     }

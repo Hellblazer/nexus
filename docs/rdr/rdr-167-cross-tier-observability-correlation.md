@@ -292,9 +292,11 @@ optional and later.
    sites found in research-3.
 2. **MDC bridge at the engine (Gap 2).** At the top of `AuthFilter.doFilter`, read the
    inbound header (accept a well-formed one, otherwise generate one), put
-   `correlation_id` in MDC, add `tenant` and `session` once they are resolved, and
+   `correlation_id` in MDC, add `tenant` when the bearer token resolves and `session`
+   once the session token is verified, and
    clear everything in a `finally` that wraps the whole method. In that `finally`,
-   write one WARN `request_failed` line for every response with status 400 or above.
+   write one `request_failed` line (WARN; a sent 404 with nothing thrown at INFO) for every response with status 400 or above,
+   for a request that sent no response, and for a request whose chain threw.
    Add the three keys to the log pattern. Echo the id in the response so a caller that sent none can still
    learn the id the engine made.
 3. **Optional, Phase 3: JSON logs (Gap 4).** Switch the managed image to
@@ -347,24 +349,36 @@ across retries of one keyed write and is sent as `Idempotency-Key`
 doFilter(exchange, chain):
     cid = accept(exchange.header("X-Correlation-ID")) or generate()
     MDC.put("correlation_id", cid); exchange.responseHeaders.set("X-Correlation-ID", cid)
+    start = nanoTime(); thrown = null
     try:
-        ... existing steps 1 to 4; after step 3 resolves them:
-        MDC.put("tenant", tenant); if (sessionId != null) MDC.put("session", sessionId)
+        ... existing steps 1 to 4; MDC.put("tenant", tenant) as soon as the bearer token resolves;
+        after step 3 verifies the session: if (sessionId != null) MDC.put("session", sessionId)
         RequestContext.set(...); chain.doFilter(exchange)
+    catch (Throwable t): thrown = t; throw t         // precise rethrow, the exception is unchanged
     finally:
-        status = exchange.getResponseCode()          // -1 when no response was sent
-        if (status >= 400 or status == -1) log.warn("event=request_failed method={} path={} status={} duration_ms={}", ...)
+        // the warn is guarded: a logging failure must not skip the clears
+        try:
+            status = exchange.getResponseCode()      // -1 when no response was sent
+            if (status >= 400 or status == -1 or thrown != null)
+                level = (status == 404 and thrown == null) ? INFO : WARN
+                log.atLevel(level).log("event=request_failed method={} path={} status={} exception={} duration_ms={}", ...)
+        catch (Throwable): pass
         RequestContext.clear(); RequestContext.clearDeadline(); MDC.clear()
 ```
 
-- **Failure line.** One WARN line per response with status 400 or above, written in
+- **Failure line.** One line per response with status 400 or above, per request
+  that sent no response, and per request whose chain threw, written in
   that `finally` before MDC is cleared, so the pattern prints the id, tenant and
-  session on it. Fields: `event=request_failed`, method, path (no query string, as the
+  session on it. The tenant is there from the moment the bearer token resolves; a
+  missing, non-Bearer or unknown token has no tenant, so the pattern prints `-`.
+  Fields: `event=request_failed`, method, path (no query string, as the
   existing `event=auth_rejected` line already logs the path only,
-  `AuthFilter.java:342-343`), status and duration. Where a handler threw and no
-  status was sent, `getResponseCode()` is -1 and the client sees a dropped
+  `AuthFilter.java:342-343`), status, exception and duration. Where a handler threw
+  and no status was sent, `getResponseCode()` is -1 and the client sees a dropped
   connection; the line then says `status=none` and names the exception class, and the
-  exception is rethrown unchanged. Why here, and not in `HttpUtil.send`: the filter
+  exception is rethrown unchanged. A handler that sent 200 and then threw while
+  writing the body also leaves a line, with `status=200` and the class. The line
+  never carries the exception message or stack trace, which can hold client text. Why here, and not in `HttpUtil.send`: the filter
   list puts `AuthFilter` first and `IdempotencyKeyGuard` second
   (`NexusService.java:760-761`), so the filter's `finally` sees the guard's 400 and
   `AuthFilter`'s own 401s; two handlers send without `HttpUtil.send`
@@ -373,7 +387,7 @@ doFilter(exchange, chain):
   chunked 503 and body-less 400 all read back correctly, and a throw read -1
   (research-9). WARN is the right level: root is INFO (`logback.xml:12`), so WARN is
   printed, while the lines that exist today for these failures are DEBUG
-  (`AuthFilter.java:342`, `PlanHandler.java:98`) and are not. Cost: 404 is an
+  (`AuthFilter.java:342`, `PlanHandler.java:98`) and are not. A sent 404 with nothing thrown logs at INFO instead, still printed: the Step 3 measurement found 404 was 16 of 18 failure lines, and Sam ruled on 2026-11-17 that 404 goes at INFO and every other failure stays WARN. Cost: 404 is an
   ordinary answer on some routes (the `PlanHandlerTest` contract returns 404 for an
   empty project with no row, commit `3da30e2af`), so ordinary misses will be
   logged; the rate was not measured (inferred, not read, to be low outside
@@ -523,8 +537,9 @@ and `HttpTokenStore`; extend the census test so a sender must send it.
 
 #### Step 3: MDC bridge in the engine
 Wrap `AuthFilter.doFilter`; validate and generate the id; put `correlation_id`,
-`tenant`, `session`; echo on the response; in the `finally`, write the WARN
-`request_failed` line for a status of 400 or above (or none) and clear. Update
+`tenant` (when the token resolves), `session`; echo on the response; in the
+`finally`, write the `request_failed` line (WARN; a sent 404 at INFO) for a status of 400 or above, none or a
+thrown chain (naming the exception class) and clear. Update
 `logback.xml`. On the engine-substrate run, count failure lines per 1000 requests and
 record the number in the bead.
 
@@ -573,9 +588,14 @@ None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7).
   a request with none gets a generated one; the response header echoes it.
 - **Java, failure line.** With the real filter list: a handler answering 400, 404 and
   503 (fixed length and chunked), `IdempotencyKeyGuard`'s 400, a 401 from a bad token,
-  and a handler that sends without `HttpUtil.send` (the `MemoryHandler.java:610`
-  shape) each log exactly one WARN `request_failed` line carrying the id; a 200 logs
-  none; a handler that throws logs `status=none` and the exception still propagates.
+  and a synthetic handler that calls `exchange.sendResponseHeaders(409, -1)` directly,
+  without `HttpUtil.send`, each log exactly one `request_failed` line (WARN; the 404 at INFO) carrying the
+  id; a 200, a synthetic direct `sendResponseHeaders(204, -1)` (the
+  `MemoryHandler.java:610` shape, which sends 204) and a synthetic direct
+  `sendResponseHeaders(302, -1)` log none, because all three are below 400. A handler that throws before sending logs `status=none` and the exception class
+  and the exception still propagates; a handler that returns without sending logs
+  `status=none exception=none`; a handler that sends 200 and then throws logs
+  `status=200` and the class. No line holds an exception message.
 - **Java, pattern.** A formatted engine line starts with date, time and level and
   still matches `_ENGINE_LOGBACK_LINE` and the readiness `event=` pattern.
 - **Python, binding.** The CLI callback and the MCP middleware bind an id; two
@@ -698,3 +718,4 @@ and the JSON appender is not built until something needs it.
   renamed `X-Correlation-ID`; the Phase 2 probe tests overwrite and strip as well as
   pass-through. Research `nexus_rdr/167-research-9`.
 - 2026-11-16: Accepted (Sam, by dialog in halcyon's session: "Accept"). Fix check `nexus_rdr/167-fix-check-b5b0e4bbeab4` PASS. Epic nexus-dngtz. Residual dispositions: gate S2 nexus-dngtz.1.9, S4 nexus-dngtz.1.1, S5 nexus-dngtz.1.2; fix-check probe outcomes nexus-dngtz.1.4, exception naming nexus-dngtz.1.6, synthetic 4xx test nexus-dngtz.1.7, path escaping nexus-dngtz.1.8.
+- 2026-11-17: Step 3 measured (nexus-dngtz.1.6): 52 failure lines per 1000 client calls on the engine-substrate scenario run, 404 16 of 18. Sam's ruling (by dialog in halcyon's session): a sent 404 logs at INFO, every other failure stays WARN. Step 3 text and sketch amended to the reviewed code: tenant at token resolution, the thrown arm, the `exception=` field.

@@ -10,6 +10,7 @@ import com.sun.net.httpserver.HttpExchange;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.slf4j.event.Level;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -200,14 +201,49 @@ public final class AuthFilter extends Filter {
         // executor, not a fix for a pool leak.
         String correlationId = CorrelationId.acceptOrGenerate(
             exchange.getRequestHeaders().getFirst(CorrelationId.HEADER));
+        long startNanos = System.nanoTime();
+        Throwable thrown = null;
         try {
             MDC.put(MDC_CORRELATION_ID, correlationId);
             exchange.getResponseHeaders().set(CorrelationId.HEADER, correlationId);
             authenticateAndDispatch(exchange, chain);
+        } catch (Throwable t) {
+            // Precise rethrow: t is not reassigned, so this compiles under `throws IOException` and the
+            // exception reaches the server unchanged. It is kept only to name its class in the line.
+            thrown = t;
+            throw t;
         } finally {
+            logRequestFailed(exchange, thrown, startNanos);   // never throws; before the clears so the line carries the ids
             RequestContext.clear();
             RequestContext.clearDeadline();
             MDC.clear();
+        }
+    }
+
+    /**
+     * RDR-167 Step 3 (nexus-dngtz.1.6): one line, at WARN (a sent 404 with nothing thrown at INFO), for a request that failed or was never answered:
+     * the response status is 400 or above, nothing was sent ({@code getResponseCode() == -1}, printed as
+     * {@code none}), or the chain threw (a handler that sent 200 and then threw while writing the body
+     * counts). The exception's class name is printed, never its message or stack trace: both can carry
+     * client text. The path has no query string, as in {@code event=auth_rejected}. A failure to log
+     * is swallowed: it must not replace the request's own exception, and the caller clears the request
+     * context behind this call either way.
+     */
+    private void logRequestFailed(HttpExchange exchange, Throwable thrown, long startNanos) {
+        try {
+            int status = exchange.getResponseCode();
+            if (status >= 400 || status == -1 || thrown != null) {
+                // Sam's ruling 2026-11-17 (RDR-167 Step 3): a 404 is a normal "not found" answer on
+                // lookup routes, so a sent 404 with nothing thrown logs at INFO; every other failure WARN.
+                Level level = status == 404 && thrown == null ? Level.INFO : Level.WARN;
+                log.atLevel(level).log("event=request_failed method={} path={} status={} exception={} duration_ms={}",
+                    exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
+                    status == -1 ? "none" : Integer.toString(status),
+                    thrown == null ? "none" : thrown.getClass().getName(),
+                    (System.nanoTime() - startNanos) / 1_000_000L);
+            }
+        } catch (Throwable loggingFailure) {
+            // Deliberately empty: see the method comment.
         }
     }
 
@@ -235,6 +271,10 @@ public final class AuthFilter extends Filter {
             return;
         }
         String tokenTenant = resolved.get().tenantId();
+        // The tenant goes in MDC as soon as the token names it, so the request_failed line for a 403
+        // scope refusal or a cross-tenant / unminted-session 401 carries it. An unknown token has no
+        // tenant and prints none. The session is put only once it is verified (step 3).
+        MDC.put(MDC_TENANT, tokenTenant);
         boolean isOperator = resolved.get().isRoot();
         String scope = resolved.get().scope();
 
@@ -346,8 +386,7 @@ public final class AuthFilter extends Filter {
         // 4. Publish the principal thread-confined; clear after dispatch.
         RequestContext.set(new RequestContext.Principal(
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
-        // Tenant and session ids only: never the token or the credential hash.
-        MDC.put(MDC_TENANT, tenant);
+        // Tenant (put at resolution) and session ids only: never the token or the credential hash.
         if (sessionId != null) {
             MDC.put(MDC_SESSION, sessionId);
         }
