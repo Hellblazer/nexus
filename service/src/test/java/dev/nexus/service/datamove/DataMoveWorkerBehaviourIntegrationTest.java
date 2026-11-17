@@ -214,6 +214,36 @@ class DataMoveWorkerBehaviourIntegrationTest extends DataMoveIntegrationBase {
         }
     }
 
+    @Test
+    void withoutTheSingletonLock_noBackendOfAnotherBootIsEnded() throws Exception {
+        Properties other = new Properties();
+        other.setProperty("user", ADMIN);
+        other.setProperty("password", ADMIN_PASSWORD);
+        other.setProperty("ApplicationName", "nexus-data-move-livenonce-call");
+        try (Connection live = DriverManager.getConnection(pg.getJdbcUrl(), other)) {
+            // an engine that runs without the lock (the operator opted out, or a pooler): the other nonce may be a live engine
+            var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, MoveFinisher.RUNS_ONLY, false);
+            assertThat(w.terminateOrphans()).isZero();
+            Thread.sleep(300);
+            assertThat(sessionsNamed("nexus-data-move-livenonce-call")).isEqualTo(1);
+            assertThat(live.isValid(5)).isTrue();
+        }
+    }
+
+    @Test
+    void aStopBetweenOpeningTheConnectionAndPublishingIt_startsNoCall() throws Exception {
+        register("b-race", "plain_rows", 5_000, 0);
+        var w = worker(installed(), null);
+        w.afterConnectionOpenedHook = w::stop;   // stop() finds no connection yet to cancel
+
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        assertThat(activeRuns("b-race")).as("the CALL never started: no run was created").isEmpty();
+        assertThat(countWhere("plain_rows", N.ne(0))).isZero();
+        assertThat(reasonOf(w, "b-race")).contains("stopped");
+        assertThat(callPid()).isEqualTo(-1);
+    }
+
     // ── the seams the later beads fill in ─────────────────────────────────────────────────────────────────────
 
     @Test

@@ -122,7 +122,11 @@ public final class DataMoveWorker implements AutoCloseable {
     private final MoveStates states;
     private final FailureHandler failures;
     private final MoveFinisher finisher;
+    /** Whether this engine holds the one-engine-per-database lock; orphans are ended only when it does. */
+    private final boolean singletonLockHeld;
     private volatile boolean stopped;
+    /** Test seam: runs between opening the call connection and publishing it, where a stop can slip through. */
+    Runnable afterConnectionOpenedHook;
     private volatile Thread loop;
     private volatile CallConnection callConnection;
     /** The one admin session the registry is read on, kept between cycles; guarded by {@code registryLock}. */
@@ -130,9 +134,13 @@ public final class DataMoveWorker implements AutoCloseable {
     private final Object registryLock = new Object();
     /** The last registry read failure that was logged, so one that repeats every cycle is logged once. */
     private String lastRegistryError;
+    /** Set once the skipped orphan reaping has been logged. */
+    private boolean orphansSkipLogged;
 
     DataMoveWorker(AdminConnection admin, DmlUtilsInstaller installer, Settings settings, String applicationName,
-                   Clock clock, MoveStates states, FailureHandler failures, MoveFinisher finisher) {
+                   Clock clock, MoveStates states, FailureHandler failures, MoveFinisher finisher,
+                   boolean singletonLockHeld) {
+        this.singletonLockHeld = singletonLockHeld;
         this.admin = Objects.requireNonNull(admin, "admin");
         this.installer = Objects.requireNonNull(installer, "installer");
         this.settings = Objects.requireNonNull(settings, "settings");
@@ -149,12 +157,15 @@ public final class DataMoveWorker implements AutoCloseable {
      *
      * @param engineApplicationName the engine pool's per-boot application name ({@code BackendReaper.newApplicationName});
      *                              its nonce names this worker's connections
+     * @param singletonLockHeld     whether the engine holds {@code EngineSingletonLock} (it does not when the operator opted
+     *                              out or a pooler is configured); without it a backend of another nonce may be a LIVE
+     *                              engine's, so none is ended
      */
     public static DataMoveWorker create(AdminConnection admin, DmlUtilsInstaller installer, Settings settings,
-                                        String engineApplicationName) {
+                                        String engineApplicationName, boolean singletonLockHeld) {
         String nonce = BackendReaper.bootNonce(engineApplicationName);
         return new DataMoveWorker(admin, installer, settings, APPLICATION_NAME_PREFIX + nonce, Clock.systemUTC(),
-            new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS, MoveFinisher.RUNS_ONLY);
+            new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS, MoveFinisher.RUNS_ONLY, singletonLockHeld);
     }
 
     /** The worker's in-memory view of its moves. */
@@ -246,6 +257,14 @@ public final class DataMoveWorker implements AutoCloseable {
      * @return how many backends were signalled
      */
     int terminateOrphans() {
+        if (!singletonLockHeld) {
+            if (!orphansSkipLogged) {
+                orphansSkipLogged = true;
+                log.warn("event=data_move_orphans_skipped reason=\"the engine holds no singleton lock, so a backend of "
+                    + "another boot may be a live engine's\"");
+            }
+            return 0;
+        }
         try (AdminDdlSession session = openSession("nexus", "data_moves")) {
             var pid = DSL.field(DSL.name("pid"), Integer.class);
             var name = DSL.field(DSL.name("application_name"), String.class);
@@ -546,6 +565,11 @@ public final class DataMoveWorker implements AutoCloseable {
                 errorMark, e, "the call connection could not be opened: sqlstate=" + e.getSQLState() + " "
                     + FailureHandler.oneLine(e.getMessage()));
         }
+        if (stopped) {   // immediately before the CALL: none starts after a stop
+            conn.cancel();
+            return fail(move, ctx, FailureHandler.Stage.CONNECTION, runLabel, drivingSchema, drivingTable, tenant,
+                errorMark, null, "the worker is stopped");
+        }
         try {
             if (tenant != null) {
                 conn.useTenant(tenant);
@@ -590,7 +614,17 @@ public final class DataMoveWorker implements AutoCloseable {
             throw new SQLException("the worker is stopped", "57014");
         }
         c = CallConnection.open(admin, applicationName + "-call");
+        Runnable hook = afterConnectionOpenedHook;
+        if (hook != null) {
+            hook.run();
+        }
         callConnection = c;
+        // a stop() between the check above and the line above saw no connection to cancel: look again now it is published
+        if (stopped) {
+            c.cancel();
+            closeConnection();
+            throw new SQLException("the worker is stopped", "57014");
+        }
         return c;
     }
 

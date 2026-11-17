@@ -643,7 +643,7 @@ public final class Main {
         // nexus-f3yqd.2.13 (RDR-246): the data-move worker works the open moves of nexus.data_moves, one at a time, on its
         // own admin connections, after the listener is bound. It reads the library install the migration above recorded.
         // Never takes the engine down: a worker that cannot start is logged and the engine serves without it.
-        var dataMoveWorker = startDataMoveWorker(adminConnection, dmlUtilsInstaller, applicationName);
+        var dataMoveWorker = startDataMoveWorker(adminConnection, dmlUtilsInstaller, applicationName, singletonLock != null);
 
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
@@ -751,10 +751,10 @@ public final class Main {
      */
     private static dev.nexus.service.datamove.DataMoveWorker startDataMoveWorker(
             dev.nexus.service.db.AdminConnection admin, dev.nexus.service.db.DmlUtilsInstaller installer,
-            String engineApplicationName) {
+            String engineApplicationName, boolean singletonLockHeld) {
         try {
             var worker = dev.nexus.service.datamove.DataMoveWorker.create(admin, installer,
-                dev.nexus.service.datamove.DataMoveWorker.Settings.fromEnv(System::getenv), engineApplicationName);
+                dev.nexus.service.datamove.DataMoveWorker.Settings.fromEnv(System::getenv), engineApplicationName, singletonLockHeld);
             worker.start();
             return worker;
         } catch (VirtualMachineError e) {
