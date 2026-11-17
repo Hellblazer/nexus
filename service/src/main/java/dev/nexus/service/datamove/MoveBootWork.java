@@ -41,7 +41,7 @@ import java.util.function.Function;
  * or index. So {@code what} carries the move's label, a fixed class and, where there is one, an SQLSTATE, and nothing a
  * run, a tenant or the server wrote: no run label (they are {@code <label>/<tenant>[/<leaf>]}), leaf name, backend pid or
  * PostgreSQL message. {@link MoveReasons#publicForm} does the reduction; the full text stays in the engine log
- * ({@code event=data_move_blocked}, {@code data_move_failed}, {@code data_move_call}) and, for a failed move, in the
+ * ({@code event=data_move_blocked}, {@code data_move_failed}, {@code data_move_verification_failed}, {@code data_move_call}; {@link MoveEvents}) and, for a failed move, in the
  * registry's {@code failure} column.
  *
  * <p>The classes, in {@code what}: {@code working:}, {@code blocked:}, {@code failed:}, {@code paused:}, {@code stalled:} (below),
@@ -371,7 +371,7 @@ public final class MoveBootWork implements AutoCloseable {
                 try {
                     s.close();
                 } catch (RuntimeException e) {
-                    log.debug("event=data_move_boot_work_session_close_failed cause=\"{}\"", e.toString());
+                    log.debug("event=data_move_boot_work_session_close_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
                 }
             }
         }

@@ -6,6 +6,7 @@ import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.BackendReaper;
 import dev.nexus.service.db.DmlUtilsInstaller;
+import dev.nexus.service.log.SecretMask;
 import org.jooq.DSLContext;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
@@ -169,6 +170,7 @@ public final class DataMoveWorker implements AutoCloseable {
                                         String engineApplicationName, boolean singletonLockHeld) {
         String nonce = BackendReaper.bootNonce(engineApplicationName);
         String name = APPLICATION_NAME_PREFIX + nonce;
+        SecretMask.add(admin.password());   // the credential this worker connects with stays out of what it reports (Main has added it)
         return new DataMoveWorker(admin, installer, settings, name, Clock.systemUTC(),
             new MoveStates(Clock.systemUTC()), new DataMoveFailureHandler(admin, name, Clock.systemUTC()),
             new VerifyingFinisher(), singletonLockHeld);
@@ -413,7 +415,8 @@ public final class DataMoveWorker implements AutoCloseable {
                 "the admin connection could not be opened: " + FailureHandler.oneLine(e.getMessage()));
             return;
         }
-        try (AdminDdlSession session = opened) {
+        AdminDdlSession session = opened;
+        try {
             DSLContext ctx = session.ctx();
             // the row as it is now: another move may have run for hours since the list was read
             Optional<DataMove> current = DataMoveRegistry.reload(ctx, listed.label());
@@ -426,6 +429,10 @@ public final class DataMoveWorker implements AutoCloseable {
                 states.paused(move);
                 return;
             }
+            boolean alreadyWorking = states.state(move.label()).filter(s -> s.kind() == MoveStates.Kind.WORKING).isPresent();
+            if (!alreadyWorking) {
+                MoveEvents.started(move.label());   // a pass that begins on a move that was not working: one transition
+            }
             states.working(move);   // a retry that runs for hours is working; the state keeps the time it was first blocked
             Optional<MovePreflight.Miss> blocked = MovePreflight.check(session, move, installer);
             if (blocked.isPresent()) {
@@ -435,10 +442,21 @@ public final class DataMoveWorker implements AutoCloseable {
             }
             passOver(move, session);
         } catch (RuntimeException e) {
-            // one move's surprise is that move's failure; the moves behind it still run (the session is closed: no admin context)
+            // one move's surprise is that move's failure; the moves behind it still run (no admin context: the session's state is
+            // unknown after a surprise, so the handler writes on a short connection of its own)
             fail(move, null, FailureHandler.Stage.PASS, null, schema, table, null, 0,
                 DataMoveFailureClassifier.sqlExceptionOf(e),
                 "the pass could not run: " + FailureHandler.oneLine(e.getMessage() == null ? e.toString() : e.getMessage()));
+        } finally {
+            closeQuietly(session);   // a close that fails after the pass reported is not a second failure of the pass
+        }
+    }
+
+    private void closeQuietly(AdminDdlSession session) {
+        try {
+            session.close();
+        } catch (RuntimeException e) {
+            log.debug("event=data_move_session_close_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
         }
     }
 
@@ -449,12 +467,13 @@ public final class DataMoveWorker implements AutoCloseable {
      */
     private boolean fail(DataMove move, DSLContext ctx, FailureHandler.Stage stage, String runLabel, String schema,
                          String table, String tenant, long errorMark, SQLException raised, String detail) {
-        return report(new FailureHandler.Failure(move, stage, runLabel, schema, table, tenant, errorMark, raised, detail,
-            ctx));
+        return report(new FailureHandler.Failure(move, stage, runLabel, schema, table, tenant, errorMark, raised,
+            detail, ctx));
     }
 
     /** {@link #fail} for a failure that is already built (the finisher's). */
-    private boolean report(FailureHandler.Failure failure) {
+    private boolean report(FailureHandler.Failure reported) {
+        FailureHandler.Failure failure = reported.masked();   // no credential reaches the handler, a log line or a registry column
         DataMove move = failure.move();
         FailureHandler.Stage stage = failure.stage();
         String detail = failure.detail();
@@ -462,14 +481,18 @@ public final class DataMoveWorker implements AutoCloseable {
         try {
             d = failures.onFailure(failure);
         } catch (RuntimeException e) {
+            // Disposition masks its reason, and oneLine masks the exception text before it cuts it
             d = FailureHandler.Disposition.blocked(detail + " (the failure handler failed: "
                 + FailureHandler.oneLine(e.toString()) + ")");
         }
+        String sqlstate = d.sqlstate() != null ? d.sqlstate() : failure.raised() == null ? null : failure.raised().getSQLState();
         if (d.kind() == FailureHandler.Kind.FAILED) {
-            log.error("event=data_move_failed label={} stage={} reason=\"{}\"", move.label(), stage, d.reason());
+            MoveEvents.failed(move.label(), stage.name(), failure.tenant(), sqlstate, d.reason());
             states.failed(move, d.reason());
         } else {
-            log.warn("event=data_move_blocked label={} stage={} reason=\"{}\"", move.label(), stage, d.reason());
+            // a handler that counted no retry leaves the row's count as it was
+            int retries = d.retries() >= 0 ? d.retries() : move.transientRetries();
+            MoveEvents.blocked(move.label(), stage.name(), failure.tenant(), retries, sqlstate, d.reason());
             states.blocked(move, d.reason());
         }
         return false;
@@ -537,8 +560,14 @@ public final class DataMoveWorker implements AutoCloseable {
             () -> stopped));
         switch (result.outcome()) {
             case COMPLETED -> states.forget(move.label());
-            case FAILED -> states.failed(move, result.reason());
-            case BLOCKED -> states.blocked(move, result.reason());
+            case FAILED -> {
+                MoveEvents.failed(move.label(), "FINISH", null, null, result.reason());
+                states.failed(move, result.reason());
+            }
+            case BLOCKED -> {
+                MoveEvents.blocked(move.label(), "FINISH", null, move.transientRetries(), null, result.reason());
+                states.blocked(move, result.reason());
+            }
             case LEFT_OPEN -> states.runsComplete(move);
             case REPORT -> report(result.failure());
             case PAUSED -> states.paused(result.move());
@@ -664,6 +693,7 @@ public final class DataMoveWorker implements AutoCloseable {
             return fail(move, ctx, FailureHandler.Stage.INCOMPLETE, runLabel, drivingSchema, drivingTable, tenant,
                 errorMark, null, "run " + runLabel + " returned without completing");
         }
+        MoveEvents.runComplete(move.label(), runLabel, tenant);
         return true;
     }
 

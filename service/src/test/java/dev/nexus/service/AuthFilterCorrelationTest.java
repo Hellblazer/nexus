@@ -815,8 +815,10 @@ class AuthFilterCorrelationTest {
             String q = ex.getRequestURI().getQuery();
             LOG.info("event=probe {}", q);
             if (q != null && q.contains("mode=throw")) {
-                ex.sendResponseHeaders(200, -1);
+                // counted before the status goes out: the client reads the 200 and asserts the count at once, so a count taken
+                // after sendResponseHeaders raced that read (intermittent red, 1 run in 3 on chas)
                 threw.incrementAndGet();
+                ex.sendResponseHeaders(200, -1);
                 throw new IllegalStateException("handler failed after it sent its status");
             }
             byte[] bytes = ("tenant=" + RequestContext.tenant()).getBytes(StandardCharsets.UTF_8);

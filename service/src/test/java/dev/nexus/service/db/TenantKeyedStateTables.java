@@ -173,6 +173,12 @@ final class TenantKeyedStateTables {
         notKeyed.put("MoveBootWork.Snapshot.open", DATA_MOVE_REPORT);
         notKeyed.put("MoveBootWork.Snapshot.failed", DATA_MOVE_REPORT);
         notKeyed.put("MoveBootWork.Snapshot.progress", DATA_MOVE_REPORT);
+        // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
+        notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
+            + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
+        notKeyed.put("SecretMask.current", "the redactor built from the engine's own database passwords (the admin and the "
+            + "application role), swapped in whole when one is added at startup so the log encoder and the failure texts can "
+            + "remove them: process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
         notKeyed.put("DataMoveWorker.loop", DATA_MOVE_HANDLE);
         notKeyed.put("DataMoveWorker.callConnection", DATA_MOVE_CALL);
         notKeyed.put("CallConnection.running", DATA_MOVE_CALL);

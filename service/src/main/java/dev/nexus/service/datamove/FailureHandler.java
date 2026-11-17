@@ -2,9 +2,11 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.datamove;
 
+import dev.nexus.service.log.SecretMask;
 import org.jooq.DSLContext;
 
 import java.sql.SQLException;
+import java.util.Objects;
 
 /**
  * Where every failure of a pass is decided. Each failure, whatever the stage, comes here as one {@link Failure} and goes back
@@ -67,14 +69,35 @@ public interface FailureHandler {
         FAILED
     }
 
-    /** The decision: the move is reported with {@code reason}, as {@code blocked:} or {@code failed:}. */
-    record Disposition(Kind kind, String reason) {
+    /**
+     * The decision: the move is reported with {@code reason}, as {@code blocked:} or {@code failed:}. {@code sqlstate} is the
+     * SQLSTATE the decision rests on, or null when nothing raised one; {@code retries} is the consecutive transient count
+     * after this failure, or {@link #NOT_COUNTED} when the handler counted none. Both are for the engine log
+     * ({@link MoveEvents}) and change nothing the worker does.
+     */
+    record Disposition(Kind kind, String reason, String sqlstate, int retries) {
+        /** A reason never carries a credential, whoever built it (a handler, a test, a finisher). */
+        public Disposition {
+            reason = SecretMask.mask(reason);
+        }
+
+        /** {@code retries} of a decision that counted no retry (a permanent one, or a handler that writes nothing). */
+        public static final int NOT_COUNTED = -1;
+
         public static Disposition blocked(String reason) {
-            return new Disposition(Kind.BLOCKED, reason);
+            return new Disposition(Kind.BLOCKED, reason, null, NOT_COUNTED);
+        }
+
+        public static Disposition blocked(String reason, String sqlstate, int retries) {
+            return new Disposition(Kind.BLOCKED, reason, sqlstate, retries);
         }
 
         public static Disposition failed(String reason) {
-            return new Disposition(Kind.FAILED, reason);
+            return new Disposition(Kind.FAILED, reason, null, NOT_COUNTED);
+        }
+
+        public static Disposition failed(String reason, String sqlstate) {
+            return new Disposition(Kind.FAILED, reason, sqlstate, NOT_COUNTED);
         }
     }
 
@@ -97,7 +120,14 @@ public interface FailureHandler {
      *                      could not open one
      */
     record Failure(DataMove move, Stage stage, String runLabel, String drivingSchema, String drivingTable,
-                   String tenant, long errorMark, SQLException raised, String detail, DSLContext admin) { }
+                   String tenant, long errorMark, SQLException raised, String detail, DSLContext admin) {
+        /** This failure with the engine's credentials removed from its text; the same instance when it holds none. */
+        Failure masked() {
+            String clean = SecretMask.mask(detail);
+            return Objects.equals(clean, detail) ? this
+                : new Failure(move, stage, runLabel, drivingSchema, drivingTable, tenant, errorMark, raised, clean, admin);
+        }
+    }
 
     Disposition onFailure(Failure failure);
 
@@ -107,12 +137,16 @@ public interface FailureHandler {
             + oneLine(failure.raised().getMessage()))
         : Disposition.blocked(failure.detail());
 
-    /** The first line of an error text, bounded, for a reason. */
+    /**
+     * The first line of an error text, bounded, for a reason. The credentials the engine holds ({@link SecretMask}) are
+     * removed from the whole text first, so a credential that straddles the cut or the line end leaves no prefix; this is the
+     * one place an exception's text becomes a reason, a log field or a registry column.
+     */
     static String oneLine(String text) {
         if (text == null) {
             return "";
         }
-        String line = text.strip().split("\\R", 2)[0];
+        String line = SecretMask.mask(text).strip().split("\\R", 2)[0];
         return line.length() <= 300 ? line : line.substring(0, 300) + "...";
     }
 }

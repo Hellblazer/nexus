@@ -51,7 +51,8 @@ public final class DataMoveFailureHandler implements FailureHandler {
     }
 
     @Override
-    public Disposition onFailure(Failure failure) {
+    public Disposition onFailure(Failure unmasked) {
+        Failure failure = unmasked.masked();
         DataMoveFailureClassifier.Verdict verdict;
         try {
             verdict = classify(failure);
@@ -62,13 +63,13 @@ public final class DataMoveFailureHandler implements FailureHandler {
         }
         Instant now = clock.instant();
         try {
-            return verdict.permanent() ? permanent(failure, verdict.reason(), now)
-                : transientFailure(failure, verdict.reason(), now);
+            return verdict.permanent() ? permanent(failure, verdict, now) : transientFailure(failure, verdict, now);
         } catch (RuntimeException e) {
-            log.warn("event=data_move_failure_unrecorded label={} cause=\"{}\"", failure.move().label(),
-                FailureHandler.oneLine(e.toString()));
+            log.warn("event=data_move_failure_unrecorded label=\"{}\" cause=\"{}\"",
+                MoveEvents.value(failure.move().label()), MoveEvents.value(FailureHandler.oneLine(e.toString())));
             return Disposition.blocked(verdict.reason() + " (" + (verdict.permanent() ? "failed_at" : "the retry count")
-                + " could not be recorded: " + FailureHandler.oneLine(e.toString()) + ")");
+                + " could not be recorded: " + FailureHandler.oneLine(e.toString()) + ")", verdict.sqlstate(),
+                Disposition.NOT_COUNTED);
         }
     }
 
@@ -93,20 +94,24 @@ public final class DataMoveFailureHandler implements FailureHandler {
         }
     }
 
-    private Disposition permanent(Failure f, String reason, Instant now) {
+    private Disposition permanent(Failure f, DataMoveFailureClassifier.Verdict verdict, Instant now) {
+        String reason = verdict.reason();
         boolean marked = withAdmin(f, ctx -> MoveFailureRecords.markFailed(ctx, f.move().label(), now, reason));
         if (!marked) {
             // the row is no longer open (completed, failed or superseded meanwhile): report it as the worker saw it
-            log.info("event=data_move_failure_not_recorded label={} reason=\"the move is no longer open\"",
-                f.move().label());
+            log.info("event=data_move_failure_not_recorded label=\"{}\" reason=\"the move is no longer open\"",
+                MoveEvents.value(f.move().label()));
         }
-        return Disposition.failed(reason);
+        return Disposition.failed(reason, verdict.sqlstate());
     }
 
-    private Disposition transientFailure(Failure f, String reason, Instant now) {
+    private Disposition transientFailure(Failure f, DataMoveFailureClassifier.Verdict verdict, Instant now) {
+        String reason = verdict.reason();
         OptionalInt retries = withAdmin(f, ctx -> MoveFailureRecords.recordTransient(ctx, f.move().label(), now, reason));
-        return Disposition.blocked(retries.isPresent()
-            ? MoveRetryPolicy.blockedReason(retries.getAsInt(), now, reason) : reason);
+        return retries.isPresent()
+            ? Disposition.blocked(MoveRetryPolicy.blockedReason(retries.getAsInt(), now, reason), verdict.sqlstate(),
+                retries.getAsInt())
+            : Disposition.blocked(reason, verdict.sqlstate(), Disposition.NOT_COUNTED);
     }
 
     /** Runs {@code write} on the pass's admin connection, or on a short one of its own when the pass has none. */

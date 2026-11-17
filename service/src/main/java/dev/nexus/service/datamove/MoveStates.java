@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.datamove;
 
+import dev.nexus.service.log.SecretMask;
+
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Collection;
@@ -42,7 +44,8 @@ public final class MoveStates implements MoveReporter {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    private void put(String label, Kind kind, String reason, String pausedBy) {
+    private void put(String label, Kind kind, String maskable, String pausedBy) {
+        String reason = SecretMask.mask(maskable);
         State old = byLabel.get(label);
         Instant now = clock.instant();
         // the time moves only when the kind or the reason does: a move that stays blocked keeps the time it first was

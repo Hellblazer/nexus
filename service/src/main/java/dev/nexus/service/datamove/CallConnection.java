@@ -177,7 +177,7 @@ final class CallConnection implements AutoCloseable {
             try {
                 st.cancel();
             } catch (SQLException e) {
-                log.debug("event=data_move_call_cancel_failed cause=\"{}\"", e.toString());
+                log.debug("event=data_move_call_cancel_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
             }
         }
     }
@@ -188,7 +188,7 @@ final class CallConnection implements AutoCloseable {
         try {
             conn.close();
         } catch (SQLException e) {
-            log.debug("event=data_move_call_close_failed cause=\"{}\"", e.toString());
+            log.debug("event=data_move_call_close_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
         }
     }
 

@@ -159,7 +159,7 @@ final class VerifyingFinisher implements MoveFinisher {
         List<String> parts = new ArrayList<>();
         found.forEach((who, n) -> parts.add(who + "=" + (n > COUNT_CAP ? COUNT_CAP + "+" : n)));
         detail.append(String.join(", ", parts));
-        log.warn("event=data_move_verification_nonempty label={} found=\"{}\"", move.label(), String.join(", ", parts));
+        MoveEvents.verificationFailed(move.label(), String.join(", ", parts));
         return Result.report(failure(context.admin(), move, FailureHandler.Stage.VERIFICATION_NONEMPTY, null, null,
             detail.toString()));
     }
@@ -262,7 +262,7 @@ final class VerifyingFinisher implements MoveFinisher {
                             tx.transaction(nested -> PciBuilders.terminateOrThrow(nested.dsl(),
                                 "reason=data_move_on_complete move=" + move.label(), log));
                         } catch (DataAccessException e) {
-                            log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
+                            log.error("event=pci_builders_terminate_failed cause=\"{}\"", FailureHandler.oneLine(e.toString()));
                         }
                     }
                     tx.connection(c -> MoveSql.runOnComplete(c, onComplete));
@@ -283,7 +283,7 @@ final class VerifyingFinisher implements MoveFinisher {
             }
             return now.get().paused() ? Result.paused(now.get()) : Result.leftOpen();
         }
-        log.info("event=data_move_completed label={} on_complete={}", move.label(), onComplete != null);
+        MoveEvents.completed(move.label(), onComplete != null);
         return Result.completed();
     }
 
@@ -309,7 +309,7 @@ final class VerifyingFinisher implements MoveFinisher {
 
     private static String describe(Exception e) {
         if (e instanceof MoveSql.Refused) {
-            return e.getMessage();
+            return FailureHandler.oneLine(e.getMessage());
         }
         SQLException sql = sqlOf(e);
         return FailureHandler.oneLine(sql != null ? "sqlstate=" + sql.getSQLState() + " " + sql.getMessage() : e.toString());

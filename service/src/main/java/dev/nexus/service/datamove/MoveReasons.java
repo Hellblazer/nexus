@@ -151,7 +151,7 @@ final class MoveReasons {
         }
         if (lower.contains("found old-shape rows")) {   // the verification names each tenant's count: those stay in the log
             return "the verification found old-shape rows in the driving table (the counts are in the engine log, "
-                + "event=data_move_verification_nonempty)";
+                + "event=data_move_verification_failed)";
         }
         if (lower.startsWith("the verification of ") && lower.contains("was not run")) {
             return "the verification text was not run (see the engine log)";

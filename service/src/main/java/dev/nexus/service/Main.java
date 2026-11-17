@@ -254,6 +254,11 @@ public final class Main {
         // setups where the application role also owns the schema.
         // RDR-227: the resolved admin values stay in scope for the per-collection index builder.
         var adminConnection = dev.nexus.service.db.AdminConnection.resolve(System::getenv, dbUrl, dbUser, dbPass);
+        // nexus-f3yqd.2.18: the credentials the engine resolved stay out of its log lines, stack traces included, and out of
+        // the texts the data-move worker records and reports. Set once, here, from the values the worker and the migration use.
+        dev.nexus.service.log.SecretMask.add(adminConnection.password());
+        dev.nexus.service.log.SecretMask.add(dbPass);
+        dev.nexus.service.log.LogMasking.install();
         var migrationDs = buildMigrationDataSource(adminConnection);
         // nexus-f3yqd.2.11 (RDR-246): the vendored ddl_utils and dml_utils changelogs apply first, as dml_utils_owner,
         // when the engine has a separate admin role; the installer keeps why they did not, for the data-move worker.

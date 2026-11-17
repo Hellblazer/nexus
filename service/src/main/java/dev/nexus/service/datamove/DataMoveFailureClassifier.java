@@ -4,6 +4,7 @@ package dev.nexus.service.datamove;
 
 import dev.nexus.service.datamove.FailureHandler.Stage;
 import dev.nexus.service.db.AdminDdlSession;
+import dev.nexus.service.log.SecretMask;
 
 import java.sql.SQLException;
 import java.util.List;
@@ -37,13 +38,22 @@ final class DataMoveFailureClassifier {
     private DataMoveFailureClassifier() { /* static */ }
 
     /** The decision and the reason an operator reads (the {@code failure} column for a permanent one). */
-    record Verdict(boolean permanent, String reason) {
+    record Verdict(boolean permanent, String reason, String sqlstate) {
+        Verdict {
+            reason = SecretMask.mask(reason);
+        }
+
         static Verdict transientFailure(String reason) {
-            return new Verdict(false, reason);
+            return new Verdict(false, reason, null);
         }
 
         static Verdict permanentFailure(String reason) {
-            return new Verdict(true, reason);
+            return new Verdict(true, reason, null);
+        }
+
+        /** The same decision resting on {@code state} (for the engine log); a decision that already has one keeps it. */
+        Verdict resting(String state) {
+            return sqlstate != null ? this : new Verdict(permanent, reason, state);
         }
     }
 
@@ -134,6 +144,11 @@ final class DataMoveFailureClassifier {
      * @param detail   the worker's own account of the failure, used where the stage says nothing more precise
      */
     static Verdict classify(Stage stage, SQLException raised, List<DataMoveRuns.RunError> recorded, String detail) {
+        // the SQLSTATE a decision rests on is the recorded chunk error's when there is one (byRecorded), else what was raised
+        return decide(stage, raised, recorded, detail).resting(raised == null ? null : raised.getSQLState());
+    }
+
+    private static Verdict decide(Stage stage, SQLException raised, List<DataMoveRuns.RunError> recorded, String detail) {
         return switch (stage) {
             // a named miss (no install, missing role, no slot, the admin view) carries no SQLException and is transient; a
             // check that itself raised follows the raised list, so a missing driving schema or table (3F000, 42P01) is permanent
@@ -165,10 +180,11 @@ final class DataMoveFailureClassifier {
     private static Verdict byRecorded(List<DataMoveRuns.RunError> recorded) {
         for (DataMoveRuns.RunError e : recorded) {
             if (!transientRecorded(e.sqlstate())) {
-                return Verdict.permanentFailure(describe(e));
+                return new Verdict(true, describe(e), e.sqlstate());
             }
         }
-        return Verdict.transientFailure(describe(recorded.get(recorded.size() - 1)));
+        DataMoveRuns.RunError latest = recorded.get(recorded.size() - 1);
+        return new Verdict(false, describe(latest), latest.sqlstate());
     }
 
     private static String describe(DataMoveRuns.RunError e) {
