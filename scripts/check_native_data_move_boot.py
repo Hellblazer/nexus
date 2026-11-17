@@ -229,7 +229,7 @@ def _secrets_from_env(specs: list[str]) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--mode", required=True, choices=MODES)
     ap.add_argument("--log", required=True, type=Path)
     ap.add_argument("--secret", action="append", default=[], metavar="LABEL=ENV_NAME",

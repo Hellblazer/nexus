@@ -451,7 +451,10 @@ def scenario_no_pgbg(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     if not moved:
         raise MvvError(f"no pg_background files under {ext_dir}: the scenario would test nothing")
     marks = eng.start("no-pgbg")
-    st = eng.ubw.http_status(eng.inst.service_port(), "/health")
+    port = eng.inst.service_port()
+    if port is None:
+        raise MvvError("no-pgbg: the engine answered /health during start but its address file is gone")
+    st = eng.ubw.http_status(port, "/health")
     out = {"files_moved_aside": moved, "marks": marks, "health": st[0], "libraries": library_state(eng),
            "events": collect_events(eng)}
     skipped = [ln for ln in eng.events("event=data_move_libraries_skipped")]

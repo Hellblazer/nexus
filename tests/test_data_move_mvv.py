@@ -19,6 +19,7 @@ CHANGESET = Path(__file__).resolve().parent.parent / "service" / "src" / "test" 
 
 def _load():
     spec = importlib.util.spec_from_file_location("data_move_mvv", SCRIPT)
+    assert spec is not None and spec.loader is not None, f"cannot load {SCRIPT}"
     mod = importlib.util.module_from_spec(spec)
     import sys
 
