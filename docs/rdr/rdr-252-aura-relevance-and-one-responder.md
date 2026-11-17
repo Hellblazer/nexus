@@ -2,12 +2,12 @@
 title: "Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment"
 id: RDR-252
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
-reviewed-by: pending
+reviewed-by: self
 created: 2026-11-16
-accepted_date:
+accepted_date: 2026-11-17
 related_issues: []
 related: [RDR-249, RDR-211, RDR-220, RDR-213, RDR-245, RDR-242, JDR-002]
 ---
@@ -1056,3 +1056,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-17: post-gate fixes, all fourteen at Sam's direction ("Fix all, then accept"; `nexus_rdr/252-research-7`): the stamper serialized per topic by an advisory lock shared with the timer; a newer red with the same owner refreshes the row and keeps the ack and deadline; `nx group form`, `set`, `disband` and `override`; groups in a table and memberships on RDR-253 Step 1's routes; the serving group found by `serves`, not coded in the engine; push, owner, clear and ack rows on a new `board/coord/<topic>` template with its own cap; seat-only leaders and members; the override in RDR-253's purge states, audited in `gc_audit`; a Desktop server loads only when it knows its identity; `owner_unleased` first; the server's state file for `nx aura list`; group names, re-forming a disbanded name; acks across a refresh; the escalated row with nobody live.
 - 2026-11-17: fix check `252-fix-check-b01405db2a50` passed 3-0; its counted items fixed (`nexus_rdr/252-research-8`): back to `board/ci/<topic>` (its cap counts each subspace, so nothing was crowded out, and the aura grammar takes it); refreshed rows carry `episode_at`, `refresh` and `handoffs`, keep the current owner and do not wake; `serves` format, keys within `serves`, one live group per topic under an advisory lock; re-forming a disbanded name by the former leader or, when it is not live, another seat, starting with no other members; disband removes memberships; the override also for an `unleased` or purged leader; the escalated display with nobody live; clear rows only for a topic with an open owner row; the aura state file keyed and cleaned like RDR-253's token files; the serving group in place of `push-train` in the stamper rules; Activation forms with `--serves`.
 - 2026-11-17: fix check `252-fix-check-b03c30cf28aa` failed (2 counted BLOCKS-PLANNING: a start-time replay with no mechanism, and the `board-ci` token reaching owner rows); fixed once (`nexus_rdr/252-research-9`): the replay promise dropped (a late server shows the next row); the engine refuses a `board-ci`-scoped write to `--owner` and `--push`; the stamper runs on every `--done` write, owner rows only for a served topic and clear rows for any open red; refreshes carry their row's reason and hand-offs `reason=handoff`; the null-owner escalated display; re-form named in the leader-only rules, locked, every field the form call's, history kept in `gc_audit`; the disband cascade exempt from the membership checks, no join to a disbanded group, `ended_at` cleared only by re-form; one lock order shared with the stamper; the override for an `unleased` leader stated in RDR-253's terms; the state-file cleanup by RDR-253's holder check; the aura's group tied to the serving group.
+- 2026-11-17: accepted by Sam ("Accept and plan"); last fix check `252-fix-check-b460ee2181a5` PASS 3-0; its seven counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
