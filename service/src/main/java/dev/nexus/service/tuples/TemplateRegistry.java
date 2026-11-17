@@ -99,7 +99,8 @@ public final class TemplateRegistry {
             "/tuples/templates/directory.yaml",
             "/tuples/templates/lock.yaml",
             "/tuples/templates/mailbox.yaml",
-            "/tuples/templates/queue.yaml");
+            "/tuples/templates/queue.yaml",
+            "/tuples/templates/work.yaml");
 
     private static final ObjectMapper DIGEST_MAPPER = new ObjectMapper();
 

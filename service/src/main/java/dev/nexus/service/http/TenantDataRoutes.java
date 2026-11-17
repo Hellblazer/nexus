@@ -6,6 +6,7 @@ import com.sun.net.httpserver.Filter;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.ChashRepository;
+import dev.nexus.service.db.IdentityRepository;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PipelineRepository;
@@ -21,7 +22,7 @@ import java.util.List;
 
 /**
  * The route registrations of the per-tenant stores that need nothing but their repository and the auth filter
- * (memory, plans, telemetry, T1 scratch, taxonomy, aspects, chash, remap, ladder, pipeline), moved out of
+ * (memory, plans, telemetry, T1 scratch, taxonomy, aspects, chash, remap, ladder, pipeline, identity), moved out of
  * {@code NexusService}'s constructor (nexus-hczdo.1.1) so that file, which sits at its size ceiling, has room
  * for the routes added after it. The order and the contexts are unchanged: each is one {@code createContext}
  * with the auth filter on it, exactly as the constructor had them.
@@ -31,14 +32,15 @@ public final class TenantDataRoutes {
     private TenantDataRoutes() {
     }
 
-    /** Registers the ten contexts, each behind {@code authFilter}. */
+    /** Registers the eleven contexts, each behind {@code authFilter}. */
     public static void register(HttpServer server, List<Filter> authFilter,
                                 MemoryRepository memoryRepo, PlanRepository planRepo,
                                 TelemetryRepository telemetryRepo, ScratchRepository scratchRepo,
                                 TaxonomyRepository taxonomyRepo, TaxonomyCentroidRepository taxonomyCentroidRepo,
                                 TaxonomyCoverage taxonomyCoverage, AspectRepository aspectRepo,
                                 ChashRepository chashRepo, RemapRepository remapRepo,
-                                LadderRepository ladderRepo, PipelineRepository pipelineRepo) {
+                                LadderRepository ladderRepo, PipelineRepository pipelineRepo,
+                                IdentityRepository identityRepo) {
         // /v1/memory/* — memory endpoints
         server.createContext("/v1/memory", new MemoryHandler(memoryRepo)).getFilters().addAll(authFilter);
 
@@ -73,5 +75,9 @@ public final class TenantDataRoutes {
         // /v1/pipeline/* — engine-hosted streaming-PDF buffer (RDR-186 nexus-146xx.16: pipeline.db's PG twin; state
         // hosts here, the extraction compute stays client-side)
         server.createContext("/v1/pipeline", new PipelineHandler(pipelineRepo)).getFilters().addAll(authFilter);
+
+        // /v1/identity/* — session identity: seats, aliases, the binding log and the session index (RDR-253 Step 1,
+        // bead nexus-hczdo.1.1). The handler admits each route for the credential that needs it.
+        server.createContext("/v1/identity", new IdentityHandler(identityRepo)).getFilters().addAll(authFilter);
     }
 }

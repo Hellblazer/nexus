@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-hczdo.1.1 (RDR-253 Phase 1 Step 1): the records of session identity.
+
+    WHY TABLES AND NOT TUPLE TEMPLATES. A tuple template needs a finite retention_seconds
+    (TemplateSchemaParser requires a positive one) and the scheduled sweep deletes a row once
+    it passes it. A seat, its aliases and its identity record are permanent, a retired alias is a
+    permanent tombstone, a seat's newest binding row is never pruned, and the compare-and-set on the
+    generation needs one transaction over the identity row and the binding row it appends. None of that
+    fits a tuple. Memberships (member/<id>) and background work (work/<id>) are label-like and do
+    have a tuple surface, so they ship as templates (resources/tuples/templates/member.yaml, work.yaml).
+
+    identity_counters: one row per tenant, last_n only ever rises; an identity id is "i" + the value
+    it returned, so an id never names a second identity, whatever is purged or tombstoned.
+    identity_records: one row per identity; it holds the current generation, state and holder (the
+    process that holds it: host, pid, startedAt, proc_start), so pruning binding rows never loses them.
+    The generation is compared and set under a row lock on this row (IdentityRepository).
+    identity_aliases: one row per name ever given to a seat, live or retired. The primary key is the
+    name, so a retired name can never be issued again; a partial unique index keeps one live alias
+    per identity.
+    identity_bindings: the append-only log of each time a process took, kept or lost an identity;
+    seq counts per identity (the appender holds the identity row lock), so it needs no sequence and a
+    restored tenant keeps the numbers it had.
+    identity_sessions: the session index (session id to identity and generation).
+    identity_memberships: one row per (identity, group) with the role and when it joined, which gives a group's
+    roster in join order. A membership must last as long as its seat does (RDR-252 re-keys its groups onto
+    it), and a tuple cannot: a re-out is clamped to created_at plus the template's retention, so a row would
+    purge on schedule however often it was refired. So it is a permanent row, removed when the identity leaves
+    the group, by retention when a non-seat identity is tombstoned (ON DELETE CASCADE), or by the operator purge.
+
+    parent on identity_records is a label, not a foreign key: a delegated identity may outlive an
+    ephemeral parent that retention has tombstoned.
+
+    Every table: tenant_id, ENABLE + FORCE row level security, the tenant_isolation policy of
+    memory-001-baseline.xml. Grants: grants-nexus-svc.xml and grants-nexus-diag.xml iterate every
+    relation in schema nexus at execution time and run after this file.
+
+    DDL only: CREATE TABLE, CREATE INDEX, no data mutation of any existing row, so no DATA EFFECT line
+    applies per scripts/data_effect_lint.py's own scope. Nothing is backfilled and nothing runs at boot.
+    Placed after taxonomy-022-coverage-counts.xml and before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="identity-001-1" author="nexus-hczdo.1.1">
+        <comment>nexus.identity_counters and nexus.identity_records (RDR-253): the per-tenant id counter and the identity record with its current generation, state and holder. Tenant-scoped, RLS ENABLE+FORCE with memory-001-3's tenant_isolation policy shape.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.identity_counters (
+    tenant_id TEXT   NOT NULL,
+    last_n    BIGINT NOT NULL,
+    CONSTRAINT identity_counters_pk PRIMARY KEY (tenant_id)
+);
+
+CREATE TABLE nexus.identity_records (
+    tenant_id          TEXT        NOT NULL,
+    id                 TEXT        NOT NULL,
+    kind               TEXT        NOT NULL,
+    parent             TEXT,
+    generation         INTEGER     NOT NULL DEFAULT 0,
+    state              TEXT        NOT NULL,
+    display_name       TEXT,
+    creator            TEXT        NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL,
+    ended_at           TIMESTAMPTZ,
+    lease              TEXT,
+    last_renewal       TIMESTAMPTZ,
+    lapsed_at          TIMESTAMPTZ,
+    gone_at            TIMESTAMPTZ,
+    client_version     TEXT,
+    holder_session_id  TEXT,
+    holder_host        TEXT,
+    holder_pid         INTEGER,
+    holder_started_at  BIGINT,
+    holder_proc_start  TEXT,
+    holder_pane        TEXT,
+    last_binding_seq   INTEGER     NOT NULL DEFAULT 0,
+    CONSTRAINT identity_records_pk PRIMARY KEY (tenant_id, id),
+    CONSTRAINT identity_records_kind_ck CHECK (kind IN ('seat', 'ephemeral', 'delegated')),
+    CONSTRAINT identity_records_state_ck CHECK (state IN ('unheld', 'live', 'lapsed', 'ended')),
+    CONSTRAINT identity_records_lease_ck CHECK (lease IS NULL OR lease IN ('leased', 'unleased')),
+    CONSTRAINT identity_records_creator_ck CHECK (creator IN ('sam', 'restart', 'session', 'dispatch'))
+);
+
+-- The bindings-by-host route and the SessionStart sweep read the live and lapsed holders of one host.
+CREATE INDEX idx_identity_records_holder_host ON nexus.identity_records (tenant_id, holder_host)
+    WHERE state IN ('live', 'lapsed');
+-- Retention reads the ended and lapsed non-seat identities.
+CREATE INDEX idx_identity_records_retention ON nexus.identity_records (tenant_id, state)
+    WHERE kind &lt;&gt; 'seat';
+
+ALTER TABLE nexus.identity_counters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.identity_counters FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.identity_counters
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.identity_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.identity_records FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.identity_records
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP TABLE IF EXISTS nexus.identity_records CASCADE;
+            DROP TABLE IF EXISTS nexus.identity_counters CASCADE;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="identity-001-2" author="nexus-hczdo.1.1">
+        <comment>nexus.identity_aliases (RDR-253): every name ever given to a seat, live or retired. The name is the primary key within a tenant, so a retired name is never reissued; one live alias per identity. Tenant-scoped, RLS ENABLE+FORCE.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.identity_aliases (
+    tenant_id    TEXT        NOT NULL,
+    name         TEXT        NOT NULL,
+    identity_id  TEXT        NOT NULL,
+    state        TEXT        NOT NULL,
+    since        TIMESTAMPTZ NOT NULL,
+    retired_at   TIMESTAMPTZ,
+    renamed_to   TEXT,
+    CONSTRAINT identity_aliases_pk PRIMARY KEY (tenant_id, name),
+    CONSTRAINT identity_aliases_identity_fk FOREIGN KEY (tenant_id, identity_id)
+        REFERENCES nexus.identity_records (tenant_id, id),
+    CONSTRAINT identity_aliases_state_ck CHECK (state IN ('live', 'retired'))
+);
+
+CREATE UNIQUE INDEX uq_identity_aliases_one_live ON nexus.identity_aliases (tenant_id, identity_id)
+    WHERE state = 'live';
+
+ALTER TABLE nexus.identity_aliases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.identity_aliases FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.identity_aliases
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.identity_aliases CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="identity-001-3" author="nexus-hczdo.1.1">
+        <comment>nexus.identity_bindings (the append-only binding log) and nexus.identity_sessions (the session index) (RDR-253). Both reference identity_records ON DELETE CASCADE, so a tombstone removes them with the identity. Tenant-scoped, RLS ENABLE+FORCE.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.identity_bindings (
+    tenant_id         TEXT        NOT NULL,
+    identity_id       TEXT        NOT NULL,
+    seq               INTEGER     NOT NULL,
+    event             TEXT        NOT NULL,
+    generation        INTEGER     NOT NULL,
+    lease             TEXT,
+    session_id        TEXT,
+    host              TEXT,
+    pid               INTEGER,
+    started_at        BIGINT,
+    proc_start        TEXT,
+    pane              TEXT,
+    client_version    TEXT,
+    prior_session_id  TEXT,
+    holder_gone       JSONB,
+    detail            TEXT,
+    at                TIMESTAMPTZ NOT NULL,
+    CONSTRAINT identity_bindings_pk PRIMARY KEY (tenant_id, identity_id, seq),
+    CONSTRAINT identity_bindings_identity_fk FOREIGN KEY (tenant_id, identity_id)
+        REFERENCES nexus.identity_records (tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT identity_bindings_event_ck CHECK (event IN
+        ('start', 'clear', 'resume', 'fork', 'takeover', 'release', 'rename', 'end', 'lapse', 'revive', 'gone')),
+    CONSTRAINT identity_bindings_lease_ck CHECK (lease IS NULL OR lease IN ('leased', 'unleased'))
+);
+
+CREATE TABLE nexus.identity_sessions (
+    tenant_id    TEXT        NOT NULL,
+    session_id   TEXT        NOT NULL,
+    identity_id  TEXT        NOT NULL,
+    generation   INTEGER     NOT NULL,
+    at           TIMESTAMPTZ NOT NULL,
+    CONSTRAINT identity_sessions_pk PRIMARY KEY (tenant_id, session_id),
+    CONSTRAINT identity_sessions_identity_fk FOREIGN KEY (tenant_id, identity_id)
+        REFERENCES nexus.identity_records (tenant_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_identity_sessions_identity ON nexus.identity_sessions (tenant_id, identity_id);
+
+ALTER TABLE nexus.identity_bindings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.identity_bindings FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.identity_bindings
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.identity_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.identity_sessions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.identity_sessions
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP TABLE IF EXISTS nexus.identity_sessions CASCADE;
+            DROP TABLE IF EXISTS nexus.identity_bindings CASCADE;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="identity-001-4" author="nexus-hczdo.1.1">
+        <comment>nexus.identity_memberships (RDR-253): the group memberships of an identity, permanent until the identity leaves the group or is tombstoned. References identity_records ON DELETE CASCADE. Tenant-scoped, RLS ENABLE+FORCE.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.identity_memberships (
+    tenant_id    TEXT        NOT NULL,
+    identity_id  TEXT        NOT NULL,
+    group_name   TEXT        NOT NULL,
+    role         TEXT        NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL,
+    CONSTRAINT identity_memberships_pk PRIMARY KEY (tenant_id, identity_id, group_name),
+    CONSTRAINT identity_memberships_identity_fk FOREIGN KEY (tenant_id, identity_id)
+        REFERENCES nexus.identity_records (tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT identity_memberships_role_ck CHECK (role IN ('leader', 'member'))
+);
+
+-- A group's roster in join order.
+CREATE INDEX idx_identity_memberships_group ON nexus.identity_memberships (tenant_id, group_name, created_at, identity_id);
+
+ALTER TABLE nexus.identity_memberships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.identity_memberships FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.identity_memberships
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.identity_memberships CASCADE</rollback>
+    </changeSet>
+</databaseChangeLog>

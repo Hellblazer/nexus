@@ -3,8 +3,9 @@
 # The nonce in id_from is a sender-minted message id; "from" also enters
 # the id (id_dims) and so must be declared required.
 #
-# address_kind (RDR-208 Phase 1 Step 2, bead nexus-galkv.2) allows agent
-# and session only. instance (a Claude Code instance name) was retired
+# address_kind (RDR-208 Phase 1 Step 2, bead nexus-galkv.2) allowed agent
+# and session only; RDR-253 Step 1 (bead nexus-hczdo.1.1) adds identity (to is an
+# identity id, i followed by a number). instance (a Claude Code instance name) was retired
 # at RDR-208 Phase 3 (bead nexus-galkv.24): the client release that stops
 # sending it (R3, conexus 7.60.0) shipped first, and only this engine
 # release refuses it -- a value the RDR-205 Phase 6 addressing scheme
@@ -24,7 +25,7 @@ dimensions:
     type: string
   address_kind:
     type: string
-    values: [agent, session]
+    values: [agent, session, identity]
 
 id_from: keys+nonce
 id_dims:
@@ -48,7 +49,7 @@ doc:
     - the session's nexus MCP server waits on mailbox/SESSION_ID and pushes arrivals through the Claude Code channel
     - nx tuple wait, and tuple_in for a manual claim
   fields:
-    to: the address, a session id or an agent id; the same as the subspace's last segment
+    to: the address, a session id, an agent id or an identity id; the same as the subspace's last segment
     from: the sender's session or agent id; a claim the engine does not check, and mailbox_send fills it in
     kind:
       request: ask the addressee to do something and reply
@@ -58,6 +59,7 @@ doc:
     address_kind:
       agent: to is a subagent id
       session: to is a session id
+      identity: to is an identity id, i followed by a number; the mail follows the seat across /clear and restart
   body: free text up to 4096 bytes
   example:
     subspace: mailbox/00000000-0000-0000-0000-000000000000

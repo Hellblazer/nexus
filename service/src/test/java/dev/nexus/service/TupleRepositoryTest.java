@@ -592,7 +592,7 @@ class TupleRepositoryTest {
                 "body", "nonce-kind-instance", null))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("field 'address_kind'")
-                .hasMessageContaining("not in [agent, session]");
+                .hasMessageContaining("not in [agent, session, identity]");
 
         assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
     }
@@ -605,7 +605,7 @@ class TupleRepositoryTest {
                 "body", "nonce-kind-bogus", null))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("field 'address_kind'")
-                .hasMessageContaining("not in [agent, session]");
+                .hasMessageContaining("not in [agent, session, identity]");
 
         assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
     }
@@ -1371,9 +1371,9 @@ class TupleRepositoryTest {
         // extra template directory, bead nexus-em75s.39's multi-pinned-key fixture) +
         // probe-lease (nexus-xapt8's default_lease_seconds fixture) + probe-ro (the retired
         // ledger's shape, nexus-onjvw) -- see startAll.
-        // The bundled set is 7: RDR-220 added board/ci/<topic>, RDR-235 E3 the literal aspects
-        // (nexus-5r2sc.2.4), and nexus-onjvw retired ledger/<session_id>.
-        assertThat(snap.templates()).hasSize(10);
+        // The bundled set is 8: RDR-220 added board/ci/<topic>, RDR-235 E3 the literal aspects
+        // (nexus-5r2sc.2.4), nexus-onjvw retired ledger/<session_id>, RDR-253 added work.
+        assertThat(snap.templates()).hasSize(11);
         assertThat(snap.digest()).isNotBlank();
     }
 

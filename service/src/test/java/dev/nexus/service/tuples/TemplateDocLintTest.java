@@ -51,7 +51,7 @@ class TemplateDocLintTest {
     /** The templates whose writers and readers are intent, not evidence (S1 Q2). Hand-kept: when
      *  a template gains a verified writer and reader, drop it here in the same change that drops
      *  the prefix. */
-    private static final List<String> UNVERIFIED_TEMPLATES = List.of("board/<topic>", "queue/<name>");
+    private static final List<String> UNVERIFIED_TEMPLATES = List.of("board/<topic>", "queue/<name>", "work/<id>");
     private static final String UNVERIFIED_PREFIX = "Unverified: ";
     /** The one template whose placeholder slot may hold a reserved UUID instead of an {@code example...} segment. */
     private static final String RESERVED_UUID_SLOT_TEMPLATE = "mailbox/<address>";

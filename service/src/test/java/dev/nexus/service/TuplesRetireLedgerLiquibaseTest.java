@@ -163,7 +163,7 @@ class TuplesRetireLedgerLiquibaseTest {
         assertThat(registry.templates().stream().map(t -> t.name()).toList())
             .as("the bundled registry")
             .doesNotContain("ledger/<session_id>")
-            .hasSize(7);
+            .hasSize(8);
         assertThat(registry.resolve("ledger/x")).as("ledger/x resolves to no template").isNull();
 
         PostgreSQLContainer<?> pg = PgContainerHelper.start();

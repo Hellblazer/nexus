@@ -155,7 +155,8 @@ class TupleHandlerWiringTest {
         // lock/<resource>, queue/<name> beside directory/mailbox (and the since-retired ledger).
         // 7 since RDR-220 added board/ci/<topic>; 8 since RDR-235 E3 added aspects;
         // 7 again since nexus-onjvw retired ledger/<session_id>.
-        assertThat((java.util.List<?>) body.get("templates")).hasSize(7);
+        // 8 since RDR-253 Step 1 added work/<id>.
+        assertThat((java.util.List<?>) body.get("templates")).hasSize(8);
     }
 
     /**

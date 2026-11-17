@@ -226,6 +226,8 @@ public final class NexusService {
      * {@link #stop()} skips its shutdown signal.
      */
     private final TupleRepository tupleRepo;
+    /** RDR-253 Step 1 (nexus-hczdo.1.1): session identity records; the tuple sweep runs its retention. */
+    private final dev.nexus.service.db.IdentityRepository identityRepo;
 
     /**
      * RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, scheduled on {@link #sweepScheduler}.
@@ -706,6 +708,7 @@ public final class NexusService {
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
         this.catalogRepo  = new CatalogRepository(tenantScope);
+        this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
 
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
@@ -790,10 +793,10 @@ public final class NexusService {
                 new dev.nexus.service.http.RequestHandler(requestLedger));
         requestsCtx.getFilters().addAll(authFilter);
 
-        // /v1/memory, plans, telemetry, t1, taxonomy, aspects, chash, remap, ladder, pipeline: registered in one place.
+        // /v1/memory, plans, telemetry, t1, taxonomy, aspects, chash, remap, ladder, pipeline, identity: one place.
         dev.nexus.service.http.TenantDataRoutes.register(server, authFilter, memoryRepo, planRepo, telemetryRepo,
                 scratchRepo, taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage, aspectRepo, chashRepo, remapRepo,
-                ladderRepo, pipelineRepo);
+                ladderRepo, pipelineRepo, identityRepo);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18). The
         // combined-write orchestration seam (nexus-kl2z6 increment 1) rides
@@ -2111,6 +2114,17 @@ public final class NexusService {
                 complete = false;
                 tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_ERROR);
                 log.warn("event=tuple_sweep_arm_failed arm=purge_log tenant={} error={}",
+                        tenant, ex.getMessage(), ex);
+            }
+
+            // Arm 4 (RDR-253 Step 1, nexus-hczdo.1.1): identity retention, tombstones and binding-row pruning. One bounded
+            // pass per visit (IdentityRetention.PASS_LIMIT); failure is contained like the arms above.
+            try {
+                identityRepo.runRetention(tenant);
+            } catch (Exception ex) {
+                complete = false;
+                tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_ERROR);
+                log.warn("event=tuple_sweep_arm_failed arm=identity_retention tenant={} error={}",
                         tenant, ex.getMessage(), ex);
             }
 
