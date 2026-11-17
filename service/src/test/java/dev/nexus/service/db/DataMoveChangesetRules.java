@@ -554,9 +554,9 @@ final class DataMoveChangesetRules {
                                 + " is empty; it is a SELECT of the rows still in the old shape, and the worker cannot run an empty one (the move would fail permanently after it registered)"));
                         } else {
                             findings.add(new Finding("r1.verification-placeholder", "the verification of move " + r.label()
-                                + " has a '?', a '/*/' or a $-digit placeholder the worker refuses (a permanent failure). Write jsonb_exists, "
+                                + " has a '?', a '/*/', a '$' next to a non-ASCII character or a $-digit placeholder the worker refuses (a permanent failure). Write jsonb_exists, "
                                 + "jsonb_exists_any or jsonb_exists_all for the jsonb ?, ?| and ?& operators, and chr(63) or E'\\x3f' for a ? in a "
-                                + "pattern. The tenant is the one standalone $1, never in a comment, string literal, dollar quote or quoted name"));
+                                + "pattern, and keep the characters beside a '$' ASCII. The tenant is the one standalone $1, never in a comment, string literal, dollar quote or quoted name"));
                         }
                     }
                 }
