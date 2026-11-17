@@ -43,7 +43,6 @@ domain = [
   "catalog/link_generator.py::_entries_of_type",
   "catalog/meta_backfill.py::backfill_meta",
   "catalog/recovery_bundle.py::enumerate_all_documents",
-  "catalog/sensitivity_doctor.py::_walk_sensitive",
   "commands/catalog.py::list_cmd",
   "commands/catalog.py::reconcile_cmd",
   "commands/catalog_cmds/doctor.py::_run_store_put_integrity",
@@ -82,11 +81,6 @@ emit = { class = "BULK JOB", calls = 1, reason = "Writes meta on every document,
 id = "catalog/recovery_bundle.py::enumerate_all_documents"
 match = { site = "catalog/recovery_bundle.py::enumerate_all_documents" }
 emit = { class = "BULK JOB", calls = 1, reason = "The nx catalog recovery export walk; the wrapper's one caller is export_bundle (recovery_bundle.py:491), and it stays." }
-
-[[row]]
-id = "catalog/sensitivity_doctor.py::_walk_sensitive"
-match = { site = "catalog/sensitivity_doctor.py::_walk_sensitive" }
-emit = { class = "AGGREGATE", calls = 1, reason = "The fallback when /sensitive is unavailable or capped; Phase 1 reports 'not checked' instead of walking, so the call leaves the table.", next = "nexus-uwggq.1.8" }
 
 [[row]]
 id = "commands/catalog.py::list_cmd"

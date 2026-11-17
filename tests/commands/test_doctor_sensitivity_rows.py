@@ -30,10 +30,14 @@ class _Reader:
     def catalog_sensitivity_probe(self):
         return self._supported, "1.2.3" if self._supported else "0.0.1"
 
-    def all_documents(self, limit=0):
+    def sensitive_documents(self, limit=1000):
+        """The engine's bounded list (``GET /sensitive``): the sensitive documents only, uncapped. The rows make
+        no catalog walk, so this is the only read a row has (RDR-241, nexus-uwggq.1.8)."""
         if self._raises:
             raise self._raises
-        return self._docs
+        sensitive = [d for d in self._docs if d.sensitive]
+        return {"count": len(sensitive), "capped": False,
+                "documents": [{"tumbler": d.tumbler, "physical_collection": d.physical_collection} for d in sensitive]}
 
 
 class _Aspects:
@@ -120,6 +124,13 @@ def test_a_row_that_examined_no_sensitive_document_is_not_applicable_never_a_pas
     assert report["findings"] == []
     text = "\n".join(sd.render_text(report))
     assert "not applicable" in text and "[✓]" not in text and "PASS" not in text.upper().replace("NOT APPLICABLE", "")
+
+
+def test_an_unreadable_catalog_is_not_checked_with_the_cause() -> None:
+    report = sd.check_sensitive_in_aspect_eligible(
+        reader=_Reader([], raises=OSError("engine unreachable")), aspects=_Aspects(), select=lambda c: object())
+    assert report["status"] == sd.NOT_APPLICABLE
+    assert report["reason"] == "not checked: the sensitive list could not be read (OSError: engine unreachable)"
 
 
 def test_an_unreadable_aspect_store_is_not_applicable_with_the_cause_not_a_false_red() -> None:

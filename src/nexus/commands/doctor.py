@@ -2971,7 +2971,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
     from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
 
     # F30 (nexus-f3yqd.6): the three sensitivity rows share one read of the sensitive set: the engine's bounded
-    # list, or one catalog walk where that is not available (each row walked, about 23 s, before they shared it).
+    # list; where that is unavailable or capped the rows read "not checked" and no row walks the catalog (RDR-241).
     with sd.one_walk():
         gating_failed = _run_supplementary_rows(runners, progress)
     click.echo(

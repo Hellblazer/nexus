@@ -1,0 +1,3 @@
+### Changed
+
+- **`nx doctor` and `nx catalog doctor` report the sensitive-document rows as "not checked", with the cause, when the engine's sensitive list is unavailable or capped, instead of scanning the catalog.** The `sensitive_in_aspect_eligible`, `sensitive_with_aspects` and `sensitive_in_external_embedder` rows read the engine's bounded `GET /sensitive` list once. When the engine does not offer it (engine-service 0.1.188 or later) or the tenant holds more than 10,000 sensitive documents, each row reads "not checked" and names which, and a "not checked" row never fails the sweep. When the list answers, the rows read as before (nexus-uwggq.1.8, RDR-241).
