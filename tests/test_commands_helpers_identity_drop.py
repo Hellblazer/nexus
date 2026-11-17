@@ -461,8 +461,9 @@ def test_raise_identity_drop_exception_sweep_skip_only_names_the_right_cause_and
     msg = str(exc_info.value)
 
     assert "a superseded-chunk sweep skip" in msg
-    assert "engine reaper collects" in msg
-    assert "nx t3 gc -c COLLECTION" not in msg
+    assert "engine reaper normally collects" in msg
+    assert "if the reaper is disabled or refuses" in msg
+    assert "once the grace has passed" in msg
     # Must NOT point at the write-class remedy — nothing wrote failed.
     assert "manifest-verify" not in msg
     assert "manifest write failures" not in msg
@@ -531,8 +532,8 @@ def test_raise_identity_drop_exception_mixed_cause_names_both_remedies():
     assert "manifest write failures" in msg
     assert "a superseded-chunk sweep skip" in msg
     assert "nx catalog reconcile" in msg
-    assert "engine reaper collects" in msg
-    assert "t3 gc -c COLLECTION" not in msg
+    assert "engine reaper normally collects" in msg
+    assert "once the grace has passed" in msg
 
 
 def test_raise_identity_drop_exception_write_failed_and_identity_dropped_names_one_remedy():

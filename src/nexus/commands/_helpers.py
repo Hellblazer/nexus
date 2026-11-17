@@ -729,14 +729,16 @@ def _emit_superseded_sweep_skipped_warning() -> bool:
     What is left: a dropped chunk that no other document owns is out of search and
     the get/list reads, which require a live owner in the chunk's own collection
     (``chunk_live_owners``, RDR-192 Steps 4-5, vectors-018/019). A lookup by chash
-    (``resolve_chash``, ``resolve_span``: a citation) still returns its text, as it
-    does for any chunk, until the engine reaper (``ChunkReaper``, RDR-192 Step 9)
-    takes it: the reaper finds ownerless chunks from the manifest with no record of
+    (``resolve_chash``, ``resolve_span``: a citation) still returns its text by
+    default, as it does for any chunk (``resolve_chash`` until the quarantine copy is
+    deleted, ``resolve_span`` until the move), until the engine reaper (``ChunkReaper``,
+    RDR-192 Step 9) takes it: the reaper finds ownerless chunks from the manifest with no record of
     the skip, quarantines them after a 30-day grace and deletes them 14 days later,
     when it is enabled and its checks pass (backfill gate, floor, census; a refusal
     is a ``gc_audit`` row and an engine WARN). A dropped chunk another document
     still owns stays searchable, as it should. ``nx t3 gc`` uses the reaper's grace,
-    so it reclaims nothing sooner.
+    so it reclaims nothing sooner; it is the remedy when the reaper is disabled or
+    refuses.
 
     Returns ``True`` iff any skip was recorded, so it still counts toward the
     batch's non-zero exit (uqq9z/7f5qj strictness; unchanged here). Each call with
@@ -766,8 +768,8 @@ def _emit_superseded_sweep_skipped_warning() -> bool:
         f"  WARNING: superseded-chunk sweep skipped for {documents} "
         f"document(s) ({', '.join(reasons)}): dropped chunks no other document "
         f"owns are out of search but stay in T3, readable by chash, until the "
-        f"engine reaper collects them (quarantined after a 30-day grace, "
-        f"deleted 14 days later).",
+        f"engine reaper normally collects them (quarantined after a 30-day "
+        f"grace, deleted 14 days later).",
         err=True,
     )
     return True
@@ -870,10 +872,11 @@ def raise_identity_drop_exception(
     safety, no write ever failed) joined the same fail-loud gate: a run
     tripping ONLY that condition would exit non-zero pointing an operator
     at ``manifest-verify`` for a document whose manifest was never in
-    question. A sweep skip has no command remedy: the skipped chunks are
-    already out of every manifest, so a re-index does not drop them again,
-    and ``nx t3 gc`` uses the reaper's grace. The engine reaper collects
-    them (see ``_emit_superseded_sweep_skipped_warning``).
+    question. For a sweep skip the engine reaper normally collects the
+    chunks after its 30-day grace (see ``_emit_superseded_sweep_skipped_warning``).
+    A re-index does not: the chunks are already out of every manifest, so it
+    does not drop them again. ``nx t3 gc`` uses the same grace, so it is the
+    remedy only when the reaper is disabled or refuses.
 
     Reads the SAME four collectors ``emit_identity_drop_summary`` just
     printed from — nothing resets between that call and this one, so the
@@ -981,9 +984,10 @@ def raise_identity_drop_exception(
         )
     if sweep_skipped:
         remedies.append(
-            "a skipped sweep needs no command: the engine reaper collects "
-            "the chunks it left (a re-index does not, and nx t3 gc uses the "
-            "reaper's grace)"
+            "the engine reaper normally collects the chunks a skipped sweep "
+            "left after its 30-day grace (a re-index does not drop them again); "
+            "if the reaper is disabled or refuses (gc_audit reaper_refused, an "
+            "engine WARN), run 'nx t3 gc -c COLLECTION' once the grace has passed"
         )
     remedy_text = "; ".join(remedies) + "."
 
