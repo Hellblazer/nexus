@@ -735,6 +735,8 @@ class BoundaryView:
     rehydrate: Callable[[], tuple[list[str], bool]] | None = None
     install_note: Callable[[str], None] | None = None
     assessment_cost_estimate: Callable[[], float | None] = lambda: None
+    #: The summed known cost of the assessment calls so far, or ``None`` (the view cannot say); a call cut before it reported adds nothing.
+    assessment_cost_spent: Callable[[], float | None] = lambda: None
 
 
 # ── anchors ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -1260,6 +1262,7 @@ class CoverageBoundary:
 
     async def _resolve_anchors(
         self, view: BoundaryView, first: CoverageResult, *, resolve_until: float, fetch_until: float,
+        usd_reserve: float | None = None,
     ) -> _Resolution:
         """RDR-147 Step 4 (nexus-qpimy): the exact-key branch of the one repair.
 
@@ -1282,6 +1285,10 @@ class CoverageBoundary:
 
         An install with no ``entity.collections`` at all is not considered: the fields stay empty, so the repair and its
         wire are exactly what they were before RDR-147 (Phase 2 turned the switch on by default, nexus-bwct4.2).
+
+        With ``pool_key_scan`` (RDR-250) the anchors' keys are resolved and joined first, as above, and then
+        :func:`nexus.plans.coverage_pool.run_pool_phase` does the pool's own scan, filter and second resolve inside what the
+        repair has left, *usd_reserve* USD held back for the reassessment. It cannot undo phase A.
         """
         from nexus.entity_keys import (  # noqa: PLC0415 — deferred: the ledger stays light at import
             EntityConfigError,
@@ -1313,27 +1320,33 @@ class CoverageBoundary:
         except EntityConfigError as exc:
             _log.warning("nx_answer_coverage_resolution_config_invalid", error=str(exc)[:200])
             return _Resolution({"resolution_reason": "entity_config_error"})
-        pool_fields: dict[str, Any] = {}
-        if self.pool_key_scan:  # RDR-250: off, none of this is entered and the report has no pool field
-            from nexus.plans.coverage_pool import scan_pool  # noqa: PLC0415 — deferred, as above
-
-            try:
-                pool = await scan_pool(
-                    view, anchors=first.ledger.anchors, anchor_keys=frozenset(t for _, t in pairs), config=config,
-                    facets=self.request.facets if self.request else (), hits_of=_hits, in_scope=self._hit_in_scope,
-                    assess=self._assess, call_timeout=self.call_timeout, resolve_until=resolve_until, fetch_until=fetch_until)
-            except EntityConfigError as exc:
-                _log.warning("nx_answer_coverage_resolution_config_invalid", error=str(exc)[:200])
-                return _Resolution({"resolution_reason": "entity_config_error"})
-            pairs += list(pool.pairs)  # the anchors' pairs first: the cap below fills with their keys before any pool key
-            pool_fields = pool.fields
-        scan: dict[str, Any] = {"anchors_scanned": scanned, "anchors_without_pattern": without_pattern, **pool_fields}
-        if scanned and without_pattern == scanned and not pairs:
-            return _Resolution({**scan, "resolution_reason": "no_pattern_for_anchor_collections"})
-        key_ids = tuple(dict.fromkeys(t for _, t in pairs))
-        if not key_ids:
-            return _Resolution({**scan, "resolution_reason": "no_key_tokens"})
+        scan: dict[str, Any] = {"anchors_scanned": scanned, "anchors_without_pattern": without_pattern}
         cap = max(1, self.max_repair_items)
+        if scanned and without_pattern == scanned:
+            base = _Resolution({**scan, "resolution_reason": "no_pattern_for_anchor_collections"})
+        elif not pairs:
+            base = _Resolution({**scan, "resolution_reason": "no_key_tokens"})
+        else:  # phase A: the anchors' keys, resolved and joined exactly as with the pool switch off
+            base = await self._join_keys(view, pairs, scan, cap=cap, resolve_until=resolve_until, fetch_until=fetch_until)
+        if not self.pool_key_scan:
+            return base
+        # phase B (RDR-250, nexus-io7tw): the pool, after phase A, so it can never starve the anchors' resolve
+        from nexus.plans.coverage_pool import PoolEnv, run_pool_phase  # noqa: PLC0415 — deferred, as above
+
+        env = PoolEnv(
+            config=config, facets=self.request.facets if self.request else (), cap=cap, hits_of=_hits, in_scope=self._hit_in_scope,
+            assess=self._assess, join=self._join_keys, min_call_s=self.min_call_s, max_concurrent_calls=self.max_concurrent_calls,
+            resolve_until=resolve_until, fetch_until=fetch_until, usd_reserve=usd_reserve)
+        return await run_pool_phase(view, first, base, env, anchor_keys=frozenset(t for _, t in pairs))
+
+    async def _join_keys(
+        self, view: BoundaryView, pairs: Sequence[tuple[EvidenceAnchor, str]], scan: Mapping[str, Any], *,
+        cap: int, resolve_until: float, fetch_until: float,
+    ) -> _Resolution:
+        """Resolve the first *cap* distinct keys of *pairs* and join each (anchor, key) pair to its record: the body of
+        :meth:`_resolve_anchors` (see there), run once for the anchors' keys and, with the pool switch on, again for the
+        pool's kept keys. *scan* is the report's scan fields, carried into the result."""
+        key_ids = tuple(dict.fromkeys(t for _, t in pairs))
         tokens = list(key_ids[:cap])
         fields: dict[str, Any] = {
             **scan, "resolution_entered": True, "anchor_key_ids": key_ids, "resolution_tokens": len(tokens),
@@ -1515,7 +1528,9 @@ class CoverageBoundary:
         # returns below, which would otherwise end the repair before any re-check. Running both is unmeasured.
         resolution: _Resolution | None = None
         if self.resolution_repair and not retrieval_skipped:
-            resolution = await self._resolve_anchors(view, first, resolve_until=queries_until, fetch_until=retrieval_until)
+            resolution = await self._resolve_anchors(
+                view, first, resolve_until=queries_until, fetch_until=retrieval_until,
+                usd_reserve=None if estimate is None else estimate * planned)
             resolution_fields.update(resolution.fields)
         entered = resolution is not None and resolution.entered
         # Retrieval is for the unsupported facets only; the covered and contradicted facets with most anchors unread are

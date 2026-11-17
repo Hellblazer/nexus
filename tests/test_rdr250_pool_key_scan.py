@@ -26,8 +26,8 @@ from unittest.mock import patch
 import pytest
 
 from nexus import config as _config
-from nexus.plans import coverage_pool, switches
-from nexus.plans.coverage_ledger import BoundaryView, CoverageBoundary
+from nexus.plans import coverage_ledger, coverage_pool, switches
+from nexus.plans.coverage_ledger import AssessmentReport, BoundaryView, CoverageBoundary
 from nexus.plans.coverage_repair import WIRE_KEY_LIST_CAP, RepairReport
 from nexus.plans.repair_stream import SupplementItem
 from nexus.plans.reserved_stream import strip_source_note
@@ -239,8 +239,9 @@ async def test_scenario_2_a_pool_key_the_assessment_cites_is_resolved_and_joined
     assert r.pool_candidate_keys == (_tok(7), _tok(8)), "keys found only in the pool; the repeat of an anchor key is no candidate"
     assert r.pool_keys_kept == (_tok(7),) and r.pool_keys_rejected == (_tok(8),) and r.pool_filter_calls == 1
     assert r.anchors_scanned == ANCHORS, "anchors_scanned keeps its meaning: the anchors only"
-    assert d.resolve_calls() == [[_tok(1), _tok(2), _tok(7)]], "anchor keys first, then the kept pool key"
-    assert r.resolved == (_tok(1), _tok(2), _tok(7)) and r.joined_added == 3
+    assert d.resolve_calls() == [[_tok(1), _tok(2)], [_tok(7)]], "the anchors' keys first, in their own call, then the kept pool key"
+    assert r.anchor_key_ids == (_tok(1), _tok(2)), "anchor_key_ids stays anchors-only: pool keys are reported in pool_keys_kept"
+    assert r.resolved == (_tok(1), _tok(2), _tok(7)) and r.joined_added == 3 and r.resolution_tokens == 3
     # the joined item for the pool key carries the pool chunk's own text as its anchor text
     joined = _cited(7, _tok(7)) + JOINED_SEP + f"{_tok(7)}: {_record_text(_tok(7))}"
     assert joined in [a.content for a in cov.ledger.anchors]
@@ -289,7 +290,7 @@ async def test_a_pool_chunk_cited_only_as_contradicting_is_rejected_though_its_f
     assert r.pool_reason == "" and r.pool_filter_calls == 1
     assert r.pool_candidate_keys == (_tok(7), _tok(8))
     assert r.pool_keys_kept == (_tok(8),) and r.pool_keys_rejected == (_tok(7),), "the supporter is kept, the contradicter is not"
-    assert d.resolve_calls() == [[_tok(1), _tok(2), _tok(8)]]
+    assert d.resolve_calls() == [[_tok(1), _tok(2)], [_tok(8)]]
 
 
 @pytest.mark.asyncio
@@ -327,13 +328,14 @@ def _no_records(items: str, instruction: str) -> dict:  # noqa: ARG001
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("inner", "reason"), [
-    (_raise, "filter_failed"), (_malformed, "filter_failed"), (_no_records, "filter_failed"),
+    (_raise, "filter_failed"), (_malformed, "filter_failed"),
 ])
 async def test_scenario_4_a_filter_that_fails_or_replies_unusably_keeps_no_pool_key_and_the_anchors_still_resolve(inner, reason: str) -> None:
     d = _fixture(check=_on_pool(inner))
     cov = _cov(await _run(d, pool_on(), plan=POOL_PLAN))
     r = cov.repair
     assert r.pool_reason == reason and r.pool_keys_kept == ()
+    assert r.pool_filter_calls == 1, "a call that raised or replied unusably still started"
     assert r.pool_keys_rejected == (_tok(7), _tok(8)), "fail closed: every candidate is named as not kept"
     assert d.resolve_calls() == [[_tok(1), _tok(2)]]
     assert r.resolution_entered and r.resolved == (_tok(1), _tok(2)) and r.outcome == "completed", "the anchors' keys resolve as today"
@@ -347,39 +349,94 @@ async def test_scenario_4_a_failed_pool_fetch_keeps_no_pool_key_and_the_anchors_
     assert d.resolve_calls() == [[_tok(1), _tok(2)]] and r.resolution_entered and r.resolved == (_tok(1), _tok(2))
 
 
-@pytest.mark.asyncio
-async def test_scenario_4_a_filter_that_outlives_its_slice_of_the_allowance_keeps_no_pool_key() -> None:
-    class Slow(PoolDispatcher):
-        async def __call__(self, tool: str, args: dict) -> dict:
-            if tool == "operator_check" and any(i["id"].startswith("p") for i in json.loads(args["items"])):
-                await asyncio.sleep(30)
-            return await super().__call__(tool, args)
+class _SlowFilter(PoolDispatcher):
+    """The filter's call hangs (the pool's items are ``p<n>``); everything else answers at once."""
 
-    d = Slow([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [_cited(7, _tok(7))])
+    async def __call__(self, tool: str, args: dict) -> dict:
+        if tool == "operator_check" and any(i["id"].startswith("p") for i in json.loads(args["items"])):
+            await asyncio.sleep(30)
+        return await super().__call__(tool, args)
+
+
+def _anchors_resolved(res: Any) -> None:
+    """Phase A ran: the anchors' keys went to ``resolve`` and the branch did not fail, whatever the pool did."""
+    assert res.failure == "" and res.entered and res.fields["resolved"][:2] == (_tok(1), _tok(2)), "the anchors' keys resolved"
+    assert len(res.items) >= 2
+
+
+@pytest.mark.asyncio
+async def test_scenario_4_a_filter_that_outlives_its_slice_keeps_no_pool_key_and_never_starves_the_anchors_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The review blocker (probe 1): a hung filter used to take the time the anchors' ``resolve`` needed. Phase A now runs
+    first, so the anchors' keys resolve whatever phase B does, and the filter is cut at its slice and counted."""
+    monkeypatch.setattr(coverage_pool, "_TAIL_S", 0.5)
+    d = _SlowFilter([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [_cited(7, _tok(7))])
     view, first = await _view_and_first(d)
     started = time.monotonic()
-    res = await pool_on()._resolve_anchors(view, first, resolve_until=started + 2.0, fetch_until=started + 2.0)
+    res = await replace(pool_on(), min_call_s=0.5)._resolve_anchors(view, first, resolve_until=started + 2.0, fetch_until=started + 2.0)
+    _anchors_resolved(res)
     assert res.fields["pool_reason"] == "filter_timeout" and res.fields["pool_keys_kept"] == ()
+    assert res.fields["pool_filter_calls"] >= 1, "a call that started and was cut still counts"
+    assert res.fields["pool_keys_rejected"] == (_tok(7),)
     assert time.monotonic() - started < 5, "the filter was cut at its slice, not left to run"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("usd", "seconds", "estimate", "reason", "calls"), [
-    (0.001, None, 0.01, "filter_skipped_budget", 0),    # what is left is below one call's mean cost
-    (0.0, None, None, "filter_skipped_budget", 0),      # spent
-    (0.5, None, 0.01, "", 1),                           # affordable: the filter runs
-    (None, None, 0.01, "", 1),                          # no USD limit
-    (0.001, None, None, "", 1),                         # cost unknown: proceed
-    (None, 1.0, None, "filter_skipped_deadline", 0),    # under the boundary's minimum call time
+async def test_scenario_4_a_window_too_short_for_one_assessment_call_skips_the_pool_before_starting_it() -> None:
+    """Probe 1's own window (two seconds): one call needs the boundary's 5 s minimum, so nothing is started, the filter is
+    never sent and the anchors' keys still resolve."""
+    d = _SlowFilter([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [_cited(7, _tok(7))])
+    view, first = await _view_and_first(d)
+    started = time.monotonic()
+    res = await pool_on()._resolve_anchors(view, first, resolve_until=started + 2.0, fetch_until=started + 2.0)
+    _anchors_resolved(res)
+    assert res.fields["pool_reason"] == "filter_skipped_deadline" and res.fields["pool_filter_calls"] == 0
+    assert res.fields["pool_scanned"] == 0 and d.pool_fetches() == [], "not even the pool fetch was started"
+    assert time.monotonic() - started < 1.5
+
+
+@pytest.mark.asyncio
+async def test_scenario_4_a_pool_fetch_that_times_out_never_starves_the_anchors_resolve() -> None:
+    """Probe 2: a hung pool fetch. The anchors' record fetch (other ids) is untouched and resolved first."""
+    d = PoolDispatcher([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [_cited(7, _tok(7))])
+    view, first = await _view_and_first(d)
+    real = view.fetch
+
+    async def slow_pool_fetch(hits: list[Any], *, timeout: float) -> list[Any]:
+        if {h.id for h in hits} & d.pool_hashes:
+            await asyncio.sleep(0.2)
+            raise TimeoutError
+        return await real(hits, timeout=timeout)
+
+    started = time.monotonic()
+    res = await pool_on()._resolve_anchors(
+        replace(view, fetch=slow_pool_fetch), first, resolve_until=started + 30.0, fetch_until=started + 30.0)
+    _anchors_resolved(res)
+    assert res.fields["pool_reason"] == "fetch_failed" and res.fields["pool_scanned"] == 0 and res.fields["pool_filter_calls"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("usd", "seconds", "estimate", "reserve", "reason", "calls"), [
+    (0.001, None, 0.01, None, "filter_skipped_budget", 0),    # what is left is below one call's mean cost
+    (0.0, None, None, None, "filter_skipped_budget", 0),      # spent
+    (0.05, None, 0.01, 0.045, "filter_skipped_budget", 0),    # the reassessment's reserve leaves less than one call
+    (0.5, None, 0.01, None, "", 1),                           # affordable: the filter runs
+    (0.5, None, 0.01, 0.4, "", 1),                            # affordable beside the reserve
+    (None, None, 0.01, 0.4, "", 1),                           # no USD limit
+    (0.001, None, None, None, "", 1),                         # cost unknown: proceed
+    (None, 1.0, None, None, "filter_skipped_deadline", 0),    # the answer has under one call's time left
 ])
-async def test_scenario_4_a_short_allowance_keeps_no_pool_key_and_an_unknown_cost_proceeds(usd, seconds, estimate, reason, calls) -> None:
+async def test_scenario_4_a_short_allowance_keeps_no_pool_key_and_an_unknown_cost_proceeds(usd, seconds, estimate, reserve, reason, calls) -> None:
     d = _fixture()
     view, first = await _view_and_first(d)
     view = replace(view, remaining_usd=lambda: usd, remaining_seconds=lambda: seconds, assessment_cost_estimate=lambda: estimate)
-    res = await pool_on()._resolve_anchors(view, first, resolve_until=_soon(), fetch_until=_soon())
+    res = await pool_on()._resolve_anchors(view, first, resolve_until=_soon(), fetch_until=_soon(), usd_reserve=reserve)
+    _anchors_resolved(res)
     assert res.fields["pool_reason"] == reason and res.fields["pool_filter_calls"] == calls
     if reason:
-        assert res.fields["pool_keys_kept"] == () and res.fields["pool_keys_rejected"] == (_tok(7), _tok(8))
+        assert res.fields["pool_keys_kept"] == () and res.fields["pool_scanned"] == 0, "nothing was started"
+        assert d.pool_fetches() == []
     else:
         assert res.fields["pool_keys_kept"] == (_tok(7),)
 
@@ -389,7 +446,133 @@ async def test_scenario_4_a_request_with_no_facet_has_nothing_to_filter_by() -> 
     d = _fixture()
     view, first = await _view_and_first(d)
     res = await replace(pool_on(), request=None)._resolve_anchors(view, first, resolve_until=_soon(), fetch_until=_soon())
+    _anchors_resolved(res)
     assert res.fields["pool_reason"] == "no_facets" and res.fields["pool_keys_kept"] == () and res.fields["pool_filter_calls"] == 0
+    assert res.fields["pool_keys_rejected"] == (_tok(7), _tok(8))
+
+
+@pytest.mark.asyncio
+async def test_an_empty_evidence_reply_on_a_filter_pack_is_a_reject_verdict_not_a_failure() -> None:
+    d = _fixture(check=_on_pool(_no_records))
+    r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
+    assert r.pool_reason == "" and r.pool_filter_calls == 1, "the assessor read the pack and found nothing: ok"
+    assert r.pool_keys_kept == () and r.pool_keys_rejected == (_tok(7), _tok(8))
+    assert d.resolve_calls() == [[_tok(1), _tok(2)]]
+
+
+@pytest.mark.asyncio
+async def test_a_two_pack_filter_with_one_failed_pack_keeps_what_the_completed_pack_cited() -> None:
+    """One chunk a pack (``max_anchors_per_call=1``): the pack holding CUST-0008 raises, the one holding CUST-0007 cites it."""
+    def check(items: str, instruction: str) -> Any:
+        payload = json.loads(items)
+        if payload[0]["id"].startswith("p") and _tok(8) in payload[0]["text"]:
+            return RuntimeError("one pack's call failed")
+        return CHECK(items, instruction)
+
+    d = _fixture(check=check)
+    r = _cov(await _run(d, pool_on(max_anchors_per_call=1), plan=POOL_PLAN)).repair
+    assert r.pool_filter_calls == 2 and r.pool_reason == "filter_partial_failure"
+    assert r.pool_keys_kept == (_tok(7),) and r.pool_keys_rejected == (_tok(8),), "the failed pack's candidate is rejected, by name"
+    assert d.resolve_calls() == [[_tok(1), _tok(2)], [_tok(7)]]
+
+
+@pytest.mark.asyncio
+async def test_a_request_of_two_facet_groups_keeps_a_key_either_group_cites() -> None:
+    """Seven facets make two groups (six and one) of the one pack. Group one says nothing (an empty reply, a verdict), group
+    two cites the CUST-0007 chunk for f7: the key is kept and the empty reply is no failure."""
+    def check(items: str, instruction: str) -> Any:
+        payload = json.loads(items)
+        if not payload[0]["id"].startswith("p"):
+            return CHECK(items, instruction)
+        if "[f7]" not in instruction:
+            return {"ok": False, "evidence": []}
+        seven = next(i["id"] for i in payload if _tok(7) in i["text"])
+        return {"ok": True, "evidence": [{"item_id": seven, "quote": "[f7] it supports", "role": "supports"}]}
+
+    d = _fixture(check=check)
+    boundary = CoverageBoundary(request=_request(7), resolution_repair=True, pool_key_scan=True)
+    r = _cov(await _run(d, boundary, plan=POOL_PLAN)).repair
+    assert r.pool_filter_calls == 2 and r.pool_reason == ""
+    assert r.pool_keys_kept == (_tok(7),) and r.pool_keys_rejected == (_tok(8),)
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_chunk_the_size_cap_left_unread_is_rejected_with_a_named_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    d = _fixture()
+    view, first = await _view_and_first(d)
+    monkeypatch.setattr(coverage_ledger, "ASSESSMENT_MAX_ITEM_CHARS", len(_cited(7, _tok(7))) + 5)  # room for one chunk only
+    res = await pool_on()._resolve_anchors(view, first, resolve_until=_soon(), fetch_until=_soon())
+    _anchors_resolved(res)
+    assert res.fields["pool_keys_kept"] == (_tok(7),) and res.fields["pool_keys_rejected"] == (_tok(8),)
+    assert res.fields["pool_reason"] == "filter_unread", "an unread candidate is not left to read as a judged one"
+
+
+@pytest.mark.asyncio
+async def test_the_pool_phase_runs_after_phase_a_and_does_not_run_when_phase_a_failed() -> None:
+    d = _fixture(fail_resolve=True)
+    r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
+    assert r.outcome == "retrieval_failed" and r.pool_reason == "resolution_failed"
+    assert d.pool_fetches() == [] and r.pool_filter_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_exception_in_the_pool_phase_leaves_phase_a_standing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> float:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(coverage_pool, "_need_s", boom)
+    d = _fixture()
+    view, first = await _view_and_first(d)
+    res = await pool_on()._resolve_anchors(view, first, resolve_until=_soon(), fetch_until=_soon())
+    _anchors_resolved(res)
+    assert res.fields["pool_reason"] == "pool_error" and res.fields["pool_keys_kept"] == ()
+
+
+@pytest.mark.asyncio
+async def test_a_boundary_with_no_fetch_hook_cannot_scan_the_pool() -> None:
+    d = _fixture()
+    view, first = await _view_and_first(d)
+    res = await pool_on()._resolve_anchors(replace(view, fetch=None), first, resolve_until=_soon(), fetch_until=_soon())
+    assert res.failure == "" and res.fields["pool_reason"] == "no_fetch" and res.fields["pool_scanned"] == 0
+
+
+def test_a_filter_that_was_skipped_whole_maps_to_the_reason_it_was_skipped_for() -> None:
+    tally = coverage_pool._Tally()
+    verdict = coverage_pool._verdict
+    assert verdict(AssessmentReport(outcome="skipped_budget", calls=0, skipped_budget_calls=1), tally) == "filter_skipped_budget"
+    assert verdict(AssessmentReport(outcome="skipped_deadline", calls=0, skipped_deadline_calls=1), tally) == "filter_skipped_deadline"
+    assert verdict(AssessmentReport(outcome="partial_failure", calls=1, skipped_budget_calls=1), tally) == "filter_partial_failure"
+    assert verdict(AssessmentReport(outcome="ok", calls=1), tally) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_filter_calls_and_their_cost_are_reported_and_a_cut_call_still_counts() -> None:
+    """``usage_cost`` makes each assessment call report 0.01 USD to the run; the filter's share is its calls' sum."""
+    d = _fixture(usage_cost=0.01)
+    r = _cov(await _run(d, pool_on(), plan=POOL_PLAN)).repair
+    assert r.pool_filter_calls == 1 and r.pool_filter_cost_usd == pytest.approx(0.01)
+    assert r.to_wire()["pool_filter_cost_usd"] == pytest.approx(0.01)
+    off = _cov(await _run(_fixture(usage_cost=0.01), pool_off(), plan=POOL_PLAN)).repair
+    assert off.pool_filter_cost_usd is None and "pool_filter_cost_usd" not in off.to_wire()
+
+
+# ── the runner caller's wiring ────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("value", "expected"), [(None, False), ("", False), ("0", False), ("1", True), ("on", True), ("garbage", False)])
+async def test_nx_answer_hands_the_boundary_the_pool_switch_it_reads_from_the_environment(monkeypatch: pytest.MonkeyPatch, value: str | None, expected: bool) -> None:
+    from tests.test_rdr232_coverage_wiring import _drive  # noqa: PLC0415 — the one test that needs the whole nx_answer harness
+    from nexus.plans.runner import PlanResult  # noqa: PLC0415
+
+    monkeypatch.setenv(switches.ANSWER_COVERAGE_ENV, "1")
+    if value is None:
+        monkeypatch.delenv(switches.ANSWER_POOL_KEY_SCAN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(switches.ANSWER_POOL_KEY_SCAN_ENV, value)
+    run = await _drive(plan_result=PlanResult(steps=[{"text": "ok"}]), request=_request(2))
+    [kw] = run.plan_run_calls
+    assert kw["coverage_boundary"].pool_key_scan is expected
 
 
 # ── scenario 5: no search step ────────────────────────────────────────────────────────────────────────────
@@ -418,7 +601,7 @@ async def test_scenario_6_anchor_keys_fill_the_cap_first_and_the_overflow_is_nam
     d = _crowded()
     r = _cov(await _run(d, pool_on(max_repair_items=3), plan=POOL_PLAN)).repair
     assert r.pool_keys_kept == (_tok(7), _tok(8), _tok(9)), "all three passed the filter"
-    assert d.resolve_calls() == [[_tok(1), _tok(2), _tok(7)]], "the two anchor keys, then the first pool key"
+    assert d.resolve_calls() == [[_tok(1), _tok(2)], [_tok(7)]], "the two anchor keys, then the one pool key the cap leaves room for"
     assert r.tokens_dropped == (_tok(8), _tok(9)) and r.resolution_tokens == 3
     tight = _crowded()
     r2 = _cov(await _run(tight, pool_on(max_repair_items=2), plan=POOL_PLAN)).repair

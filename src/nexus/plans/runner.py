@@ -4303,6 +4303,13 @@ async def _plan_run_impl(
         ]
         return sum(costs) / len(costs) if costs else None
 
+    def _assessment_cost_spent() -> float:
+        """The summed known cost of the assessment calls so far (the records :func:`_assessment_cost_estimate` averages)."""
+        return sum(
+            r.cost_usd for r in step_records
+            if r.operator == "operator_check" and r.step_index >= len(steps) and r.cost_usd is not None
+        )
+
     async def _run_coverage_boundary(
         texts: list[str], observed: bool, terminal_index: int,
         rehydrate: Callable[[], tuple[list[str], bool]] | None = None,
@@ -4324,6 +4331,7 @@ async def _plan_run_impl(
                 retrieve=_coverage_retrieval if can_repair else None, fetch=_coverage_fetch if can_repair else None,
                 install_supplement=_install_supplement if can_repair else None, rehydrate=rehydrate if can_repair else None,
                 install_note=_install_note if can_repair else None, assessment_cost_estimate=_assessment_cost_estimate,
+                assessment_cost_spent=_assessment_cost_spent,
             ))
         except Exception as exc:  # noqa: BLE001 — the boundary never fails an answer
             _log.warning("nx_answer_coverage_boundary_failed", error=type(exc).__name__)  # the type only: an exception's text can carry prompt text

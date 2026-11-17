@@ -329,7 +329,7 @@ class RepairReport:
     #: ``NX_ANSWER_POOL_KEY_SCAN`` is off, and the wire then carries none of them. ``pool_key_scan`` says the scan was
     #: considered. ``pool_scanned`` is the pool chunks fetched; ``pool_candidate_keys`` the keys found only in the pool;
     #: ``pool_keys_kept`` and ``pool_keys_rejected`` split them by the precision filter (a closed filter rejects all);
-    #: ``pool_filter_calls`` the assessment calls the filter made; ``pool_reason`` why the pool was skipped or closed
+    #: ``pool_filter_calls`` the assessment calls the filter started (a call cut or raised counts) and ``pool_filter_cost_usd`` their cost; ``pool_reason`` why the pool was skipped or closed
     #: (:data:`nexus.plans.coverage_pool.POOL_REASONS`; empty when it ran through).
     pool_key_scan: bool = False
     pool_scanned: int = 0
@@ -338,6 +338,8 @@ class RepairReport:
     pool_keys_rejected: tuple[str, ...] = ()
     pool_filter_calls: int = 0
     pool_reason: str = ""
+    #: The summed cost of the filter's calls as the run accounted them, or ``None`` when the view cannot say.
+    pool_filter_cost_usd: float | None = None
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -361,7 +363,10 @@ class RepairReport:
                 wire[f"{name}_truncated"] = max(0, len(values) - WIRE_KEY_LIST_CAP)
         if self.pool_key_scan:
             # Additive, and only with the pool switch on: with it off the wire is what it was.
-            wire.update({"pool_scanned": self.pool_scanned, "pool_filter_calls": self.pool_filter_calls, "pool_reason": self.pool_reason})
+            wire.update({
+                "pool_scanned": self.pool_scanned, "pool_filter_calls": self.pool_filter_calls, "pool_reason": self.pool_reason,
+                "pool_filter_cost_usd": self.pool_filter_cost_usd,
+            })
             for name in ("pool_candidate_keys", "pool_keys_kept", "pool_keys_rejected"):
                 pool_values: tuple[str, ...] = getattr(self, name)
                 wire[name] = list(pool_values[:WIRE_KEY_LIST_CAP])
