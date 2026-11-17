@@ -94,11 +94,11 @@ class TestSupervisorArmIsAnchoredOnTheArgvHead:
     @pytest.mark.parametrize(
         "command",
         [
-            "/Users/Sam Smith/.local/bin/nx daemon service start --foreground --config-dir {cfg}",
-            "/Users/Sam Smith/.local/bin/nx daemon service start --foreground",
-            "/Users/Sam Smith/venv/bin/python /Users/Sam Smith/venv/bin/nx daemon service start --foreground --config-dir {cfg}",
-            "/Users/Sam Smith/venv/bin/python -m nexus.cli daemon service start --foreground --config-dir {cfg}",
-            "/bin/sh /Users/Sam Smith/.local/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/Users/you there/.local/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/Users/you there/.local/bin/nx daemon service start --foreground",
+            "/Users/you there/venv/bin/python /Users/you there/venv/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/Users/you there/venv/bin/python -m nexus.cli daemon service start --foreground --config-dir {cfg}",
+            "/bin/sh /Users/you there/.local/bin/nx daemon service start --foreground --config-dir {cfg}",
         ],
     )
     def test_a_posix_nx_path_with_a_space_still_matches(self, tmp_path: Path, command: str) -> None:
@@ -117,7 +117,7 @@ class TestSupervisorArmIsAnchoredOnTheArgvHead:
             "/usr/bin/sudo python -m nexus.cli daemon service start --foreground --config-dir {cfg}",
             "/bin/bash /usr/local/libexec/lab-hand-exec 524a6b6d /tmp/e /usr/bin/nx daemon service start --config-dir {cfg}",
             "/usr/bin/watch -n 5 /usr/bin/nx daemon service start --config-dir {cfg}",
-            "/Users/Sam Smith/bin/lab-run -- /Users/Sam Smith/.local/bin/nx daemon service start --config-dir {cfg}",
+            "/Users/you there/bin/lab-run -- /Users/you there/.local/bin/nx daemon service start --config-dir {cfg}",
         ],
     )
     def test_a_wrapper_before_an_absolute_nx_does_not_match(self, tmp_path: Path, command: str) -> None:
@@ -130,9 +130,9 @@ class TestSupervisorArmIsAnchoredOnTheArgvHead:
         assert not match(f"nx daemon service start --foreground --config-dir {cfg}-staging")
         assert not match(f"nx daemon service start --foreground --config-dir {tmp_path / 'other'}")
 
-    CFG = Path(r"C:\Users\Sam Smith\.config\nexus")
-    PY = r"C:\Users\Sam Smith\AppData\Local\Programs\Python\Python312\python.exe"
-    NX = r"C:\Users\Sam Smith\AppData\Local\Programs\Python\Python312\Scripts\nx.exe"
+    CFG = Path(r"C:\Users\you there\.config\nexus")
+    PY = r"C:\Users\you there\AppData\Local\Programs\Python\Python312\python.exe"
+    NX = r"C:\Users\you there\AppData\Local\Programs\Python\Python312\Scripts\nx.exe"
 
     @pytest.mark.parametrize(
         "raw",
@@ -144,7 +144,7 @@ class TestSupervisorArmIsAnchoredOnTheArgvHead:
     def test_a_windows_supervisor_under_a_spaced_user_directory_matches(self, raw: str) -> None:
         """The process table dequotes, so the spaced path arrives as words (winproc_core.render_command_line)."""
         rendered = render_command_line(raw.format(py=self.PY, nx=self.NX, cfg=self.CFG))
-        assert '"' not in rendered and "Sam Smith" in rendered, rendered
+        assert '"' not in rendered and "you there" in rendered, rendered
         assert storage_service_stack_matcher(self.CFG, platform="win32")(rendered)
 
     @pytest.mark.parametrize(

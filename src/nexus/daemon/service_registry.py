@@ -2683,7 +2683,7 @@ def _is_bare_supervisor_head(command: str, *, windows: bool = False) -> bool:
     forbids for a config_dir. Here it fails closed: an nx path that contains
     a space is not matched from the process table and is stopped through its
     lease alone. Windows is the exception (*windows*): a process table renders
-    ``C:\\Users\\Sam Smith\\...\\python.exe`` unquoted, so a head with exactly one
+    ``C:\\Users\\you there\\...\\python.exe`` unquoted, so a head with exactly one
     ``.exe`` in it, ending in ``<nx>.exe`` or ``<python>.exe -m nexus.cli``,
     is one program and is accepted (``ssh.exe host nx`` and ``lab-run.exe --
     nx.exe`` name a second program and are not).
@@ -2712,7 +2712,7 @@ def _path_base(token: str) -> str:
 
 
 def _is_spaced_posix_head(head: str) -> bool:
-    """POSIX: *head* is one or two ABSOLUTE programs, spaces inside a path allowed (``/Users/Sam Smith/.local/bin/nx``).
+    """POSIX: *head* is one or two ABSOLUTE programs, spaces inside a path allowed (``/Users/you there/.local/bin/nx``).
 
     The process table is one space-joined string, so such a path arrives as words and the token test cannot
     place it. A new path starts at ``" /"``: the head is cut there, after dropping a trailing ``-m nexus.cli``,
