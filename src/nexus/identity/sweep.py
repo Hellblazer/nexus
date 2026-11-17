@@ -44,6 +44,9 @@ class SweepReport:
     unknown: int = 0
     other_host: int = 0
     forbidden: bool = False
+    swept: bool = False
+    #: identity id -> (pid, started_at) of every binding the sweep listed, so cleanup knows who the engine still has
+    holders: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     unjudged_other_registry: int = 0
     token_files_removed: list[str] = field(default_factory=list)
     tmp_files_removed: list[str] = field(default_factory=list)
@@ -60,6 +63,10 @@ def sweep_host(client: Any, procs: Processes | Any, *, host: str, own: tuple[int
     report = SweepReport()
     views = client.bindings_by_host(host)
     report.listed = len(views)
+    report.swept = True
+    for v in views:
+        if isinstance(v.get("holder"), Mapping):
+            report.holders[v["id"]] = (v["holder"].get("pid"), v["holder"].get("started_at"))
     for view in views:
         holder = view.get("holder")
         if view.get("kind") == "delegated":
@@ -104,8 +111,12 @@ def sweep_host(client: Any, procs: Processes | Any, *, host: str, own: tuple[int
 
 def clean_local_files(identity_dir: Path, procs: Processes | Any, *, host: str, own_token: Path | None = None,
                       report: SweepReport | None = None) -> SweepReport:
-    """Delete token files whose process the holder check finds gone and pending files that are stale. A token file
-    the hook just wrote (*own_token*) is never touched."""
+    """Delete token files of gone processes and pending files that are stale. A token file the hook just wrote
+    (*own_token*) is never touched. A token file is deleted only after this run's sweep (*report*, from
+    :func:`sweep_host`) has dealt with its holder: the engine recorded the gone, or no longer lists the file's process as
+    the holder of the file's identity (it ended, was released or was taken over). A run with no sweep, or a sweep the
+    credential could not complete, deletes no token file: the file may be the only thing that names a live
+    binding's registry directory."""
     rep = report if report is not None else SweepReport()
     for path in token_files(identity_dir):
         if own_token is not None and path == own_token:
@@ -115,11 +126,14 @@ def clean_local_files(identity_dir: Path, procs: Processes | Any, *, host: str, 
             continue
         pid, started_at = parsed
         record = read_token_file(path)
-        if record is not None and record.registry_dir and record.registry_dir != str(procs.sessions_dir):
-            continue  # a Claude under another config directory: its registry file is not in the directory this reads
-        holder = {"host": (record.host if record and record.host else host), "pid": pid, "started_at": started_at,
-                  "proc_start": record.proc_start if record else None}
-        if check_holder(holder, procs=procs, host=host, identity_dir=identity_dir).state == GONE:
+        if record is None or not rep.swept or rep.forbidden:
+            continue
+        holder = {"host": (record.host if record.host else host), "pid": pid, "started_at": started_at,
+                  "proc_start": record.proc_start}
+        if check_holder(holder, procs=procs, host=host, identity_dir=identity_dir).state != GONE:
+            continue
+        still_listed = rep.holders.get(record.identity) == (pid, started_at)
+        if record.identity in rep.recorded_gone or not still_listed:
             delete_token_file(path)
             if path.name not in rep.token_files_removed:
                 rep.token_files_removed.append(path.name)

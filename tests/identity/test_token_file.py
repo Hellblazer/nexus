@@ -105,3 +105,30 @@ def test_a_compare_and_swap_sees_the_other_writer_and_can_decline(tmp_path: Path
     delete = __import__("nexus.identity.token_file", fromlist=["delete_token_file"]).delete_token_file
     delete(path)
     assert not path.exists() and not path.with_name(path.name + ".lock").exists()
+
+
+def test_two_threads_updating_one_file_lose_no_update_because_the_swap_holds_the_file_lock(tmp_path: Path) -> None:
+    """Each update reads the generation, waits, and writes it plus one. Under the lock ten updates from two threads make
+    generation 10; without ``with locked(path)`` they interleave and updates are lost (verified by removing the lock)."""
+    import threading
+    import time
+
+    from nexus.identity.token_file import update_token_file
+
+    path = token_path(tmp_path / "identity", 4242, 4_242_000)
+    write_token_file(path, _record(generation=0))
+
+    def bump(current: TokenFile) -> TokenFile:
+        time.sleep(0.01)                               # the window a missing lock leaves open
+        return TokenFile(**{**current.__dict__, "generation": current.generation + 1})
+
+    def worker() -> None:
+        for _ in range(5):
+            update_token_file(path, bump)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert read_token_file(path).generation == 10

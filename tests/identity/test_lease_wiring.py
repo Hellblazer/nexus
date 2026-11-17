@@ -14,6 +14,7 @@ import structlog
 
 from nexus.daemon.t1_handoff import write_handoff_marker
 from nexus.hooks.identity_bind import bind_at_session_start, handoff_fields
+from nexus.identity import token_header
 from nexus.identity.holder import os_start_time
 from nexus.identity.token_file import token_path
 from tests.identity.conftest import World
@@ -53,7 +54,7 @@ def test_the_lease_starts_from_cores_start_path_adopts_a_marker_through_the_hand
 
         core._start_identity_lease()                                       # the server's own start path
         lease = identity_lease.current()
-        assert lease is not None
+        assert lease is not None and token_header._LEASE_OWNER, "the server owns the binding: its spawn-time session id is not checked"
         deadline = time.monotonic() + 15
         while not lease.bound and time.monotonic() < deadline:             # its thread reads the token file within seconds
             time.sleep(0.2)
@@ -73,6 +74,6 @@ def test_the_lease_starts_from_cores_start_path_adopts_a_marker_through_the_hand
         core._await_session_name_release(thread)
         assert world.identity(alpha)["state"] == "ended" and world.events(alpha)[-1] == "end"
         assert not token_path(config_dir / "identity", me, 5_000_000).exists()
-        assert identity_lease.current() is None
+        assert identity_lease.current() is None and not token_header._LEASE_OWNER
     finally:
         identity_lease._STOP.set()

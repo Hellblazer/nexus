@@ -47,6 +47,8 @@ def test_a_holder_of_another_claude_config_dir_is_not_reported_gone_and_its_file
     _token(directory, 100, str(procs.sessions_dir))                        # bound under A, crashed
     _token(directory, 200, str(tmp_path / "B-sessions"))                   # bound under B, alive there
     _token(directory, 300, None)                                           # bound before the registry dir was recorded
+    procs.procs[200] = T0                                                  # running, but its file is in B
+    procs.procs[300] = T0
     engine = _Engine([_view("i100", 100), _view("i200", 200), _view("i300", 300)])
     report = sweep_host(engine, procs, host=HOST, own=(999, 999_000), identity_dir=directory)
     assert engine.gone_calls == ["i100"] and report.recorded_gone == ["i100"] and report.unjudged_other_registry == 2
@@ -63,3 +65,23 @@ def test_a_credential_that_may_not_report_gone_ends_the_sweep_quietly(tmp_path: 
     report = sweep_host(engine, procs, host=HOST, own=None, identity_dir=directory)
     assert report.forbidden and engine.gone_calls == ["i100"] and report.recorded_gone == []
     assert token_path(directory, 100, 100_000).exists(), "nothing was recorded, so nothing is deleted"
+
+
+def test_a_token_file_is_deleted_only_after_this_runs_sweep_dealt_with_its_holder(tmp_path: Path) -> None:
+    """clean_local_files deletes a gone process's token file only when the sweep recorded the gone with the engine, or the
+    engine no longer lists that process as the holder of the file's identity. No sweep, a sweep the credential could not
+    finish, or a holder the engine still lists and the sweep did not record: the file stays."""
+    from nexus.identity.sweep import SweepReport, clean_local_files
+
+    procs = FakeProcesses(tmp_path / "sessions")
+    directory = tmp_path / "identity"
+    for pid in (100, 101, 102):
+        _token(directory, pid, str(procs.sessions_dir))                    # three crashed holders (no process, no file)
+    assert clean_local_files(directory, procs, host=HOST).token_files_removed == []          # no sweep ran
+    forbidden = SweepReport(swept=True, forbidden=True)
+    assert clean_local_files(directory, procs, host=HOST, report=forbidden).token_files_removed == []
+    # i100: the sweep recorded it; i101: still listed, not recorded (a repeat verdict); i102: not listed (taken over)
+    report = SweepReport(swept=True, recorded_gone=["i100"], holders={"i100": (100, 100_000), "i101": (101, 101_000)})
+    removed = clean_local_files(directory, procs, host=HOST, report=report).token_files_removed
+    assert sorted(removed) == ["100.100000.token", "102.102000.token"]
+    assert token_path(directory, 101, 101_000).exists()
