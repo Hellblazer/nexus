@@ -4190,6 +4190,23 @@ async def _plan_run_impl(
         """One assessment call through the run's own dispatcher, accounted as a ``StepRecord``."""
         nonlocal _coverage_calls
         from nexus.plans.coverage_ledger import ASSESSMENT_OPERATOR  # noqa: PLC0415 — deferred; the ledger module imports this one's neighbours
+        from nexus.plans.coverage_pool import DISPATCH_USAGE_KEY  # noqa: PLC0415 — deferred, as above
+
+        # nexus-w8d30: with the pool switch on, the call's token counts ride beside the reply (and on a raised exception) under
+        # this runner-owned key, for the pool filter's call log. The assessment reads only ``evidence``; with the switch off
+        # nothing is attached.
+        pool_log = coverage_boundary is not None and bool(getattr(coverage_boundary, "pool_key_scan", False))
+
+        def usage_counts(rolled: Any) -> dict[str, Any]:
+            if rolled is None:
+                return {}
+            counts: dict[str, Any] = {
+                name: n for name in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+                if isinstance(n := getattr(rolled, name, None), int) and not isinstance(n, bool)
+            }
+            if isinstance(model := getattr(rolled, "model", None), str):
+                counts["model"] = model[:80]
+            return counts
 
         step_index = len(steps) + _coverage_calls
         _coverage_calls += 1
@@ -4208,13 +4225,17 @@ async def _plan_run_impl(
                     ref=ASSESSMENT_OPERATOR,
                     reason=f"returned {type(result).__name__}; expected dict",
                 )
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as exc:
             # A cancelled call counts too (nexus-jypmj.17): the boundary cuts each concurrent call at its own timeout
             # from outside, and a call cut that way still spent what it spent.
+            rolled = _rollup_step_usage(usage)
             _record_step(
                 step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
-                elapsed_ms=int((time.monotonic() - started) * 1000), ok=False, usage=_rollup_step_usage(usage),
+                elapsed_ms=int((time.monotonic() - started) * 1000), ok=False, usage=rolled,
             )
+            if pool_log and (counts := usage_counts(rolled)):
+                with contextlib.suppress(Exception):  # an exception that refuses attributes just carries no counts
+                    setattr(exc, DISPATCH_USAGE_KEY, counts)
             raise
         _, result = _step_source(ASSESSMENT_OPERATOR, result)
         rolled = _rollup_step_usage(usage)
@@ -4222,13 +4243,13 @@ async def _plan_run_impl(
             step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
             elapsed_ms=int((time.monotonic() - started) * 1000), ok=True, usage=rolled,
         )
-        counts = {
-            name: n for name in ("input_tokens", "output_tokens")
-            if rolled is not None and isinstance(n := getattr(rolled, name, None), int) and not isinstance(n, bool)
-        }
-        # nexus-w8d30: the call's token counts ride beside the reply so the pool filter can log them. The assessment reads
-        # only ``evidence`` from a reply, so a ``usage`` key changes nothing it reads; the dispatcher's own dict is not touched.
-        return {**result, "usage": counts} if counts else result
+        if not pool_log:
+            return result
+        # a copy, so the dispatcher's own dict is not touched; a key the model put there is replaced, never trusted
+        reply = {k: v for k, v in result.items() if k != DISPATCH_USAGE_KEY}
+        if counts := usage_counts(rolled):
+            reply[DISPATCH_USAGE_KEY] = counts
+        return reply
 
     async def _coverage_retrieval(tool: str, args: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         """One repair retrieval call (a targeted query or the chunk fetch) through the run's dispatcher,

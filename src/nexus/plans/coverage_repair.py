@@ -348,8 +348,9 @@ class RepairReport:
     pool_need_s: float | None = None
     pool_room_s: float | None = None
     #: nexus-w8d30: the filter calls that replied with no evidence record (a failed call, never a reject), and one entry per
-    #: call (``call``, ``prompt_sha256``, ``reply_chars``, ``reply_sha256``, ``output_tokens``, ``supports`` as item and
-    #: facet ids, ``outcome``): hashes, ids and closed names, no chunk text.
+    #: call (``call``, ``payload_sha256``, ``reply_chars``, ``reply_sha256``, the runner's token, cache and model figures,
+    #: ``supports`` as accepted item and facet ids, ``unmatched``, ``host_rejected``, ``outcome``, ``error``): hashes, ids and
+    #: closed names, no chunk text.
     pool_filter_empty_calls: int = 0
     pool_filter_log: tuple[Mapping[str, Any], ...] = ()
 

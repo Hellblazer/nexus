@@ -331,12 +331,24 @@ def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
             "pool_keys_rejected": len(r.pool_keys_rejected), "pool_filter_calls": r.pool_filter_calls,
             "pool_filter_cost_usd": r.pool_filter_cost_usd, "pool_reason": r.pool_reason,
             "pool_need_s": r.pool_need_s, "pool_room_s": r.pool_room_s,
-            # nexus-w8d30: hashes, ids and closed names per filter call, cut at WIRE_FILTER_LOG_CAP
+            # nexus-w8d30: per filter call, scalars only (closed names and counts), cut at WIRE_FILTER_LOG_CAP; the id lists and
+            # hashes stay on the repair report's wire form
             "pool_filter_empty_calls": r.pool_filter_empty_calls,
-            "pool_filter_log": [dict(c) for c in r.pool_filter_log[:WIRE_FILTER_LOG_CAP]],
+            "pool_filter_log": [_pool_call_scalars(c) for c in r.pool_filter_log[:WIRE_FILTER_LOG_CAP]],
             "pool_filter_log_truncated": max(0, len(r.pool_filter_log) - WIRE_FILTER_LOG_CAP),
         })
     return counts
+
+
+def _pool_call_scalars(call: Mapping[str, Any]) -> dict[str, Any]:
+    """One pool filter call as the run summary keeps it: the call number, its outcome and error class, the output tokens, the
+    reply's length and four counts. No id, hash or string a model wrote."""
+    return {
+        "call": call.get("call"), "outcome": call.get("outcome"), "error": call.get("error"),
+        "output_tokens": call.get("output_tokens"), "reply_chars": call.get("reply_chars"),
+        "supports": len(call.get("supports") or ()) + int(call.get("supports_truncated") or 0),
+        "unmatched": call.get("unmatched", 0), "host_rejected": call.get("host_rejected", 0),
+    }
 
 
 def build_run_summary(

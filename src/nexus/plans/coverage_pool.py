@@ -44,6 +44,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -51,14 +52,14 @@ from typing import Any
 
 import structlog
 
-from nexus.plans.coverage_ledger import _TAG, AssessmentReport, BoundaryView, CoverageResult, EvidenceAnchor, FacetFinding
+from nexus.plans.coverage_ledger import _ROLES, _TAG, AssessmentReport, BoundaryView, CoverageResult, EvidenceAnchor, FacetFinding
 from nexus.plans.coverage_repair import MIN_REPAIR_QUERY_S, RepairHit
 from nexus.plans.request_coverage import Facet
 from nexus.plans.reserved_stream import strip_source_note
 
 _log = structlog.get_logger(__name__)
 
-__all__ = ["POOL_REASONS", "PoolEnv", "run_pool_phase"]
+__all__ = ["DISPATCH_USAGE_KEY", "POOL_REASONS", "PoolEnv", "run_pool_phase"]
 
 #: Why the pool was skipped or closed (``RepairReport.pool_reason``); empty when the scan ran through.
 POOL_REASONS: tuple[str, ...] = (
@@ -112,54 +113,121 @@ class PoolEnv:
     usd_reserve: float | None = None
 
 
-#: The ``supports`` records one call's log entry lists; the rest are counted in ``supports_truncated``.
+#: The ``supports`` pairs one call's log entry lists; the rest are counted in ``supports_truncated``.
 _CALL_SUPPORTS_CAP = 50
+#: Longest string any log field carries: a backstop, since the ids are matched against the call's own and the rest are ours.
+_FIELD_CAP = 80
+#: The key the runner's assessment check puts the call's token counts under (a runner-owned key, never read from the model's
+#: reply), and the attribute it gives an exception raised by a call. Only a run with the pool switch on carries it.
+DISPATCH_USAGE_KEY = "_nx_dispatch_usage"
+_USAGE_INTS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _call_record(ordinal: int, args: Mapping[str, Any], reply: Any, outcome: str) -> dict[str, Any]:
+def _cap(value: Any, n: int = _FIELD_CAP) -> str:
+    return str(value)[:n]
+
+
+def _host_rejected(reply: Any) -> int:
+    """How many records the host dropped from the reply (``bind`` lists an item id outside the call's items in ``rejected``)."""
+    rejected = reply.get("rejected") if isinstance(reply, Mapping) else None
+    return len(rejected) if isinstance(rejected, list) else 0
+
+
+def _is_empty(reply: Any) -> bool:
+    """An evidence list with no record in it and nothing the host dropped: a failed call. Plain checks only, because the
+    filter's verdict reads this and logging must never move it."""
+    evidence = reply.get("evidence") if isinstance(reply, Mapping) else None
+    return isinstance(evidence, list) and not any(isinstance(r, Mapping) for r in evidence) and _host_rejected(reply) == 0
+
+
+_FACET_LINE = re.compile(r"^\[([A-Za-z0-9_.\-]+)\]", re.MULTILINE)
+
+
+def _call_scope(args: Mapping[str, Any]) -> tuple[frozenset[str], dict[str, str]]:
+    """The item ids the call showed and its facet tags (lower case to the id), read from what was sent: the ledger's own
+    rules for a valid record (``CoverageBoundary._assess``) are tested against these."""
+    try:
+        shown = json.loads(str(args.get("items", "")))
+        ids = frozenset(str(i["id"]) for i in shown if isinstance(i, Mapping) and "id" in i)
+    except (ValueError, TypeError):
+        ids = frozenset()
+    instruction = str(args.get("check_instruction", ""))
+    tags = {t.lower(): t for t in _FACET_LINE.findall(instruction.partition("Facets:\n")[2])}
+    return ids, tags
+
+
+def _accepted(rec: Mapping[str, Any], ids: frozenset[str], tags: Mapping[str, str]) -> tuple[str, str, str] | None:
+    """``(item id, facet id, role)`` when the ledger would accept *rec* for this call, else ``None``."""
+    item_id, role, quote = rec.get("item_id"), rec.get("role"), rec.get("quote")
+    m = _TAG.match(quote) if isinstance(quote, str) else None
+    facet = tags.get(m.group(1).lower()) if m is not None else None
+    if not isinstance(item_id, str) or item_id not in ids or role not in _ROLES or facet is None:
+        return None
+    return item_id, facet, role
+
+
+def _reply_body(reply: Any) -> Any:
+    """What the model itself said: its ``evidence`` list. A reply without one is hashed whole, less the keys that are not the
+    model's (the runner's usage and ``ok``), so the same reply hashes the same on every pass whatever the call cost."""
+    evidence = reply.get("evidence") if isinstance(reply, Mapping) else None
+    if isinstance(evidence, list):
+        return evidence
+    if isinstance(reply, Mapping):
+        return {k: v for k, v in reply.items() if k not in (DISPATCH_USAGE_KEY, "usage", "ok")}
+    return reply
+
+
+def _usage_of(reply: Any, exc: BaseException | None) -> dict[str, Any]:
+    """The runner's token counts for the call, from its own key (never a model-supplied ``usage``); every field ``None`` when
+    the call reported none."""
+    raw = getattr(exc, DISPATCH_USAGE_KEY, None) if exc is not None else (reply.get(DISPATCH_USAGE_KEY) if isinstance(reply, Mapping) else None)
+    raw = raw if isinstance(raw, Mapping) else {}
+    out: dict[str, Any] = {n: (raw[n] if isinstance(raw.get(n), int) and not isinstance(raw.get(n), bool) else None) for n in _USAGE_INTS}
+    out["model"] = _cap(raw["model"]) if isinstance(raw.get("model"), str) else None
+    return out
+
+
+def _call_record(ordinal: int, args: Mapping[str, Any], reply: Any, exc: BaseException | None = None, *, timed_out: bool = False) -> dict[str, Any]:
     """What one filter call sent and got back, as closed names, hashes and ids: no chunk text, no quote.
 
-    *outcome* is ``supports`` (a record cites an item as support), ``no_support`` (records, none of them ``supports``: a
-    genuine reject), ``empty`` (an evidence list with no record), ``malformed`` (not the check shape), ``raised`` or
-    ``timeout``. The payload hash covers the items and the instruction, which is all the boundary sends; the check's own
-    prompt wrapper is a constant of the operator and is not hashed."""
+    ``outcome`` agrees with the verdict: ``supports`` and ``no_support`` completed (at least one record the ledger accepts,
+    with and without a ``supports`` among them; ``no_support`` is the genuine reject), ``empty`` (an evidence list with no
+    record), ``all_rejected`` (records, or records the host dropped, and none accepted), ``malformed`` (not the check
+    shape), ``raised`` or ``timeout``, the last two with ``error``, the exception's class name. ``supports`` holds only
+    the item and facet ids the ledger accepts; ``unmatched`` counts the records it would not and ``host_rejected`` those the
+    host dropped before the pool saw the reply. ``payload_sha256`` covers the items and the instruction the boundary sends: the
+    operator's own prompt wrapper is built below it and is not seen here."""
     payload = f"{args.get('items', '')}\n{args.get('check_instruction', '')}"
     record: dict[str, Any] = {
-        "call": ordinal, "prompt_sha256": _digest(payload), "reply_chars": None, "reply_sha256": None, "output_tokens": None,
-        "supports": [], "supports_truncated": 0, "outcome": outcome,
+        "call": ordinal, "payload_sha256": _digest(payload), "reply_chars": None, "reply_sha256": None,
+        **_usage_of(reply, exc), "supports": [], "supports_truncated": 0, "unmatched": 0, "host_rejected": 0,
+        "outcome": "timeout" if timed_out else "raised", "error": _cap(type(exc).__name__) if exc is not None else None,
     }
-    if outcome in ("raised", "timeout"):
+    if exc is not None:
         return record
-    raw = json.dumps(reply, sort_keys=True, default=str, ensure_ascii=False)
+    raw = json.dumps(_reply_body(reply), sort_keys=True, default=str, ensure_ascii=False)
     record["reply_chars"], record["reply_sha256"] = len(raw), _digest(raw)
-    usage = reply.get("usage") if isinstance(reply, Mapping) else None
-    tokens = usage.get("output_tokens") if isinstance(usage, Mapping) else None
-    record["output_tokens"] = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
-    cited: list[dict[str, str]] = []
-    evidence = reply.get("evidence") if isinstance(reply, Mapping) else None
-    for rec in evidence if isinstance(evidence, list) else ():
-        if not isinstance(rec, Mapping) or rec.get("role") != "supports":
-            continue
-        quote = rec.get("quote")
-        tag = _TAG.match(quote) if isinstance(quote, str) else None
-        cited.append({"item_id": str(rec.get("item_id")), "facet_id": tag.group(1) if tag else ""})
-    record["supports"] = cited[:_CALL_SUPPORTS_CAP]
-    record["supports_truncated"] = max(0, len(cited) - _CALL_SUPPORTS_CAP)
-    return record
-
-
-def _outcome(reply: Any) -> str:
     evidence = reply.get("evidence") if isinstance(reply, Mapping) else None
     if not isinstance(evidence, list):
-        return "malformed"
+        record["outcome"] = "malformed"
+        return record
+    ids, tags = _call_scope(args)
     records = [r for r in evidence if isinstance(r, Mapping)]
-    if not records:
-        return "empty"
-    return "supports" if any(r.get("role") == "supports" for r in records) else "no_support"
+    accepted = [a for r in records if (a := _accepted(r, ids, tags)) is not None]
+    cited = list(dict.fromkeys((i, f) for i, f, role in accepted if role == "supports"))
+    record["supports"] = [{"item_id": i, "facet_id": f} for i, f in cited[:_CALL_SUPPORTS_CAP]]
+    record["supports_truncated"] = max(0, len(cited) - _CALL_SUPPORTS_CAP)
+    record["unmatched"] = len(records) - len(accepted)
+    record["host_rejected"] = _host_rejected(reply)
+    if accepted:
+        record["outcome"] = "supports" if cited else "no_support"
+    else:
+        record["outcome"] = "all_rejected" if records or record["host_rejected"] else "empty"
+    return record
 
 
 class _Tally:
@@ -175,10 +243,18 @@ class _Tally:
     def counts(self) -> dict[str, Any]:
         return {"calls": self.calls, "cost": self.cost, "empty": self.empty, "log": tuple(self.log)}
 
-    def _note(self, ordinal: int, args: Mapping[str, Any], reply: Any, outcome: str) -> None:
-        record = _call_record(ordinal, args, reply, outcome)
+    def _note(self, ordinal: int, args: Mapping[str, Any], reply: Any, exc: BaseException | None = None, *, timed_out: bool = False) -> None:
+        """One log entry and one event for a call. Never raises: logging must not move a verdict."""
+        try:
+            record = _call_record(ordinal, args, reply, exc, timed_out=timed_out)
+        except Exception as err:  # noqa: BLE001 — a call that cannot be described is named, and the filter carries on
+            record = {"call": ordinal, "outcome": "unlogged", "error": _cap(type(err).__name__)}
+            _log.warning("nx_answer_pool_filter_log_failed", call=ordinal, error=record["error"])
         self.log.append(record)
-        _log.info("nx_answer_pool_filter_call", **record)
+        try:
+            _log.info("nx_answer_pool_filter_call", **record)
+        except Exception:  # noqa: BLE001, S110 — see above
+            pass
 
     def counting(self, check: Callable[..., Awaitable[Mapping[str, Any]]]) -> Callable[..., Awaitable[Mapping[str, Any]]]:
         async def counted(args: dict[str, Any], *, timeout: float) -> Mapping[str, Any]:
@@ -186,17 +262,18 @@ class _Tally:
             ordinal = self.calls  # calls run side by side: the count may have moved on by the time this one ends
             try:
                 reply = await check(args, timeout=timeout)
-            except (TimeoutError, asyncio.CancelledError):
+            except (TimeoutError, asyncio.CancelledError) as exc:
                 self.timed_out = True
-                self._note(ordinal, args, None, "timeout")
+                self._note(ordinal, args, None, exc, timed_out=True)
                 raise
-            except Exception:
-                self._note(ordinal, args, None, "raised")
+            except Exception as exc:
+                cut = any(c.__name__ == "OperatorTimeoutError" for c in type(exc).__mro__)  # the dispatcher's own timeout
+                self.timed_out = self.timed_out or cut
+                self._note(ordinal, args, None, exc, timed_out=cut)
                 raise
-            outcome = _outcome(reply)
-            if outcome == "empty":
+            if _is_empty(reply):
                 self.empty += 1
-            self._note(ordinal, args, reply, outcome)
+            self._note(ordinal, args, reply)
             return reply
 
         return counted
