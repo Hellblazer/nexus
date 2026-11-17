@@ -38,6 +38,8 @@ def span_cmd(tumbler: str, passage: str | None, start: int | None, end: int | No
     more than once, or not at all, is refused. PDFs and nx-note documents have
     no text source and are refused.
     """
+    if not tumbler.strip():
+        raise click.UsageError("TUMBLER is empty.")
     by_offsets = start is not None or end is not None
     if passage is not None and by_offsets:
         raise click.UsageError("--passage cannot be combined with --start/--end.")
@@ -45,6 +47,8 @@ def span_cmd(tumbler: str, passage: str | None, start: int | None, end: int | No
         raise click.UsageError("give --passage TEXT, or --start N with --end N.")
     if by_offsets and (start is None or end is None):
         raise click.UsageError("--start and --end go together.")
+
+    import httpx  # noqa: PLC0415 — keeps CLI startup light
 
     from nexus.catalog.dchash import dchash_span, dchash_span_for_passage  # noqa: PLC0415 — keeps CLI startup light
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -60,8 +64,12 @@ def span_cmd(tumbler: str, passage: str | None, start: int | None, end: int | No
         raise click.ClickException(
             f"{tumbler}: the source file is not valid UTF-8 ({exc.reason} at byte {exc.start})"
         ) from exc
-    except (ValueError, OSError) as exc:
+    except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(f"{tumbler}: cannot read the source file: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise click.ClickException(f"{tumbler}: catalog lookup failed: {exc}") from exc
     click.echo(span)
 
 

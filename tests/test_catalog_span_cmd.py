@@ -87,7 +87,7 @@ def test_refused_mint_exits_1_with_message(cat: FakeCatalog) -> None:
 def test_range_refusal_exits_1(cat: FakeCatalog) -> None:
     result = run(cat, TUMBLER, "--start", "5", "--end", "5")
     assert result.exit_code == 1
-    assert "5" in result.output and str(len(BODY)) in result.output
+    assert f"range 5-5 is outside the document (need 0 <= start < end <= {len(BODY)})" in result.output
 
 
 def test_pdf_refused_exits_1(tmp_path: Path) -> None:
@@ -110,4 +110,6 @@ def test_missing_source_file_exits_1(tmp_path: Path) -> None:
     cat = FakeCatalog(make_entry(file_path=str(tmp_path / "gone.md")))
     result = run(cat, TUMBLER, "--start", "0", "--end", "1")
     assert result.exit_code == 1
-    assert "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert f"{TUMBLER}: cannot read the source file" in result.output
+    assert "gone.md" in result.output

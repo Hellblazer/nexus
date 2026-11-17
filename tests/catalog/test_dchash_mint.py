@@ -141,6 +141,18 @@ def test_paper_pdf_refused_before_read(tmp_path: Path, no_read: None) -> None:
             call()
 
 
+def test_paper_content_type_alone_refused_before_read(tmp_path: Path, no_read: None) -> None:
+    # `nx index pdf` registers a PDF as "paper"; the type alone must refuse it.
+    cat = doc_catalog(tmp_path, BAD_BYTES, "a.txt", content_type="paper")
+    with pytest.raises(ValueError, match="is a PDF"):
+        dchash_span(cat, TUMBLER, 0, 1)
+
+
+def test_malformed_source_uri_does_not_block_minting(tmp_path: Path) -> None:
+    cat = doc_catalog(tmp_path, b"hello world", "a.md", source_uri="http://[bad")
+    assert dchash_span(cat, TUMBLER, 0, 5).endswith(":0-5")
+
+
 def test_pdf_content_type_refused_before_read(tmp_path: Path, no_read: None) -> None:
     cat = doc_catalog(tmp_path, BAD_BYTES, "a.txt", content_type="pdf")
     with pytest.raises(ValueError, match="is a PDF"):

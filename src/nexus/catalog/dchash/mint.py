@@ -29,7 +29,11 @@ def _is_pdf(entry: CatalogEntry) -> bool:
         return True
     if entry.file_path.lower().endswith(".pdf"):
         return True
-    return urlparse(entry.source_uri or "").path.lower().endswith(".pdf")
+    try:
+        uri_path = urlparse(entry.source_uri or "").path
+    except ValueError:  # a malformed URI (e.g. "http://[bad") names no path
+        uri_path = ""
+    return uri_path.lower().endswith(".pdf")
 
 
 def _source_path(catalog: Any, tumbler: str) -> Path:
