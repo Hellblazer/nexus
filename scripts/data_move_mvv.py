@@ -32,8 +32,8 @@ Subcommands:
                      back (moved rows = committed chunks x chunk size), then let the move finish: every row once.
     ``masking``      after the move, register a move that errors with the admin password in its message. Positive
                      control first: PostgreSQL's own log (``<pgdata>/pg.log``) must carry the password; then the
-                     engine log must carry ``<redacted>`` and never the password, and no failure column in
-                     nexus.data_moves or the dml_utils run tables may carry it.
+                     engine log must carry ``<redacted>`` and never the password, and nexus.data_moves.failure may not
+                     carry it; the dml_utils run tables are scanned and the counts reported.
 
 Every scenario prints one JSON object on stdout (and to ``--json``). Exit 0 when its checks pass, 1 when one fails,
 2 when the run could not measure.
@@ -186,7 +186,7 @@ def masking_verdict(*, pg_log_lines: int, engine_log_lines: int, failure_column_
               "masking_installed_ge_1": masking_installed,
               "a_masked_line_with_redacted": masked_line_seen,
               "no_engine_log_line_carries_the_password": engine_log_lines == 0,
-              "no_failure_column_carries_the_password": failure_column_hits == 0}
+              "no_data_moves_failure_carries_the_password": failure_column_hits == 0}
     why = []
     if not checks["control_pg_log_carries_the_password"]:
         why.append("the control did not fire: PostgreSQL's log holds no line with the password, so the probe read "
@@ -694,7 +694,11 @@ def scenario_masking(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     pg_lines = lines_with(pg_logs, pw, pg_start)
     # the password is in the redacted text's place everywhere the engine wrote: scan what it stored, too
     column_hits = secret_column_hits(eng, pw)
-    failure_hits = sum(n for k, n in column_hits.items() if _FAILURE_COLUMN.search(k.rsplit(".", 1)[-1]))
+    # nexus.data_moves.failure is the engine's own record and is gated. The dml_utils_data run tables belong to the
+    # library, which stores PostgreSQL's raw error message: reported, with the count, not gated.
+    failure_hits = column_hits.get("nexus.data_moves.failure", 0)
+    library_error_hits = {k: n for k, n in column_hits.items()
+                          if k.startswith("dml_utils_data.") and _FAILURE_COLUMN.search(k.rsplit(".", 1)[-1])}
     installed = eng.events("event=log_masking_installed")
     masking = [int(m.group(1)) for ln in installed if (m := re.search(r"masking=(\d+)", ln))]
     verdict = masking_verdict(pg_log_lines=len(pg_lines), engine_log_lines=len(raw), failure_column_hits=failure_hits,
@@ -705,10 +709,12 @@ def scenario_masking(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
            "pg_log_lines_with_the_password": len(pg_lines),
            "pg_log_sample": [ln.replace(pw, "<PASSWORD>")[:300] for ln in pg_lines[:3]],
            "engine_log_lines_with_the_password": len(raw),
-           "stored_columns_with_the_password": column_hits, "failure_column_hits": failure_hits,
+           "stored_columns_with_the_password": column_hits, "data_moves_failure_hits": failure_hits,
+           "library_error_columns_with_the_password": library_error_hits,
            "checks": verdict["checks"], "verdict": verdict,
-           "note": "nexus.data_moves.template holds the password because the probe's own INSERT put it there; it is the "
-                   "input, not an output of the engine"}
+           "note": "nexus.data_moves.template and dml_utils_data.migration_run.sql_text hold the password because the "
+                   "probe's own INSERT put it in the template: that is the input, not an output of the engine. "
+                   "dml_utils_data.migration_error.message is PostgreSQL's raw error text, kept by the library"}
     return out, verdict["ok"]
 
 

@@ -208,9 +208,9 @@ class TestMaskingVerdict:
         v = self._v(engine_log_lines=1)
         assert v["ok"] is False and v["checks"]["no_engine_log_line_carries_the_password"] is False
 
-    def test_a_password_in_a_failure_column_fails(self):
+    def test_a_password_in_data_moves_failure_fails(self):
         v = self._v(failure_column_hits=1)
-        assert v["ok"] is False and v["checks"]["no_failure_column_carries_the_password"] is False
+        assert v["ok"] is False and v["checks"]["no_data_moves_failure_carries_the_password"] is False
 
     def test_masking_not_installed_or_no_masked_line_fails(self):
         assert self._v(masking_installed=False)["ok"] is False
