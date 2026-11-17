@@ -28,9 +28,9 @@ def plain_tracebacks() -> None:
 
     A mitigation, not a cure. The suite's default structlog renderer draws every ``exc_info`` as a rich
     traceback with each frame's locals, the heaviest allocation burst inside any of the journey's claim
-    windows (30-50 ms idle, up to 0.5 s on a loaded chas grant; plain text, a few ms). CI run 44056253456
-    lapsed document 7's claim during such a render: the process paused about 3 s, neither the worker nor
-    the renewer ran, and the renew and then the nack answered ClaimNotFound. What paused the process (a
+    windows (measured for nexus-bpikw, 2026-11-17: 30-50 ms idle, up to 0.5 s on a loaded chas lab-m grant; plain text, a few ms). CI run 44056253456
+    lapsed document 7's claim during such a render: for about 3 s neither the worker nor the renewer
+    logged or sent anything, a pause of the process inferred from the log, and the renew and then the nack answered ClaimNotFound. What paused the process (a
     GC pass, a cgroup or host stall) is not identified; ``PauseWatch`` reports it next time. Production
     renders exceptions as plain text too (``logging_setup.configure_logging``: ``format_exc_info``).
     """
@@ -62,7 +62,8 @@ class PauseWatch:
     KEEP = 5
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        # Reentrant: a gc callback can fire on a thread already inside this lock.
+        self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.gaps: list[tuple[float, datetime]] = []

@@ -99,12 +99,12 @@ DOC_RETRY = 7
 DOC_CRASH = 13
 
 #: Lease asked of every claim in the journey. The engine's template cap is 900;
-#: 6 s keeps the six lapses of document 13 well under a minute, not an hour (gate O6).
+#: 6 s keeps the six lapses of document 13 to about 40 s, not an hour (gate O6).
 #: RESIDUAL: renewed every ``_RENEW_RATIO * _LEASE_S`` (1.2 s), a claim survives a process
 #: pause of up to about 4.8 s in any claim window; a longer pause lapses it under a live worker,
 #: and the bullet-1 or bullet-2 message then shows the pause (``_PauseWatch``). It was 2 s renewed
-#: every 0.5 s (about 1.5 s of tolerance) until nexus-bpikw: CI's loaded ``-n 4`` shards paused
-#: the process past that.
+#: every 0.5 s (about 1.5 s of tolerance) until nexus-bpikw: on CI's loaded ``-n 4`` shards the
+#: journey lapsed doc 7's claim four times, and run 44056253456 shows a ~3 s pause.
 _LEASE_S = 6
 #: Renew interval over lease, production's own (``RENEW_INTERVAL_S`` 120 over ``LEASE_S`` 600).
 _RENEW_RATIO = 0.2
