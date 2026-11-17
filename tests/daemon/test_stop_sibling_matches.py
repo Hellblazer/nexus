@@ -353,24 +353,24 @@ class TestMemberCheckPlacesAJarEngineByItsOwnDirectory:
 
     def test_an_engine_of_this_directory_is_a_member(self, tmp_path: Path, jar: Path) -> None:
         cfg = tmp_path / "a"
-        check = storage_service_member_check(cfg, environment_of=_env({7: {"NEXUS_CONFIG_DIR": str(cfg)}}))
+        check = storage_service_member_check(cfg, platform="linux", environment_of=_env({7: {"NEXUS_CONFIG_DIR": str(cfg)}}))
         assert check(7, self._engine(jar)) == "member"
 
     def test_an_engine_of_another_install_sharing_the_jar_is_left_alone(self, tmp_path: Path, jar: Path) -> None:
         a, b = tmp_path / "a", tmp_path / "b"
-        check = storage_service_member_check(a, environment_of=_env({7: {"NEXUS_CONFIG_DIR": str(b)}}))
+        check = storage_service_member_check(a, platform="linux", environment_of=_env({7: {"NEXUS_CONFIG_DIR": str(b)}}))
         assert check(7, self._engine(jar)) == "other"
 
     def test_the_default_directory_is_read_from_the_engines_home(self, tmp_path: Path, jar: Path) -> None:
         home = tmp_path / "home"
         default = home / ".config" / "nexus"
-        check = storage_service_member_check(default, environment_of=_env({7: {"HOME": str(home)}}))
+        check = storage_service_member_check(default, platform="linux", environment_of=_env({7: {"HOME": str(home)}}))
         assert check(7, self._engine(jar)) == "member"
-        elsewhere = storage_service_member_check(tmp_path / "a", environment_of=_env({7: {"HOME": str(home)}}))
+        elsewhere = storage_service_member_check(tmp_path / "a", platform="linux", environment_of=_env({7: {"HOME": str(home)}}))
         assert elsewhere(7, self._engine(jar)) == "other"
 
     def test_an_unreadable_environment_is_unreadable_not_a_member(self, tmp_path: Path, jar: Path) -> None:
-        check = storage_service_member_check(tmp_path / "a", environment_of=_env({7: None}))
+        check = storage_service_member_check(tmp_path / "a", platform="linux", environment_of=_env({7: None}))
         assert check(7, self._engine(jar)) == "unreadable"
 
     def test_on_windows_a_jar_match_is_a_member_because_there_is_no_environment_reader(
@@ -410,7 +410,7 @@ class TestMemberCheckPlacesAJarEngineByItsOwnDirectory:
         ):
             result = sweep_matching_processes(
                 storage_service_stack_matcher(a), exclude_pid=99999,
-                member_check=storage_service_member_check(a, environment_of=_env(env)),
+                member_check=storage_service_member_check(a, platform="linux", environment_of=_env(env)),
             )
         assert terminated == [[10]], "the other install's engine must not be signalled"
         assert result.unreadable == (12,)
