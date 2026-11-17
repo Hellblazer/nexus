@@ -2120,7 +2120,7 @@ public final class NexusService {
             // Arm 4 (RDR-253 Step 1, nexus-hczdo.1.1): identity retention, tombstones and binding-row pruning. One bounded
             // pass per visit (IdentityRetention.PASS_LIMIT); failure is contained like the arms above.
             try {
-                identityRepo.runRetention(tenant);
+                identityRepo.runRetention(tenant, statementTimeout);
             } catch (Exception ex) {
                 complete = false;
                 tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_ERROR);

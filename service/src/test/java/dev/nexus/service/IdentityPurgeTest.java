@@ -49,7 +49,7 @@ class IdentityPurgeTest {
         env.putTuple(t, "mailbox/" + id);
         env.putTuple(t, "mailbox/" + id);
         assertThat(env.post(t, "/" + id + "/memberships", Map.of("group", "crew", "role", "member")).status()).isEqualTo(200);
-        env.putTuple(t, "work/" + id);
+        assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "tmux", "ref", "srv", "state", "done")).status()).isEqualTo(200);
     }
 
     @Test
@@ -103,9 +103,8 @@ class IdentityPurgeTest {
         assertThat(r.map("removed")).containsEntry("board_entries", 1).containsEntry("mailbox", 2)
             .containsEntry("member", 1).containsEntry("work", 1);
         assertThat(env.threadsTitles(t)).containsExactly("somebody else");
-        for (String fam : new String[] {"mailbox", "work"}) {
-            assertThat(env.tupleCount(t, fam + "/" + id)).as(fam).isZero();
-        }
+        assertThat(env.tupleCount(t, "mailbox/" + id)).isZero();
+        assertThat(env.get(t, "/" + id + "/work").list("work")).as("the purge removed the work rows").isEmpty();
         assertThat(env.tupleCount(t, "mailbox/" + other)).isEqualTo(1);
         assertThat(env.get(t, "/" + id + "/memberships").list("memberships")).as("the purge removed the memberships").isEmpty();
         // A seat's record, alias and binding rows are permanent history.
@@ -114,7 +113,7 @@ class IdentityPurgeTest {
         // The removal is logged with the caller and what it removed.
         var audit = env.audit(t, "identity_purge");
         assertThat(audit).hasSize(1);
-        assertThat(audit.get(0).get(0)).isEqualTo("operator:tenant");
+        assertThat(audit.get(0).get(0)).isEqualTo("operator:tenant:test-hash");
         assertThat(audit.get(0).get(1)).contains(id).contains("\"board_entries\"").contains("\"mailbox\"");
         // A second purge finds nothing and says so, and is logged too.
         Resp again = env.post(t, "/" + id + "/purge", OPERATOR);
@@ -123,7 +122,7 @@ class IdentityPurgeTest {
     }
 
     @Test
-    void anEphemeralIdentityIsTombstonedByAPurgeAndAnUnheldSeatMayBePurged() {
+    void anEphemeralIdentityIsTombstonedByAPurgeAndAnUnheldSeatIsRefused() {
         String t = IdentityTestEnv.freshTenant();
         env.clock.set(T0);
         Resp eph = env.post(t, "", Map.of("kind", "ephemeral", "created_by", "session", "bind", ev("e1", 4, 40)));
@@ -137,8 +136,16 @@ class IdentityPurgeTest {
 
         String unheld = env.createSeat(t, "never");
         env.putThreadsEntry(t, "entry of " + unheld, unheld);
-        assertThat(env.post(t, "/" + unheld + "/purge", OPERATOR).status()).isEqualTo(200);
-        assertThat(env.threadsTitles(t)).doesNotContain("entry of " + unheld);
+        // The RDR allows an identity that ended, or lapsed with its holder gone; a seat nobody has bound, or one that was
+        // released, is neither.
+        Resp refused = env.post(t, "/" + unheld + "/purge", OPERATOR);
+        assertThat(refused.status()).isEqualTo(409);
+        assertThat(refused.error()).isEqualTo("identity_unheld");
+        assertThat(env.threadsTitles(t)).contains("entry of " + unheld);
+        var holder = ev("u1", 6, 60);
+        env.bind(t, unheld, "start", 0, holder);
+        env.bind(t, unheld, "release", 1, holder);
+        assertThat(env.post(t, "/" + unheld + "/purge", OPERATOR).error()).as("released").isEqualTo("identity_unheld");
     }
 
     @Test
@@ -155,7 +162,7 @@ class IdentityPurgeTest {
         assertThat(data.status()).isEqualTo(403);
         assertThat(env.tupleCount(t, "mailbox/" + id)).isEqualTo(2);
         assertThat(env.call("root", t, "POST", "/" + id + "/purge", OPERATOR).status()).isEqualTo(200);
-        assertThat(env.audit(t, "identity_purge").get(0).get(0)).isEqualTo("operator:root");
+        assertThat(env.audit(t, "identity_purge").get(0).get(0)).isEqualTo("operator:root:test-hash");
         assertThat(env.call(TENANT, t, "POST", "/i424242/purge", OPERATOR).status()).isEqualTo(404);
         assertThat(env.post(t, "/not-an-id/purge", OPERATOR).status()).isEqualTo(400);
     }

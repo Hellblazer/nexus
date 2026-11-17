@@ -20,6 +20,7 @@ import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_ALIASES;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_BINDINGS;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_COUNTERS;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_RECORDS;
+import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_WORK;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -71,12 +72,11 @@ class IdentityRetentionTest {
         env.putThreadsEntry(t, "scratch42 (" + id + ")", id);
         env.putThreadsEntry(t, "kept entry", keep);
         env.putThreadsEntry(t, "no identity", null);
-        for (String fam : new String[] {"mailbox", "work"}) {
-            env.putTuple(t, fam + "/" + id);
-            env.putTuple(t, fam + "/" + keep);
-        }
+        env.putTuple(t, "mailbox/" + id);
+        env.putTuple(t, "mailbox/" + keep);
         for (String who : new String[] {id, keep}) {
             assertThat(env.post(t, "/" + who + "/memberships", Map.of("group", "crew", "role", "leader")).status()).isEqualTo(200);
+            assertThat(env.post(t, "/" + who + "/work", Map.of("kind", "worktree", "ref", "/tmp/wt-" + who, "state", "running")).status()).isEqualTo(200);
         }
 
         env.clock.set(T0.plus(Duration.ofDays(30)).minusSeconds(1));
@@ -89,10 +89,10 @@ class IdentityRetentionTest {
         assertThat(env.get(t, "/sessions/e1").status()).as("its session index rows").isEqualTo(404);
         assertThat(env.get(t, "/sessions/e1b").status()).isEqualTo(404);
         assertThat(env.threadsTitles(t)).containsExactly("kept entry", "no identity");
-        for (String fam : new String[] {"mailbox", "work"}) {
-            assertThat(env.tupleCount(t, fam + "/" + id)).as(fam).isZero();
-            assertThat(env.tupleCount(t, fam + "/" + keep)).as(fam + " of another identity").isEqualTo(1);
-        }
+        assertThat(env.tupleCount(t, "mailbox/" + id)).as("mailbox").isZero();
+        assertThat(env.tupleCount(t, "mailbox/" + keep)).as("mailbox of another identity").isEqualTo(1);
+        assertThat(env.get(t, "/" + keep + "/work").list("work")).as("the other identity's work stays").hasSize(1);
+        assertThat(env.rows(t, IDENTITY_WORK, IDENTITY_WORK.TENANT_ID)).as("the tombstone took its work").isEqualTo(1);
         assertThat(env.get(t, "/" + keep).status()).isEqualTo(200);
         assertThat(env.get(t, "/groups/crew").list("members")).extracting(m -> m.get("identity")).as("the tombstone took its memberships").containsExactly(keep);
         assertThat(count(t, IDENTITY_BINDINGS, IDENTITY_BINDINGS.TENANT_ID)).as("only the other identity's rows are left: its start and the lapse the pass applied").isEqualTo(2);

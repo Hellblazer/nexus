@@ -63,8 +63,6 @@ class TupleShapeValidatorTest {
                 Map.of("to", "x"), Map.of("from", "a", "address_kind", "agent"), "hi", "n1", false));
         m.put("queue/<name>", () -> TupleShapeValidator.validateOut(template("queue/<name>"),
                 Map.of("queue", "q"), Map.of("from", "a"), "job", "n1", false));
-        m.put("work/<id>", () -> TupleShapeValidator.validateOut(template("work/<id>"),
-                Map.of("id", "i1"), Map.of("kind", "worktree", "ref", "r", "state", "running"), null, "n1", false));
         return m;
     }
 

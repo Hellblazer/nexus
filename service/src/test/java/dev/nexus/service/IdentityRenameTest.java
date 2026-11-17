@@ -150,4 +150,48 @@ class IdentityRenameTest {
         assertThat(env.get(t, "/alias/raven").status()).isEqualTo(404);
         assertThat(env.threadsTitles(t)).containsExactly("raven", "wren");
     }
+
+    @Test
+    void theBoardLineMatchesOnlyItsOwnIdentityNotOneThatSharesAPrefix() {
+        String t = IdentityTestEnv.freshTenant();
+        env.clock.set(T0);
+        String[] ids = new String[13];
+        for (int n = 1; n <= 12; n++) {
+            ids[n] = env.createSeat(t, "seat" + n);
+        }
+        assertThat(ids[1]).isEqualTo("i1");
+        assertThat(ids[10]).isEqualTo("i10");
+        assertThat(ids[12]).isEqualTo("i12");
+        env.putThreadsEntry(t, "entry-one", ids[1]);
+        env.putThreadsEntry(t, "entry-ten", ids[10]);
+        env.putThreadsEntry(t, "entry-twelve", ids[12]);
+
+        Resp r = env.post(t, "/rename", Map.of("old", "seat1", "new", "uno"));
+        assertThat(r.integer("board_entries_retitled")).isEqualTo(1);
+        assertThat(env.threadsTitles(t)).as("only i1's entry was retitled").containsExactly("entry-ten", "entry-twelve", "uno");
+
+        // The purge of i10 (ended) deletes i10's entry and neither i1's (now 'uno') nor i12's.
+        env.bind(t, ids[10], "start", 0, ev("s10", 10, 100));
+        env.bind(t, ids[10], "end", 1, Map.of());
+        assertThat(env.post(t, "/" + ids[10] + "/purge", Map.of("operator", true)).map("removed")).containsEntry("board_entries", 1);
+        assertThat(env.threadsTitles(t)).containsExactly("entry-twelve", "uno");
+    }
+
+    @Test
+    void aQuarantinedBoardEntryIsNotRetitledButAPurgeStillRemovesIt() {
+        String t = IdentityTestEnv.freshTenant();
+        env.clock.set(T0);
+        String id = env.createSeat(t, "hidden");
+        env.putThreadsEntry(t, "hidden entry", id);
+        env.quarantineThreadsEntry(t, "hidden entry");
+        Resp r = env.post(t, "/rename", Map.of("old", "hidden", "new", "shown"));
+        assertThat(r.status()).isEqualTo(200);
+        assertThat(r.integer("board_entries_retitled")).as("a hidden entry is not the board entry").isZero();
+        assertThat(env.threadsTitles(t)).containsExactly("hidden entry");
+        // An explicit removal is a hard delete, as MemoryRepository#delete is: no hidden copy is left behind.
+        env.bind(t, id, "start", 0, ev("s1", 1, 10));
+        env.bind(t, id, "end", 1, Map.of());
+        assertThat(env.post(t, "/" + id + "/purge", Map.of("operator", true)).map("removed")).containsEntry("board_entries", 1);
+        assertThat(env.threadsTitles(t)).isEmpty();
+    }
 }

@@ -145,6 +145,21 @@ public final class IdentityTestEnv implements AutoCloseable {
         }
     }
 
+    /** A call with the body text exactly as given (a test of malformed JSON sends what Jackson would never write). */
+    public Resp callRaw(String scopeName, String tenant, String method, String path, String rawBody) {
+        try {
+            var req = TestHttp.request("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/identity" + path)
+                .header("X-Test-Tenant", tenant).header("X-Test-Scope", scopeName)
+                .header("Content-Type", "application/json")
+                .method(method, HttpRequest.BodyPublishers.ofString(rawBody)).build();
+            HttpResponse<String> r = http.send(req, HttpResponse.BodyHandlers.ofString());
+            Map<String, Object> parsed = r.body() == null || r.body().isBlank() ? Map.of() : MAPPER.readValue(r.body(), MAP);
+            return new Resp(r.statusCode(), parsed);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     public Resp post(String tenant, String path, Object body) {
         return call(TENANT, tenant, "POST", path, body);
     }
@@ -227,6 +242,12 @@ public final class IdentityTestEnv implements AutoCloseable {
             .set(MEMORY.CONTENT, "session: sess-" + title + "\n"
                 + (identityId == null ? "" : "identity: " + identityId + "\n") + "## the work\nstate: running\n")
             .set(MEMORY.TIMESTAMP, OffsetDateTime.now(clock)).execute());
+    }
+
+    /** Hides a board entry the way {@code MemoryRepository#expire} does: quarantined_at set, every read path skips it. */
+    public void quarantineThreadsEntry(String tenant, String title) {
+        scope.withTenant(tenant, ctx -> ctx.update(MEMORY).set(MEMORY.QUARANTINED_AT, OffsetDateTime.now(clock))
+            .where(MEMORY.TENANT_ID.eq(tenant)).and(MEMORY.PROJECT.eq("threads")).and(MEMORY.TITLE.eq(title)).execute());
     }
 
     public List<String> threadsTitles(String tenant) {

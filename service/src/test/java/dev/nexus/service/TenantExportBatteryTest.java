@@ -180,7 +180,7 @@ class TenantExportBatteryTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             List<String> problems = new ArrayList<>();
             List<ExportTable> exported = TenantExport.TABLES.stream().filter(ExportTable::exported).toList();
-            assertThat(exported).as("the registry's data and derived tables").hasSize(31);
+            assertThat(exported).as("the registry's data and derived tables").hasSize(32);
 
             // the seed is not vacuous: every exported column is non-NULL in some A row and NULL-or-default in the
             // others, and B has rows in every table
@@ -840,6 +840,9 @@ class TenantExportBatteryTest {
             run(failures, "identity_sessions", () -> insert(ctx, "identity_sessions",
                 List.of("tenant_id", "session_id", "identity_id", "generation", "at"),
                 new Object[] {t, "s1", "i1", 1, TS}, new Object[] {t, "s1b", "i1", 1, TS}));
+            run(failures, "identity_work", () -> insert(ctx, "identity_work",
+                List.of("tenant_id", "identity_id", "kind", "ref", "state", "updated_at"),
+                new Object[] {t, "i1", "worktree", "/tmp/wt", "running", TS}));
             run(failures, "identity_memberships", () -> insert(ctx, "identity_memberships",
                 List.of("tenant_id", "identity_id", "group_name", "role", "created_at"), new Object[] {t, "i1", "crew", "leader", TS}));
         }

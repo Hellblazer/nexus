@@ -117,7 +117,9 @@ class IdentityCredentialRoutesTest {
     private static List<Probe> probes() {
         Map<String, Object> bind = evidence("probe", 7);
         List<Probe> p = new ArrayList<>();
-        p.add(new Probe("create", "POST", "", Map.of("kind", "seat", "name", "probe", "created_by", "sam"), false));
+        p.add(new Probe("create seat", "POST", "", Map.of("kind", "seat", "name", "probe", "created_by", "sam"), false));
+        // The MCP server's pending bind creates an ephemeral identity with its data credential.
+        p.add(new Probe("create ephemeral", "POST", "", Map.of("kind", "ephemeral", "created_by", "session", "bind", bind), true));
         p.add(new Probe("delegated", "POST", "/delegated", Map.of("parent", "i999999", "bind", bind), false));
         p.add(new Probe("rename", "POST", "/rename", Map.of("old", "nobody", "new", "somebody"), false));
         p.add(new Probe("promote", "POST", "/i999999/promote", Map.of("name", "x"), false));
@@ -146,6 +148,10 @@ class IdentityCredentialRoutesTest {
         p.add(new Probe("leave", "DELETE", "/i999999/memberships/crew", null, true));
         p.add(new Probe("groups of", "GET", "/i999999/memberships", null, true));
         p.add(new Probe("roster", "GET", "/groups/crew", null, true));
+        p.add(new Probe("work put", "POST", "/i999999/work", Map.of("kind", "wait", "ref", "x", "state", "running"), true));
+        p.add(new Probe("work remove", "DELETE", "/i999999/work?kind=wait&ref=x", null, true));
+        p.add(new Probe("work list", "GET", "/i999999/work", null, true));
+        p.add(new Probe("history", "GET", "/bindings?host=h1&pid=1&history=1", null, true));
         return p;
     }
 
@@ -167,7 +173,7 @@ class IdentityCredentialRoutesTest {
             if (mint != 403) wrong.add(p.name() + ": a mint credential got " + mint);
             if (boardCi != 403) wrong.add(p.name() + ": a board-ci credential got " + boardCi);
         }
-        assertThat(examined).as("non-vacuity: routes examined").isGreaterThanOrEqualTo(23);
+        assertThat(examined).as("non-vacuity: routes examined").isGreaterThanOrEqualTo(28);
         assertThat(wrong).isEmpty();
     }
 

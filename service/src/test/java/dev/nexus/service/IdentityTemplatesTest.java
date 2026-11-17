@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * RDR-253 Step 1 (nexus-hczdo.1.1): the template surface and the id counter. The templates with a tuple surface
- * (the mailbox's {@code identity} address kind and {@code work/<id>}) load and resolve; the
+ * (the mailbox's {@code identity} address kind) load and resolve; the
  * records with no expiry (identity, alias, binding, session) are engine tables, so there is no template for them.
  * The counter only grows: an id is never issued twice, not even after a tombstone removed the identity that held it.
  */
@@ -42,15 +42,13 @@ class IdentityTemplatesTest {
     }
 
     @Test
-    void theMailboxTakesIdentityAddressesAndWorkResolves() {
+    void theMailboxTakesIdentityAddressesAndNothingElseIsATemplate() {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, NexusService.SWEEP_INTERVAL_HOURS * 3600L);
         TemplateSchema mailbox = registry.resolve("mailbox/i12");
         assertThat(mailbox.name()).isEqualTo("mailbox/<address>");
         assertThat(mailbox.dimensions().get("address_kind").values()).containsExactly("agent", "session", "identity");
-        assertThat(registry.resolve("work/i12").name()).isEqualTo("work/<id>");
-        assertThat(registry.resolve("work/i12").take().enabled()).isFalse();
-        // The permanent records, memberships included, are tables, not templates: nothing resolves for them.
-        for (String name : new String[] {"identity/i12", "alias/marginalia", "binding/i12", "session/s-1", "member/i12"}) {
+        // The permanent records, memberships and work included, are tables, not templates: nothing resolves for them.
+        for (String name : new String[] {"identity/i12", "alias/marginalia", "binding/i12", "session/s-1", "member/i12", "work/i12"}) {
             assertThat(registry.resolve(name)).as(name).isNull();
         }
     }

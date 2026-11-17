@@ -27,13 +27,13 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_RECORDS;
-import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * RDR-253 Step 1 (nexus-hczdo.1.1): identity retention runs in the engine's scheduled tuple sweep, the one task the
  * RDR names for it. An ephemeral identity that ended 31 days ago is tombstoned by {@code runScheduledTupleSweep};
- * a live one and a seat are left alone.
+ * a live one and a seat are left alone. The tenant has identities and no tuple traffic, which is the case the sweep's
+ * tenant list must still reach.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class IdentitySweepWiringTest {
@@ -120,11 +120,8 @@ class IdentitySweepWiringTest {
         scope.withTenant(TENANT, ctx -> ctx.update(IDENTITY_RECORDS).set(IDENTITY_RECORDS.STATE, "ended")
             .set(IDENTITY_RECORDS.ENDED_AT, now.minusDays(400))
             .where(IDENTITY_RECORDS.TENANT_ID.eq(TENANT)).and(IDENTITY_RECORDS.ID.eq(seat)).execute());
-        // The sweep visits the tenants of nexus.tuple_tenants.
-        DSL.using(ds, SQLDialect.POSTGRES).insertInto(TUPLE_TENANTS)
-            .set(TUPLE_TENANTS.TENANT_ID, TENANT).set(TUPLE_TENANTS.FIRST_SEEN, now).set(TUPLE_TENANTS.LAST_SEEN, now)
-            .onConflictDoNothing().execute();
-
+        // No tuple was written and nothing was inserted into nexus.tuple_tenants by hand: creating an identity
+        // registered the tenant, so the sweep visits it.
         NexusService.TupleSweepRunResult result = service.runScheduledTupleSweep(now);
         assertThat(result.tenantsVisited()).as("non-vacuity: the sweep visited the tenant").isGreaterThanOrEqualTo(1);
         assertThat(result.incompleteCause()).isEqualTo(NexusService.TupleSweepIncompleteCause.NONE);

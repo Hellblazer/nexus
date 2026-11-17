@@ -12,7 +12,12 @@ public final class IdentityException extends RuntimeException {
 
     private final int status;
     private final String code;
-    /** Key, value, key, value... (an array, so the exception holds no collection field). */
+    /**
+     * The response detail as key, value, key, value... Held as an array and not as a {@code Map} on purpose:
+     * {@code TenantKeyedStateGateTest} flags every collection or map field of the main sources as possible
+     * per-tenant state that a tenant reset would have to clear, and an exception's payload is neither shared nor
+     * long-lived, so it is not one. {@link #details()} builds a map from it for the handler.
+     */
     private final Object[] detailPairs;
 
     public IdentityException(int status, String code, String message, Map<String, Object> details) {

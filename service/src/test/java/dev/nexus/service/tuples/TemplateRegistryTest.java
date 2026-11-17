@@ -49,9 +49,8 @@ class TemplateRegistryTest {
         // RDR-220 added board/ci/<topic> (sorts after board/<topic>).
         // RDR-235 E3 added the literal aspects (sorts first).
         // nexus-onjvw retired ledger/<session_id>: it is not here, and not a resolvable subspace.
-        // RDR-253 Step 1 added work/<id> (memberships are a table).
         assertEquals(List.of("aspects", "board/<topic>", "board/ci/<topic>", "directory/<name>",
-                "lock/<resource>", "mailbox/<address>", "queue/<name>", "work/<id>"), names);
+                "lock/<resource>", "mailbox/<address>", "queue/<name>"), names);
         assertNull(TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS).resolve("ledger/some-session"),
                 "the retired ledger subspace resolves to no template");
     }
@@ -84,14 +83,6 @@ class TemplateRegistryTest {
         assertTrue(mailbox.dimensions().get("from").required());
         assertEquals(List.of("agent", "session", "identity"), mailbox.dimensions().get("address_kind").values());
 
-        // RDR-253 Step 1 (nexus-hczdo.1.1): the identity-owned family with a tuple surface.
-        TemplateSchema work = registry.templates().stream()
-                .filter(t -> t.name().equals("work/<id>")).findFirst().orElseThrow();
-        assertFalse(work.take().enabled());
-        assertEquals(List.of("kind", "ref"), work.idDims());
-        assertEquals(List.of("watcher", "wait", "labrun", "worktree", "tmux"), work.dimensions().get("kind").values());
-        assertEquals(List.of("running", "done"), work.dimensions().get("state").values());
-
         TemplateSchema directory = registry.templates().stream()
                 .filter(t -> t.name().equals("directory/<name>")).findFirst().orElseThrow();
         assertEquals(Set.of("name"), Set.copyOf(directory.keys()));
@@ -115,7 +106,7 @@ class TemplateRegistryTest {
     void everyShippedTemplateCarriesAValidatedDocBlock() {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
         List<TemplateSchema> templates = registry.templates();
-        assertEquals(8, templates.size());
+        assertEquals(7, templates.size());
         int examined = 0;
         for (TemplateSchema t : templates) {
             TemplateDoc doc = t.doc();
@@ -129,7 +120,7 @@ class TemplateRegistryTest {
                     t.name() + "'s example subspace resolves to another template");
             examined++;
         }
-        assertEquals(8, examined);
+        assertEquals(7, examined);
     }
 
     // ── registry() digest ───────────────────────────────────────────────
@@ -317,8 +308,7 @@ class TemplateRegistryTest {
         TemplateRegistry registry = TemplateRegistry.loadAtBoot(null, null, SWEEP_INTERVAL_SECONDS);
         // 8 since RDR-235 E3 added the literal aspects (its own 100-day claim-log TTL);
         // 7 again since nexus-onjvw retired ledger/<session_id>.
-        // 8 since RDR-253 Step 1 added work/<id>, which declares no claim-log override.
-        assertEquals(8, registry.templates().size());
+        assertEquals(7, registry.templates().size());
     }
 
     @Test
@@ -623,8 +613,8 @@ class TemplateRegistryTest {
         // 7, not 4: RDR-211 Phase 1 Step 2 (bead nexus-rplay.8) added board/<topic>,
         // lock/<resource>, queue/<name> beside the three bundled resource templates;
         // 8 since RDR-220 added board/ci/<topic>; 9 since RDR-235 E3 added aspects;
-        // 8 again since nexus-onjvw retired ledger/<session_id>; 9 since RDR-253 Step 1 added work/<id>.
-        assertEquals(9, registry.templates().size());
+        // 8 again since nexus-onjvw retired ledger/<session_id>.
+        assertEquals(8, registry.templates().size());
         assertTrue(registry.templates().stream().anyMatch(t -> t.name().equals("test/<id>")));
     }
 
@@ -976,7 +966,7 @@ class TemplateRegistryTest {
                 box[0] = TemplateRegistry.loadAtBoot(dir.toString(), null, SWEEP_INTERVAL_SECONDS));
         assertEquals(1, warnings.size(), warnings.toString());
         assertNull(box[0].byName("alpha/<x>").doc());
-        assertEquals(9, box[0].templates().size());
+        assertEquals(8, box[0].templates().size());
     }
 
     // M1: a directory template that shadows a classpath template's example owner

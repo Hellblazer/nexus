@@ -102,8 +102,8 @@ class TupleTemplatesTest {
     void registryHasSixTemplatesAndTheThreeNewOnesResolve() {
         // 7 since RDR-220 added board/ci/<topic>; the method name records the
         // RDR-211 set it was written for. 8 since RDR-235 E3 added the literal aspects;
-        // 7 again since nexus-onjvw retired ledger/<session_id>; 8 since RDR-253 Step 1 added work/<id>.
-        assertThat(registry.templates()).hasSize(8);
+        // 7 again since nexus-onjvw retired ledger/<session_id>.
+        assertThat(registry.templates()).hasSize(7);
         assertThat(registry.byName("board/<topic>")).as("board must load").isNotNull();
         assertThat(registry.byName("queue/<name>")).as("queue must load").isNotNull();
         assertThat(registry.byName("lock/<resource>")).as("lock must load").isNotNull();

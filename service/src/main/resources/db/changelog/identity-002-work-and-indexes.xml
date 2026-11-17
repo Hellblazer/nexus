@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-hczdo.1.1 (RDR-253 Step 1, review round 1): background work as a table, and the indexes the retention
+    and history reads need.
+
+    identity_work: the work an identity owns (watcher, wait, lab run, worktree, tmux server), one row per
+    (identity, kind, ref), the state updated in place. A tuple template could not hold it: a keys+nonce template cannot
+    change a row's state in place and every tuple expires (30 days here), while this lasts as long as the identity
+    does and goes with it when retention tombstones it (ON DELETE CASCADE). A label, not a fenced family.
+
+    idx_identity_bindings_session (tenant_id, identity_id, session_id): the retention pass drops a session-index row
+    whose binding rows are gone, with a NOT EXISTS over exactly these columns. idx_identity_bindings_at (tenant_id, at):
+    the same pass prunes binding rows older than 180 days. idx_identity_bindings_process (tenant_id, host, pid): the
+    history mode of bindings-by-host finds every identity that ever held a process.
+
+    DDL only: CREATE TABLE and CREATE INDEX, no data mutation of any existing row, so no DATA EFFECT line applies per
+    scripts/data_effect_lint.py's own scope. Placed after identity-001-records.xml and before the grants-nexus-svc.xml
+    runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="identity-002-1" author="nexus-hczdo.1.1">
+        <comment>nexus.identity_work (RDR-253): the background work an identity owns, permanent until its identity is tombstoned. References identity_records ON DELETE CASCADE. Tenant-scoped, RLS ENABLE+FORCE.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.identity_work (
+    tenant_id    TEXT        NOT NULL,
+    identity_id  TEXT        NOT NULL,
+    kind         TEXT        NOT NULL,
+    ref          TEXT        NOT NULL,
+    state        TEXT        NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL,
+    CONSTRAINT identity_work_pk PRIMARY KEY (tenant_id, identity_id, kind, ref),
+    CONSTRAINT identity_work_identity_fk FOREIGN KEY (tenant_id, identity_id)
+        REFERENCES nexus.identity_records (tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT identity_work_kind_ck CHECK (kind IN ('watcher', 'wait', 'labrun', 'worktree', 'tmux')),
+    CONSTRAINT identity_work_state_ck CHECK (state IN ('running', 'done'))
+);
+
+ALTER TABLE nexus.identity_work ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.identity_work FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.identity_work
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.identity_work CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="identity-002-2" author="nexus-hczdo.1.1">
+        <comment>Indexes on nexus.identity_bindings for the retention pass (sessions with no binding row left, rows older than 180 days) and the history mode of bindings-by-host (RDR-253).</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_identity_bindings_session ON nexus.identity_bindings (tenant_id, identity_id, session_id);
+CREATE INDEX idx_identity_bindings_at ON nexus.identity_bindings (tenant_id, at);
+CREATE INDEX idx_identity_bindings_process ON nexus.identity_bindings (tenant_id, host, pid) WHERE host IS NOT NULL;
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS nexus.idx_identity_bindings_process;
+            DROP INDEX IF EXISTS nexus.idx_identity_bindings_at;
+            DROP INDEX IF EXISTS nexus.idx_identity_bindings_session;
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

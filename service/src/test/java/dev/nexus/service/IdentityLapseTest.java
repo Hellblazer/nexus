@@ -176,7 +176,8 @@ class IdentityLapseTest {
         Resp r = env.get(t, "/bindings?host=hostA");
         assertThat(r.status()).isEqualTo(200);
         var rows = r.list("bindings");
-        assertThat(rows).extracting(m -> m.get("id")).containsExactlyInAnyOrder(live, lapsed, unleased);
+        assertThat(rows).extracting(m -> m.get("id")).as("the default mode lists live and lapsed holders and excludes ended ones")
+            .containsExactlyInAnyOrder(live, lapsed, unleased);
         assertThat(rows).filteredOn(m -> m.get("id").equals(lapsed)).singleElement().satisfies(m ->
             assertThat(m).containsEntry("state", "lapsed"));
         assertThat(rows).filteredOn(m -> m.get("id").equals(unleased)).singleElement().satisfies(m ->
@@ -188,5 +189,48 @@ class IdentityLapseTest {
         assertThat(env.get(t, "/bindings").status()).isEqualTo(400);
         assertThat(env.get(t, "/bindings?host=hostB").list("bindings")).extracting(m -> m.get("id"))
             .containsExactly(elsewhere);
+    }
+
+    @Test
+    void theHistoryModeFindsEndedAndReleasedIdentitiesByTheirProcessNewestRowFirst() {
+        String t = IdentityTestEnv.freshTenant();
+        env.clock.set(T0);
+        var proc = evOn("hostH", "p1", 41, 410);
+        String ended = env.createSeat(t, "endedseat");
+        String released = env.createSeat(t, "releasedseat");
+        String live = env.createSeat(t, "liveseat");
+        String other = env.createSeat(t, "otherproc");
+        env.bind(t, ended, "start", 0, proc);
+        env.bind(t, ended, "clear", 1, Map.of("session_id", "p1b"));
+        env.clock.set(T0.plusSeconds(10));
+        env.bind(t, ended, "end", 1, Map.of());
+        env.clock.set(T0.plusSeconds(20));
+        env.bind(t, released, "start", 0, with(proc, "session_id", "p2"));
+        env.bind(t, released, "release", 1, with(proc, "session_id", "p2"));
+        env.clock.set(T0.plusSeconds(30));
+        env.bind(t, live, "start", 0, with(proc, "session_id", "p3", "started_at", 411L));
+        env.bind(t, other, "start", 0, evOn("hostH", "p4", 42, 420));
+
+        // The in-place /restart rebind asks for its own process's rows: the default mode cannot see an ended seat.
+        assertThat(env.get(t, "/bindings?host=hostH&pid=41").list("bindings")).extracting(m -> m.get("id"))
+            .as("holders only: ended and released are not listed").containsExactly(live);
+        Resp r = env.get(t, "/bindings?host=hostH&pid=41&proc_start=" + proc.get("proc_start") + "&history=1");
+        assertThat(r.status()).isEqualTo(200);
+        var rows = r.list("bindings");
+        assertThat(rows).extracting(m -> m.get("id")).as("newest first").containsExactly(live, released, ended);
+        var endedRow = rows.stream().filter(m -> ended.equals(m.get("id"))).findFirst().orElseThrow();
+        assertThat(endedRow).containsEntry("state", "ended").containsEntry("generation", 1);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> newest = (Map<String, Object>) endedRow.get("binding");
+        assertThat(newest).as("the newest row of the identity on that process").containsEntry("event", "end")
+            .containsEntry("pid", 41).containsEntry("proc_start", proc.get("proc_start"));
+        var releasedRow = rows.stream().filter(m -> released.equals(m.get("id"))).findFirst().orElseThrow();
+        assertThat(releasedRow).containsEntry("state", "unheld");
+        // A different proc_start or pid matches nothing; pid and host are required.
+        assertThat(env.get(t, "/bindings?host=hostH&pid=41&proc_start=1999-01-01T00:00:00Z&history=1").list("bindings")).isEmpty();
+        assertThat(env.get(t, "/bindings?host=hostH&pid=42&history=1").list("bindings")).extracting(m -> m.get("id"))
+            .containsExactly(other);
+        assertThat(env.get(t, "/bindings?host=hostH&history=1").status()).isEqualTo(400);
+        assertThat(env.get(t, "/bindings?host=elsewhere&pid=41&history=1").list("bindings")).isEmpty();
     }
 }

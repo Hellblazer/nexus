@@ -499,6 +499,9 @@ public final class TenantExport {
         data("identity_sessions").pk("tenant_id text", "session_id text")
             .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
             .build(),
+        data("identity_work").pk("tenant_id text", "identity_id text", "kind text", "ref text")
+            .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
+            .build(),
         data("identity_memberships").pk("tenant_id text", "identity_id text", "group_name text")
             .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
             .build(),

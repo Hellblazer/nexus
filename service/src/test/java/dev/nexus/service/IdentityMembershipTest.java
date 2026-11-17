@@ -116,6 +116,41 @@ class IdentityMembershipTest {
     }
 
     @Test
+    void workIsRegisteredAndItsStateChangesInPlaceAndItLastsPastAnyRetention() {
+        String t = IdentityTestEnv.freshTenant();
+        env.clock.set(T0);
+        String id = env.createSeat(t, "worker");
+        env.bind(t, id, "start", 0, ev("w1", 1, 10));
+        var first = env.post(t, "/" + id + "/work", Map.of("kind", "worktree", "ref", "/tmp/wt-a", "state", "running"));
+        assertThat(first.status()).isEqualTo(200);
+        env.post(t, "/" + id + "/work", Map.of("kind", "tmux", "ref", "srv", "state", "running"));
+        env.clock.set(T0.plus(Duration.ofDays(90)));
+        var again = env.call(IdentityTestEnv.DATA, t, "POST", "/" + id + "/work", Map.of("kind", "worktree", "ref", "/tmp/wt-a", "state", "done"));
+        assertThat(again.str("state")).isEqualTo("done");
+        assertThat(again.str("updated_at")).isEqualTo(env.clock.instant().toString());
+        var rows = env.get(t, "/" + id + "/work").list("work");
+        assertThat(rows).as("one row per (kind, ref), the state changed in place").hasSize(2);
+        assertThat(rows).filteredOn(m -> "worktree".equals(m.get("kind"))).singleElement()
+            .satisfies(m -> assertThat(m).containsEntry("state", "done").containsEntry("ref", "/tmp/wt-a"));
+        assertThat(rows).filteredOn(m -> "tmux".equals(m.get("kind"))).singleElement()
+            .satisfies(m -> assertThat(m).containsEntry("state", "running"));
+        env.clock.set(T0.plus(Duration.ofDays(400)));
+        assertThat(env.repo.runRetention(t)).containsEntry("tombstoned", 0);
+        assertThat(env.get(t, "/" + id + "/work").list("work")).as("no expiry, unlike a tuple").hasSize(2);
+
+        var gone = env.call(IdentityTestEnv.TENANT, t, "DELETE", "/" + id + "/work?kind=tmux&ref=srv", null);
+        assertThat(gone.integer("removed")).isEqualTo(1);
+        assertThat(env.call(IdentityTestEnv.TENANT, t, "DELETE", "/" + id + "/work?kind=tmux&ref=srv", null).integer("removed")).isZero();
+        assertThat(env.get(t, "/" + id + "/work").list("work")).hasSize(1);
+
+        assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "bogus", "ref", "x", "state", "running")).error()).isEqualTo("bad_kind");
+        assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "wait", "ref", "x", "state", "stuck")).error()).isEqualTo("bad_state");
+        assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "wait", "ref", " ", "state", "running")).error()).isEqualTo("bad_ref");
+        assertThat(env.post(t, "/i424242/work", Map.of("kind", "wait", "ref", "x", "state", "running")).status()).isEqualTo(404);
+        assertThat(env.get(t, "/i424242/work").status()).isEqualTo(404);
+    }
+
+    @Test
     void aDueLapseIsAppliedOnEveryReadAndAnUnleasedBindingsLivenessIsUnknown() {
         String t = IdentityTestEnv.freshTenant();
         env.clock.set(T0);

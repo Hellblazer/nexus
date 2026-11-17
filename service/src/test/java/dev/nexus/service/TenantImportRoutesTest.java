@@ -785,7 +785,7 @@ class TenantImportRoutesTest {
         assertThat(end.get("state").asText()).isEqualTo("committed");
         ObjectNode report = (ObjectNode) end.get("report");
         assertThat(report.get("rows_inserted").asLong()).isPositive();
-        assertThat(report.get("tables").size()).isEqualTo(31);
+        assertThat(report.get("tables").size()).isEqualTo(32);
         String id = end.get("session_id").asText();
         assertThat(json(env.call("GET", IMPORT + "/" + id, token)).get("status").asText()).isEqualTo("committed");
         assertThat(env.call("DELETE", IMPORT + "/" + id, token).statusCode()).as("an ended session cannot be aborted").isEqualTo(404);

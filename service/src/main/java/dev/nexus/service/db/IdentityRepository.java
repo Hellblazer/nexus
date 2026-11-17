@@ -4,6 +4,7 @@ package dev.nexus.service.db;
 
 import dev.nexus.service.jooq.nexus.tables.records.IdentityRecordsRecord;
 import org.jooq.DSLContext;
+import org.jooq.impl.DSL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,6 +22,7 @@ import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_BINDINGS;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_COUNTERS;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_RECORDS;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_SESSIONS;
+import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
 
 /**
  * RDR-253 Step 1: the engine records of session identity and the operations that change them.
@@ -67,12 +69,14 @@ public final class IdentityRepository {
     private final Clock clock;
     private final IdentityRetention retention;
     private final IdentityMemberships memberships;
+    private final IdentityWork work;
 
     public IdentityRepository(TenantScope scope, Clock clock) {
         this.scope = scope;
         this.clock = clock;
         this.retention = new IdentityRetention(scope, clock);
         this.memberships = new IdentityMemberships(scope, clock);
+        this.work = new IdentityWork(scope, clock);
     }
 
     private OffsetDateTime now() {
@@ -92,6 +96,17 @@ public final class IdentityRepository {
         }
     }
 
+    /** The longest free-text field a caller may write (display name, host, pane, client version, ...). */
+    static final int MAX_TEXT = 256;
+
+    /** Throws 400 when {@code value} is longer than {@link #MAX_TEXT}; null passes. */
+    static String bounded(String value, String field) {
+        if (value != null && value.length() > MAX_TEXT) {
+            throw new IdentityException(400, "bad_field", "'" + field + "' is longer than " + MAX_TEXT + " characters");
+        }
+        return value;
+    }
+
     static void requireId(String id) {
         if (id == null || !ID.matcher(id).matches()) {
             throw new IdentityException(400, "bad_identity", "an identity id is i followed by digits: " + id);
@@ -100,6 +115,11 @@ public final class IdentityRepository {
 
     /** The next id of the tenant's counter, which only grows: a number is never issued twice. */
     private static String nextId(DSLContext ctx, String tenant) {
+        // The scheduled sweep visits the tenants of nexus.tuple_tenants, and the identity retention is one of its
+        // arms: a tenant with identities and no tuple traffic must be visited too, so creating an identity registers it.
+        OffsetDateTime seen = OffsetDateTime.now(java.time.ZoneOffset.UTC);
+        ctx.insertInto(TUPLE_TENANTS, TUPLE_TENANTS.TENANT_ID, TUPLE_TENANTS.FIRST_SEEN, TUPLE_TENANTS.LAST_SEEN)
+            .values(tenant, seen, seen).onConflictDoNothing().execute();
         long n = ctx.insertInto(IDENTITY_COUNTERS, IDENTITY_COUNTERS.TENANT_ID, IDENTITY_COUNTERS.LAST_N)
             .values(tenant, 1L)
             .onConflict(IDENTITY_COUNTERS.TENANT_ID).doUpdate()
@@ -143,6 +163,7 @@ public final class IdentityRepository {
     /** Creates a seat: unheld, generation 0, with a live alias. {@code createdBy} is {@code sam} or {@code restart}. */
     public Map<String, Object> createSeat(String tenant, String name, String displayName, String createdBy) {
         requireAliasName(name);
+        bounded(displayName, "display_name");
         if (!"sam".equals(createdBy) && !"restart".equals(createdBy)) {
             throw new IdentityException(400, "bad_created_by", "a seat is created by sam or restart");
         }
@@ -159,6 +180,7 @@ public final class IdentityRepository {
     /** Creates an ephemeral identity already bound to the launching process: generation 1, live, a {@code start} row. */
     public Map<String, Object> createEphemeral(String tenant, String displayName, String createdBy, IdentityEvidence ev) {
         requireProcess(ev, true);
+        bounded(displayName, "display_name");
         if (!"session".equals(createdBy) && !"restart".equals(createdBy)) {
             throw new IdentityException(400, "bad_created_by", "an ephemeral identity is created by session or restart");
         }
@@ -175,6 +197,8 @@ public final class IdentityRepository {
     /** Creates a delegated identity under {@code parent} (a {@code claude -p} child), generation 1, live. */
     public Map<String, Object> createDelegated(String tenant, String parent, String displayName, IdentityEvidence ev) {
         requireId(parent);
+        requireProcess(ev, false);
+        bounded(displayName, "display_name");
         return scope.withTenant(tenant, ctx -> {
             if (IdentityRows.peek(ctx, tenant, parent) == null) {
                 throw new IdentityException(404, "unknown_identity", "no parent identity " + parent);
@@ -453,6 +477,7 @@ public final class IdentityRepository {
         if (generation == null) {
             throw new IdentityException(400, "missing_generation", "generation is required");
         }
+        bounded(clientVersion, "client_version");
         return scope.withTenant(tenant, ctx -> {
             IdentityRecordsRecord rec = IdentityRows.lock(ctx, tenant, id);
             OffsetDateTime now = now();
@@ -538,6 +563,12 @@ public final class IdentityRepository {
             String oldName = IdentityRows.liveAlias(ctx, tenant, id);
             if (oldName == null) {
                 throw new IdentityException(409, "no_alias", id + " has no live alias");
+            }
+            if (!ID.matcher(from).matches() && !oldName.equals(from)) {
+                // A second rename retired the name between the lookup and the lock: the caller named a name the seat no
+                // longer holds, and renaming what it holds now is not what it asked for.
+                throw new IdentityException(409, "stale_name", "'" + from + "' is no longer the seat's name; it is '" + oldName + "'",
+                    Map.of("current_name", oldName));
             }
             if (oldName.equals(to)) {
                 throw new IdentityException(409, "same_name", "the seat is already named " + to);
@@ -695,25 +726,70 @@ public final class IdentityRepository {
             }
             return ctx.selectFrom(IDENTITY_BINDINGS)
                 .where(IDENTITY_BINDINGS.TENANT_ID.eq(tenant)).and(IDENTITY_BINDINGS.IDENTITY_ID.eq(id))
-                .orderBy(IDENTITY_BINDINGS.SEQ).fetch(r -> {
-                    Map<String, Object> m = new LinkedHashMap<>();
-                    m.put("seq", r.getSeq());
-                    m.put("event", r.getEvent());
-                    m.put("generation", r.getGeneration());
-                    m.put("lease", r.getLease());
-                    m.put("session_id", r.getSessionId());
-                    m.put("host", r.getHost());
-                    m.put("pid", r.getPid());
-                    m.put("started_at", r.getStartedAt());
-                    m.put("proc_start", r.getProcStart());
-                    m.put("pane", r.getPane());
-                    m.put("client_version", r.getClientVersion());
-                    m.put("prior_session_id", r.getPriorSessionId());
-                    m.put("holder_gone", IdentityRows.parse(r.getHolderGone()));
-                    m.put("detail", r.getDetail());
-                    m.put("at", IdentityRows.str(r.getAt()));
-                    return m;
-                });
+                .orderBy(IDENTITY_BINDINGS.SEQ).fetch(IdentityRepository::bindingMap);
+        });
+    }
+
+    private static Map<String, Object> bindingMap(dev.nexus.service.jooq.nexus.tables.records.IdentityBindingsRecord r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("seq", r.getSeq());
+        m.put("event", r.getEvent());
+        m.put("generation", r.getGeneration());
+        m.put("lease", r.getLease());
+        m.put("session_id", r.getSessionId());
+        m.put("host", r.getHost());
+        m.put("pid", r.getPid());
+        m.put("started_at", r.getStartedAt());
+        m.put("proc_start", r.getProcStart());
+        m.put("pane", r.getPane());
+        m.put("client_version", r.getClientVersion());
+        m.put("prior_session_id", r.getPriorSessionId());
+        m.put("holder_gone", IdentityRows.parse(r.getHolderGone()));
+        m.put("detail", r.getDetail());
+        m.put("at", IdentityRows.str(r.getAt()));
+        return m;
+    }
+
+    /** The most identities a history lookup returns. */
+    static final int HISTORY_LIMIT = 20;
+
+    /**
+     * The history mode of bindings-by-host: for every identity whose binding log has a row on {@code host} with
+     * {@code pid} (and {@code procStart} when given), its NEWEST such row, joined to the identity's current record,
+     * most recent first. Unlike {@link #bindingsByHost} it finds an identity that {@code ended} or was released,
+     * whose holder columns are cleared: the in-place {@code /restart} rebind (RDR-253 policy row 1) looks for the most
+     * recent binding with the process's own pid and {@code proc_start}, "whatever the identity's state, ended
+     * included".
+     */
+    public List<Map<String, Object>> bindingHistoryByProcess(String tenant, String host, Integer pid, String procStart) {
+        if (host == null || host.isBlank() || pid == null) {
+            throw new IdentityException(400, "missing_process", "host and pid are required for the history of a process");
+        }
+        return scope.withTenant(tenant, ctx -> {
+            OffsetDateTime now = now();
+            var b = IDENTITY_BINDINGS;
+            var cond = b.TENANT_ID.eq(tenant).and(b.HOST.eq(host)).and(b.PID.eq(pid));
+            if (procStart != null && !procStart.isBlank()) {
+                cond = cond.and(b.PROC_START.eq(procStart));
+            }
+            var newest = DSL.max(b.AT);
+            var seqs = DSL.max(b.SEQ);
+            List<org.jooq.Record2<String, Integer>> found = ctx.select(b.IDENTITY_ID, seqs).from(b).where(cond)
+                .groupBy(b.IDENTITY_ID).orderBy(newest.desc(), b.IDENTITY_ID).limit(HISTORY_LIMIT).fetch();
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var f : found) {
+                String id = f.value1();
+                var row = ctx.selectFrom(b).where(b.TENANT_ID.eq(tenant)).and(b.IDENTITY_ID.eq(id))
+                    .and(b.SEQ.eq(f.value2())).fetchOne();
+                IdentityRecordsRecord rec = refreshed(ctx, tenant, id, now);
+                if (row == null || rec == null) {
+                    continue;
+                }
+                Map<String, Object> m = new LinkedHashMap<>(IdentityRows.view(rec, IdentityRows.liveAlias(ctx, tenant, id)));
+                m.put("binding", bindingMap(row));
+                out.add(m);
+            }
+            return out;
         });
     }
 
@@ -739,6 +815,23 @@ public final class IdentityRepository {
         return memberships.ofGroup(tenant, group);
     }
 
+    // ── background work ─────────────────────────────────────────────────────
+
+    /** Registers work an identity owns, or changes its state in place (a label, not fenced). */
+    public Map<String, Object> putWork(String tenant, String id, String kind, String ref, String state) {
+        return work.put(tenant, id, kind, ref, state);
+    }
+
+    /** Forgets work; idempotent. */
+    public Map<String, Object> removeWork(String tenant, String id, String kind, String ref) {
+        return work.remove(tenant, id, kind, ref);
+    }
+
+    /** The work of one identity. */
+    public List<Map<String, Object>> workOf(String tenant, String id) {
+        return work.ofIdentity(tenant, id);
+    }
+
     // ── purge and retention ─────────────────────────────────────────────────
 
     /** The operator purge of {@code id}'s fenced state; see {@link IdentityRetention#purge}. */
@@ -749,6 +842,11 @@ public final class IdentityRepository {
 
     /** One retention pass over a tenant; see {@link IdentityRetention#run}. */
     public Map<String, Integer> runRetention(String tenant) {
-        return retention.run(tenant);
+        return retention.run(tenant, null);
+    }
+
+    /** One retention pass over a tenant with a statement timeout on every statement, as the sweep's other arms have. */
+    public Map<String, Integer> runRetention(String tenant, java.time.Duration statementTimeout) {
+        return retention.run(tenant, statementTimeout);
     }
 }

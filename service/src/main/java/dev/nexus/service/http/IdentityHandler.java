@@ -26,8 +26,9 @@ import java.util.Set;
  * RDR-253 Step 1: the {@code /v1/identity} routes of session identity.
  *
  * <pre>
- *   POST /v1/identity                      create a seat {kind:seat, name, display_name?, created_by} or an
+ *   POST /v1/identity                      create a seat {kind:seat, name, display_name?, created_by} (tenant only) or an
  *                                          ephemeral identity {kind:ephemeral, display_name?, created_by, bind:{evidence}}
+ *                                          (the MCP server's pending bind may do the second with its data credential)
  *   POST /v1/identity/delegated            {parent, display_name?, bind:{evidence}}: a delegated identity, generation 1
  *   POST /v1/identity/rename               {old, new}: retire the old alias, take the new, retitle the board entry
  *   POST /v1/identity/&lt;id&gt;/promote         {name}: an ephemeral identity becomes a seat
@@ -37,6 +38,9 @@ import java.util.Set;
  *   POST /v1/identity/&lt;id&gt;/purge           {operator:true}: remove the fenced state of an identity that is not live
  *   GET  /v1/identity/&lt;id&gt;                  the identity, its state and holder as of now (alive)
  *   GET  /v1/identity/&lt;id&gt;/bindings         its binding log
+ *   POST /v1/identity/&lt;id&gt;/work             {kind, ref, state}: register work the identity owns, or change its state
+ *   DELETE /v1/identity/&lt;id&gt;/work?kind=&amp;ref=  forget it (idempotent)
+ *   GET  /v1/identity/&lt;id&gt;/work             the work of one identity
  *   POST /v1/identity/&lt;id&gt;/memberships      {group, role}: join a group, or change the role (the join time stays)
  *   DELETE /v1/identity/&lt;id&gt;/memberships/&lt;group&gt;  leave a group (idempotent)
  *   GET  /v1/identity/&lt;id&gt;/memberships      the groups of one identity, in join order
@@ -44,12 +48,14 @@ import java.util.Set;
  *   GET  /v1/identity/alias/&lt;name&gt;         resolve a name; a retired one for 7 days with a notice, then 410
  *   GET  /v1/identity/sessions/&lt;session id&gt; the session index
  *   GET  /v1/identity/bindings?host=&amp;pid=    the live and lapsed holders on a host
+ *   GET  /v1/identity/bindings?host=&amp;pid=&amp;proc_start=&amp;history=1  the newest binding row of every identity that ever
+ *                                          held that process, ended or released ones included (the in-place /restart rebind)
  * </pre>
  *
  * <p>Two credentials reach this surface (RDR-253): the hook, {@code nx identity} and the {@code nx} dispatcher use
  * the tenant credential (the root token counts as one); the MCP server uses the data credential for the calls it
  * makes in a running session. Each route admits exactly the scopes that need it, in {@link #admit}; purge,
- * creation, promotion, rename and the {@code gone} verdict are tenant-only, and a data credential binds only the
+ * seat creation, promotion, rename and the {@code gone} verdict are tenant-only, and a data credential binds only the
  * events {@link #DATA_EVENTS}. Any other scope is a 403, as is a scope not listed. Reads admit both.
  */
 public final class IdentityHandler implements HttpHandler {
@@ -78,15 +84,15 @@ public final class IdentityHandler implements HttpHandler {
     }
 
     /** The route a request is, for the credential check. */
-    enum Route { CREATE, DELEGATED, RENAME, PROMOTE, BIND, GONE, RENEW, PURGE, SHOW, LOG, ALIAS, SESSION, BY_HOST,
-        MEMBER_WRITE, MEMBER_READ }
+    enum Route { CREATE, CREATE_EPHEMERAL, DELEGATED, RENAME, PROMOTE, BIND, GONE, RENEW, PURGE, SHOW, LOG, ALIAS, SESSION, BY_HOST,
+        MEMBER_WRITE, MEMBER_READ, WORK_WRITE, WORK_READ }
 
     /** Whether {@code scope} may call {@code route} (the bind event is checked by the caller). */
     static boolean admit(Route route, String scope) {
         return switch (route) {
             case CREATE, DELEGATED, RENAME, PROMOTE, GONE, PURGE -> tenantScope(scope);
-            case BIND, RENEW, SHOW, LOG, ALIAS, SESSION, BY_HOST, MEMBER_WRITE, MEMBER_READ ->
-                tenantScope(scope) || dataScope(scope);
+            case BIND, RENEW, SHOW, LOG, ALIAS, SESSION, BY_HOST, MEMBER_WRITE, MEMBER_READ,
+                 CREATE_EPHEMERAL, WORK_WRITE, WORK_READ -> tenantScope(scope) || dataScope(scope);
         };
     }
 
@@ -151,7 +157,10 @@ public final class IdentityHandler implements HttpHandler {
                 if (!"GET".equals(method)) throw methodNotAllowed();
                 require(Route.BY_HOST, scope);
                 Map<String, String> q = query(ex);
-                List<Map<String, Object>> rows = repo.bindingsByHost(tenant, q.get("host"), intParam(q.get("pid")));
+                boolean history = "1".equals(q.get("history")) || "true".equals(q.get("history"));
+                List<Map<String, Object>> rows = history
+                    ? repo.bindingHistoryByProcess(tenant, q.get("host"), intParam(q.get("pid")), q.get("proc_start"))
+                    : repo.bindingsByHost(tenant, q.get("host"), intParam(q.get("pid")));
                 return Map.of("bindings", rows);
             }
             case "sessions" -> {
@@ -186,15 +195,16 @@ public final class IdentityHandler implements HttpHandler {
 
     private Map<String, Object> create(HttpExchange ex, String tenant, String method, String scope) throws IOException {
         if (!"POST".equals(method)) throw methodNotAllowed();
-        require(Route.CREATE, scope);
         Map<String, Object> body = readBody(ex);
         String kind = string(body, "kind");
         String display = string(body, "display_name");
         String createdBy = string(body, "created_by");
         if ("seat".equals(kind)) {
+            require(Route.CREATE, scope);
             return repo.createSeat(tenant, string(body, "name"), display, createdBy);
         }
         if ("ephemeral".equals(kind)) {
+            require(Route.CREATE_EPHEMERAL, scope);
             return repo.createEphemeral(tenant, display, createdBy, evidence(map(body, "bind")));
         }
         throw new IdentityException(400, "bad_kind", "kind must be seat or ephemeral");
@@ -234,6 +244,21 @@ public final class IdentityHandler implements HttpHandler {
         }
         if (seg.length != 2) throw notFound();
         switch (seg[1]) {
+            case "work" -> {
+                if ("GET".equals(method)) {
+                    require(Route.WORK_READ, scope);
+                    return Map.of("identity", id, "work", repo.workOf(tenant, id));
+                }
+                if ("DELETE".equals(method)) {
+                    require(Route.WORK_WRITE, scope);
+                    Map<String, String> q = query(ex);
+                    return repo.removeWork(tenant, id, q.get("kind"), q.get("ref"));
+                }
+                if (!"POST".equals(method)) throw methodNotAllowed();
+                require(Route.WORK_WRITE, scope);
+                Map<String, Object> body = readBody(ex);
+                return repo.putWork(tenant, id, string(body, "kind"), string(body, "ref"), string(body, "state"));
+            }
             case "memberships" -> {
                 if ("GET".equals(method)) {
                     require(Route.MEMBER_READ, scope);
@@ -259,6 +284,9 @@ public final class IdentityHandler implements HttpHandler {
                 require(Route.BIND, scope);
                 Map<String, Object> body = readBody(ex);
                 String event = string(body, "event");
+                if (event == null) {
+                    throw new IdentityException(400, "bad_event", "event is required");
+                }
                 if (!tenantScope(scope) && !DATA_EVENTS.contains(event)) {
                     throw new IdentityException(403, "forbidden",
                         "a '" + scope + "' credential may not send the '" + event + "' event");
@@ -285,7 +313,9 @@ public final class IdentityHandler implements HttpHandler {
                 if (!Boolean.TRUE.equals(body.get("operator"))) {
                     throw new IdentityException(400, "operator_required", "purge needs \"operator\": true");
                 }
-                return repo.purge(tenant, id, "operator:" + scope);
+                String credential = RequestContext.credentialHash();
+                String named = credential == null ? "" : ":" + credential.substring(0, Math.min(12, credential.length()));
+                return repo.purge(tenant, id, "operator:" + scope + named);
             }
             default -> throw notFound();
         }
@@ -299,7 +329,16 @@ public final class IdentityHandler implements HttpHandler {
             if (bytes.length == 0) {
                 throw new IdentityException(400, "bad_body", "request body is required");
             }
-            return MAPPER.readValue(bytes, MAP_TYPE);
+            Map<String, Object> body;
+            try {
+                body = MAPPER.readValue(bytes, MAP_TYPE);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new IdentityException(400, "bad_body", "the request body is not a JSON object");
+            }
+            if (body == null) {
+                throw new IdentityException(400, "bad_body", "the request body is not a JSON object");
+            }
+            return body;
         }
     }
 

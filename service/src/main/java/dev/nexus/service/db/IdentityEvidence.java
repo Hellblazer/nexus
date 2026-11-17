@@ -18,6 +18,11 @@ public record IdentityEvidence(String sessionId, String host, Integer pid, Long 
     /** A process as the binding log names it. {@code procStart} may be null (a client that could not read it). */
     public record Process(String host, Integer pid, Long startedAt, String procStart) {
 
+        public Process {
+            bound(host, "host");
+            bound(procStart, "proc_start");
+        }
+
         /** Two processes are the same only when all four fields agree (null equals null). */
         public boolean sameAs(Process other) {
             return other != null && java.util.Objects.equals(host, other.host) && java.util.Objects.equals(pid, other.pid)
@@ -39,11 +44,24 @@ public record IdentityEvidence(String sessionId, String host, Integer pid, Long 
     public static final String UNLEASED = "unleased";
 
     public IdentityEvidence {
+        bound(sessionId, "session_id");
+        bound(host, "host");
+        bound(procStart, "proc_start");
+        bound(pane, "pane");
+        bound(clientVersion, "client_version");
+        bound(priorSessionId, "prior_session_id");
         if (lease == null) {
             lease = LEASED;
         }
         if (!LEASED.equals(lease) && !UNLEASED.equals(lease)) {
             throw new IllegalArgumentException("'lease' must be leased or unleased");
+        }
+    }
+
+    /** Free text a caller writes is bounded (256 characters): a data credential may send these. */
+    private static void bound(String value, String field) {
+        if (value != null && value.length() > IdentityRepository.MAX_TEXT) {
+            throw new IllegalArgumentException("'" + field + "' is longer than " + IdentityRepository.MAX_TEXT + " characters");
         }
     }
 

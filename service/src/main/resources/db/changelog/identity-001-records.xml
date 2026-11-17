@@ -7,8 +7,10 @@
     it passes it. A seat, its aliases and its identity record are permanent, a retired alias is a
     permanent tombstone, a seat's newest binding row is never pruned, and the compare-and-set on the
     generation needs one transaction over the identity row and the binding row it appends. None of that
-    fits a tuple. Memberships (member/<id>) and background work (work/<id>) are label-like and do
-    have a tuple surface, so they ship as templates (resources/tuples/templates/member.yaml, work.yaml).
+    fits a tuple. Memberships are the identity_memberships table below, for the same reason (a membership
+    lasts as long as its seat), and the background work of an identity is the identity_work table of
+    identity-002-work-and-indexes.xml: neither is a tuple template. The one template the identity work touches is
+    the mailbox's new address_kind value, identity.
 
     identity_counters: one row per tenant, last_n only ever rises; an identity id is "i" + the value
     it returned, so an id never names a second identity, whatever is purged or tombstoned.
