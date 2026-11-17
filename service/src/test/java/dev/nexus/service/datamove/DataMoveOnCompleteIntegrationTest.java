@@ -81,6 +81,13 @@ class DataMoveOnCompleteIntegrationTest extends DataMoveIntegrationBase {
         return c;
     }
 
+    /** ROW SHARE on {@code dm_test.tenant_plain}, held until the connection ends its transaction. */
+    private static Connection holdingTenantPlain(Connection c) throws Exception {
+        c.setAutoCommit(false);
+        DSL.using(c, SQLDialect.POSTGRES).select(DSL.one()).from(table("dm_test", "tenant_plain")).forShare().fetch();
+        return c;
+    }
+
     private void insertOldShapeRow(long id) {
         ctx().insertInto(table("dm_test", "tenant_plain")).columns(TENANT_ID, ID).values("acme", id).execute();
     }
@@ -299,6 +306,32 @@ class DataMoveOnCompleteIntegrationTest extends DataMoveIntegrationBase {
 
         assertThat(finish("oc-lock", "tenant_plain", List.of()).outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
         assertThat(completedAt("oc-lock")).isNotNull();
+    }
+
+    @Test
+    void anOnCompleteOutsideTheChunkFamily_thatCannotGetItsLock_failsAtLockTimeout_andIsTransient() throws Exception {
+        register("oc-other-lock", "tenant_plain", 50, 0, "verification-tenant-plain.sql", 4_000, "on-complete-add-marker.sql");
+        runsOnly("oc-other-lock");
+        // ROW SHARE on the table: the verification's SELECT does not queue behind it, the ALTER TABLE does
+        try (Connection holder = holdingTenantPlain(adminLogin("oc-other-lock-holder"))) {
+            long started = System.nanoTime();
+            var result = finish("oc-other-lock", "tenant_plain", List.of());
+            long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+
+            assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+            assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.ON_COMPLETE);
+            assertThat(result.failure().raised().getSQLState()).as("lock_not_available, not the statement timeout")
+                .isEqualTo("55P03");
+            assertThat(elapsedMs).as("lock_timeout is half of statement_timeout_ms: 2 s").isBetween(1_500L, 3_900L);
+            assertThat(completedAt("oc-other-lock")).as("the completion rolled back with it").isNull();
+            assertThat(columnExists("marker")).as("on_complete did not run").isFalse();
+            assertThat(DataMoveFailureClassifier.classify(result.failure().stage(), result.failure().raised(), List.of(),
+                result.failure().detail()).permanent()).as("a lock timeout is the host's: transient").isFalse();
+            holder.rollback();
+        }
+
+        assertThat(finish("oc-other-lock", "tenant_plain", List.of()).outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
+        assertThat(columnExists("marker")).as("on_complete ran once the lock was free").isTrue();
     }
 
     @Test

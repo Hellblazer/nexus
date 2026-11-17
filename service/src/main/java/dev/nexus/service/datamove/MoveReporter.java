@@ -4,8 +4,9 @@ package dev.nexus.service.datamove;
 
 /**
  * What the move worker says about each move as it works. The in-memory {@link MoveStates} is the one implementation:
- * boot_work and the nx doctor line (nexus-f3yqd.2.17) read it, never {@code nexus.data_moves} on the serving pool, since
- * {@code nexus_svc} holds no grant there. {@code blocked} and {@code failed} carry the reason an operator reads after
+ * boot_work and the nx doctor line (nexus-f3yqd.2.17) read it, together with the move rows and run totals that
+ * {@link MoveBootWork} reads from the registry on its own admin session; none of it goes through the serving pool, since
+ * {@code nexus_svc} holds no grant on {@code nexus.data_moves}. {@code blocked} and {@code failed} carry the reason an operator reads after
  * {@code blocked:} or {@code failed:}.
  */
 public interface MoveReporter {

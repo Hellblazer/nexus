@@ -191,19 +191,23 @@ class DataMoveFailureClassifierTest {
     }
 
     @ParameterizedTest(name = "a verification that raised {0} -> transient={1}")
-    @CsvSource(nullValues = "NULL", value = {"NULL, true", "57014, true", "40001, true", "55P03, true", "53200, true",
-        "08006, true", "42501, true", "42P01, false", "22012, false", "3F000, false", "XX000, false"})
-    void aVerificationThatCouldNotFinish_isTransientForATimeoutOrNothingRaised_otherwiseTheRaisedList(String sqlstate,
-                                                                                                       boolean expected) {
+    @CsvSource(nullValues = "NULL", value = {"NULL, true", "57014, true", "08000, true", "08006, true", "08001, true",
+        "57P01, true", "57P02, true", "57P03, true",
+        "42501, false", "42883, false", "40001, false", "40P01, false", "55P03, false", "53200, false",
+        "42P01, false", "22012, false", "3F000, false", "XX000, false"})
+    void aVerificationThatCouldNotFinish_isTransientOnlyForATimeoutALostConnectionOrAShutdown(String sqlstate,
+                                                                                            boolean expected) {
         SQLException error = sqlstate == null ? null : raised(sqlstate);
         assertThat(DataMoveFailureClassifier.classify(Stage.VERIFICATION, error, List.of(), "verification could not run")
             .permanent()).isEqualTo(!expected);
     }
 
     @ParameterizedTest(name = "on_complete raised {0} -> transient={1}")
-    @CsvSource(nullValues = "NULL", value = {"55P03, true", "57014, true", "40001, false", "40P01, false", "53200, false",
-        "08006, false", "42501, false", "42P01, false", "23514, false", "22012, false", "XX000, false", "NULL, false"})
-    void anOnCompleteFailure_isTransientOnlyForItsTwoTimeouts(String sqlstate, boolean expected) {
+    @CsvSource(nullValues = "NULL", value = {"55P03, true", "57014, true", "08000, true", "08006, true", "08001, true",
+        "57P01, true", "57P02, true", "57P03, true",
+        "40001, false", "40P01, false", "53200, false", "42501, false", "42883, false", "42P01, false", "23514, false",
+        "22012, false", "XX000, false", "NULL, false"})
+    void anOnCompleteFailure_isTransientForItsTimeoutsALostConnectionOrAShutdown(String sqlstate, boolean expected) {
         SQLException error = sqlstate == null ? null : raised(sqlstate);
         assertThat(DataMoveFailureClassifier.classify(Stage.ON_COMPLETE, error, List.of(), "on_complete failed").permanent())
             .isEqualTo(!expected);

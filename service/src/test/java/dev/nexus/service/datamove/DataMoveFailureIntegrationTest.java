@@ -624,4 +624,31 @@ class DataMoveFailureIntegrationTest extends DataMoveIntegrationBase {
         assertThat(retries(row("x-clean"))).isZero();
         assertThat(lastAt(row("x-clean"))).isNull();
     }
+
+    @Test
+    void aTransientFailureReportedByTheFinisher_countsAnotherRetry_andIsNeverClearedAfterwards() throws Exception {
+        var clock = new MutableClock();
+        registerFaulty("x-report", 50);
+        fault("40001", 0);
+        assertThat(workerOn(clock).runCycle()).isEqualTo(1);
+        assertThat(retries(row("x-report"))).as("the starting count").isEqualTo(1);
+
+        clearFault();
+        clock.advance(Duration.ofSeconds(30));
+        // the runs finish clean, then the finisher cannot finish its verification: a statement timeout, transient
+        var w = workerOn(clock, c -> MoveFinisher.Result.report(new FailureHandler.Failure(c.move(),
+            FailureHandler.Stage.VERIFICATION, null, "dm_test", "tenant_plain", null, 0,
+            new java.sql.SQLException("canceling statement due to statement timeout", "57014"),
+            "verification timed out", c.admin())));
+        assertThat(w.runCycle()).isEqualTo(1);
+
+        Record r = row("x-report");
+        assertThat(retries(r)).as("a finisher-stage transient failure counts a retry; clearRetries must not run after it")
+            .isEqualTo(2);
+        assertThat(last(r)).contains("verification timed out");
+        assertThat(lastAt(r).toInstant()).isEqualTo(clock.instant());
+        assertThat(failedAt(r)).isNull();
+        assertThat(kindOf(w, "x-report")).isEqualTo(MoveStates.Kind.BLOCKED);
+        assertThat(reasonOf(w, "x-report")).startsWith("retry 2, last ");
+    }
 }

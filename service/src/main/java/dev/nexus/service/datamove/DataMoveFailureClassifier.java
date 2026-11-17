@@ -25,8 +25,11 @@ import java.util.List;
  * always transient; a preflight check that itself raised follows the raised list. A surprise from a query (the tenant probe, the pass itself) follows the raised list. A CALL, and a CALL that returned without
  * completing its run, are read through the recorded rows first. A run dml_utils recorded as cancelled is permanent. A
  * verification that found rows, or whose text the worker refuses, is permanent; one that could not finish is transient when
- * it timed out or carries no error, and otherwise follows the raised list; {@code on_complete} is transient only for its
- * statement timeout (57014) and its lock timeout (55P03).
+ * it timed out (57014), lost its connection (class 08), met a shutdown or startup (57P01 to 57P03) or carries no error, and
+ * is otherwise permanent, 42501 and 42883 included, since a verification text that names a missing function or an ungranted
+ * table is the text's own fault; {@code on_complete} is transient for its lock timeout (55P03), its statement timeout
+ * (57014), a lost connection (class 08) and a shutdown or startup (57P01 to 57P03), whose completion transaction rolls back
+ * whole so a retry is safe, and everything else, no error included, is permanent.
  */
 final class DataMoveFailureClassifier {
 
@@ -65,6 +68,22 @@ final class DataMoveFailureClassifier {
         }
         return transientRecorded(sqlstate) || sqlstate.equals("42501") || sqlstate.equals("42883")
             || inClass(sqlstate, "08");
+    }
+
+    /**
+     * Whether a failure of a verification or {@code on_complete} statement is the host's: the statement timeout (57014), a lost
+     * connection (class 08) and a shutdown or startup (57P01 to 57P03), and for {@code on_complete} also its lock timeout
+     * (55P03). The {@code lockTimeout} flag is the one difference between the two stages.
+     */
+    static boolean transientSession(String sqlstate, boolean lockTimeout) {
+        if (sqlstate == null) {
+            return false;
+        }
+        return switch (sqlstate) {
+            case "57014", "57P01", "57P02", "57P03" -> true;
+            case "55P03" -> lockTimeout;
+            default -> inClass(sqlstate, "08");
+        };
     }
 
     /**
@@ -119,11 +138,13 @@ final class DataMoveFailureClassifier {
             case CANCELLED -> Verdict.permanentFailure(detail);
             // old-shape rows remain, or the verification text is one the worker will not run: no retry changes either
             case VERIFICATION_NONEMPTY, VERIFICATION_REFUSED -> Verdict.permanentFailure(detail);
-            // a timeout (57014) or a connection still carrying a tenant (null) can pass; anything else follows the raised list
-            case VERIFICATION -> raised == null || transientRaised(raised.getSQLState())
+            // a connection still carrying a tenant (null), the statement timeout, a lost connection or a shutdown can pass; any
+            // other error is the verification text's own (a missing function, an ungranted table), so it is permanent
+            case VERIFICATION -> raised == null || transientSession(raised.getSQLState(), false)
                 ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
-            // the completion transaction rolled back whole: only its two timeouts are the host's, anything else is the move's
-            case ON_COMPLETE -> raised != null && ("55P03".equals(raised.getSQLState()) || "57014".equals(raised.getSQLState()))
+            // the completion transaction rolled back whole, so a lock or statement timeout, a lost connection or a shutdown
+            // retries safely; anything else, no error included, is the move's
+            case ON_COMPLETE -> raised != null && transientSession(raised.getSQLState(), true)
                 ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
             case PROBE, PASS -> raised != null && transientRaised(raised.getSQLState())
                 ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
