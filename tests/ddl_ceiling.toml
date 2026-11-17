@@ -225,7 +225,9 @@ migration_wal_bytes_per_worker = 12143000
 # Counted from the changeset's statements (9) and measured: chas lab-m via lab-remote, 2026-11-16, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-7fku2.1.1 tree rebased onto develop d42ead8e6 (on top of datamoves-001's 2581; gate jar rebuilt), ddl: migration=2590. Commit: the nexus-7fku2.1.1 commit that adds vectors-062.
 # 2590 -> 2599 (2026-11-16, nexus-7fku2.1.2, RDR-134 Step 2): taxonomy-022-1 creates nexus.taxonomy_coverage_counts_384, _768 and _1024 (the per-collection coverage counts), REVOKEs EXECUTE from PUBLIC and GRANTs it to nexus_svc on each: 3 CREATE FUNCTION, 3 REVOKE, 3 GRANT, no table.
 # Counted from the changeset's statements (9) and measured: chas lab-m via lab-remote, 2026-11-16, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-7fku2.1.2 tree (base 8d1afc15a, no service/ or ceiling change on origin/develop since; gate jar rebuilt), ddl: migration=2599. Commit: the nexus-7fku2.1.2 commit that adds taxonomy-022.
-migration_ddl_per_worker = 2599
+# 2599 -> 2602 (2026-11-17, nexus-7fku2.1.2 develop red fix): taxonomy-023-1 replaces the bodies of nexus.taxonomy_coverage_counts_384, _768 and _1024 with a set-based count: 3 CREATE OR REPLACE FUNCTION, ACL kept, no table.
+# Counted from the changeset's statements (3) and measured: chas lab-m via lab-remote, 2026-11-17, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the fix tree 2413db499 (base origin/develop ea8a47528; gate jar rebuilt), ddl: migration=2602. Commit: the nexus-7fku2.1.2 commit that bumps this ceiling for taxonomy-023.
+migration_ddl_per_worker = 2602
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
