@@ -45,6 +45,19 @@ _REMEDIATE_DEFAULT_EXTENSIONS: frozenset[str] = frozenset({
 _RDR_PREFIX_RE = _re.compile(r"^(rdr-\d{3,}-)")
 
 
+def _collection_entries(cat: object, collection: str) -> list:
+    """The live documents whose ``physical_collection`` is exactly *collection*, in tumbler order.
+
+    One ``GET /list?collection=...`` (``list_by_collection``) instead of a walk of the whole catalog
+    (RDR-241, nexus-uwggq.1.6). A whitespace-only name reads nothing and sends no request: the engine treats a
+    blank ``collection`` param as absent and would list the first 200 documents of the tenant, where the old
+    walk matched no document.
+    """
+    if not collection.strip():
+        return []
+    return cat.list_by_collection(collection)  # type: ignore[attr-defined]
+
+
 def _build_basename_index(
     source_dir: Path,
     extensions: frozenset[str] | None = _REMEDIATE_DEFAULT_EXTENSIONS,
@@ -299,12 +312,7 @@ def remediate_paths_cmd(
     if owner:
         entries = cat.by_owner(Tumbler.parse(owner))
     elif collection:
-        # CatalogTaxonomy doesn't expose by_physical_collection directly;
-        # walk all_documents and filter.
-        entries = [
-            e for e in cat.all_documents()
-            if e.physical_collection == collection
-        ]
+        entries = _collection_entries(cat, collection)
     else:
         entries = cat.all_documents()
 
@@ -512,10 +520,7 @@ def prune_stale_cmd(
     if owner:
         entries = cat.by_owner(Tumbler.parse(owner))
     elif collection:
-        entries = [
-            e for e in cat.all_documents()
-            if e.physical_collection == collection
-        ]
+        entries = _collection_entries(cat, collection)
     else:
         entries = cat.all_documents()
 

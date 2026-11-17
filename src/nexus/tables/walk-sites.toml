@@ -131,12 +131,12 @@ emit = { class = "BULK JOB", calls = 1, reason = "Checks T3 presence for every r
 [[row]]
 id = "commands/catalog_cmds/remediation.py::prune_stale_cmd"
 match = { site = "commands/catalog_cmds/remediation.py::prune_stale_cmd" }
-emit = { class = "BULK JOB", calls = 2, reason = "Tests file existence on disk for each row; Phase 1 reads the --collection branch with list_by_collection, which takes calls from 2 to 1.", next = "nexus-uwggq.1.6" }
+emit = { class = "BULK JOB", calls = 1, reason = "Tests file existence on disk for each row; the no-argument walk stays, and --collection reads list_by_collection." }
 
 [[row]]
 id = "commands/catalog_cmds/remediation.py::remediate_paths_cmd"
 match = { site = "commands/catalog_cmds/remediation.py::remediate_paths_cmd" }
-emit = { class = "BULK JOB", calls = 2, reason = "Resolves the path of each row; Phase 1 reads the --collection branch with list_by_collection, which takes calls from 2 to 1.", next = "nexus-uwggq.1.6" }
+emit = { class = "BULK JOB", calls = 1, reason = "Resolves the path of each row; the no-argument walk stays, and --collection reads list_by_collection." }
 
 [[row]]
 id = "commands/catalog_cmds/sensitivity.py::_targets"
