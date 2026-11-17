@@ -410,7 +410,13 @@ a *background worker* is a pg_background process in the database.
   READ ONLY transaction, so it cannot write. `$1` is its only placeholder and
   stands outside comments, string literals, dollar quotes and quoted names;
   the text holds no `?` (a jsonb test is written with `jsonb_exists` and its
-  kin, a literal question mark as `chr(63)`), and no `$2` or higher. The
+  kin, a literal question mark as `chr(63)`), and no `$2` or higher. It is
+  not blank, holds no `/*/` (the driver ends a block comment at that `/`,
+  PostgreSQL does not), and has no `$` directly next to a character outside
+  ASCII (PostgreSQL reads every such character as part of an identifier and
+  the driver does not, so the two disagree on where a dollar-quote tag ends).
+  A `$1` counts as standalone only when no word character, `$` or non-ASCII
+  character stands beside it. The
   changeset gate refuses a registering INSERT whose verification breaks these
   rules, and the move worker refuses to run one (`MoveSql`, Stage
   `VERIFICATION_REFUSED`, a permanent failure), because the JDBC driver binds
@@ -1108,9 +1114,9 @@ launcher that upstream does not test.
   complete; every tenant's run and the table-wide run execute first, so the
   count covers all of them. The fix is in the writer or the template, then a new move that
   supersedes it.
-- **The verification text is one the worker refuses** (a `?`, a `$` and digit
-  other than a standalone `$1`, or a `$1` the driver does not count as a
-  parameter): no verification query runs, and the move is `failed:`
+- **The verification text is one the worker refuses** (blank, a `?`, a
+  `/*/`, a `$` next to a non-ASCII character, a `$` and digit other than a
+  standalone `$1`, or a `$1` the driver does not count as a parameter): no verification query runs, and the move is `failed:`
   (Stage `VERIFICATION_REFUSED`, `failed_at` set); the fix is a superseding move.
 - **The move worker or its boot_work reporter fails to start**: the engine
   serves and publishes a `blocked:` entry (`data-move-worker` or
@@ -1477,3 +1483,4 @@ the first registered move.
 - 2026-11-17: wording to landed, reviewed code (grant 3): the changeset gate as built (nexus-f3yqd.2.19: MERGE, data-modifying WITH and SELECT INTO under rule 1; DROP without COLUMN and table or column renames under rule 3, whose precondition names a driving move's literal label; the exemption line scoped to its table; the frozen list as the shipped offenders; native change types refused; the verification placeholder rules); the driving-table isolation check (nexus-f3yqd.2.16: every registry row in any state, nexus.chunks left to ChunksIsolationCheck, a partitioned driving table checked at its parent, `<table>_owner_read`, boot only); the four-column re-pin to 9196f4b1c and its verified Critical Assumption (nexus-f3yqd.2.21).
 - 2026-11-17: wording to landed, reviewed code (grant 3), nexus-f3yqd.2.14, .2.15 and .2.17, develop commits 8cf174765..20b338640: `on_complete` runs under `lock_timeout` min(5 s, `statement_timeout_ms` / 2), at least 1 ms, on every move, and builder termination stays chunk-family only, decided by a name match pinned to the lint's list (`ChunkFamily`, `ChunkFamilyLintPinTest`); the completion UPDATE runs first and is guarded (not paused, failed, completed or superseded), with builders ended after it matched, inside the transaction; every run executes before a non-empty verification is reported, a move with no tenant scope gets the table-wide run only, a refused verification text is a permanent failure (Stage `VERIFICATION_REFUSED`; `MoveSql` sanctioned by Sam, 2026-11-17), and a stop is read between tenants and before completion; a missing driving schema or table is permanent, a raised 42501, 42883 or class 08 is read once more after 750 ms for dml_utils' asynchronous recorder, a paused pass and a stop count no retry, and an unwritable registry reports `blocked:`; boot_work entries come from `MoveBootWork` (own admin session, every 5 s) with the `working:`, `queued:`, `blocked:`, `failed:`, `paused:`, `stalled:` and `runs complete:` classes, carry no tenant, leaf, run label, pid or server text, `stalled:` after `NX_DATA_MOVE_STALL_MINUTES`, `done` as a clamped high-water, red entries for a worker or reporter that did not start, and `grants-nexus-svc-1` revoking `nexus_svc`'s privileges on `nexus.data_moves` where it can; nx doctor rows for each.
 - 2026-11-17: verification and `on_complete` failure classes to the code of nexus-f3yqd.2.15's follow-up and its critique (decided by linda under Sam's "keep things moving" rule, reversible): a verification run is transient for its timeout, a lost connection, a shutdown, a busy host (class 53) or a fault with no SQLSTATE, and an open failure of its connection is a connection failure; any other error it raises is permanent, 42501 and 42883 included; an `on_complete` is also transient for a lost connection, a shutdown, a busy host, a deadlock or a serialization failure, since its transaction rolls back whole.
+- 2026-11-17: verification refusals to the code of nexus-f3yqd.2.19's parity follow-up (grant 3): the gate and `MoveSql` both refuse a blank text, a `/*/` and a `$` directly next to a non-ASCII character, and a standalone `$1` has no word character, `$` or non-ASCII character beside it.
