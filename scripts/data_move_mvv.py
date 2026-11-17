@@ -659,7 +659,7 @@ def scenario_load2(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     t_v0, w_v0 = time.monotonic(), wal_lsn(eng)
     tail_quiet = True
     try:
-        wait_quiet(eng, timeout=a.quiet_timeout)
+        wait_quiet(eng, timeout=a.quiet_timeout, wal_bytes=int(a.quiet_wal_mb * (1 << 20)))
     except MvvError:
         tail_quiet = False
     t_v1, w_v1 = time.monotonic(), wal_lsn(eng)
@@ -690,7 +690,136 @@ def scenario_load2(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     return out, ok
 
 
-SCENARIOS = {"upgrade": scenario_upgrade, "kill-resume": scenario_kill_resume, "load": scenario_load, "load2": scenario_load2,
+
+def _leaf_upd(eng: Engine) -> tuple[int, int]:
+    """n_tup_upd and n_tup_hot_upd summed over the leaf partitions of nexus.chunks."""
+    r = sql(eng, "select coalesce(sum(s.n_tup_upd), 0), coalesce(sum(s.n_tup_hot_upd), 0) from pg_stat_user_tables s "
+                 "where s.relid in (select inhrelid from pg_inherits where inhparent in "
+                 "(select inhrelid from pg_inherits where inhparent = 'nexus.chunks'::regclass) "
+                 "union select inhrelid from pg_inherits where inhparent = 'nexus.chunks'::regclass)")[0]
+    return int(r[0]), int(r[1])
+
+
+def _stop_move(eng: Engine, label: str) -> dict:
+    """Pause a move and cancel its in-flight chunk (a pause alone waits for the run's end). Returns what was cancelled."""
+    sql(eng, f"update nexus.data_moves set paused_at = now(), paused_by = 'mvv-sweep' where label = '{label}'")
+    pids = [r[0] for r in sql(eng, "select pid from pg_stat_activity where pid <> pg_backend_pid() and state = 'active' and "
+                                   "(query like '%run_migration_chunks_committing%' or query like '%process_migration_chunk%')")]
+    for pid in pids:
+        sql(eng, f"select pg_cancel_backend({int(pid)})")
+    time.sleep(10)
+    _, d0 = _label_done_chunks(eng, label)
+    time.sleep(20)
+    _, d1 = _label_done_chunks(eng, label)
+    return {"cancelled_pids": len(pids), "chunks_after_stop": d1 - d0}
+
+
+def scenario_sweep(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
+    """One warm boot, then per (chunk_size, sleep_ms) pair: a fresh baseline after quiet, a move registered with that
+    pair in its INSERT (no NX_DATA_MOVE_SLEEP_MS override), a window of a.window_s under the same steady load (or the
+    whole move when it ends sooner), the move paused and its chunk cancelled, then the tail until quiet."""
+    if a.sleep_ms is not None:
+        raise MvvError("sweep sets sleep_ms per move in the registry; leave --sleep-ms unset")
+    pairs = [tuple(int(x) for x in s.split(":")) for s in a.pairs.split(",")]
+    eng.start("sweep")
+    first = wait_move(eng, a.move_timeout)
+    if not first["completed"]:
+        raise MvvError(f"the boot move did not complete: {first}")
+    upd, hot = _leaf_upd(eng)
+    cols = [r[0] for r in sql(eng, "select name from nexus.catalog_collections where name like 'knowledge\\_\\_bootw-%' "
+                                   "and name not like '%control%' order by 1")]
+    if not cols:
+        raise MvvError("no seeded collections to search")
+    out: dict = {"rate": a.rate, "threads": a.threads, "collections_searched": len(cols), "window_s": a.window_s,
+                 "boot_move_leaf_updates": {"n_tup_upd": upd, "n_tup_hot_upd": hot}, "pairs": []}
+    t_q0 = time.monotonic()
+    wait_quiet(eng, timeout=a.quiet_timeout)
+    out["boot_quiet_wait_s"] = round(time.monotonic() - t_q0, 1)
+    load = Load(eng, cols, a.rate, a.threads)
+    load.start()
+    time.sleep(a.warmup_s)
+    ok = True
+    try:
+        for i, (cs, sl) in enumerate(pairs):
+            label = f"{MOVE_LABEL}-c{cs}-s{sl}"
+            res: dict = {"chunk_size": cs, "sleep_ms": sl, "label": label}
+            out["pairs"].append(res)
+            try:
+                t_q = time.monotonic()
+                wait_quiet(eng, timeout=a.quiet_timeout, wal_bytes=int(a.quiet_wal_mb * (1 << 20)))
+                res["quiet_wait_s"] = round(time.monotonic() - t_q, 1)
+                t_b0, w_b0 = time.monotonic(), wal_lsn(eng)
+                time.sleep(a.baseline_s)
+                t_b1, w_b1 = time.monotonic(), wal_lsn(eng)
+                base = load.window(t_b0, t_b1)
+                base["wal_bytes_per_s"] = round((w_b1 - w_b0) / (t_b1 - t_b0))
+                u0, h0 = _leaf_upd(eng)
+                sql(eng, "insert into nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, "
+                         "statement_timeout_ms, verification, on_complete, changeset_id) "
+                         f"select '{label}', template, driving_schema, driving_table, {cs}, {sl}, statement_timeout_ms, "
+                         f"'SELECT 1 FROM nexus.chunks t WHERE coalesce(t.mvv_n, 0) < {i + 3} AND (t.tenant_id = $1 OR $1 IS NULL)', "
+                         f"on_complete, 'mvv-sweep-{i}' from nexus.data_moves where label = '{MOVE_LABEL}'")
+                t_m0, w_m0 = time.monotonic(), wal_lsn(eng)
+                started = None
+                d_start = 0
+                completed = False
+                while True:
+                    now = time.monotonic()
+                    total, done = _label_done_chunks(eng, label)
+                    if started is None and done > 0:
+                        started, d_start = now, done
+                    row = _label_row(eng, label)
+                    if row and (row["completed"] or row["failed"]):
+                        completed = bool(row["completed"])
+                        res["failed"] = bool(row["failed"])
+                        break
+                    if started is not None and now - started >= a.window_s:
+                        break
+                    if now - t_m0 > a.window_s + 600:
+                        raise MvvError(f"no chunk of {label} completed within {a.window_s + 600:.0f}s")
+                    time.sleep(0.5)
+                t_m1, w_m1 = time.monotonic(), wal_lsn(eng)
+                total, done = _label_done_chunks(eng, label)
+                u1, h1 = _leaf_upd(eng)
+                res["stop"] = {} if completed else _stop_move(eng, label)
+                during = load.window(started or t_m0, t_m1)
+                during["wal_bytes_per_s"] = round((w_m1 - w_m0) / (t_m1 - t_m0))
+                window_chunks = done - d_start
+                res |= {"baseline": base, "during_move": during, "completed": completed, "total_chunks": total,
+                        "chunks_done": done, "window_chunks": window_chunks,
+                        "seconds_per_chunk": round((t_m1 - (started or t_m0)) / window_chunks, 2) if window_chunks else None,
+                        "leaf_updates": {"n_tup_upd": u1 - u0, "n_tup_hot_upd": h1 - h0},
+                        "p99_ratio": round(during["p99_ms"] / base["p99_ms"], 3),
+                        "p50_ratio": round(during["p50_ms"] / base["p50_ms"], 3),
+                        "wal_ratio": round(during["wal_bytes_per_s"] / max(base["wal_bytes_per_s"], 1), 1)}
+                t_v0, w_v0 = time.monotonic(), wal_lsn(eng)
+                tail_quiet = True
+                try:
+                    wait_quiet(eng, timeout=a.quiet_timeout, wal_bytes=int(a.quiet_wal_mb * (1 << 20)))
+                except MvvError:
+                    tail_quiet = False
+                t_v1, w_v1 = time.monotonic(), wal_lsn(eng)
+                if t_v1 - t_v0 >= 10:
+                    after = load.window(t_v0, t_v1)
+                    after["wal_bytes_per_s"] = round((w_v1 - w_v0) / (t_v1 - t_v0))
+                    after["quiet_reached"] = tail_quiet
+                    res["after_move_until_quiet"] = after
+                    res["after_p99_ratio"] = round(after["p99_ms"] / base["p99_ms"], 3)
+                log(f"pair c{cs} s{sl}: p99 {base['p99_ms']} -> {during['p99_ms']} ({res['p99_ratio']}x), "
+                    f"{window_chunks} chunks in window, {res['seconds_per_chunk']} s/chunk")
+            except Exception as exc:  # noqa: BLE001 - one pair's failure is recorded and the sweep goes on
+                res["error"] = f"{type(exc).__name__}: {exc}"
+                ok = False
+                log(f"pair c{cs} s{sl} failed: {res['error']}")
+            if a.json:
+                a.json.write_text(json.dumps(out, indent=1, default=str) + "\n", encoding="utf-8")
+    finally:
+        load.stop()
+    out["search_errors"] = load.errors
+    return out, ok and load.errors == 0
+
+
+SCENARIOS = {"upgrade": scenario_upgrade, "kill-resume": scenario_kill_resume, "load": scenario_load, "load2": scenario_load2, "sweep": scenario_sweep,
              "no-pgbg": scenario_no_pgbg, "masking": scenario_masking}
 
 
@@ -713,6 +842,9 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--threads", type=int, default=4)
     sc.add_argument("--warmup-s", type=float, default=20.0)
     sc.add_argument("--baseline-s", type=float, default=90.0)
+    sc.add_argument("--pairs", default="1000:20000", help="sweep: chunk_size:sleep_ms pairs, comma separated")
+    sc.add_argument("--window-s", type=float, default=900.0, help="sweep: seconds measured per pair, from its first chunk")
+    sc.add_argument("--quiet-wal-mb", type=float, default=1.0, help="WAL MB per 30 s under which a wait under search load counts as quiet")
     sc.add_argument("--quiet-timeout", type=float, default=900.0, help="load2: seconds to wait for quiet before the baseline")
     sc.add_argument("--json", type=Path, default=None)
     a = ap.parse_args(argv)
