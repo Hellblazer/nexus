@@ -67,6 +67,7 @@ runs:
         key: m2-v1-${{ runner.os }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
         restore-keys: |
           m2-v1-${{ runner.os }}-${{ inputs.job-class }}-
+          setup-graalvm-${{ runner.os }}-maven-
 
     - name: Retry transient Maven Central errors
       shell: bash
