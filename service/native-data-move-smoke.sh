@@ -50,7 +50,7 @@ PROBE_PATH_PREFIX="/v1/_whoami/"
 # engine-service-release.yml), so initdb sits at <dir>/<top>/bin/initdb, depth 3. Prints the root, or nothing.
 locate_bundle() {
   local hit
-  hit=$(find "$1" -mindepth 3 -maxdepth 3 -type f -name initdb -path '*/bin/initdb' | head -1)
+  hit=$(find "$1" -mindepth 3 -maxdepth 3 -type f -name initdb -path '*/bin/initdb' -print -quit)
   [ -n "$hit" ] && dirname "$(dirname "$hit")"
 }
 
@@ -129,7 +129,7 @@ run_mode() {
 
   # Non-vacuity: a bundle that lacks pg_background cannot be the 'with' case, and the 'without' case must have
   # removed something.
-  ctl=$(find "$bundle" -name 'pg_background.control' | head -1)
+  ctl=$(find "$bundle" -name 'pg_background.control' -print -quit)
   if [ "$mode" = "with-pg-background" ]; then
     [ -n "$ctl" ] || { echo "FAIL: the bundle has no pg_background.control: it cannot serve the with-pg-background boot"; return 2; }
   else

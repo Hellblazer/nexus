@@ -102,13 +102,8 @@ def test_the_labels_the_script_probes_are_the_labels_the_checker_is_given() -> N
 
 def _pack_like_the_release(tmp_path: Path) -> Path:
     """A txz packed the way build-publish-pg-bundle packs it: tar -cJf -C <parent> <basename>, top directory kept."""
-    import shutil
     import subprocess
 
-    if shutil.which("xz") is None and sys.platform != "darwin":
-        import pytest
-
-        pytest.skip("tar here cannot write .txz without xz")
     bundle = tmp_path / "src" / "pgsql"
     (bundle / "bin").mkdir(parents=True)
     (bundle / "bin" / "initdb").write_text("#!/bin/sh\n")
