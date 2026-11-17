@@ -149,10 +149,14 @@ class TestLoadGates:
         gates = ab.load_gates(COVERAGE)
         assert len(gates["0.9"]) == 11 == report["partition"]["definite_miss"]
         assert gates["0.9"] <= set(report["not_routed_by_gate_names"])
-        assert "docs__1-20__voyage-context-3__v1" not in gates["0.9"]  # no_taxonomy: never routable
-        assert gates["0.96"] - gates["0.9"] == {"rdr__1-79__voyage-context-3__v1",
-                                                 "knowledge__dt-papers__voyage-context-3__v1"}
-        assert "knowledge__1-1__voyage-context-3__v1" not in ab.report_collections(COVERAGE)
+        # Collections are named by their content type and owner (the first two segments): the
+        # baseline is about which collections the gate moves, not the model they embed with.
+        def owners(names: set[str]) -> set[str]:
+            return {"__".join(n.split("__")[:2]) for n in names}
+
+        assert "docs__1-20" not in owners(gates["0.9"])  # no_taxonomy: never routable
+        assert owners(gates["0.96"] - gates["0.9"]) == {"rdr__1-79", "knowledge__dt-papers"}
+        assert "knowledge__1-1" not in owners(ab.report_collections(COVERAGE))
 
     @pytest.mark.parametrize("report", [
         {"complete": False, "collections": [_row("a", above=False)]},
