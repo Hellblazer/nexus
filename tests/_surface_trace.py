@@ -132,6 +132,11 @@ def _subprocess(args: Any, cwd: Any) -> None:
         return
     if tool in _NO_REPO_READS:
         return
+    if tool in ("bash", "sh") and rest[:1] == ["-n"]:
+        # A syntax check reads only the scripts it names.
+        for a in rest[1:]:
+            _record("opened", _rel(a, where))
+        return
     _record("opaque", " ".join(argv)[:200])
 
 

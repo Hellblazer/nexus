@@ -86,13 +86,43 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
 
 
+#: Per-test lists of paths, inverted on disk: path -> id of the set of tests that read it.
+_INVERTED = ("opened", "statted", "listed")
+
+
 def load_manifest(path: Path) -> dict:
-    return json.loads(gzip.decompress(path.read_bytes()))
+    """The manifest as {"tests": {test: {"sha256", "opened", "statted", "listed", "prefixes", ...}}}."""
+    disk = json.loads(gzip.decompress(path.read_bytes()))
+    names = disk["names"]
+    tests = {n: {**disk["tests"][n], **{k: [] for k in _INVERTED}} for n in names}
+    for kind in _INVERTED:
+        for p, sid in disk[kind].items():
+            for i in disk["sets"][sid]:
+                tests[names[i]][kind].append(p)
+    for entry in tests.values():
+        for kind in _INVERTED:
+            entry[kind].sort()
+    return {**{k: v for k, v in disk.items() if k not in ("names", "sets", "tests", *_INVERTED)}, "tests": tests}
 
 
 def write_manifest(path: Path, manifest: dict) -> None:
-    """Deterministic bytes: no name or mtime in the gzip header."""
-    raw = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()
+    """Deterministic bytes (no name or mtime in the gzip header). Most paths are read by one of a
+    few hundred groups of tests, so each path names its group's id instead of the tests."""
+    tests = manifest["tests"]
+    names = sorted(tests)
+    index = {n: i for i, n in enumerate(names)}
+    sets: dict[tuple[int, ...], int] = {}
+    disk: dict = {k: v for k, v in manifest.items() if k != "tests"}
+    disk["names"] = names
+    disk["tests"] = {n: {k: v for k, v in e.items() if k not in _INVERTED} for n, e in tests.items()}
+    for kind in _INVERTED:
+        readers: dict[str, list[int]] = {}
+        for n in names:
+            for p in tests[n].get(kind, ()):
+                readers.setdefault(p, []).append(index[n])
+        disk[kind] = {p: sets.setdefault(tuple(v), len(sets)) for p, v in sorted(readers.items())}
+    disk["sets"] = [list(s) for s, _ in sorted(sets.items(), key=lambda kv: kv[1])]
+    raw = json.dumps(disk, separators=(",", ":"), sort_keys=True).encode()
     path.write_bytes(gzip.compress(raw, compresslevel=9, mtime=0))
 
 
