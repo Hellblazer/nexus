@@ -735,6 +735,7 @@ def _placement_problems(calls: set[str], importers: set[str], not_senders: dict[
     return problems
 
 
+@pytest.mark.census
 def test_every_http_call_site_is_a_sender_or_a_named_non_sender() -> None:
     """A new engine-facing call site fails here until it sends the header (and the documents' scope stays
     true) or is named in ``_NOT_SENDERS`` with a reason, so the claim cannot widen or narrow unseen."""

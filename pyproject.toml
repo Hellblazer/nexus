@@ -350,6 +350,7 @@ log_level = "WARNING"
 # CI instead of going unnoticed for months.
 addopts = "-m 'not integration and not slow and not lint'"
 markers = [
+    "census: a repo-structure census that stays in the default loop (not deselected); scripts/meta_tests.py runs it, and every lint test, before a push when the diff reaches the files it scans",
     "integration: end-to-end tests requiring real services (deselect with '-m not integration')",
     "slow: expensive benchmarks/pagination/cold-import tests (deselect with '-m not slow'); excluded from default addopts, runs in the nightly local-service gate leg — see .github/workflows/local-service-gate-nightly.yml",
     "no_service_jar: integration test that drives PostgreSQL directly and is exempt from the service-jar freshness gate",
