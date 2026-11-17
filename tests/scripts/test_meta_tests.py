@@ -404,3 +404,18 @@ def test_the_diff_of_a_push_that_reddened_develop_selects_the_meta_test_it_broke
     sel = mt.select(REPO_ROOT, replay["changed"], "HEAD", tree=tree)
     picked = {**sel.selected, **sel.always, **sel.java}
     assert replay["file"] in picked, f"{replay['offender']} (CI run {replay['ci_run']}) not selected"
+
+
+def test_a_declared_meta_scans_root_stands_in_for_the_opaque_subprocess(repo: Path) -> None:
+    _write(repo, {"tests/test_scan.py": LINT + 'META_SCANS = ("src/nexus/pkg", "docs/")\n'})
+    manifest = _manifest(repo, test_scan={"opened": ["pyproject.toml"], "opaque": ["bash run.sh"]})
+    sel = mt.select(repo, ["src/nexus/pkg/a.py"], "base", manifest)
+    assert sel.selected["tests/test_scan.py"] == "enumerates a subtree holding src/nexus/pkg/a.py"
+    assert "tests/test_scan.py" not in mt.select(repo, ["src/nexus/mod.py"], "base", manifest).always
+
+
+def test_every_meta_scans_root_declared_in_the_repo_exists() -> None:
+    declared = {t: mt.declared_scans(REPO_ROOT, t) for t in mt.python_meta_tests(REPO_ROOT)}
+    missing = {t: [p for p in roots if not (REPO_ROOT / p).exists()] for t, roots in declared.items()}
+    assert {t: m for t, m in missing.items() if m} == {}
+    assert sum(1 for roots in declared.values() if roots) >= 5

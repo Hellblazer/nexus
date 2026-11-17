@@ -130,6 +130,10 @@ with open(proj / "main.jsonl", "a") as fh:
         fh.write(json.dumps(x) + "\n")
 '''
 
+#: Roots this file's subprocesses read, which scripts/meta_tests.py's trace cannot see:
+#: the harness scripts its bash runs, the stage list the harness itself names.
+META_SCANS = ("tests/cc-validation", "tests/e2e/lib.sh", "tests/e2e/lib", "conexus", "sn", "docs/tables")
+
 
 def _run_command_scenario(tmp_path: pathlib.Path, prefix: str, mode: str, forge_control: bool = False) -> list[str]:
     """Source a command scenario with a simulated Claude Code and return its PASS:/FAIL: lines.
