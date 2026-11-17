@@ -1,0 +1,173 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""The HTTP calls to the engine's ``/v1/identity`` routes (RDR-253 Step 1, ``IdentityHandler``).
+
+One small synchronous client shared by the SessionStart hook (the tenant credential), the MCP server (the data
+credential) and the CLI. It sends no identity token itself: the bind that mints one is the call that cannot have
+one, and every other call here is a read or an unfenced write. Fenced writes go through the T2 stores, which attach
+the token (:mod:`nexus.identity.token_header`).
+
+Which routes each credential may call is the engine's decision (``IdentityHandler.admit``), not this module's: a
+refusal comes back as :class:`IdentityApiError` with the engine's status and error code. The calls the MCP
+server's pending bind and renewal make (alias, session, bindings by host and its history mode, ephemeral create,
+bind with start/resume/fork/refresh/end, renew) are all admitted to the data credential; ``clear``, ``release``,
+``takeover`` and ``gone`` are the tenant credential's.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from typing import Any
+
+import httpx
+
+DEFAULT_TIMEOUT_S: float = 10.0
+DEFAULT_TENANT: str = "default"
+
+
+class IdentityApiError(Exception):
+    """The engine refused an identity call. *code* is its ``error`` field (``held``, ``generation_conflict``,
+    ``unknown_name``, ...); *body* is the whole answer, which carries the holder on a ``held``."""
+
+    def __init__(self, status: int, code: str | None, message: str, body: Mapping[str, Any] | None = None) -> None:
+        super().__init__(f"identity engine {status} {code or ''}: {message}".strip())
+        self.status = status
+        self.code = code
+        self.message = message
+        self.body: Mapping[str, Any] = body or {}
+
+
+class IdentityUnavailableError(Exception):
+    """The engine could not be reached, or its endpoint or credential does not resolve."""
+
+
+def evidence_body(
+    *, session_id: str | None = None, host: str | None = None, pid: int | None = None, started_at: int | None = None,
+    proc_start: str | None = None, pane: str | None = None, client_version: str | None = None,
+    lease: str | None = None, prior_session_id: str | None = None, holder_gone: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """A bind's evidence in the engine's field names, with every unset field left out."""
+    fields: dict[str, Any] = {
+        "session_id": session_id, "host": host, "pid": pid, "started_at": started_at, "proc_start": proc_start,
+        "pane": pane, "client_version": client_version, "lease": lease, "prior_session_id": prior_session_id,
+        "holder_gone": dict(holder_gone) if holder_gone else None,
+    }
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+class IdentityClient:
+    """``/v1/identity`` over httpx. *bearer* is the credential, or a callable resolved on every request so a data
+    token that refreshes is never baked in."""
+
+    def __init__(self, base_url: str, bearer: str | Callable[[], str], *, tenant: str = DEFAULT_TENANT,
+                 timeout: float = DEFAULT_TIMEOUT_S, http: httpx.Client | None = None) -> None:
+        self._base = base_url.rstrip("/")
+        self._bearer = bearer if callable(bearer) else (lambda: bearer)
+        self._tenant = tenant
+        self._http = http or httpx.Client(timeout=timeout)
+
+    @classmethod
+    def from_config(cls, *, timeout: float = DEFAULT_TIMEOUT_S) -> "IdentityClient":
+        """The client the hook, the MCP server and the CLI use: the endpoint and the credential ``nx`` already
+        resolves (``NX_SERVICE_URL``/``NX_SERVICE_TOKEN``, the config file, the supervisor's lease), and, on a box
+        that holds only a mint credential, the data token the stores mint. Raises :class:`IdentityUnavailableError`
+        when none resolves."""
+        from nexus.db.service_endpoint import resolve_service_endpoint  # noqa: PLC0415 — deferred: hook import cost
+
+        try:
+            base_url, token = resolve_service_endpoint()
+        except Exception as exc:  # noqa: BLE001 — every resolution failure is one fact: no engine to bind against
+            raise IdentityUnavailableError(f"{type(exc).__name__}: {exc}") from exc
+        if token:
+            return cls(base_url, token, timeout=timeout)
+
+        def mint() -> str:
+            from nexus.db.data_token import get_data_token_manager  # noqa: PLC0415 — deferred, as above
+
+            return get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT) or ""
+
+        return cls(base_url, mint, timeout=timeout)
+
+    def close(self) -> None:
+        self._http.close()
+
+    # ── transport ───────────────────────────────────────────────────────────
+
+    def _request(self, method: str, path: str, *, json: Any = None, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        headers = {"Authorization": f"Bearer {self._bearer()}", "X-Nexus-Tenant": self._tenant}
+        try:
+            resp = self._http.request(method, f"{self._base}/v1/identity{path}", json=json, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            raise IdentityUnavailableError(f"{type(exc).__name__}: {exc}") from exc
+        try:
+            body = resp.json() if resp.content else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        if resp.status_code >= 400:
+            message = body.get("message") or body.get("error") or resp.reason_phrase
+            raise IdentityApiError(resp.status_code, body.get("error") if isinstance(body.get("error"), str) else None,
+                                   str(message), body)
+        return body
+
+    # ── reads ───────────────────────────────────────────────────────────────
+
+    def alias(self, name: str) -> dict[str, Any]:
+        """Resolve a seat name: ``identity``, ``state`` (live or retired), ``generation``, ``identity_state``."""
+        return self._request("GET", f"/alias/{name}")
+
+    def show(self, identity: str) -> dict[str, Any]:
+        """The identity as of now: ``state``, ``generation``, ``lease``, ``holder``, ``reserved_until``."""
+        return self._request("GET", f"/{identity}")
+
+    def session(self, session_id: str) -> dict[str, Any]:
+        """The session index: ``identity``, ``generation``, ``current_generation``, ``state``; 404 when unindexed."""
+        return self._request("GET", f"/sessions/{session_id}")
+
+    def bindings_by_host(self, host: str, pid: int | None = None) -> list[dict[str, Any]]:
+        """The live and lapsed holders on *host* (optionally one pid), each the identity view with its ``holder``."""
+        params: dict[str, Any] = {"host": host}
+        if pid is not None:
+            params["pid"] = pid
+        return list(self._request("GET", "/bindings", params=params).get("bindings") or [])
+
+    def history(self, host: str, pid: int, proc_start: str) -> list[dict[str, Any]]:
+        """Every identity that ever held the process (*host*, *pid*, *proc_start*), most recent first: the identity
+        view plus ``binding`` (its newest row for that process). ``proc_start`` is required by the engine."""
+        params = {"host": host, "pid": pid, "proc_start": proc_start, "history": "1"}
+        return list(self._request("GET", "/bindings", params=params).get("bindings") or [])
+
+    # ── writes ──────────────────────────────────────────────────────────────
+
+    def create_seat(self, name: str, *, created_by: str = "sam", display_name: str | None = None) -> dict[str, Any]:
+        """A seat: unheld, generation 0, with a live alias (tenant credential only). The caller of this is
+        ``nx identity create`` (Step 4); the policy tests use it to stage seats."""
+        body: dict[str, Any] = {"kind": "seat", "name": name, "created_by": created_by}
+        if display_name:
+            body["display_name"] = display_name
+        return self._request("POST", "", json=body)
+
+    def create_ephemeral(self, *, display_name: str | None, created_by: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
+        """A new ephemeral identity already bound to the caller (generation 1, event ``start``)."""
+        body: dict[str, Any] = {"kind": "ephemeral", "created_by": created_by, "bind": dict(evidence)}
+        if display_name:
+            body["display_name"] = display_name
+        return self._request("POST", "", json=body)
+
+    def bind(self, identity: str, event: str, expected_generation: int, evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """The compare-and-set. The answer is the identity view plus ``event``, ``generation_changed``, ``noop``,
+        and, from Step 2, ``identity_token``."""
+        body: dict[str, Any] = {"event": event, "expected_generation": expected_generation}
+        body.update(evidence or {})
+        return self._request("POST", f"/{identity}/bind", json=body)
+
+    def gone(self, identity: str, expected_generation: int, holder_gone: Mapping[str, Any]) -> dict[str, Any]:
+        """Record that the holder is gone (tenant credential only). ``recorded`` is false for a repeat."""
+        return self._request("POST", f"/{identity}/gone",
+                             json={"expected_generation": expected_generation, "holder_gone": dict(holder_gone)})
+
+    def renew(self, identity: str, generation: int, client_version: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"generation": generation}
+        if client_version:
+            body["client_version"] = client_version
+        return self._request("POST", f"/{identity}/renew", json=body)

@@ -85,6 +85,7 @@ ENGINE_CLIENT_MODULES: frozenset[str] = frozenset({
     "nexus.db.t2._refreshable_client",   # the shared T2 client
     "nexus.db.t2.http_centroid_store",
     "nexus.db.t2.http_token_store",
+    "nexus.identity.bind_client",        # /v1/identity: the session identity routes (RDR-253 Step 3)
     "nexus.daemon.storage_service_daemon",    # the supervisor's loopback admin post
     "nexus.upgrade_ladder.provisioning",      # engine version, capability and health probes
 })

@@ -32,6 +32,10 @@ process that calls :func:`write_handoff_marker` directly with a
 same-UID-is-trusted posture for T1 tokens elsewhere (``nexus.db.t1``),
 not a new hole this module introduces.)
 
+RDR-253 Step 3 extends the payload: on ``clear``, ``resume`` and ``fork`` the hook also names the identity it bound,
+its generation and the path of the process's token file (never the token), which the MCP server's identity lease
+adopts (:mod:`nexus.mcp.identity_lease`). The fields are absent when the hook bound nothing.
+
 Live marker file: ``<config_dir>/t1_handoff.<mcp_pid>``, mode 0600 (same
 sensitivity posture as the T1 session lease files in ``nexus.db.t1`` --
 the marker names a session id, not a secret, but the file lives in the
@@ -93,6 +97,22 @@ class HandoffMarker:
     new_session_id: str
     claude_pid: int
     written_at: float
+    #: RDR-253 Step 3: the identity the hook bound, its generation and the path of the token file (never the
+    #: token). None for a marker written before the identity binding, or by a hook that bound nothing.
+    identity: str | None = None
+    generation: int | None = None
+    token_file: str | None = None
+
+
+def _payload(new_session_id: str, claude_pid: int, written_at: float, identity: str | None, generation: int | None,
+             token_file: str | None) -> bytes:
+    """The marker's JSON. The identity fields are present only when the hook bound an identity."""
+    body: dict = {"new_session_id": new_session_id, "claude_pid": claude_pid, "written_at": written_at}
+    if identity is not None:
+        body["identity"] = identity
+        body["generation"] = generation
+        body["token_file"] = token_file
+    return json.dumps(body).encode("utf-8")
 
 
 def write_handoff_marker(
@@ -102,6 +122,9 @@ def write_handoff_marker(
     claude_pid: int,
     config_dir: Path,
     clock: Callable[[], float] = time.time,
+    identity: str | None = None,
+    generation: int | None = None,
+    token_file: str | None = None,
 ) -> None:
     """Publish a handoff marker for *mcp_pid* at the LIVE path.
 
@@ -132,13 +155,7 @@ def write_handoff_marker(
     make_user_dir(config_dir)
     path = handoff_marker_path(mcp_pid, config_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    payload = json.dumps(
-        {
-            "new_session_id": new_session_id,
-            "claude_pid": claude_pid,
-            "written_at": clock(),
-        }
-    ).encode("utf-8")
+    payload = _payload(new_session_id, claude_pid, clock(), identity, generation, token_file)
     fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, payload)
@@ -160,6 +177,9 @@ def write_handoff_marker_if_absent(
     claude_pid: int,
     config_dir: Path,
     clock: Callable[[], float] = time.time,
+    identity: str | None = None,
+    generation: int | None = None,
+    token_file: str | None = None,
 ) -> bool:
     """Publish a handoff marker at the LIVE path ONLY if none exists there.
 
@@ -195,13 +215,7 @@ def write_handoff_marker_if_absent(
     make_user_dir(config_dir)
     path = handoff_marker_path(mcp_pid, config_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.reinstate.tmp")
-    payload = json.dumps(
-        {
-            "new_session_id": new_session_id,
-            "claude_pid": claude_pid,
-            "written_at": clock(),
-        }
-    ).encode("utf-8")
+    payload = _payload(new_session_id, claude_pid, clock(), identity, generation, token_file)
     fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
         os.write(fd, payload)
@@ -251,10 +265,16 @@ def _parse_marker_bytes(raw: str) -> HandoffMarker | None:
         written_at = float(written_at)
     except (TypeError, ValueError):
         return None
+    identity = data.get("identity")
+    generation = data.get("generation")
+    token_file = data.get("token_file")
     return HandoffMarker(
         new_session_id=new_session_id.strip(),
         claude_pid=claude_pid,
         written_at=written_at,
+        identity=identity if isinstance(identity, str) and identity else None,
+        generation=generation if isinstance(generation, int) and not isinstance(generation, bool) else None,
+        token_file=token_file if isinstance(token_file, str) and token_file else None,
     )
 
 

@@ -1,0 +1,394 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""The MCP server's half of session identity (RDR-253 Step 3): handover, renewal, refresh, fork row, pending bind, end.
+
+The SessionStart hook binds and writes the process's token file; this module keeps the binding alive from the
+server, which is the one process that outlives every ``/clear``:
+
+* **token read.** A new server reads the token file of its own Claude process (its pid and the registry's
+  ``startedAt``), polling once a second for up to 30 seconds, since the hook and the server start together; if the
+  file has not appeared it runs unbound and keeps looking on every heartbeat.
+* **heartbeat re-read.** Every heartbeat it re-reads the file and adopts the identity and generation it finds, so a
+  cross-seat ``/resume`` or a take-over reaches it within a minute even if the T1 handoff marker was lost.
+* **renewal** every 60 seconds; **refresh** at half the token's life through ``bind`` with the same generation, which
+  rewrites the process's one token file. A renewal or refresh from a superseded generation is refused: the server
+  stops writing identity state and says so.
+* **fork row.** ``/branch`` runs no hook. When the registry entry of its Claude process names a session id the
+  index does not know, the server appends the ``fork`` row.
+* **pending bind.** While unbound it looks for the pending file of its own Claude process (the hook's registry wait
+  timed out), binds from it with the data credential and deletes it. That credential may start, resume, fork,
+  refresh and end a binding and create an ephemeral identity, and the pending bind needs nothing else.
+* **end.** On a clean shutdown it appends ``end`` with its expected generation, so a late ``end`` from a superseded
+  process is refused, and deletes its token file.
+
+One thread per server (:func:`start`); :meth:`IdentityLease.tick` is one heartbeat and holds the logic, so a test
+drives it with a fixed clock and no thread. This module does not use ``subscriptions._lease_loop``: that loop runs
+only while a ``directory/<name>`` lease is armed, and identity must be renewed for a server with no name.
+"""
+from __future__ import annotations
+
+import os
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+from nexus.identity import token_contract
+from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body
+from nexus.identity.binder import LaunchFacts, SessionBinder
+from nexus.identity.holder import Processes, epoch_seconds, normalise_instant, read_registry_entry
+from nexus.identity.pending import Pending, delete_pending, take_pending
+from nexus.identity.token_file import TokenFile, ancestor_token_path, delete_token_file, identity_dir, read_token_file, write_token_file
+
+_log = structlog.get_logger(__name__)
+
+HEARTBEAT_S: float = 60.0
+STARTUP_POLL_S: float = 1.0
+STARTUP_WINDOW_S: float = 30.0
+THREAD_POLL_S: float = 1.0
+DEFAULT_TOKEN_LIFE_S: float = 3600.0
+#: How long a shutdown waits for the Claude process to exit before deciding the shutdown is not a session end.
+CLAUDE_EXIT_WAIT_S: float = 1.5
+
+
+@dataclass
+class TickReport:
+    """What one heartbeat did, for tests and the log."""
+
+    adopted: bool = False
+    pending_bound: bool = False
+    renewed: bool = False
+    refreshed: bool = False
+    forked: bool = False
+    superseded: bool = False
+    error: str | None = None
+
+
+class IdentityLease:
+    """This MCP server's binding, kept alive. *claude_pid* is the nearest Claude ancestor."""
+
+    def __init__(self, *, client_factory: Callable[[], Any], config_dir: Path, claude_pid: int,
+                 procs: Processes | Any | None = None, clock: Callable[[], float] = time.time,
+                 client_version: str | None = None, sleep: Callable[[float], None] = time.sleep) -> None:
+        self._factory = client_factory
+        self._idir = identity_dir(config_dir)
+        self._claude_pid = claude_pid
+        self._procs = procs if procs is not None else Processes()
+        self._clock = clock
+        self._sleep = sleep
+        self._version = client_version
+        self._lock = threading.RLock()
+        self.identity: str | None = None
+        self.generation: int | None = None
+        self.token: str | None = None
+        self.token_expires_at: float | None = None
+        self.token_life_s: float = DEFAULT_TOKEN_LIFE_S
+        self.session_id: str | None = None
+        self.superseded: bool = False
+        self._known_sessions: set[str] = set()
+        self._started = clock()
+        self._next_heartbeat = 0.0
+        self._next_renew = 0.0
+
+    # ── what the process is ─────────────────────────────────────────────────
+
+    @property
+    def bound(self) -> bool:
+        return self.identity is not None and not self.superseded
+
+    def token_path(self) -> Path | None:
+        """This process's token file: its Claude pid and the ``startedAt`` the registry records; None until the
+        registry file exists."""
+        return ancestor_token_path(self._idir, self._claude_pid, self._procs.sessions_dir)
+
+    def _evidence_process(self) -> dict[str, Any]:
+        entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
+        return {"started_at": entry.started_at if entry else None}
+
+    # ── one heartbeat ───────────────────────────────────────────────────────
+
+    def due(self) -> bool:
+        """Whether a heartbeat is due now: every second inside the startup window while unbound, else every 60."""
+        now = self._clock()
+        if not self.bound and now - self._started < STARTUP_WINDOW_S:
+            return now >= self._next_heartbeat
+        return now >= self._next_heartbeat
+
+    def tick(self) -> TickReport:
+        """One heartbeat: re-read the token file, bind from a pending file while unbound, then renew, refresh and
+        append a fork row as due. Never raises: a failure is logged and the next heartbeat tries again."""
+        report = TickReport()
+        with self._lock:
+            now = self._clock()
+            unbound_early = not self.bound and now - self._started < STARTUP_WINDOW_S
+            self._next_heartbeat = now + (STARTUP_POLL_S if unbound_early else HEARTBEAT_S)
+            try:
+                report.adopted = self._reread()
+                if self.identity is None:
+                    report.pending_bound = self._pending_bind()
+                if self.bound:
+                    self._maintain(now, report)
+            except IdentityUnavailableError as exc:
+                report.error = f"engine unavailable: {exc}"
+                _log.debug("identity_lease_engine_unavailable", error=str(exc))
+            except IdentityApiError as exc:
+                report.error = f"{exc}"
+                _log.warning("identity_lease_refused", error=str(exc), identity=self.identity)
+            except Exception as exc:  # noqa: BLE001 — a heartbeat must never kill the server's thread
+                report.error = f"{type(exc).__name__}: {exc}"
+                _log.warning("identity_lease_tick_failed", error=report.error)
+            report.superseded = self.superseded
+        return report
+
+    def _reread(self) -> bool:
+        """Adopt what the token file says: a new identity or generation (an identity switch, a take-over, a
+        refresh by a sibling) or a new token. True when anything changed."""
+        path = self.token_path()
+        record = read_token_file(path) if path is not None else None
+        if record is None:
+            return False
+        return self._adopt(record)
+
+    def _adopt(self, record: TokenFile) -> bool:
+        changed = (record.identity, record.generation) != (self.identity, self.generation)
+        newer_token = record.token != self.token
+        if not changed and not newer_token and record.session_id == self.session_id:
+            return False
+        if changed and self.superseded and self.identity is not None:
+            _log.info("identity_lease_readopted", old=self.identity, new=record.identity, generation=record.generation)
+        if changed:
+            self.superseded = False
+            self._next_renew = 0.0
+        self.identity, self.generation = record.identity, record.generation
+        self.token, self.token_expires_at = record.token, record.expires_at
+        if record.session_id:
+            self.session_id = record.session_id
+            self._known_sessions.add(record.session_id)
+        return True
+
+    def adopt_marker(self, *, identity: str | None, generation: int | None, token_file: str | None) -> bool:
+        """Adopt the identity a T1 handoff marker names, reading the token file it points at. The path must be this
+        process's own token file: a marker naming another path is ignored, never followed."""
+        if not identity or token_file is None:
+            return False
+        with self._lock:
+            own = self.token_path()
+            if own is None or Path(token_file) != own:
+                _log.warning("identity_marker_path_rejected", marker_path=token_file, own=str(own) if own else None)
+                return False
+            record = read_token_file(own)
+            if record is None or record.identity != identity or (generation is not None and record.generation != generation):
+                return False
+            return self._adopt(record)
+
+    # ── bound: renew, refresh, fork ─────────────────────────────────────────
+
+    def _maintain(self, now: float, report: TickReport) -> None:
+        client = self._factory()
+        if now >= self._next_renew:
+            self._fork_if_unknown(client, report)
+            try:
+                client.renew(self.identity, self.generation, self._version)
+                report.renewed = True
+            except IdentityApiError as exc:
+                if token_contract.is_stale_generation(exc.status, exc.code):
+                    self._superseded(exc)
+                    return
+                if exc.status == 409 and exc.code in ("not_held", "identity_not_held"):  # Step 1 / Step 2 spellings
+                    _log.info("identity_lease_not_held", identity=self.identity, state=exc.body.get("state"))
+                    return  # the seat was released or ended under this process: the token file will say what is next
+                raise
+            self._next_renew = now + HEARTBEAT_S
+        if self.token and self.token_expires_at is not None and self.token_expires_at - now <= self.token_life_s / 2:
+            self._refresh(client, now, report)
+
+    def _refresh(self, client: Any, now: float, report: TickReport) -> None:
+        try:
+            view = client.bind(self.identity, "refresh", self.generation, evidence_body(client_version=self._version))
+        except IdentityApiError as exc:
+            if token_contract.is_stale_generation(exc.status, exc.code):
+                self._superseded(exc)
+                return
+            raise
+        token, life = token_contract.token_from_response(view)
+        if token is None:
+            return  # an engine that issues none (Step 1): nothing to rewrite
+        self.token, self.token_expires_at = token, token_contract.expires_at(life, now=now)
+        if life:
+            self.token_life_s = life
+        self._rewrite_file()
+        report.refreshed = True
+
+    def _rewrite_file(self) -> None:
+        path = self.token_path()
+        if path is None or self.identity is None or self.generation is None:
+            return
+        entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
+        if entry is None or entry.started_at is None:
+            return
+        prior = read_token_file(path)
+        write_token_file(path, TokenFile(
+            identity=self.identity, generation=self.generation, token=self.token, expires_at=self.token_expires_at,
+            session_id=self.session_id or (prior.session_id if prior else None), pid=self._claude_pid,
+            started_at=entry.started_at, proc_start=(prior.proc_start if prior else None) or normalise_instant(self._procs.os_start(self._claude_pid)),
+            host=self._procs.host,
+        ))
+
+    def _fork_if_unknown(self, client: Any, report: TickReport) -> None:
+        """``/branch``: a session id in the registry entry of this process that the index does not know."""
+        entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
+        sid = entry.session_id if entry else None
+        if not sid or sid in self._known_sessions:
+            return
+        try:
+            client.session(sid)
+            self._known_sessions.add(sid)
+            return
+        except IdentityApiError as exc:
+            if exc.status != 404:
+                raise
+        prior = self.session_id
+        view = client.bind(self.identity, "fork", self.generation, evidence_body(session_id=sid, prior_session_id=prior,
+                                                                                client_version=self._version))
+        self._known_sessions.add(sid)
+        self.session_id = sid
+        token, life = token_contract.token_from_response(view)
+        if token is not None:
+            self.token, self.token_expires_at = token, token_contract.expires_at(life, now=self._clock())
+        self._rewrite_file()
+        report.forked = True
+        _log.info("identity_lease_fork_row", identity=self.identity, session_id=sid, prior=prior)
+
+    def _superseded(self, exc: IdentityApiError) -> None:
+        if not self.superseded:
+            _log.error("identity_lease_superseded", identity=self.identity, generation=self.generation,
+                       detail=str(exc), consequence="another process holds this identity now; this server stops writing identity state")
+        self.superseded = True
+
+    # ── unbound: the pending bind ───────────────────────────────────────────
+
+    def _pending_bind(self) -> bool:
+        """Bind from the hook's pending file, when it names exactly this Claude process (pid and OS start time)."""
+        entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
+        if entry is None or entry.started_at is None:
+            return False
+        start = normalise_instant(self._procs.os_start(self._claude_pid))
+        if start is None:
+            return False
+        found = take_pending(self._idir, self._claude_pid, epoch_seconds(start))
+        if found is None:
+            return False
+        path, pending = found
+        facts = LaunchFacts(source=pending.source, session_id=pending.session_id, host=self._procs.host,
+                            claude_pid=self._claude_pid, proc_start=start, client_version=self._version,
+                            seat=pending.seat, name=pending.name, pane=pending.pane)
+        facts.with_registry(entry)
+        binder = SessionBinder(client=self._factory(), procs=self._procs, identity_dir=self._idir, allow_privileged=False,
+                               clock=self._clock, sleep=self._sleep)
+        outcome = binder.bind(facts)
+        if outcome.action == "unbound":
+            _log.warning("identity_pending_bind_failed", notices=outcome.notices)
+            return False  # kept: the next heartbeat retries
+        delete_pending(path)
+        for notice in outcome.notices:
+            _log.info("identity_pending_bind_notice", notice=notice)
+        record = read_token_file(outcome.token_file) if outcome.token_file is not None else None
+        if record is not None:
+            self._adopt(record)
+        _log.info("identity_pending_bind", identity=outcome.identity, row=outcome.row, generation=outcome.generation)
+        return record is not None
+
+    # ── shutdown ────────────────────────────────────────────────────────────
+
+    def shutdown(self, *, wait_for_claude: bool = True) -> None:
+        """A clean exit: append ``end`` with the expected generation and delete the token file. Done only when the
+        Claude process is gone: a server shutting down under a live Claude (a ``/mcp`` reconnect) leaves the
+        binding and the file for its successor, which has no hook to bind it again. A server that stopped writing
+        because it was superseded sends nothing. Best effort and never raises."""
+        with self._lock:
+            try:
+                if wait_for_claude:
+                    deadline = self._clock() + CLAUDE_EXIT_WAIT_S
+                    while self._procs.alive(self._claude_pid) and self._clock() < deadline:
+                        self._sleep(0.1)
+                if self._procs.alive(self._claude_pid):
+                    return
+                if self.identity is not None and self.generation is not None and not self.superseded:
+                    try:
+                        self._factory().bind(self.identity, "end", self.generation, evidence_body(client_version=self._version))
+                    except IdentityApiError as exc:
+                        _log.info("identity_end_refused", identity=self.identity, error=str(exc))
+                path = self.token_path()
+                if path is not None:
+                    delete_token_file(path)
+                else:
+                    for stale in self._idir.glob(f"{self._claude_pid}.*.token"):
+                        delete_token_file(stale)
+            except Exception as exc:  # noqa: BLE001 — shutdown is best effort
+                _log.warning("identity_shutdown_failed", error=f"{type(exc).__name__}: {exc}")
+
+
+# ── the process's one lease ─────────────────────────────────────────────────
+
+_LEASE: IdentityLease | None = None
+_THREAD: threading.Thread | None = None
+_STOP = threading.Event()
+_GUARD = threading.Lock()
+
+
+def start() -> IdentityLease | None:
+    """Start this server's identity lease on its own daemon thread. Idempotent. None when there is no Claude
+    ancestor (a server started by hand) or identity is switched off with ``NX_IDENTITY_LEASE=0``."""
+    global _LEASE, _THREAD
+    with _GUARD:
+        if _LEASE is not None:
+            return _LEASE
+        if os.environ.get("NX_IDENTITY_LEASE", "1") == "0":
+            return None
+        from nexus import config as _nx_config  # noqa: PLC0415 — deferred: server start cost; a module attribute so a patched config dir reaches it
+        from nexus.db.client_identity import client_version  # noqa: PLC0415
+        from nexus.session import _command_name_of, find_immediate_claude_pid  # noqa: PLC0415
+
+        pid = find_immediate_claude_pid(start_pid=os.getpid())
+        if pid <= 0 or not _command_name_of(pid).lower().startswith("claude"):
+            return None
+        lease = IdentityLease(client_factory=IdentityClient.from_config, config_dir=_nx_config.nexus_config_dir(), claude_pid=pid,
+                              client_version=client_version())
+        _STOP.clear()
+        _THREAD = threading.Thread(target=_run, args=(lease,), name="nx-identity-lease", daemon=True)
+        _LEASE = lease
+        _THREAD.start()
+        return lease
+
+
+def _run(lease: IdentityLease) -> None:
+    while not _STOP.wait(THREAD_POLL_S):
+        if lease.due():
+            lease.tick()
+
+
+def adopt_marker(*, identity: str | None, generation: int | None, token_file: str | None) -> bool:
+    """Called by the T1 handoff watcher for a marker that carries an identity. False when no lease runs."""
+    lease = _LEASE
+    return lease.adopt_marker(identity=identity, generation=generation, token_file=token_file) if lease else False
+
+
+def shutdown() -> None:
+    """Stop the thread and end the binding (:meth:`IdentityLease.shutdown`). Idempotent."""
+    global _LEASE, _THREAD
+    with _GUARD:
+        lease, _LEASE = _LEASE, None
+        thread, _THREAD = _THREAD, None
+    _STOP.set()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=1.0)
+    if lease is not None:
+        lease.shutdown()
+
+
+def current() -> IdentityLease | None:
+    return _LEASE

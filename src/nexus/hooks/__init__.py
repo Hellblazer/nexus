@@ -166,7 +166,7 @@ def _infer_repo() -> str:
 _T1_HANDOFF_SOURCES = frozenset({"clear", "resume", "fork"})
 
 
-def _write_t1_handoff_markers(new_session_id: str) -> None:
+def _write_t1_handoff_markers(new_session_id: str, identity_fields: dict | None = None) -> None:
     """nexus-d76vc: hand THIS conversation's new session id to any live
     MCP server sibling of the current claude process, so its frozen T1
     scope can follow across ``/clear``/``/resume`` instead of staying
@@ -189,6 +189,9 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
     the session over a T1-scope convenience feature. Every non-T1 tool,
     and T1 itself via the frozen pre-existing scope, keeps working either
     way.
+
+    RDR-253 Step 3: *identity_fields* (identity, generation, token_file) are the hook's bind result, which the
+    marker carries to the MCP server beside the session id (never the token itself).
     """
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import; rare/branch-local path
@@ -211,6 +214,7 @@ def _write_t1_handoff_markers(new_session_id: str) -> None:
                 new_session_id=new_session_id,
                 claude_pid=claude_pid,
                 config_dir=config_dir,
+                **(identity_fields or {}),
             )
     except Exception as exc:  # noqa: BLE001 — best-effort; hook must never crash session-start over a T1-scope convenience feature
         _logger().debug("t1_handoff_marker_write_failed", error=str(exc))
@@ -383,8 +387,11 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     if not inherited:
         write_claude_session_id(session_id)
 
+    # RDR-253 Step 3: bind this session to its identity (the policy table) before the marker, which carries the result.
+    identity = _bind_identity(session_id, source)
+
     if source in _T1_HANDOFF_SOURCES and session_id and session_id != "unknown":
-        _write_t1_handoff_markers(session_id)
+        _write_t1_handoff_markers(session_id, _identity_marker_fields(identity, source))
     if session_id and session_id != "unknown":
         # Every source, not just clear/resume: see the writer's docstring.
         _write_tuple_watch_session_marker(session_id, source)
@@ -403,7 +410,30 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     # :func:`render_session_start`. The mailbox-arm probe is the one
     # remaining piece of real I/O (network probe + cache write), computed
     # here rather than inside the pure render.
-    return render_session_start(session_id, mailbox_arm_text=_mailbox_arm_block(session_id))
+    text = render_session_start(session_id, mailbox_arm_text=_mailbox_arm_block(session_id))
+    return f"{text}\n\n{identity.text()}" if identity is not None and identity.notices else text
+
+
+def _bind_identity(session_id: str, source: str | None):
+    """RDR-253 Step 3: the identity leg of SessionStart (:mod:`nexus.hooks.identity_bind`); None when it did not run.
+    Never raises."""
+    if not session_id or session_id == "unknown":
+        return None
+    try:
+        from nexus.hooks.identity_bind import bind_at_session_start  # noqa: PLC0415 — deferred: a hook pays its import cost on every invocation
+
+        return bind_at_session_start(session_id, source)
+    except Exception as exc:  # noqa: BLE001 — session start must never break on identity
+        _logger().warning("identity_bind_unavailable", error=str(exc))
+        return None
+
+
+def _identity_marker_fields(identity, source: str | None) -> dict:
+    if identity is None:
+        return {}
+    from nexus.hooks.identity_bind import handoff_fields  # noqa: PLC0415 — deferred, as above
+
+    return handoff_fields(identity, source)
 
 
 def _stale_mcp_host_warning() -> str:
