@@ -371,7 +371,8 @@ Applied to this RDR's scope, in the order the work can ship:
   `all_documents` with its class, refuses a new one, and lets the list only
   shrink. It lands before any switch, so nothing new arrives while the rest
   moves.
-- **Switch to routes that exist (client only).** Eight sites (Gap 1) read
+- **Switch to routes that exist (client only).** Seven sites (Gap 1; an eighth,
+  `--check-references`, moved to Phase 2) read
   through an engine route instead of a walk, or instead of the walk's
   unscoped branch. A switch that removes a call lowers the table in the same
   commit.
@@ -699,8 +700,8 @@ the table in the same commit:
   (code 3, distinct from pass, fail and a usage error) when its row reads "not
   checked", and the general `nx doctor` sweep keeps those rows non-gating.
 
-Expected count after this phase: 22 calls in 21 sites (the 21 forecast less
-the `--check-references` switch, which moved to Phase 2).
+Expected count after this phase: 22 calls in 21 sites (the 21 forecast plus
+the one call `--check-references` keeps until its switch in Phase 2).
 
 ### Phase 2: Engine routes, then client (days, with an engine release)
 
@@ -830,9 +831,9 @@ and outside the plan: that site stays in the ratchet table as AGGREGATE.
 
 The scope is the narrowed one Sam took on 2026-11-16: the ratchet (Gap 4),
 the unattended walks (Gap 3), and the routes and switches for Gap 1. Every
-in-scope gap has a phase: Gap 4 is Phase 1's first step, Gap 3 and the
-Gap 1 switches to existing routes are Phase 1, and the new author, metadata
-and sensitive-locator routes are Phase 2. Gap 2 (tenant-wide jobs) is
+in-scope gap has a phase: Gap 4 is Phase 1's first step, the Gap 1
+switches to existing routes are Phase 1, and Gap 3's two walks and the new
+author, metadata, sensitive-locator and scheme-prefix routes are Phase 2. Gap 2 (tenant-wide jobs) is
 deferred with the trigger "nexus-f3yqd.2's job mechanism is built" and is not
 a gate item. The operator-dispatch walk was found during the revision and is
 inside Gap 3's definition (an unattended path that reaches a walk), so it is
