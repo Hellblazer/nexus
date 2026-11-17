@@ -338,7 +338,7 @@ skipped before the pool fetch (`filter_skipped_deadline`,
 `filter_skipped_budget`) rather than started and cut. When phase A's resolve
 failed (`resolution_failed`) or the anchors already fill the cap (`cap_full`),
 phase B does not run, so no call is spent that cannot change the answer.
-An empty reply for a pack is a reject verdict, not a failure. When some filter
+A reply with no record is a failed call, as the assessor's own instruction says ("a reply with no record is read as a failed assessment", coverage_ledger.py around line 322), named `filter_empty_reply` (nexus-w8d30); a reply whose records the host accepted, none citing support, is the reject verdict. The build first read an empty reply as a reject, which dropped every candidate silently (post-mortem). When some filter
 calls fail, keys that completed calls cited as support are kept and the failed
 packs' candidates are rejected (`filter_partial_failure`). No pool key is kept
 when the fetch fails, the assessment raises or every call fails
