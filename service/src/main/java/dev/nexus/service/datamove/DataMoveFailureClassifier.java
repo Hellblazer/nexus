@@ -75,8 +75,10 @@ final class DataMoveFailureClassifier {
      * Whether a failure of a verification or {@code on_complete} statement is the host's: the statement timeout (57014), a lost
      * connection (class 08), a shutdown or startup (57P01 to 57P03) and a busy host (class 53). {@code on_complete} also takes
      * its lock timeout (55P03), a deadlock (40P01) and a serialization failure (40001), which live writers cause during its
-     * DDL; its transaction rolls back whole, so a retry is safe. A verification text that raises one of those three is
-     * deterministic in its own right, so it stays permanent.
+     * DDL; its transaction rolls back whole, so a retry is safe. A verification is a READ ONLY SELECT at the server's default
+     * isolation with no lock_timeout, so in the shipped session it cannot raise 40001 or 55P03 (a lock wait ends at the
+     * statement timeout, 57014) and 40P01 needs a lock cycle with DDL; those three are kept permanent there as unreachable,
+     * not because they are the text's fault.
      */
     static boolean transientSession(String sqlstate, boolean onComplete) {
         if (sqlstate == null) {
