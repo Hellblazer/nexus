@@ -1,0 +1,3 @@
+### Added
+
+- **`service/native-smoke.sh` checks that the correlation id and the `event=request_failed` line print on a native binary (RDR-167, Phase 1).** Four checks after the gzip check: a bad bearer on `/v1/_whoami` (behind `AuthFilter`; `/version` is unauthenticated and echoes nothing) with `X-Correlation-ID: native-smoke-cid-1` answers 401 and echoes the header; the service log then has a line with `cid=native-smoke-cid-1`, `event=request_failed` and `status=401`; and a malformed document tumbler on `/v1/catalog/register` with `native-smoke-cid-2` answers 400 and logs a `request_failed` line whose `tenant=` is a resolved value, not `-`. The engine release workflow runs the script on every release, so a native-only Logback or MDC break now fails the release smoke.

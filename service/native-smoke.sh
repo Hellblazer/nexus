@@ -255,6 +255,52 @@ if grep -q 'gzip_response_unavailable' "$SMOKE_TMP/svc.log"; then
   echo "  FAIL gzip fell back to identity in the native image:"; grep -m 3 gzip_response_unavailable "$SMOKE_TMP/svc.log"; fail=1
 fi
 
+# RDR-167 (nexus-dngtz.1.9): the correlation id and the request_failed line in the NATIVE
+# image. The engine is built with --initialize-at-build-time=org.slf4j,ch.qos.logback and
+# Logback's reflection entries are listed by hand, so "%X needs no reflection entry" is a
+# source read and a JVM run until this runs on the binary. /version is NOT used: it is
+# registered without AuthFilter, so a bad bearer gets 200 and no echo. /v1/_whoami is behind
+# AuthFilter. The log lines are read after a short bounded poll (the appender writes per line,
+# but the reader is another process).
+echo "correlation id / MDC (RDR-167):"
+_log_line() { # pattern... : first svc.log line matching every pattern, polled for up to 2 s
+  local i l pat
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    l=$(cat "$SMOKE_TMP/svc.log")
+    for pat in "$@"; do l=$(printf '%s\n' "$l" | grep -E -- "$pat"); done
+    [ -n "$l" ] && { printf '%s\n' "${l%%$'\n'*}"; return 0; }
+    sleep 0.2
+  done
+  return 1
+}
+code=$(curl -s -D "$SMOKE_TMP/cid1.hdr" -o "$SMOKE_TMP/cid1.out" -w '%{http_code}' \
+  -H 'Authorization: Bearer not-the-token' -H 'X-Correlation-ID: native-smoke-cid-1' "$U/v1/_whoami")
+# The headers are read into a variable first (no pipe into an early-exit consumer under pipefail),
+# lower-cased because header names are case-insensitive, then matched as one whole line.
+cid1_hdr=$(tr -d '\r' < "$SMOKE_TMP/cid1.hdr" | tr '[:upper:]' '[:lower:]')
+cid1_re=$'(^|\n)x-correlation-id: *native-smoke-cid-1(\n|$)'
+if [ "$code" = "401" ] && [[ $cid1_hdr =~ $cid1_re ]]; then
+  echo "  ok   bad bearer on /v1/_whoami -> 401 and X-Correlation-ID echoed"
+else
+  echo "  FAIL bad bearer on /v1/_whoami -> $code (want 401) with X-Correlation-ID native-smoke-cid-1 echoed:"; cat "$SMOKE_TMP/cid1.hdr"; fail=1
+fi
+if line=$(_log_line 'cid=native-smoke-cid-1' 'event=request_failed' 'status=401'); then
+  echo "  ok   svc.log: $line"
+else
+  echo "  FAIL svc.log has no line with cid=native-smoke-cid-1, event=request_failed and status=401:"
+  grep -m 3 'native-smoke-cid-1' "$SMOKE_TMP/svc.log" || tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+# A malformed document tumbler on the catalog register route is answered 400 by CatalogHandler
+# after the token resolved, so the request_failed line carries a real tenant, not "-".
+assert "catalog/register bad tumbler (cid-2)" 400 "${A[@]}" "${J[@]}" -H 'X-Correlation-ID: native-smoke-cid-2' \
+  -X POST -d '{"tumbler":"not-a-tumbler"}' "$U/v1/catalog/register"
+if line=$(_log_line 'cid=native-smoke-cid-2' 'event=request_failed' 'status=400' 'tenant=[A-Za-z0-9]'); then
+  echo "  ok   svc.log: $line"
+else
+  echo "  FAIL svc.log has no event=request_failed line with cid=native-smoke-cid-2, status=400 and a resolved tenant=:"
+  grep -m 3 'native-smoke-cid-2' "$SMOKE_TMP/svc.log" || tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+
 # ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
 # T1 scratch lives in its OWN generated jOOQ schema (t1, e.g.
 # dev.nexus.service.jooq.t1.T1) — a completely separate schema model from every
