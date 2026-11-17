@@ -56,7 +56,8 @@ def check_link_span(span: str) -> None:
     """Refuse a link span that starts with ``dchash:`` but does not parse.
 
     Raises ValueError naming the span. Any other span, ``""`` included, returns
-    without a check: the chash and line forms are not revalidated here.
+    without a check: the chash and line forms are not revalidated here. A value
+    that is not a ``str`` is not a dchash span and is left to the engine.
     """
-    if span.startswith(DCHASH_PREFIX):
+    if isinstance(span, str) and span.startswith(DCHASH_PREFIX):
         parse_dchash_span(span)

@@ -71,7 +71,8 @@ def link_cmd(
         # nexus-9ssih: engines >= v0.1.61 refuse a link whose endpoint is not
         # a live document (400 code=dangling_endpoint, translated to
         # ValueError by the client). Surface it as a clean CLI error, same
-        # pattern as every other except-ValueError site in catalog.py.
+        # pattern as every other except-ValueError site in catalog.py. RDR-171:
+        # the client also raises ValueError for a malformed dchash: span.
         raise click.ClickException(str(exc)) from exc
     click.echo(f"Linked: {ft} → {tt} ({link_type})")
 

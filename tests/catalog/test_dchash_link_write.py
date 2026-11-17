@@ -61,6 +61,10 @@ class TestCheckLinkSpan:
     def test_a_chash_span_is_not_revalidated_here(self) -> None:
         assert check_link_span("chash:not-hex") is None
 
+    @pytest.mark.parametrize("value", [None, 0, 42])
+    def test_a_value_that_is_not_a_str_is_left_to_the_engine(self, value: object) -> None:
+        assert check_link_span(value) is None  # type: ignore[arg-type]
+
 
 class TestClientRefusal:
     @pytest.mark.parametrize("side", ["from_span", "to_span"])

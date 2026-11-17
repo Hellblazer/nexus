@@ -845,13 +845,14 @@ def import_bundle(
                 link_type=rec["link_type"],
             )
             continue
-        from_span = _validated_span(reader, rec.get("from_span", ""), summary)
-        to_span = _validated_span(reader, rec.get("to_span", ""), summary)
-        bad = from_span
+        # RDR-171: refuse a malformed dchash span on the raw record, before
+        # _validated_span probes chash spans and counts a stripped one, so a
+        # refused link is never also counted under links_missing_span.
+        bad = rec.get("from_span", "")
         try:
-            check_link_span(from_span)
-            bad = to_span
-            check_link_span(to_span)
+            check_link_span(bad)
+            bad = rec.get("to_span", "")
+            check_link_span(bad)
         except ValueError as exc:
             summary.links_refused_span.append({
                 "from_uri": rec["from_source_uri"], "to_uri": rec["to_source_uri"],
@@ -863,6 +864,8 @@ def import_bundle(
                 link_type=rec["link_type"], span=bad, error=str(exc),
             )
             continue
+        from_span = _validated_span(reader, rec.get("from_span", ""), summary)
+        to_span = _validated_span(reader, rec.get("to_span", ""), summary)
         created = writer.link(
             from_e.tumbler,
             to_e.tumbler,
