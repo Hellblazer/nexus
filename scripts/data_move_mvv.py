@@ -691,6 +691,31 @@ def scenario_load2(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
 
 
 
+def wait_settled(eng: Engine, timeout: float, wal_bytes: int) -> dict:
+    """Quiet, and nothing left for autovacuum to start: every chunk leaf's dead tuples are under its autovacuum trigger
+    (threshold + scale_factor * live, from the leaf's reloptions or the server defaults) and no vacuum runs. A quiet
+    window alone is not enough, because autovacuum looks only once a naptime and can start right after it."""
+    t0 = time.monotonic()
+    while True:
+        rows = sql(eng, "select s.relid::regclass::text, s.n_dead_tup, s.n_live_tup, "
+                        "coalesce((select split_part(o, '=', 2) from unnest(c.reloptions) o "
+                        "where o like 'autovacuum_vacuum_threshold=%'), current_setting('autovacuum_vacuum_threshold')), "
+                        "coalesce((select split_part(o, '=', 2) from unnest(c.reloptions) o "
+                        "where o like 'autovacuum_vacuum_scale_factor=%'), current_setting('autovacuum_vacuum_scale_factor')) "
+                        "from pg_stat_user_tables s join pg_class c on c.oid = s.relid "
+                        "where s.relid in (select inhrelid from pg_inherits where inhparent in "
+                        "(select inhrelid from pg_inherits where inhparent = 'nexus.chunks'::regclass))")
+        over = [(r[0], int(r[1])) for r in rows if int(r[1]) > float(r[3]) + float(r[4]) * int(r[2])]
+        running = int(sql(eng, "select count(*) from pg_stat_progress_vacuum")[0][0])
+        if not over and running == 0:
+            wait_quiet(eng, timeout=max(timeout - (time.monotonic() - t0), 60.0), wal_bytes=wal_bytes)
+            return {"settle_s": round(time.monotonic() - t0, 1)}
+        if time.monotonic() - t0 > timeout:
+            raise MvvError(f"autovacuum never caught up: over trigger {over}, vacuums running {running}")
+        log(f"settling: over trigger {over}, vacuums running {running}")
+        time.sleep(15)
+
+
 def _leaf_upd(eng: Engine) -> tuple[int, int]:
     """n_tup_upd and n_tup_hot_upd summed over the leaf partitions of nexus.chunks."""
     r = sql(eng, "select coalesce(sum(s.n_tup_upd), 0), coalesce(sum(s.n_tup_hot_upd), 0) from pg_stat_user_tables s "
@@ -733,7 +758,7 @@ def scenario_sweep(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     out: dict = {"rate": a.rate, "threads": a.threads, "collections_searched": len(cols), "window_s": a.window_s,
                  "boot_move_leaf_updates": {"n_tup_upd": upd, "n_tup_hot_upd": hot}, "pairs": []}
     t_q0 = time.monotonic()
-    wait_quiet(eng, timeout=a.quiet_timeout)
+    wait_settled(eng, a.quiet_timeout, 1 << 20)
     out["boot_quiet_wait_s"] = round(time.monotonic() - t_q0, 1)
     load = Load(eng, cols, a.rate, a.threads)
     load.start()
@@ -746,7 +771,7 @@ def scenario_sweep(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
             out["pairs"].append(res)
             try:
                 t_q = time.monotonic()
-                wait_quiet(eng, timeout=a.quiet_timeout, wal_bytes=int(a.quiet_wal_mb * (1 << 20)))
+                res["settle"] = wait_settled(eng, a.quiet_timeout, int(a.quiet_wal_mb * (1 << 20)))
                 res["quiet_wait_s"] = round(time.monotonic() - t_q, 1)
                 t_b0, w_b0 = time.monotonic(), wal_lsn(eng)
                 time.sleep(a.baseline_s)
@@ -795,7 +820,7 @@ def scenario_sweep(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
                 t_v0, w_v0 = time.monotonic(), wal_lsn(eng)
                 tail_quiet = True
                 try:
-                    wait_quiet(eng, timeout=a.quiet_timeout, wal_bytes=int(a.quiet_wal_mb * (1 << 20)))
+                    wait_settled(eng, a.quiet_timeout, int(a.quiet_wal_mb * (1 << 20)))
                 except MvvError:
                     tail_quiet = False
                 t_v1, w_v1 = time.monotonic(), wal_lsn(eng)
