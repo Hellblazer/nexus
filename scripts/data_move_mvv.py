@@ -169,6 +169,7 @@ class Engine:
         self.watch = None
         self.proc: subprocess.Popen | None = None
         self.marks: dict[str, float] = {}
+        self.stop_rc: int | None = None
 
     def start(self, label: str, max_wait: float = 900.0) -> dict:
         """Starts the engine and waits for /health 200; returns the timing marks (seconds from the start)."""
@@ -204,7 +205,13 @@ class Engine:
         return self.ubw.http_status(port, "/v1/status")[1] if port else None
 
     def stop(self) -> None:
-        self.ubw.stop_new(self.env)
+        """``nx daemon service stop --with-pg``, its output and exit status kept in ``mvv-stop.log``."""
+        t = time.monotonic()
+        r = subprocess.run(["uv", "run", "--project", str(REPO), "nx", "daemon", "service", "stop", "--with-pg"],
+                           env=self.env, cwd=REPO, capture_output=True, text=True)
+        with (self.config / "mvv-stop.log").open("a", encoding="utf-8") as f:
+            f.write(f"rc={r.returncode} after {time.monotonic() - t:.1f}s\n{r.stdout}\n{r.stderr}\n")
+        self.stop_rc = r.returncode
         if self.proc is not None:
             try:
                 self.proc.wait(timeout=120)
@@ -363,20 +370,28 @@ def reboot_after(eng: Engine, ubw) -> dict:
     """Stop the engine and PG cleanly, wait until the cluster reads 'shut down' (a stop after a large move can
     take minutes to checkpoint), then boot again and count the boot's WAL: a same-version reboot with the move done."""
     eng.stop()
-    deadline = time.monotonic() + 900
+    stop_log = (eng.config / "mvv-stop.log").read_text(encoding="utf-8", errors="replace")[-1500:]
+    stopped_by_us = False
+    deadline = time.monotonic() + 120
     while True:
         try:
             base = eng.inst.checkpoint_lsn()
             break
         except ubw.HarnessError as exc:
-            if time.monotonic() > deadline:
-                raise MvvError(f"the cluster never reached 'shut down' after the stop: {exc}") from exc
+            if time.monotonic() > deadline and not stopped_by_us:
+                # nx daemon service stop --with-pg left PostgreSQL running: say so, stop it here, go on.
+                log(f"PostgreSQL still up {120}s after nx daemon service stop --with-pg (rc {eng.stop_rc}): {exc}")
+                eng.inst.pg_ctl("stop", "-m", "fast", "-w")
+                stopped_by_us = True
+            elif stopped_by_us:
+                raise MvvError(f"the cluster is not 'shut down' after a fast stop: {exc}") from exc
             time.sleep(5)
     eng.proc = None
     marks = eng.start("reboot")
     wal = wal_lsn(eng) - ubw.lsn_bytes(base)
     row = move_row(eng)
-    return {"marks": marks, "boot_wal_bytes": wal, "move": row,
+    return {"marks": marks, "boot_wal_bytes": wal, "move": row, "stop_rc": eng.stop_rc, "stop_log_tail": stop_log,
+            "pg_left_running_by_the_stop": stopped_by_us,
             "library_applied_lines": len(eng.events("event=data_move_library_applied"))}
 
 
