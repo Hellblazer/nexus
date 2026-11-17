@@ -53,32 +53,58 @@ final class DataMoveChangesetRules {
     /** One statement: lowercased text with literals replaced by {@code '#n#'}, and the literals of its whole body. */
     record Stmt(String text, List<String> literals) {}
 
-    /** A changeset read from a changelog file: its executable statements, comment and CONTINUE-precondition checks. */
-    record Changeset(String file, String id, List<Stmt> statements, String comment, List<Stmt> continueChecks, int opaqueChildren) {
+    /** A child of a changeset the rules cannot read: a native Liquibase change type, with its {@code tableName} when it has one. */
+    record Opaque(String element, String table) {}
+
+    /**
+     * A changeset read from a changelog file: its executable statements, comment and CONTINUE-precondition checks, the native
+     * change elements it holds ({@link Opaque}) and how many {@code sqlFile} children it has (counted, never read).
+     */
+    record Changeset(String file, String id, String author, List<Stmt> statements, String comment, List<Stmt> continueChecks,
+                     List<Opaque> opaque, int sqlFiles) {
+        /** The frozen list's key: the file, the changeset id and its author (Liquibase's own identity of a changeset). */
         String key() {
-            return file + "::" + id;
+            return file + "::" + id + "::" + author;
         }
     }
 
-    record Finding(String kind, String detail) {
+    /**
+     * One finding. {@code table} is the bare table it concerns (null when the statement has no single target) and {@code text}
+     * the statement it came from, which the exemption line uses to decide whether it may lift the finding.
+     */
+    record Finding(String kind, String detail, String table, String text) {
+        Finding(String kind, String detail) {
+            this(kind, detail, null, "");
+        }
+
         @Override
         public String toString() {
             return kind + " (" + detail + ")";
         }
     }
 
-    /** What the rules say of one changeset: its findings before any exemption, and whether a valid exemption line lifts them. */
-    record Entry(Changeset changeset, List<Finding> findings, boolean exempt) {
+    /**
+     * What the rules say of one changeset: its findings, whether it carries a valid exemption line, and the findings that line
+     * does not lift (the ones on any table but the exempted one).
+     */
+    record Entry(Changeset changeset, List<Finding> findings, boolean exempt, List<Finding> unlifted) {
         Set<String> kinds() {
             Set<String> kinds = new LinkedHashSet<>();
             for (Finding f : findings) kinds.add(f.kind());
+            return kinds;
+        }
+
+        /** The kinds of the findings no exemption lifts: what makes the changeset an offender. */
+        Set<String> unliftedKinds() {
+            Set<String> kinds = new LinkedHashSet<>();
+            for (Finding f : unlifted) kinds.add(f.kind());
             return kinds;
         }
     }
 
     // ---- reading -----------------------------------------------------------------------------------------------------
 
-    /** Text of a changeset's child elements that the rules do not read ({@code sqlFile}, a custom change and the like). */
+    /** Children that are read ({@code sql}, {@code comment}, {@code preConditions}) or run nothing at boot; any other is {@link Opaque}. */
     private static final Set<String> READ_OR_NONEXECUTABLE =
         Set.of("sql", "comment", "rollback", "preConditions", "validCheckSum");
 
@@ -95,7 +121,8 @@ final class DataMoveChangesetRules {
                 List<Stmt> statements = new ArrayList<>();
                 StringBuilder comment = new StringBuilder();
                 List<Stmt> checks = new ArrayList<>();
-                int opaque = 0;
+                List<Opaque> opaque = new ArrayList<>();
+                int sqlFiles = 0;
                 for (Element child : children(cs, null)) {
                     String name = localName(child);
                     switch (name) {
@@ -108,12 +135,17 @@ final class DataMoveChangesetRules {
                                 }
                             }
                         }
+                        case "sqlFile" -> sqlFiles++;
                         default -> {
-                            if (!READ_OR_NONEXECUTABLE.contains(name)) opaque++;
+                            if (!READ_OR_NONEXECUTABLE.contains(name)) {
+                                String table = child.getAttribute("tableName").trim();
+                                opaque.add(new Opaque(name, table.isEmpty() ? null : bare(table.toLowerCase())));
+                            }
                         }
                     }
                 }
-                out.add(new Changeset(file.getFileName().toString(), cs.getAttribute("id"), statements, comment.toString(), checks, opaque));
+                out.add(new Changeset(file.getFileName().toString(), cs.getAttribute("id"), cs.getAttribute("author"), statements,
+                    comment.toString(), checks, opaque, sqlFiles));
             }
         }
         return out;
@@ -221,20 +253,20 @@ final class DataMoveChangesetRules {
     }
 
     static String normalise(String s) {
-        return s.toLowerCase().replace("\"", "").replaceAll("\\s+", " ").replaceAll(" ?\\. ?", ".").trim();
+        return s.toLowerCase().replace("\"", " ").replaceAll("\\s+", " ").replaceAll(" ?\\. ?", ".").trim();
     }
 
     // ---- statement shapes --------------------------------------------------------------------------------------------
 
     private static final String IDENT = "[a-z_][\\w$]*(?:\\.[a-z_][\\w$]*)*";
 
-    private static final Pattern ALTER_TABLE = Pattern.compile("^alter table (?:if exists )?(?:only )?(" + IDENT + ")\\*? (.*)$");
+    private static final Pattern ALTER_TABLE = Pattern.compile("^alter table (?:if exists )?(?:only )?(" + IDENT + ")(?: ?\\*)? (.*)$");
     private static final Pattern INSERT_INTO = Pattern.compile("^insert into (" + IDENT + ")\\b");
     private static final Pattern DML_WORD = Pattern.compile("\\b(?:update|delete from|insert into|merge into)\\b");
     private static final Pattern SELECT_WORD = Pattern.compile("\\bselect\\b");
     private static final Pattern SELECT_INTO = Pattern.compile("^select\\b.*\\binto\\b");
     private static final Pattern ALTER_TYPE = Pattern.compile("^alter (?:column )?" + IDENT + " (?:set data )?type\\b");
-    private static final Pattern GENERATED = Pattern.compile("\\bgenerated always as \\(");
+    private static final Pattern GENERATED = Pattern.compile("\\bgenerated always as ?\\(");
     private static final Pattern CTAS_HEAD = Pattern.compile(
         "^create (?:(?:global |local )?(?:temp |temporary )|unlogged )?table (?:if not exists )?" + IDENT + " ?");
     private static final Pattern CTAS_AS = Pattern.compile(
@@ -244,9 +276,16 @@ final class DataMoveChangesetRules {
     private static final Pattern NOT_VALID = Pattern.compile("\\bnot valid\\b");
     private static final Pattern VALIDATE = Pattern.compile("^validate constraint\\b");
     private static final Pattern SET_NOT_NULL = Pattern.compile("^alter (?:column )?" + IDENT + " set not null\\b");
-    private static final Pattern DROP_COLUMN = Pattern.compile("^drop column\\b");
+    /** DROP [COLUMN] [IF EXISTS] x: any drop action that is not DROP CONSTRAINT (DROP DEFAULT and DROP NOT NULL follow ALTER COLUMN). */
+    private static final Pattern DROP_COLUMN = Pattern.compile("^drop (?!constraint\\b)");
     private static final Pattern RENAME_TO = Pattern.compile("^rename to (" + IDENT + ")");
-    private static final Pattern RENAME_OTHER = Pattern.compile("^rename (?:column|constraint)\\b");
+    /** RENAME [COLUMN] x TO y; RENAME CONSTRAINT and RENAME TO are handled apart. */
+    private static final Pattern RENAME_COLUMN = Pattern.compile("^rename (?!constraint\\b|to\\b)");
+    private static final Pattern UPDATE_TARGET = Pattern.compile("^update (?:only )?(" + IDENT + ")");
+    private static final Pattern DELETE_TARGET = Pattern.compile("^delete from (?:only )?(" + IDENT + ")");
+    private static final Pattern MERGE_TARGET = Pattern.compile("^merge into (?:only )?(" + IDENT + ")");
+    private static final Pattern GROWING_WORD = Pattern.compile(
+        "\\bchunks\\b|\\bchunks_\\w+|\\b(?:" + String.join("|", GROWING_TABLES) + ")\\b");
     private static final Pattern DROP_TABLE = Pattern.compile("^drop table (?:if exists )?(.*?)(?: cascade| restrict)?$");
 
     static String bare(String qualified) {
@@ -297,8 +336,8 @@ final class DataMoveChangesetRules {
 
     // ---- registering INSERT ------------------------------------------------------------------------------------------
 
-    /** A move a changeset registers: the label and the table its dml_utils runs are cut over. */
-    record Registration(String label, String drivingTable) {}
+    /** A move a changeset registers: its label, the table its dml_utils runs are cut over, and the label it supersedes (or null). */
+    record Registration(String label, String drivingTable, String supersedes) {}
 
     /** The registrations in a registering INSERT, or null when the statement is not one the gate can read. */
     private static List<Registration> parseRegistering(Stmt stmt) {
@@ -308,6 +347,7 @@ final class DataMoveChangesetRules {
         for (String c : head.group(1).split(",")) columns.add(c.trim());
         int label = columns.indexOf("label");
         int table = columns.indexOf("driving_table");
+        int supersedes = columns.indexOf("supersedes");
         if (label < 0 || table < 0) return null;
         List<Registration> out = new ArrayList<>();
         String rest = head.group(2).trim();
@@ -324,7 +364,9 @@ final class DataMoveChangesetRules {
             String l = literal(values.get(label), stmt.literals());
             String t = literal(values.get(table), stmt.literals());
             if (l == null || t == null || l.isEmpty() || t.isEmpty()) return null;
-            out.add(new Registration(l, t.toLowerCase().trim()));
+            // NULL, or anything that is not a literal label, names no superseded move
+            String sup = supersedes < 0 ? null : literal(values.get(supersedes), stmt.literals());
+            out.add(new Registration(l, t.toLowerCase().trim(), sup));
             rest = rest.substring(i + 1).trim();
             if (rest.startsWith(",")) rest = rest.substring(1).trim();
             else break;
@@ -341,9 +383,30 @@ final class DataMoveChangesetRules {
 
     private static final Pattern EXEMPTION = Pattern.compile("(?m)^[ \\t]*data-move-exempt:[ \\t]*([A-Za-z_][\\w.]*)[ \\t]*:[ \\t]*(\\S.*?)[ \\t]*$");
 
+    /**
+     * The moves registered so far: the labels that count as "a move that drives" each table, and the table of each label. A move
+     * that supersedes another also counts for the table of the move it replaces, so a step waiting on the old label or on the
+     * new one is waiting on a move that drives that table (RDR-246, Finishing a move).
+     */
+    private static final class Moves {
+        final Map<String, Set<String>> labelsByTable = new LinkedHashMap<>();
+        final Map<String, String> tableOfLabel = new LinkedHashMap<>();
+
+        void register(Registration r) {
+            tableOfLabel.put(r.label(), r.drivingTable());
+            labelsByTable.computeIfAbsent(r.drivingTable(), k -> new LinkedHashSet<>()).add(r.label());
+            String replaced = r.supersedes() == null ? null : tableOfLabel.get(r.supersedes());
+            if (replaced != null) labelsByTable.computeIfAbsent(replaced, k -> new LinkedHashSet<>()).add(r.label());
+        }
+
+        boolean drives(String table) {
+            return labelsByTable.containsKey(table);
+        }
+    }
+
     /** Runs the rules over the changesets in changelog order; a registering INSERT makes its table a driven table for what follows it. */
     static List<Entry> evaluate(List<Changeset> inOrder) {
-        Map<String, Set<String>> labelsByTable = new LinkedHashMap<>();
+        Moves moves = new Moves();
         List<Entry> out = new ArrayList<>();
         for (Changeset cs : inOrder) {
             List<Finding> findings = new ArrayList<>();
@@ -355,16 +418,24 @@ final class DataMoveChangesetRules {
                     findings.add(new Finding("r1.registering-unreadable",
                         "an INSERT into nexus.data_moves the gate cannot read (it names its columns, lists VALUES literals for label and driving_table)"));
                 } else {
-                    for (Registration r : regs) labelsByTable.computeIfAbsent(r.drivingTable(), k -> new LinkedHashSet<>()).add(r.label());
+                    for (Registration r : regs) moves.register(r);
                 }
             }
             for (Stmt s : cs.statements()) {
                 row1(s, findings);
-                alterTable(s, cs, labelsByTable, findings);
-                dropTable(s, cs, labelsByTable, findings);
+                alterTable(s, cs, moves, findings);
+                dropTable(s, cs, moves, findings);
             }
-            boolean exempt = exemption(cs, labelsByTable, findings);
-            out.add(new Entry(cs, findings, exempt));
+            for (Opaque o : cs.opaque()) {
+                findings.add(new Finding("opaque.native-change", "<" + o.element() + (o.table() == null ? "" : " tableName=" + o.table())
+                    + "> is a Liquibase change type the gate cannot read; write the change as <sql>", o.table(), ""));
+            }
+            String exemptTable = exemption(cs, moves, findings);
+            List<Finding> unlifted = new ArrayList<>();
+            for (Finding f : findings) {
+                if (exemptTable == null || !lifts(exemptTable, f, moves)) unlifted.add(f);
+            }
+            out.add(new Entry(cs, findings, exemptTable != null, unlifted));
         }
         return out;
     }
@@ -374,64 +445,74 @@ final class DataMoveChangesetRules {
         return m.find() && isDataMoves(m.group(1));
     }
 
+    private static String target(Pattern p, String t) {
+        Matcher m = p.matcher(t);
+        return m.find() ? bare(m.group(1)) : null;
+    }
+
+    private static Finding at(String kind, String shown, String table, String text) {
+        return new Finding(kind, shown, table, text);
+    }
+
     /** Rule 1: row DML. */
     private static void row1(Stmt s, List<Finding> findings) {
         String t = s.text();
         String shown = t.length() > 90 ? t.substring(0, 90) + "..." : t;
-        if (t.startsWith("update ")) findings.add(new Finding("r1.update", shown));
-        else if (t.startsWith("delete from ")) findings.add(new Finding("r1.delete", shown));
-        else if (t.startsWith("merge into ")) findings.add(new Finding("r1.merge", shown));
-        else if (t.startsWith("with ") && DML_WORD.matcher(t).find()) findings.add(new Finding("r1.with-dml", shown));
+        if (t.startsWith("update ")) findings.add(at("r1.update", shown, target(UPDATE_TARGET, t), t));
+        else if (t.startsWith("delete from ")) findings.add(at("r1.delete", shown, target(DELETE_TARGET, t), t));
+        else if (t.startsWith("merge into ")) findings.add(at("r1.merge", shown, target(MERGE_TARGET, t), t));
+        else if (t.startsWith("with ") && DML_WORD.matcher(t).find()) findings.add(at("r1.with-dml", shown, null, t));
         else if (t.startsWith("insert into ")) {
             // a registering INSERT lists VALUES; its SQL is text in a literal (masked), so only a SELECT in it is DML
-            if (SELECT_WORD.matcher(t).find()) findings.add(new Finding("r1.insert-select", shown));
-        } else if (SELECT_INTO.matcher(t).find()) findings.add(new Finding("r1.select-into", shown));
-        else if (isCreateTableAs(t)) findings.add(new Finding("r1.ctas", shown));
-        Matcher at = ALTER_TABLE.matcher(t);
-        if (at.matches()) {
-            for (String action : splitTop(at.group(2))) {
-                if (ALTER_TYPE.matcher(action).find()) findings.add(new Finding("r1.alter-type", shown));
-                if (GENERATED.matcher(action).find() && action.startsWith("add ")) findings.add(new Finding("r1.generated", shown));
+            if (SELECT_WORD.matcher(t).find()) findings.add(at("r1.insert-select", shown, target(INSERT_INTO, t), t));
+        } else if (SELECT_INTO.matcher(t).find()) findings.add(at("r1.select-into", shown, null, t));
+        else if (isCreateTableAs(t)) findings.add(at("r1.ctas", shown, null, t));
+        Matcher alter = ALTER_TABLE.matcher(t);
+        if (alter.matches()) {
+            String table = bare(alter.group(1));
+            for (String action : splitTop(alter.group(2))) {
+                if (ALTER_TYPE.matcher(action).find()) findings.add(at("r1.alter-type", shown, table, t));
+                if (GENERATED.matcher(action).find() && action.startsWith("add ")) findings.add(at("r1.generated", shown, table, t));
             }
         }
     }
 
     /** Rules 2 and 3 on an ALTER TABLE. */
-    private static void alterTable(Stmt s, Changeset cs, Map<String, Set<String>> driven, List<Finding> findings) {
-        Matcher at = ALTER_TABLE.matcher(s.text());
-        if (!at.matches()) return;
-        String table = bare(at.group(1));
-        for (String action : splitTop(at.group(2))) {
+    private static void alterTable(Stmt s, Changeset cs, Moves moves, List<Finding> findings) {
+        Matcher alter = ALTER_TABLE.matcher(s.text());
+        if (!alter.matches()) return;
+        String table = bare(alter.group(1));
+        for (String action : splitTop(alter.group(2))) {
             if (growsWithUserData(table)) {
                 if (ADD_CONSTRAINT.matcher(action).find() && !NOT_VALID.matcher(action).find()) {
-                    findings.add(new Finding("r2.add-constraint", table + ": " + abbreviate(action)));
+                    findings.add(at("r2.add-constraint", table + ": " + abbreviate(action), table, s.text()));
                 }
-                if (VALIDATE.matcher(action).find()) findings.add(new Finding("r2.validate", table + ": " + abbreviate(action)));
-                if (SET_NOT_NULL.matcher(action).find()) findings.add(new Finding("r2.set-not-null", table + ": " + abbreviate(action)));
+                if (VALIDATE.matcher(action).find()) findings.add(at("r2.validate", table + ": " + abbreviate(action), table, s.text()));
+                if (SET_NOT_NULL.matcher(action).find()) findings.add(at("r2.set-not-null", table + ": " + abbreviate(action), table, s.text()));
             }
             Set<String> touched = new LinkedHashSet<>();
             Matcher rename = RENAME_TO.matcher(action);
-            if (DROP_COLUMN.matcher(action).find() || RENAME_OTHER.matcher(action).find()) touched.add(table);
+            if (DROP_COLUMN.matcher(action).find() || RENAME_COLUMN.matcher(action).find()) touched.add(table);
             else if (rename.find()) {
                 touched.add(table);
                 touched.add(bare(rename.group(1)));
             }
-            for (String t : touched) waitsForItsMove(t, cs, driven, abbreviate(s.text()), findings);
+            for (String t : touched) waitsForItsMove(t, cs, moves, abbreviate(s.text()), s.text(), findings);
         }
     }
 
-    private static void dropTable(Stmt s, Changeset cs, Map<String, Set<String>> driven, List<Finding> findings) {
+    private static void dropTable(Stmt s, Changeset cs, Moves moves, List<Finding> findings) {
         Matcher m = DROP_TABLE.matcher(s.text());
         if (!m.matches()) return;
         for (String name : m.group(1).split(",")) {
             String t = bare(name.trim());
-            if (!t.isEmpty()) waitsForItsMove(t, cs, driven, abbreviate(s.text()), findings);
+            if (!t.isEmpty()) waitsForItsMove(t, cs, moves, abbreviate(s.text()), s.text(), findings);
         }
     }
 
     /** Rule 3: a destructive statement on a driven table needs a CONTINUE precondition on that move's completed_at. */
-    private static void waitsForItsMove(String table, Changeset cs, Map<String, Set<String>> driven, String shown, List<Finding> findings) {
-        Set<String> labels = driven.get(table);
+    private static void waitsForItsMove(String table, Changeset cs, Moves moves, String shown, String text, List<Finding> findings) {
+        Set<String> labels = moves.labelsByTable.get(table);
         if (labels == null) return;
         for (Stmt check : cs.continueChecks()) {
             if (!check.text().contains("data_moves") || !check.text().contains("completed_at")) continue;
@@ -439,25 +520,50 @@ final class DataMoveChangesetRules {
                 if (check.literals().contains(label)) return;
             }
         }
-        findings.add(new Finding("r3.destructive-without-precondition", table + " is driven by move " + labels
-            + "; no onFail=CONTINUE precondition reads nexus.data_moves.completed_at for one of them: " + shown));
+        findings.add(at("r3.destructive-without-precondition", table + " is driven by move " + labels
+            + "; no onFail=CONTINUE precondition reads nexus.data_moves.completed_at for one of them: " + shown, table, text));
     }
 
-    /** The exemption line, if the changeset has one: lifts every rule when it names a small table the changeset touches. */
-    private static boolean exemption(Changeset cs, Map<String, Set<String>> driven, List<Finding> findings) {
+    /**
+     * The table of the changeset's exemption line when it is valid, else null (an invalid line adds an {@code exemption} finding). A
+     * valid line names a small table the changeset's statements name; it lifts only findings on that table (see {@link #lifts}).
+     */
+    private static String exemption(Changeset cs, Moves moves, List<Finding> findings) {
         Matcher m = EXEMPTION.matcher(cs.comment());
-        if (!m.find()) return false;
+        if (!m.find()) return null;
         String table = bare(m.group(1)).toLowerCase();
-        if (growsWithUserData(table) || driven.containsKey(table)) {
+        if (growsWithUserData(table) || moves.drives(table)) {
             findings.add(new Finding("exemption", table + " grows with user data or is driven by a registered move, so it cannot be exempted"));
-            return false;
+            return null;
         }
-        Pattern named = Pattern.compile("\\b" + Pattern.quote(table) + "\\b");
+        Pattern named = namesTable(table);
         for (Stmt s : cs.statements()) {
-            if (named.matcher(s.text()).find()) return true;
+            if (named.matcher(s.text()).find()) return table;
+        }
+        for (Opaque o : cs.opaque()) {
+            if (table.equals(o.table())) return table;
         }
         findings.add(new Finding("exemption", "the changeset's statements never name " + table));
-        return false;
+        return null;
+    }
+
+    private static Pattern namesTable(String table) {
+        return Pattern.compile("\\b" + Pattern.quote(table) + "\\b");
+    }
+
+    /**
+     * Whether the exemption for {@code table} lifts a finding: the finding is on that table (its target; with no single target,
+     * the statement names that table), and the statement names no table that grows or that a registered move drives, anywhere in it
+     * (a subquery, a FROM). So {@code UPDATE plans ...; UPDATE chunks ...} stays red on the second, and so does
+     * {@code UPDATE chunks ... (SELECT ... FROM plans)}.
+     */
+    private static boolean lifts(String table, Finding f, Moves moves) {
+        if (GROWING_WORD.matcher(f.text()).find()) return false;
+        for (String driven : moves.labelsByTable.keySet()) {
+            if (namesTable(driven).matcher(f.text()).find()) return false;
+        }
+        if (f.table() != null) return f.table().equals(table);
+        return !f.text().isEmpty() && namesTable(table).matcher(f.text()).find();
     }
 
     private static String abbreviate(String s) {
@@ -466,7 +572,7 @@ final class DataMoveChangesetRules {
 
     // ---- the frozen list ---------------------------------------------------------------------------------------------
 
-    /** The frozen list: entries as {@code file::id}, and the include (file) after which no entry may sit. */
+    /** The frozen list: entries as {@code file::id::author}, and the include (file) from which on no entry may sit. */
     record Frozen(Set<String> keys, String freezePoint) {
         static Frozen parse(List<String> lines) {
             Set<String> keys = new LinkedHashSet<>();
@@ -482,9 +588,10 @@ final class DataMoveChangesetRules {
     }
 
     /**
-     * What is wrong with a frozen list against the evaluated changelog: an entry that names no changeset, one that sits after
-     * the freeze point in changelog order (the list never grows to admit a new changeset), and one whose changeset has no
-     * finding left (stale: the list holds exactly the offenders).
+     * What is wrong with a frozen list against the evaluated changelog: an entry that names no changeset, one in the freeze-point
+     * include or after it in changelog order (so a changeset in a later or the closing include cannot be added), and one whose
+     * changeset has no finding left (stale: the list holds exactly the offenders). It does NOT catch a new changeset added to an
+     * include that sits before the freeze point; that is review's.
      */
     static List<String> frozenProblems(Frozen frozen, List<String> includeOrder, List<Entry> entries) {
         List<String> problems = new ArrayList<>();
@@ -498,19 +605,19 @@ final class DataMoveChangesetRules {
                 problems.add("frozen entry names no changeset: " + key);
                 continue;
             }
-            if (point >= 0 && includeOrder.indexOf(e.changeset().file()) > point) {
-                problems.add("frozen entry sits after the freeze point " + frozen.freezePoint() + " (the list never admits a new changeset): " + key);
+            if (point >= 0 && includeOrder.indexOf(e.changeset().file()) >= point) {
+                problems.add("frozen entry sits in or after the freeze-point include " + frozen.freezePoint() + " (a changeset there cannot be frozen): " + key);
             }
             if (e.findings().isEmpty()) problems.add("stale frozen entry (no rule finds it any more, remove it): " + key);
         }
         return problems;
     }
 
-    /** Changesets with a finding that neither the frozen list nor a valid exemption line covers. */
+    /** Changesets with a finding that neither the frozen list nor a valid exemption line (for that finding's table) covers. */
     static List<Entry> offenders(List<Entry> entries, Frozen frozen) {
         List<Entry> out = new ArrayList<>();
         for (Entry e : entries) {
-            if (e.findings().isEmpty() || frozen.keys().contains(e.changeset().key()) || e.exempt()) continue;
+            if (e.unlifted().isEmpty() || frozen.keys().contains(e.changeset().key())) continue;
             out.add(e);
         }
         return out;

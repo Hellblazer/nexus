@@ -66,6 +66,30 @@ ALTER TABLE nexus.chunks ADD CONSTRAINT a_check CHECK (x &gt; 0) NOT VALID, ADD 
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="r2-star-after-the-table" author="fixture">
+        <comment>r2-star-after-the-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks * VALIDATE CONSTRAINT c;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-star-without-a-space" author="fixture">
+        <comment>r2-star-without-a-space</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE ONLY nexus.catalog_links* VALIDATE CONSTRAINT c;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-quote-touching-the-keyword" author="fixture">
+        <comment>r2-quote-touching-the-keyword</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE "nexus"."chunks"VALIDATE CONSTRAINT c;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="r2-precondition-does-not-lift-it" author="fixture">
         <preConditions onFail="CONTINUE" onError="CONTINUE">
             <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'g-move-1' AND completed_at IS NOT NULL</sqlCheck>

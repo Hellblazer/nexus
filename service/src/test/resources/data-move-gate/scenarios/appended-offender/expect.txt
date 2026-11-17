@@ -1,3 +1,3 @@
-# one line per changeset the gate must flag: file::id kind[,kind]; no line means the gate must pass it
-zz-new-offender.xml::new-update-on-chunks r1.update
-zz-new-offender.xml::new-validating-add-constraint r2.add-constraint
+# one line per changeset the gate must flag: file::id::author kind[,kind]; no line means the gate must pass it
+zz-new-offender.xml::new-update-on-chunks::fixture r1.update
+zz-new-offender.xml::new-validating-add-constraint::fixture r2.add-constraint

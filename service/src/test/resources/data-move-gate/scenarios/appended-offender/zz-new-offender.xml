@@ -21,8 +21,8 @@ UPDATE nexus.chunks SET collection = collection WHERE false;
     <changeSet id="registered-instead" author="fixture">
         <comment>registered-instead</comment>
         <sql splitStatements="false" stripComments="false">
-INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id) VALUES
-    ('appended-move-1', 'UPDATE nexus.chunks SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.chunks WHERE dead', 'nexus', 'chunks', 1000, 50, 60000, 'SELECT count(*) FROM nexus.chunks WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.chunks VALIDATE CONSTRAINT moved_check', 'appended-move-1');
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('appended-move-1', 'UPDATE nexus.chunks SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.chunks WHERE dead', 'nexus', 'chunks', 1000, 50, 60000, 'SELECT count(*) FROM nexus.chunks WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.chunks VALIDATE CONSTRAINT moved_check', 'appended-move-1', NULL);
         </sql>
         <rollback>SELECT 1;</rollback>
     </changeSet>

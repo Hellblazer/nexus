@@ -86,6 +86,30 @@ ALTER TABLE nexus.widgets DROP COLUMN old_col;
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="r3-drop-without-column-keyword" author="fixture">
+        <comment>r3-drop-without-column-keyword</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-drop-if-exists-without-column-keyword" author="fixture">
+        <comment>r3-drop-if-exists-without-column-keyword</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP IF EXISTS old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-rename-without-column-keyword" author="fixture">
+        <comment>r3-rename-without-column-keyword</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets RENAME a TO b;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="r3-drop-table-list" author="fixture">
         <comment>r3-drop-table-list</comment>
         <sql splitStatements="false" stripComments="false">

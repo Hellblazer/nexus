@@ -34,6 +34,31 @@ UPDATE nexus.widgets SET a = 1;
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="ex-lifts-only-its-own-table" author="fixture">
+        <comment>data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.plans SET a = 1;
+UPDATE nexus.chunks SET a = 2;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-subselect-names-a-growing-table" author="fixture">
+        <comment>data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.chunks SET a = (SELECT max(a) FROM nexus.plans);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-small-target-reads-a-growing-table" author="fixture">
+        <comment>data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.plans p SET a = c.a FROM nexus.chunks c WHERE c.id = p.id;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="ex-without-a-reason" author="fixture">
         <comment>data-move-exempt: nexus.settings:</comment>
         <sql splitStatements="false" stripComments="false">

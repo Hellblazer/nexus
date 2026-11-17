@@ -90,6 +90,30 @@ SELECT a INTO nexus.copy3 FROM nexus.t;
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="r1-quoted-update" author="fixture">
+        <comment>r1-quoted-update</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE"nexus"."chunks" SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-quoted-delete" author="fixture">
+        <comment>r1-quoted-delete</comment>
+        <sql splitStatements="false" stripComments="false">
+DELETE FROM"nexus"."chunks" WHERE true;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-generated-no-space" author="fixture">
+        <comment>r1-generated-no-space</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.t ADD COLUMN g int GENERATED ALWAYS AS(a + 1) STORED;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="r1-after-a-comment-and-a-literal" author="fixture">
         <comment>r1-after-a-comment-and-a-literal</comment>
         <sql splitStatements="false" stripComments="false">

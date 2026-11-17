@@ -1,0 +1,6 @@
+# one line per changeset the gate must flag: file::id::author kind[,kind]; no line means the gate must pass it
+01-native.xml::o-custom-change::fixture opaque.native-change
+01-native.xml::o-exemption-does-not-lift-a-custom-change::fixture opaque.native-change
+01-native.xml::o-exemption-does-not-lift-a-native-change-on-chunks::fixture opaque.native-change
+01-native.xml::o-modify-data-type-on-chunks::fixture opaque.native-change
+01-native.xml::o-update::fixture opaque.native-change

@@ -28,6 +28,17 @@ ALTER TABLE nexus.widgets RENAME COLUMN a TO b;
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="g-constraint-and-default-changes-on-a-driven-table" author="fixture">
+        <comment>g-constraint-and-default-changes-on-a-driven-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP CONSTRAINT IF EXISTS c;
+ALTER TABLE nexus.widgets RENAME CONSTRAINT a TO b;
+ALTER TABLE nexus.widgets ALTER COLUMN x DROP DEFAULT;
+ALTER TABLE nexus.widgets ALTER COLUMN x DROP NOT NULL;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="g-unrelated-table" author="fixture">
         <comment>g-unrelated-table</comment>
         <sql splitStatements="false" stripComments="false">

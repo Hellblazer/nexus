@@ -5,8 +5,8 @@
     <changeSet id="reg-widgets" author="fixture">
         <comment>reg-widgets</comment>
         <sql splitStatements="false" stripComments="false">
-INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id) VALUES
-    ('m-widgets-1', 'UPDATE nexus.widgets SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.widgets WHERE dead', 'nexus', 'widgets', 1000, 50, 60000, 'SELECT count(*) FROM nexus.widgets WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.widgets VALIDATE CONSTRAINT moved_check', 'm-widgets-1');
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('m-widgets-1', 'UPDATE nexus.widgets SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.widgets WHERE dead', 'nexus', 'widgets', 1000, 50, 60000, 'SELECT count(*) FROM nexus.widgets WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.widgets VALIDATE CONSTRAINT moved_check', 'm-widgets-1', NULL);
         </sql>
         <rollback>SELECT 1;</rollback>
     </changeSet>

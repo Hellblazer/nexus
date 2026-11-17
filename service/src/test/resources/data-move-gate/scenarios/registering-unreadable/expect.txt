@@ -1,5 +1,5 @@
-# one line per changeset the gate must flag: file::id kind[,kind]; no line means the gate must pass it
-01-unreadable.xml::u-label-is-not-a-literal r1.registering-unreadable
-01-unreadable.xml::u-no-column-list r1.registering-unreadable
-01-unreadable.xml::u-select-form r1.insert-select,r1.registering-unreadable
-01-unreadable.xml::u-wrong-value-count r1.registering-unreadable
+# one line per changeset the gate must flag: file::id::author kind[,kind]; no line means the gate must pass it
+01-unreadable.xml::u-label-is-not-a-literal::fixture r1.registering-unreadable
+01-unreadable.xml::u-no-column-list::fixture r1.registering-unreadable
+01-unreadable.xml::u-select-form::fixture r1.insert-select,r1.registering-unreadable
+01-unreadable.xml::u-wrong-value-count::fixture r1.registering-unreadable

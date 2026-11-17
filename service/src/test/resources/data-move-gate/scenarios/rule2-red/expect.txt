@@ -1,10 +1,13 @@
-# one line per changeset the gate must flag: file::id kind[,kind]; no line means the gate must pass it
-01-boot-scans.xml::r2-add-constraint r2.add-constraint
-01-boot-scans.xml::r2-add-fk-chunks r2.add-constraint
-01-boot-scans.xml::r2-add-primary-key r2.add-constraint
-01-boot-scans.xml::r2-add-unnamed-unique r2.add-constraint
-01-boot-scans.xml::r2-precondition-does-not-lift-it r2.validate
-01-boot-scans.xml::r2-second-action-is-valid r2.add-constraint
-01-boot-scans.xml::r2-set-not-null r2.set-not-null
-01-boot-scans.xml::r2-validate r2.validate
-01-boot-scans.xml::r2-validate-leaf r2.validate
+# one line per changeset the gate must flag: file::id::author kind[,kind]; no line means the gate must pass it
+01-boot-scans.xml::r2-add-constraint::fixture r2.add-constraint
+01-boot-scans.xml::r2-add-fk-chunks::fixture r2.add-constraint
+01-boot-scans.xml::r2-add-primary-key::fixture r2.add-constraint
+01-boot-scans.xml::r2-add-unnamed-unique::fixture r2.add-constraint
+01-boot-scans.xml::r2-precondition-does-not-lift-it::fixture r2.validate
+01-boot-scans.xml::r2-quote-touching-the-keyword::fixture r2.validate
+01-boot-scans.xml::r2-second-action-is-valid::fixture r2.add-constraint
+01-boot-scans.xml::r2-set-not-null::fixture r2.set-not-null
+01-boot-scans.xml::r2-star-after-the-table::fixture r2.validate
+01-boot-scans.xml::r2-star-without-a-space::fixture r2.validate
+01-boot-scans.xml::r2-validate-leaf::fixture r2.validate
+01-boot-scans.xml::r2-validate::fixture r2.validate
