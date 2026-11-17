@@ -89,4 +89,38 @@ class LogTextTest {
         String ok = " ~\u00a0\u00a1\u2027\u202a";
         assertThat(LogText.escapeControl(ok)).isSameAs(ok);
     }
+
+    // nexus-dngtz.1.11: the MDC value sits inside the bracketed prefix, so it also escapes the delimiters.
+
+    @Test
+    void mdcValueEscapesSpaceAndBracketsAndEquals() {
+        assertThat(LogText.mdcValue("a b")).isEqualTo("a\\x20b");
+        assertThat(LogText.mdcValue("a]b")).isEqualTo("a\\x5db");
+        assertThat(LogText.mdcValue("a[b")).isEqualTo("a\\x5bb");
+        assertThat(LogText.mdcValue("a=b")).isEqualTo("a\\x3db");
+    }
+
+    @Test
+    void mdcValueEscapesNewlineAndDoublesBackslash() {
+        assertThat(LogText.mdcValue("a\nb")).isEqualTo("a\\x0ab");
+        assertThat(LogText.mdcValue("a\\x20b")).isEqualTo("a\\\\x20b");
+    }
+
+    @Test
+    void mdcValueOfAForgedFieldCarriesNoDelimiter() {
+        String out = LogText.mdcValue("x\n] - event=forged a=b");
+        assertThat(out).isEqualTo("x\\x0a\\x5d\\x20-\\x20event\\x3dforged\\x20a\\x3db");
+        assertThat(out).doesNotContain("\n", " ", "]", "[", "=");
+    }
+
+    @Test
+    void mdcValueOfNullIsADash() {
+        assertThat(LogText.mdcValue(null)).isEqualTo("-");
+    }
+
+    @Test
+    void aPlainSessionIdIsUnchangedAndTheSameInstance() {
+        String id = "sess-1.2_ab:CD/ef";
+        assertThat(LogText.mdcValue(id)).isSameAs(id);
+    }
 }

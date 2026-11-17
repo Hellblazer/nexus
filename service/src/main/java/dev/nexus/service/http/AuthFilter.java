@@ -204,6 +204,7 @@ public final class AuthFilter extends Filter {
         long startNanos = System.nanoTime();
         Throwable thrown = null;
         try {
+            // Needs no escape: CorrelationId admits only [A-Za-z0-9._-]{1,64}.
             MDC.put(MDC_CORRELATION_ID, correlationId);
             exchange.getResponseHeaders().set(CorrelationId.HEADER, correlationId);
             authenticateAndDispatch(exchange, chain);
@@ -275,7 +276,8 @@ public final class AuthFilter extends Filter {
         // The tenant goes in MDC as soon as the token names it, so the request_failed line for a 403
         // scope refusal or a cross-tenant / unminted-session 401 carries it. An unknown token has no
         // tenant and prints none. The session is put only once it is verified (step 3).
-        MDC.put(MDC_TENANT, tokenTenant);
+        // mdcValue: only the printed text is escaped; routing and every comparison keep the raw tenant.
+        MDC.put(MDC_TENANT, LogText.mdcValue(tokenTenant));
         boolean isOperator = resolved.get().isRoot();
         String scope = resolved.get().scope();
 
@@ -391,7 +393,8 @@ public final class AuthFilter extends Filter {
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
         // Tenant (put at resolution) and session ids only: never the token or the credential hash.
         if (sessionId != null) {
-            MDC.put(MDC_SESSION, sessionId);
+            // A client chose this id (/v1/sessions/start takes any non-blank one): escape it for the prefix.
+            MDC.put(MDC_SESSION, LogText.mdcValue(sessionId));
         }
         // nexus-8hdg9 phase 2: mint the request's embed deadline alongside the
         // principal, for EVERY route, from the budget resolved once at construction.

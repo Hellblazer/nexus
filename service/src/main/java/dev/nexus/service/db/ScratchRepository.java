@@ -270,7 +270,10 @@ public final class ScratchRepository {
             int deleted = dsl.deleteFrom(SCRATCH)
                 .where(SCRATCH.SESSION_ID.eq(sessionId))
                 .execute();
-            log.info("event=t1_session_closed tenant={} session={} deleted={}", tenant, sessionId, deleted);
+            // The session id is client-chosen (/v1/sessions/start): escaped so it cannot forge a line (nexus-dngtz.1.11).
+            log.info("event=t1_session_closed tenant={} session={} deleted={}",
+                dev.nexus.service.http.LogText.mdcValue(tenant),
+                dev.nexus.service.http.LogText.mdcValue(sessionId), deleted);
             return deleted;
         });
     }

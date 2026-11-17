@@ -1,6 +1,10 @@
 package dev.nexus.service;
 
 import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.LoggerContext;
+import ch.qos.logback.classic.encoder.PatternLayoutEncoder;
+import ch.qos.logback.classic.joran.JoranConfigurator;
+import ch.qos.logback.classic.spi.ILoggingEvent;
 import dev.nexus.service.http.AuthFilter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -212,5 +216,82 @@ class AuthFilterLogEscapeTest {
         assertThat(lines).as("exactly one board-ci refusal line").hasSize(1);
         assertThat(lines.get(0).getFormattedMessage()).contains("path=/v1/corr/x method=GE\\x09T")
             .doesNotContain("\t").doesNotContain("\n").doesNotContain("\r");
+    }
+
+    // ── nexus-dngtz.1.11: the session and tenant in the log prefix ─────────────
+
+    /** A client-chosen session id as /v1/sessions/start would store it: a newline, a bracket, spaces, an equals. */
+    private static final String FORGED_SESSION = "x\n] - event=schema_migration_pending changesets=3 a=b";
+    private static final String FORGED_SESSION_ESCAPED =
+        "x\\x0a\\x5d\\x20-\\x20event\\x3dschema_migration_pending\\x20changesets\\x3d3\\x20a\\x3db";
+
+    /** Renders one captured event through the PatternLayoutEncoder of the shipped logback.xml. */
+    private static String renderShipped(ILoggingEvent event) throws Exception {
+        var lc = new LoggerContext();
+        lc.setMDCAdapter(new ch.qos.logback.classic.util.LogbackMDCAdapter());
+        var configurator = new JoranConfigurator();
+        configurator.setContext(lc);
+        configurator.doConfigure(AuthFilterLogEscapeTest.class.getResource("/logback.xml"));
+        var appender = lc.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).getAppender("STDOUT");
+        var encoder = (PatternLayoutEncoder) ((ch.qos.logback.core.OutputStreamAppender<ILoggingEvent>) appender)
+            .getEncoder();
+        return new String(encoder.encode(event), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * nexus-dngtz.1.11: /v1/sessions/start accepts any non-blank session_id, and the id reaches the MDC
+     * and the {@code session_token_minted} line. Printed raw, a newline would forge a line and a space,
+     * bracket or equals would forge fields in the prefix (the supervisor readers match event= by
+     * substring). The stored id and the routing keep the raw value; only the printed text is escaped.
+     */
+    @Test
+    void aClientChosenSessionIdCannotForgeALineOrFieldsInTheRenderedPrefix() throws Exception {
+        var mint = new Capture(dev.nexus.service.db.TokenStore.class.getName(), Level.INFO);
+        String rawSessionToken;
+        try (mint) {
+            rawSessionToken = fx.store.issueSessionToken("tenant-a", FORGED_SESSION, 3600).rawToken();
+        }
+        assertThat(mint.appender.list).as("exactly one session_token_minted line").hasSize(1);
+        String minted = mint.appender.list.get(0).getFormattedMessage();
+        assertThat(minted).isEqualTo("event=session_token_minted tenant=tenant-a session=" + FORGED_SESSION_ESCAPED);
+
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        HttpResponse<String> r;
+        try (capture) {
+            r = fx.send(FAIL_PATH + "?shape=send400", TOK_A, rawSessionToken, "cid-forge");
+            fx.awaitProbe();
+        }
+        assertThat(r.statusCode()).isEqualTo(400);
+        var failed = failureLines(capture);
+        assertThat(failed).as("exactly one request_failed event").hasSize(1);
+        String line = renderShipped(failed.get(0));
+        assertThat(line).as("the session printed escaped, after the correlation id and tenant")
+            .contains(" [cid=cid-forge tenant=tenant-a session=" + FORGED_SESSION_ESCAPED + "] - event=request_failed");
+        assertThat(line).as("one line").endsWith("\n").doesNotContain("\r");
+        assertThat(line.substring(0, line.length() - 1)).doesNotContain("\n");
+        assertThat(line.split("\\] - ", -1)).as("one prefix terminator, so no forged second prefix").hasSize(2);
+        assertThat(line).doesNotContain("event=schema_migration_pending");
+    }
+
+    /** A tenant id with a space, bracket and equals prints escaped too (operator-minted, same treatment). */
+    @Test
+    void aTenantIdWithDelimitersIsEscapedInTheRenderedPrefix() throws Exception {
+        String tok = "corr-token-tenant-odd";
+        try (var su = fx.pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.seedServiceToken(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES),
+                tok, "t x]=y", "test", null, null, null);
+        }
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        HttpResponse<String> r;
+        try (capture) {
+            r = fx.send(FAIL_PATH + "?shape=send400", tok, null, "cid-odd-tenant");
+            fx.awaitProbe();
+        }
+        assertThat(r.statusCode()).isEqualTo(400);
+        var failed = failureLines(capture);
+        assertThat(failed).hasSize(1);
+        assertThat(renderShipped(failed.get(0)))
+            .contains(" [cid=cid-odd-tenant tenant=t\\x20x\\x5d\\x3dy session=-] - event=request_failed");
     }
 }

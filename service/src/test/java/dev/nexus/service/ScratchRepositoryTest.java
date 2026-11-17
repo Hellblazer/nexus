@@ -361,6 +361,31 @@ class ScratchRepositoryTest {
         assertThat(other).as("other session entry must be unaffected by closeSession").isNotEmpty();
     }
 
+    /**
+     * nexus-dngtz.1.11: the session id is client-chosen, so the {@code t1_session_closed} line prints it
+     * escaped: a newline, {@code ]}, space and {@code =} cannot forge a second line or a field. The
+     * expected text is a hand-written literal.
+     */
+    @Test
+    void closeSession_aClientChosenSessionIdIsLoggedEscapedOnOneLine() {
+        String forged = "x\n] - event=schema_migration_pending a=b";
+        repo.put(TENANT_A, forged, uuid(), "entry", null, null, false, null, null);
+
+        var capture = new AuthFilterCorrelationFixture.Capture(ScratchRepository.class.getName(),
+            ch.qos.logback.classic.Level.INFO);
+        int deleted;
+        try (capture) {
+            deleted = repo.closeSession(TENANT_A, forged);
+        }
+
+        assertThat(deleted).as("the row with the raw id was found and deleted").isEqualTo(1);
+        assertThat(capture.appender.list).as("exactly one t1_session_closed line").hasSize(1);
+        String text = capture.appender.list.get(0).getFormattedMessage();
+        assertThat(text).isEqualTo("event=t1_session_closed tenant=" + TENANT_A
+            + " session=x\\x0a\\x5d\\x20-\\x20event\\x3dschema_migration_pending\\x20a\\x3db deleted=1");
+        assertThat(text).doesNotContain("\n").doesNotContain("\r");
+    }
+
     // ── Test 14: closeSession — idempotent (double-close returns 0) ──────────
 
     @Test
