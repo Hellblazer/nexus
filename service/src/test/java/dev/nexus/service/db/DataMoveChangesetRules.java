@@ -444,7 +444,7 @@ final class DataMoveChangesetRules {
                         moves.register(r);
                         if (r.verification().isBlank()) {
                             findings.add(new Finding("r1.verification-empty", "the verification of move " + r.label()
-                                + " is empty; it is a SELECT of the rows still in the old shape, and the worker refuses an empty one"));
+                                + " is empty; it is a SELECT of the rows still in the old shape, and the worker cannot run an empty one (the move would fail permanently after it registered)"));
                         } else if (badPlaceholders(r.verification())) {
                             findings.add(new Finding("r1.verification-placeholder", "the verification of move " + r.label()
                                 + " has a '?' or a $-digit placeholder the worker refuses (a permanent failure). Write jsonb_exists, "
