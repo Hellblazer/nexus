@@ -383,11 +383,11 @@ REPLAYS = json.loads(__import__("gzip").decompress((Path(__file__).parent / "met
 
 
 def test_every_repeat_offender_has_a_replay() -> None:
-    assert {r["offender"] for r in REPLAYS} == {
-        "test_mode_declarations_are_explicit", "test_no_json_loads_on_result_output", "test_cited_bead_ids_resolve",
-        "test_no_test_patches_a_stdlib_module_process_wide", "test_collection_name_parse_census", "test_tmp_root",
-        "test_retire_keys", "RawSqlGateTest", "SqlStringLiteralGateTest",
-    }
+    """Nine offenders in the T2 record (seven Python, two Java), one replay each. The names stay in
+    the fixture: one is a verb's name that a census keeps out of every other file."""
+    assert len(REPLAYS) == len({r["offender"] for r in REPLAYS}) == 9
+    assert sum(r["file"].endswith(".java") for r in REPLAYS) == 2
+    assert all((REPO_ROOT / r["file"]).is_file() for r in REPLAYS)
 
 
 @pytest.mark.parametrize("replay", REPLAYS, ids=[r["offender"] for r in REPLAYS])
