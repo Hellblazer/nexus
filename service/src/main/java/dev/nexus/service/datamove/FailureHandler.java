@@ -7,11 +7,12 @@ import org.jooq.DSLContext;
 import java.sql.SQLException;
 
 /**
- * Where every failure of a pass is decided. Each way a pass can stop, whatever the stage, comes here as one {@link Failure}
- * and goes back as one {@link Disposition}; the worker never reports a move blocked or failed on its own. This bead's
- * handler ({@link #BLOCK_ALWAYS}) reports every failure {@code blocked:} with the reason; the failure-class bead
- * (nexus-f3yqd.2.15) supplies the one that tells a transient error from a permanent one by the SQLSTATE lists and the
- * {@code error_id} mark, counts retries and sets {@code failed_at}.
+ * Where every failure of a pass is decided. Each failure, whatever the stage, comes here as one {@link Failure} and goes back
+ * as one {@link Disposition}; the worker never reports a failure blocked or failed on its own. (A pass that ends cleanly
+ * brings nothing here: the worker clears the retry count itself.) An engine runs
+ * {@link DataMoveFailureHandler} (nexus-f3yqd.2.15), which tells a transient error from a permanent one by the SQLSTATE
+ * lists and the {@code error_id} mark, counts retries and sets {@code failed_at}. {@link #BLOCK_ALWAYS} reports every failure
+ * {@code blocked:} and writes nothing; tests use it where the class of a failure does not matter.
  */
 public interface FailureHandler {
 
@@ -89,7 +90,8 @@ public interface FailureHandler {
      * @param tenant        the tenant whose session the run used; null for a table with no tenant scope
      * @param errorMark     the run's highest {@code error_id} held before the CALL (0 outside a CALL); an error row above
      *                      it is this pass's recorded chunk error
-     * @param raised        what the CALL raised; null for any other stage
+     * @param raised        what the CALL raised; for a surprise (the tenant probe, the pass itself) the SQLException behind
+     *                      it when there is one; null otherwise
      * @param detail        the worker's own account of the failure, one line
      * @param admin         the admin connection of the pass, to read {@code migration_error} with; null when the pass
      *                      could not open one

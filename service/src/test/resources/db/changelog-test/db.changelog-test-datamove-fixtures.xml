@@ -180,6 +180,24 @@ CREATE POLICY tenant_isolation ON dm_test.unforced_owned
 INSERT INTO dm_test.unforced_owned (tenant_id, id)
 SELECT t, g FROM unnest(ARRAY['acme', 'globex']) t, generate_series(1, 20) g;
 
+-- nexus-f3yqd.2.15: a fault a move's template can be made to raise. A row in dm_test.fault makes dm_test.maybe_fail(id)
+-- raise its SQLSTATE for every row whose id is at least from_id; with no row it returns 1, so a template
+-- "SET n = t.n + dm_test.maybe_fail(t.id)" moves a row exactly like the stamping template. SECURITY DEFINER (the superuser
+-- that creates the fixtures), so the chunk's role needs no grant on the table.
+CREATE TABLE dm_test.fault (sqlstate text NOT NULL, from_id bigint NOT NULL DEFAULT 0);
+CREATE FUNCTION dm_test.maybe_fail(row_id bigint) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+AS $f$
+DECLARE s text;
+BEGIN
+    SELECT f.sqlstate INTO s FROM dm_test.fault f WHERE row_id >= f.from_id LIMIT 1;
+    IF s IS NOT NULL THEN
+        RAISE EXCEPTION 'injected fault %', s USING ERRCODE = s;
+    END IF;
+    RETURN 1;
+END
+$f$;
+
 DO $$
 DECLARE r record;
 BEGIN

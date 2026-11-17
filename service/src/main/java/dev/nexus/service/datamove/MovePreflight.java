@@ -11,13 +11,16 @@ import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.sql.SQLException;
 import java.util.List;
 import java.util.Optional;
 
 /**
  * Step 1 of a pass (RDR-246, The move worker): grants what the libraries need on the driving table, then checks that
  * dml_utils is installed, that the admin connection reads every row of the driving table, and that a
- * {@code max_worker_processes} slot is free. Each miss is a reason the move is {@code blocked:} with; none is permanent.
+ * {@code max_worker_processes} slot is free. Each named miss is a reason the move is {@code blocked:} with, and transient. A
+ * driving table that does not exist, or a check that itself raised, carries the {@link SQLException} it raised so the failure
+ * class can tell (a missing schema or table is permanent, the RDR's 3F000 example).
  */
 final class MovePreflight {
 
@@ -39,39 +42,65 @@ final class MovePreflight {
         "standalone backend", "walsummarizer", "io worker");
 
     /**
+     * What stops a pass at the preflight: the reason, and what the check raised ({@code null} for a miss the worker names:
+     * no install, a missing role, no slot, an admin that cannot see every row).
+     */
+    record Miss(String reason, SQLException raised) {
+        static Miss named(String reason) {
+            return new Miss(reason, null);
+        }
+    }
+
+    /**
      * Runs the preflight on {@code session}, which names the move's driving table.
      *
-     * @return the reason the move is blocked, or empty when the pass may go on to the runs
+     * @return what blocks the pass, or empty when it may go on to the runs
      */
-    static Optional<String> blockedReason(AdminDdlSession session, DataMove move, DmlUtilsInstaller installer) {
+    static Optional<Miss> check(AdminDdlSession session, DataMove move, DmlUtilsInstaller installer) {
         Optional<String> install = installer.status().blockedReason();
         if (install.isPresent()) {
-            return install;
+            return Optional.of(Miss.named(install.get()));
         }
         DSLContext ctx = session.ctx();
         try {
+            if (!tableExists(ctx, move)) {
+                // what the CALL would raise (assert_schema_exists' 3F000 for a missing schema, 42P01 for a table), and the
+                // state the grant and the row-security read below would otherwise blur into "cannot see every row"
+                return Optional.of(new Miss("the driving table " + move.drivingTableLabel() + " does not exist",
+                    new SQLException("the driving table " + move.drivingTableLabel() + " does not exist", "42P01")));
+            }
             grant(session, move);
             if (!committingEntryPointInstalled(ctx)) {
-                return Optional.of("dml_utils.run_migration_chunks_committing is not installed");
+                return Optional.of(Miss.named("dml_utils.run_migration_chunks_committing is not installed"));
             }
             if (rowSecurity(ctx, move).narrowsAdmin()) {
                 try {
                     session.requireUnrestrictedView(VIEW_POINT_AT);
                 } catch (AdminDdlSession.Refused refused) {
-                    return Optional.of(refused.getMessage());
+                    return Optional.of(Miss.named(refused.getMessage()));
                 }
             }
             if (freeWorkerSlots(ctx) < 1) {
-                return Optional.of("waiting for a background worker slot");
+                return Optional.of(Miss.named("waiting for a background worker slot"));
             }
         } catch (AdminDdlSession.Refused refused) {
-            return Optional.of("the pass could not grant dml_utils_owner its access to "
-                + move.drivingTableLabel() + ": " + refused.getMessage());
+            return Optional.of(new Miss("the pass could not grant dml_utils_owner its access to "
+                + move.drivingTableLabel() + ": " + refused.getMessage(), DataMoveFailureClassifier.sqlExceptionOf(refused)));
         } catch (DataAccessException e) {
-            return Optional.of("a preflight check on " + move.drivingTableLabel() + " failed: sqlstate=" + e.sqlState()
-                + " " + FailureHandler.oneLine(e.getMessage()));
+            return Optional.of(new Miss("a preflight check on " + move.drivingTableLabel() + " failed: sqlstate="
+                + e.sqlState() + " " + FailureHandler.oneLine(e.getMessage()), DataMoveFailureClassifier.sqlExceptionOf(e)));
         }
         return Optional.empty();
+    }
+
+    /** Whether the driving table (a table, a partitioned table or a view) exists. */
+    static boolean tableExists(DSLContext ctx, DataMove move) {
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return ctx.fetchExists(DSL.selectOne().from(c)
+            .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(move.drivingSchema()))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(move.drivingTable())));
     }
 
     /**

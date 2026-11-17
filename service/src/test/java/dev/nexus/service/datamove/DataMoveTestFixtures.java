@@ -95,7 +95,14 @@ final class DataMoveTestFixtures {
     /** As the shorter form, naming the move it supersedes (or none) and the template resource. */
     static void register(DSLContext ctx, String label, String table, int chunkSize, int sleepMs, String supersedes,
                          String templateResource) {
-        register(ctx, label, table, chunkSize, sleepMs, supersedes, templateResource, "verification.sql", 60_000, null);
+        registerOn(ctx, label, "dm_test", table, chunkSize, sleepMs, supersedes, templateResource);
+    }
+
+    /** As the longer form, over {@code <schema>.<table>} (which need not exist). */
+    static void registerOn(DSLContext ctx, String label, String schema, String table, int chunkSize, int sleepMs,
+                           String supersedes, String templateResource) {
+        registerOn(ctx, label, schema, table, chunkSize, sleepMs, supersedes, templateResource, "verification.sql", 60_000,
+            null);
     }
 
     /**
@@ -105,6 +112,14 @@ final class DataMoveTestFixtures {
     static void register(DSLContext ctx, String label, String table, int chunkSize, int sleepMs, String supersedes,
                          String templateResource, String verificationResource, int statementTimeoutMs,
                          String onCompleteResource) {
+        registerOn(ctx, label, "dm_test", table, chunkSize, sleepMs, supersedes, templateResource, verificationResource,
+            statementTimeoutMs, onCompleteResource);
+    }
+
+    /** The full form: over {@code <schema>.<table>}, with the verification, timeout and {@code on_complete}. */
+    static void registerOn(DSLContext ctx, String label, String schema, String table, int chunkSize, int sleepMs,
+                           String supersedes, String templateResource, String verificationResource,
+                           int statementTimeoutMs, String onCompleteResource) {
         ctx.insertInto(DSL.table(DSL.name("nexus", "data_moves")))
             .columns(DSL.field(DSL.name("label"), String.class), DSL.field(DSL.name("template"), String.class),
                 DSL.field(DSL.name("driving_schema"), String.class), DSL.field(DSL.name("driving_table"), String.class),
@@ -112,7 +127,7 @@ final class DataMoveTestFixtures {
                 DSL.field(DSL.name("statement_timeout_ms"), Integer.class),
                 DSL.field(DSL.name("verification"), String.class), DSL.field(DSL.name("changeset_id"), String.class),
                 DSL.field(DSL.name("supersedes"), String.class), DSL.field(DSL.name("on_complete"), String.class))
-            .values(label, resource(templateResource), "dm_test", table, chunkSize, sleepMs, statementTimeoutMs,
+            .values(label, resource(templateResource), schema, table, chunkSize, sleepMs, statementTimeoutMs,
                 resource(verificationResource), "test-" + label, supersedes,
                 onCompleteResource == null ? null : resource(onCompleteResource))
             .execute();

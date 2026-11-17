@@ -124,9 +124,15 @@ abstract class DataMoveIntegrationBase {
 
     DataMoveWorker worker(DmlUtilsInstaller installer, Integer sleepOverrideMs, FailureHandler failures,
                           MoveFinisher finisher, boolean singletonLockHeld) {
+        return worker(installer, sleepOverrideMs, failures, finisher, singletonLockHeld, Clock.systemUTC());
+    }
+
+    /** A worker on {@code clock}: the one {@link DataMoveFailureHandler} writes its times with, and the one backoffs wait on. */
+    DataMoveWorker worker(DmlUtilsInstaller installer, Integer sleepOverrideMs, FailureHandler failures,
+                          MoveFinisher finisher, boolean singletonLockHeld, Clock clock) {
         var w = new DataMoveWorker(adminConnection, installer,
             new DataMoveWorker.Settings(Duration.ofMillis(50), Duration.ofMillis(10), sleepOverrideMs),
-            WORKER_NAME, Clock.systemUTC(), new MoveStates(Clock.systemUTC()), failures, finisher, singletonLockHeld);
+            WORKER_NAME, clock, new MoveStates(clock), failures, finisher, singletonLockHeld);
         workers.add(w);
         return w;
     }
