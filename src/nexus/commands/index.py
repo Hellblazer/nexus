@@ -3428,12 +3428,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
         batch_start = _time.monotonic()
 
         # nexus-7f5qj: same collector-swallow gap as the single-file
-        # branches below — a register failure during THIS pdf's write
-        # never raises (it's caught inside doc_indexer's preflight
-        # registration and recorded to the identity-drop collector
-        # instead), so the existing per-pdf ``except Exception`` isolation
-        # never sees it and this file's "— N chunks" line prints as a
-        # plain success. Reset before each pdf so a drop attributes to
+        # branches below — a preflight register failure during THIS pdf's
+        # write is caught inside doc_indexer and recorded to the
+        # identity-drop collector. When the fallback registration still
+        # yields an identity the write goes ahead without raising, so the
+        # per-pdf ``except Exception`` isolation never sees the drop and this
+        # file's "— N chunks" line prints as a plain success (when it yields
+        # none, CatalogIdentityMissingError raises into that isolation and
+        # nothing is written, RDR-223). Reset before each pdf so a drop attributes to
         # THIS file, not a prior one in the batch; check after so a drop
         # surfaces in the same ``failures`` list every other per-pdf
         # problem here already uses (batch isolation: one orphaned
@@ -3722,12 +3724,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
         click.echo("\n(no cloud write)")
         return
 
-    # nexus-7f5qj: single-file identity-drop wiring. A catalog-register
-    # failure during THIS call never raises (doc_indexer's preflight
-    # registration swallows it into the identity-drop collector) so neither
-    # except clause below ever sees it; the collector check after the call is what
-    # catches it. Reset here so a leftover drop from an earlier call in
-    # this process is never misattributed to this run.
+    # nexus-7f5qj: single-file identity-drop wiring. doc_indexer's preflight
+    # registration swallows a catalog-register failure into the identity-drop
+    # collector. If the fallback registration then yields an identity, the
+    # write goes ahead and nothing raises, so only the collector check after
+    # the call catches the drop. If it yields none, CatalogIdentityMissingError
+    # raises and nothing is written (RDR-223; handled by _index_pdf's wrapper).
+    # Reset here so a leftover drop from an earlier call in this process is
+    # never misattributed to this run.
     from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
     reset_identity_drop_collectors()
     # nexus-cy9u7 S3: single-file `nx index pdf` never wired in the retry/
