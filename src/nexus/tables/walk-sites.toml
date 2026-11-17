@@ -25,8 +25,8 @@
 #           escapes the scan.
 #   next    optional: the bead that removes or lowers the row.
 #
-# Frozen on 2e09b8cfc: 25 sites, 28 calls, 19 files. Forecast (RDR-241): 21 calls after
-# Phase 1, 18 after Phase 2.
+# Frozen on 2e09b8cfc: 25 sites, 28 calls, 19 files. Forecast (RDR-241): 22 calls after
+# Phase 1 (the --check-references switch moved to Phase 2), 18 after Phase 2.
 #
 # KIND. A total lookup, site -> row, with no guard dimension: "state-machine" is the checker's
 # kind without the guard obligation (the same choice chunk-metadata-keys.toml makes). What the

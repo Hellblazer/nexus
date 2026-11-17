@@ -453,15 +453,16 @@ only), "P2" is Phase 2 (engine, then client):
 | `commands/catalog_cmds/remediation.py::remediate_paths_cmd` | BULK JOB | 2 | Per-row path resolution. P1: the `--collection` branch uses `list_by_collection` (calls 2 to 1). |
 | `commands/catalog_cmds/sensitivity.py::_targets` | BULK JOB | 1 | `nx catalog sensitive` with no tumbler, `--collection` or `--owner`. Stays. |
 | `commands/enrich.py::_aspect_bearing_collections` | AGGREGATE | 1 | Builds a set of collection names. P1: `distinct_doc_collections()`. |
-| `doctor_references.py::reference_only_candidates` | AGGREGATE | 1 | Wants non-`file://` rows. P1: one `list_scoped` read per registered scheme. |
+| `doctor_references.py::reference_only_candidates` | AGGREGATE | 1 | Wants non-`file://` rows. P2: the case-insensitive scheme-prefix route (moved from P1, option C). |
 | `mcp/catalog.py::catalog_list` | BOUNDED | 2 | One page of `limit + 1`. Stays. |
 | `mcp/catalog.py::catalog_search` | AGGREGATE | 1 | Author alone, unattended (Gap 3). P2: the author route. |
 | `operators/sensitive_paths.py::file_tool_restriction` | AGGREGATE | 1 | Per dispatch, unattended (Gap 3). P2: the locator route. |
 | `upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan` | BULK JOB | 1 | Gap 2, deferred. Guarded unattended on a managed service. |
 | `upgrade_ladder/rungs/manifest_span_fill.py::ManifestSpanFillRung._scan` | BULK JOB | 1 | Gap 2, deferred. Guarded the same way (`manifest_span_fill.py:599`, `:639`, `:712`). |
 
-If every P1 and P2 line lands as written, the count goes 28, then 21 after
-Phase 1, then 18 after Phase 2: 14 BULK JOB, 3 BOUNDED (the two `catalog_list`
+If every P1 and P2 line lands as written, the count goes 28, then 22 after
+Phase 1 (21 before the `--check-references` switch moved to Phase 2), then 18
+after Phase 2: 14 BULK JOB, 3 BOUNDED (the two `catalog_list`
 calls and `list_cmd`'s bounded mode) and one AGGREGATE (the citation join).
 That is a forecast from reading the code, not a measurement; each step reports
 the real count.
@@ -680,9 +681,8 @@ the table in the same commit:
 - `_aspect_bearing_collections` uses `distinct_doc_collections()`.
 - `backfill_source_uri_cmd` and `backfill_etags_cmd` (no owner) use
   `list_scoped(source_uri_prefix=...)`.
-- `reference_only_candidates` makes one `list_scoped` call per registered
-  non-file scheme (`<scheme>:`), then applies its existing filters. The
-  Critical Assumption on unregistered schemes is checked here.
+- `reference_only_candidates` is not switched here: Sam's option C moved it
+  to Phase 2 (nexus-uwggq.1.5), where it reads through the scheme-prefix route.
 - `prune_stale_cmd` and `remediate_paths_cmd` use `list_by_collection` for
   `--collection`. It refuses a blank collection name (nexus-uwggq.1.6); the
   sibling scoped methods got the same guard in nexus-uwggq.1.9 (Client rules).
@@ -768,7 +768,7 @@ None.
   `GET /list`, and the rows equal the walk's rows on the same fixture.
 - **Scenario**: `nx doctor --check-references` on one fixture with a row of each
   registered scheme, a `chroma://` row and a drive-path row, before and after
-  the switch — **Verify**: the reports differ only by the two unregistered
+  the switch (Phase 2, nexus-uwggq.1.5) — **Verify**: the reports differ only by the two unregistered
   rows.
 - **Scenario**: `nx doctor` sensitive rows when `/sensitive` is unavailable, and
   when it answers capped — **Verify**: both read "not checked" with the cause,
@@ -809,7 +809,7 @@ the number the spike produces; this RDR states no latency target before it.
 Checked the narrowed text against itself on 2026-11-16. The call-site count
 appears as 28 calls in 19 files (42 grep lines in 23 files) in the Problem
 Statement, Research Findings and the ratchet's starting value, and the
-forecasts (21 after Phase 1, 18 after Phase 2) appear only as forecasts.
+forecasts (21 after Phase 1, revised to 22 on 2026-11-17; 18 after Phase 2) appear only as forecasts.
 Gap 2 is described in one place, as deferred, and no phase builds it. Gap 3
 names the same two unattended walks (MCP author search, operator dispatch's
 sensitive-path list) wherever it is cited. No contradiction found.
@@ -822,8 +822,8 @@ shipped pieces with the existing routes a walk can switch to. Two are
 assumed, each with a named check before the work it gates: the author and
 meta filter speed at 50,000 documents (a spike in Phase 2, before those
 routes ship) and the per-scheme switch in `nx doctor --check-references`
-(a before-and-after fixture diff, before that one Phase 1 switch ships).
-The first gates Phase 2 only. The citation join in `link_generator._all_entries` is unverified
+(a before-and-after fixture diff, before that switch ships in Phase 2).
+Both gate Phase 2 only. The citation join in `link_generator._all_entries` is unverified
 and outside the plan: that site stays in the ratchet table as AGGREGATE.
 
 ### Scope Verification
@@ -903,4 +903,4 @@ the next one without the ratchet.
 - 2026-11-17: `nx catalog list --sensitive` (nexus-uwggq.1.7) ships with a refusal on filtered or past-10,000 reads of a tenant over 10,000 sensitive documents (Sam, ask uwggq17-sensitive-cap, option C); Phase 2 closes it with the metadata route and a type filter on the sensitive route (standing grant 3).
 - 2026-11-17: The sensitive-document doctor rows (nexus-uwggq.1.8) read "not checked" with a reason that names the cause the engine's list reported and a next step; `nx catalog doctor --sensitive-with-aspects` exits 3 ("could not check") when its row reads "not checked", and `nx doctor` keeps the rows non-gating (standing grant 3).
 - 2026-11-17: Client rules and Phase 1 Step 2 record that scoped client reads and writes refuse a blank or whitespace value (nexus-uwggq.1.9, after nexus-uwggq.1.6). The engine-side 400 and the `descendants` LIKE escape are not yet planned in this RDR; they are recorded in the nexus-uwggq.1.9 notes.
-- 2026-11-17: Phase 1's expected count reads 22 calls in 21 sites, the live walk-site scan on e0d833c58, because the `--check-references` switch (nexus-uwggq.1.5) moved to Phase 2; Phase 2's 18 is unchanged (standing grant 3).
+- 2026-11-17: Phase 1's expected count reads 22 calls in 21 sites, the live walk-site scan on e0d833c58, because the `--check-references` switch (nexus-uwggq.1.5) moved to Phase 2; Phase 2's 18 is unchanged. The site table row, the count forecast, Phase 1 Step 2, the Test Plan scenario and the Finalization Gate text say the same (standing grant 3).
