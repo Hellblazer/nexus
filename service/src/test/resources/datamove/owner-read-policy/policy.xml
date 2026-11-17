@@ -35,8 +35,9 @@
     a permissive policy other than tenant_isolation on a driving table of nexus.data_moves applies to the serving role.
 
     WHERE THE PATTERN DOES NOT APPLY. A table partitioned one tenant per leaf (nexus.chunks, nexus.taxonomy_centroids) needs
-    nexus.partition_sync_access so each leaf carries the policy, and a walk of the leaves; ChunksIsolationCheck does that for
-    those two trees and DrivingTableIsolationCheck leaves them to it. A non-chunks table partitioned some other way gets its
+    nexus.partition_sync_access so each leaf carries the policy, and a walk of the leaves; ChunksIsolationCheck.structure
+    walks those two trees (tenant policy present, leaves mirror the root; it does not ask whether a policy reaches the serving
+    role), and DrivingTableIsolationCheck asks the parent's question of every driving table but nexus.chunks. A non-chunks table partitioned some other way gets its
     policy on the parent only, because the worker runs such a move per tenant over the parent.
 
     Rollback drops the policy. DDL only, no row DML, so the gate's rules 1 to 3 have nothing to read here.

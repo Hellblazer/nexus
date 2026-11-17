@@ -41,8 +41,9 @@ import java.util.function.LongConsumer;
  * <p><b>Scope.</b> The pattern, and so this check, is for a table with one set of policies on its parent. It does not
  * apply to a table partitioned one tenant per leaf (the shape of {@code nexus.chunks} and
  * {@code nexus.taxonomy_centroids}): that needs {@code nexus.partition_sync_access} so each leaf carries the policy, and a
- * walk of the leaves, which {@link ChunksIsolationCheck#structure} does for the two trees it knows and no check does for
- * another. A non-chunks table partitioned some other way gets its policy on the parent only, because the worker runs
+ * walk of the leaves, which {@link ChunksIsolationCheck#structure} does for the two trees it knows (it checks that the
+ * tenant policy exists and that every leaf mirrors its root; it does not ask whether a policy reaches the serving role).
+ * A move over {@code nexus.taxonomy_centroids} still gets the parent's question from this check. A non-chunks table partitioned some other way gets its policy on the parent only, because the worker runs
  * such a move per tenant over the parent.
  *
  * <p>Like the chunks check, a probe that cannot run is a refusal, and a transient failure (SQLState classes 08, 53, 57,
@@ -85,8 +86,8 @@ public final class DrivingTableIsolationCheck {
     }
 
     /**
-     * Every distinct driving table {@code nexus.data_moves} names, in any state, except the partition trees
-     * {@link ChunksIsolationCheck} covers ({@code nexus.chunks} and {@code nexus.taxonomy_centroids}); ordered by
+     * Every distinct driving table {@code nexus.data_moves} names, in any state, except {@code nexus.chunks},
+     * which {@link ChunksIsolationCheck} asks about; ordered by
      * schema, then name. Read on the admin connection.
      */
     public static List<Table> registeredDrivingTables(DSLContext admin) {
@@ -103,9 +104,13 @@ public final class DrivingTableIsolationCheck {
         return out;
     }
 
-    /** The roots of the two partition trees {@link ChunksIsolationCheck} already checks, policy by policy and relation by relation. */
+    /**
+     * {@code nexus.chunks}: {@link ChunksIsolationCheck#violations(DSLContext)} asks the policy question of it alone. Its
+     * {@code structure} check also walks {@code nexus.taxonomy_centroids}, but only for the tenant policy and the leaves
+     * mirroring the root, so a centroid driving table is asked here.
+     */
     private static boolean coveredByChunksCheck(Table t) {
-        return t.schema().equals("nexus") && ChunksIsolationCheck.TREE_ROOTS.contains(t.name());
+        return t.schema().equals("nexus") && t.name().equals("chunks");
     }
 
     /** The policies that apply to the role {@code service} is connected as, on each of {@code tables}, tables in order. */

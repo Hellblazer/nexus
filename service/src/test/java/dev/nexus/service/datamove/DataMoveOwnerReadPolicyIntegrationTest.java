@@ -314,7 +314,7 @@ class DataMoveOwnerReadPolicyIntegrationTest extends DataMoveIntegrationBase {
         migrateAsAdmin(REGISTER, "or-b", "other");
         migrateAsAdmin(POLICY, "or-b", "other");
         insertMove("or-chunks", "nexus", "chunks");
-        insertMove("or-centroids", "nexus", "taxonomy_centroids");   // the second tree ChunksIsolationCheck covers
+        insertMove("or-centroids", "nexus", "taxonomy_centroids");   // a centroid driving table is asked, unlike chunks
         ctx().update(table("nexus", "data_moves"))
             .set(DSL.field(DSL.name("completed_at"), OffsetDateTime.class), OffsetDateTime.now())
             .where(DSL.field(DSL.name("label"), String.class).eq("or-a")).execute();
@@ -325,7 +325,8 @@ class DataMoveOwnerReadPolicyIntegrationTest extends DataMoveIntegrationBase {
                 new dev.nexus.service.db.AdminDdlSession.Settings("or-scope-read", 0L, "test", "nexus", "data_moves", "none"),
                 false)) {
             assertThat(DrivingTableIsolationCheck.registeredDrivingTables(admin.ctx()))
-                .as("both tables, the completed move's included; nexus.chunks and nexus.taxonomy_centroids are ChunksIsolationCheck's").containsExactly(other, rows);
+                .as("both tables, the completed move's included, and nexus.taxonomy_centroids; nexus.chunks is ChunksIsolationCheck's")
+                .containsExactly(other, rows, new DrivingTableIsolationCheck.Table("nexus", "taxonomy_centroids"));
         }
 
         membership(SVC, true);
@@ -335,6 +336,17 @@ class DataMoveOwnerReadPolicyIntegrationTest extends DataMoveIntegrationBase {
                 .extracting(v -> v.table().name() + ":" + v.policy())
                 .as("the second table, and the completed move's table, both still carry the policy")
                 .containsExactly("other:other_owner_read", "rows:rows_owner_read");
+
+            // a policy that reaches the serving role on the centroid tree is the parent's question, asked here
+            var centroids = new DrivingTableIsolationCheck.Table("nexus", "taxonomy_centroids");
+            PgContainerHelper.createPolicyUsingTrue(su, dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS,
+                "or_centroid_probe", PgContainerHelper.PolicyKind.PERMISSIVE, "SELECT", "PUBLIC");
+            try {
+                assertThat(DrivingTableIsolationCheck.violations(service, List.of(centroids)))
+                    .containsExactly(new DrivingTableIsolationCheck.Violation(centroids, "or_centroid_probe", "public"));
+            } finally {
+                PgContainerHelper.dropPolicy(su, dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS, "or_centroid_probe");
+            }
 
             ctx().dropTable(DSL.name("dm_ownerread", "rows")).execute();
             assertThat(DrivingTableIsolationCheck.violations(service, List.of(other, rows)))
