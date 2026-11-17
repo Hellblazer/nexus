@@ -1,0 +1,3 @@
+### Added
+
+- **`nx doctor` warns when the engine's recall canary reads red.** A new `Recall canary` row reads `per_collection_indexes.this_engine.maintenance.canary` from `GET /v1/status` (RDR-230 Technical Design 7). It warns when `red` is above 0, naming the count and the green and unmeasured counts, and says which index is red is on `GET /v1/admin/chunks-leaves` under `canary_indexes` (operator token; `nx doctor` never calls that route). With no red it shows the counts as information. An engine that predates the `maintenance` or `canary` keys reads "not applicable", and a value the row cannot read says "could not read" rather than passing.
