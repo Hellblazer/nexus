@@ -52,7 +52,7 @@ import java.util.stream.Stream;
  *   <li>the inputs to {@code AdminConnection}: the {@code resolve} call and its {@code defaultUrl} argument, and
  *       who calls a method that takes an {@code AdminConnection} parameter (the rule trusts the parameter);</li>
  *   <li>the URL sources at the {@code DriverManager.getConnection} sites (PciBuilderSession, AspectQueueDrain's
- *       {@code admin.url()}, EngineSingletonLock's {@code jdbcUrl} parameter, BackendReaper, AdminDdlSession,
+ *       {@code admin.url()}, DrivingTableIsolationCheck's {@code admin.url()}, EngineSingletonLock's {@code jdbcUrl} parameter, BackendReaper, AdminDdlSession,
  *       PoolerModeCheck):
  *       they are counted and pinned, and their arguments are not read;</li>
  *   <li>the Hikari forms the URL rule does not read: {@code new HikariConfig(Properties)} or
@@ -195,6 +195,10 @@ final class EgressGuardCensus {
             "JDBC to the engine's own database (NX_DB_ADMIN_*): the owner-side census of the retired aspect queue table"
                 + " (nexus-hbnml), which counts every tenant's rows with FORCE ROW LEVEL SECURITY lifted in a"
                 + " transaction it rolls back."));
+        m.put("dev/nexus/service/db/DrivingTableIsolationCheck.java", Allow.pinned(JDBC_SITE,
+            "JDBC to the engine's own database (NX_DB_ADMIN_*): the boot check's read of nexus.data_moves"
+                + " (nexus-f3yqd.2.16), a global registry only the migrating role can read, on the same admin.url()"
+                + " AspectQueueDrain uses; the policy question itself runs on the service pool."));
         m.put("dev/nexus/service/db/PoolerModeCheck.java", Allow.pinned(JDBC_SITE,
             "JDBC to the engine's own database (NX_DB_URL): the pooler-mode probe."));
         m.put("dev/nexus/service/db/EngineSingletonLock.java", Allow.pinned(JDBC_SITE,
