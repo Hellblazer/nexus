@@ -2,12 +2,12 @@
 title: "Multi-hop answers read past the six-chunk generator budget"
 id: RDR-250
 type: Feature
-status: draft
+status: accepted
 priority: low
 author: Hal Hildebrand
-reviewed-by: pending
+reviewed-by: self
 created: 2026-11-15
-accepted_date:
+accepted_date: 2026-11-17
 related_issues: ["nexus-io7tw", "nexus-bwct4"]
 ---
 
