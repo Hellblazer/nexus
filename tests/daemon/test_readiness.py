@@ -556,6 +556,37 @@ class TestMigrationLogScanner:
         assert scanner.pending == 7
         assert scanner.started is True
 
+    # nexus-dngtz.1.5: the engine's logback line gained ``[cid=.. tenant=.. session=..]`` before `` - ``
+    # (RDR-167 Step 3). The markers and RE_PENDING match message text, so they must read these as before.
+    _NEW_FORMAT_BARE = "2026-11-17 02:10:03,114 INFO  [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
+    _NEW_FORMAT_REQUEST = (
+        "2026-11-17 02:10:03,114 INFO  [HTTP-Dispatcher] dev.nexus.service.http.AuthFilter "
+        "[cid=nxe-0123456789abcdef0123456789abcdef tenant=tenant-a session=session-a1] - "
+    )
+
+    def test_new_format_pending_line_gives_the_same_count(self):
+        from nexus.daemon.readiness import RE_PENDING
+
+        for prefix in (self._NEW_FORMAT_BARE, self._NEW_FORMAT_REQUEST):
+            line = prefix + "event=schema_migration_pending changesets=7"
+            m = RE_PENDING.search(line)
+            assert m is not None and m.group(1) == "7", line
+            scanner = MigrationLogScanner()
+            scanner.feed([line])
+            assert scanner.pending == 7
+            assert scanner.started is True
+
+    def test_new_format_start_and_complete_lines_set_the_same_flags(self):
+        from nexus.daemon.readiness import MARKER_START
+
+        start = self._NEW_FORMAT_BARE + "event=schema_migration_start"
+        assert MARKER_START in start
+        scanner = MigrationLogScanner()
+        scanner.feed([start])
+        assert scanner.started is True
+        scanner.feed([self._NEW_FORMAT_BARE + "event=schema_migration_complete"])
+        assert scanner.complete is True
+
     def test_waiting_for_lock_is_not_sticky(self):
         scanner = MigrationLogScanner()
         first = scanner.feed(["Waiting for changelog lock"])

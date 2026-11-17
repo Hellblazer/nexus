@@ -137,7 +137,7 @@ final class TenantKeyedStateTables {
             "HttpUtil.TENANT_PARTITION_MISSING_REASON", "HttpUtil.TENANT_CREATION_BUSY_REASON",
             "HttpUtil.TENANT_CREATION_RETRY_AFTER_SECONDS", "HttpUtil.TENANT_CREATION_RESTORE_RETRY_AFTER_SECONDS",
             "AuthFilter.BOOTSTRAP_ANY_TENANT",
-            "AuthFilter.TENANT_HEADER", "TenantConstants.DEFAULT_TENANT", "TenantConstants.BOOTSTRAP_ANY_TENANT",
+            "AuthFilter.TENANT_HEADER", "AuthFilter.MDC_TENANT", "TenantConstants.DEFAULT_TENANT", "TenantConstants.BOOTSTRAP_ANY_TENANT",
             "ChunksIsolationCheck.TENANT_POLICY", "TokenStore.SCOPE_TENANT", "TenantScope.DEFAULT_TENANT_GUC",
             "TenantScope.T1_TENANT_GUC", "ScratchRepository.T1_TENANT_GUC", "PciReconciler.SET_LOCAL_TENANT",
             "MintRateLimiter.MAX_TENANT_BUCKETS_PER_CREDENTIAL", "MintRateLimiter.tenantBurst",

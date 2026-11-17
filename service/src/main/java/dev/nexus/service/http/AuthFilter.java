@@ -9,6 +9,7 @@ import com.sun.net.httpserver.Filter;
 import com.sun.net.httpserver.HttpExchange;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -69,6 +70,11 @@ public final class AuthFilter extends Filter {
     private static final String BEARER_PREFIX = "Bearer ";
     private static final String TENANT_HEADER = "X-Nexus-Tenant";
     private static final String SESSION_HEADER = "X-Nexus-T1-Session";
+
+    // MDC keys; logback.xml prints them as [cid=... tenant=... session=...].
+    private static final String MDC_CORRELATION_ID = "correlation_id";
+    private static final String MDC_TENANT = "tenant";
+    private static final String MDC_SESSION = "session";
 
     /**
      * Public alias of {@link RequestDeadline#REQUEST_DEADLINE_HEADER} (nexus-8hdg9
@@ -185,6 +191,27 @@ public final class AuthFilter extends Filter {
 
     @Override
     public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+        // RDR-167 Step 3 (nexus-dngtz.1.5): the correlation id is accepted or generated and
+        // set on the response BEFORE anything can send a response, so every path below (the
+        // 401 early returns included) echoes it and logs under it. Everything after the
+        // accept sits inside the try, so the MDC is cleared on every exit. Production runs one
+        // virtual thread per request (NexusService: newVirtualThreadPerTaskExecutor), so a
+        // ThreadLocal cannot outlive a request there; the clear is defense for any other
+        // executor, not a fix for a pool leak.
+        String correlationId = CorrelationId.acceptOrGenerate(
+            exchange.getRequestHeaders().getFirst(CorrelationId.HEADER));
+        try {
+            MDC.put(MDC_CORRELATION_ID, correlationId);
+            exchange.getResponseHeaders().set(CorrelationId.HEADER, correlationId);
+            authenticateAndDispatch(exchange, chain);
+        } finally {
+            RequestContext.clear();
+            RequestContext.clearDeadline();
+            MDC.clear();
+        }
+    }
+
+    private void authenticateAndDispatch(HttpExchange exchange, Chain chain) throws IOException {
         // 1. Extract the bearer.
         String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
         if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
@@ -319,23 +346,23 @@ public final class AuthFilter extends Filter {
         // 4. Publish the principal thread-confined; clear after dispatch.
         RequestContext.set(new RequestContext.Principal(
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
+        // Tenant and session ids only: never the token or the credential hash.
+        MDC.put(MDC_TENANT, tenant);
+        if (sessionId != null) {
+            MDC.put(MDC_SESSION, sessionId);
+        }
         // nexus-8hdg9 phase 2: mint the request's embed deadline alongside the
         // principal, for EVERY route, from the budget resolved once at construction.
         // Phase 5: a client that declares its own budget via the advisory
         // X-Nexus-Request-Deadline-Ms header replaces the env default outright;
         // absent or malformed falls back to the default. Either is clamped to the
         // NX_EMBED_DEADLINE_MAX_MS hard ceiling (phase 3 carry-in).
-        // Cleared together with the principal in the finally below.
+        // Cleared together with the principal in doFilter's finally.
         long budgetMs = RequestDeadline.resolveBudgetMs(
             exchange.getRequestHeaders().getFirst(RequestDeadline.REQUEST_DEADLINE_HEADER),
             deadlineBudgetMs, deadlineMaxMs);
         RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(budgetMs));
-        try {
-            chain.doFilter(exchange);
-        } finally {
-            RequestContext.clear();
-            RequestContext.clearDeadline();
-        }
+        chain.doFilter(exchange);
     }
 
     private void reject(HttpExchange exchange, String reason) throws IOException {

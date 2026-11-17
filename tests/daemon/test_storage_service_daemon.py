@@ -3170,6 +3170,78 @@ def test_replace_quiesce_start_service_imports_the_launcher(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
+# nexus-dngtz.1.5: the engine log line now carries [cid= tenant= session=]
+# ---------------------------------------------------------------------------
+class TestRequestScopedEngineLogFormat:
+    """RDR-167 Step 3: ``logback.xml`` prints ``[cid=.. tenant=.. session=..]`` between the logger name
+    and `` - ``. The readers anchor on the line's front (``_ENGINE_LOGBACK_LINE``, ``_ENGINE_ERROR_LINE``)
+    and on message text, so the block must change nothing they read. The Java side pins the pattern against
+    the shipped logback.xml (``AuthFilterCorrelationTest``); these pin the readers against the new shape."""
+
+    _BARE_ERR = (
+        "2026-11-17 02:10:03,114 ERROR [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
+        'event=pg_session_env_invalid error="X must be in 60..3600, got: 10"'
+    )
+    _REQUEST_ERR = (
+        "2026-11-17 02:10:05,200 ERROR [HTTP-Dispatcher] dev.nexus.service.http.VectorHandler "
+        "[cid=nxe-0123456789abcdef0123456789abcdef tenant=tenant-a session=session-a1] - "
+        "event=vector_write_failed collection=docs__x"
+    )
+    _BARE_INFO = (
+        "2026-11-17 02:10:06,000 INFO  [main] dev.nexus.service.Main [cid=- tenant=- session=-] - shutdown complete"
+    )
+    _MIG = (
+        "2026-11-17 02:10:03,114 ERROR [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
+        'event=schema_migration_failed error="Liquibase migration failed"'
+    )
+
+    def test_the_front_anchored_regexes_match_the_new_lines_as_they_matched_the_old(self) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        for line in (self._BARE_ERR, self._REQUEST_ERR, self._BARE_INFO):
+            assert ssd._ENGINE_LOGBACK_LINE.match(line), line
+        assert ssd._ENGINE_ERROR_LINE.match(self._BARE_ERR)
+        assert ssd._ENGINE_ERROR_LINE.match(self._REQUEST_ERR)
+        assert not ssd._ENGINE_ERROR_LINE.match(self._BARE_INFO), "an INFO line is not an ERROR line"
+        # the old shape, unchanged
+        assert ssd._ENGINE_ERROR_LINE.match("2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - x")
+
+    def test_last_engine_error_line_returns_the_whole_new_format_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._INFO_BEFORE + "\n" + self._BARE_ERR + "\n\tat dev.nexus.service.Main.main(Main.java:166)\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_error_line(log, 0) == self._BARE_ERR
+        log.write_text(self._BARE_ERR + "\n" + self._REQUEST_ERR + "\n", encoding="utf-8")
+        assert ssd.last_engine_error_line(log, 0) == self._REQUEST_ERR
+
+    _INFO_BEFORE = "2026-11-17 02:10:02,000 INFO  [main] dev.nexus.service.Main [cid=- tenant=- session=-] - boot"
+
+    def test_boot_failure_reason_follows_the_final_new_format_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(self._BARE_ERR + "\n\tat dev.nexus.service.Main.main(Main.java:166)\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) == self._BARE_ERR
+        log.write_text(self._BARE_ERR + "\n" + self._BARE_INFO + "\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None, "an old ERROR before a clean stop"
+
+    def test_root_cause_reads_under_a_new_format_migration_failure_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._MIG + "\nCaused by: org.postgresql.util.PSQLException: ERROR: run the repair first\n"
+            + self._BARE_INFO + "\nCaused by: java.io.IOException: after the trace ended\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_root_cause(log, 0) == "run the repair first"
+
+
+# ---------------------------------------------------------------------------
 # nexus-qke1e: ensure_storage_supervisor — the single persistent-start path
 # ---------------------------------------------------------------------------
 class TestEnsureStorageSupervisor:
