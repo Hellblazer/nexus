@@ -326,6 +326,12 @@ def scenario_upgrade(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     out: dict = {"marks": marks, "pg_background_before_boot": before, "boot_wal_bytes": ready_lsn - ubw.lsn_bytes(base)}
     out["libraries_at_ready"] = library_state(eng)
     samples: list = []
+    if move_row(eng) is None:
+        # A jar with no move registered (the plain gate jar): the control for the boot timing, nothing to wait for.
+        out["move"] = None
+        out["events"] = collect_events(eng)
+        out["libraries_after"] = library_state(eng)
+        return out, True
     row = wait_move(eng, a.move_timeout, samples)
     out["move"] = row
     out["move_seconds_after_ready"] = round(time.monotonic() - t_start - marks["ready_s"], 1)
