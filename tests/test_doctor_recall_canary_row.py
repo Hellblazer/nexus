@@ -115,6 +115,13 @@ def test_a_standby_with_red_history_warns_too() -> None:
     # This engine's own history stays after it becomes a standby (RDR-230 Technical Design 7).
     r = _row(_golden("standby_with_canary_history"))
     assert r.warn is True and "red" in r.detail
+    assert "this engine is a standby" in r.detail
+
+
+def test_a_holder_with_red_does_not_say_standby() -> None:
+    r = _row(_golden("holder_with_canary"))
+    assert r.warn is True and "this engine's recall canary" in r.detail
+    assert "standby" not in r.detail
 
 
 def test_the_count_is_plural_when_more_than_one_index_is_red() -> None:

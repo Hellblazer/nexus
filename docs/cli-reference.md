@@ -4141,6 +4141,8 @@ engine's view has `expired`, and when its reads have failed since it started and
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
 
+**Recall canary (nexus-4lnn1.1.10, RDR-230 Technical Design 7).** `nx doctor`'s "Recall canary" row reads `per_collection_indexes.this_engine.maintenance.canary` from the same `GET /v1/status` body: the counts of this engine's per-collection (`pci_`) indexes whose recall canary reads green, red or unmeasured, and when the canary last ran. The route is unauthenticated, so it carries counts only. The row warns when any index reads red and points to the operator-only `GET /v1/admin/chunks-leaves`, whose `canary_indexes` entry names each red index with its `min_recall`, `trigger` and `red_after_reindex`; the engine log's `event=pci_canary` lines name them too. This row never calls that route. With no red it shows the counts. The counts are this engine's own history: a standby keeps the counts from when it held the builder lock, and the row says so. An engine without the `maintenance` or `canary` key reads not applicable, and a value the row cannot read says "could not read" rather than passing.
+
 **Reranker (nexus-yuh4a, RDR-210 P3.1).** `nx doctor`'s "Reranker" row reads `reranker_available` from the same `GET /v1/status`
 body. `reranker` names the reranker the profile chose even when the cross-encoder's model files are absent, so the name does not say
 whether search is reranked; `reranker_available` is the engine's answer on whether the reranker's model files are present, read live

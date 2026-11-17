@@ -93,12 +93,15 @@ def check_recall_canary(engine_status: object = _ENGINE_STATUS_UNSET) -> list[He
             else "no run yet" if last_run is None else "no run time reported")
     counts = f"{'?' if green is None else green} green, {red} red, {'?' if unmeasured is None else unmeasured} unmeasured"
 
+    # RDR-230 Technical Design 7: the counts are this engine's own history and stay after it becomes a standby.
+    standby = (" (this engine is a standby: the counts are from when it held the builder lock)"
+               if isinstance(this_engine, dict) and this_engine.get("builder_state") == "standby" else "")
     if red > 0:
         return [HealthResult(
             label=LABEL, ok=False, warn=True,
-            detail=(f"{red} per-collection {'index reads' if red == 1 else 'indexes read'} red on the recall canary "
-                    f"({counts}; {when}); /v1/status carries counts only, so {ADMIN_ROUTE} (operator token) lists "
-                    "them under canary_indexes"),
+            detail=(f"this engine's recall canary reads {red} per-collection "
+                    f"{'index' if red == 1 else 'indexes'} red ({counts}; {when}){standby}; /v1/status carries "
+                    f"counts only, so {ADMIN_ROUTE} (operator token) lists them under canary_indexes"),
             fix_suggestions=[
                 f"{ADMIN_ROUTE} needs the operator (root) token (`nx config set service_token <root token>` or "
                 "NX_SERVICE_TOKEN): its canary_indexes entry names each red index with its min_recall, trigger and "
@@ -110,4 +113,4 @@ def check_recall_canary(engine_status: object = _ENGINE_STATUS_UNSET) -> list[He
     if green is None or unmeasured is None:
         bad = "green" if green is None else "unmeasured"
         return _unreadable(f"maintenance.canary.{bad} is not a non-negative count (got {repr(canary.get(bad))[:40]})")
-    return [HealthResult(label=LABEL, ok=True, detail=f"{counts}; {when}")]
+    return [HealthResult(label=LABEL, ok=True, detail=f"{counts}; {when}{standby}")]
