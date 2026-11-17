@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
-from nexus.catalog.sensitive_list import SensitiveListUnavailable
+from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable
 
 _BODY = {"count": 2, "limit": 1000, "capped": False,
          "documents": [{"tumbler": "1.2.3", "physical_collection": "knowledge__a__voyage-context-3__v1"},
@@ -110,8 +110,8 @@ def _status_error(status: int):
     (dict(get=_status_error(503)), SensitiveListUnavailable.TIMEOUT),
     (dict(get=_status_error(500)), SensitiveListUnavailable.FAILED),
     (dict(get=_status_error(403)), SensitiveListUnavailable.FAILED),
-    (dict(get={"count": "2"}), SensitiveListUnavailable.FAILED),
-    (dict(get=[]), SensitiveListUnavailable.FAILED),
+    (dict(get={"count": "2"}), SensitiveListUnavailable.MALFORMED),
+    (dict(get=[]), SensitiveListUnavailable.MALFORMED),
 ], ids=["flag-false", "flag-absent", "404", "503", "500", "403", "malformed", "not-a-dict"])
 def test_strict_raises_the_cause(monkeypatch: pytest.MonkeyPatch, setup: dict, reason: str) -> None:
     c, _calls = _client(monkeypatch, **setup)
@@ -133,3 +133,13 @@ def test_strict_transport_error_is_failed(monkeypatch: pytest.MonkeyPatch) -> No
 def test_strict_returns_the_answer_like_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     c, _calls = _client(monkeypatch, get=_BODY)
     assert c.sensitive_documents(1000, strict=True) == c.sensitive_documents(1000)
+
+
+def test_strict_a_failed_version_probe_is_its_own_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    c, calls = _client(monkeypatch, flag=None, get=_BODY)
+    monkeypatch.setattr(c, "_version_probe_failed", True, raising=False)
+    with pytest.raises(SensitiveListUnavailable) as caught:
+        c.sensitive_documents(strict=True)
+    assert caught.value.reason == SensitiveListUnavailable.PROBE_FAILED
+    assert calls == []
+    assert c.sensitive_documents() is None, "the default contract is unchanged"

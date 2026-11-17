@@ -62,6 +62,53 @@ def _report(name: str, status: str, reason: str = "", total: int = 0, findings: 
             "findings": findings or []}
 
 
+class SensitiveListUnavailable(Exception):
+    """``HttpCatalogClient.sensitive_documents(strict=True)`` got no answer; :attr:`reason` says why (nexus-uwggq.1.7).
+
+    A caller that must not scan the catalog instead (``nx catalog list --sensitive``) tells the causes apart: an
+    engine without the route is a message about the engine, a timeout or a failed probe is a retry.
+    """
+
+    #: The engine answered ``GET /version`` without ``catalog_sensitive_list_supported``, or the route answers 404.
+    UNSUPPORTED = "unsupported"
+    #: ``GET /version`` itself failed, so no capability could be read; the engine said nothing about this route.
+    PROBE_FAILED = "probe_failed"
+    #: The route answered 503: the engine's own statement timeout, or the service unavailable.
+    TIMEOUT = "timeout"
+    #: Any other status, or a transport error.
+    FAILED = "failed"
+    #: The body is not the route's shape.
+    MALFORMED = "malformed"
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"the engine's sensitive list is unavailable ({reason})")
+        self.reason = reason
+
+
+def sensitive_answer(result: object) -> dict | None:
+    """The route's body as ``{"count", "capped", "documents": [{"tumbler", "physical_collection"}]}``, or ``None`` when
+    it is malformed or inconsistent (an uncapped list whose length is not ``count``)."""
+    if not isinstance(result, dict):
+        return None
+    count, capped, documents = result.get("count"), result.get("capped"), result.get("documents")
+    well_formed = (
+        not isinstance(count, bool) and isinstance(count, int) and count >= 0 and isinstance(capped, bool)
+        and isinstance(documents, list)
+        # A document flagged before it was indexed has no collection: the engine sends null, read as "",
+        # as _to_entry reads it for the walk.
+        and all(isinstance(d, dict) and isinstance(d.get("tumbler"), str) and "physical_collection" in d
+                and isinstance(d["physical_collection"], (str, type(None))) for d in documents)
+        and (capped or len(documents) == count)
+    )
+    if not well_formed:
+        return None
+    return {
+        "count": count, "capped": capped,
+        "documents": [{"tumbler": d["tumbler"], "physical_collection": d.get("physical_collection") or ""}
+                      for d in documents],
+    }
+
+
 #: The most sensitive documents the bounded route is asked for: the engine's own maximum (CatalogSensitiveReads.
 #: MAX_LIMIT). The route reads the whole sensitive set from its index whatever the limit, so asking for fewer
 #: saves nothing. A tenant with more walks the catalog, which keeps the gating row's coverage; past that size the

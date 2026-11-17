@@ -90,7 +90,7 @@ import httpx
 import structlog
 
 from nexus._log_safe_url import log_endpoint
-from nexus.catalog.sensitive_list import SensitiveListUnavailable, sensitive_answer
+from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable, sensitive_answer
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
@@ -1161,7 +1161,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return None
 
         if self._version_flags().get("catalog_sensitive_list_supported") is not True:
-            return cannot_say(SensitiveListUnavailable.UNSUPPORTED)
+            # A probe that failed says nothing about the route; one that answered without the flag says "old engine".
+            return cannot_say(SensitiveListUnavailable.PROBE_FAILED if self._version_probe_failed
+                              else SensitiveListUnavailable.UNSUPPORTED)
         try:
             result = self._get("/sensitive", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
         except httpx.HTTPStatusError as exc:
@@ -1176,7 +1178,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if answer is None:
             if isinstance(result, dict):
                 _log.warning("http_catalog_client.sensitive_documents_malformed", keys=sorted(result))
-            return cannot_say(SensitiveListUnavailable.FAILED)
+            return cannot_say(SensitiveListUnavailable.MALFORMED)
         return answer
 
     def _get_unprefixed(self, path: str, *, idempotent: bool = True, timeout: float | None = None) -> Any:

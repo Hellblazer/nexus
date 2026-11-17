@@ -57,12 +57,15 @@ class FakeEngine:
     """The catalog routes this command can reach, over a row store; every request is recorded in ``calls``."""
 
     def __init__(self, rows: list[dict[str, Any]], *, flag: bool | None = True, sensitive_status: int | None = None,
-                 sensitive_body: Any = None, drop_from_resolve: tuple[str, ...] = ()) -> None:
+                 sensitive_body: Any = None, drop_from_resolve: tuple[str, ...] = (),
+                 unflag_in_resolve: tuple[str, ...] = (), probe_failed: bool = False) -> None:
         self.rows = rows
         self.flag = flag
         self.sensitive_status = sensitive_status
         self.sensitive_body = sensitive_body
         self.drop_from_resolve = drop_from_resolve
+        self.unflag_in_resolve = unflag_in_resolve
+        self.probe_failed = probe_failed
         self.calls: list[tuple] = []
 
     def live(self) -> list[dict[str, Any]]:
@@ -108,11 +111,16 @@ class FakeEngine:
         self.calls.append(("POST", "/resolve_many", ids))
         by_tumbler = {r["tumbler"]: r for r in self.live() if r["tumbler"] not in self.drop_from_resolve}
         found = [by_tumbler[t] for t in ids if t in by_tumbler]
-        return {"entries": {r["tumbler"]: self.wire(r) for r in reversed(found)}}
+        wire = {r["tumbler"]: self.wire(r) for r in reversed(found)}
+        for t in self.unflag_in_resolve:
+            if t in wire:
+                wire[t] = {**wire[t], "sensitive": False}  # cleared between the list read and this one
+        return {"entries": wire}
 
     def client(self, monkeypatch: pytest.MonkeyPatch) -> HttpCatalogClient:
         c = object.__new__(HttpCatalogClient)
         monkeypatch.setattr(c, "_version_flags", self.flags, raising=False)
+        monkeypatch.setattr(c, "_version_probe_failed", self.probe_failed, raising=False)
         monkeypatch.setattr(c, "_get", self.get, raising=False)
         monkeypatch.setattr(c, "_post", self.post, raising=False)
         return c
@@ -165,6 +173,10 @@ _CASES = [
     pytest.param({"limit": 2, "offset": 2}, id="second-page"),
     pytest.param({"limit": 2, "offset": 4}, id="last-page"),
     pytest.param({"limit": 2, "offset": 40}, id="past-the-end"),
+    pytest.param({"limit": 0}, id="zero-page"),
+    pytest.param({"limit": 0, "offset": 3}, id="zero-page-offset"),
+    pytest.param({"limit": -1}, id="negative-limit"),
+    pytest.param({"limit": 2, "offset": -1}, id="negative-offset"),
     pytest.param({"content_type": "knowledge"}, id="type"),
     pytest.param({"content_type": "knowledge", "limit": 1, "offset": 1}, id="type-paged"),
     pytest.param({"content_type": "paper"}, id="type-with-no-sensitive-row"),
@@ -218,7 +230,7 @@ def test_request_sequence_without_a_filter_resolves_only_the_page(monkeypatch: p
     engine.wired(monkeypatch)
     result = _run("-n", "2", "--offset", "1", "--json")
     assert result.exit_code == 0, result.stderr
-    assert engine.calls == [("GET", "/sensitive", {"limit": 10_000}), ("POST", "/resolve_many", ["1.1.2", "1.1.3"])]
+    assert engine.calls == [("GET", "/sensitive", {"limit": 3}), ("POST", "/resolve_many", ["1.1.2", "1.1.3"])]
     assert "Next page" not in result.stdout  # --json prints rows only
 
 
@@ -228,7 +240,7 @@ def test_next_page_line_uses_the_routes_count(monkeypatch: pytest.MonkeyPatch) -
     result = _run("-n", "2")
     assert result.exit_code == 0, result.stderr
     assert result.stdout.rstrip().endswith("Next page: --offset 2")
-    assert [c for c in engine.calls if c[1] == "/resolve_many"] == [("POST", "/resolve_many", ["1.1.10", "1.1.2"])]
+    assert engine.calls == [("GET", "/sensitive", {"limit": 2}), ("POST", "/resolve_many", ["1.1.10", "1.1.2"])]
 
 
 @pytest.mark.parametrize("argv", [["--type", "knowledge"], ["--meta", "extraction_method=mineru"]], ids=["type", "meta"])
@@ -289,7 +301,7 @@ def test_a_404_from_the_route_exits_with_the_same_message(monkeypatch: pytest.Mo
     result = _run()
     assert result.exit_code != 0
     assert _NEEDS_ROUTE in result.stderr
-    assert engine.calls == [("GET", "/sensitive", {"limit": 10_000})]
+    assert engine.calls == [("GET", "/sensitive", {"limit": 50})]
 
 
 def test_a_reader_without_the_method_exits_with_the_message(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -313,17 +325,89 @@ def test_a_503_exits_saying_the_engine_could_not_answer_in_time(monkeypatch: pyt
     assert [c for c in engine.calls if c[1] != "/sensitive"] == [], "no walk, no resolve"
 
 
-def test_a_capped_answer_exits_naming_the_limit_and_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = {"count": 12_000, "limit": 10_000, "capped": True,
-            "documents": [{"tumbler": f"3.1.{i}", "physical_collection": "knowledge__c__bge-base-en-v15-768__v1"}
-                          for i in range(1, 4)]}
-    engine = FakeEngine(_fixture_rows(), sensitive_body=body)
+def _big_tenant(n: int = 12_000) -> FakeEngine:
+    return FakeEngine([_row(f"4.1.{i:05d}", f"b{i}", sensitive=True) for i in range(1, n + 1)] + _fixture_rows())
+
+
+def test_a_first_page_works_on_a_tenant_with_more_than_ten_thousand(monkeypatch: pytest.MonkeyPatch,
+                                                                    capsys: pytest.CaptureFixture[str]) -> None:
+    """The route's count is exact when capped and its order is the walk's, so ``-n 50`` needs only 50 tumblers."""
+    engine = _big_tenant()
+    cat = engine.wired(monkeypatch)
+    expected = _old_output(cat, capsys, as_json=False, offset=0, limit=50)
+    engine.calls.clear()
+    result = _run("-n", "50")
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout == expected
+    assert "Next page: --offset 50" in result.stdout
+    assert [c[:2] for c in engine.calls] == [("GET", "/sensitive"), ("POST", "/resolve_many")]
+    assert engine.calls[0][2] == {"limit": 50}
+
+
+def test_a_page_ending_at_ten_thousand_still_works_and_one_past_it_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _big_tenant()
+    engine.wired(monkeypatch)
+    ok = _run("--offset", "9950", "-n", "50", "--json")
+    assert ok.exit_code == 0, ok.stderr
+    assert len(json.loads(ok.stdout)) == 50
+    assert engine.calls[0] == ("GET", "/sensitive", {"limit": 10_000})
+    engine.calls.clear()
+    refused = _run("--offset", "9951", "-n", "50")
+    assert refused.exit_code != 0
+    assert "more than 10000 sensitive documents" in refused.stderr
+    assert "reaches past the first 10000" in refused.stderr and "--owner" in refused.stderr
+    assert [c[1] for c in engine.calls] == ["/sensitive"], "refused before anything is resolved"
+
+
+@pytest.mark.parametrize("argv", [["--type", "knowledge"], ["--meta", "extraction_method=mineru"]], ids=["type", "meta"])
+def test_a_filter_on_a_capped_tenant_is_refused_naming_the_limit_and_owner(monkeypatch: pytest.MonkeyPatch,
+                                                                           argv: list[str]) -> None:
+    engine = _big_tenant()
+    engine.wired(monkeypatch)
+    result = _run(*argv)
+    assert result.exit_code != 0
+    assert "more than 10000 sensitive documents" in result.stderr
+    assert "--type and --meta need the whole list" in result.stderr and "--owner" in result.stderr
+    assert engine.calls == [("GET", "/sensitive", {"limit": 10_000})]
+
+
+def test_a_huge_page_size_on_a_small_tenant_is_not_refused(monkeypatch: pytest.MonkeyPatch,
+                                                           capsys: pytest.CaptureFixture[str]) -> None:
+    engine = FakeEngine(_fixture_rows())
+    cat = engine.wired(monkeypatch)
+    expected = _old_output(cat, capsys, as_json=True, offset=0, limit=1_000_000)
+    engine.calls.clear()
+    result = _run("-n", "1000000", "--json")
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout == expected
+    assert engine.calls[0] == ("GET", "/sensitive", {"limit": 10_000})
+
+
+def test_a_listed_tumbler_that_resolves_unflagged_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = FakeEngine(_fixture_rows(), unflag_in_resolve=("1.1.2",))
+    engine.wired(monkeypatch)
+    assert [r["tumbler"] for r in json.loads(_run("--json").stdout)] == ["1.1.10", "1.1.3", "1.2.1", "1.4.1"]
+    assert [r["tumbler"] for r in json.loads(_run("--type", "knowledge", "--json").stdout)] == ["1.1.10", "1.4.1"]
+
+
+def test_a_failed_version_probe_says_so_and_does_not_say_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = FakeEngine(_fixture_rows(), flag=None, probe_failed=True)
     engine.wired(monkeypatch)
     result = _run()
     assert result.exit_code != 0
-    assert "more than 10000 sensitive documents" in result.stderr
-    assert "--owner" in result.stderr
-    assert [c for c in engine.calls if c[1] != "/sensitive"] == []
+    assert "capabilities could not be read" in result.stderr
+    assert "0.1.188" not in result.stderr
+    assert engine.calls == []
+
+
+@pytest.mark.parametrize("status", [500, 403])
+def test_a_5xx_or_other_status_reads_as_could_not_be_reached_or_failed(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    engine = FakeEngine(_fixture_rows(), sensitive_status=status)
+    engine.wired(monkeypatch)
+    result = _run()
+    assert result.exit_code != 0
+    assert "could not be reached or failed" in result.stderr
+    assert "could not be read" not in result.stderr and "--owner" not in result.stderr
 
 
 def test_a_malformed_answer_exits_without_walking(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,7 +415,8 @@ def test_a_malformed_answer_exits_without_walking(monkeypatch: pytest.MonkeyPatc
     engine.wired(monkeypatch)
     result = _run()
     assert result.exit_code != 0
-    assert "could not be read" in result.stderr
+    assert "answer could not be read" in result.stderr
+    assert "reached or failed" not in result.stderr
     assert [c for c in engine.calls if c[1] != "/sensitive"] == []
 
 
@@ -341,4 +426,4 @@ def test_the_nothing_flagged_answer_lists_nothing_and_resolves_nothing(monkeypat
     result = _run("--json")
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout) == []
-    assert engine.calls == [("GET", "/sensitive", {"limit": 10_000})]
+    assert engine.calls == [("GET", "/sensitive", {"limit": 50})]
