@@ -304,6 +304,31 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
         }
     }
 
+    // ── a verification connection that cannot be opened ──────────────────────────────────────────────────
+
+    @Test
+    void aVerificationConnectionThatCannotBeOpened_isAConnectionFailure_andTransientWhateverItsSqlstate() {
+        register("v-noconn", "tenant_rows", 50, 0);
+        runsOnly("v-noconn");
+        DataMove move = DataMoveRegistry.reload(ctx(), "v-noconn").orElseThrow();
+
+        MoveFinisher.Result result;
+        try (var session = adminSession("tenant_rows")) {
+            // a role that does not exist: a login failure (class 28), which no SQLSTATE list calls transient, trust auth or not
+            var badLogin = new dev.nexus.service.db.AdminConnection(pg.getJdbcUrl(), "no_such_admin_role", ADMIN_PASSWORD);
+            result = new VerifyingFinisher().finish(
+                new MoveFinisher.Context(move, List.of("acme"), session.ctx(), badLogin, WORKER_NAME, () -> false));
+        }
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+        var failure = result.failure();
+        assertThat(failure.stage()).isEqualTo(FailureHandler.Stage.CONNECTION);
+        assertThat(failure.raised().getSQLState()).as("the login failure the finisher saw").startsWith("28");
+        assertThat(DataMoveFailureClassifier.classify(failure.stage(), failure.raised(), List.of(), failure.detail())
+            .permanent()).as("an open failure is the environment's, so transient").isFalse();
+        assertThat(completedAt("v-noconn")).isNull();
+    }
+
     // ── a stop ───────────────────────────────────────────────────────────────────────────────────────────
 
     @Test

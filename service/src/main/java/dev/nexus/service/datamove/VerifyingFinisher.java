@@ -136,7 +136,8 @@ final class VerifyingFinisher implements MoveFinisher {
                 conn = CallConnection.open(context.adminConnection(),
                     context.applicationName() + (tenantPass ? "-verify" : "-verify-all"));
             } catch (SQLException e) {
-                return Result.report(failure(context.admin(), move, FailureHandler.Stage.VERIFICATION, null, e,
+                // as for the CALL connection: the environment's, transient whatever the SQLSTATE
+                return Result.report(failure(context.admin(), move, FailureHandler.Stage.CONNECTION, null, e,
                     "the verification connection could not be opened: sqlstate=" + e.getSQLState() + " "
                         + FailureHandler.oneLine(e.getMessage())));
             }
