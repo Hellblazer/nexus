@@ -102,7 +102,7 @@ RDR index was not scanned for other overlapping budget or recall work.
 
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
-| RDR-097 | Origin of the 6/4 budget | RF-6 sized 6 and 4 as a 60/40 split of a 10-chunk generator context, for generator precision. It did not size an anchor set for the coverage boundary. |
+| RDR-097 | Origin of the 6/4 budget | RDR-097 set the defaults 6 and 4 as "a 60/40 split per RF-6", RF-6 dividing the model's input budget between the vector and graph streams (rdr-097 lines 81 and 107; 250-research-10). It did not size an anchor set for the coverage boundary. |
 | RDR-147 (closed 2026-11-06) | Origin of the resolution branch | Its branch reused the 6 without sizing. Its R6 left hop-1 recall as separate later work, which this RDR takes up. Its R5 names the precision risk of answering from every held id. |
 | RDR-232 | Adjacent | Owns the coverage boundary that reads the anchors. Option E below changes that boundary's input. |
 
@@ -210,9 +210,11 @@ assumption, with no run. **Code-read** means read from source at the named sha.
     Q1, Q4 and Q5 score as the control (250-research-9).
   - The filter made one assessment call per question, 0.0008 to 0.0016 USD.
   - Held-out key8, reported only: recall .517, precision .228, F1 .298 over
-    the 8; the resolution branch was entered on 2 of them. The pool phase ran on
-    2 rows with 3 candidates and kept none, and no switch-off control ran for
-    key8, so key8 carries no evidence on the filter (250-research-9).
+    the 8; the resolution branch was entered on rows 33 and 42. The pool phase
+    ran on rows 33 and 39 (row 39 is recorded as not entered, with 20 anchors
+    scanned), with 3 candidates, and kept none. No switch-off control ran for
+    key8 on this sandbox, so key8 carries no evidence on the filter
+    (250-research-9, 250-research-10).
   - A first attempt on the RDR-147 sandbox measured nothing: its engine
     (0.1.180) refuses the sensitivity-excluding search the 8.3.0 client needs.
 
@@ -220,7 +222,7 @@ assumption, with no run. **Code-read** means read from source at the named sha.
 
 - [x] The companies of the top N anchors are the companies the answer names, at N above 6. Status: Verified at N=20 on issue5 (paid run, 2026-11-15); N=40 and above unmeasured. Method: Spike.
 - [x] Generation names exactly the anchor-key companies when N is above 6. Status: Verified at N=20 in 19 of 20 answers over four runs; the one miss did not enter the resolution branch and named ids. Method: Spike.
-- [x] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Observed once, unreplicated: in one MVV pass on issue5 the filter kept 4 of 4 gold keys on 2 of 5 questions, and pooled precision was .950, at the bar (250-research-5, 250-research-8, 250-research-9). The filter is a model call, and the budget-20 repeat varied in one of four runs (250-research-3). Method: Spike.
+- [x] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Observed once, unreplicated: in one MVV pass on issue5 the filter kept 4 of 4 gold keys on 2 of 5 questions, and pooled precision was .950, at the bar (250-research-5, 250-research-8, 250-research-9). Replication is not measured: the budget-20 repeat (250-research-3) predates the filter, and its variance was the resolution branch's entry (250-research-10). Method: Spike.
 - [ ] Option A's gain is not specific to HERB's template overlap. Status: Unverified. This RDR does not claim it generalises. Method: Spike on a second corpus.
 - [ ] Option B assumes entity keys sit in retrievable announcement chunks. Status: Unverified in general; true on HERB. Method: Spike.
 
@@ -236,7 +238,7 @@ The budget of 20 shipped as plan 10's default in 4a25a7c5a (Phase 1 Step 1). It
 needed no code: measured at F1 0.764 with precision 0.967, inside the gate
 (250-research-2, 250-research-3).
 
-This RDR's design is Option E with a precision filter (Phase 1 Step 2). For
+This RDR's design is Option E with a precision filter (Phase 1 Steps 2 and 3). For
 Gap 1, Option E is the largest lever in the record: it widens the key scan from
 the generator's 20 inputs to the search step's 40 hits. The generator's 20
 chunks do not change; each kept pool key adds one joined item. Unfiltered it is
@@ -361,8 +363,9 @@ Gap 1 caps `nx_answer` at the anchor cut (6 before 4a25a7c5a, 20 since). Gap 2
 caps the script, and any design that reads the hop-1 pool directly. A lever for
 Gap 1 therefore does not need to improve hop-1 recall, and the reverse also
 holds. Option E is chosen because it is the largest Gap 1 lever and it reuses
-the boundary's fetch and assessment calls. Its precision depends on a filter the
-record has not measured, so the switch stays off until the MVV measures it.
+the boundary's fetch and assessment calls. Its precision depends on the filter,
+observed once in the MVV and not replicated (250-research-8), so the switch
+stays off; turning it on is a later decision with no criteria set here.
 
 ## Alternatives Considered
 
@@ -418,7 +421,7 @@ pattern (`CUST-\d{4}`), then take the top few.
 **Cons**:
 
 - Distance filters fail. Even the oracle that keeps only cited hits reaches precision only 0.834.
-- The filter's precision effect is unmeasured. One assessment call per pack adds cost.
+- The filter's precision was observed once, in the MVV (250-research-8), not replicated. One assessment call per pack adds cost.
 - The RDR-147 coverage re-check cited 35 of 45 joined items as supporting (147-research-10). That measures support, not precision.
 
 **Why not chosen**: Its filter is taken into Option E (a support verdict from the
@@ -436,7 +439,7 @@ pool key adds one joined item.
 
 - Projected issue5 F1 0.817 (recall 0.967, precision 0.715), against 0.500 measured.
 - The largest projected lever for `nx_answer` in the record.
-- The generator's 20 chunks do not change. Each kept key adds one joined item: 5 to 15 percent more generation cost on the two MVV questions that kept keys (250-research-9).
+- The generator's 20 chunks do not change. Each kept key adds one joined item: 8 to 15 percent more rank-and-generate cost on the two MVV questions that kept keys (250-research-9, 250-research-10).
 
 **Cons**:
 
@@ -467,12 +470,12 @@ passed the pre-registered bar (250-research-8).
 - **Risk**: HERB's template overlap inflates the lexical gain.
   **Mitigation**: Report the lexical result on the held-out set and on a second corpus before relying on it.
 - **Risk**: Precision falls below 0.95 past N=20.
-  **Mitigation**: The precision filter, and the switch stays off until the MVV measures it.
+  **Mitigation**: The precision filter, which held .950 pooled precision in one MVV pass (250-research-9), and the switch stays off by default.
 - **Risk**: The support verdict keeps a non-gold company's key. The benchmark's cited artifacts also name non-gold companies (that oracle caps near 0.83, 250-research-5); the filter judges support instead, and kept no non-gold key in one MVV pass (250-research-9), which is not yet a replicated result.
   **Mitigation**: The MVV reports kept and rejected pool keys by name, so a filter that keeps them shows in the record, not only in the score.
-- **Risk**: Answer cost. In the MVV the whole answer cost a mean 0.111 USD with the pool on against 0.056 for the control, almost all of it in the generation step. The run order explains most of it: the pool pass ran first (05:58 to 06:02 UTC) and the control second (06:02 to 06:05). On Q1, Q4 and Q5, where no pool key was kept, the control's generation input was the same prompt the pool pass had just sent (same joined item counts, 6, 6 and 4), and those control calls cost 0.031 to 0.042 USD, almost all output. On Q2 and Q3, where pool keys changed the prompt, both passes paid full input, and generation cost 0.095 against 0.083 and 0.087 against 0.081 USD: 5 to 15 percent more, in line with 6 joined items against 4. That the cheap control calls were prompt-cache reads is inferred from the cost split, not read: the run records carry no cache token counts. The timestamps, per-call costs and joined item counts are in 250-research-9; 250-research-8, written before the diagnosis, calls the gap unexplained. The filter itself adds 0.0008 to 0.0016 USD a question.
+- **Risk**: Answer cost. In the MVV the whole answer cost a mean 0.111 USD with the pool on against 0.056 for the control, almost all of it in the generation step. The run order explains most of it: the pool pass ran first (05:58 to 06:02 UTC) and the control second (06:02 to 06:05). On Q1, Q4 and Q5, where no pool key was kept, the control's generation input was the same prompt the pool pass had just sent (same joined item counts, 6, 6 and 4), and those control calls cost 0.031 to 0.042 USD, almost all output. On Q2 and Q3, where pool keys changed the prompt, both passes paid full input, and generation cost 0.095 against 0.083 and 0.087 against 0.081 USD: 8 to 15 percent more, in line with 6 joined items against 4. That the cheap control calls were prompt-cache reads is inferred from the cost split, not read: the run records carry no cache token counts. The timestamps, per-call costs and joined item counts are in 250-research-9; 250-research-8, written before the diagnosis, calls the gap unexplained. The filter itself adds 0.0008 to 0.0016 USD a question.
   **Mitigation**: A cost comparison runs the two arms interleaved or with a cold cache on both sides. The like-for-like figure is the Q2 and Q3 pair above.
-- **Risk**: Step 1 raised plan 10's default from 6 to 20 for every `hybrid-factual-lookup` call. The 6 came from RDR-097 RF-6, a 60/40 split of a 10-chunk generator context, for generator precision. The evidence for 20 is HERB issue5; on the key8 held-out set budget 20 scored F1 .145 against .135 at 6 (250-research-9), and no other lookup set was measured.
+- **Risk**: Step 1 (4a25a7c5a) raised the `vector_budget_chunks` default from 6 to 20 in two plans, `hybrid-factual-lookup` (plan 10) and `entity-resolution` (plan 8), for every call that does not bind the budget, once an install runs `nx plan reseed` (250-research-10). RDR-097 set the 6 as "a 60/40 split per RF-6" between the vector and graph streams. The evidence for 20 is HERB issue5; on the key8 held-out set budget 20 scored F1 .145 against .135 at 6 (250-research-9). The other HERB set measured, agg2 (two counting questions), scored 0 at both budgets, and no lookup set outside HERB was measured.
   **Mitigation**: None in this RDR. The default of 20 rests on HERB evidence only; a lookup set outside HERB, run at 6 and at 20, would test it.
 - **Risk**: The resolution branch is sometimes not entered at all (budget-20 repeat, run d: one question scored 0, 250-research-3). That variance is outside this design, and it would show in the MVV as a lost question.
   **Mitigation**: The MVV reports `resolution_entered` per row, so a lost question is told apart from a precision loss.
@@ -494,7 +497,7 @@ the keys completed calls cited as support.
 
 - [x] Sam picks the lever or levers: option 2, 2026-11-15
 - [x] Sam gives the go for the paid run: 2026-11-16, with the bar signed as written
-- [x] The filter assumption verified, and the held-out set frozen (250-research-7)
+- [x] The filter assumption observed once in the MVV (250-research-8), and the held-out set frozen before it (250-research-7)
 
 ### Minimum Viable Validation
 
@@ -510,9 +513,8 @@ the budget-20 measurement, F1 0.764 (250-research-2), and the RDR-147 F1 0.500
 
 The same run must include a held-out check beyond the five issue questions.
 The questions are chosen and frozen before the run. They must not be used to
-pick N or the filter threshold. The 20 valid held-out questions of the RDR-147
-MVV (branch entered 0) are one candidate. The record does not say whether they
-were used for tuning, so that needs checking before use.
+pick N or the filter threshold. The set run was key8, frozen by hash in
+250-research-7 (Open Question 3).
 
 Stop rule: if the first two questions skip phase B on time
 (`filter_skipped_deadline`, with `pool_need_s` above `pool_room_s`), the run
@@ -520,11 +522,10 @@ stops before more spend and the window is widened first. The budget-20 rows
 record about 41 s per answer and no per-call assessment latency, so whether one
 filter call fits is read from the first rows, not assumed.
 
-The paid run is spend and it calls the cloud, so it needs Sam's explicit go and
-an announced window. For scale, the two-run RDR-147 MVV cost 1.20 USD
-(147-research-17). Pass criteria are Sam's to set, before the run (Open
-Question 5 carries a proposal). Changing them after the run counts as changing
-promotion criteria.
+The paid run was spend, so it ran on Sam's explicit go, in an announced window,
+for 2.65 USD (250-research-8). Its pass criteria were Sam's, signed before the
+run (Open Question 5, 250-research-7). Changing them after the run would count
+as changing promotion criteria.
 
 ### Phase 1: Code Implementation
 
@@ -585,7 +586,7 @@ None.
 ### Testing Strategy
 
 1. **Scenario**: The MVV above, on the chosen lever.
-   **Expected**: The pass criteria Sam signs off before the run (Open Question 5), reported beside the 0.764 and 0.500 baselines.
+   **Expected**: The pass criteria Sam signed before the run (Open Question 5), reported beside the 0.764 and 0.500 baselines. Result: passed (250-research-8).
 2. **Scenario**: The held-out check.
    **Expected**: Results reported on questions chosen before the run, with no tuning on them.
 
@@ -599,9 +600,9 @@ for the control; the filter's assessment call took 5 to 13 s of that
 ## Finalization Gate
 
 - **Contradictions**: The Approach, Technical Design and Implementation Plan name one design (Option E with a support-verdict filter, behind a switch). Option A's earlier "unmeasured" lines were updated to the paid measurement.
-- **Assumptions**: The anchor-key assumption is verified at N=20 (250-research-2, 250-research-3). The filter's precision was observed once in the MVV, unreplicated (250-research-5, 250-research-8). The unfiltered Option E projection (250-research-4) stays assumed; the design does not rely on it. The switch stays off by default.
+- **Assumptions**: The anchor-key assumption is verified at N=20 (250-research-2, 250-research-3). The filter's precision was observed once in the MVV, unreplicated (250-research-5, 250-research-8). The unfiltered Option E projection (250-research-4) stays assumed; it is the reason the filter is part of the design, and no number in the design depends on it. The switch stays off by default.
 - **Scope**: Gap 1 only. Gap 2 (Options A and B) and the resolution branch's entry variance are named and left out.
-- **Cross-cutting**: The change sits in the coverage boundary that RDR-232 owns. RDR-232 bounds the boundary to "one repair/reassessment cycle" (rdr-232 line 1740), and records a repair as costing "about 5 search calls and one reassessment call" (line 603). Under the switch, the pool filter is one more assessment pass inside that one repair: the MVV saw 3 `operator_check` calls per answer with the pool on against 2 off (250-research-9). A reader that treats two assessment passes per run as fixed sees 3 under the switch. The change reuses the boundary's fetch and assessment calls, adds no engine surface, and leaves `anchors_scanned` and the switch-off path unchanged.
+- **Cross-cutting**: The change sits in the coverage boundary that RDR-232 owns. RDR-232 bounds the boundary to "at most one repair and one terminal reduction" (rdr-232 line 2058), and records a repair as costing "about 5 search calls and one reassessment call" (line 603). Under the switch, the pool filter is one more assessment pass inside that one repair: the MVV saw 3 `operator_check` calls per issue5 answer with the pool on against 2 off (250-research-9); a key8 row whose pool phase made no filter call had none extra. A reader that treats two assessment passes per run as fixed sees 3 under the switch. The change reuses the boundary's fetch and assessment calls, adds no engine surface, and leaves `anchors_scanned` and the switch-off path unchanged.
 - **Proportionality**: One switch, one fetch and one assessment call per pack, no new dependency. The paid MVV is Sam's go.
 
 ### Open Questions for Sam
