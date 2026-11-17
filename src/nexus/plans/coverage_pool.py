@@ -22,8 +22,8 @@ carry a candidate key go through the boundary's own assessment (``CoverageBounda
 groups, its packing by ``_pack``, its reply parsing, its budget and deadline checks), against the request's facets, and a
 key is kept when a ``supports`` record cites its chunk's item id (a covered facet's ``evidence_ids`` also holds its
 contradicting ids, so those are not read). Keys the anchors name are not filtered. Without the filter a pool key is projected
-at precision 0.715, below the 0.95 gate (250-research-4), so the filter is part of the design and the switch stays off until
-the MVV measures it. A pack the assessor answers with no evidence record is a reject verdict, not a failure.
+at precision 0.715, below the 0.95 gate (250-research-4), so the filter is part of the design. The MVV passed (250-research-8); the switch stays off by
+default until a separate decision turns it on. A pack the assessor answers with no evidence record is a reject verdict, not a failure.
 
 **Bounds.** Phase B starts only when one assessment call fits: the time left to the repair's retrieval stamp (less what the
 resolve and the record fetch need), and the answer's own remaining time, must cover the longest of the boundary's minimum

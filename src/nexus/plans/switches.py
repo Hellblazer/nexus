@@ -134,7 +134,7 @@ def resolution_repair_enabled(environ: Mapping[str, str]) -> bool:
 #: The switch of the pool key scan inside the exact-key resolution branch (RDR-250 Phase 1 Steps 2 and 3, nexus-io7tw).
 ANSWER_POOL_KEY_SCAN_ENV = "NX_ANSWER_POOL_KEY_SCAN"
 #: What an unset or blank :data:`ANSWER_POOL_KEY_SCAN_ENV` means. Off: unlike the other two switches this one ships dark,
-#: until RDR-250's MVV measures the precision filter (turning it on by default is a later decision).
+#: the MVV passed (RDR-250, 250-research-8), and turning it on by default is a separate decision with no criteria set yet.
 ANSWER_POOL_KEY_SCAN_ENABLED: bool = False
 
 
