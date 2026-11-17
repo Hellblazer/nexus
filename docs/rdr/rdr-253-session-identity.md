@@ -371,6 +371,34 @@ A `--fork-session` launch is a new process: it binds by the `startup` or
 `mailbox/<id>` follows the seat into the forked conversation; mail in the old
 `mailbox/<session id>` stays where RDR-208 put it.
 
+**Identity tokens.** A `bind` that leaves the caller holding the identity
+(`start`, `resume`, `takeover`, `clear`, `fork`, `refresh`), and the create of
+an ephemeral or delegated identity, returns `identity_token` and
+`identity_token_expires_in_seconds`; the lifetime is one hour. The token
+travels in the header `X-Nexus-Identity-Token`. The engine stores only its
+hash, in `identity_tokens`, one row per mint: the table is insert-only, its
+binding columns (identity and generation) are not unique, and its rows go
+with the identity. So a `/clear`, a refresh or a restart mints another token
+without invalidating one still inside its hour, and the token of a superseded
+generation stays readable until it expires, which is what lets the engine
+answer `generation_superseded` in place of a 401. An expired or unknown token
+is ignored on the `bind` and `renew` routes only, so a client woken from a
+long sleep can refresh through `bind` with whatever header it holds; on every
+other route, sends included, it is a 401.
+
+**Stale generations and named processes.** On the bind events of a process
+that already holds the identity (`clear`, `fork`, `refresh`, `end`) and on
+`renew`, an expected generation below the current one is 409
+`generation_superseded` (the body carries `expected_generation`,
+`current_generation`, `state` and the `holder`). The events that take or hand
+over the seat (`start`, `resume`, `takeover`, `release`) and `gone` keep
+`generation_conflict`: a lost compare-and-set there is a race between
+claimants, not a stale holder. A `clear`, `fork` or `refresh` that names any
+field of a process (host, pid, `startedAt` or `proc_start`) must agree with
+the holder's on every field it names, or it is 409 `holder_mismatch`, since
+each of them ends with a fresh token. One that names none still mints: the
+tenant credential is the trust boundary for a request that names no process.
+
 **A holder that no longer exists.** The check is the client's: the engine
 cannot read a laptop's files, least of all in cloud mode. Before binding, the
 hook (or `nx identity claim`) reads the current holder from the engine and,
@@ -438,7 +466,8 @@ while the lease is live. Because it frees only a gone holder's seat and binds
 nothing, it needs no interactivity or ancestry guard, and a person can run it
 from a plain shell. A clean exit appends `end` (the MCP
 server, on shutdown, with its expected generation, so a late `end` from a
-superseded process is refused); a crash leaves the seat to lapse.
+superseded process is refused with 409 `generation_superseded`); a crash
+leaves the seat to lapse.
 
 **Handover to the MCP server.** The hook binds, receives the token and writes
 it to `~/.config/nexus/identity/<claude pid>.<startedAt>.token` (mode 0600):
@@ -469,8 +498,8 @@ take-over) reaches it within a minute even if the marker write failed.
 token lives one hour, the ceiling for a token minted under the data
 credential the MCP server holds (`nexus_rdr/253-research-8` (c)); the server
 refreshes it at half life through `bind` with the same generation (a refresh,
-not a new binding) and rewrites its process's one token file. A renewal or refresh from a superseded generation is refused, and
-the server stops writing identity state and says so. The engine marks a seat
+not a new binding) and rewrites its process's one token file. A renewal or refresh from a superseded generation is answered 409
+`generation_superseded`, and the server stops writing identity state and says so. The engine marks a seat
 `lapsed`, without changing the generation, when it reads a binding whose last
 renewal is more than 300 seconds old; the next renewal from the same process
 appends `revive`. On the holder's own host the probe above decides: a running
@@ -499,19 +528,36 @@ refuses with both, never picks. It only reads. A Bash child's `nx` reads the
 token file of its nearest Claude ancestor process; on an expired token (HTTP
 401) it re-reads the file once, and on a superseded generation (HTTP 409
 with error code `generation_superseded`, distinct from the engine's other
-409s) it stops and names the holder. On a fenced family a client never
+409s) it stops and names the holder; a 409 `identity_not_held` is a stop too.
+On a fenced family a client never
 retries without a token, which JDR-002's 401 fallback would otherwise do.
 
-**Fencing.** Two checks (Sam, 2026-11-16, decision 2 as amended). The
-ownership check: the token's identity is the family's owner. The generation check: the token's
-generation is the owner's current generation. A write to a fenced family
-with no identity token is refused, with two exceptions. A send (`out`) to a
+**Fencing.** Two checks (Sam, 2026-11-16, decision 2 as amended), made in
+this order. The ownership check: the token's identity is the family's owner
+(403 `not_owner` otherwise). The generation check: the token's generation is
+the owner's current generation (409 `generation_superseded` otherwise; the
+body carries `identity`, `token_generation`, `current_generation`, `state` and
+the `holder`). A token also fences nothing once its identity has let go of the
+seat: when the owner is `unheld` or `ended`, or `lapsed` with a recorded
+`gone`, the write is 409 `identity_not_held`, because `end`, `release` and a
+purge leave the generation unchanged. A seat that is plainly `lapsed` is
+still held (a sleeping host wakes and renews), and its token still writes. A
+write to a fenced family with no identity token is refused (403
+`identity_token_required`), with two exceptions. A send (`out`) to a
 mailbox is open to any caller, token or none: `nx ask` answers, the console
-and scripts send without one (`nexus_rdr/253-research-9` (e)). And a write to
-a family whose owner's current binding is `unleased` (a Desktop seat) is
-accepted without an identity token and labelled unattested: the exception is
-keyed on the target, since a Desktop MCP server holds no token at all
-(JDR-002, F17). A person can remove the fenced state of an
+and scripts send without one (`nexus_rdr/253-research-9` (e)). And a write
+with no token to a family whose owner's current binding is `unleased` (a
+Desktop seat) is accepted and labelled unattested with the response header
+`X-Nexus-Unattested`, set once even when a parked `in` is fenced again on
+waking: the exception is keyed on the target, since a Desktop MCP server holds
+no token at all (JDR-002, F17). It is for a write with no token only: a token that names
+another identity is still 403 `not_owner`. The other refusals are 404
+`unknown_identity` (the owner does not exist), 403 `identity_line_immutable`
+(a threads entry that would drop or change its `identity:` line) and 400
+`bad_scope` (a scratch scope that is not `identity:` and an id such as `i7`).
+Each check reads the identity in its own statement before the write, without
+a lock, so a process that loses the seat between the check and the write lands
+at most that one write, and is refused on its next. A person can remove the fenced state of an
 identity with `nx identity purge <id> --operator`: an engine route taking the
 tenant credential. It is refused unless the identity is `ended`, or `lapsed`
 with a recorded `gone`, so it is also refused for a `live` identity and an
@@ -523,20 +569,32 @@ already gone.
 
 | Family | Store and handler | Who may write | Checked operations | Checks |
 |---|---|---|---|---|
-| Mailbox `mailbox/<id>` | tuple space, `TupleHandler` | any identity may send (`out`) | the owner's `in`, `inp`, `ack`, `nack`, `renew`, `release` | ownership and generation; a send is a label, as today |
+| Mailbox `mailbox/<id>` | tuple space, `TupleHandler` | any identity may send (`out`) | the owner's `in`, `inp`, `ack`, `nack`, `renew`, `release` | ownership and generation; a send is a label, as today; a parked `in` is fenced again when it wakes and releases a claim it no longer owns |
 | Membership `identity_memberships` | table, `IdentityHandler`, the `/v1/identity/<id>/memberships` routes | the owner only | join, leave and role change | ownership and generation |
-| Threads entry | T2 memory, project `threads`, `MemoryHandler` | the owner only | `put` (including `replaces`), `put_or_merge`, `merge`, `import`, `import_batch`, `delete`, `restore`, `summaries` on an entry carrying an `identity: <id>` line | ownership and generation, read against the stored entry; a new entry may name only the writer's own identity, and a write that removes or changes the line is refused; the tenant-wide sweeps `expire` and `reap` skip such entries |
-| Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`; the scope is never closed by `session/close` and is excluded from `sweep` | ownership and generation |
+| Threads entry | T2 memory, project `threads`, `MemoryHandler` | the owner only | `put` (including `replaces`), `put_or_merge`, `merge`, `import`, `import_batch`, `delete`, `restore`, `summaries` on an entry carrying an `identity: <id>` line | ownership and generation, read against the stored entry whether it is quarantined or not; a new entry may name only the writer's own identity, and a write that removes or changes the line is refused (the identity line is immutable); a rollup `summaries` counts as the fenced operation on each of its sources; `put_or_merge` never merges into a fenced entry (a legacy entry with no `identity:` line still merges); `replaces` checks the entry it replaces; the tenant-wide sweeps `expire` and `reap` skip such entries |
+| Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`, on the scope with `session_id` `identity:<id>`; `session/close` never closes the scope (it answers `deleted` 0) and `sweep` excludes it | ownership and generation |
 
 Reads are not checked, a delegated child's included. Every other subspace, project and scope keeps its
 current rule: the stamp is a label (JDR-002), and `ScratchHandler`'s existing
 refusal of a mismatched session on the session scope
 (`nexus_rdr/253-research-8` (d)) is unchanged; for an identity token that check
 accepts any session id the session index maps to the token's identity and
-generation, so a session-scope write after `/clear` is not refused. JDR-002 gains a revision entry
+generation, so a session-scope write after `/clear` is not refused. That
+check applies to writes only; a read of the session scope is not checked.
+JDR-002 gains a revision entry
 naming these four families, and JDR-001 one for the identity T1 scope and the
 extended handoff marker (both Sam's edits). The
 board keeps `memory_put` as its write path.
+
+**What a stamp says.** With an identity token, a tuple's `sender_session` is
+the session id of the identity's newest binding row under the token's
+generation, so a send after `/clear` carries the new session id. A T2 row
+written with a token records the token's identity in `memory.identity`. That
+column is a label no check reads: the checks read the stored entry's
+`identity:` line. A tokenless overwrite of the row, or a tokenless merge into
+it, clears the label, since the content is no longer the token holder's;
+`import_batch` stamps nothing. The tenant import and restore routes are
+deliberate unfenced operator paths.
 
 **Delegation.** `nx` operator dispatch (`claude -p`) creates a delegated
 identity, `kind=delegated parent=<id>`, with generation 1 and one `start`
@@ -569,7 +627,13 @@ local: the MCP server deletes its own at shutdown, the dispatcher its
 delegated ones, and the hook deletes any whose process the holder check finds
 gone. A seat's binding rows are kept
 for 180 days, never the last one, and its session-index rows as long as the
-binding rows they point to. 
+binding rows they point to. Identity scratch goes with its identity: a
+purge removes the scope right after the purge commits (the scope is in another
+schema under another tenant setting, so it cannot join the purge's
+transaction), and every retention pass pages through the identity scopes whose
+record no longer exists and removes them, which covers a tombstone. A crash
+between a seat's purge and the removal leaves the scope until the purge is run
+again.
 
 **Aliases and renames.** `nx identity rename <old> <new>` (Sam or the seat)
 retires the old alias, sets `renamed_to`, appends a `rename` binding row, and
@@ -600,7 +664,9 @@ seat's alias differ.
   an identity counterpart.
 - **Identity scratch and per-identity T2.** The identity scope holds working
   state that must cross `/clear` and restart but is not worth a permanent
-  record; it lives as long as the identity. T2 holds what is permanent:
+  record; it lives as long as the identity, and is the T1 scope whose
+  `session_id` is `identity:<id>`, which needs no new table or changeset. T2
+  holds what is permanent:
   records a seat writes carry its identity, and a seat's own notes live in
   project `identity/<id>`, keyed by id so a rename moves nothing.
 - **Memberships and push records.** Memberships are the `identity_memberships`
@@ -808,15 +874,18 @@ operator override.
 
 #### Step 2: Identity tokens and the four fences
 
-Tokens carrying identity and generation, one-hour lifetime, refreshed through
-`bind`; the ownership and generation checks on every listed operation in
-`TupleHandler`, `IdentityHandler` (the memberships routes), `MemoryHandler`
-(project `threads`) and `ScratchHandler` (the new identity scope); refusal of tokenless writes except sends and writes to
-`unleased` seats; `ScratchHandler`'s session-scope check accepting every
-session id the index maps to the token's identity and generation; `expire`,
-`reap`, `sweep` and `session/close` kept off
-fenced state; `generation_superseded` as its own 409 code; T2 identity
-stamping; the JDR-002 and JDR-001 revision entries (Sam's edits).
+Tokens carrying identity and generation, one-hour lifetime, stored by hash in
+`identity_tokens` and refreshed through `bind`; the ownership and generation
+checks on every listed operation in `TupleHandler`, `IdentityHandler` (the
+memberships routes), `MemoryHandler` (project `threads`) and `ScratchHandler`
+(the new identity scope); refusal of tokenless writes except sends and writes
+to `unleased` seats; `ScratchHandler`'s session-scope check accepting every
+session id the index maps to the token's identity and generation, for writes;
+`expire`, `reap`, `sweep` and `session/close` kept off fenced state;
+`generation_superseded` as its own 409 code on `clear`, `fork`, `refresh`,
+`end` and `renew`, with `identity_not_held` and `holder_mismatch`; T2 identity
+stamping; retention of identity scratch; the JDR-002 and JDR-001 revision
+entries (Sam's edits).
 
 #### Step 3: The resolver, hooks and the MCP server
 
@@ -1037,3 +1106,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-16: accept residual dispositions: residuals 1-8 of `253-gate-latest` fixed in the text by 9206b2cca and 530195c73 (fix checks `253-fix-check-224682f97eef` FAIL, `253-fix-check-125b505e41d3` PASS 3-0); its four counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
 - 2026-11-16: gate fix check `253-fix-check-88e4ee8da3a2` rerun at Sam's direction in the format the accept guard counts: PASS 3-0, 0 BLOCKS-PLANNING; accepted.
 - 2026-11-17: wording amended to match the reviewed Step 1 code (grant 3), bead nexus-hczdo.1.1.
+- 2026-11-17: wording amended to match the reviewed Step 2 code (grant 3), bead nexus-hczdo.1.2: identity tokens and their expiry rule, stale-generation and holder-mismatch codes, the four fences' refusal codes and check-then-write limit, threads, scratch and mailbox behaviour, and what the stamps say.
