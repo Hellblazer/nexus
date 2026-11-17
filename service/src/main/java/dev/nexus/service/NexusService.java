@@ -790,52 +790,10 @@ public final class NexusService {
                 new dev.nexus.service.http.RequestHandler(requestLedger));
         requestsCtx.getFilters().addAll(authFilter);
 
-        // /v1/memory/* — memory endpoints
-        var memCtx = server.createContext("/v1/memory", new MemoryHandler(memoryRepo));
-        memCtx.getFilters().addAll(authFilter);
-
-        // /v1/plans/* — plan library endpoints (bead nexus-gmiaf.11)
-        var planCtx = server.createContext("/v1/plans", new PlanHandler(planRepo));
-        planCtx.getFilters().addAll(authFilter);
-
-        // /v1/telemetry/* — telemetry endpoints (bead nexus-gmiaf.12)
-        var telCtx = server.createContext("/v1/telemetry", new TelemetryHandler(telemetryRepo));
-        telCtx.getFilters().addAll(authFilter);
-
-        // /v1/t1/* — T1 scratch endpoints (bead nexus-gmiaf.13)
-        var t1Ctx = server.createContext("/v1/t1", new ScratchHandler(scratchRepo));
-        t1Ctx.getFilters().addAll(authFilter);
-
-        // /v1/taxonomy/* — taxonomy endpoints (bead nexus-gmiaf.14)
-        var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage));
-        taxonomyCtx.getFilters().addAll(authFilter);
-
-        // /v1/aspects/* — aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15)
-        var aspectCtx = server.createContext("/v1/aspects", new AspectHandler(aspectRepo));
-        aspectCtx.getFilters().addAll(authFilter);
-
-        // /v1/chash/* — chash_index endpoints (bead nexus-gmiaf.16)
-        var chashCtx = server.createContext("/v1/chash", new ChashHandler(chashRepo));
-        chashCtx.getFilters().addAll(authFilter);
-
-        // /v1/remap/* — chash_remap endpoints (RDR-186 nexus-146xx.4: wire re-id
-        // map write-through + per-leg clear + live membership counts). The
-        // RDR-180 per-tenant full-digest rekey (nexus-jxizy.6/nexus-b878d) was
-        // RETIRED with nexus.chash_alias (nexus-lgdel.l1) — see RemapHandler's
-        // class javadoc.
-        var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
-        remapCtx.getFilters().addAll(authFilter);
-
-        // /v1/ladder/* — upgrade-ladder completion bookkeeping (RDR-186
-        // nexus-146xx.12: the ladder.db retirement's PG write/read surface)
-        var ladderCtx = server.createContext("/v1/ladder", new LadderHandler(ladderRepo));
-        ladderCtx.getFilters().addAll(authFilter);
-
-        // /v1/pipeline/* — engine-hosted streaming-PDF buffer (RDR-186
-        // nexus-146xx.16: pipeline.db's PG twin; state hosts here, the
-        // extraction compute stays client-side)
-        var pipelineCtx = server.createContext("/v1/pipeline", new PipelineHandler(pipelineRepo));
-        pipelineCtx.getFilters().addAll(authFilter);
+        // /v1/memory, plans, telemetry, t1, taxonomy, aspects, chash, remap, ladder, pipeline: registered in one place.
+        dev.nexus.service.http.TenantDataRoutes.register(server, authFilter, memoryRepo, planRepo, telemetryRepo,
+                scratchRepo, taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage, aspectRepo, chashRepo, remapRepo,
+                ladderRepo, pipelineRepo);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18). The
         // combined-write orchestration seam (nexus-kl2z6 increment 1) rides
