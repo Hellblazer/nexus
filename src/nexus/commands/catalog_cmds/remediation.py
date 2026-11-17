@@ -53,12 +53,12 @@ def _collection_entries(cat: CatalogReader, collection: str) -> list:
     """The live documents whose ``physical_collection`` is exactly *collection*, in tumbler order.
 
     One ``GET /list?collection=...`` (``list_by_collection``) instead of a walk of the whole catalog
-    (RDR-241, nexus-uwggq.1.6). A whitespace-only name reads nothing and sends no request: the engine treats a
-    blank ``collection`` param as absent and would list the first 200 documents of the tenant, where the old
-    walk matched no document.
+    (RDR-241, nexus-uwggq.1.6). A whitespace-only name is a usage error before any request, as
+    ``nx catalog sensitive`` refuses it: the engine reads a blank ``collection`` param as absent, and a
+    report of "nothing to consider" would read as a clean result.
     """
     if not collection.strip():
-        return []
+        raise click.UsageError("--collection is blank; name a physical collection.")
     return cat.list_by_collection(collection)
 
 

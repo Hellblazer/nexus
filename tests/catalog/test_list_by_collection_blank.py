@@ -98,3 +98,19 @@ def test_sensitive_refuses_a_blank_collection_even_with_a_path(monkeypatch: pyte
     result = CliRunner().invoke(main, ["catalog", "sensitive", "--collection", " ", "--path", "docs/*"])
     assert result.exit_code == 2, result.output
     assert "blank" in result.output
+
+
+def test_none_is_refused_like_a_blank_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_get drops a None param too, so a None name would also have listed the tenant."""
+    cat = HttpCatalogClient(base_url="http://blank.fake", _token="t")
+    monkeypatch.setattr(cat, "_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no request")))
+    with pytest.raises(ValueError, match="blank"):
+        cat.list_by_collection(None)  # type: ignore[arg-type]
+
+
+def test_sensitive_with_an_empty_collection_keeps_its_old_meaning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare --collection "" still means "not given": with no other target it is the old usage error."""
+    result = CliRunner().invoke(main, ["catalog", "sensitive", "--collection", ""])
+    assert result.exit_code == 2, result.output
+    assert "--collection is blank" not in result.output
+

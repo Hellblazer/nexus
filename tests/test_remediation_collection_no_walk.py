@@ -12,7 +12,7 @@ through the same real client), and require identical output. The fake engine ans
 tumbler order and an unfiltered page in tumbler order, as the real engine does (both ``ORDER BY tumbler``,
 both hide deleted rows), but it holds its rows in a shuffled list so an answer in insertion order would fail.
 
-One input is not an equality case: a ``--collection`` that is whitespace only. The engine treats a blank
+One input is not an equality case: a ``--collection`` that is whitespace only is a usage error. The engine treats a blank
 ``collection`` param as absent and lists the first 200 documents of the tenant, so the commands answer it with
 no entries and send no ``/list`` request. The old walk matched nothing for it, so those tests take the old
 walk's output for a name nothing matches as the expected output.
@@ -225,37 +225,32 @@ class TestOutputEqualsTheWalks:
         assert "[rdr__TARGET]" not in out and "rdr__target-2" not in out and "knowledge__other" not in out
 
 
-# ── a whitespace-only name: no entries, no /list request ────────────────────
+# ── a whitespace-only name: a usage error, no /list request, nothing written ─
+
+
+def _refused(*args: str):
+    result = CliRunner().invoke(main, ["catalog", *args])
+    assert result.exit_code == 2, result.output
+    assert "--collection is blank" in result.output
+    return result
 
 
 # ASCII spaces and controls, and the Unicode spaces Java's isBlank also reads as blank (U+3000, U+2003,
 # U+2028, U+001C): Python's str.strip covers every one, so none reaches the engine's blank branch.
 @pytest.mark.parametrize("blank", [" ", "   ", "\t", " \n ", "\u3000", "\u2003", "\u2028", "\u001c"])
 class TestWhitespaceOnlyCollection:
-    def test_prune_stale_considers_nothing_and_sends_no_list(
+    def test_prune_stale_refuses_and_sends_no_list(
         self, engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch, blank: str,
     ) -> None:
-        cat = _client(engine, monkeypatch)
-        _use(monkeypatch, cat, walk=True)
-        walked = _run(*_prune("--collection", "absent__x")).stdout  # what the old walk gave for a name nothing matches
-        engine.requests.clear()
-        _use(monkeypatch, cat, walk=False)
-        out = _run(*_prune("--collection", blank)).stdout
-        assert out == walked
-        assert out.startswith("0 stale entries.")
+        _use(monkeypatch, _client(engine, monkeypatch), walk=False)
+        _refused(*_prune("--collection", blank))
         assert [r for r in engine.requests if r[0] == "/list"] == []
 
-    def test_remediate_paths_considers_nothing_and_sends_no_list(
+    def test_remediate_paths_refuses_and_sends_no_list(
         self, engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch, source_dir: Path, blank: str,
     ) -> None:
-        cat = _client(engine, monkeypatch)
-        _use(monkeypatch, cat, walk=True)
-        walked = _run(*_remediate(source_dir, "--collection", "absent__x")).stdout  # the old walk's answer for a name nothing matches
-        engine.requests.clear()
-        _use(monkeypatch, cat, walk=False)
-        out = _run(*_remediate(source_dir, "--collection", blank)).stdout
-        assert out == walked
-        assert "No catalog entries to consider." in out
+        _use(monkeypatch, _client(engine, monkeypatch), walk=False)
+        _refused(*_remediate(source_dir, "--collection", blank))
         assert engine.requests == []
 
     def test_prune_stale_confirmed_deletes_nothing(
@@ -271,8 +266,7 @@ class TestWhitespaceOnlyCollection:
             return list(tumblers)
 
         monkeypatch.setattr(cat, "delete_many", _delete_many, raising=False)
-        out = _run("prune-stale", "--no-dry-run", "--confirm", "--collection", blank).stdout
-        assert out.startswith("0 stale entries.")
+        _refused("prune-stale", "--no-dry-run", "--confirm", "--collection", blank)
         assert deleted == []  # no tumbler reached the writer
         assert [r for r in engine.requests if r[0] == "/list"] == []
 
@@ -280,8 +274,6 @@ class TestWhitespaceOnlyCollection:
         self, engine: _FakeEngine, monkeypatch: pytest.MonkeyPatch, source_dir: Path, blank: str,
     ) -> None:
         """The rewriting run, without --dry-run: a blank name sends no request and rewrites nothing."""
-        cat = _client(engine, monkeypatch)
-        _use(monkeypatch, cat, walk=False)
-        out = _run("remediate-paths", str(source_dir), "--collection", blank).stdout
-        assert "No catalog entries to consider." in out
+        _use(monkeypatch, _client(engine, monkeypatch), walk=False)
+        _refused("remediate-paths", str(source_dir), "--collection", blank)
         assert engine.requests == []
