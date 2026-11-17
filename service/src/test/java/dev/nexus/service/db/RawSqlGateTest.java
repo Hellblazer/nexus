@@ -3120,7 +3120,9 @@ class RawSqlGateTest {
         "census-probe-leak", "census-probe-rel", "census-probe-overloads", "census-probe-kept",
         // nexus-u5m5g.3: the reconcile commit's transient-error test trigger, behind PgContainerHelper.installDeadlockOnTrash
         // (a plain file name only)
-        "deadlock-trigger-install");
+        "deadlock-trigger-install",
+        // nexus-7fku2.1.1: TS2's template copy, behind PgContainerHelper.cloneDatabase (both names through requireTestIdentifier)
+        "database-clone");
 
     /**
      * The parameterised test changelogs that are NOT on the validated list, each with the reason it is allowed. Every
