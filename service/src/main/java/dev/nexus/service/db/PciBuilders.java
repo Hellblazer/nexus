@@ -8,7 +8,6 @@ import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The per-collection index builder's backends (RDR-227), found and ended in one place so the two callers that must end
@@ -21,10 +20,12 @@ import org.slf4j.LoggerFactory;
  * index that a later pass drops and rebuilds. Scope: this database only, and not the calling session. Failure to read or
  * signal is logged at ERROR and swallowed: the builder is optional, and a caller that died because it could not end one
  * would turn an optional feature into an outage.
+ *
+ * <p>Every line is logged through the caller's logger, never this class's: each caller's events (and the tests that
+ * capture them, {@code PciBuilderTerminationIntegrationTest} and {@code PciReconcilerIntegrationTest} on
+ * {@code SchemaMigrator}) belong to the caller's log, as they did before the extraction.
  */
 public final class PciBuilders {
-
-    private static final Logger log = LoggerFactory.getLogger(PciBuilders.class);
 
     /**
      * The {@code application_name} prefix of the per-collection index builder's backend. Equal to
@@ -45,8 +46,12 @@ public final class PciBuilders {
             .and(datname.eq(DSL.function("current_database", SQLDataType.VARCHAR)));
     }
 
-    /** How many builder backends this database has now (other than the calling session), or -1 when it cannot be read. */
-    static int count(DSLContext ctx) {
+    /**
+     * How many builder backends this database has now (other than the calling session), or -1 when it cannot be read.
+     *
+     * @param log the caller's logger, for the failure line
+     */
+    static int count(DSLContext ctx, Logger log) {
         try {
             Integer count = ctx.selectCount()
                 .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
@@ -66,11 +71,12 @@ public final class PciBuilders {
      *
      * @param ctx a context on the calling session (autocommit)
      * @param why the {@code reason=...} fields of the log line
+     * @param log the caller's logger, for every line
      * @return how many backends were signalled, or -1 when the read or the signal failed
      */
-    public static int terminate(DSLContext ctx, String why) {
+    public static int terminate(DSLContext ctx, String why, Logger log) {
         try {
-            return terminateOrThrow(ctx, why);
+            return terminateOrThrow(ctx, why, log);
         } catch (DataAccessException e) {
             log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
             return -1;
@@ -80,8 +86,10 @@ public final class PciBuilders {
     /**
      * {@link #terminate} without the swallow, for a caller inside a transaction: a failed statement aborts the transaction
      * unless the caller runs this in a nested one (a savepoint) and catches what it throws.
+     *
+     * @param log the caller's logger, for the {@code event=pci_builders_terminated} line
      */
-    public static int terminateOrThrow(DSLContext ctx, String why) {
+    public static int terminateOrThrow(DSLContext ctx, String why, Logger log) {
         var pid = DSL.field(DSL.name("pid"), Integer.class);
         int terminated = 0;
         for (Boolean ended : ctx

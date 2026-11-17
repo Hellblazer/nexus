@@ -915,7 +915,7 @@ public final class SchemaMigrator {
      * @param why the {@code reason=...} fields of the log line
      */
     private static void terminatePciBuilders(Connection conn, String why) {
-        PciBuilders.terminate(DSL.using(conn, SQLDialect.POSTGRES), why);
+        PciBuilders.terminate(DSL.using(conn, SQLDialect.POSTGRES), why, log);
     }
 
     /**
@@ -951,7 +951,7 @@ public final class SchemaMigrator {
     /** The walk has only runAlways (or self-retrying) work: say how many builder backends it leaves running, and what it let pass. */
     private static void logPciBuildersKept(Connection conn, List<ChangeSet> retrying) {
         try {
-            int count = PciBuilders.count(DSL.using(conn, SQLDialect.POSTGRES));
+            int count = PciBuilders.count(DSL.using(conn, SQLDialect.POSTGRES), log);
             if (count < 0) {
                 return;   // the count failed and was logged: no line rather than count=-1
             }

@@ -259,7 +259,7 @@ final class VerifyingFinisher implements MoveFinisher {
                         // best effort: a savepoint keeps a refused signal from aborting the transaction
                         try {
                             tx.transaction(nested -> PciBuilders.terminateOrThrow(nested.dsl(),
-                                "reason=data_move_on_complete move=" + move.label()));
+                                "reason=data_move_on_complete move=" + move.label(), log));
                         } catch (DataAccessException e) {
                             log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
                         }
