@@ -537,6 +537,22 @@ def jar_launch_stack_marker() -> str | None:
     return f"-jar {Path(jar_override).resolve(strict=False)}"
 
 
+#: ``java``/``java.exe`` as the first argument: bare, under a path with no whitespace, or quoted.
+_JAVA_COMMAND_HEAD = re.compile(r'^(?:"[^"]*[/\\]java(?:\.exe)?"|(?:\S*[/\\])?java(?:\.exe)?)(?:\s|$)', re.I)
+
+
+def jar_launch_command_matches(command: str, marker: str) -> bool:
+    """True when *command* is a JVM running the jar *marker* names, not a command that only mentions it.
+
+    nexus-f3yqd.2.22: this was ``marker in command``, and ``--jar <jar>`` / ``--new-jar <jar>`` contain the
+    marker's text, so the RDR-246 MVV driver and lab-run's root ``lab-hand-exec`` wrapper around it joined the
+    stop's sweep; both signals met EPERM and ``nx daemon service stop --with-pg`` exited 1 ("survived SIGKILL")
+    before its PostgreSQL step. Now the marker must be whole arguments and argv[0] must be java (strings arrive
+    case-folded on Windows). An unquoted java path with whitespace is not matched; its engine stops via its lease.
+    """
+    return f" {marker} " in f" {command} " and _JAVA_COMMAND_HEAD.match(command) is not None
+
+
 #: Minimum JDK for the JVM-fallback launch. MUST equal
 #: ``maven.compiler.release`` in ``service/pom.xml`` (the property, not the
 #: maven-compiler-plugin's retyped copy). The wheel does not ship the pom, so

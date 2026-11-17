@@ -2593,6 +2593,7 @@ def storage_service_stack_matcher(
         str(Path(bin_override).resolve(strict=False)) if bin_override else None
     )
     from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred, avoids an import cycle (storage_service_daemon imports FROM this module at load time)
+        jar_launch_command_matches,
         jar_launch_stack_marker,
     )
 
@@ -2619,7 +2620,9 @@ def storage_service_stack_matcher(
             or command.startswith(engine_override_path + " ")
         ):
             return True
-        if jar_override_marker is not None and jar_override_marker in command:
+        # nexus-f3yqd.2.22: a JVM running the jar, never a command that only names it
+        # as an option value (a driver's own jar flag; see jar_launch_command_matches).
+        if jar_override_marker is not None and jar_launch_command_matches(command, jar_override_marker):
             return True
         if "daemon service start" not in command:
             return False
