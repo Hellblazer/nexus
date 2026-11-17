@@ -1,0 +1,3 @@
+### Fixed
+
+- **The superseded-chunk sweep warning no longer says the skipped chunks may be searchable.** They are not: every engine read requires a live owner in the chunk's own collection (RDR-192), and a chunk a skipped sweep left behind has none. The engine reaper finds such chunks from the manifest and quarantines them after its 30-day grace, so the line now says no action is needed and drops the `nx t3 gc -c COLLECTION` advice, which uses the same grace and reclaimed nothing sooner. Each summary with skips also logs one `superseded_sweep_skipped` event with the document count, the count per reason and the collections. The skip still counts toward the non-zero exit.

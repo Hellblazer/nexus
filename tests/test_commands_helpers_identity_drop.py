@@ -294,10 +294,12 @@ def test_emit_identity_drop_summary_surfaces_swept_count_as_info_not_a_problem(c
 
 
 def test_emit_identity_drop_summary_surfaces_sweep_skips_as_a_problem(capsys):
-    """nexus-39upx hazard 4: a sweep that could not run leaves old,
-    superseded T3 rows searchable — the exact silent-orphan shape this
-    bead exists to close one layer up. Must count toward the non-zero
-    exit like the other three collectors (uqq9z/7f5qj strictness)."""
+    """nexus-39upx hazard 4: a sweep that could not run leaves the dropped
+    chunks in storage. They are not searchable (no live owner, RDR-192) and
+    the engine reaper collects them, so the line says so and gives no remedy
+    that does nothing (nx t3 gc has the same 30-day grace). It still counts
+    toward the non-zero exit like the other three collectors (uqq9z/7f5qj
+    strictness)."""
     from nexus.mcp_infra import _record_superseded_sweep_skip
 
     _record_superseded_sweep_skip("1.2.3", "knowledge__x", "note_lookup_failed")
@@ -308,7 +310,30 @@ def test_emit_identity_drop_summary_surfaces_sweep_skips_as_a_problem(capsys):
     err = capsys.readouterr().err
     assert "WARNING: superseded-chunk sweep skipped for 1 document(s)" in err
     assert "note_lookup_failed" in err
-    assert "nx t3 gc -c COLLECTION" in err
+    assert "not searchable" in err
+    assert "may still be searchable" not in err
+    assert "nx t3 gc" not in err
+
+
+def test_sweep_skips_log_one_counted_event_per_summary(capsys):
+    """Observability look-back 2026-11-17 item 7: the skip count is a counted log
+    event, not only a stderr line: one ``superseded_sweep_skipped`` event with the
+    document count, the count per reason and the collections."""
+    from nexus.mcp_infra import _record_superseded_sweep_skip
+
+    _record_superseded_sweep_skip("1.2.3", "code__a", "gate_timeout")
+    _record_superseded_sweep_skip("1.2.4", "code__a", "gate_timeout")
+    _record_superseded_sweep_skip("1.2.5", "docs__b", "statement_timeout")
+
+    with capture_logs() as cap:
+        assert emit_identity_drop_summary(indexed_count=3) is True
+    events = [e for e in cap if e["event"] == "superseded_sweep_skipped"]
+    assert len(events) == 1, cap
+    assert events[0]["documents"] == 3
+    assert events[0]["reasons"] == {"gate_timeout": 2, "statement_timeout": 1}
+    assert events[0]["collections"] == ["code__a", "docs__b"]
+    assert events[0]["log_level"] == "warning"
+    assert "superseded-chunk sweep skipped for 3 document(s)" in capsys.readouterr().err
 
 
 @pytest.mark.t2_tenant

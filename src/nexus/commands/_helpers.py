@@ -719,28 +719,44 @@ def _emit_superseded_swept_info() -> bool:
 
 
 def _emit_superseded_sweep_skipped_warning() -> bool:
-    """nexus-39upx hazard 4: the sweep could not verify orphanhood or
-    note-safety for one or more documents this run — old/superseded T3
-    rows (nexus-gtltb-class: still fully searchable, since vector search
-    reads T3, not the manifest) may remain. Capability-honest: this
-    collector exists so that state is never silent. Returns ``True`` iff
-    any skip was recorded, so it counts toward the batch's non-zero exit
-    (uqq9z/7f5qj strictness direction — a sweep that could not run is
-    treated the same as any other identity-drop-class problem, not
-    swallowed as housekeeping)."""
+    """nexus-39upx hazard 4: the post-commit sweep did not delete the chunks one or
+    more documents dropped this run (a gate or statement timeout, a failed
+    before-read, a note lookup). Those chunks are not searchable: every engine read
+    path requires a live owner in the chunk's own collection (``chunk_live_owners``,
+    RDR-192 Steps 4-5, vectors-018/019). They hold storage until the engine reaper
+    (``ChunkReaper``, RDR-192 Step 9) finds them from the manifest, which it does
+    without any record of the skip: it quarantines an ownerless chunk past its
+    30-day grace and expires the quarantine after 14 days. ``nx t3 gc`` uses the
+    same grace, so nothing reclaims them sooner and no action is needed. Returns
+    ``True`` iff any skip was recorded, so it still counts toward the batch's
+    non-zero exit (uqq9z/7f5qj strictness, decided when the chunks were thought
+    searchable; unchanged here). Each call
+    with skips also logs one ``superseded_sweep_skipped`` event carrying the
+    document count and the count per reason, so the skips can be counted from the
+    log as well as read."""
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
+    import structlog  # noqa: PLC0415 — deliberate function-local import: rare branch
 
     from nexus.mcp_infra import get_superseded_sweep_stats  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
 
     skips = get_superseded_sweep_stats().get("skipped", [])
     if not skips:
         return False
-    reasons = sorted({s["reason"] for s in skips})
+    by_reason: dict[str, int] = {}
+    for s in skips:
+        by_reason[s["reason"]] = by_reason.get(s["reason"], 0) + 1
+    reasons = sorted(by_reason)
+    structlog.get_logger(__name__).warning(
+        "superseded_sweep_skipped",
+        documents=len(skips),
+        reasons={r: by_reason[r] for r in reasons},
+        collections=sorted({s.get("collection", "") for s in skips}),
+    )
     click.echo(
         f"  WARNING: superseded-chunk sweep skipped for {len(skips)} "
-        f"document(s) ({', '.join(reasons)}) — old/superseded T3 rows "
-        f"may still be searchable. Re-index, or run "
-        f"'nx t3 gc -c COLLECTION' once the underlying issue clears.",
+        f"document(s) ({', '.join(reasons)}): their dropped chunks are not "
+        f"searchable (no live owner) and stay in storage until the engine "
+        f"reaper collects them after its 30-day grace. No action is needed.",
         err=True,
     )
     return True
