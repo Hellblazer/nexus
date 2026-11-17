@@ -793,6 +793,12 @@ def wait_quiet(eng: Engine, timeout: float = 900.0, window: float = 30.0, wal_by
         lsn = wal_lsn(eng)
         now = time.monotonic()
         if prev and now - prev[0] >= window:
+            what = sql(eng, "select coalesce(string_agg(x, '; '), '-') from ("
+                            "select 'index ' || relid::regclass || ' ' || phase as x from pg_stat_progress_create_index "
+                            "union all select 'vacuum ' || relid::regclass || ' ' || phase from pg_stat_progress_vacuum "
+                            "union all select 'active ' || left(regexp_replace(query, '[[:space:]]+', ' ', 'g'), 120) "
+                            "from pg_stat_activity where state = 'active' and pid <> pg_backend_pid()) s")[0][0]
+            log(f"quiet check: busy={busy} wal={lsn - prev[1]} bytes in {now - prev[0]:.0f}s; {what}")
             if busy == 0 and lsn - prev[1] < wal_bytes:
                 return
             prev = (now, lsn)
@@ -857,8 +863,105 @@ def scenario_load(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     return out, ok
 
 
+SECOND_LABEL = MOVE_LABEL + "-load"
+
+
+def _label_row(eng: Engine, label: str) -> dict | None:
+    rows = sql(eng, "select completed_at is not null, failed_at is not null, coalesce(failure, ''), transient_retries "
+                    f"from nexus.data_moves where label = '{label}'")
+    if not rows:
+        return None
+    r = rows[0]
+    return {"completed": r[0] == "t", "failed": r[1] == "t", "failure": r[2], "retries": int(r[3])}
+
+
+def _label_done_chunks(eng: Engine, label: str) -> tuple[int, int]:
+    r = sql(eng, "select coalesce(sum(total_chunks), 0), coalesce(sum(total_chunks_completed), 0) "
+                 f"from dml_utils_data.migration_run where label = '{label}' or starts_with(label, '{label}/')")[0]
+    return int(r[0]), int(r[1])
+
+
+def scenario_load2(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
+    """Baseline and move in one warm boot. The upgrade boot's own move runs first and completes (a paused_at set
+    after boot does not stop a CALL already in flight), the cluster goes quiet, the baseline window runs under load,
+    then a second move with the same template is registered by hand and measured while it runs under the same load."""
+    eng.start("load2")
+    first = wait_move(eng, a.move_timeout)
+    if not first["completed"]:
+        raise MvvError(f"the boot move did not complete: {first}")
+    cols = [r[0] for r in sql(eng, "select name from nexus.catalog_collections where name like 'knowledge\\_\\_bootw-%' "
+                                   "and name not like '%control%' order by 1")]
+    if not cols:
+        raise MvvError("no seeded collections to search")
+    t_q0 = time.monotonic()
+    wait_quiet(eng, timeout=a.quiet_timeout)
+    quiet_s = round(time.monotonic() - t_q0, 1)
+    load = Load(eng, cols, a.rate, a.threads)
+    load.start()
+    time.sleep(a.warmup_s)
+    t_b0, w_b0 = time.monotonic(), wal_lsn(eng)
+    time.sleep(a.baseline_s)
+    t_b1, w_b1 = time.monotonic(), wal_lsn(eng)
+    base = load.window(t_b0, t_b1)
+    base["wal_bytes_per_s"] = round((w_b1 - w_b0) / (t_b1 - t_b0))
+    sql(eng, "insert into nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, "
+             "statement_timeout_ms, verification, on_complete, changeset_id) "
+             f"select '{SECOND_LABEL}', template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, "
+             "'SELECT 1 FROM nexus.chunks t WHERE coalesce(t.mvv_n, 0) < 2 AND (t.tenant_id = $1 OR $1 IS NULL)', "
+             f"on_complete, 'mvv-load-second' from nexus.data_moves where label = '{MOVE_LABEL}'")
+    t_m0, w_m0 = time.monotonic(), wal_lsn(eng)
+    started = t_end = None
+    row = None
+    deadline = t_m0 + a.move_timeout
+    while time.monotonic() < deadline:
+        row = _label_row(eng, SECOND_LABEL)
+        total, done = _label_done_chunks(eng, SECOND_LABEL)
+        if started is None and done > 0:
+            started = time.monotonic()
+        if row and (row["completed"] or row["failed"]):
+            t_end, w_m1 = time.monotonic(), wal_lsn(eng)
+            break
+        time.sleep(0.5)
+    else:
+        load.stop()
+        raise MvvError(f"the second move did not finish under load: {row}")
+    # the tail: the autovacuum the move's updates set off, still under the same load, until the cluster is quiet
+    t_v0, w_v0 = time.monotonic(), wal_lsn(eng)
+    tail_quiet = True
+    try:
+        wait_quiet(eng, timeout=a.quiet_timeout)
+    except MvvError:
+        tail_quiet = False
+    t_v1, w_v1 = time.monotonic(), wal_lsn(eng)
+    load.stop()
+    if started is None:
+        started = t_m0
+    during = load.window(started, t_end)
+    during["wal_bytes_per_s"] = round((w_m1 - w_m0) / max(t_end - t_m0, 1e-9))
+    after = load.window(t_v0, t_v1) if t_v1 - t_v0 >= 10 else {}
+    if after:
+        after["wal_bytes_per_s"] = round((w_v1 - w_v0) / (t_v1 - t_v0))
+        after["quiet_reached"] = tail_quiet
+    rc = sql(eng, "select count(*), count(*) filter (where mvv_n = 2), count(*) filter (where coalesce(mvv_n, 0) < 2) "
+                  "from nexus.chunks")[0]
+    counts = {"rows_total": int(rc[0]), "rows_at_2": int(rc[1]), "rows_short": int(rc[2])}
+    sl = sql(eng, "select coalesce(min(sleep_ms), -1), coalesce(max(sleep_ms), -1), coalesce(sum(total_chunks), 0) "
+                  f"from dml_utils_data.migration_run where label = '{SECOND_LABEL}' or starts_with(label, '{SECOND_LABEL}/')")[0]
+    out = {"sleep_ms": a.sleep_ms, "applied_run_sleep_ms": [int(sl[0]), int(sl[1])], "chunks": int(sl[2]),
+           "rate": a.rate, "threads": a.threads, "collections_searched": len(cols), "quiet_wait_s": quiet_s,
+           "baseline": base, "during_move": during, "after_move_until_quiet": after, "search_errors": load.errors,
+           "move_seconds": round(t_end - t_m0, 1), "move_work_seconds": round(t_end - started, 1),
+           "move": row, "row_counts": counts,
+           "p99_ratio": round(during["p99_ms"] / base["p99_ms"], 3),
+           "p50_ratio": round(during["p50_ms"] / base["p50_ms"], 3),
+           "wal_ratio": round(during["wal_bytes_per_s"] / max(base["wal_bytes_per_s"], 1), 1),
+           "after_p99_ratio": round(after["p99_ms"] / base["p99_ms"], 3) if after else None}
+    ok = bool(row["completed"]) and load.errors == 0 and counts["rows_short"] == 0
+    return out, ok
+
+
 SCENARIOS = {"upgrade": scenario_upgrade, "kill-resume": scenario_kill_resume, "crash-resume": scenario_crash_resume,
-             "load": scenario_load,
+             "load": scenario_load, "load2": scenario_load2,
              "no-pgbg": scenario_no_pgbg, "masking": scenario_masking}
 
 
@@ -884,6 +987,7 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--warmup-s", type=float, default=20.0)
     sc.add_argument("--baseline-s", type=float, default=90.0)
     sc.add_argument("--reboot", action="store_true", help="upgrade: after the move, a clean stop and a second boot, counted")
+    sc.add_argument("--quiet-timeout", type=float, default=900.0, help="load2: seconds to wait for quiet before the baseline")
     sc.add_argument("--json", type=Path, default=None)
     a = ap.parse_args(argv)
     if a.cmd == "make-jar":
