@@ -98,9 +98,6 @@ def test_a_conftest_without_the_session_items_registry_stops_the_script(repo: Pa
     [
         ({"opened": ["docs/a.md"]}, "docs/a.md", "reads docs/a.md"),
         ({"statted": ["docs/gone.md"]}, "docs/gone.md", "reads docs/gone.md"),
-        ({"listed": ["docs"]}, "docs/new.md", "lists the directory of docs/new.md"),
-        # A new directory: its first ancestor that exists at the base was listed.
-        ({"listed": ["docs"]}, "docs/fresh/deeper/new.md", "lists the directory of docs/fresh/deeper/new.md"),
         ({"prefixes": ["src/nexus"]}, "src/nexus/pkg/a.py", "enumerates a subtree holding src/nexus/pkg/a.py"),
         ({"prefixes": [""]}, "anything/at/all.txt", "enumerates a subtree holding anything/at/all.txt"),
     ],
@@ -267,8 +264,8 @@ def test_compaction_drops_only_what_selects_nothing_more() -> None:
     assert got == {
         "prefixes": ["src/nexus", "tests"],
         "listed": ["docs"],
-        "opened": ["README.md", "docs/sub/b.md"],
-        "statted": ["scripts/s.py"],
+        "opened": ["README.md", "docs/a.md", "docs/sub/b.md"],
+        "statted": ["docs/c.md", "scripts/s.py"],
         "opaque": ["bash x.sh"],
     }
 
@@ -349,3 +346,18 @@ def test_run_selects_from_the_built_manifest_runs_the_pick_and_says_what_it_does
     assert "meta-tests ran in" in out
     assert out.rstrip().endswith(mt.NOT_COVERED)
     assert rc == 1  # test_imports fails, and it ran
+
+
+def test_a_listed_directory_selects_a_path_added_or_deleted_in_it_and_not_an_edit(repo: Path) -> None:
+    manifest = _manifest(repo, test_scan={"listed": ["docs"]})
+    _write(repo, {"docs/new.md": "n\n", "docs/fresh/deeper/new.md": "n\n"})
+    sel = mt.select(repo, ["docs/new.md"], "base", manifest)
+    assert sel.selected["tests/test_scan.py"] == "lists the directory gaining docs/new.md"
+    # A new directory: its first ancestor that exists at the base was listed.
+    sel = mt.select(repo, ["docs/fresh/deeper/new.md"], "base", manifest)
+    assert sel.selected["tests/test_scan.py"] == "lists the directory gaining docs/fresh/deeper/new.md"
+    (repo / "docs/a.md").write_text("edited\n")
+    assert "tests/test_scan.py" not in mt.select(repo, ["docs/a.md"], "base", manifest).selected
+    (repo / "docs/a.md").unlink()
+    sel = mt.select(repo, ["docs/a.md"], "base", manifest)
+    assert sel.selected["tests/test_scan.py"] == "lists the directory losing docs/a.md"
