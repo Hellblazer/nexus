@@ -61,6 +61,7 @@ __all__ = ["POOL_REASONS", "PoolEnv", "run_pool_phase"]
 
 #: Why the pool was skipped or closed (``RepairReport.pool_reason``); empty when the scan ran through.
 POOL_REASONS: tuple[str, ...] = (
+    "cap_full",  # phase A's keys fill the cap: no pool key could be resolved, so nothing is fetched or asked
     "no_search_step",  # the plan has no search step carrying ids: no pool
     "no_fetch",  # the runner gave the boundary no fetch hook
     "fetch_failed",  # the one chunk fetch raised: nothing was scanned
@@ -203,22 +204,17 @@ def _verdict(report: AssessmentReport, tally: _Tally) -> str:
     return "filter_failed"
 
 
-def _merge(base: Any, joined: Any, dropped: Sequence[str], fields: Mapping[str, Any]) -> Any:
+def _merge(base: Any, joined: Any, fields: Mapping[str, Any]) -> Any:
     """Phase A's result with phase B's joined items, keys and report fields after it. *joined* is phase B's own
-    resolution (or ``None``), *dropped* the kept keys the cap left no slot for. ``anchor_key_ids`` is phase A's alone."""
+    resolution. ``anchor_key_ids`` is phase A's alone."""
     f = dict(base.fields)
-    part = joined.fields if joined is not None else {}
-    if joined is not None:
-        f["resolution_entered"] = True
-        f.pop("resolution_reason", None)
-        f["resolution_tokens"] = int(f.get("resolution_tokens", 0)) + int(part.get("resolution_tokens", 0))
-        for name in ("resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped"):
-            f[name] = (*tuple(f.get(name, ())), *tuple(part.get(name, ())))
-    if dropped:
-        f["tokens_dropped"] = (*tuple(f.get("tokens_dropped", ())), *dropped)
+    part = joined.fields
+    f["resolution_entered"] = True
+    f.pop("resolution_reason", None)
+    f["resolution_tokens"] = int(f.get("resolution_tokens", 0)) + int(part.get("resolution_tokens", 0))
+    for name in ("resolved", "missing", "ambiguous", "joined_dropped", "tokens_dropped"):
+        f[name] = (*tuple(f.get(name, ())), *tuple(part.get(name, ())))
     f.update(fields)
-    if joined is None:
-        return replace(base, fields=f)
     detail = f"{base.detail}; pool: {joined.detail}" if base.detail else joined.detail
     return replace(
         base, fields=f, entered=True, items=[*base.items, *joined.items], keys=(*base.keys, *joined.keys), detail=detail)
@@ -242,6 +238,10 @@ async def _phase(
 
     if base.entered and base.failure:
         return _with(base, _fields(reason="resolution_failed"))
+    # phase A's tokens and items hold their slots; the pool's keys take what the cap leaves
+    room = env.cap - max(int(base.fields.get("resolution_tokens", 0)), len(base.items))
+    if room <= 0:  # no key the pool could add would be resolved, so no fetch and no model call is spent on it
+        return _with(base, _fields(reason="cap_full"))
     out = _search_ids(view)
     if out is None:
         return _with(base, _fields(reason="no_search_step"))
@@ -327,13 +327,10 @@ async def _phase(
         return _with(base, fields)
     order = {k: i for i, k in enumerate(kept)}
     pairs = sorted(((a, k) for a, keys in kept_chunks for k in keys if k in kept_keys), key=lambda p: order[p[1]])
-    # phase A's tokens and items hold their slots; the pool's keys take what the cap leaves, and the overflow is named
-    room = env.cap - max(int(base.fields.get("resolution_tokens", 0)), len(base.items))
-    if room <= 0:
-        return _merge(base, None, kept, fields)
+    # the overflow past the room the cap leaves is named in tokens_dropped by the join
     joined = await env.join(
         view, pairs, {}, cap=room, resolve_until=env.fetch_until - MIN_REPAIR_QUERY_S, fetch_until=env.fetch_until)
     if joined.failure:
         _log.warning("nx_answer_pool_resolve_failed", why=joined.failure[:80])
         return _with(base, {**fields, "pool_reason": reason or "pool_resolve_failed"})
-    return _merge(base, joined, (), fields)
+    return _merge(base, joined, fields)

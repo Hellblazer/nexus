@@ -618,7 +618,9 @@ async def test_scenario_6_anchor_keys_fill_the_cap_first_and_the_overflow_is_nam
     tight = _crowded()
     r2 = _cov(await _run(tight, pool_on(max_repair_items=2), plan=POOL_PLAN)).repair
     assert tight.resolve_calls() == [[_tok(1), _tok(2)]], "a cap the anchors fill leaves the pool keys no slot"
-    assert r2.tokens_dropped == (_tok(7), _tok(8), _tok(9))
+    assert r2.pool_reason == "cap_full" and r2.pool_filter_calls == 0 and r2.pool_scanned == 0
+    assert tight.pool_fetches() == [] and len(tight.args_of("operator_check")) == 2, "no pool fetch and no filter call: nothing can change the answer"
+    assert r2.tokens_dropped == () and r2.resolved == (_tok(1), _tok(2))
 
 
 def test_the_wire_cuts_a_long_pool_list_at_the_shared_cap_and_counts_what_it_left_out() -> None:
