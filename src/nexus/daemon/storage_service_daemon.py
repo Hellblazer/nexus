@@ -539,6 +539,7 @@ def jar_launch_stack_marker() -> str | None:
 
 #: The program names the JVM-fallback launch runs (``_resolve_java_executable``), case-folded.
 _JAVA_PROGRAM_NAMES = frozenset({"java", "java.exe"})
+_ABSOLUTE_PROGRAM = re.compile(r"^(?:/|[A-Za-z]:/)")  # POSIX, drive letter or UNC (//host), slashes normalised
 
 
 def jar_launch_command_matches(command: str, marker: str) -> bool:
@@ -550,8 +551,9 @@ def jar_launch_command_matches(command: str, marker: str) -> bool:
     """
     if f" {marker} " not in f" {command} ":
         return False
-    program = command.split(" -", 1)[0].strip()
-    return program.replace("\\", "/").rsplit("/", 1)[-1].lower() in _JAVA_PROGRAM_NAMES
+    program = command.split(" -", 1)[0].strip().replace("\\", "/")
+    absolute_or_bare = "/" not in program or _ABSOLUTE_PROGRAM.match(program)  # not `sudo /usr/bin/java`
+    return bool(absolute_or_bare) and program.rsplit("/", 1)[-1].lower() in _JAVA_PROGRAM_NAMES
 
 
 #: Minimum JDK for the JVM-fallback launch. MUST equal

@@ -72,6 +72,9 @@ class TestJarArmOfTheMatcher:
             "uv run python scripts/data_move_mvv.py scenario upgrade --jar {jar}",
             # release Step 3h's harness
             "python3 scripts/upgrade_boot_writes.py --prev-client 8.3.0 --new-jar {jar}",
+            # a wrapper before an absolute java is the wrapper, not the engine (review round 2)
+            "sudo /usr/bin/java -jar {jar}",
+            "env A=1 /usr/bin/java -jar {jar}",
             # a shell that runs java is not the engine; the java it runs is
             "/bin/sh -c /usr/bin/java -jar {jar}",
             # another jar that starts with this one's path
