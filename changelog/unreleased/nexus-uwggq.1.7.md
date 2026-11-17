@@ -1,0 +1,3 @@
+### Changed
+
+- **`nx catalog list --sensitive` reads the engine's sensitive list instead of scanning the catalog.** Without `--owner` it asks the engine for the tenant's sensitive tumblers (engine-service 0.1.188 or later), then resolves them, so a page of the list no longer reads every document of the type; the rows, their order and the paging are the ones the scan gave. On an engine without the list route the command exits with a message instead of scanning the catalog, and it exits the same way, saying why, when the engine answers 503 or the list is capped (a tenant with more than 10000 sensitive documents narrows with `--owner`). `--owner` with `--sensitive` is unchanged. (nexus-uwggq.1.7, RDR-241)

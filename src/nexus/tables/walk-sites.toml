@@ -91,7 +91,7 @@ emit = { class = "AGGREGATE", calls = 1, reason = "The fallback when /sensitive 
 [[row]]
 id = "commands/catalog.py::list_cmd"
 match = { site = "commands/catalog.py::list_cmd" }
-emit = { class = "AGGREGATE", calls = 1, reason = "The --meta and --sensitive modes read every document of a type; Phase 1 sends --sensitive through /sensitive and resolve_many, Phase 2 sends --meta through the metadata route, and the row then becomes BOUNDED.", next = "nexus-uwggq.1.7, nexus-uwggq.2.14" }
+emit = { class = "AGGREGATE", calls = 1, reason = "The --meta mode and the bounded page read documents with all_documents; --sensitive without --owner no longer walks (it reads /sensitive, then resolve_many, nexus-uwggq.1.7); Phase 2 sends --meta through the metadata route, and the row then becomes BOUNDED.", next = "nexus-uwggq.2.14" }
 
 [[row]]
 id = "commands/catalog.py::reconcile_cmd"

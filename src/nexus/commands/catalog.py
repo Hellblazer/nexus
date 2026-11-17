@@ -21,6 +21,7 @@ from nexus.catalog.tombstones import (
     read_tombstones,
 )
 from nexus.catalog.tumbler import Tumbler
+from nexus.commands.catalog_cmds.sensitive_listing import sensitive_page
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
@@ -439,7 +440,8 @@ def _echo_document_rows(presented: "DocumentRows") -> None:
                    "Scans the catalog's documents (nexus-6pfgb.16).")
 @click.option("--sensitive", "only_sensitive", is_flag=True,
               help="Keep only documents flagged sensitive (RDR-243): the list to review before a clear. "
-                   "Scans the catalog's documents, like --meta; paging applies to the matches.")
+                   "Reads the engine's sensitive list (engine-service 0.1.188 or later), not the catalog's documents; "
+                   "paging applies to the matches. Refuses, and does not scan, on an engine without the list.")
 @click.option("--json", "as_json", is_flag=True)
 def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filters: tuple[str, ...], only_sensitive: bool, as_json: bool) -> None:
     """List catalog entries."""
@@ -450,6 +452,7 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
     cat = _get_catalog()
+    paged = False  # True: the rows are already the requested page (sensitive_page cuts it itself)
     if owner:
         # Resolve --owner to a Tumbler. Try the dotted-tumbler form first
         # (the canonical input), then fall back to looking up by owner
@@ -464,6 +467,11 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
         # safe). Apply the type filter here too if provided.
         if content_type:
             entries = [e for e in entries if e.content_type == content_type]
+    elif only_sensitive:
+        # RDR-241 Phase 1 (nexus-uwggq.1.7): the engine's sensitive list, then resolve_many; never a walk.
+        entries, total = sensitive_page(
+            cat, content_type=content_type, meta_wanted=meta_wanted, offset=offset, limit=limit)
+        paged = True
     else:
         # GH #568: push --type into SQL so pagination on a small-
         # cardinality content_type doesn't return empty. Pre-fix the
@@ -472,16 +480,14 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
         # 0. Mirrors PR #533's fix for the MCP catalog_list surface.
         # nexus-6pfgb.16: a meta filter cannot be pushed into SQL, so it scans every document of the type
         # (0 is the unbounded read) and pages the matches.
-        # RDR-243: the sensitive flag is not pushed into SQL either, so it scans like a meta filter.
-        entries = cat.all_documents(
-            limit=0 if (meta_wanted or only_sensitive) else limit + offset + 1, content_type=content_type,
-        )
-    if only_sensitive:
-        entries = [e for e in entries if e.sensitive]
-    if meta_wanted:
-        entries = documents_with_meta(entries, meta_wanted)
-    total = len(entries)
-    entries = entries[offset:offset + limit]
+        entries = cat.all_documents(limit=0 if meta_wanted else limit + offset + 1, content_type=content_type)
+    if not paged:
+        if only_sensitive:  # --owner only: the no-owner read is sensitive_page's
+            entries = [e for e in entries if e.sensitive]
+        if meta_wanted:
+            entries = documents_with_meta(entries, meta_wanted)
+        total = len(entries)
+        entries = entries[offset:offset + limit]
 
     presented = _present_cli_rows(cat, entries)
     if as_json:
