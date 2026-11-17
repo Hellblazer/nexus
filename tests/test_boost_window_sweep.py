@@ -123,6 +123,10 @@ def swept(t2_service_env, monkeypatch):
     cols = _seed_corpus(random.Random(20261009))
     corpus = ",".join(cols)
     monkeypatch.setattr(mcp_core, "_get_t3", lambda: client)
+    # The swept k (_MCP_PER_COLLECTION_K) reaches only the per-collection route,
+    # off by default since nexus-tu8wp.3; on the batched path k is a no-op and
+    # the non-vacuity assert reads 0.
+    monkeypatch.setenv(hvc.PER_COLLECTION_ROUTE_ENV, "1")
 
     real_boosts = search_engine.apply_ranking_boosts
     real_cap = search_engine.apply_file_diversity_cap
