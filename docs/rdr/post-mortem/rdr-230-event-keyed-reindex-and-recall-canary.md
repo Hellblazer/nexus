@@ -29,9 +29,13 @@ after a 24-hour back-off. On `code__1-87` one ring query was an outlier whose
 true nearest row the HNSW search could not reach in any build, so every daily
 REINDEX finished and the index was still red. Sam chose a hold: after a REINDEX
 that leaves the index red, the engine records `red_unfixed` and stops
-rebuilding until a green canary clears it (798c4e723). The hold was proved on
-2026-11-17: no REINDEX through the back-off expiry, then a green run cleared it
-(T2 `conexus/reads-2026-11-17-code187-quiet`).
+rebuilding until a green canary clears it (798c4e723). On 2026-11-17 no REINDEX fired through the
+back-off expiry, then a green run cleared the hold (T2
+`conexus/reads-2026-11-17-code187-quiet`). The engine logs nothing when the hold
+suppresses a trigger, so the suppression itself was not observed; the hold's
+unit tests and review rounds are the evidence for it. The green also follows
+the canary's moving window of the ten newest queries, so it does not show that
+the missed query now succeeds.
 
 *Drift: missing failure mode.*
 
@@ -66,9 +70,20 @@ statement timeout, and the status fields.
 
 *Drift: under-specified architecture.*
 
+**The operator warning was assigned to a bead that disclaimed it.** The RDR said
+the `nx doctor` row of nexus-dxsjc would surface a red canary. That bead closed
+before the canary existed and said the canary was not its job; the Phase 1
+status bead said the row was dxsjc's. No bead built it, and the close critique
+found it missing. It shipped at close as the `Recall
+canary` row (nexus-4lnn1.1.10).
+
+*Drift: missing cross-cutting concern.*
+
 ## What the next person should take from it
 
 A recall canary measures the query set as much as the index. Before a red
 verdict triggers work, ask two questions. Is the ring big enough to mean
 anything? Would a rebuild change the answer at all? Build the "rebuild did not
-help" state in from the start, not after it loops.
+help" state in from the start, not after it loops. And when an RDR hands a
+piece to another bead, check at close that the bead shipped it: two beads can
+each say the other owns it.

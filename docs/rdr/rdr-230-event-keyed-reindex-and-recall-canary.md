@@ -131,8 +131,10 @@ except a schema migration that rewrites the leaf.
 storage parameters through Liquibase in both modes (scale factor 0.05, threshold
 1000, insert scale factor 0.05, analyze scale factor 0.02), is bead nexus-s9wav.
 R4, bloat visibility per leaf and per `pci_` index in `/v1/status` and one
-`nx doctor` row over HTTP, is bead nexus-dxsjc; that row is also where a red
-canary from this RDR is surfaced to an operator. The prerequisite that the
+`nx doctor` row over HTTP, is bead nexus-dxsjc. A red canary from this RDR is
+surfaced to an operator by a separate `Recall canary` doctor row
+(`src/nexus/recall_canary_health.py`, nexus-4lnn1.1.10); this text first gave it to
+nexus-dxsjc's row, which closed on 2026-10-19 without it. The prerequisite that the
 builder drop its own invalid `_ccnew`/`_ccold` leftovers landed as nexus-rn1yd
 (`4a7794543`, ledger entry `f90da05f8`; Sam's carve-out
 `nexus_rdr/227-decision-4-amendment-reindex-leftovers`). The proposal's R5 (do
@@ -161,7 +163,8 @@ What changed since the bead was filed, each with its record:
 
 ### Technical Environment
 
-- PostgreSQL 17, pgvector 0.8.2, HNSW `m` 16 and `ef_construction` 64,
+- PostgreSQL 17, pgvector 0.8.2 (0.8.7 in the bundle and the cloud since
+  engine-service-v0.1.194, 8013eb3ef), HNSW `m` 16 and `ef_construction` 64,
   `nexus.vector_cosine_ops`.
 - Builder: `PciBuilderSession` (direct admin connection, autocommit,
   `application_name` `nexus-pci-builder-<boot id>`, advisory lock
@@ -351,10 +354,10 @@ These are the proposal's Unknowns that this design depends on. Each says how it
 gets verified; the first canary run on the cloud is the missing aged-index
 measurement.
 
-- [x] **A1.** (Read 2026-11-08, T2 `conexus/rdr230-a1-canary-2026-11-08`: `code__1-1` green on the cloud at 10 ring queries, mean 0.9951, no red anywhere.) An aged `pci_` index on production data still meets the Gap 1 bar
+- [partly verified: five of six `pci_` indexes read green (T2 `conexus/rdr230-a1-canary-2026-11-08`, `conexus/rdr230-a6-seven-day-reading-2026-11-14`); `code__1-87` read red at ten queries on 2026-11-15 and 2026-11-16, a red this item names as its falsification, for a cause not shown to be graph age (Later reading below)] **A1.** An aged `pci_` index on production data still meets the Gap 1 bar
   at serving `ef_search` (mean recall at least 0.99 at k 40 to 120, no top-1
-  miss). **Status**: Unverified at the bar, answered in part
-  (`nexus_rdr/230-research-18`): on a production fork every `pci_` index
+  miss). **Status**: Partly verified (see the box and the Later reading). Before
+  the cloud canary, it was answered in part (`nexus_rdr/230-research-18`): on a production fork every `pci_` index
   scored 1.0000 at k 10 with no top-1 miss, but only one was read as aged
   (the L17 ones had just been vacuumed), and k 40 to 120 was not measured.
   **Method**: the canary's first
@@ -1008,8 +1011,10 @@ this engine's own history and stay after it becomes a standby, like
 empty list. A client against an engine that predates the key finds none and
 reports not-applicable. The two keys go in the wire ledger
 (`docs/wire-contract-pending.md`) and the client fixture
-(`tests/fixtures/pci_status_bodies.json`); the doctor row that reads it, and
-warns on a red canary, is nexus-dxsjc's.
+(`tests/fixtures/pci_status_bodies.json`); the doctor row that reads it is the
+`Recall canary` row (nexus-4lnn1.1.10). It warns when `red` is above 0 and names
+`canary_indexes` on `GET /v1/admin/chunks-leaves` as where the red indexes are
+listed.
 
 **8. Switches.** REINDEX and the post-delete `VACUUM` are part of the builder's
 DDL, so `NX_SEARCH_PCI=0` stops them along with builds. A new setting,
@@ -1391,14 +1396,15 @@ blocks P2.2 and P2.3. P1.6 is done at its seven-day reading; a collection whose
 ring has not reached three queries by then is reported and does not hold P2.1. P2.4 blocks P2.5. nexus-s9wav (R1) is independent but
 should land before P2.5, so autovacuum is already acting at 5% when REINDEX is
 enabled; nexus-dxsjc (R4) consumes the status object and may land before or
-after P1.4.
+after P1.4. The `Recall canary` row (nexus-4lnn1.1.10) consumes
+`maintenance.canary` and landed after P1.4.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | Anchor comments | `obj_description` on `pci_` indexes | the `canary_indexes` entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
-| Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the doctor row (nexus-dxsjc) | logs |
+| Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the `Recall canary` doctor row (nexus-4lnn1.1.10) | logs |
 | REINDEX | status `reindexing` (`in_flight`), `last_reindex_at` | `event=pci_ddl_done op=reindex took_ms=` | N/A | `reindex_leftover` returns to 0 | N/A |
 | Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the `canary_indexes` entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
 
@@ -1572,8 +1578,9 @@ is 16.83 a second, 1,010 rows on 2026-10-19 09:37). T2
   (P2.4). Sam chose the comment anchor (Open Question 2), so the anchor adds
   no changeset.
 - **Credentials**: unchanged from RDR-227 (restart-bound admin credentials).
-- **Versioning**: the status key is additive; the client half (doctor row) is
-  nexus-dxsjc's and tolerates its absence.
+- **Versioning**: the status key is additive; the client half is the `Recall
+  canary` doctor row (nexus-4lnn1.1.10), which reports not applicable on an
+  engine without the key.
 
 ### Proportionality
 
@@ -1636,3 +1643,4 @@ bulk delete, both on an existing session under an existing lock.
 - 2026-11-15: Wording brought to the reviewed Phase 2 code (nexus-4lnn1.1.10): the REINDEX `statement_timeout` is the build's 6 hours; `reindexing` reads `in_flight` on `/v1/status`, `unanchored` joins `maintenance`, and `canary_indexes` gains `red_after_reindex` and the `after_reindex` trigger; the red-canary REINDEX needs ten queries (Sam, 2026-11-14) and a 24-hour floor read from the anchor; the size-change recount in Technical Design 2; the leaf rule's row floor; the trigger-label precedence, owed bulk deletes and owed anchors, and the REINDEX phase never failing the pass.
 - 2026-11-17: Closed. Both phases shipped (engine-service-v0.1.194, REINDEX on in the cloud since 2026-11-16 07:13Z); phase-review gate PASSED, T2 `nexus/phase-review-rdr-230-phases-1-2-2026-11-16`. The `red_unfixed` hold (a field in an index's anchor that stops the daily red-canary REINDEX while the red is unchanged; Technical Design 3) held through the 2026-11-17 backoff expiry and cleared on a green canary (T2 `conexus/reads-2026-11-17-code187-quiet`).
 - 2026-11-17: Wording brought to the shipped Phase 2 code at close: the anchor's `relfilenode` field and the `red_unfixed` hold with its conditions and the 10% growth constant (Technical Design 1, 3, 7; commits `359276955`, `f59e6ff37`, `1c4905e19`, `c721af09c`, `fd6cc1d46`, `798c4e723`); inserts are recall-neutral except for dense near-duplicate clusters, with Sam's 2026-11-16 disposition (Research Findings, Technical Design 3, Alternative 1, Risks, Contradiction Check); the `code__1-87` red that a REINDEX did not cure, read in A1; the Phase 2 rehearsal's insert rate below the 0.2 s it names (Scope Verification) and the measured 613 s leaf REINDEX in place of "unmeasured".
+- 2026-11-17: Close round 2. The red-canary doctor row this text gave to nexus-dxsjc was never built (dxsjc closed 2026-10-19 without it); it shipped as the `Recall canary` row (nexus-4lnn1.1.10), and the five passages that named dxsjc's row now name it. A1 is marked partly verified (the `code__1-87` red), and the pgvector version notes 0.8.7.
