@@ -21,7 +21,7 @@ The meta-tests (``known``):
 
 Each Python meta-test's surface is derived, never declared: ``build`` runs
 each test file in its own pytest process under ``tests/_surface_trace.py``
-and writes what it read to ``tests/meta_surfaces.json``, with a hash of the
+and writes what it read to ``tests/meta_surfaces.json.gz``, with a hash of the
 file, the tests/ modules it imports and the conftests above it. A changed path
 selects a test when the test opened or statted it, listed its directory (for a
 new directory, its first ancestor that exists at the base), ran a subprocess
@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import gzip
 import hashlib
 import json
 import os
@@ -55,7 +56,9 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
-MANIFEST = "tests/meta_surfaces.json"
+#: Gzipped: a binary file, so the repo-wide text censuses it records (route names, retired
+#: library names, paths) do not read their own findings back out of it, and a tenth the size.
+MANIFEST = "tests/meta_surfaces.json.gz"
 MARKS = ("lint", "census")
 CONFTEST = "tests/conftest.py"
 SESSION_ITEMS_NAME = "_SESSION_ITEMS_CENSUS_TEST_NODEIDS"
@@ -80,6 +83,16 @@ NOT_COVERED = (
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+
+
+def load_manifest(path: Path) -> dict:
+    return json.loads(gzip.decompress(path.read_bytes()))
+
+
+def write_manifest(path: Path, manifest: dict) -> None:
+    """Deterministic bytes: no name or mtime in the gzip header."""
+    raw = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()
+    path.write_bytes(gzip.compress(raw, compresslevel=9, mtime=0))
 
 
 def sha256(path: Path) -> str:
@@ -263,7 +276,7 @@ def _prefix_hit(path: str, prefixes: list[str]) -> bool:
 def select(repo: Path, changed: list[str], base: str, manifest: dict | None = None) -> Selection:
     if manifest is None:
         mpath = repo / MANIFEST
-        manifest = json.loads(mpath.read_text()) if mpath.is_file() else {}
+        manifest = load_manifest(mpath) if mpath.is_file() else {}
     surfaces: dict = (manifest or {}).get("tests", {})
     known = python_meta_tests(repo)
     sel = Selection(known=known, java_known=java_meta_tests(repo), changed=changed)
@@ -445,13 +458,13 @@ def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict
     proc = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, errors="replace")
     merged: dict[str, set[str]] = {}
     for frag in out.glob("trace-*.json"):
-        for kinds in [json.loads(frag.read_text()).get(test, {})]:
-            for kind, items in kinds.items():
-                merged.setdefault(kind, set()).update(items)
+        for kind, items in json.loads(frag.read_text()).get(test, {}).items():
+            merged.setdefault(kind, set()).update(items)
     tail = [ln for ln in proc.stdout.splitlines() if ln.strip()][-1:] or ["no output"]
     why = None
     if proc.returncode != 0:
-        why = f"pytest exit {proc.returncode}: {tail[0][:160]}"
+        failed = [ln for ln in proc.stdout.splitlines() if ln.startswith(("FAILED", "ERROR"))][:1]
+        why = f"pytest exit {proc.returncode}: {tail[0][:120]}" + (f"; {failed[0][:200]}" if failed else "")
     elif re.search(r"\b\d+ skipped\b", tail[0]):
         why = f"a skip, so part of it never ran: {tail[0][:160]}"
     return merged, why
@@ -482,7 +495,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         "built_from": git(repo, "rev-parse", "HEAD").strip(),
         "tests": tests,
     }
-    (repo / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+    write_manifest(repo / MANIFEST, manifest)
     incomplete = sorted(t for t, e in tests.items() if e.get("incomplete"))
     print(f"wrote {MANIFEST}: {len(tests)} meta-tests in {time.monotonic() - t0:.0f}s;"
           f" {len(incomplete)} with an incomplete trace (they run whatever the diff):")
