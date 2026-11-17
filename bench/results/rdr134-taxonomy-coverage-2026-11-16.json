@@ -1,0 +1,657 @@
+{
+ "bead": "nexus-7fku2.1.7",
+ "date": "2026-11-16",
+ "engine": "release 0.1.194",
+ "base_url_host": "api.conexus-nexus.com",
+ "complete": true,
+ "threshold": 0.9,
+ "denominator": "collection_stats count of the collection's (name, dim) row: live owner and embedding",
+ "bound_note": "coverage_upper assumes every stored chunk without a live owner is among the listed unassigned; stored_count - count also counts manifest-less ghost chunks the unassigned read never lists, so the bound can be loose",
+ "rebuild": {
+  "expected_set_size": 37,
+  "rebuilt_set_size": 37,
+  "spike_per_question_routed": 36,
+  "not_in_saved_prod": [],
+  "drift": false
+ },
+ "partition": {
+  "candidates": 37,
+  "routed_by_gate": 25,
+  "definite_miss": 11,
+  "uncertain": 0,
+  "not_measurable": 1,
+  "not_measurable_by_status": {
+   "no_taxonomy": 1
+  },
+  "with_taxonomy": 36,
+  "no_taxonomy": 1,
+  "taxonomy_not_read": {
+   "no_chunks": 0,
+   "multi_dim": 0,
+   "error": 0,
+   "unregistered": 0
+  },
+  "reconciles": true,
+  "unrouted_low": 11,
+  "unrouted_high": 11,
+  "line": "37 candidates: 25 routed by the gate; 11 definite coverage misses; 0 uncertain; 1 not measurable or never routable (no_taxonomy 1)",
+  "statement": "Of 37 candidates (36 routed by the spike), the 0.9 gate would leave 11 to 11 of the spike-routed collections unrouted: 11 definite, 0 unresolved until Step 5a's engine arm reports coverage. With a measured taxonomy: 36; spike-routed: 36. Candidates with no taxonomy at their dimension: 1 (read, so not spike-routable). has_taxonomy was not read for no_chunks 0, multi_dim 0, error 0, unregistered 0, so any of those the spike routed adds to the range. Candidates minus spike-routed (1) equals no_taxonomy plus unregistered (1), as expected."
+ },
+ "partition_line": "37 candidates: 25 routed by the gate; 11 definite coverage misses; 0 uncertain; 1 not measurable or never routable (no_taxonomy 1)",
+ "spike_statement": "Of 37 candidates (36 routed by the spike), the 0.9 gate would leave 11 to 11 of the spike-routed collections unrouted: 11 definite, 0 unresolved until Step 5a's engine arm reports coverage. With a measured taxonomy: 36; spike-routed: 36. Candidates with no taxonomy at their dimension: 1 (read, so not spike-routable). has_taxonomy was not read for no_chunks 0, multi_dim 0, error 0, unregistered 0, so any of those the spike routed adds to the range. Candidates minus spike-routed (1) equals no_taxonomy plus unregistered (1), as expected.",
+ "measured": 37,
+ "errors": 0,
+ "above_0_9": 25,
+ "not_routed_by_gate": 12,
+ "not_routed_by_gate_names": [
+  "docs__1-20__voyage-context-3__v1",
+  "docs__1-28__voyage-context-3__v1",
+  "docs__1-41__voyage-context-3__v1",
+  "docs__1-75__voyage-context-3__v1",
+  "docs__1-77__voyage-context-3__v1",
+  "docs__1-78__voyage-context-3__v1",
+  "docs__1-79__voyage-context-3__v1",
+  "docs__1-80__voyage-context-3__v1",
+  "docs__1-81__voyage-context-3__v1",
+  "rdr__1-20__voyage-context-3__v1",
+  "rdr__1-41__voyage-context-3__v1",
+  "rdr__1-78__voyage-context-3__v1"
+ ],
+ "gate_uncertain_names": [],
+ "coverage_below_0_9": 11,
+ "collections": [
+  {
+   "collection": "docs__1-15__voyage-context-3__v1",
+   "live_chunks": 1461,
+   "unassigned": 3,
+   "has_taxonomy": true,
+   "coverage": 0.997946611909651,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.997946611909651,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-1__voyage-context-3__v1",
+   "live_chunks": 9136,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 196,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-20__voyage-context-3__v1",
+   "live_chunks": 4091,
+   "unassigned": null,
+   "has_taxonomy": false,
+   "coverage": null,
+   "above_0_9": false,
+   "status": "no_taxonomy",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": null,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-27__voyage-context-3__v1",
+   "live_chunks": 788,
+   "unassigned": 3,
+   "has_taxonomy": true,
+   "coverage": 0.9961928934010152,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9961928934010152,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-28__voyage-context-3__v1",
+   "live_chunks": 236,
+   "unassigned": 47,
+   "has_taxonomy": true,
+   "coverage": 0.8008474576271186,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.8008474576271186,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-41__voyage-context-3__v1",
+   "live_chunks": 116,
+   "unassigned": 105,
+   "has_taxonomy": true,
+   "coverage": 0.09482758620689657,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.09482758620689657,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-46__voyage-context-3__v1",
+   "live_chunks": 1252,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 2,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-70__voyage-context-3__v1",
+   "live_chunks": 122,
+   "unassigned": 2,
+   "has_taxonomy": true,
+   "coverage": 0.9836065573770492,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9836065573770492,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-72__voyage-context-3__v1",
+   "live_chunks": 7809,
+   "unassigned": 192,
+   "has_taxonomy": true,
+   "coverage": 0.9754129850172878,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9754129850172878,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-75__voyage-context-3__v1",
+   "live_chunks": 241,
+   "unassigned": 169,
+   "has_taxonomy": true,
+   "coverage": 0.29875518672199175,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.29875518672199175,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-77__voyage-context-3__v1",
+   "live_chunks": 861,
+   "unassigned": 597,
+   "has_taxonomy": true,
+   "coverage": 0.3066202090592335,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.3066202090592335,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-78__voyage-context-3__v1",
+   "live_chunks": 200,
+   "unassigned": 110,
+   "has_taxonomy": true,
+   "coverage": 0.44999999999999996,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.44999999999999996,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-79__voyage-context-3__v1",
+   "live_chunks": 265,
+   "unassigned": 163,
+   "has_taxonomy": true,
+   "coverage": 0.3849056603773585,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.3849056603773585,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-80__voyage-context-3__v1",
+   "live_chunks": 436,
+   "unassigned": 361,
+   "has_taxonomy": true,
+   "coverage": 0.17201834862385323,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.17201834862385323,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-81__voyage-context-3__v1",
+   "live_chunks": 1218,
+   "unassigned": 783,
+   "has_taxonomy": true,
+   "coverage": 0.3571428571428571,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.3571428571428571,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-83__voyage-context-3__v1",
+   "live_chunks": 294,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-84__voyage-context-3__v1",
+   "live_chunks": 668,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-86__voyage-context-3__v1",
+   "live_chunks": 556,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-87__voyage-context-3__v1",
+   "live_chunks": 10456,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-91__voyage-context-3__v1",
+   "live_chunks": 1331,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-92__voyage-context-3__v1",
+   "live_chunks": 168,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-93__voyage-context-3__v1",
+   "live_chunks": 206,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-94__voyage-context-3__v1",
+   "live_chunks": 1864,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-95__voyage-context-3__v1",
+   "live_chunks": 620,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "docs__1-9__voyage-context-3__v1",
+   "live_chunks": 576,
+   "unassigned": 15,
+   "has_taxonomy": true,
+   "coverage": 0.9739583333333334,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9739583333333334,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "knowledge__art-papers__voyage-context-3__v1",
+   "live_chunks": 18039,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "knowledge__distributed-systems__voyage-context-3__v1",
+   "live_chunks": 1029,
+   "unassigned": 5,
+   "has_taxonomy": true,
+   "coverage": 0.9951409135082604,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9951409135082604,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "knowledge__dt-papers__voyage-context-3__v1",
+   "live_chunks": 6717,
+   "unassigned": 308,
+   "has_taxonomy": true,
+   "coverage": 0.9541461962185499,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9541461962185499,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "knowledge__semantic-operators__voyage-context-3__v1",
+   "live_chunks": 876,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-1__voyage-context-3__v1",
+   "live_chunks": 12521,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-20__voyage-context-3__v1",
+   "live_chunks": 819,
+   "unassigned": 402,
+   "has_taxonomy": true,
+   "coverage": 0.5091575091575091,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.5091575091575091,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-27__voyage-context-3__v1",
+   "live_chunks": 1651,
+   "unassigned": 17,
+   "has_taxonomy": true,
+   "coverage": 0.9897032101756511,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9897032101756511,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-41__voyage-context-3__v1",
+   "live_chunks": 67,
+   "unassigned": 54,
+   "has_taxonomy": true,
+   "coverage": 0.19402985074626866,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.19402985074626866,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-46__voyage-context-3__v1",
+   "live_chunks": 403,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 2,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-78__voyage-context-3__v1",
+   "live_chunks": 147,
+   "unassigned": 141,
+   "has_taxonomy": true,
+   "coverage": 0.04081632653061229,
+   "above_0_9": false,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.04081632653061229,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-79__voyage-context-3__v1",
+   "live_chunks": 14300,
+   "unassigned": 709,
+   "has_taxonomy": true,
+   "coverage": 0.9504195804195804,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 0.9504195804195804,
+   "gate_uncertain": false,
+   "note": null
+  },
+  {
+   "collection": "rdr__1-86__voyage-context-3__v1",
+   "live_chunks": 505,
+   "unassigned": 0,
+   "has_taxonomy": true,
+   "coverage": 1.0,
+   "above_0_9": true,
+   "status": "ok",
+   "dims": [
+    1024
+   ],
+   "non_live_chunks": 0,
+   "coverage_upper": 1.0,
+   "gate_uncertain": false,
+   "note": null
+  }
+ ],
+ "table_markdown": "| collection | status | live chunks | unassigned | coverage | >= 0.9 |\n|---|---|---:|---:|---:|---|\n| docs__1-15__voyage-context-3__v1 | ok | 1461 | 3 | 0.9979 | yes |\n| docs__1-1__voyage-context-3__v1 | ok | 9136 | 0 | 1.0000 | yes |\n| docs__1-20__voyage-context-3__v1 | no_taxonomy | 4091 | - | - | no |\n| docs__1-27__voyage-context-3__v1 | ok | 788 | 3 | 0.9962 | yes |\n| docs__1-28__voyage-context-3__v1 | ok | 236 | 47 | 0.8008 | no |\n| docs__1-41__voyage-context-3__v1 | ok | 116 | 105 | 0.0948 | no |\n| docs__1-46__voyage-context-3__v1 | ok | 1252 | 0 | 1.0000 | yes |\n| docs__1-70__voyage-context-3__v1 | ok | 122 | 2 | 0.9836 | yes |\n| docs__1-72__voyage-context-3__v1 | ok | 7809 | 192 | 0.9754 | yes |\n| docs__1-75__voyage-context-3__v1 | ok | 241 | 169 | 0.2988 | no |\n| docs__1-77__voyage-context-3__v1 | ok | 861 | 597 | 0.3066 | no |\n| docs__1-78__voyage-context-3__v1 | ok | 200 | 110 | 0.4500 | no |\n| docs__1-79__voyage-context-3__v1 | ok | 265 | 163 | 0.3849 | no |\n| docs__1-80__voyage-context-3__v1 | ok | 436 | 361 | 0.1720 | no |\n| docs__1-81__voyage-context-3__v1 | ok | 1218 | 783 | 0.3571 | no |\n| docs__1-83__voyage-context-3__v1 | ok | 294 | 0 | 1.0000 | yes |\n| docs__1-84__voyage-context-3__v1 | ok | 668 | 0 | 1.0000 | yes |\n| docs__1-86__voyage-context-3__v1 | ok | 556 | 0 | 1.0000 | yes |\n| docs__1-87__voyage-context-3__v1 | ok | 10456 | 0 | 1.0000 | yes |\n| docs__1-91__voyage-context-3__v1 | ok | 1331 | 0 | 1.0000 | yes |\n| docs__1-92__voyage-context-3__v1 | ok | 168 | 0 | 1.0000 | yes |\n| docs__1-93__voyage-context-3__v1 | ok | 206 | 0 | 1.0000 | yes |\n| docs__1-94__voyage-context-3__v1 | ok | 1864 | 0 | 1.0000 | yes |\n| docs__1-95__voyage-context-3__v1 | ok | 620 | 0 | 1.0000 | yes |\n| docs__1-9__voyage-context-3__v1 | ok | 576 | 15 | 0.9740 | yes |\n| knowledge__art-papers__voyage-context-3__v1 | ok | 18039 | 0 | 1.0000 | yes |\n| knowledge__distributed-systems__voyage-context-3__v1 | ok | 1029 | 5 | 0.9951 | yes |\n| knowledge__dt-papers__voyage-context-3__v1 | ok | 6717 | 308 | 0.9541 | yes |\n| knowledge__semantic-operators__voyage-context-3__v1 | ok | 876 | 0 | 1.0000 | yes |\n| rdr__1-1__voyage-context-3__v1 | ok | 12521 | 0 | 1.0000 | yes |\n| rdr__1-20__voyage-context-3__v1 | ok | 819 | 402 | 0.5092 | no |\n| rdr__1-27__voyage-context-3__v1 | ok | 1651 | 17 | 0.9897 | yes |\n| rdr__1-41__voyage-context-3__v1 | ok | 67 | 54 | 0.1940 | no |\n| rdr__1-46__voyage-context-3__v1 | ok | 403 | 0 | 1.0000 | yes |\n| rdr__1-78__voyage-context-3__v1 | ok | 147 | 141 | 0.0408 | no |\n| rdr__1-79__voyage-context-3__v1 | ok | 14300 | 709 | 0.9504 | yes |\n| rdr__1-86__voyage-context-3__v1 | ok | 505 | 0 | 1.0000 | yes |"
+}
