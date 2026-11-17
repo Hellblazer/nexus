@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-green. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-register-two-moves" author="fixture">
+        <comment>g-register-two-moves</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id) VALUES
+    ('m-widgets-1', 'UPDATE nexus.widgets SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.widgets WHERE dead', 'nexus', 'widgets', 1000, 50, 60000, 'SELECT count(*) FROM nexus.widgets WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.widgets VALIDATE CONSTRAINT moved_check', 'm-widgets-1'),
+    ('m-gizmos-1', 'UPDATE nexus.gizmos SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.gizmos WHERE dead', 'nexus', 'gizmos', 1000, 50, 60000, 'SELECT count(*) FROM nexus.gizmos WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.gizmos VALIDATE CONSTRAINT moved_check', 'm-gizmos-1');
+ALTER TABLE nexus.widgets ADD COLUMN new_col int;
+CREATE TABLE nexus.widgets_new (id int);
+ALTER TABLE nexus.gizmos ADD CONSTRAINT gizmos_new_check CHECK (new_col &gt; 0) NOT VALID;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

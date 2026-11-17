@@ -1,0 +1,7 @@
+# one line per changeset the gate must flag: file::id kind[,kind]; no line means the gate must pass it
+02-bad-exemptions.xml::ex-names-a-driven-table exemption,r1.update
+02-bad-exemptions.xml::ex-names-a-growing-table exemption,r1.update
+02-bad-exemptions.xml::ex-names-a-per-model-table exemption,r2.validate
+02-bad-exemptions.xml::ex-names-a-table-the-changeset-never-touches exemption,r1.update
+02-bad-exemptions.xml::ex-without-a-reason r1.update
+02-bad-exemptions.xml::ex-without-the-colon-form r1.update

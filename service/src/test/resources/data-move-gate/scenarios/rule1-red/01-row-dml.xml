@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule1-red. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="r1-update" author="fixture">
+        <comment>r1-update</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.chunks SET embedding_model = 'm' WHERE embedding_model IS NULL;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-delete" author="fixture">
+        <comment>r1-delete</comment>
+        <sql splitStatements="false" stripComments="false">
+DELETE FROM nexus.catalog_links WHERE dead;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-insert-select" author="fixture">
+        <comment>r1-insert-select</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.other (a) SELECT a FROM nexus.chunks;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-alter-type" author="fixture">
+        <comment>r1-alter-type</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.t ALTER COLUMN c SET DATA TYPE bigint;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-alter-type-short" author="fixture">
+        <comment>r1-alter-type-short</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.t ADD COLUMN k int, ALTER c TYPE bigint USING c::bigint;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-generated-readded" author="fixture">
+        <comment>r1-generated-readded</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.t DROP COLUMN g, ADD COLUMN g int GENERATED ALWAYS AS (a + 1) STORED;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-ctas" author="fixture">
+        <comment>r1-ctas</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE TABLE nexus.copy AS SELECT * FROM nexus.t;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-ctas-columns" author="fixture">
+        <comment>r1-ctas-columns</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE UNLOGGED TABLE nexus.copy2 (a, b) WITH (fillfactor = 80) AS SELECT a, b FROM nexus.t;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-with-dml" author="fixture">
+        <comment>r1-with-dml</comment>
+        <sql splitStatements="false" stripComments="false">
+WITH d AS (DELETE FROM nexus.t RETURNING a) SELECT count(*) FROM d;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-merge" author="fixture">
+        <comment>r1-merge</comment>
+        <sql splitStatements="false" stripComments="false">
+MERGE INTO nexus.t USING nexus.u ON t.id = u.id WHEN MATCHED THEN DELETE;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-select-into" author="fixture">
+        <comment>r1-select-into</comment>
+        <sql splitStatements="false" stripComments="false">
+SELECT a INTO nexus.copy3 FROM nexus.t;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r1-after-a-comment-and-a-literal" author="fixture">
+        <comment>r1-after-a-comment-and-a-literal</comment>
+        <sql splitStatements="false" stripComments="false">
+-- leading comment; with a semicolon
+SELECT 'a;b';
+/* block; */ UPDATE nexus.t SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario exemption-green. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-exempt-small-table" author="fixture">
+        <comment>Backfills nexus.settings, one row per install.
+data-move-exempt: nexus.settings: one row per install, never grows with user data
+End.</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+ALTER TABLE nexus.settings VALIDATE CONSTRAINT s_check;
+ALTER TABLE nexus.settings DROP COLUMN old_v;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -1,0 +1,73 @@
+# DataMoveChangesetGateTest: the frozen list (RDR-246 Step 5, nexus-f3yqd.2.19).
+#
+# The shipped changesets that rule 1 (row DML), rule 2 (boot scans) or rule 3 (destructive statement on a registered move's
+# table) finds, one `<file>::<changeset id>` per line, derived by the gate at its own revision. They ran in earlier releases
+# and are exempt from all three rules. The list is EXACTLY those offenders: an entry the rules no longer find fails as stale,
+# and an entry in a changelog after the freeze point fails, so it never grows to admit a new changeset. It only shrinks.
+# A new changeset that needs a boot-time rewrite registers a move in nexus.data_moves (RDR-246), or carries an exemption line
+# naming a table whose size does not grow with user data; it is never added here.
+#
+# freeze-point: taxonomy-023-coverage-counts-set-based.xml
+aspects-003-type-hygiene.xml::aspects-003-1-document-aspects-type-hygiene
+aspects-003-type-hygiene.xml::aspects-003-2-promotion-log-type-hygiene
+aspects-004-doc-id-backfill.xml::aspects-004-1
+catalog-002-hygiene.xml::catalog-002-1-temporal-typing
+catalog-013-chash-checks-validate.xml::catalog-013-0
+catalog-013-chash-checks-validate.xml::catalog-013-1b
+catalog-013-chash-checks-validate.xml::catalog-013-2
+catalog-015-fts-filename-tokens.xml::catalog-015-0
+catalog-016-source-uri-unique.xml::catalog-016-0
+catalog-017-fts-diacritic-folding.xml::catalog-017-0
+catalog-021-index-run-fence-check.xml::catalog-021-1
+catalog-025-collection-not-null.xml::catalog-025-0
+catalog-029-manifest-chunk-fk.xml::catalog-029-2
+catalog-031-type-hygiene.xml::catalog-031-1-documents-temporal
+catalog-031-type-hygiene.xml::catalog-031-2-links-created-at
+catalog-031-type-hygiene.xml::catalog-031-3-collections-legacy-bool
+catalog-032-links-tumbler-fk.xml::catalog-032-2
+catalog-032-links-tumbler-fk.xml::catalog-032-3
+fk-001-catalog-cross-store.xml::fk-001-2
+fk-001-catalog-cross-store.xml::fk-001-3
+fk-001-catalog-cross-store.xml::fk-001-4
+fk-001-catalog-cross-store.xml::fk-001-5
+fk-002-collection-registry.xml::fk-002-0-backfill-stubs
+fk-002-validate.xml::fk-002-11
+fk-002-validate.xml::fk-002-6-reconcile
+fk-002-validate.xml::fk-002-7
+fk-002-validate.xml::fk-002-8
+fk-002-validate.xml::fk-002-9
+fk-003-collection-registry-extra.xml::fk-003-0-backfill-stubs
+fk-003-validate.xml::fk-003-6-reconcile
+fk-004-chunks-collection-registry.xml::fk-004-1-reconcile
+fk-004-chunks-collection-registry.xml::fk-004-2
+hygiene-001-not-null.xml::hygiene-001-4
+hygiene-001-not-null.xml::hygiene-001-5
+hygiene-001-not-null.xml::hygiene-001-7
+hygiene-001-not-null.xml::hygiene-001-8
+memory-001-baseline.xml::memory-001-4
+memory-002-fts-separator-tokens.xml::memory-002-1
+note-uri-001-backfill.xml::note-uri-001-1
+pipeline-002-per-row-identity.xml::pipeline-002-2
+plans-001-baseline.xml::plans-001-3
+plans-002-jsonb.xml::plans-002-1-type-hygiene
+rdr180-001-bytea-chash.xml::rdr180-3-convert-chunks-384
+rdr180-001-bytea-chash.xml::rdr180-4-convert-chunks-768
+rdr180-001-bytea-chash.xml::rdr180-5-convert-chunks-1024
+rdr180-001-bytea-chash.xml::rdr180-6-convert-manifest
+rdr180-001-bytea-chash.xml::rdr180-7-convert-chash-index
+remap-003-new-chash-bytea.xml::remap-003-1
+service-tokens-003-scope-column.xml::service-tokens-003-1
+t1-001-baseline.xml::t1-001-4
+taxonomy-007-unify-centroids.xml::taxonomy-007-1
+taxonomy-008-link-types-jsonb.xml::taxonomy-008-1-link-types-jsonb
+taxonomy-010-source-collection-backfill.xml::taxonomy-010-1
+taxonomy-011-doc-id-bytea.xml::taxonomy-011-1
+taxonomy-012-doc-id-chunk-fk.xml::taxonomy-012-3
+telemetry-004-type-hygiene.xml::telemetry-004-1-hook-failures-type-hygiene
+tuples-003-body-size-limit.xml::tuples-003-2
+tuples-004-clear-consumed-body.xml::tuples-004-1
+tuples-012-retire-ledger.xml::tuples-012-1
+vectors-004-unify-chunks.xml::vectors-004-1
+vectors-014-retention.xml::vectors-014-2
+vectors-030-model-tenant-partition-functions.xml::vectors-030-1
+vectors-046-request-ledger-tenants.xml::vectors-046-4

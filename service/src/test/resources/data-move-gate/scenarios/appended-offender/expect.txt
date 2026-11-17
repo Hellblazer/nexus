@@ -1,0 +1,3 @@
+# one line per changeset the gate must flag: file::id kind[,kind]; no line means the gate must pass it
+zz-new-offender.xml::new-update-on-chunks r1.update
+zz-new-offender.xml::new-validating-add-constraint r2.add-constraint

@@ -1,0 +1,13 @@
+# one line per changeset the gate must flag: file::id kind[,kind]; no line means the gate must pass it
+01-row-dml.xml::r1-after-a-comment-and-a-literal r1.update
+01-row-dml.xml::r1-alter-type r1.alter-type
+01-row-dml.xml::r1-alter-type-short r1.alter-type
+01-row-dml.xml::r1-ctas r1.ctas
+01-row-dml.xml::r1-ctas-columns r1.ctas
+01-row-dml.xml::r1-delete r1.delete
+01-row-dml.xml::r1-generated-readded r1.generated
+01-row-dml.xml::r1-insert-select r1.insert-select
+01-row-dml.xml::r1-merge r1.merge
+01-row-dml.xml::r1-select-into r1.select-into
+01-row-dml.xml::r1-update r1.update
+01-row-dml.xml::r1-with-dml r1.with-dml

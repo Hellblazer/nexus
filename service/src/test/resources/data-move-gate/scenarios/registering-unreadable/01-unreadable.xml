@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario registering-unreadable. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="u-no-column-list" author="fixture">
+        <comment>u-no-column-list</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves VALUES ('x', 't', 'nexus', 'chunks', 1, 0, 1, 'v', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="u-select-form" author="fixture">
+        <comment>u-select-form</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+SELECT 'x', 't', 'nexus', 'chunks', 1, 0, 1, 'v';
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="u-label-is-not-a-literal" author="fixture">
+        <comment>u-label-is-not-a-literal</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES (lower('X'), 't', 'nexus', 'chunks', 1, 0, 1, 'v');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="u-wrong-value-count" author="fixture">
+        <comment>u-wrong-value-count</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, driving_table) VALUES ('x');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

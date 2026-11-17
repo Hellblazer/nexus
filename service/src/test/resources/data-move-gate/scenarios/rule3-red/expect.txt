@@ -1,0 +1,12 @@
+# one line per changeset the gate must flag: file::id kind[,kind]; no line means the gate must pass it
+01-register.xml::reg-gadgets-and-drops-its-own-table r3.destructive-without-precondition
+02-destructive.xml::r3-drop-column r3.destructive-without-precondition
+02-destructive.xml::r3-drop-table r3.destructive-without-precondition
+02-destructive.xml::r3-drop-table-list r3.destructive-without-precondition
+02-destructive.xml::r3-halt-not-continue r3.destructive-without-precondition
+02-destructive.xml::r3-label-only-in-a-comment r3.destructive-without-precondition
+02-destructive.xml::r3-not-completed-at r3.destructive-without-precondition
+02-destructive.xml::r3-rename-column r3.destructive-without-precondition
+02-destructive.xml::r3-rename-to r3.destructive-without-precondition
+02-destructive.xml::r3-swap-in r3.destructive-without-precondition
+02-destructive.xml::r3-wrong-label r3.destructive-without-precondition

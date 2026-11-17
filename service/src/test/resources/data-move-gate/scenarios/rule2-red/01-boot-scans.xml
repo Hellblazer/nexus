@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule2-red. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="r2-add-constraint" author="fixture">
+        <comment>r2-add-constraint</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_documents ADD CONSTRAINT documents_size_check CHECK (size_bytes &gt;= 0);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-add-fk-chunks" author="fixture">
+        <comment>r2-add-fk-chunks</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks ADD CONSTRAINT chunks_fk FOREIGN KEY (a) REFERENCES nexus.x (a);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-add-unnamed-unique" author="fixture">
+        <comment>r2-add-unnamed-unique</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE ONLY nexus.catalog_links ADD UNIQUE (a, b);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-add-primary-key" author="fixture">
+        <comment>r2-add-primary-key</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE IF EXISTS nexus.catalog_document_chunks ADD PRIMARY KEY (a);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-validate" author="fixture">
+        <comment>r2-validate</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.topic_assignments VALIDATE CONSTRAINT assignments_check;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-validate-leaf" author="fixture">
+        <comment>r2-validate-leaf</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks_m0abc VALIDATE CONSTRAINT leaf_check;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-set-not-null" author="fixture">
+        <comment>r2-set-not-null</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus."catalog_document_chunks" ALTER COLUMN "collection" SET NOT NULL;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-second-action-is-valid" author="fixture">
+        <comment>r2-second-action-is-valid</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks ADD CONSTRAINT a_check CHECK (x &gt; 0) NOT VALID, ADD CONSTRAINT b_check CHECK (y &gt; 0);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r2-precondition-does-not-lift-it" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'g-move-1' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>r2-precondition-does-not-lift-it</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_links VALIDATE CONSTRAINT links_check;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

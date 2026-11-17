@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule2-green. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-not-valid" author="fixture">
+        <comment>g-not-valid</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks ADD CONSTRAINT a_check CHECK (x &gt; 0) NOT VALID;
+ALTER TABLE nexus.catalog_documents ADD CONSTRAINT d_fk FOREIGN KEY (a) REFERENCES nexus.u (a) NOT VALID;
+ALTER TABLE nexus.catalog_links ADD COLUMN extra int;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-small-table" author="fixture">
+        <comment>g-small-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.settings ADD CONSTRAINT s_check CHECK (v &gt; 0);
+ALTER TABLE nexus.settings VALIDATE CONSTRAINT s_check;
+ALTER TABLE nexus.settings ALTER COLUMN v SET NOT NULL;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-chunks-lookalike" author="fixture">
+        <comment>g-chunks-lookalike</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunk_orphaned_at ALTER COLUMN a SET NOT NULL;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>
