@@ -45,6 +45,7 @@ import structlog
 
 from nexus.redact import redact_credentials
 
+from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY
 from nexus.upgrade_ladder.completion import derive_ladder_position
 from nexus.upgrade_ladder.deadline import Deadline, active_deadline, active_expired, bound
 from nexus.upgrade_ladder.engine_outage import engine_unreachable
@@ -163,6 +164,9 @@ class RungRun:
     #: start: that rung did not defer, the budget ran out ahead of it (nexus-0sm1t counts it as no deferral).
     #: Left out of equality: it is provenance, not part of what a run reports.
     deadline_stop: bool = field(default=False, compare=False)
+    #: True only for a SKIPPED_NOT_APPLICABLE run whose rung declined this unattended run (its detect detail carries
+    #: ``INTERACTIVE_REMEDY``): it did not finish, so a rung with a hard edge from it waits. Provenance, like above.
+    declined: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -297,7 +301,7 @@ class LadderRunner:
             if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED):
                 runs.extend(self._not_attempted(rungs))
                 break
-            if run.outcome is RungOutcome.DEFERRED:
+            if run.outcome is RungOutcome.DEFERRED or run.declined:
                 held.add(rung.name)
         return LadderRunReport(
             runs=tuple(runs),
@@ -395,7 +399,10 @@ class LadderRunner:
 
         if not status.applicable:
             self._reporter.emit("ladder_rung_skipped_na", rung=rung.name)
-            return RungRun(rung.name, RungOutcome.SKIPPED_NOT_APPLICABLE)
+            # A rung that declined an unattended run (a managed service) is not done: its hard-edge dependents wait,
+            # as they do on a deferral, but without the deferral's warning.
+            declined = INTERACTIVE_REMEDY in (status.pending_detail or "")
+            return RungRun(rung.name, RungOutcome.SKIPPED_NOT_APPLICABLE, declined=declined)
 
         if status.converged and rung.name in self._store.verified_rungs():
             return RungRun(rung.name, RungOutcome.ALREADY_RECORDED)

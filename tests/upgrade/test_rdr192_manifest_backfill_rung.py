@@ -26,11 +26,12 @@ from structlog.testing import capture_logs
 
 import nexus.catalog.factory as factory
 import nexus.db as nexus_db
+from nexus import health, upgrade_finish
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY
 from nexus.upgrade_ladder.completion import CompletionRecord
-from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
-from nexus.upgrade_ladder.registry import LadderRegistry, default_registry
+from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung, RungStatus
+from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SECTION_LABELS, LadderRegistry, default_registry
 from nexus.upgrade_ladder.retire_keys_state import swept_pin_reason
 from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
     RUNG_NAME,
@@ -1036,7 +1037,6 @@ def test_an_unattended_converge_on_a_managed_service_censuses_nothing_and_defers
     assert tenant.lock.entered == 0, "refused before the lock"
 
 
-
 @pytest.mark.parametrize("record", [None, "1.0.0"], ids=["no-record", "older-record"])
 def test_an_unattended_detect_on_a_managed_service_is_not_applicable_and_names_the_interactive_command(record) -> None:
     """The observability look-back (2026-11-17): refused only in converge, the rung read pending at every unattended
@@ -1120,3 +1120,69 @@ def test_an_unattended_verify_on_a_managed_service_censuses_nothing_and_defers()
             r = t.rung(managed_fn=lambda m=managed: m)
             r.verify()
         assert t.censuses >= 1 and not r.verify_deferred()
+
+
+# ── observability look-back 2026-11-17: the declined rung holds its dependents and is told once ──────────────
+
+
+class _Dependent:
+    """A rung with a hard edge from the backfill: it records when walked, which it must not do while the backfill
+    has not finished (registry.HARD_EDGES)."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.walked = 0
+
+    def detect(self) -> RungStatus:
+        self.walked += 1
+        return RungStatus(applicable=True, converged=True)
+
+    def converge(self, report):  # pragma: no cover - converged at detect
+        raise AssertionError("not reached")
+
+    def verify(self) -> bool:
+        return True
+
+
+def test_a_declined_backfill_holds_its_hard_edge_dependents_without_a_warning() -> None:
+    """A deferral held them before (nexus-dfemn); a decline must too: section labels and the span fill read converged
+    for good once recorded, so recording them before the backfill adds its rows would leave those rows unfilled."""
+    tenant = FakeTenant({"knowledge__a": 7})
+    dependent = _Dependent(RUNG_MANIFEST_SECTION_LABELS)
+    ledger = InMemoryCompletionLedger()
+    with unattended_run(), capture_logs() as logs:
+        report = LadderRunner(LadderRegistry((tenant.rung(managed_fn=lambda: True), dependent)), ledger).run()
+    assert [(r.name, r.outcome) for r in report.runs] == [
+        (RUNG_NAME, RungOutcome.SKIPPED_NOT_APPLICABLE), (RUNG_MANIFEST_SECTION_LABELS, RungOutcome.NOT_ATTEMPTED)]
+    assert dependent.walked == 0 and ledger.verified_rungs() == frozenset()
+    assert not [e for e in logs if e.get("log_level") == "warning"]
+
+
+def test_an_interactive_walk_still_reaches_the_dependent_after_the_backfill() -> None:
+    tenant = FakeTenant({})
+    dependent = _Dependent(RUNG_MANIFEST_SECTION_LABELS)
+    LadderRunner(LadderRegistry((tenant.rung(managed_fn=lambda: True), dependent)), InMemoryCompletionLedger()).run()
+    assert dependent.walked == 1
+
+
+def test_doctor_names_the_declined_backfill_with_its_reason_and_the_interactive_command(monkeypatch) -> None:
+    tenant = FakeTenant({"knowledge__a": 7})
+    with unattended_run():
+        status = tenant.rung(managed_fn=lambda: True).detect()
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry(()))
+    monkeypatch.setattr("nexus.upgrade_ladder.runner.pending_rungs", lambda _reg: [(RUNG_NAME, status)])
+    (row,) = health._check_pending_rungs()
+    assert row.warn and not row.ok
+    assert f"not checked: {RUNG_NAME} (no completion is recorded, so the engine's reaper stays refused)" in row.detail
+    assert any("interactively" in s for s in row.fix_suggestions), row.fix_suggestions
+
+
+def test_the_version_change_callout_names_the_declined_backfill_once_with_the_command(monkeypatch) -> None:
+    tenant = FakeTenant({"knowledge__a": 7})
+    tenant.record = _record("1.0.0")
+    rung = tenant.rung(managed_fn=lambda: True)
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: (rung,))
+    (line,) = upgrade_finish.pending_data_rung_callout()
+    assert line.startswith(f"data rung '{RUNG_NAME}' not checked — the completion recorded at package version 1.0.0")
+    assert line.endswith("run `nx upgrade` interactively")
+    assert upgrade_finish.pending_data_rung_callout(upgrade_walks_ladder=True) == []

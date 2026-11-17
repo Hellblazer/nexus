@@ -10126,8 +10126,10 @@ def _check_pending_rungs() -> list[HealthResult]:
             + ", ".join(f"{name} (recorded {when})" for name, when in answered_from_record)
         )
     # A rung that declined to read a managed catalog says so with the shared INTERACTIVE_REMEDY text.
+    # Each with its own reason's first clause: rdr192-manifest-backfill's says whether an older completion still
+    # answers the engine's reaper gate or none is recorded and the reaper stays refused.
     not_checked = [
-        name for name, status in statuses
+        f"{name} ({status.pending_detail.split('; ')[0]})" for name, status in statuses
         if not status.applicable and INTERACTIVE_REMEDY in (status.pending_detail or "")
     ]
     if not pending and not not_checked:

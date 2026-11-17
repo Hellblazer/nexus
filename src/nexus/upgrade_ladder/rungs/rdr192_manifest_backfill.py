@@ -821,15 +821,24 @@ class Rdr192ManifestBackfillRung:
         if refuses_managed_unattended(self.managed_fn):
             # converge() refuses this run anyway (nexus-75w5d). Said here, as the sibling data rungs do, the walk
             # skips the rung with no deferral warning and `nx doctor` lists it once as not checked; refused only
-            # in converge, it logged a warning at every unattended session start after each version bump.
-            held = (
-                f"the completion recorded at package version {record.package_version} stands (the engine's gate "
-                "reads a record at any version)"
-                if record is not None else "no completion is recorded, so the engine's reaper stays refused"
-            )
+            # in converge, it logged a warning at every unattended session start after each version bump. The runner
+            # still holds this rung's hard-edge dependents (RungRun.declined). On a local engine an unattended run is
+            # not refused: it censuses and backfills within the `--auto` time limit, resuming from its progress note.
+            if record is not None:
+                held = (
+                    f"the completion recorded at package version {record.package_version} stands (the engine's "
+                    "gate reads a record at any version)"
+                )
+            elif ledger_error:
+                held = ledger_error.strip().removeprefix("(").removesuffix(")")  # "the completion ledger could not be read: ..."
+            else:
+                held = "no completion is recorded, so the engine's reaper stays refused"
+            note = guarded("residual_note", self.memo.load, None)
+            if note and note.get("detail"):
+                held += f", and the last attempt ({note.get('at', '?')}) left a residual: {note['detail']}"
             reason = (
                 f"{held}; unattended `nx upgrade` does not census a managed service's collections "
-                f"(one engine scan each); {INTERACTIVE_REMEDY}{ledger_error}"
+                f"(one engine scan each); {INTERACTIVE_REMEDY}"
             )
             return RungStatus(applicable=False, converged=False, pending_detail=reason)
 
