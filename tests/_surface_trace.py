@@ -120,10 +120,10 @@ def _subprocess(args: Any, cwd: Any) -> None:
             specs = [t for t in tail if not t.startswith("-")]
             if sub == "ls-tree":
                 specs = specs[1:]  # the first is the tree-ish
-        targets = specs or ["."]
-        for t in targets:
-            t = t.split(":", 1)[-1] if t.startswith(":") else t
-            _record("prefixes", _rel(t.rstrip("*").rstrip("/") or ".", where))
+        for t in specs or ["."]:
+            static = _pathspec_root(t)
+            if static is not None:
+                _record("prefixes", _rel(static or ".", where))
         return
     if tool in _TREE_WALKERS:
         paths = [a for a in rest if not a.startswith("-") and os.path.exists(os.path.join(where, a))]
@@ -133,6 +133,26 @@ def _subprocess(args: Any, cwd: Any) -> None:
     if tool in _NO_REPO_READS:
         return
     _record("opaque", " ".join(argv)[:200])
+
+
+def _pathspec_root(spec: str) -> str | None:
+    """The directory a git pathspec can match under: its text before the first glob
+    character, cut back to a whole directory ("" is the whole repo). None for an
+    exclude, which narrows a listing and adds nothing to read."""
+    if spec.startswith(":"):
+        if spec.startswith((":!", ":^")):
+            return None
+        if spec.startswith(":("):
+            magic, _, spec = spec[2:].partition(")")
+            if "exclude" in magic.split(","):
+                return None
+        else:
+            spec = spec[1:]
+    cut = min((i for i, c in enumerate(spec) if c in "*?["), default=len(spec))
+    if cut == len(spec):
+        return spec.rstrip("/")
+    head = spec[:cut]
+    return head.rsplit("/", 1)[0] if "/" in head else ""
 
 
 def _hook(event: str, args: tuple) -> None:

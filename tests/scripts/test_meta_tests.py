@@ -205,7 +205,7 @@ def test_the_tracer_records_reads_listings_stats_and_git_enumerations_and_skips_
             "def test_reads():\n"
             "    Path('docs/a.md').read_text()\n"
             "    assert not os.path.exists('docs/absent.md')\n"
-            "    subprocess.run(['git', 'ls-files', '--', 'service'], check=True, capture_output=True)\n"
+            "    subprocess.run(['git', 'ls-files', '--', 'service', 'src/**.py', ':!docs'], check=True, capture_output=True)\n"
             "    subprocess.run(['ps', '-o', 'pid='], capture_output=True)\n"
             "def test_opaque():\n"
             "    subprocess.run([os.sys.executable, '-c', 'pass'], check=True)\n"
@@ -224,7 +224,48 @@ def test_the_tracer_records_reads_listings_stats_and_git_enumerations_and_skips_
     assert "docs/a.md" in got["opened"]
     assert "docs/absent.md" in got["statted"]
     assert "src/nexus/pkg" in got["listed"]  # module level: recorded during collection
-    assert got["prefixes"] == ["service"]
+    assert got["prefixes"] == ["service", "src"]
     assert [o for o in got["opaque"] if o.startswith(sys.executable)], got["opaque"]
     assert not any(o.startswith("ps ") for o in got["opaque"])
     assert not any(p.endswith(".pyc") or p == "tests/_surface_trace.py" for p in got["opened"])
+
+
+@pytest.mark.parametrize(
+    ("spec", "root"),
+    [
+        ("src/nexus", "src/nexus"),
+        ("src/nexus/", "src/nexus"),
+        ("src/nexus/**.py", "src/nexus"),
+        ("src/nexus/a*.py", "src/nexus"),
+        ("*.py", ""),
+        ("docs/rdr/rdr-[0-9]*.md", "docs/rdr"),
+        (":(glob)tests/**/test_*.py", "tests"),
+        (":!docs", None),
+        (":^docs", None),
+        (":(exclude)docs", None),
+        (":(top,exclude)docs", None),
+        (":(top)scripts", "scripts"),
+    ],
+)
+def test_a_pathspec_is_read_as_the_directory_it_can_match_under(spec: str, root: str | None) -> None:
+    sys.path.insert(0, str(REPO_ROOT))
+    from tests._surface_trace import _pathspec_root
+
+    assert _pathspec_root(spec) == root
+
+
+def test_compaction_drops_only_what_selects_nothing_more() -> None:
+    got = mt.compact({
+        "prefixes": ["src/nexus", "src/nexus/pkg", "tests"],
+        "listed": ["src/nexus/x", "docs"],
+        "opened": ["src/nexus/a.py", "docs/a.md", "docs/sub/b.md", "README.md"],
+        "statted": ["docs/sub/b.md", "docs/c.md", "scripts/s.py"],
+        "opaque": ["bash x.sh"],
+    })
+    assert got == {
+        "prefixes": ["src/nexus", "tests"],
+        "listed": ["docs"],
+        "opened": ["README.md", "docs/sub/b.md"],
+        "statted": ["scripts/s.py"],
+        "opaque": ["bash x.sh"],
+    }
