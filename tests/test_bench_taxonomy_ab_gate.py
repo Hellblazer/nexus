@@ -571,7 +571,7 @@ class TestRuleBlock:
         block = _block(text, "topk1@g0.9")
         assert "gain vs OFF +0.1500; wins 13, losses 0; min per-question delta vs OFF +0.0000" in block[1]
         assert "gated minus ungated mean +0.0000" in block[2] and "S1 delta within the run 0.0000 (no saved run)" in block[2]
-        assert block[-1] == "  => PASS"
+        assert block[-1] == "  => PASS (topk1@g0.9, decides the verdict)"
         assert all(ln.endswith("PASS") for ln in block[3:7])
         assert "cband0.03@g0.9" in text  # the second arm is reported too
         assert "n = 26 questions" in text

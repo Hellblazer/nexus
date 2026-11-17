@@ -217,7 +217,8 @@ def rule(gated: dict[str, Any], saved: dict[str, Any] | None = None) -> list[str
             f"  wins >= {WINS_MIN} and losses <= {LOSSES_MAX}: {_pf(core['wins_losses'])}",
             f"  no question worse than OFF by more than {-WORST_MIN}: {_pf(core['worst'])}",
             f"  |gated - ungated| <= max({DRIFT_FLOOR}, S1 drift): {_pf(stable)}",
-            f"  => {_pf(all(core.values()) and stable)}"]
+            f"  => {_pf(all(core.values()) and stable)} ({arm}, "
+            f"{'decides the verdict' if arm == 'topk1@g0.9' else 'reported only, does not decide'})"]
         if arm == "topk1@g0.9":
             decided = {"st": st, "moved": moved, "worse": worse_than_ung, "core": all(core.values()),
                        "stable": stable, "tol": tol}
