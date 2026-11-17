@@ -213,7 +213,8 @@ def test_the_tracer_records_reads_listings_stats_and_git_enumerations_and_skips_
         ),
     })
     out = tmp_path / "trace"
-    env = {**os.environ, "NX_SURFACE_TRACE_OUT": str(out), "PYTHONPATH": str(repo / "src") + os.pathsep + str(repo)}
+    env = {**os.environ, "NX_TEST_T2_SUBSTRATE": "none", "NX_SURFACE_TRACE_OUT": str(out),
+           "PYTHONPATH": str(repo / "src") + os.pathsep + str(repo)}
     run = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:randomly", "-p", "no:cacheprovider", "-p", "tests._surface_trace",
          "--rootdir", str(repo), "-c", os.devnull, "tests/test_traced.py"],
@@ -322,7 +323,7 @@ def test_build_traces_each_file_for_real_and_marks_a_failed_run_incomplete(
 ) -> None:
     _with_tracer(repo)
     assert mt.main(["build", "--repo", str(repo), "--jobs", "2"]) == 0
-    tests = json.loads((repo / mt.MANIFEST).read_text())["tests"]
+    tests = mt.load_manifest(repo / mt.MANIFEST)["tests"]
     assert set(tests) == {"tests/test_scan.py", "tests/test_census.py", "tests/test_imports.py"}
     assert "docs/a.md" in tests["tests/test_scan.py"]["opened"]
     assert tests["tests/test_census.py"]["listed"] == ["src/nexus/pkg"]
