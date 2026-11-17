@@ -314,16 +314,24 @@ def scenario_upgrade(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     """One boot on the old state with the move registered. The WAL phases come from the harness's own run; this
     records what the install looks like at each step."""
     ubw = eng.ubw
-    before = None
+    # What the install held before this boot: PG is started on its own, read, and stopped again, so nothing but the
+    # new client and engine have touched it when the boot below runs.
+    eng.inst.pg_ctl("start", "-w")
     try:
-        before = sql(eng, "select count(*) from pg_extension where extname = 'pg_background'")[0][0]
-    except (MvvError, ubw.HarnessError):
-        before = "pg down"  # the old state is stopped; PG comes up with the engine start
+        before = {"pg_background_extension": sql(eng, "select count(*) from pg_extension where extname = 'pg_background'")[0][0],
+                  "library_roles": [r[0] for r in sql(eng, "select rolname from pg_roles where rolname like 'dml_utils%' "
+                                                           "or rolname like 'ddl_utils%' order by 1")],
+                  "library_schemas": [r[0] for r in sql(eng, "select nspname from pg_namespace where nspname in "
+                                                             "('dml_utils', 'ddl_utils', 'dml_utils_data', 'liquibase') order by 1")],
+                  "data_moves_table": sql(eng, "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+                                               "where n.nspname = 'nexus' and c.relname = 'data_moves'")[0][0]}
+    finally:
+        eng.inst.pg_ctl("stop", "-m", "fast", "-w")
     base = eng.inst.checkpoint_lsn()
     t_start = time.monotonic()
     marks = eng.start("upgrade")
     ready_lsn = wal_lsn(eng)
-    out: dict = {"marks": marks, "pg_background_before_boot": before, "boot_wal_bytes": ready_lsn - ubw.lsn_bytes(base)}
+    out: dict = {"marks": marks, "state_before_boot": before, "boot_wal_bytes": ready_lsn - ubw.lsn_bytes(base)}
     out["libraries_at_ready"] = library_state(eng)
     samples: list = []
     if move_row(eng) is None:
