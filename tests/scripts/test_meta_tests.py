@@ -338,12 +338,13 @@ def test_run_selects_from_the_built_manifest_runs_the_pick_and_says_what_it_does
     _git(repo, "commit", "-qm", "manifest")
     _git(repo, "tag", "-f", "base")
     (repo / "docs/a.md").write_text("changed\n")
-    rc = mt.main(["run", "--repo", str(repo), "--base", "base"])
+    rc = mt.main(["run", "--repo", str(repo), "--base", "base", "--", "--maxfail=50"])
     out = capsys.readouterr().out
     assert "tests/test_scan.py: reads docs/a.md" in out
     assert "tests/test_census.py" not in out.split("run whatever the diff")[0]
     assert "tests/test_imports.py: its traced run did not complete cleanly" in out
     assert "meta-tests ran in" in out
+    assert "--maxfail=50 tests/" in out  # pytest arguments after -- reach the meta-test run
     assert out.rstrip().endswith(mt.NOT_COVERED)
     assert rc == 1  # test_imports fails, and it ran
 

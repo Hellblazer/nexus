@@ -479,7 +479,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     rc = 0
     runs = []
     if files:
-        runs.append(("meta-tests", [*shlex.split(META_RUN), *files]))
+        runs.append(("meta-tests", [*shlex.split(META_RUN), *args.pytest_args, *files]))
     if guards:
         runs.append(("session-items guard with the changed test files",
                      [*shlex.split(GUARD_RUN), *guards, *changed_tests]))
@@ -625,6 +625,10 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--base", default="origin/develop")
         p.add_argument("--repo", default=".")
+        if name == "run":
+            p.add_argument("pytest_args", nargs="*",
+                           help="extra pytest arguments for the meta-test run, e.g. -n 4 inside a lab grant"
+                                " (an -n run is heavy on a laptop)")
         if name == "select":
             p.add_argument("--json", action="store_true")
             p.add_argument("--names-from-stdin", action="store_true",
