@@ -1686,7 +1686,8 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     if killed_survivors:
         click.echo(
             f"Warning: pid(s) {', '.join(str(p) for p in killed_survivors)} "
-            "survived SIGKILL and may still be running.",
+            "survived SIGKILL, or could not be signalled at all because "
+            "another user owns them (EPERM), and may still be running.",
             err=True,
         )
 
