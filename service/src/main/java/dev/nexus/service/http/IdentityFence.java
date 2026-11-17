@@ -89,7 +89,10 @@ public final class IdentityFence {
         }
         if (tokenId == null) {
             if ("unleased".equals(state.get().lease())) {
-                ex.getResponseHeaders().add(UNATTESTED_HEADER, "true");
+                // A parked in is fenced again when it wakes: the label is set once.
+                if (!ex.getResponseHeaders().containsKey(UNATTESTED_HEADER)) {
+                    ex.getResponseHeaders().add(UNATTESTED_HEADER, "true");
+                }
                 log.info("event=identity_fence_unattested tenant={} owner={} path={}", tenant, ownerId,
                     ex.getRequestURI().getPath());
                 return;

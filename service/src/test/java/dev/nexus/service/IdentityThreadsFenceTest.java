@@ -9,6 +9,7 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -309,6 +310,39 @@ class IdentityThreadsFenceTest extends IdentityFenceHarness {
         put(owner.token(), title, "once more");
         assertThat(post(null, "/v1/memory/import_batch", Map.of("rows", List.of(row))).status()).isEqualTo(200);
         assertThat(stampOf(id)).as("import_batch").isNull();
+    }
+
+    private long insertStamped(String project, String title, String content, String identity) {
+        return scope.withTenant(TENANT, ctx -> ctx.insertInto(MEMORY).set(MEMORY.TENANT_ID, TENANT).set(MEMORY.PROJECT, project)
+            .set(MEMORY.TITLE, title).set(MEMORY.CONTENT, content).set(MEMORY.TIMESTAMP, OffsetDateTime.now(ZoneOffset.UTC))
+            .set(MEMORY.IDENTITY, identity).returning(MEMORY.ID).fetchOne().getId());
+    }
+
+    @Test
+    void aMergeWithoutATokenClearsTheStampOfTheKeptRowAndOneWithATokenStampsIt() {
+        Seat owner = bindSeat("thread-merge-stamp", 424);
+        long keep = insertStamped("notes", unique("keep"), "legacy words", owner.id());
+        Resp bare = post(null, "/v1/memory/merge", Map.of("keep_id", keep, "delete_ids", List.of(), "merged_content", "bare merge"));
+        assertThat(bare.status()).as(bare.raw()).isEqualTo(204);
+        assertThat(stampOf(keep)).as("a tokenless merge rewrites the content, so the label goes").isNull();
+        Resp tokened = post(owner.token(), "/v1/memory/merge",
+            Map.of("keep_id", keep, "delete_ids", List.of(), "merged_content", "token merge"));
+        assertThat(tokened.status()).as(tokened.raw()).isEqualTo(204);
+        assertThat(stampOf(keep)).as("a merge with a token stamps it, as put does").isEqualTo(owner.id());
+    }
+
+    @Test
+    void aPutOrMergeWithoutATokenThatMergesIntoAStampedRowClearsTheStamp() {
+        Seat owner = bindSeat("thread-pom-stamp", 425);
+        String words = "alpha beta gamma delta epsilon zeta eta theta " + UUID.randomUUID();
+        String project = unique("pom-stamp");
+        long id = insertStamped(project, unique("legacy"), words, owner.id());
+        Resp r = post(null, "/v1/memory/put_or_merge", Map.of("project", project, "title", unique("incoming"),
+            "content", words, "min_similarity", 0.5));
+        assertThat(r.status()).as(r.raw()).isEqualTo(200);
+        assertThat(r.text("action")).isEqualTo("merged");
+        assertThat(r.json().get("id").asLong()).isEqualTo(id);
+        assertThat(stampOf(id)).as("the merge rewrote the row with no token behind it").isNull();
     }
 
     @Test

@@ -964,7 +964,7 @@ public final class MemoryRepository {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             int updated = ctx.update(MEMORY)
                              .set(MEMORY.CONTENT,   mergedContent)
-                             .set(MEMORY.TIMESTAMP, now)
+                             .set(MEMORY.TIMESTAMP, now).set(MEMORY.IDENTITY, (String) null) // handler re-stamps
                              .where(MEMORY.ID.eq(keepId))
                              .execute();
             if (updated == 0) {
