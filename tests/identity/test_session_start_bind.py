@@ -11,7 +11,7 @@ import pytest
 
 from nexus.identity.bind_client import IdentityApiError, evidence_body
 from nexus.identity.resolver import IdentityConflictError, resolve_identity
-from nexus.identity.token_file import read_token_file, token_path
+from nexus.identity.token_file import TokenFile, read_token_file, token_path, write_token_file
 from tests.identity.conftest import T0, World
 from tests.identity.fakes import HOST
 
@@ -330,3 +330,86 @@ def test_an_empty_in_place_restart_rebinds_the_same_identity_ended_included_and_
     world.process(600, os_start=T1, started_at=777_000, session_id="x")   # pid 600 comes back, same OS start, new startedAt
     skipped = world.hook(600, "startup", "new-600")
     assert skipped.identity != taken and skipped.action == "ephemeral"
+
+
+def test_a_rebind_considers_only_the_most_recent_identity_of_the_process(world: World) -> None:
+    """The newest identity of the process is held by another process now; an older, ended identity of the same pid must
+    not be rebound in its place (it belongs to an earlier life of the pid)."""
+    older, newer = world.seat("older"), world.seat("newer")
+    ev = lambda pid, started: evidence_body(session_id=f"p-{started}", host=HOST, pid=pid, started_at=started, proc_start=T1)  # noqa: E731
+    world.client.bind(older, "start", 0, ev(610, 610_000))
+    world.client.bind(older, "end", 1)
+    world.client.bind(newer, "start", 0, ev(610, 611_000))
+    write_token_file(token_path(world.identity_dir, 610, 611_000), TokenFile(      # the file its hook would have written
+        identity=newer, generation=1, token=None, expires_at=None, session_id="p-611000", pid=610, started_at=611_000,
+        proc_start=T1, host=HOST, registry_dir=str(world.procs.sessions_dir)))
+    world.process(620, os_start=T2, name="newer")
+    assert world.hook(620, "startup", "q-sid").identity == newer                # another process takes `newer`
+    world.process(610, os_start=T1, started_at=612_000, session_id="p3")
+    out = world.hook(610, "startup", "p3")
+    assert out.action == "ephemeral" and out.identity not in (older, newer)
+    assert world.identity(older)["state"] == "ended"
+
+
+def test_a_data_credential_hook_forks_for_a_clear_keeps_its_seat_on_a_forbidden_switch_and_sweeps_quietly(world: World) -> None:
+    """A mint-only install: the hook holds only the data credential, which may fork but not clear, release or report
+    gone. /clear still moves the session id (as a fork row); a cross-seat /resume keeps the seat and says why; the sweep
+    ends without raising."""
+    from nexus.identity.sweep import sweep_host
+
+    alpha, gamma, crashed = world.seat("alpha"), world.seat("gamma"), world.seat("crashed")
+    world.process(300, name="gamma", os_start=T1, session_id="g-old")
+    world.hook(300, "startup", "g-old")
+    world.client.bind(gamma, "end", 1)
+    world.procs.stop(300, keep_registry=False)
+    world.process(400, name="crashed", os_start=T2, session_id="c-sid")
+    world.hook(400, "startup", "c-sid")
+    world.procs.stop(400, keep_registry=True)
+    world.process(100, name="alpha", session_id="s1")
+    world.hook(100, "startup", "s1")
+
+    cleared = world.hook(100, "clear", "s2", client=world.data_client)
+    assert (cleared.action, cleared.identity, cleared.generation, cleared.event) == ("bound", alpha, 1, "fork")
+    assert world.events(alpha) == ["start", "fork"] and world.indexed("s2")["identity"] == alpha
+
+    switched = world.hook(100, "resume", "g-old", client=world.data_client)
+    assert (switched.action, switched.identity) == ("unchanged", alpha)
+    assert any("may not release" in n for n in switched.notices)
+    assert world.identity(alpha)["state"] == "live" and world.identity(gamma)["state"] == "ended"
+
+    report = sweep_host(world.data_client, world.procs, host=HOST, own=(100, 100_000), identity_dir=world.identity_dir)
+    assert report.forbidden and world.identity(crashed)["state"] == "live"
+
+
+def test_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_it_or_closes_it_for_the_named_seat(world: World) -> None:
+    """No second ephemeral beside the first: with no seat named the process keeps its identity and adds the session id
+    (a fork row); naming another seat ends the ephemeral and binds the seat."""
+    beta = world.seat("beta")
+    world.process(100, session_id="sid-a")
+    first = world.hook(100, "startup", "sid-a")
+    reused = world.hook(100, "resume", "never-indexed")
+    assert (reused.action, reused.identity, reused.generation, reused.row) == ("unchanged", first.identity, 1, "resume_unindexed_reuse")
+    assert world.events(first.identity) == ["start", "fork"] and world.indexed("never-indexed")["identity"] == first.identity
+    assert len(world.client.bindings_by_host(HOST, 100)) == 1
+
+    world.process(101, os_start=T1, session_id="sid-b")
+    second = world.hook(101, "startup", "sid-b")
+    moved = world.hook(101, "resume", "also-unindexed", seat="beta")
+    assert (moved.identity, moved.action, moved.switched_from) == (beta, "bound", second.identity)
+    assert world.identity(second.identity)["state"] == "ended" and world.identity(beta)["holder"]["pid"] == 101
+
+
+def test_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start(world: World) -> None:
+    """The resumed seat is held from another host and lapsed. Inside the 10-minute reservation the process keeps what it
+    has; after it, the process switches."""
+    alpha, gamma = world.seat("alpha"), world.seat("gamma")
+    _held_by(world, gamma, 7, host="elsewhere", sid="g-sid")
+    world.process(100, name="alpha", session_id="a-sid")
+    world.hook(100, "startup", "a-sid")
+    world.lapse(gamma, seconds_ago=400)
+    inside = world.hook(100, "resume", "g-sid")
+    assert (inside.action, inside.identity) == ("unchanged", alpha) and world.identity(alpha)["state"] == "live"
+    world.lapse(gamma, seconds_ago=1_000)
+    after = world.hook(100, "resume", "g-sid")
+    assert (after.action, after.identity, after.generation, after.switched_from) == ("bound", gamma, 2, alpha)
+    assert world.identity(alpha)["state"] == "unheld"

@@ -103,3 +103,142 @@ def test_a_refused_renewal_stops_the_server_writing_until_the_file_names_a_newer
     now[0] += HEARTBEAT_S
     back = lease.tick()
     assert back.adopted and lease.bound and lease.generation == 3 and engine.calls == [("renew", ("i1", 3))]
+
+
+# ── the review round: the file lock, the loop that must not wait, the fork under a stale generation ──────────────
+
+
+def test_a_lease_that_still_holds_the_old_identity_never_overwrites_a_switch_the_hook_wrote(tmp_path: Path) -> None:
+    """Compare-and-swap under the file lock: the hook rewrote the file for i2 (a cross-seat /resume) between the lease's
+    read and its refresh; the lease, still holding i1, leaves the file alone and the next heartbeat adopts i2."""
+    now = [1_000.0]
+    lease, engine, _ = _setup(tmp_path, now)
+    _file(tmp_path, "tok-0", expires_at=now[0] + 3600)
+    assert lease.tick().adopted and lease.identity == "i1"
+    path = token_path(tmp_path / "config" / "identity", 100, 100_000)
+    write_token_file(path, TokenFile(identity="i2", generation=4, token="tok-i2", expires_at=now[0] + 3600, session_id="g-sid",
+                                     pid=100, started_at=100_000, proc_start=T0, session_ids=("g-sid",)))
+    lease.token, lease.token_expires_at = "tok-refreshed", now[0] + 3600
+    lease._rewrite_file()
+    from nexus.identity.token_file import read_token_file
+
+    kept = read_token_file(path)
+    assert (kept.identity, kept.generation, kept.token) == ("i2", 4, "tok-i2")
+    now[0] += HEARTBEAT_S
+    follow = lease.tick()
+    assert follow.adopted and (lease.identity, lease.generation) == ("i2", 4)
+    path.unlink()
+    lease.token = "tok-x"
+    lease._rewrite_file()
+    assert not path.exists(), "a deleted file is not resurrected"
+
+
+def test_a_marker_is_adopted_while_a_heartbeat_is_stuck_in_an_engine_call(tmp_path: Path) -> None:
+    """The handoff watcher calls adopt_marker on the asyncio loop: it must never wait on the engine. The heartbeat holds
+    its own lock across the call; the state lock adopt_marker needs is free."""
+    import threading
+
+    now = [1_000.0]
+    lease, engine, _ = _setup(tmp_path, now)
+    _file(tmp_path, "tok-0", expires_at=now[0] + 3600)
+    lease.tick()
+    release = threading.Event()
+    entered = threading.Event()
+
+    def slow_renew(identity: str, generation: int, client_version: str | None = None) -> dict:
+        entered.set()
+        release.wait(10)
+        return {}
+
+    engine.renew = slow_renew                         # type: ignore[method-assign]
+    now[0] += HEARTBEAT_S
+    worker = threading.Thread(target=lease.tick, daemon=True)
+    worker.start()
+    assert entered.wait(5)
+    _file(tmp_path, "tok-new", expires_at=now[0] + 3600, generation=1)
+    own = str(token_path(tmp_path / "config" / "identity", 100, 100_000))
+    result: list[bool] = []
+    caller = threading.Thread(target=lambda: result.append(lease.adopt_marker(identity="i1", generation=1, token_file=own)), daemon=True)
+    caller.start()
+    caller.join(2.0)
+    release.set()
+    worker.join(5)
+    assert not caller.is_alive() and result == [True], "adopt_marker returned while the heartbeat was in the engine call"
+
+
+def test_a_fork_refused_for_a_stale_generation_flags_superseded(tmp_path: Path) -> None:
+    now = [1_000.0]
+    lease, engine, procs = _setup(tmp_path, now)
+    _file(tmp_path, "tok-0", expires_at=now[0] + 3600)
+    lease.tick()
+    procs.write_registry(100, 100_000, T0, session_id="branch-sid")
+    engine.session = lambda sid: (_ for _ in ()).throw(IdentityApiError(404, "unknown_session", "no", {}))   # type: ignore[method-assign]
+
+    def refuse(*a: Any, **k: Any) -> dict:
+        raise IdentityApiError(409, "generation_superseded", "i1 is at generation 2", {})
+
+    engine.bind = refuse                              # type: ignore[method-assign]
+    now[0] += HEARTBEAT_S
+    assert lease.tick().superseded and not lease.bound
+
+
+def test_refresh_fork_and_end_carry_the_process_they_speak_for(tmp_path: Path) -> None:
+    """host, pid, startedAt and OS start time ride every bind the lease sends, so the engine's row names the process."""
+    now = [1_000.0]
+    lease, engine, procs = _setup(tmp_path, now)
+    seen: list[tuple[str, dict]] = []
+    orig = engine.bind
+
+    def spy(identity: str, event: str, generation: int, evidence: Any = None) -> dict:
+        seen.append((event, dict(evidence or {})))
+        return orig(identity, event, generation, evidence)
+
+    engine.bind = spy                                  # type: ignore[method-assign]
+    engine.session = lambda sid: (_ for _ in ()).throw(IdentityApiError(404, "unknown_session", "no", {}))   # type: ignore[method-assign]
+    _file(tmp_path, "tok-0", expires_at=now[0] + 1_000)           # under half of the hour left: a refresh is due
+    procs.write_registry(100, 100_000, T0, session_id="branch-sid")
+    lease.tick()                                                 # the fork row (its answer carries a fresh token)
+    lease.token_expires_at = now[0] + 1_000                      # under half of the hour left: a refresh is due
+    lease._next_renew = 0.0
+    lease.tick()
+    procs.stop(100, keep_registry=True)
+    lease.shutdown(wait_for_claude=False)
+    events = [e for e, _ in seen]
+    assert events == ["fork", "refresh", "end"]
+    for _event, ev in seen:
+        assert (ev["host"], ev["pid"], ev["started_at"], ev["proc_start"]) == (procs.host, 100, 100_000, T0)
+
+
+def test_the_lease_reuses_one_engine_client_closes_it_on_shutdown_and_rebuilds_after_an_unreachable_engine(tmp_path: Path) -> None:
+    from nexus.identity.bind_client import IdentityUnavailableError
+
+    now = [1_000.0]
+    procs = FakeProcesses(tmp_path / "sessions")
+    procs.start(100, T0, started_at=100_000, session_id="sid-1")
+    made: list[Any] = []
+
+    class _Client(_Engine):
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    def factory() -> _Client:
+        made.append(_Client())
+        return made[-1]
+
+    lease = IdentityLease(client_factory=factory, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
+                          clock=lambda: now[0], client_version="1", sleep=lambda s: None, close_client=True)
+    _file(tmp_path, "tok-0", expires_at=now[0] + 3600)
+    lease.tick()
+    now[0] += HEARTBEAT_S
+    lease.tick()
+    assert len(made) == 1, "one client for the life of the lease"
+    made[0].renew = lambda *a, **k: (_ for _ in ()).throw(IdentityUnavailableError("connection refused"))  # type: ignore[method-assign]
+    now[0] += HEARTBEAT_S
+    assert "engine unavailable" in lease.tick().error and made[0].closed
+    now[0] += HEARTBEAT_S
+    assert lease.tick().renewed and len(made) == 2, "rebuilt: the endpoint is resolved again"
+    procs.stop(100, keep_registry=False)
+    lease.shutdown(wait_for_claude=False)
+    assert made[1].closed

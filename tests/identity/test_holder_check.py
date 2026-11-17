@@ -65,15 +65,25 @@ def test_an_in_place_restart_changes_started_at_and_is_gone(procs: FakeProcesses
     assert verdict.state == GONE and "restarted" in verdict.reason
 
 
-def test_a_matching_start_time_in_utc_is_not_gone_whatever_the_zone_of_the_test_process(
-        procs: FakeProcesses, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The registry's procStart is UTC; ``ps`` prints local time. Both are compared as UTC instants, so a process
-    whose local time differs from UTC is not found gone."""
-    monkeypatch.setenv("TZ", "Pacific/Auckland")
-    procs.start(500, T0, started_at=500_000)
-    procs.write_registry(500, 500_000, T0)
-    assert read_registry_entry(500, procs.sessions_dir).proc_start == T0
-    assert check_holder(_holder(), procs=procs).state == RUNNING
+@pytest.mark.skipif(os.name != "posix", reason="the POSIX ps probe: argv_off_cwd finds no ps on Windows")
+def test_ps_is_run_under_utc_so_a_local_zone_never_reaches_the_comparison(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``ps`` stand-in that prints local time (Pacific, 8 hours behind) unless the probe's environment says
+    ``TZ=UTC``: the probe must say it, and the instant it returns is the UTC one. Without the variable this reads
+    ``2026-11-17T00:00:00Z`` and finds every holder gone."""
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    seen: list[dict] = []
+
+    class _Done:
+        def __init__(self, out: str) -> None:
+            self.stdout = out
+
+    def fake_ps(argv, *, timeout, env, **kw):
+        seen.append(env)
+        local = env.get("TZ") != "UTC"
+        return _Done("Tue Nov 17 00:00:00 2026\n" if local else ps_style(T0) + "\n")
+
+    assert os_start_time(500, platform="darwin", run=fake_ps) == T0
+    assert seen[0]["TZ"] == "UTC" and seen[0]["LC_ALL"] == "C"
 
 
 def test_the_real_ps_probe_reads_this_process_in_utc_under_any_local_zone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,10 +107,42 @@ def test_a_start_time_that_cannot_be_read_is_unknown_never_gone(procs: FakeProce
     assert check_holder(_holder(), procs=procs).state == UNKNOWN
 
 
-def test_windows_is_an_explicit_refusal_to_compare_start_times() -> None:
-    """No ps on Windows: the probe says so by answering None, and the check then answers unknown for a running
-    holder rather than guessing. A missing file or a dead pid is still gone there (no start time needed)."""
-    assert os_start_time(1234, platform="win32") is None
+def test_windows_reads_the_process_creation_time_as_a_fixed_utc_instant() -> None:
+    """No ps on Windows: the start time is the process creation FILETIME, floored to the second, the same instant on
+    every call (``process_age_seconds`` moves; this does not), so the pending file, ``proc_start`` and the in-place
+    ``/restart`` rebind work there."""
+    unix = 1_794_902_400 + 0.7                         # 2026-11-17T08:00:00Z plus a fraction
+    filetime = int((unix + 11_644_473_600) * 10_000_000)
+
+    class _Api:
+        def open_process(self, pid): return (7, 0) if pid == 1234 else (None, 5)
+        def close(self, handle): pass
+        def creation_filetime(self, handle): return filetime
+
+    assert os_start_time(1234, platform="win32", win_api=_Api()) == T0
+    assert os_start_time(1234, platform="win32", win_api=_Api()) == T0
+    assert os_start_time(999, platform="win32", win_api=_Api()) is None
+
+
+def test_a_holder_registered_under_another_claude_config_dir_is_never_judged_gone_by_this_one(
+        procs: FakeProcesses, tmp_path: Path) -> None:
+    """A Claude under another CLAUDE_CONFIG_DIR writes its registry file somewhere this reader does not look: an absent
+    file proves nothing. Gone only when the holder's own token file names THIS registry directory; unknown otherwise,
+    including a holder with no token file at all."""
+    from nexus.identity.token_file import TokenFile, token_path, write_token_file
+
+    d = tmp_path / "identity"
+
+    def token(registry_dir):
+        write_token_file(token_path(d, 500, 500_000), TokenFile(
+            identity="i1", generation=1, token=None, expires_at=None, session_id="s", pid=500, started_at=500_000,
+            proc_start=T0, host=HOST, registry_dir=registry_dir))
+
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == UNKNOWN              # no token file
+    token(str(tmp_path / "other-profile" / "sessions"))
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == UNKNOWN              # another profile's
+    token(str(procs.sessions_dir))
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == GONE                 # this reader's own
 
 
 def test_a_holder_on_another_host_is_judged_by_its_lease_alone(procs: FakeProcesses) -> None:

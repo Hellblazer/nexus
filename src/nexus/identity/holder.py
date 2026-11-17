@@ -15,8 +15,11 @@ On the holder's own host the check is, in order:
 2. a pid probe (:func:`nexus.daemon.service_registry.pid_alive`, the one liveness probe); not running: **gone**;
 3. the running process's OS start time against the binding's ``proc_start``, both as UTC instants: different means
    the pid was reused after a crash: **gone**. The registry's ``procStart`` string is UTC while ``ps`` prints local
-   time, so the probe runs ``ps`` under ``TZ=UTC``; a probe that cannot read a start time (Windows, a ``ps`` that
-   failed) answers **unknown**, never gone, and the caller treats unknown as running.
+   time, so the probe runs ``ps`` under ``TZ=UTC`` (Windows reads the process creation FILETIME); a probe that
+   cannot read a start time answers **unknown**, never gone, and the caller treats unknown as running.
+
+The check reads one registry directory, ``CLAUDE_CONFIG_DIR/sessions``. A Claude under another config directory writes
+its file elsewhere, so a holder it bound is judged gone only when its token file names THIS directory as its registry.
 
 A holder on another host is judged by its lease alone and the check says **other_host**. A crashed process leaves
 its registry file behind, so file presence alone never decides: the probe does.
@@ -92,12 +95,17 @@ def epoch_seconds(instant: str) -> int:
 # ── the process table ───────────────────────────────────────────────────────
 
 
-def os_start_time(pid: int, *, platform: str | None = None, run: Callable[..., Any] | None = None) -> str | None:
-    """The OS start time of *pid* as a UTC instant, or None when it cannot be read (no such process, a failed
-    ``ps``, Windows). ``ps -o lstart=`` under ``TZ=UTC`` and ``LC_ALL=C``: ``lstart`` is local time, so a probe that
-    forgot the variable would compare a local-time start against a UTC ``proc_start`` and find every holder gone."""
+def os_start_time(pid: int, *, platform: str | None = None, run: Callable[..., Any] | None = None,
+                  win_api: Any = None) -> str | None:
+    """The OS start time of *pid* as a UTC instant, or None when it cannot be read (no such process, a failed ``ps``).
+    POSIX: ``ps -o lstart=`` under ``TZ=UTC`` and ``LC_ALL=C``: ``lstart`` is local time, so a probe that forgot the
+    variable would compare a local-time start against a UTC ``proc_start`` and find every holder gone. Windows: the
+    process creation FILETIME (``nexus._install.winproc_core``), floored to the second, which is a fixed instant."""
     if (platform if platform is not None else sys.platform) == "win32":
-        return None  # no ps; GetProcessTimes would need its own UTC rendering, so the check says unknown instead
+        from nexus._install import winproc_core  # noqa: PLC0415 — Windows only
+
+        created = winproc_core.process_creation_unix(pid, win_api if win_api is not None else winproc_core.ctypes_win_info_api())
+        return None if created is None else format_instant(datetime.fromtimestamp(int(created), tz=timezone.utc))
     if run is None:
         from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: hook import cost
 
@@ -116,10 +124,12 @@ class Processes:
     """What the holder check asks of the machine. The default reads the real process table; a test passes a
     stand-in with the same methods (``tests/identity/fakes.py``)."""
 
-    def __init__(self, *, sessions_dir: Path | None = None, host: str | None = None, platform: str | None = None) -> None:
+    def __init__(self, *, sessions_dir: Path | None = None, host: str | None = None, platform: str | None = None,
+                 win_api: Any = None) -> None:
         self.sessions_dir = sessions_dir if sessions_dir is not None else claude_sessions_dir()
         self.host = host if host is not None else this_host()
         self.platform = platform if platform is not None else sys.platform
+        self.win_api = win_api
 
     def alive(self, pid: int) -> bool:
         from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — the one liveness probe (test_pid_alive_single_probe_lint); deferred, stdlib-heavy module
@@ -127,7 +137,7 @@ class Processes:
         return pid_alive(pid, platform=self.platform)
 
     def os_start(self, pid: int) -> str | None:
-        return os_start_time(pid, platform=self.platform)
+        return os_start_time(pid, platform=self.platform, win_api=self.win_api)
 
 
 # ── the registry ────────────────────────────────────────────────────────────
@@ -201,9 +211,15 @@ def holder_process(holder: Mapping[str, Any]) -> dict[str, Any]:
             "proc_start": holder.get("proc_start")}
 
 
-def check_holder(holder: Mapping[str, Any], *, procs: Processes | Any, host: str | None = None) -> Verdict:
+def check_holder(holder: Mapping[str, Any], *, procs: Processes | Any, host: str | None = None,
+                 identity_dir: Path | None = None) -> Verdict:
     """Whether the process *holder* names still exists (module docstring). *holder* is a binding's
-    ``{host, pid, started_at, proc_start}``."""
+    ``{host, pid, started_at, proc_start}``.
+
+    This reads ONE registry directory, ``procs.sessions_dir``: a Claude running under another ``CLAUDE_CONFIG_DIR``
+    writes its registry file somewhere else, and its absence here proves nothing. With *identity_dir*, the holder's
+    token file says which registry directory the holder used; an absent registry file then means gone only when the
+    token file names this reader's directory, and anything else is unknown (never gone)."""
     here = host if host is not None else procs.host
     if holder.get("host") != here:
         return Verdict(OTHER_HOST, f"held on {holder.get('host')}, not on {here}")
@@ -212,6 +228,14 @@ def check_holder(holder: Mapping[str, Any], *, procs: Processes | Any, host: str
         return Verdict(UNKNOWN, "the binding names no pid")
     entry = read_registry_entry(pid, procs.sessions_dir)
     if entry is None:
+        if identity_dir is not None:
+            from nexus.identity.token_file import read_token_file, token_path  # noqa: PLC0415 — token_file imports holder lazily
+
+            started_at = _int(holder.get("started_at"))
+            record = read_token_file(token_path(identity_dir, pid, started_at)) if started_at is not None else None
+            if record is None or record.registry_dir != str(procs.sessions_dir):
+                where = "no token file records" if record is None else f"its token file records {record.registry_dir}, not"
+                return Verdict(UNKNOWN, f"no registry file for pid {pid} in {procs.sessions_dir}, and {where} that directory as its own")
         return Verdict(GONE, f"no registry file for pid {pid}")
     if entry.started_at != holder.get("started_at"):
         return Verdict(GONE, f"pid {pid} now has startedAt {entry.started_at}, not {holder.get('started_at')} (restarted)")

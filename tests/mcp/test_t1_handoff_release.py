@@ -684,6 +684,36 @@ async def test_mint_failure_reinstates_marker_at_live_path(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reinstated_marker_keeps_its_identity_fields_and_the_adoption_runs_off_the_event_loop(monkeypatch) -> None:
+    """RDR-253 Step 3: the hook's marker names an identity, a generation and a token file. The tick hands them to the
+    identity lease on a worker thread (the loop never waits on the lease), and a failed re-lease reinstates the marker
+    WITH those fields, so the retry still carries them."""
+    import threading
+
+    from nexus.db import t1 as t1_mod
+    from nexus.mcp import identity_lease
+
+    monkeypatch.setattr("nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID)
+    adopted: list[tuple[dict, str]] = []
+    monkeypatch.setattr(identity_lease, "adopt_marker",
+                        lambda **kw: adopted.append((kw, threading.current_thread().name)) or True)
+
+    def _boom(sid, **kw):
+        raise RuntimeError("service unreachable")
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", _boom)
+    config_dir = nexus_config_dir()
+    write_handoff_marker(_MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID, config_dir=config_dir,
+                         clock=lambda: 42.0, identity="i7", generation=3, token_file="/x/100.100000.token")
+    await core._t1_handoff_tick(_MCP_PID, MagicMock())
+
+    assert adopted == [({"identity": "i7", "generation": 3, "token_file": "/x/100.100000.token"}, adopted[0][1])]
+    assert adopted[0][1] != threading.current_thread().name, "adopted on a worker thread, not on the event loop's"
+    marker = read_handoff_marker(_MCP_PID, config_dir)
+    assert (marker.new_session_id, marker.identity, marker.generation, marker.token_file) == (
+        "new-sess", "i7", 3, "/x/100.100000.token")
+
+
+@pytest.mark.asyncio
 async def test_reinstated_marker_is_processed_by_a_later_tick(monkeypatch) -> None:
     """The reinstated marker isn't just present on disk -- a SUBSEQUENT
     tick actually picks it up and completes the re-lease. A fake clock
