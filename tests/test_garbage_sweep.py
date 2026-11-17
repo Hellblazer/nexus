@@ -12,12 +12,12 @@ from click.testing import CliRunner
 
 from nexus import health
 from nexus.cli import main
-
 from nexus.db.t1 import (
     _t1_session_mint_lock_path,
     end_owned_t1_session_lease,
     publish_t1_session_lease,
 )
+from nexus.errors import require_unlink_args
 from nexus.garbage import (
     MINT_LOCK_MAX_AGE_DAYS,
     OPERATOR_LOG_MAX_AGE_DAYS,
@@ -184,6 +184,18 @@ class TestCatalogGarbage:
         assert len(client.unlinked) == 2
         assert client.purge_calls == [{"older_than_days": TRASH_MAX_AGE_DAYS, "dry_run": False}]
         assert catalog_garbage(client).orphaned_links == 0
+
+    def test_reclaim_skips_a_blank_type_link_and_finishes(self) -> None:
+        class _Guarded(_FakeCatalog):
+            def unlink(self, from_t, to_t, link_type) -> int:
+                require_unlink_args(from_t, to_t, link_type)
+                return super().unlink(from_t, to_t, link_type)
+
+        links = [*_LINKS, {"from_tumbler": "1.1.7", "to_tumbler": "1.1.8", "link_type": ""}]
+        client = _Guarded(links, _TRASH)
+        r = reclaim_catalog_garbage(client)
+        assert r.links_deleted == 2
+        assert client.purge_calls == [{"older_than_days": TRASH_MAX_AGE_DAYS, "dry_run": False}]
 
     def test_reclaim_raises_on_engine_error(self) -> None:
         with pytest.raises(RuntimeError):

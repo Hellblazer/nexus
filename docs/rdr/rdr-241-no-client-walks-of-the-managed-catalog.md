@@ -734,16 +734,6 @@ test per site drives a fake engine that has the route and one that does not.
 Raise `REQUIRED_ENGINE_VERSION` in the client release that depends on them
 (`.claude/rules/releases-and-engine.md`).
 
-#### Step 5: Engine-side blank-filter guard
-
-The client guard (Client rules) is the only defence today. The engine returns
-400 on a whitespace-only filter in `handleList`, `handleResolve`, `handleLinks`
-and the bulk `/unlink`, so a caller that is not this client cannot widen a read
-or a bulk delete. `CatalogRepository.descendants` escapes `%`, `_` and `\` in
-the prefix before it builds `LIKE prefix || '.%'`; until then the client refuses
-a prefix that is not digits and dots. A client that drops `""` before it sends
-is not reached by a 400, so the client guard stays.
-
 Expected count after this phase: 18 calls.
 
 ### Deferred: Gap 2 (trigger: nexus-f3yqd.2's job mechanism is built)
@@ -911,4 +901,4 @@ the next one without the ratchet.
 - 2026-11-16: Sam chose the engine route for registered schemes in any case (ask uwggq15-scheme-case, option C, superseding his earlier option A): the `--check-references` switch (nexus-uwggq.1.5) moves from Phase 1 to Phase 2, which gains a fourth route, a case-insensitive scheme-prefix list.
 - 2026-11-17: `nx catalog list --sensitive` (nexus-uwggq.1.7) ships with a refusal on filtered or past-10,000 reads of a tenant over 10,000 sensitive documents (Sam, ask uwggq17-sensitive-cap, option C); Phase 2 closes it with the metadata route and a type filter on the sensitive route (standing grant 3).
 - 2026-11-17: The sensitive-document doctor rows (nexus-uwggq.1.8) read "not checked" with a reason that names the cause the engine's list reported and a next step; `nx catalog doctor --sensitive-with-aspects` exits 3 ("could not check") when its row reads "not checked", and `nx doctor` keeps the rows non-gating (standing grant 3).
-- 2026-11-17: Client rules and Phase 1 Step 2 record that scoped client reads and writes refuse a blank or whitespace value (nexus-uwggq.1.9, after nexus-uwggq.1.6); Phase 2 gains Step 5, the engine 400 on a whitespace filter and the `descendants` LIKE escape.
+- 2026-11-17: Client rules and Phase 1 Step 2 record that scoped client reads and writes refuse a blank or whitespace value (nexus-uwggq.1.9, after nexus-uwggq.1.6). The engine-side 400 and the `descendants` LIKE escape are not yet planned in this RDR; they are recorded in the nexus-uwggq.1.9 notes.

@@ -7,6 +7,9 @@ are per-method; nothing else stops a new method, or a guard deleted in a refacto
 test parses ``http_catalog_client.py`` and fails when a method that calls ``self._get`` / ``self._post`` with one
 of the scoped routes does not call a guard and is not named in ``EXEMPT`` with a reason.
 
+The check is method-level: a method passes when it calls any guard, so a new unguarded parameter on an
+already-guarded method is caught by the per-parameter tests in ``test_blank_filter_guards.py``, not here.
+
 Falsified by hand on 2026-11-17: deleting the ``_tumbler_prefix`` call from ``descendants`` (and, separately,
 the ``_nonblank`` call from ``by_corpus``) turns ``test_every_scoped_route_caller_is_guarded_or_exempt`` red.
 """
