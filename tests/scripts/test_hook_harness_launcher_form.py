@@ -26,6 +26,10 @@ import sys
 import pytest
 from tests._module_seam import setattr_in
 
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tests"))
 import _hook_wiring as wiring  # noqa: E402

@@ -20,14 +20,16 @@ The meta-tests (``known``):
   ``find`` or ``newDirectoryStream``), except ``*IntegrationTest``.
 
 Each Python meta-test's surface is derived, never declared: ``build`` runs
-them all under ``tests/_surface_trace.py`` and writes what each read to
-``tests/meta_surfaces.json``, with the hash of the test file. A changed path
+each test file in its own pytest process under ``tests/_surface_trace.py``
+and writes what it read to ``tests/meta_surfaces.json``, with a hash of the
+file, the tests/ modules it imports and the conftests above it. A changed path
 selects a test when the test opened or statted it, listed its directory (for a
 new directory, its first ancestor that exists at the base), ran a subprocess
 that enumerates a subtree holding it, or imports it directly (a ``src/nexus``
 or ``tests`` module). A test runs whatever the diff when the manifest does not
-hold it, its file changed since the build, or it ran a subprocess whose reads
-the trace cannot see. Every such test is listed by reason, so a new meta-test
+hold it, that hash changed since the build, its traced run failed or skipped,
+the trace recorded no read, or it ran a subprocess whose reads the trace
+cannot see. Every such test is listed by reason, so a new meta-test
 cannot fall out unseen. A Java meta-test's surface is ``service/src/``.
 
 Usage::
@@ -66,6 +68,14 @@ META_RUN = "uv run pytest -q -rf -p no:randomly --color=no -o addopts= -m '(lint
 #: The session-items guard judges what its own invocation collected, so the changed test files run
 #: with it unfiltered (a -m that deselects some reads as a partial view, and the guard skips).
 GUARD_RUN = "uv run pytest -q -rf -p no:randomly --color=no -o addopts= -m 'not integration and not slow'"
+#: Meta-tests read files; none needs the engine, so no gate jar is built or checked for them, and
+#: no suite lease is taken (tests/conftest.py takes one only for a substrate that boots the engine).
+ENV = {"NX_TEST_T2_SUBSTRATE": "none"}
+#: What a green run of this script does not cover, printed at the end of every run.
+NOT_COVERED = (
+    "not covered here: the whole -m lint bucket and the full-corpus census job (push-train rule 1 still asks for"
+    " them), census-style tests that carry neither mark, and the Java source walkers (printed above when selected)"
+)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -183,6 +193,33 @@ def module_files(repo: Path, test: str) -> set[str]:
     return out
 
 
+def tests_closure(repo: Path, test: str) -> list[str]:
+    """The test file, every tests/ module it imports transitively, and the conftest.py files from
+    tests/ down to its directory: what can change its scan while the file itself stays put."""
+    seen: set[str] = set()
+    todo = [test]
+    while todo:
+        cur = todo.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        todo.extend(m for m in module_files(repo, cur) if m.startswith("tests/") and m not in seen)
+    parts = test.split("/")[:-1]
+    for i in range(1, len(parts) + 1):
+        conf = "/".join([*parts[:i], "conftest.py"])
+        if (repo / conf).is_file():
+            seen.add(conf)
+    return sorted(seen)
+
+
+def surface_hash(repo: Path, test: str) -> str:
+    h = hashlib.sha256()
+    for rel in tests_closure(repo, test):
+        h.update(rel.encode() + b"\0")
+        h.update(sha256(repo / rel).encode() + b"\0")
+    return h.hexdigest()
+
+
 # ── selection ────────────────────────────────────────────────────────────────
 
 
@@ -243,11 +280,18 @@ def select(repo: Path, changed: list[str], base: str, manifest: dict | None = No
         if entry is None:
             sel.always[test] = "not in the manifest (new since the build): surface unknown"
             continue
-        if not path.is_file() or entry.get("sha256") != sha256(path):
-            sel.always[test] = "its file changed since the manifest was built: surface may have moved"
+        if not path.is_file() or entry.get("sha256") != surface_hash(repo, test):
+            sel.always[test] = ("it, a tests/ module it imports or a conftest above it changed since the manifest"
+                                " was built: surface may have moved")
+            continue
+        if entry.get("incomplete"):
+            sel.always[test] = "its traced run did not complete cleanly: " + entry["incomplete"]
             continue
         if entry.get("opaque"):
             sel.always[test] = "runs a subprocess whose reads the trace cannot see: " + entry["opaque"][0]
+            continue
+        if not any(entry.get(k) for k in ("opened", "statted", "listed", "prefixes")):
+            sel.always[test] = "the trace recorded no read (a cached or shared scan?): surface unknown"
             continue
         hit = _hit(test, entry, changed, existing, module_files(repo, test))
         if hit:
@@ -358,44 +402,93 @@ def cmd_run(args: argparse.Namespace) -> int:
     for label, argv in runs:
         print("$ " + shlex.join(argv), flush=True)
         t1 = time.monotonic()
-        code = subprocess.run(argv, cwd=repo, env={**os.environ, **ENV}).returncode
+        code, skipped = _run_streaming(argv, repo, guards)
         print(f"{label} ran in {time.monotonic() - t1:.1f}s (exit {code})")
+        if skipped:
+            # A skip exits 0, and here it means the guard judged nothing.
+            print("the session-items guard skipped (its invocation looked partial), so it judged nothing: run the"
+                  " full-corpus census job (push-train rule 1) for this push")
+            code = code or 1
         rc = rc or code
     cmd = java_command(sel)
     if cmd:
         print("Java meta-tests to run (heavy, not run here; the engine class's full suite also covers them):")
         print(cmd)
+    if any(p.startswith("tests/") and p.endswith(".py") and not Path(p).name.startswith("test_") for p in changed):
+        print("a tests/ helper or conftest changed: the session-items guard judges only a full collection, so run"
+              " the full-corpus census job (push-train rule 1)")
+    print(NOT_COVERED)
     return rc
 
 
+def _run_streaming(argv: list[str], repo: Path, guards: list[str]) -> tuple[int, bool]:
+    """Run pytest, echoing its output; also say whether a guard file's test was reported skipped."""
+    proc = subprocess.Popen([*argv, "-rs"], cwd=repo, env={**os.environ, **ENV},
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    skipped = False
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        if line.startswith("SKIPPED") and any(g in line for g in guards):
+            skipped = True
+    return proc.wait(), skipped
+
+
+def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict, str | None]:
+    """Trace one test file in its own pytest process, so a cache or session fixture another file
+    warmed cannot hide this file's reads. Returns its reads and, when the run was not clean, why."""
+    out.mkdir(parents=True)
+    # -p loads the plugin before pytest puts the rootdir on sys.path.
+    path = os.pathsep.join(p for p in (str(repo), os.environ.get("PYTHONPATH", "")) if p)
+    env = dict(os.environ, **ENV, NX_SURFACE_TRACE_OUT=str(out), PYTHONPATH=path)
+    argv = [*shlex.split(META_RUN), "-rs", "-p", "tests._surface_trace", *extra, test]
+    proc = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, errors="replace")
+    merged: dict[str, set[str]] = {}
+    for frag in out.glob("trace-*.json"):
+        for kinds in [json.loads(frag.read_text()).get(test, {})]:
+            for kind, items in kinds.items():
+                merged.setdefault(kind, set()).update(items)
+    tail = [ln for ln in proc.stdout.splitlines() if ln.strip()][-1:] or ["no output"]
+    why = None
+    if proc.returncode != 0:
+        why = f"pytest exit {proc.returncode}: {tail[0][:160]}"
+    elif re.search(r"\b\d+ skipped\b", tail[0]):
+        why = f"a skip, so part of it never ran: {tail[0][:160]}"
+    return merged, why
+
+
 def cmd_build(args: argparse.Namespace) -> int:
+    from concurrent.futures import ThreadPoolExecutor
+
     repo = Path(args.repo).resolve()
     known = python_meta_tests(repo)
     files = sorted(f for f, k in known.items() if "session-items" not in k)
+    jobs = args.jobs or int(os.environ.get("LAB_CPUS") or os.cpu_count() or 2)
+    print(f"tracing {len(files)} meta-test files, {jobs} at a time", flush=True)
+    t0 = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="meta-surface-") as out:
-        argv = [*shlex.split(META_RUN), "-p", "tests._surface_trace", *args.pytest_args, *files]
-        # -p loads the plugin before pytest puts the rootdir on sys.path.
-        path = os.pathsep.join(p for p in (str(repo), os.environ.get("PYTHONPATH", "")) if p)
-        env = dict(os.environ, **ENV, NX_SURFACE_TRACE_OUT=out, PYTHONPATH=path)
-        print("$ " + shlex.join(argv), flush=True)
-        rc = subprocess.run(argv, cwd=repo, env=env).returncode
-        merged: dict[str, dict[str, set[str]]] = {}
-        for frag in Path(out).glob("trace-*.json"):
-            for test, kinds in json.loads(frag.read_text()).items():
-                for kind, items in kinds.items():
-                    merged.setdefault(test, {}).setdefault(kind, set()).update(items)
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            results = dict(zip(files, pool.map(
+                lambda ij: _trace_one(repo, ij[1], Path(out) / str(ij[0]), args.pytest_args), enumerate(files))))
     tests = {}
     for test in files:
-        tests[test] = {"sha256": sha256(repo / test), **compact(merged.get(test, {}))}
+        reads, why = results[test]
+        entry = {"sha256": surface_hash(repo, test), **compact(reads)}
+        if why:
+            entry["incomplete"] = why
+        tests[test] = entry
     manifest = {
         "about": "Generated by scripts/meta_tests.py build; do not edit. What each meta-test read, per file.",
         "built_from": git(repo, "rev-parse", "HEAD").strip(),
         "tests": tests,
     }
     (repo / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
-    traced = sum(1 for t in tests.values() if any(t[k] for k in ("opened", "statted", "listed", "prefixes", "opaque")))
-    print(f"wrote {MANIFEST}: {len(tests)} meta-tests, {traced} with a recorded surface (pytest exit {rc})")
-    return 0 if rc in (0, 1) else rc
+    incomplete = sorted(t for t, e in tests.items() if e.get("incomplete"))
+    print(f"wrote {MANIFEST}: {len(tests)} meta-tests in {time.monotonic() - t0:.0f}s;"
+          f" {len(incomplete)} with an incomplete trace (they run whatever the diff):")
+    for test in incomplete:
+        print(f"  {test}: {tests[test]['incomplete']}")
+    return 0
 
 
 def compact(kinds: dict) -> dict[str, list[str]]:
@@ -439,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
                            help="read the changed paths from stdin instead of git (a replay)")
     b = sub.add_parser("build")
     b.add_argument("--repo", default=".")
+    b.add_argument("--jobs", type=int, default=0, help="files traced at once (default: the grant's or host's cores)")
     b.add_argument("pytest_args", nargs="*", help="extra pytest arguments, e.g. -n auto")
     args = parser.parse_args(argv)
     return {"select": cmd_select, "run": cmd_run, "build": cmd_build}[args.cmd](args)

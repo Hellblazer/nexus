@@ -32,6 +32,11 @@ import pathlib
 import textwrap
 
 import nexus
+import pytest
+
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
 
 SRC = pathlib.Path(nexus.__file__).parent
 
