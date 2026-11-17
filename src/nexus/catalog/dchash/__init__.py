@@ -11,5 +11,26 @@ from nexus.catalog.dchash.text import (
     parse_dchash_span,
     text_hash,
 )
+from nexus.catalog.dchash.source import (
+    STATUSES,
+    dchash_source,
+    dchash_status,
+    read_canonical,
+    read_doc,
+    resolve_dchash_text,
+    span_status,
+)
 
-__all__ = ["DCHASH_PREFIX", "canonical_text", "parse_dchash_span", "text_hash"]
+__all__ = [
+    "DCHASH_PREFIX",
+    "STATUSES",
+    "canonical_text",
+    "dchash_source",
+    "dchash_status",
+    "parse_dchash_span",
+    "read_canonical",
+    "read_doc",
+    "resolve_dchash_text",
+    "span_status",
+    "text_hash",
+]

@@ -141,7 +141,9 @@ entries `nexus_rdr/171-research-1` to `-10`.
   `resolve_path` anchors it on the owner's repository root, and `aspect_readers.file_uri_path`
   turns a `file://` URI into a path. *Source: 171-research-7.*
 - **✅ Verified** (source search): `resolve_path` returns `None` for a curator-owned document, and
-  single files register under a curator owner by absolute path with a `file://` `source_uri`;
+  a single file outside any git checkout registers under a curator owner by absolute path with a
+  `file://` `source_uri` (one inside a checkout registers under that repository's owner,
+  `doc_indexer._repo_home_for`);
   `src/nexus/catalog/` holds 40 modules, its cap. *Source: 171-research-9.*
 - **✅ Verified** (source search): the resolver turns every exception in its chash branch into
   `None` except an engine outage (`VectorServiceError`), which it re-raises (171-research-9), and
@@ -218,9 +220,10 @@ recommends `--passage`.
 **Resolution.** A new branch in `resolve_span_text_for_entry`, before its final `return None`, for a
 span starting `dchash:`. It parses, reads the source through `dchash_source`, and returns
 `text[start:end]` when the canonical text hashes to the span's hash and the range fits; otherwise
-`None`. Every exception inside it, a malformed span's `ValueError` included, becomes `None`, except
-an engine outage (`VectorServiceError`), which it re-raises as the chash branch does and which
-`nx catalog show` already catches (171-research-8, -9).
+`None`. Every exception inside it, a malformed span's `ValueError` included, becomes `None`. That includes the catalog client's
+engine errors (`httpx.HTTPError` and `RuntimeError` from `resolve_path`): the branch makes no
+vector-store call, so it has no `VectorServiceError` to re-raise, and `nx catalog show` never fails
+on a dchash span (171-research-8, -9).
 
 **Status.** `dchash_status(entry | None, span, catalog) -> str` says why one span does or does not
 resolve against the entry on its own side of the link (`from_span` against the `from` document,
@@ -228,7 +231,8 @@ resolve against the entry on its own side of the link (`from_span` against the `
 found no entry, or a deleted one, and passes `None`);
 `unreadable` (no source path, the file cannot be read, or it is not UTF-8); `changed` (the source
 reads but hashes differently); `out_of_range` (the range exceeds the text). An engine error is not a
-status: it propagates, so an outage fails the audit instead of listing every span as stale.
+status: `httpx.HTTPError` and `RuntimeError` from `resolve_path` propagate, so an outage fails the
+audit instead of listing every span as stale.
 
 **Write validation.** The client's three link write paths, `link`, `link_if_absent` and
 `links_upsert_many`, refuse a `from_span` or `to_span` that starts `dchash:` and fails the grammar
@@ -364,7 +368,9 @@ a caller needs PDFs, notes or edit survival (Sam, 2026-11-16).
   `link_audit`.
 - A non-UTF-8 source has no canonical text: minting refuses it with the decode error; status reports
   `unreadable`.
-- `nx catalog show` never crashes on a `dchash:` span, because the resolver never raises.
+- `nx catalog show` never crashes on a `dchash:` span, because the resolver turns every error,
+  the catalog client's `httpx.HTTPError` and `RuntimeError` included, into `None`. The status and
+  the audit let those two propagate.
 
 ## Implementation Plan
 
@@ -402,9 +408,9 @@ every other malformed shape.
 survival (same text, different chunks); a repo-relative `file_path` resolved from a working directory
 outside the repository; a curator-owned single file with a catalog passed, found through its
 `file://` `source_uri`; a `file://` `source_uri` with no catalog; changed, missing, unreadable and
-out-of-range spans; a malformed span returns `None`; `resolve_path` raising a non-engine error gives
-`None`, and a `VectorServiceError` propagates; `nx catalog show` on a document with a
-malformed `dchash:` link prints the rest of its links.
+out-of-range spans; a malformed span returns `None`; `resolve_path` raising `httpx.ConnectError` or
+`RuntimeError` makes the resolver return `None` and `dchash_status` raise; `nx catalog show` on a
+document with a stale `dchash:` link prints it and the rest of its links.
 
 #### Step 3: Minting
 

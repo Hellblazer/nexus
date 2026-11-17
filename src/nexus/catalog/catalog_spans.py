@@ -550,6 +550,7 @@ def resolve_span_text_for_entry(
       * ``42-57`` → lines 42-57 from the document's source file.
       * ``3:100-250`` → characters 100-250 from chunk index 3 in T3.
       * ``chash:<sha256hex>`` → content-addressed chunk from T3.
+      * ``dchash:<hash>:<start>-<end>`` → code points of the source file's canonical text (RDR-171).
 
     The minimal transclusion read path: given a resolved entry +
     span, retrieve the exact passage. ``Catalog.resolve_span_text``
@@ -690,5 +691,11 @@ def resolve_span_text_for_entry(
                 "resolve_span_chunk_char_failed", span=span, exc_info=True,
             )
             return None
+
+    # RDR-171: a dchash span reads the source file, never T3 chunks.
+    if span.startswith("dchash:"):
+        from nexus.catalog.dchash.source import resolve_dchash_text  # noqa: PLC0415 — deferred like the other branch imports
+
+        return resolve_dchash_text(entry, span, catalog)
 
     return None
