@@ -1,0 +1,18 @@
+# one line per changeset the gate must flag: file::id::author kind[,kind]; no line means the gate must pass it
+01-verification.xml::v-an-exemption-does-not-lift-it::fixture r1.verification-placeholder
+01-verification.xml::v-dollar-quote-lookalike::fixture r1.verification-placeholder
+01-verification.xml::v-dollar-quoted-with-a-question-mark::fixture r1.verification-placeholder
+01-verification.xml::v-first-placeholder-in-a-block-comment::fixture r1.verification-placeholder
+01-verification.xml::v-first-placeholder-in-a-comment::fixture r1.verification-placeholder
+01-verification.xml::v-first-placeholder-in-a-dollar-quote::fixture r1.verification-placeholder
+01-verification.xml::v-first-placeholder-in-a-string-literal::fixture r1.verification-placeholder
+01-verification.xml::v-first-then-letter::fixture r1.verification-placeholder
+01-verification.xml::v-first-then-second::fixture r1.verification-placeholder
+01-verification.xml::v-only-placeholder-is-in-a-comment::fixture r1.verification-placeholder
+01-verification.xml::v-placeholder-form-in-a-block-comment::fixture r1.verification-placeholder
+01-verification.xml::v-placeholder-inside-a-word::fixture r1.verification-placeholder
+01-verification.xml::v-question-mark-in-a-like::fixture r1.verification-placeholder
+01-verification.xml::v-question-mark-operator::fixture r1.verification-placeholder
+01-verification.xml::v-second-placeholder-in-a-comment::fixture r1.verification-placeholder
+01-verification.xml::v-second-placeholder::fixture r1.verification-placeholder
+01-verification.xml::v-tenth-placeholder::fixture r1.verification-placeholder

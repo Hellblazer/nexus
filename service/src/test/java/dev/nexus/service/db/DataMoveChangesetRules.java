@@ -343,7 +343,7 @@ final class DataMoveChangesetRules {
     // ---- registering INSERT ------------------------------------------------------------------------------------------
 
     /** A move a changeset registers: its label, the table its dml_utils runs are cut over, and the label it supersedes (or null). */
-    record Registration(String label, String drivingTable, String supersedes) {}
+    record Registration(String label, String drivingTable, String supersedes, String verification) {}
 
     /** The registrations in a registering INSERT, or null when the statement is not one the gate can read. */
     private static List<Registration> parseRegistering(Stmt stmt) {
@@ -354,7 +354,8 @@ final class DataMoveChangesetRules {
         int label = columns.indexOf("label");
         int table = columns.indexOf("driving_table");
         int supersedes = columns.indexOf("supersedes");
-        if (label < 0 || table < 0) return null;
+        int verification = columns.indexOf("verification");
+        if (label < 0 || table < 0 || verification < 0) return null;
         List<Registration> out = new ArrayList<>();
         String rest = head.group(2).trim();
         while (rest.startsWith("(")) {
@@ -369,10 +370,11 @@ final class DataMoveChangesetRules {
             if (values.size() != columns.size()) return null;
             String l = literal(values.get(label), stmt.literals());
             String t = literal(values.get(table), stmt.literals());
-            if (l == null || t == null || l.isEmpty() || t.isEmpty()) return null;
+            String v = literal(values.get(verification), stmt.literals());
+            if (l == null || t == null || v == null || l.isEmpty() || t.isEmpty()) return null;
             // NULL, or anything that is not a literal label, names no superseded move
             String sup = supersedes < 0 ? null : literal(values.get(supersedes), stmt.literals());
-            out.add(new Registration(l, t.toLowerCase().trim(), sup));
+            out.add(new Registration(l, t.toLowerCase().trim(), sup, v));
             rest = rest.substring(i + 1).trim();
             if (rest.startsWith(",")) rest = rest.substring(1).trim();
             else break;
@@ -432,7 +434,13 @@ final class DataMoveChangesetRules {
                     findings.add(new Finding("r1.registering-unreadable",
                         "an INSERT into nexus.data_moves the gate cannot read (it names its columns, lists VALUES literals for label and driving_table)"));
                 } else {
-                    for (Registration r : regs) moves.register(r);
+                    for (Registration r : regs) {
+                        moves.register(r);
+                        if (badPlaceholders(r.verification())) {
+                            findings.add(new Finding("r1.verification-placeholder", "the verification of move " + r.label()
+                                + " has a '?' or a $-digit placeholder other than a standalone $1; the worker refuses it as a permanent failure"));
+                        }
+                    }
                 }
             }
             for (Stmt s : cs.statements()) {
@@ -454,6 +462,34 @@ final class DataMoveChangesetRules {
             out.add(new Entry(cs, findings, !exemptTables.isEmpty(), unlifted));
         }
         return out;
+    }
+
+    /**
+     * A standalone {@code $1}: no word character and no {@code $} on either side. This is the boundary of the data-move worker's
+     * check of the verification query (MoveSql, bead nexus-f3yqd.2.14), which binds the tenant as the one parameter {@code $1}; the two
+     * must agree, so a verification this gate lets through is one the worker accepts. Exact regex: {@code (?<![\w$])\$1(?![\w$])}.
+     */
+    static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$])\\$1(?![\\w$])");
+
+    /**
+     * True when a verification query has a {@code ?}, a {@code $}-digit form that is not a standalone {@code $1} ({@code $2},
+     * {@code $10}, {@code my$1}, {@code $1x}, {@code $$1}), or a standalone {@code $1} that sits in a comment, a string literal or a
+     * dollar-quoted body.
+     *
+     * <p>The last case is why this scans two ways. The worker (MoveSql, nexus-f3yqd.2.14) rewrites every {@code $1} to
+     * {@code CAST(? AS text)} by TEXT, comments and quotes included, while pgjdbc skips comments, literals and dollar quotes when it
+     * counts the placeholders of the statement. The two counts then disagree, {@code setString} goes out of range, and the move fails
+     * permanently after it has registered. So the first checks read the raw text of the column's literal (nothing masked), and the
+     * count of standalone {@code $1} in the raw text must equal the count after {@link #statements} masks comments, literals and
+     * dollar quotes; a {@code $1} the mask hides makes them differ.
+     */
+    static boolean badPlaceholders(String verification) {
+        if (verification.indexOf('?') >= 0) return true;
+        if (Pattern.compile("\\$\\d").matcher(STANDALONE_FIRST_PLACEHOLDER.matcher(verification).replaceAll(" ")).find()) return true;
+        long raw = STANDALONE_FIRST_PLACEHOLDER.matcher(verification).results().count();
+        long visible = 0;
+        for (Stmt st : statements(verification)) visible += STANDALONE_FIRST_PLACEHOLDER.matcher(st.text()).results().count();
+        return raw != visible;
     }
 
     private static boolean isDataMovesInsert(Stmt s) {

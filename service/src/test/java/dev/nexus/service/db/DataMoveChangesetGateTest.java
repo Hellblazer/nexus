@@ -230,6 +230,11 @@ class DataMoveChangesetGateTest {
     }
 
     @Test
+    void aRegisteringInsertsVerification_withAQuestionMarkOrAPlaceholderBeyondDollarOne_isRed() throws Exception {
+        scenario("verification-placeholder");
+    }
+
+    @Test
     void aRegisteringInsertTheGateCannotRead_isRed() throws Exception {
         scenario("registering-unreadable");
     }
