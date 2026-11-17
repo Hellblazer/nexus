@@ -682,7 +682,13 @@ the table in the same commit:
   Critical Assumption on unregistered schemes is checked here.
 - `prune_stale_cmd` and `remediate_paths_cmd` use `list_by_collection` for
   `--collection`.
-- `nx catalog list --sensitive` reads `/sensitive`, then `resolve_many`.
+- `nx catalog list --sensitive` reads `/sensitive`, then `resolve_many`. The
+  route returns at most 10,000 rows, so on a tenant with more than 10,000
+  sensitive documents a `--type` or `--meta` listing, or a page past row
+  10,000, refuses and names `--owner`, where the walk listed them. Sam shipped
+  that regression on 2026-11-17 (ask uwggq17-sensitive-cap, option C) and Phase
+  2 closes it: the metadata route (nexus-uwggq.2.4, .2.14) and a type filter on
+  the sensitive route.
 - `sensitivity_doctor._walk_sensitive` stops falling back to a walk: an
   unavailable or capped read is "not checked", with the cause.
 
@@ -886,3 +892,4 @@ the next one without the ratchet.
 - 2026-11-16: Gate round 1 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `641b2a2bd7fe`; critique `nexus_rdr/241-gate-critique-2026-11-16-r1`.
 - 2026-11-16: The acknowledged assumption on `nx doctor --check-references` corrected to match the code (standing grant 3; nexus-uwggq.1.4 golden test and its critique T2 `nexus/critique-0d91dac32-nexus-uwggq.1.4-2026-11-16-r1`): unregistered-scheme rows report "unknown", not "not stattable", and never set the exit code; the fixture holds two such rows; an upper-case registered scheme is outside the assumption.
 - 2026-11-16: Sam chose the engine route for registered schemes in any case (ask uwggq15-scheme-case, option C, superseding his earlier option A): the `--check-references` switch (nexus-uwggq.1.5) moves from Phase 1 to Phase 2, which gains a fourth route, a case-insensitive scheme-prefix list.
+- 2026-11-17: `nx catalog list --sensitive` (nexus-uwggq.1.7) ships with a refusal on filtered or past-10,000 reads of a tenant over 10,000 sensitive documents (Sam, ask uwggq17-sensitive-cap, option C); Phase 2 closes it with the metadata route and a type filter on the sensitive route (standing grant 3).
