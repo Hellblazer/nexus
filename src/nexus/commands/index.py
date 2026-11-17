@@ -3724,9 +3724,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
 
     # nexus-7f5qj: single-file identity-drop wiring. A catalog-register
     # failure during THIS call never raises (doc_indexer's preflight
-    # registration swallows it into the identity-drop collector — the
-    # chunks still land, searchable, orphaned) so neither except clause
-    # below ever sees it; the collector check after the call is what
+    # registration swallows it into the identity-drop collector) so neither
+    # except clause below ever sees it; the collector check after the call is what
     # catches it. Reset here so a leftover drop from an earlier call in
     # this process is never misattributed to this run.
     from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)

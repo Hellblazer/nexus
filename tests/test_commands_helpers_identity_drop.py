@@ -101,10 +101,13 @@ def test_reset_identity_drop_collectors_also_zeroes_the_partial_doc_skip_collect
 
 
 def test_emit_identity_drop_summary_silent_and_false_when_all_empty(capsys):
-    result = emit_identity_drop_summary(indexed_count=1)
+    with capture_logs() as cap:
+        result = emit_identity_drop_summary(indexed_count=1)
     assert result is False
     captured = capsys.readouterr()
     assert captured.err == ""
+    # nexus-39upx: no sweep skips, no counted event.
+    assert [e for e in cap if e["event"] == "superseded_sweep_skipped"] == []
 
 
 @pytest.mark.t2_tenant
