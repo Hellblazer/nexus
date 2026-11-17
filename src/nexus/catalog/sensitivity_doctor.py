@@ -29,7 +29,7 @@ need a sensitive document actually met. A ``not_applicable`` row whose reason st
 look (:func:`is_not_checked`); "no sensitive documents in this catalog" looked and found none.
 
 The collaborators are injectable (``reader``, ``aspects``, ``queue``, ``select``) for tests; the defaults
-are the production handles. The sensitive set comes from the engine's bounded list (``GET /sensitive``,
+are the production handles. The sensitive set comes from the engine's bounded list (``GET /v1/catalog/sensitive``,
 engine-service 0.1.188 adds it) and only from it (RDR-241): when the list is unavailable (the engine does not
 advertise it, the route answers 404 or 503, a reader without it) or capped, each row is ``not_applicable`` with
 a reason that starts "not checked:", names the cause and says what to do. No row ever walks the catalog. A
@@ -123,23 +123,28 @@ _SENSITIVE_LIST_LIMIT = 10_000
 #: Every reason that says a row could not look starts with this; :func:`is_not_checked` reads it back.
 NOT_CHECKED_PREFIX = "not checked:"
 
-#: The "not checked" reason for each way the engine's list fails to answer. Each is true for every input that
-#: produces it and says what to do (nexus-uwggq.1.8). ``UNSUPPORTED`` is the one cause about the engine; the rest
-#: are a retry.
+#: The "not checked" reason for each way the engine's list fails to answer (nexus-uwggq.1.8). ``UNSUPPORTED`` is
+#: the one cause about the engine. ``PROBE_FAILED`` and ``TIMEOUT`` can pass on a second run. ``FAILED`` and
+#: ``MALFORMED`` also cover deterministic causes (a 401 or 403, a persistent 5xx, a body that is not the route's
+#: shape), so their text sends the reader to the token and the engine's logs when a second run does not help.
 _NOT_CHECKED_BY_CAUSE: dict[str, str] = {
     SensitiveListUnavailable.UNSUPPORTED: (
         f"{NOT_CHECKED_PREFIX} the engine does not offer the sensitive list (a local engine needs engine-service "
-        "0.1.188 or later; on a managed engine the public edge must allow it)"
+        "0.1.188 or later; on a managed engine, ask the engine's operator to allow it at the public edge)"
     ),
     SensitiveListUnavailable.PROBE_FAILED: (
         f"{NOT_CHECKED_PREFIX} the engine's capabilities could not be read; run nx doctor again"
     ),
-    SensitiveListUnavailable.TIMEOUT: f"{NOT_CHECKED_PREFIX} the engine did not answer in time; run nx doctor again",
+    SensitiveListUnavailable.TIMEOUT: (
+        f"{NOT_CHECKED_PREFIX} the engine did not answer in time or was unavailable; run nx doctor again"
+    ),
     SensitiveListUnavailable.FAILED: (
-        f"{NOT_CHECKED_PREFIX} the engine could not be reached or failed; run nx doctor again"
+        f"{NOT_CHECKED_PREFIX} the engine could not be reached or failed; run nx doctor again; "
+        "if it persists, check the engine's logs or the token"
     ),
     SensitiveListUnavailable.MALFORMED: (
-        f"{NOT_CHECKED_PREFIX} the engine's answer could not be read; run nx doctor again"
+        f"{NOT_CHECKED_PREFIX} the engine's answer could not be read; run nx doctor again; "
+        "if it persists, check the engine's logs or the token"
     ),
 }
 NOT_CHECKED_UNSUPPORTED = _NOT_CHECKED_BY_CAUSE[SensitiveListUnavailable.UNSUPPORTED]
@@ -157,7 +162,13 @@ def is_not_checked(report: dict) -> bool:
 def _scrubbed(exc: BaseException, reader: Any) -> str:
     """*exc*'s text through the transport scrubber (it can quote a URL's credentials or a bearer token); the
     reader's own base URL, when it has one, is what the scrubber checks the text against."""
-    url = getattr(reader, "_base_url", "")
+    # Called from inside except handlers: the production reader is a lazy handle whose attribute read builds the
+    # service client and re-raises a build failure that is not an AttributeError, so getattr's default never
+    # applies. Nothing read here may raise out of the handler it serves.
+    try:
+        url = getattr(reader, "_base_url", "")
+    except Exception:  # noqa: BLE001 — a reader that cannot even name its URL scrubs against none
+        url = ""
     return scrub_transport_error(exc, url if isinstance(url, str) else "")
 
 
@@ -225,9 +236,16 @@ def _read_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
         if callable(probe):
             supported, version = probe()
             if supported is not True:
+                # Two inputs reach here and the text for each must be true for every case of it. A version with
+                # no flag: the engine predates the column, or a managed edge trims the flag. No version: the
+                # probe got no /version answer, or the answer names no version (both read ``(False, "")``).
                 what = (
-                    f"engine {version} does not advertise catalog_sensitivity_supported; a newer engine-service "
-                    "is needed" if version else "the engine's capabilities could not be read; run nx doctor again"
+                    f"engine {version} does not advertise catalog_sensitivity_supported; a local engine needs a "
+                    "newer engine-service, and on a managed engine the public edge may trim the flag (ask the "
+                    "engine's operator)" if version else
+                    "the engine's /version answer could not be read or names no version, so "
+                    "catalog_sensitivity_supported could not be confirmed; run nx doctor again; "
+                    "if it persists, check the engine's logs or the token"
                 )
                 return [], f"{NOT_CHECKED_PREFIX} {what}"
         # F30 (nexus-f3yqd.6): an engine with the bounded route answers in one indexed read. Where it does not

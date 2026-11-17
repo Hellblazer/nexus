@@ -16,10 +16,12 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog import sensitivity_doctor as sd
+from nexus.catalog.factory import _SharedServiceCatalogHandle
 from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable
 from nexus.commands import doctor as doctor_mod
 from nexus.commands.catalog_cmds.doctor import EXIT_COULD_NOT_CHECK
 from nexus.cli import main
+from nexus.service_handles import SharedClientSlot
 
 
 def _doc(tumbler: str, collection: str = "knowledge__sens__bge-base-en-v15-768__v1", sensitive: bool = True):
@@ -134,13 +136,15 @@ def test_a_list_that_fails_is_not_checked_with_the_cause_and_not_the_exception_t
     report = sd.check_sensitive_in_aspect_eligible(
         reader=_Reader([], raises=OSError("engine unreachable")), aspects=_Aspects(), select=lambda c: object())
     assert report["status"] == sd.NOT_APPLICABLE
-    assert report["reason"] == "not checked: the engine could not be reached or failed; run nx doctor again"
+    assert report["reason"] == ("not checked: the engine could not be reached or failed; run nx doctor again; "
+                              "if it persists, check the engine's logs or the token")
 
 
 def test_an_engine_without_the_column_is_not_checked_and_says_what_to_do() -> None:
     report = sd.check_sensitive_with_aspects(reader=_Reader([_doc("1.1.1")], supported=False))
     assert report["reason"] == ("not checked: engine 0.0.1 does not advertise catalog_sensitivity_supported; "
-                                "a newer engine-service is needed")
+                                "a local engine needs a newer engine-service, and on a managed engine the public "
+                                "edge may trim the flag (ask the engine's operator)")
 
 
 def test_an_unreadable_aspect_store_is_not_applicable_with_the_cause_not_a_false_red() -> None:
@@ -271,7 +275,7 @@ def test_the_could_not_check_exit_code_is_its_own_code() -> None:
 def test_catalog_doctor_with_aspects_exits_could_not_check_when_the_row_reads_not_checked(monkeypatch) -> None:
     result = _run_catalog_doctor(monkeypatch, _NoList([_doc("1.1.1")]), "--sensitive-with-aspects")
     assert result.exit_code == EXIT_COULD_NOT_CHECK, result.output
-    assert "not checked: the engine did not answer in time; run nx doctor again" in result.output
+    assert "not checked: the engine did not answer in time or was unavailable; run nx doctor again" in result.output
     assert "[✓]" not in result.output
 
 
@@ -315,6 +319,44 @@ def test_nx_doctor_keeps_a_not_checked_row_non_gating(monkeypatch, capsys) -> No
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _NoList([_doc("1.1.1")]))
     assert doctor_mod._run_check_sensitive_with_aspects() is False
     assert "not checked:" in capsys.readouterr().out
+
+
+# ── a reader whose attribute reads raise: the production handle when the service client cannot be built ─────
+
+
+def _handle_over_a_failing_build():
+    """The real lazy handle over a slot whose build raises: ``__getattr__`` builds the client and re-raises the failure,
+    which is a RuntimeError and not an AttributeError, so ``getattr(reader, name, default)`` does not return the
+    default. No client is ever built, so nothing touches an engine."""
+    def build():
+        raise RuntimeError("service client cannot be built")
+
+    return _SharedServiceCatalogHandle(SharedClientSlot(build=build, close=lambda client: None))
+
+
+def test_a_reader_whose_attribute_reads_raise_is_not_checked_and_the_handler_does_not_raise() -> None:
+    report = sd.check_sensitive_with_aspects(reader=_handle_over_a_failing_build(), aspects=_Aspects(),
+                                             queue=object(), queued_doc_ids=lambda q: set())
+    assert report["status"] == sd.NOT_APPLICABLE and sd.is_not_checked(report), report
+    assert report["reason"].startswith("not checked: the catalog could not be read (RuntimeError: ")
+
+
+def test_the_scrubber_helper_survives_a_reader_whose_base_url_read_raises() -> None:
+    class Hostile:
+        @property
+        def _base_url(self):
+            raise RuntimeError("no client")
+
+    assert sd._scrubbed(ValueError("plain text"), Hostile()) == "plain text"
+    assert sd._scrubbed(ValueError("plain text"), None) == "plain text"
+
+
+def test_catalog_doctor_with_aspects_exits_could_not_check_when_the_service_client_cannot_be_built(monkeypatch) -> None:
+    """Exit 3, not 1 and not a traceback: the state the exit code exists for."""
+    result = _run_catalog_doctor(monkeypatch, _handle_over_a_failing_build(), "--sensitive-with-aspects")
+    assert result.exit_code == EXIT_COULD_NOT_CHECK, (result.output, repr(result.exception))
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "not checked: the catalog could not be read (RuntimeError: " in result.output
 
 
 # ── the wiring, on the engine substrate ─────────────────────────────────────

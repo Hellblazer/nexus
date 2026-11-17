@@ -2855,7 +2855,8 @@ def _run_check_sensitive_with_aspects() -> bool:
     row that gates: RDR-243 Technical Design item 10 says the finding fails the sweep, so the row prints and
     RETURNS True when it reports FAIL, and :func:`_run_supplementary_checks` hands that to ``nx doctor``,
     which exits 1. Pass, not-applicable and an unreadable aspect state return False (a row that could not
-    look never fails the sweep). ``nx catalog doctor --sensitive-with-aspects`` gates the same way."""
+    look, a "not checked" row included, never fails the sweep). ``nx catalog doctor --sensitive-with-aspects``
+    also exits 1 on FAIL, and in addition exits 3 when this row reads "not checked"; ``nx doctor`` does not."""
     from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
 
     report = sd.check_sensitive_with_aspects()

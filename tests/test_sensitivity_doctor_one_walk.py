@@ -6,7 +6,7 @@ sensitive-in-aspect-eligible, sensitive-with-aspects and sensitive-in-external-e
 and 23.4 s, each walking the whole catalog (``all_documents(limit=0)``) to find no sensitive document. The walk
 cost scales with the catalog, so on a large one the three repeats are most of the run.
 
-RDR-241 Phase 1 (nexus-uwggq.1.8): the walk is gone. The rows read the engine's bounded list (``GET /sensitive``)
+RDR-241 Phase 1 (nexus-uwggq.1.8): the walk is gone. The rows read the engine's bounded list (``GET /v1/catalog/sensitive``)
 once; when it is unavailable or capped, each row reads "not checked" with the cause and no catalog walk is made.
 """
 from __future__ import annotations
@@ -157,11 +157,19 @@ def test_the_bounded_route_replaces_the_walk(monkeypatch: pytest.MonkeyPatch) ->
 # Each cause is asserted in full, as the operator reads it: true for every input that produces it, and it says
 # what to do. The literals are not imported, so a reworded cause fails here.
 _UNSUPPORTED = ("not checked: the engine does not offer the sensitive list (a local engine needs engine-service "
-                "0.1.188 or later; on a managed engine the public edge must allow it)")
+                "0.1.188 or later; on a managed engine, ask the engine's operator to allow it at the public edge)")
 _PROBE_FAILED = "not checked: the engine's capabilities could not be read; run nx doctor again"
-_TIMEOUT = "not checked: the engine did not answer in time; run nx doctor again"
-_FAILED = "not checked: the engine could not be reached or failed; run nx doctor again"
-_MALFORMED = "not checked: the engine's answer could not be read; run nx doctor again"
+_TIMEOUT = "not checked: the engine did not answer in time or was unavailable; run nx doctor again"
+_FAILED = ("not checked: the engine could not be reached or failed; run nx doctor again; "
+           "if it persists, check the engine's logs or the token")
+_MALFORMED = ("not checked: the engine's answer could not be read; run nx doctor again; "
+              "if it persists, check the engine's logs or the token")
+_FLAG_NOT_ADVERTISED = (
+    "not checked: engine 0.1.188 does not advertise catalog_sensitivity_supported; a local engine needs a newer "
+    "engine-service, and on a managed engine the public edge may trim the flag (ask the engine's operator)")
+_NO_VERSION = ("not checked: the engine's /version answer could not be read or names no version, so "
+               "catalog_sensitivity_supported could not be confirmed; run nx doctor again; "
+               "if it persists, check the engine's logs or the token")
 _CAPPED = ("not checked: more than 10,000 sensitive documents; "
            "list them with nx catalog list --sensitive --owner <owner>")
 
@@ -311,9 +319,14 @@ _CAPPED_BODY = {"count": 10_001, "limit": 10_000, "capped": True, "documents": _
         (_ROUTE, httpx.ConnectError("refused"), _FAILED, True),
         (_ROUTE, httpx.Response(200, json={"count": "many"}), _MALFORMED, True),
         (_ROUTE, httpx.Response(200, json=_CAPPED_BODY), _CAPPED, True),
-        (None, None, _PROBE_FAILED, False),
+        (None, None, _NO_VERSION, False),  # the doctor's own capability read gets no answer
+        # The pre-probe branch: a version with no sensitivity flag (an old engine, or a managed edge that trims it)
+        # and a /version body that carries flags but no version key are different inputs with their own text.
+        ({"release_version": "0.1.188"}, None, _FLAG_NOT_ADVERTISED, False),
+        ({"catalog_sensitivity_supported": False}, None, _NO_VERSION, False),
     ],
-    ids=["flag-absent", "404", "503", "500", "transport-error", "malformed", "capped", "version-probe-fails"],
+    ids=["flag-absent", "404", "503", "500", "transport-error", "malformed", "capped", "version-probe-fails",
+         "version-without-the-sensitivity-flag", "version-body-without-a-version-key"],
 )
 @pytest.mark.parametrize("check", _ALL_CHECKS)
 def test_the_real_client_is_never_asked_for_a_catalog_listing(
@@ -362,10 +375,13 @@ def test_no_catalog_is_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
     ("probe", "reason"),
     [
         ((False, "0.0.1"), "not checked: engine 0.0.1 does not advertise catalog_sensitivity_supported; "
-                           "a newer engine-service is needed"),
-        ((False, ""), "not checked: the engine's capabilities could not be read; run nx doctor again"),
+                           "a local engine needs a newer engine-service, and on a managed engine the public edge "
+                           "may trim the flag (ask the engine's operator)"),
+        ((False, ""), "not checked: the engine's /version answer could not be read or names no version, so "
+                      "catalog_sensitivity_supported could not be confirmed; run nx doctor again; "
+                      "if it persists, check the engine's logs or the token"),
     ],
-    ids=["flag-not-advertised", "probe-failed"],
+    ids=["flag-not-advertised", "no-version"],
 )
 def test_a_capability_that_is_not_advertised_or_not_readable_is_not_checked(
     monkeypatch: pytest.MonkeyPatch, probe: tuple[bool, str], reason: str,
@@ -415,3 +431,22 @@ def test_the_real_client_reads_the_list_when_the_route_answers() -> None:
     report = sd.check_sensitive_in_external_embedder(reader=cat)
     assert report["status"] == sd.WARN and report["sensitive_documents"] == 1, report
     assert not [p for p in seen if p.startswith("/v1/catalog/list")], seen
+
+
+def test_a_transport_error_quoting_a_token_is_scrubbed_in_the_client_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client's own log line for a failed list read goes through the same scrubber as the doctor's."""
+    logged: list[tuple[str, dict]] = []
+
+    class _Recorder:
+        def info(self, event: str, **kw: Any) -> None:
+            logged.append((event, kw))
+
+        warning = debug = info
+
+    monkeypatch.setattr("nexus.catalog.http_catalog_client._log", _Recorder())
+    cat, _seen = _real_client(
+        version=_ROUTE, sensitive=httpx.LocalProtocolError("Illegal header value b'Bearer s3cr3t-token'"))
+    report = sd.check_sensitive_with_aspects(reader=cat)
+    assert report["reason"] == _FAILED
+    lines = [kw for event, kw in logged if event == "http_catalog_client.sensitive_documents_unavailable"]
+    assert len(lines) == 1 and "s3cr3t-token" not in repr(lines) and "Bearer <redacted>" in lines[0]["error"], lines

@@ -89,7 +89,7 @@ import time
 import httpx
 import structlog
 
-from nexus._log_safe_url import log_endpoint
+from nexus._log_safe_url import log_endpoint, scrub_transport_error
 from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable, sensitive_answer
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
@@ -1144,7 +1144,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return {"fillable": fillable, "limit": limit, "capped": capped}
 
     def sensitive_documents(self, limit: int = 1000, *, strict: bool = False) -> dict | None:
-        """The tenant's live sensitive documents, from one bounded engine read (``GET /sensitive``, engine 0.1.188,
+        """The tenant's live sensitive documents, from one bounded engine read (``GET /v1/catalog/sensitive``, engine 0.1.188,
         nexus-f3yqd.6): ``{"count": n, "capped": bool, "documents": [{"tumbler", "physical_collection"}]}``, at most
         *limit* documents, in tumbler order; ``capped`` means there are more than the list holds.
 
@@ -1172,7 +1172,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return cannot_say({404: SensitiveListUnavailable.UNSUPPORTED, 503: SensitiveListUnavailable.TIMEOUT}
                               .get(status, SensitiveListUnavailable.FAILED))
         except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports it unavailable
-            _log.info("http_catalog_client.sensitive_documents_unavailable", error=str(exc))
+            _log.info("http_catalog_client.sensitive_documents_unavailable", error=scrub_transport_error(exc, self._base_url))
             return cannot_say(SensitiveListUnavailable.FAILED)
         answer = sensitive_answer(result)
         if answer is None:
