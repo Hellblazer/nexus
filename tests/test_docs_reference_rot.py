@@ -82,6 +82,7 @@ SHA_ALLOWLIST: dict[str, str] = {
     "5f088e2": "rdr-246: a commit in Hellblazer/ddl_utils, the commit nexus pins, not a commit here",
     "a6cd544": "rdr-246: a commit in Hellblazer/dml_utils (PR #1, bytea keys), superseded as the pin by 28b0b3aa9, not a commit here",
     "28b0b3aa9": "rdr-246: the merge of Hellblazer/dml_utils PR #2 (bytea keys and the committing procedure), the commit nexus pins, not a commit here",
+    "9196f4b1c": "rdr-246: the merge of Hellblazer/dml_utils PR #3 (four-column keys), the commit nexus pins, not a commit here",
     "328b6b68": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-dl queries-corpus, not a commit here",
     "3c26def7": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-dl qrels, not a commit here",
     "60a64fc8": "rdr-244 pre-registration: Hugging Face revision of CoIR-Retrieval/codetrans-contest queries-corpus, not a commit here",
