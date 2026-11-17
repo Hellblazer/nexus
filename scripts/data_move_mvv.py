@@ -27,7 +27,7 @@ Subcommands:
                      went on from the last committed chunk with every row moved exactly once.
     ``load``         a steady search load, with the move paused and then running, at one ``--sleep-ms``.
     ``no-pgbg``      boot on a bundle without pg_background.
-    ``crash-resume`` stop PostgreSQL itself with ``pg_ctl stop -m immediate`` while a chunk's UPDATE is in flight (the
+    ``crash-resume`` stop PostgreSQL itself with ``pg_ctl stop -m immediate`` while a chunk's pg_background worker is running (the
                      engine and supervisor are killed right after), recover it, and check the aborted chunk rolled
                      back (moved rows = committed chunks x chunk size), then let the move finish: every row once.
     ``masking``      after the move, register a move that errors with the admin password in its message. Positive
@@ -211,7 +211,7 @@ def crash_verdict(*, in_flight_at_kill: int, done_before_kill: int, done_after_r
     committed chunks x chunk_size (capped by the row count, the last chunk being partial)."""
     why: list[str] = []
     if in_flight_at_kill <= 0:
-        why.append("no chunk UPDATE was in flight at the kill, so a rollback was not exercised")
+        why.append("no chunk was in flight at the kill, so a rollback was not exercised")
     if not recovery_logged:
         why.append("PostgreSQL's log shows no crash recovery after the restart")
     if done_after_recovery < done_before_kill:
@@ -526,16 +526,18 @@ def scenario_kill_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool
 
 
 def in_flight_snapshot(eng: Engine) -> dict:
-    """One statement: the move's committed chunks and every active chunk UPDATE / run_migration_chunks CALL, so the
-    two numbers come from one snapshot."""
+    """One statement: the move's committed chunks and every chunk in flight, so the two numbers come from one snapshot.
+    A chunk runs in a ``pg_background`` worker whose query is ``SELECT dml_utils_lib.process_migration_chunk(run,
+    chunk, 'UPDATE nexus.chunks_... SET mvv_n ...')`` (seen live on chas, 2026-11-17), beside the engine's
+    ``CALL dml_utils.run_migration_chunks_committing`` backend."""
     r = sql(eng, "select d.n, a.pid, a.backend_type, a.state, regexp_replace(left(a.query, 90), '\\s+', ' ', 'g'), a.age_s, "
                  "(select count(*) from pg_stat_activity where state = 'active' and pid <> pg_backend_pid() "
                  "and query ilike 'call %run_migration_chunks%') "
                  "from (select coalesce(sum(total_chunks_completed), 0) as n from dml_utils_data.migration_run "
                  f"where label = '{MOVE_LABEL}' or starts_with(label, '{MOVE_LABEL}/')) d "
                  "left join (select pid, backend_type, state, query, extract(epoch from now() - xact_start)::int as age_s "
-                 "from pg_stat_activity where state = 'active' and pid <> pg_backend_pid() "
-                 "and query ilike 'update %' and query ilike '%mvv_n%') a on true")
+                 "from pg_stat_activity where state = 'active' and backend_type = 'pg_background' "
+                 "and query ilike '%process_migration_chunk%' and query ilike '%mvv_n%') a on true")
     # one row per active UPDATE (or one with null pid when none)
     updates = [{"pid": x[1], "backend_type": x[2], "state": x[3], "query": x[4], "xact_age_s": x[5]} for x in r if x[1]]
     return {"done_chunks": int(r[0][0]), "updates_in_flight": updates, "calls_in_flight": int(r[0][6])}
@@ -543,7 +545,7 @@ def in_flight_snapshot(eng: Engine) -> dict:
 
 def scenario_crash_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     """PostgreSQL itself is stopped with ``pg_ctl stop -m immediate`` (no checkpoint, no clean shutdown: the next
-    start is crash recovery) while a chunk's UPDATE is running. The engine and supervisor are killed straight
+    start is crash recovery) while a chunk's pg_background worker is running its UPDATE. The engine and supervisor are killed straight
     after, so nothing else touches the cluster. PostgreSQL is started alone and read before the engine runs again:
     the moved rows must equal the committed chunks x chunk size, the aborted chunk having rolled back."""
     inst = eng.inst
@@ -572,6 +574,7 @@ def scenario_crash_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, boo
         if snap["done_chunks"] * 1000 >= total_rows * a.kill_at and snap["updates_in_flight"]:
             break
         time.sleep(0.1)
+    log(f"crash-resume: {snap['done_chunks']} chunks done, {len(snap['updates_in_flight'])} in flight: {snap['updates_in_flight']}")
     t_kill = time.monotonic()
     inst.pg_ctl("stop", "-m", "immediate", "-w")
     engine, supervisor = eng.kill()
@@ -591,6 +594,7 @@ def scenario_crash_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, boo
     moved = moved_rows(eng)
     rec_lines = lines_with(pg_log_files(pgdata), "automatic recovery in progress", pg_start)
     redo = lines_with(pg_log_files(pgdata), "redo", pg_start)
+    log(f"crash-resume: recovered in {recovery_s}s, {prog['done_chunks']} chunks, {moved} rows, {len(rec_lines)} recovery line(s)")
     out["recovered"] = {"seconds": recovery_s, **prog, "moved_rows": moved, "move": move_row(eng),
                         "moved_rows_mod_chunk_size": moved % max(1, (move_row(eng) or {}).get("chunk_size", 1000)),
                         "recovery_log_lines": [ln[:200] for ln in rec_lines[:3]], "redo_log_lines": [ln[:200] for ln in redo[:4]]}
