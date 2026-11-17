@@ -4404,6 +4404,17 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # matching entry.
     "nexus.gc_audit",
     "nexus.hook_failures",
+    # nexus.identity_*: RDR-253 Step 1 (nexus-hczdo.1.1, identity-001-records.xml,
+    # identity-002-work-and-indexes.xml), session identities, their aliases,
+    # bindings, memberships, session index, counters and work rows; ENABLE +
+    # FORCE + tenant_isolation on each.
+    "nexus.identity_aliases",
+    "nexus.identity_bindings",
+    "nexus.identity_counters",
+    "nexus.identity_memberships",
+    "nexus.identity_records",
+    "nexus.identity_sessions",
+    "nexus.identity_work",
     # nexus.index_failures: nexus-nukn3, durable per-file index-failure
     # record (telemetry-009-index-failures.xml). Event-log shape, same RLS
     # posture as hook_failures (ENABLE + FORCE + tenant_isolation).
