@@ -73,9 +73,12 @@ public final class ScratchHandler implements HttpHandler {
     static final long SWEEP_HOURS = 24L;
 
     private final ScratchRepository repo;
+    /** RDR-253 Step 2: the identity scope's ownership and generation checks, and the session index check. */
+    private final IdentityFence fence;
 
-    public ScratchHandler(ScratchRepository repo) {
+    public ScratchHandler(ScratchRepository repo, IdentityFence fence) {
         this.repo = repo;
+        this.fence = fence;
     }
 
     @Override
@@ -110,6 +113,8 @@ public final class ScratchHandler implements HttpHandler {
             log.debug("event=t1_session_mismatch tenant={} op={}", tenant, op);
             HttpUtil.send(exchange, 403,
                 json(Map.of("error", "session_id does not match the minted session token")));
+        } catch (dev.nexus.service.db.IdentityException e) {
+            IdentityFence.refuse(exchange, e);
         } catch (IllegalArgumentException e) {
             log.debug("event=t1_bad_request tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
@@ -132,13 +137,34 @@ public final class ScratchHandler implements HttpHandler {
      * — no minted token) the body field is used as today.
      */
     private String effectiveSession(Map<String, Object> body) {
+        return effectiveSession(body, false);
+    }
+
+    /**
+     * {@code write}: the operation changes the scope. Only a write is checked against the session index for an
+     * identity token (the RDR fences writes; a read is never checked); a minted session token's rule is unchanged.
+     */
+    private String effectiveSession(Map<String, Object> body, boolean write) {
         String bodySession = requireString(body, "session_id");
+        // RDR-253 Step 2: the identity scope (identity:<id>) is not a session. Its writes are checked per
+        // operation by IdentityFence.scratchWrite; its reads are open, a delegated child's included.
+        if (IdentityFence.isIdentityScope(bodySession)) {
+            IdentityFence.scopeOwner(bodySession);
+            return bodySession;
+        }
+        boolean identityToken = RequestContext.identity() != null;
         if (RequestContext.isMintedSession()) {
             String resolved = RequestContext.session();
-            if (!resolved.equals(bodySession)) {
+            if (!resolved.equals(bodySession)
+                    && !(identityToken && fence.sessionAccepted(RequestContext.tenant(), bodySession))) {
                 throw new SessionMismatchException();
             }
-            return resolved;
+            return bodySession;
+        }
+        // An identity token with no minted session: any session id the index maps to the token's identity and
+        // generation (so the write after /clear, under a new session id, is not refused).
+        if (write && identityToken && !fence.sessionAccepted(RequestContext.tenant(), bodySession)) {
+            throw new SessionMismatchException();
         }
         return bodySession;
     }
@@ -158,7 +184,8 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String id         = requireString(body, "id");
-        String sessionId  = effectiveSession(body);
+        String sessionId  = effectiveSession(body, true);
+        fence.scratchWrite(ex, tenant, sessionId);
         String content    = requireString(body, "content");
         String tags       = optStringOrEmpty(body, "tags");
         String agent      = optStringOrNull(body, "agent");
@@ -245,7 +272,8 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String id         = requireString(body, "id");
-        String sessionId  = effectiveSession(body);
+        String sessionId  = effectiveSession(body, true);
+        fence.scratchWrite(ex, tenant, sessionId);
         String flushProj  = optStringOrEmpty(body, "flush_project");
         String flushTitle = optStringOrEmpty(body, "flush_title");
 
@@ -262,7 +290,8 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST");
         Map<String, Object> body = readBody(ex);
         String id        = requireString(body, "id");
-        String sessionId = effectiveSession(body);
+        String sessionId = effectiveSession(body, true);
+        fence.scratchWrite(ex, tenant, sessionId);
 
         boolean ok = repo.unflag(tenant, sessionId, id);
         HttpUtil.send(ex, 200, json(Map.of("ok", ok)));
@@ -277,7 +306,8 @@ public final class ScratchHandler implements HttpHandler {
         requireMethod(ex, method, "POST", "DELETE");
         Map<String, Object> body = readBody(ex);
         String id        = requireString(body, "id");
-        String sessionId = effectiveSession(body);
+        String sessionId = effectiveSession(body, true);
+        fence.scratchWrite(ex, tenant, sessionId);
 
         boolean deleted = repo.delete(tenant, sessionId, id);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
@@ -311,7 +341,8 @@ public final class ScratchHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String sessionId = effectiveSession(body);
 
-        int deleted = repo.closeSession(tenant, sessionId);
+        // The identity scope lives as long as the identity: a session's close never touches it.
+        int deleted = IdentityFence.isIdentityScope(sessionId) ? 0 : repo.closeSession(tenant, sessionId);
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
     }
 

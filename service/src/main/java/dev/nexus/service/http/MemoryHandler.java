@@ -114,9 +114,12 @@ public final class MemoryHandler implements HttpHandler {
         java.util.regex.Pattern.compile("^/([^/]+)/restore$");
 
     private final MemoryRepository repo;
+    /** RDR-253 Step 2: the ownership and generation checks of threads entries, and the T2 identity stamp. */
+    private final IdentityFence fence;
 
-    public MemoryHandler(MemoryRepository repo) {
+    public MemoryHandler(MemoryRepository repo, IdentityFence fence) {
         this.repo = repo;
+        this.fence = fence;
     }
 
     @Override
@@ -164,6 +167,8 @@ public final class MemoryHandler implements HttpHandler {
                 case "/summaries"      -> handleSummaries(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
+        } catch (dev.nexus.service.db.IdentityException e) {
+            IdentityFence.refuse(exchange, e);
         } catch (IllegalArgumentException e) {
             log.debug("event=memory_bad_request tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
@@ -220,8 +225,10 @@ public final class MemoryHandler implements HttpHandler {
             throw new IllegalArgumentException("replaces is blank (nothing written)");
         }
         String replaces = optStringOrNull(body, "replaces");
+        fence.threadsWrite(ex, tenant, project, title, content, replaces);
         if (replaces != null) {
             var res = repo.replaceMemory(tenant, project, title, content, tags, session, agent, ttl, replaces);
+            fence.stamp(tenant, res.id());
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("id", res.id());
             resp.put("replaced_id", res.replacedId());
@@ -232,6 +239,7 @@ public final class MemoryHandler implements HttpHandler {
         }
 
         long id = repo.upsert(tenant, project, title, content, tags, session, agent, ttl);
+        fence.stamp(tenant, id);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
     }
 
@@ -258,7 +266,9 @@ public final class MemoryHandler implements HttpHandler {
         Integer ttl    = requirePositiveOrNullTtl(optInt(body, "ttl"));
         double minSim  = optDouble(body, "min_similarity", 0.5);
 
+        fence.threadsWrite(ex, tenant, project, title, content, null);
         long[] result = repo.putOrMerge(tenant, project, title, content, tags, session, agent, ttl, minSim);
+        fence.stamp(tenant, result[0]);
         String action = result[1] == 1L ? "merged" : "inserted";
         HttpUtil.send(ex, 200, json(Map.of("id", result[0], "action", action)));
     }
@@ -472,10 +482,12 @@ public final class MemoryHandler implements HttpHandler {
         boolean deleted;
         if (params.containsKey("id")) {
             long id = parseLong(params.get("id"), "id");
+            fence.threadsRows(ex, tenant, List.of(id), null, null);
             deleted = repo.deleteById(tenant, id);
         } else {
             String project = requireParam(params, "project");
             String title   = requireParam(params, "title");
+            fence.threadsWrite(ex, tenant, project, title, null, null);
             deleted = repo.delete(tenant, project, title);
         }
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
@@ -519,6 +531,7 @@ public final class MemoryHandler implements HttpHandler {
             throws IOException {
         requireMethod(ex, method, "POST");
         long id = parseLong(rawId, "id");
+        fence.threadsRows(ex, tenant, List.of(id), null, null);
         HttpUtil.send(ex, 200, json(Map.of("restored", repo.restore(tenant, id))));
     }
 
@@ -571,6 +584,7 @@ public final class MemoryHandler implements HttpHandler {
                 List<Long> sourceIds = requireLongList(body, "source_ids");
                 String model = requireString(body, "model");
                 String producedBy = optStringOrNull(body, "produced_by");
+                fence.threadsRows(ex, tenant, sourceIds, null, null);
                 try {
                     long id = repo.insertSummary(tenant, project, content, sourceIds, model, producedBy);
                     HttpUtil.send(ex, 200, json(Map.of("id", id)));
@@ -605,7 +619,11 @@ public final class MemoryHandler implements HttpHandler {
         List<Long> deleteIds = requireLongList(body, "delete_ids");
         String mergedContent = requireString(body, "merged_content");
 
+        List<Long> involved = new ArrayList<>(deleteIds);
+        involved.add(keepId);
+        fence.threadsRows(ex, tenant, involved, keepId, mergedContent);
         repo.mergeMemories(tenant, keepId, deleteIds, mergedContent);
+        fence.stamp(tenant, keepId);
         // 204 No Content
         ex.sendResponseHeaders(204, -1);
         ex.getResponseBody().close();
@@ -660,9 +678,11 @@ public final class MemoryHandler implements HttpHandler {
     private void handleImport(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         MemoryRepository.ImportRow r = parseImportRow(readBody(ex));
+        fence.threadsWrite(ex, tenant, r.project(), r.title(), r.content(), null);
         long id = repo.importRow(tenant, r.project(), r.title(), r.content(), r.tags(),
                                  r.session(), r.agent(), r.ttlDays(), r.timestamp(),
                                  r.accessCount(), r.lastAccessed());
+        fence.stamp(tenant, id);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
     }
 
@@ -727,6 +747,8 @@ public final class MemoryHandler implements HttpHandler {
                 tenant, skipped.size(), skipped);
         }
 
+        fence.threadsBatch(ex, tenant, valid.stream()
+            .map(r -> new IdentityFence.Entry(r.project(), r.title(), r.content())).toList());
         int imported = repo.importBatch(tenant, valid);
         HttpUtil.send(ex, 200, json(Map.of(
             "imported", imported,

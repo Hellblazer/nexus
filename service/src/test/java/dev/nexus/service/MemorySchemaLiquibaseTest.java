@@ -58,7 +58,9 @@ class MemorySchemaLiquibaseTest {
         "content", "tags", "timestamp", "ttl_days", "access_count", "last_accessed",
         "fts_vector",
         // RDR-207 / memory-004-1 (nexus-l3yuc.1): the quarantine stamps.
-        "quarantined_at", "rolled_up_at"
+        "quarantined_at", "rolled_up_at",
+        // RDR-253 Step 2 / memory-006-1 (nexus-hczdo.1.2): the identity of the token a row was last written with.
+        "identity"
     );
 
     // Service role created by @BeforeAll — plain LOGIN, no superuser, no bypassrls.

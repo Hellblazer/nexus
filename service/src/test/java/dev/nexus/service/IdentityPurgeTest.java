@@ -48,7 +48,7 @@ class IdentityPurgeTest {
         env.putThreadsEntry(t, "somebody else", null);
         env.putTuple(t, "mailbox/" + id);
         env.putTuple(t, "mailbox/" + id);
-        assertThat(env.post(t, "/" + id + "/memberships", Map.of("group", "crew", "role", "member")).status()).isEqualTo(200);
+        env.seedMembership(t, id, "crew", "member"); // the seat has ended: the route would refuse it
         assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "tmux", "ref", "srv", "state", "done")).status()).isEqualTo(200);
     }
 

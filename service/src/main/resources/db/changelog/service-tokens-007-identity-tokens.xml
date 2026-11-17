@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-hczdo.1.2 (RDR-253 Phase 1 Step 2): identity tokens.
+
+    An identity token is the credential a process holds for one binding of an identity: it names the
+    identity and the generation, lives one hour (the ceiling for a token minted under the data credential), and is
+    refreshed through bind with event refresh. The fences of RDR-253 read identity and generation from it.
+
+    WHY A TABLE OF ITS OWN AND NOT session_tokens. session_tokens is unique on (tenant_id, session_id)
+    (service-tokens-001-baseline.xml) and TokenStore.issueSessionToken upserts on that key, so a new mint deletes
+    the old hash. A restart or a resume keeps the session id, so the new generation's mint would delete the old
+    process's token, and the old process would get a 401 (which a client treats as an expired token and re-reads
+    the file for) in place of the 409 generation_superseded that tells it to stop. Here every mint is an insert
+    and nothing is replaced: a superseded generation's token stays resolvable until it expires, and a /clear in
+    the same process (which mints a token for the same generation) leaves the token the MCP server holds working.
+    The key is the token hash; (tenant_id, identity_id, generation) names the binding and proc_start the process,
+    both for the cleanup and for an operator reading the table. Nothing here is unique but the hash.
+
+    NO ROW LEVEL SECURITY, like service_tokens and session_tokens (service-tokens-001-baseline.xml): a token is
+    resolved before any tenant is stamped, because the token is what names the tenant. It is a credential, so it
+    is never in a tenant's export (TenantExportRegistryParityTest.GLOBAL_TENANT_KEYED), and it has no tenant-export
+    classification. A tombstoned identity takes its tokens with it (ON DELETE CASCADE); the expiry sweep
+    (TokenStore.identityTokens, riding the t1-ttl-sweep loop beside session_tokens) removes the rest.
+
+    Grants: grants-nexus-svc.xml and grants-nexus-diag.xml iterate every relation in schema nexus at execution time
+    and run after this file, so nexus_svc and nexus_diag get theirs there, as for the identity-00x tables.
+
+    DDL only: CREATE TABLE, CREATE INDEX. No data mutation of any existing row, so no DATA EFFECT line applies per
+    scripts/data_effect_lint.py's own scope. Nothing is backfilled and nothing runs at boot. Placed after
+    identity-003 (the foreign key needs identity_records) and before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="service-tokens-007-1" author="nexus-hczdo.1.2">
+        <comment>nexus.identity_tokens (RDR-253): one row per minted identity token, keyed by the token hash, naming the tenant, the identity, the generation and the process (proc_start) it was minted for, with its expiry. No RLS (resolved before a tenant is stamped), cascades from identity_records.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.identity_tokens (
+    token_hash   TEXT        NOT NULL,
+    tenant_id    TEXT        NOT NULL,
+    identity_id  TEXT        NOT NULL,
+    generation   INTEGER     NOT NULL,
+    proc_start   TEXT,
+    created_at   TIMESTAMPTZ NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    CONSTRAINT identity_tokens_pk PRIMARY KEY (token_hash),
+    CONSTRAINT identity_tokens_identity_fk FOREIGN KEY (tenant_id, identity_id)
+        REFERENCES nexus.identity_records (tenant_id, id) ON DELETE CASCADE
+);
+
+-- The expiry sweep: DELETE FROM nexus.identity_tokens WHERE tenant_id = ? AND expires_at &lt; ?
+CREATE INDEX idx_identity_tokens_expires ON nexus.identity_tokens (tenant_id, expires_at);
+-- The cleanup at each mint, and the cascade from a tombstoned identity.
+CREATE INDEX idx_identity_tokens_binding ON nexus.identity_tokens (tenant_id, identity_id, generation);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.identity_tokens CASCADE</rollback>
+    </changeSet>
+</databaseChangeLog>

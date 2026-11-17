@@ -11,8 +11,11 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.TestHttp;
+import dev.nexus.service.db.IdentityFenceReads;
 import dev.nexus.service.db.IdentityRepository;
+import dev.nexus.service.db.IdentityTokenStore;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.TokenStore;
 import org.jooq.JSONB;
 import org.testcontainers.containers.PostgreSQLContainer;
 
@@ -35,6 +38,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
+import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_MEMBERSHIPS;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
 import static dev.nexus.service.jooq.nexus.Tables.TUPLES;
 
@@ -83,6 +87,8 @@ public final class IdentityTestEnv implements AutoCloseable {
     public final HikariDataSource ds;
     public final TenantScope scope;
     public final IdentityRepository repo;
+    /** The identity tokens on the test clock (RDR-253 Step 2). */
+    public final IdentityTokenStore tokens;
     private final HttpServer server;
     private final HttpClient http = TestHttp.client();
 
@@ -100,13 +106,18 @@ public final class IdentityTestEnv implements AutoCloseable {
         ds = new HikariDataSource(cfg);
         scope = new TenantScope(ds);
         repo = new IdentityRepository(scope, clock, pruneBatch, pruneMaxBatches);
+        tokens = new TokenStore(ds, clock).identityTokens();
+        var fence = new IdentityFence(new IdentityFenceReads(scope));
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/v1/identity", new IdentityHandler(repo)).getFilters().add(new Filter() {
+        server.createContext("/v1/identity", new IdentityHandler(repo, tokens, fence)).getFilters().add(new Filter() {
             @Override
             public void doFilter(HttpExchange ex, Chain chain) throws IOException {
                 String tenant = ex.getRequestHeaders().getFirst("X-Test-Tenant");
                 String sc = ex.getRequestHeaders().getFirst("X-Test-Scope");
-                RequestContext.set(new RequestContext.Principal(tenant, null, false, "root".equals(sc), sc, "test-hash"));
+                String identity = ex.getRequestHeaders().getFirst("X-Test-Identity");
+                String generation = ex.getRequestHeaders().getFirst("X-Test-Generation");
+                RequestContext.set(new RequestContext.Principal(tenant, null, false, "root".equals(sc), sc, "test-hash",
+                    identity, generation == null ? null : Integer.valueOf(generation)));
                 try {
                     chain.doFilter(ex);
                 } finally {
@@ -136,10 +147,23 @@ public final class IdentityTestEnv implements AutoCloseable {
     }
 
     public Resp call(String scopeName, String tenant, String method, String path, Object body) {
+        return callAs(scopeName, tenant, null, 0, method, path, body);
+    }
+
+    /**
+     * A call that carries the principal of an identity token for {@code identity} at {@code generation}, as
+     * {@code AuthFilter} publishes it for a verified {@code X-Nexus-Identity-Token}; a null identity is a call
+     * with no token. (The real filter and real tokens are covered by {@code IdentityFenceTest}.)
+     */
+    public Resp callAs(String scopeName, String tenant, String identity, int generation, String method, String path,
+                       Object body) {
         try {
             var req = TestHttp.request("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/identity" + path)
                 .header("X-Test-Tenant", tenant).header("X-Test-Scope", scopeName)
                 .header("Content-Type", "application/json");
+            if (identity != null) {
+                req = req.header("X-Test-Identity", identity).header("X-Test-Generation", String.valueOf(generation));
+            }
             req = "GET".equals(method) ? req.GET()
                 : req.method(method, HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body == null ? Map.of() : body)));
             HttpResponse<String> r = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
@@ -148,6 +172,20 @@ public final class IdentityTestEnv implements AutoCloseable {
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    /**
+     * A call made as the owner of {@code id} at its current generation, as the seat's own MCP server makes it with
+     * the identity token its bind returned. The fenced routes (memberships) need this; a seat that was never bound
+     * is at generation 0 and the principal says 0.
+     */
+    public Resp asOwner(String scopeName, String tenant, String id, String method, String path, Object body) {
+        int generation = ((Number) show(tenant, id).get("generation")).intValue();
+        return callAs(scopeName, tenant, id, generation, method, path, body);
+    }
+
+    public Resp asOwner(String tenant, String id, String method, String path, Object body) {
+        return asOwner(TENANT, tenant, id, method, path, body);
     }
 
     /** A call with the body text exactly as given (a test of malformed JSON sends what Jackson would never write). */
@@ -247,6 +285,17 @@ public final class IdentityTestEnv implements AutoCloseable {
             .set(MEMORY.CONTENT, "session: sess-" + title + "\n"
                 + (identityId == null ? "" : "identity: " + identityId + "\n") + "## the work\nstate: running\n")
             .set(MEMORY.TIMESTAMP, OffsetDateTime.now(clock)).execute());
+    }
+
+    /**
+     * Seeds a membership row directly, for a fixture whose identity no longer holds its seat (an ended one): the
+     * route refuses a write for it, as the fence does for any token of an identity that let go of the seat.
+     */
+    public void seedMembership(String tenant, String id, String group, String role) {
+        scope.withTenant(tenant, ctx -> ctx.insertInto(IDENTITY_MEMBERSHIPS)
+            .set(IDENTITY_MEMBERSHIPS.TENANT_ID, tenant).set(IDENTITY_MEMBERSHIPS.IDENTITY_ID, id)
+            .set(IDENTITY_MEMBERSHIPS.GROUP_NAME, group).set(IDENTITY_MEMBERSHIPS.ROLE, role)
+            .set(IDENTITY_MEMBERSHIPS.CREATED_AT, OffsetDateTime.now(clock)).execute());
     }
 
     /** Hides a board entry the way {@code MemoryRepository#expire} does: quarantined_at set, every read path skips it. */

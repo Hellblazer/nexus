@@ -46,7 +46,7 @@ class IdentityMembershipTest {
         env.clock.set(T0);
         String id = env.createSeat(t, "member1");
         env.bind(t, id, "start", 0, ev("s1", 1, 10));
-        assertThat(env.post(t, "/" + id + "/memberships", Map.of("group", "crew", "role", "leader")).status()).isEqualTo(200);
+        assertThat(env.asOwner(t, id, "POST", "/" + id + "/memberships", Map.of("group", "crew", "role", "leader")).status()).isEqualTo(200);
         // Nothing renews: the seat lapses on day one and a tuple with a retention would have purged long ago.
         for (int days : new int[] {60, 400}) {
             env.clock.set(T0.plus(Duration.ofDays(days)));
@@ -66,35 +66,40 @@ class IdentityMembershipTest {
         String a = env.createSeat(t, "alpha");
         String b = env.createSeat(t, "bravo");
         String c = env.createSeat(t, "charlie");
+        int pid = 20;
+        for (String who : new String[] {a, b, c}) {
+            env.bind(t, who, "start", 0, ev("s-" + who, pid, pid * 10L)); // a membership write needs a seat that is held
+            pid++;
+        }
         env.clock.set(T0.plusSeconds(10));
-        env.post(t, "/" + b + "/memberships", Map.of("group", "crew", "role", "member"));
+        env.asOwner(t, b, "POST", "/" + b + "/memberships", Map.of("group", "crew", "role", "member"));
         env.clock.set(T0.plusSeconds(20));
-        env.post(t, "/" + c + "/memberships", Map.of("group", "crew", "role", "member"));
+        env.asOwner(t, c, "POST", "/" + c + "/memberships", Map.of("group", "crew", "role", "member"));
         env.clock.set(T0.plusSeconds(30));
-        env.post(t, "/" + a + "/memberships", Map.of("group", "crew", "role", "member"));
-        env.post(t, "/" + a + "/memberships", Map.of("group", "other", "role", "leader"));
+        env.asOwner(t, a, "POST", "/" + a + "/memberships", Map.of("group", "crew", "role", "member"));
+        env.asOwner(t, a, "POST", "/" + a + "/memberships", Map.of("group", "other", "role", "leader"));
         assertThat(env.get(t, "/groups/crew").list("members")).extracting(m -> m.get("identity"))
             .as("join order, not id order").containsExactly(b, c, a);
 
         // A duplicate add is idempotent: one row, the first join time, whatever the clock says now.
         env.clock.set(T0.plusSeconds(50));
-        var again = env.post(t, "/" + c + "/memberships", Map.of("group", "crew", "role", "member"));
+        var again = env.asOwner(t, c, "POST", "/" + c + "/memberships", Map.of("group", "crew", "role", "member"));
         assertThat(again.status()).isEqualTo(200);
         assertThat(again.str("joined_at")).isEqualTo(T0.plusSeconds(20).toString());
         assertThat(env.get(t, "/groups/crew").list("members")).hasSize(3);
 
         env.clock.set(T0.plusSeconds(99));
-        var changed = env.post(t, "/" + b + "/memberships", Map.of("group", "crew", "role", "leader"));
+        var changed = env.asOwner(t, b, "POST", "/" + b + "/memberships", Map.of("group", "crew", "role", "leader"));
         assertThat(changed.str("role")).isEqualTo("leader");
         assertThat(changed.str("joined_at")).isEqualTo(T0.plusSeconds(10).toString());
         assertThat(env.get(t, "/groups/crew").list("members")).extracting(m -> m.get("identity")).containsExactly(b, c, a);
         assertThat(env.get(t, "/" + a + "/memberships").list("memberships")).extracting(m -> m.get("group"))
             .containsExactly("crew", "other");
 
-        var left = env.call(IdentityTestEnv.TENANT, t, "DELETE", "/" + c + "/memberships/crew", null);
+        var left = env.asOwner(t, c, "DELETE", "/" + c + "/memberships/crew", null);
         assertThat(left.status()).isEqualTo(200);
         assertThat(left.integer("removed")).isEqualTo(1);
-        assertThat(env.call(IdentityTestEnv.TENANT, t, "DELETE", "/" + c + "/memberships/crew", null).integer("removed")).isZero();
+        assertThat(env.asOwner(t, c, "DELETE", "/" + c + "/memberships/crew", null).integer("removed")).isZero();
         assertThat(env.get(t, "/groups/crew").list("members")).extracting(m -> m.get("identity")).containsExactly(b, a);
         assertThat(env.get(t, "/groups/nobody").list("members")).isEmpty();
     }
@@ -103,15 +108,16 @@ class IdentityMembershipTest {
     void membershipsRefuseABadRoleGroupOrIdentityAndAdmitTheDataCredential() {
         String t = IdentityTestEnv.freshTenant();
         String id = env.createSeat(t, "checked");
-        assertThat(env.post(t, "/" + id + "/memberships", Map.of("group", "crew", "role", "boss")).error()).isEqualTo("bad_role");
-        assertThat(env.post(t, "/" + id + "/memberships", Map.of("group", "-x", "role", "member")).error()).isEqualTo("bad_group");
+        env.bind(t, id, "start", 0, ev("s-checked", 30, 300));
+        assertThat(env.asOwner(t, id, "POST", "/" + id + "/memberships", Map.of("group", "crew", "role", "boss")).error()).isEqualTo("bad_role");
+        assertThat(env.asOwner(t, id, "POST", "/" + id + "/memberships", Map.of("group", "-x", "role", "member")).error()).isEqualTo("bad_group");
         assertThat(env.post(t, "/i424242/memberships", Map.of("group", "crew", "role", "member")).status()).isEqualTo(404);
         assertThat(env.get(t, "/i424242/memberships").status()).isEqualTo(404);
         // The MCP server's data credential may join, list and leave; the same routes are shared with the tenant one.
-        assertThat(env.call(IdentityTestEnv.DATA, t, "POST", "/" + id + "/memberships",
+        assertThat(env.asOwner(IdentityTestEnv.DATA, t, id, "POST", "/" + id + "/memberships",
             Map.of("group", "crew", "role", "member")).status()).isEqualTo(200);
         assertThat(env.call(IdentityTestEnv.DATA, t, "GET", "/groups/crew", null).list("members")).hasSize(1);
-        assertThat(env.call(IdentityTestEnv.DATA, t, "DELETE", "/" + id + "/memberships/crew", null).integer("removed")).isEqualTo(1);
+        assertThat(env.asOwner(IdentityTestEnv.DATA, t, id, "DELETE", "/" + id + "/memberships/crew", null).integer("removed")).isEqualTo(1);
         assertThat(env.call("mint", t, "GET", "/groups/crew", null).status()).as("any other scope").isEqualTo(403);
     }
 

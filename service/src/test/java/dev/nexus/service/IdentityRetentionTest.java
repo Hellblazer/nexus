@@ -75,7 +75,7 @@ class IdentityRetentionTest {
         env.putTuple(t, "mailbox/" + id);
         env.putTuple(t, "mailbox/" + keep);
         for (String who : new String[] {id, keep}) {
-            assertThat(env.post(t, "/" + who + "/memberships", Map.of("group", "crew", "role", "leader")).status()).isEqualTo(200);
+            env.seedMembership(t, who, "crew", "leader"); // one of them has ended: the route would refuse it
             assertThat(env.post(t, "/" + who + "/work", Map.of("kind", "worktree", "ref", "/tmp/wt-" + who, "state", "running")).status()).isEqualTo(200);
         }
 

@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.IdentityRepository;
+import dev.nexus.service.db.IdentityTokenStore;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.PipelineRepository;
@@ -40,9 +41,10 @@ public final class TenantDataRoutes {
                                 TaxonomyCoverage taxonomyCoverage, AspectRepository aspectRepo,
                                 ChashRepository chashRepo, RemapRepository remapRepo,
                                 LadderRepository ladderRepo, PipelineRepository pipelineRepo,
-                                IdentityRepository identityRepo) {
+                                IdentityRepository identityRepo, IdentityTokenStore identityTokens,
+                                IdentityFence fence) {
         // /v1/memory/* — memory endpoints
-        server.createContext("/v1/memory", new MemoryHandler(memoryRepo)).getFilters().addAll(authFilter);
+        server.createContext("/v1/memory", new MemoryHandler(memoryRepo, fence)).getFilters().addAll(authFilter);
 
         // /v1/plans/* — plan library endpoints (bead nexus-gmiaf.11)
         server.createContext("/v1/plans", new PlanHandler(planRepo)).getFilters().addAll(authFilter);
@@ -51,7 +53,7 @@ public final class TenantDataRoutes {
         server.createContext("/v1/telemetry", new TelemetryHandler(telemetryRepo)).getFilters().addAll(authFilter);
 
         // /v1/t1/* — T1 scratch endpoints (bead nexus-gmiaf.13)
-        server.createContext("/v1/t1", new ScratchHandler(scratchRepo)).getFilters().addAll(authFilter);
+        server.createContext("/v1/t1", new ScratchHandler(scratchRepo, fence)).getFilters().addAll(authFilter);
 
         // /v1/taxonomy/* — taxonomy endpoints (bead nexus-gmiaf.14)
         server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage))
@@ -78,6 +80,6 @@ public final class TenantDataRoutes {
 
         // /v1/identity/* — session identity: seats, aliases, the binding log and the session index (RDR-253 Step 1,
         // bead nexus-hczdo.1.1). The handler admits each route for the credential that needs it.
-        server.createContext("/v1/identity", new IdentityHandler(identityRepo)).getFilters().addAll(authFilter);
+        server.createContext("/v1/identity", new IdentityHandler(identityRepo, identityTokens, fence)).getFilters().addAll(authFilter);
     }
 }

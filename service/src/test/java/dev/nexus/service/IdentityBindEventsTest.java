@@ -87,6 +87,29 @@ class IdentityBindEventsTest {
     }
 
     @Test
+    void aClearForkOrRefreshThatNamesAnotherProcessIsRefusedAndOneNamingTheHolderOrNoneIsNot() {
+        String t = IdentityTestEnv.freshTenant();
+        String id = env.createSeat(t, "mismatch");
+        env.bind(t, id, "start", 0, ev("sess-a", 60, 600));
+        Map<String, Object> stranger = ev("sess-z", 61, 610);
+        for (String event : new String[] {"clear", "fork", "refresh"}) {
+            Resp r = env.bind(t, id, event, 1, stranger);
+            assertThat(r.status()).as(event + ": " + r.body()).isEqualTo(409);
+            assertThat(r.error()).as(event).isEqualTo("holder_mismatch");
+        }
+        // Naming only a proc_start that is not the holder's is a mismatch too.
+        assertThat(env.bind(t, id, "refresh", 1, Map.of("proc_start", "2030-01-01T00:00:00Z")).error())
+            .isEqualTo("holder_mismatch");
+        assertThat(env.events(t, id)).as("a refused event wrote nothing").containsExactly("start");
+        assertThat(env.show(t, id).get("holder")).isInstanceOf(Map.class);
+        // The holder's own evidence, and a request that names no process, pass.
+        assertThat(env.bind(t, id, "refresh", 1, ev("sess-a", 60, 600)).status()).isEqualTo(200);
+        assertThat(env.bind(t, id, "clear", 1, ev("sess-b", 60, 600)).status()).isEqualTo(200);
+        assertThat(env.bind(t, id, "fork", 1, Map.of("session_id", "sess-c")).status()).isEqualTo(200);
+        assertThat(env.bind(t, id, "refresh", 1, Map.of()).status()).isEqualTo(200);
+    }
+
+    @Test
     void resumeInTheSameProcessKeepsTheGenerationAndInANewProcessRaisesIt() {
         String t = IdentityTestEnv.freshTenant();
         String id = env.createSeat(t, "gamma");
@@ -118,9 +141,17 @@ class IdentityBindEventsTest {
         assertThat(take.status()).isEqualTo(200);
         assertThat(take.integer("generation")).isEqualTo(2);
         assertThat(take.map("holder")).containsEntry("pid", 71);
-        // The superseded process, still at generation 1, can no longer end or renew it.
-        assertThat(env.bind(t, id, "end", 1, Map.of()).error()).isEqualTo("generation_conflict");
-        assertThat(env.post(t, "/" + id + "/renew", Map.of("generation", 1)).error()).isEqualTo("generation_conflict");
+        // The superseded process, still at generation 1, can no longer end, refresh, clear or renew it, and is told
+        // so with the code the fences answer (generation_superseded, the client's stop-writing signal), which is not
+        // the generation_conflict of a lost compare-and-set on start.
+        assertThat(env.bind(t, id, "end", 1, Map.of()).error()).isEqualTo("generation_superseded");
+        assertThat(env.bind(t, id, "refresh", 1, Map.of()).error()).isEqualTo("generation_superseded");
+        assertThat(env.bind(t, id, "clear", 1, ev("s3", 70, 700)).error()).isEqualTo("generation_superseded");
+        Resp renew = env.post(t, "/" + id + "/renew", Map.of("generation", 1));
+        assertThat(renew.status()).isEqualTo(409);
+        assertThat(renew.error()).isEqualTo("generation_superseded");
+        assertThat(renew.body()).containsEntry("current_generation", 2).containsEntry("expected_generation", 1);
+        assertThat(renew.map("holder")).containsEntry("pid", 71);
     }
 
     @Test

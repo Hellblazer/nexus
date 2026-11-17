@@ -19,6 +19,7 @@ import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_MEMBERSHIPS;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_WORK;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_RECORDS;
 import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_SESSIONS;
+import static dev.nexus.service.jooq.t1.Tables.SCRATCH;
 
 /**
  * Retention and the operator purge of identity state (RDR-253 "Retention", "Fencing").
@@ -38,7 +39,12 @@ import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_SESSIONS;
  *
  * <p>The audit sink is {@code nexus.gc_audit}, the engine's one audit table ({@code operation}
  * {@code identity_purge} or {@code identity_tombstone}); a log line alone is not an audit record. Identity
- * scratch (the T1 identity scope) does not exist until RDR-253 Step 6, so there is none to remove yet.
+ * scratch (the T1 identity scope, {@code session_id = identity:<id>}) is in another schema under another tenant
+ * setting, so it cannot go in the identity's own transaction: a purge removes it right after it commits, and
+ * every retention pass removes the identity scope of identities whose record no longer exists
+ * ({@link #pruneOrphanScratch}), which covers a tombstone and a crash between its commit and the removal. A crash
+ * between a seat's purge and its removal is not covered, since the seat's record stays; the operator purges the
+ * seat again. The scheduled idle sweep never touches the scope, so this is what ends it.
  */
 final class IdentityRetention {
 
@@ -103,7 +109,7 @@ final class IdentityRetention {
      * live identity and {@code holder_not_gone} for a lapsed one with no recorded verdict.
      */
     Map<String, Object> purge(String tenant, String id, String actor) {
-        return scope.withTenant(tenant, ctx -> {
+        Map<String, Object> result = scope.withTenant(tenant, ctx -> {
             IdentityRecordsRecord rec = IdentityRows.lock(ctx, tenant, id);
             OffsetDateTime now = OffsetDateTime.now(clock);
             IdentityRows.lapseIfDue(ctx, rec, now);
@@ -133,6 +139,13 @@ final class IdentityRetention {
             out.put("removed", removed);
             return out;
         });
+        // After the commit: the identity scope of the purged identity (a seat's record stays, its state does not).
+        int scratch = scope.withTenant(tenant, TenantScope.T1_TENANT_GUC, ctx ->
+            ctx.deleteFrom(SCRATCH).where(SCRATCH.SESSION_ID.eq("identity:" + id)).execute());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> removedCounts = (Map<String, Object>) result.get("removed");
+        removedCounts.put("scratch", scratch);
+        return result;
     }
 
     /** One retention pass over one tenant. Returns {@code tombstoned}, {@code bindings_pruned}, {@code sessions_pruned}. */
@@ -164,6 +177,7 @@ final class IdentityRetention {
         }
         int[] pruned = {pruneBindings(tenant, now.minusDays(BINDING_RETENTION_DAYS), statementTimeout),
             pruneSessions(tenant, statementTimeout)};
+        pruneOrphanScratch(tenant, statementTimeout);
         Map<String, Integer> out = new LinkedHashMap<>();
         out.put("tombstoned", tombstoned);
         out.put("bindings_pruned", pruned[0]);
@@ -173,6 +187,56 @@ final class IdentityRetention {
                 tombstoned, pruned[0], pruned[1]);
         }
         return out;
+    }
+
+    /** Identity scopes read per statement; a pass pages through every scope, a page at a time. */
+    static final int SCRATCH_SCOPE_LIMIT = 1000;
+
+    /**
+     * Removes the T1 identity scope ({@code session_id = identity:<id>}) of every identity whose record no longer
+     * exists: a tombstone's scratch, or what a crash left between a tombstone's commit and its removal. A purged
+     * seat keeps its record, so its scope is not an orphan to this sweep: a crash between the purge's commit and
+     * the removal leaves it until the operator purges the seat again (the purge is repeatable, and removes the
+     * scope each time). The scope is in {@code t1.scratch} under the {@code nexus.t1_tenant} setting and the
+     * identity rows are under {@code nexus.tenant}, so each read and the delete are their own transaction. The
+     * scopes are read in {@code session_id} order, {@link #SCRATCH_SCOPE_LIMIT} to a statement, from after the
+     * last one read, so an orphan past the first page is reached in the same pass.
+     */
+    private int pruneOrphanScratch(String tenant, java.time.Duration statementTimeout) {
+        int total = 0;
+        String after = "";
+        while (true) {
+            String cursor = after;
+            List<String> scopes = scope.withTenant(tenant, TenantScope.T1_TENANT_GUC, ctx -> {
+                SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+                return ctx.selectDistinct(SCRATCH.SESSION_ID).from(SCRATCH).where(SCRATCH.SESSION_ID.like("identity:%"))
+                    .and(SCRATCH.SESSION_ID.gt(cursor)).orderBy(SCRATCH.SESSION_ID).limit(SCRATCH_SCOPE_LIMIT)
+                    .fetch(SCRATCH.SESSION_ID);
+            });
+            if (scopes.isEmpty()) {
+                return total;
+            }
+            after = scopes.get(scopes.size() - 1);
+            List<String> ids = scopes.stream().map(s -> s.substring("identity:".length())).toList();
+            java.util.Set<String> alive = scope.withTenant(tenant, ctx -> {
+                SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+                return new java.util.HashSet<>(ctx.select(IDENTITY_RECORDS.ID).from(IDENTITY_RECORDS)
+                    .where(IDENTITY_RECORDS.TENANT_ID.eq(tenant)).and(IDENTITY_RECORDS.ID.in(ids))
+                    .fetch(IDENTITY_RECORDS.ID));
+            });
+            List<String> orphans = scopes.stream().filter(s -> !alive.contains(s.substring("identity:".length()))).toList();
+            if (!orphans.isEmpty()) {
+                int deleted = scope.withTenant(tenant, TenantScope.T1_TENANT_GUC, ctx -> {
+                    SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+                    return ctx.deleteFrom(SCRATCH).where(SCRATCH.SESSION_ID.in(orphans)).execute();
+                });
+                log.info("event=identity_scratch_pruned tenant={} scopes={} rows={}", tenant, orphans.size(), deleted);
+                total += deleted;
+            }
+            if (scopes.size() < SCRATCH_SCOPE_LIMIT) {
+                return total;
+            }
+        }
     }
 
     /**

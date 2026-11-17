@@ -156,16 +156,27 @@ class IdentityCredentialRoutesTest {
         return p;
     }
 
+    /**
+     * The status the probe got, with a 403 that is not the scope's refusal ({@code forbidden}) reported as 409: the
+     * membership routes are fenced (RDR-253 Step 2), so a probe with no identity token is turned away by the fence
+     * with a 403 {@code identity_token_required}, which says the credential was admitted.
+     */
+    private int admission(String bearer, Probe p) throws Exception {
+        HttpResponse<String> r = send(bearer, p.method(), p.path(), p.body());
+        boolean fence = r.statusCode() == 403 && !r.body().contains("\"forbidden\"");
+        return fence ? 409 : r.statusCode();
+    }
+
     @Test
     void eachRouteAdmitsExactlyTheCredentialsThatNeedIt() throws Exception {
         int examined = 0;
         List<String> wrong = new ArrayList<>();
         for (Probe p : probes()) {
-            int tenant = send(TENANT_TOKEN, p.method(), p.path(), p.body()).statusCode();
-            int root = send(BOOT, p.method(), p.path(), p.body()).statusCode();
-            int data = send(DATA_TOKEN, p.method(), p.path(), p.body()).statusCode();
-            int mint = send(MINT_TOKEN, p.method(), p.path(), p.body()).statusCode();
-            int boardCi = send(BOARD_CI_TOKEN, p.method(), p.path(), p.body()).statusCode();
+            int tenant = admission(TENANT_TOKEN, p);
+            int root = admission(BOOT, p);
+            int data = admission(DATA_TOKEN, p);
+            int mint = admission(MINT_TOKEN, p);
+            int boardCi = admission(BOARD_CI_TOKEN, p);
             examined++;
             if (tenant == 403) wrong.add(p.name() + ": the tenant credential was refused");
             if (root == 403) wrong.add(p.name() + ": the root credential was refused");
