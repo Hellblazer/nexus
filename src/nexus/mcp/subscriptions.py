@@ -115,9 +115,11 @@ NAME_RESOLVE_INTERVAL_S: float = 60.0
 
 def _claude_sessions_dir() -> Path:
     """Claude Code's per-process session registry, ``<config>/sessions``.
-    ``CLAUDE_CONFIG_DIR`` is honoured the way Claude Code honours it."""
-    override = os.environ.get("CLAUDE_CONFIG_DIR")
-    return (Path(override).expanduser() if override else Path.home() / ".claude") / "sessions"
+    ``CLAUDE_CONFIG_DIR`` is honoured the way Claude Code honours it. One definition, shared with the identity
+    holder check (RDR-253 Step 3, :func:`nexus.identity.holder.claude_sessions_dir`)."""
+    from nexus.identity.holder import claude_sessions_dir  # noqa: PLC0415 — deferred; the identity package is a leaf
+
+    return claude_sessions_dir()
 
 
 def resolve_session_name(

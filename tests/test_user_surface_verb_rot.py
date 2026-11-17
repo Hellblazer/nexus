@@ -60,6 +60,13 @@ _PROSE_WORDS: frozenset[str] = frozenset("""
 
 #: (relative path, dead verb path, a fragment of the mention text) -> why the mention is deliberate.
 _ALLOWLIST: dict[tuple[str, str, str], str] = {
+    ("src/nexus/identity/binder.py", "identity", "To take it over, run: nx identity claim"): (
+        "RDR-253 Step 3 prints the remedy the RDR names; the `nx identity` group is Step 4 (nexus-hczdo.1.5), which ships "
+        "with this step in one conexus release. Step 4 removes this entry when the verb exists."
+    ),
+    ("src/nexus/identity/token_header.py", "identity", "nx identity claim <seat> --take-over"): (
+        "as above: the remedy names the Step 4 verb; remove with the binder entry"
+    ),
     ("conexus/skills/upgrade/SKILL.md", "guided-upgrade", "Never run the pin's `nx guided-upgrade"): (
         "the 6.18.1 pin's own verb: the step reads that pinned release's source and warns never to run it"
     ),

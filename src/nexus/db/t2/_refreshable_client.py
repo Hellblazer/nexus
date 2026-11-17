@@ -69,6 +69,7 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
+from nexus.identity.token_header import identity_headers, retry_headers_after_401, superseded_from_response
 from nexus.db import gateway_hold
 from nexus.db.request_gate import before_request
 from nexus.db.gateway_backoff import (
@@ -807,6 +808,7 @@ class RefreshableHttpStoreMixin:
             "Content-Type": "application/json",
             # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's logs.
             **client_identity_headers(),
+            **identity_headers(),  # RDR-253 Step 3: the Claude ancestor's identity token, when its file holds a live one
         }
 
     def _invalidate_data_token_on_401(self, exc: httpx.HTTPStatusError) -> tuple[Any, bool, str, str]:
@@ -1437,7 +1439,10 @@ class RefreshableHttpStoreMixin:
         """
         url = self._base_url + path
         before_request()  # nexus-ldf2s: every attempt, retries included, passes the request gate
-        resp = self._client.request(method, url, headers=self._auth_headers(), **kwargs)
+        resp = self._client.request(method, url, headers=(sent := self._auth_headers()), **kwargs)
+        if resp.status_code == 401 and (fresh := retry_headers_after_401(sent)):  # RDR-253 Step 3: re-read the token file once
+            before_request()
+            resp = self._client.request(method, url, headers={**sent, **fresh}, **kwargs)
         self._note_data_token_response(resp)
         self._raise_for_status(resp, path)
         if not resp.content:
@@ -1494,4 +1499,6 @@ class RefreshableHttpStoreMixin:
                 superseded = None
             if superseded is not None:
                 raise superseded from failure
+            if (lost_seat := superseded_from_response(resp)) is not None:  # RDR-253 Step 3: stop writing, name the holder
+                raise lost_seat from failure
         raise failure
