@@ -33,9 +33,17 @@ def initialized_catalog(catalog_env: Path) -> ActiveCatalog:
 
 
 @pytest.mark.t2_tenant
-def test_show_previews_a_dchash_span_and_survives_a_stale_one(
-    initialized_catalog: ActiveCatalog, catalog_env: Path, tmp_path: Path
+def test_show_and_the_live_curator_and_repo_legs(
+    initialized_catalog: ActiveCatalog,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One tenant for both checks (tests/storage_touch_ceiling.toml).
+
+    ``nx catalog show`` previews a good dchash link once and lists a stale one;
+    then the real resolve_path: None for a curator (falls through to file://),
+    repo_root for a repo, never the cwd.
+    """
     src = tmp_path / "quoted.md"
     src.write_text(BODY)
     runner = CliRunner()
@@ -85,12 +93,6 @@ def test_show_previews_a_dchash_span_and_survives_a_stale_one(
     assert f'"{PASSAGE}"' in r.output
     assert r.output.count(f'"{PASSAGE}"') == 1
 
-
-@pytest.mark.t2_tenant
-def test_live_client_curator_and_repo_legs(
-    initialized_catalog: ActiveCatalog, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The real resolve_path: None for a curator (falls through to file://), repo_root for a repo."""
     cat = initialized_catalog
     single = tmp_path / "single"
     single.mkdir()
@@ -113,7 +115,6 @@ def test_live_client_curator_and_repo_legs(
     t_repo = cat.register(repo_owner, "a", file_path="docs/a.md")
 
     monkeypatch.chdir(elsewhere)
-    start = BODY.index(PASSAGE)
     span = f"dchash:{text_hash(BODY)}:{start}-{start + len(PASSAGE)}"
     assert cat.resolve_path(t_cur) is None
     for t in (t_cur, t_repo):
