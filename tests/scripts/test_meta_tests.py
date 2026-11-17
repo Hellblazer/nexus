@@ -375,3 +375,32 @@ def test_the_manifest_round_trips_through_its_inverted_gzip_form_byte_for_byte(t
     assert mt.load_manifest(first) == manifest
     mt.write_manifest(second, mt.load_manifest(first))
     assert first.read_bytes() == second.read_bytes()
+
+
+# ── replays of develop's real reds (T2 nexus/observability-lookback-2026-11-17, item 1) ──
+
+REPLAYS = json.loads(__import__("gzip").decompress((Path(__file__).parent / "meta_tests_replays.json.gz").read_bytes()))
+
+
+def test_every_repeat_offender_has_a_replay() -> None:
+    assert {r["offender"] for r in REPLAYS} == {
+        "test_mode_declarations_are_explicit", "test_no_json_loads_on_result_output", "test_cited_bead_ids_resolve",
+        "test_no_test_patches_a_stdlib_module_process_wide", "test_collection_name_parse_census", "test_tmp_root",
+        "test_retire_keys", "RawSqlGateTest", "SqlStringLiteralGateTest",
+    }
+
+
+@pytest.mark.parametrize("replay", REPLAYS, ids=[r["offender"] for r in REPLAYS])
+def test_the_diff_of_a_push_that_reddened_develop_selects_the_meta_test_it_broke(replay: dict) -> None:
+    """Each replay is a develop push (its CI run is named) whose own change turned the offender
+    red, checked to fail at the red commit and pass at its base. Selection runs today's script
+    and committed manifest over that push's changed paths, with the push's added files absent
+    from the base tree, as they were."""
+    now = set(mt.git(REPO_ROOT, "ls-files").split("\n")) - {""}
+    added, deleted = set(replay["added"]), set(replay["deleted"])
+    files = (now - added) | deleted
+    tree = mt.BaseTree(dirs={""} | {d for f in files for d in mt._ancestors(f)}, files=files,
+                       now=(now | added) - deleted)
+    sel = mt.select(REPO_ROOT, replay["changed"], "HEAD", tree=tree)
+    picked = {**sel.selected, **sel.always, **sel.java}
+    assert replay["file"] in picked, f"{replay['offender']} (CI run {replay['ci_run']}) not selected"

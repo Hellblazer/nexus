@@ -290,6 +290,14 @@ class BaseTree:
     worktree now was deleted. Only those two change a directory's listing."""
     dirs: set[str]
     files: set[str]
+    #: Paths that exist now; None reads the worktree. A replay of a past push sets it.
+    now: set[str] | None = None
+
+    def added_or_deleted(self, repo: Path, path: str) -> str | None:
+        exists = (repo / path).exists() if self.now is None else path in self.now
+        if path not in self.files:
+            return "gaining" if exists else None
+        return None if exists else "losing"
 
 
 def base_tree(repo: Path, base: str) -> BaseTree:
@@ -314,14 +322,15 @@ def _prefix_hit(path: str, prefixes: list[str]) -> bool:
     return any(p == "" or path == p or path.startswith(p + "/") for p in prefixes)
 
 
-def select(repo: Path, changed: list[str], base: str, manifest: dict | None = None) -> Selection:
+def select(repo: Path, changed: list[str], base: str, manifest: dict | None = None,
+           tree: BaseTree | None = None) -> Selection:
     if manifest is None:
         mpath = repo / MANIFEST
         manifest = load_manifest(mpath) if mpath.is_file() else {}
     surfaces: dict = (manifest or {}).get("tests", {})
     known = python_meta_tests(repo)
     sel = Selection(known=known, java_known=java_meta_tests(repo), changed=changed)
-    existing = base_tree(repo, base) if changed else BaseTree(dirs={""}, files=set())
+    existing = tree or (base_tree(repo, base) if changed else BaseTree(dirs={""}, files=set()))
     changed_tests = [p for p in changed if p.startswith("tests/") and p.endswith(".py")]
 
     for test, kinds in known.items():
@@ -372,9 +381,9 @@ def _hit(test: str, entry: dict, changed: list[str], existing: BaseTree, imports
             return f"enumerates a subtree holding {p}"
         # A listing changes only when an entry comes or goes; an edit to a file the test only
         # listed does not reach it (an edit to a file it read is caught above).
-        added_or_deleted = p not in existing.files or not (repo / p).exists()
-        if added_or_deleted and _listed_hit(p, listed, existing.dirs):
-            return f"lists the directory {'gaining' if (repo / p).exists() else 'losing'} {p}"
+        change = existing.added_or_deleted(repo, p)
+        if change and _listed_hit(p, listed, existing.dirs):
+            return f"lists the directory {change} {p}"
     return None
 
 
