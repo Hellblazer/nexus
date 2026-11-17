@@ -316,7 +316,7 @@ def scenario_upgrade(eng: Engine, a: argparse.Namespace) -> tuple[dict, bool]:
     ubw = eng.ubw
     # What the install held before this boot: PG is started on its own, read, and stopped again, so nothing but the
     # new client and engine have touched it when the boot below runs.
-    eng.inst.pg_ctl("start", "-w")
+    eng.inst.pg_ctl("start", "-w", "-l", str(eng.work / "pre-boot-pg.log"))
     try:
         before = {"pg_background_extension": sql(eng, "select count(*) from pg_extension where extname = 'pg_background'")[0][0],
                   "library_roles": [r[0] for r in sql(eng, "select rolname from pg_roles where rolname like 'dml_utils%' "
