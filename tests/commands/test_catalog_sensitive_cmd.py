@@ -176,6 +176,8 @@ def test_a_collection_beyond_one_request_is_sent_in_batches(docs, monkeypatch) -
         ["--owner", "1.1"],
         ["1.1.1", "--owner", "1.1"],
         ["--collection", "c", "--owner", "1.1"],
+        ["--collection", " "],
+        ["--collection", " ", "--path", "docs/*"],
     ],
 )
 def test_a_malformed_invocation_is_a_usage_error_before_any_network_call(args, no_route_call, monkeypatch) -> None:

@@ -2749,6 +2749,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def list_by_collection(
         self, physical_collection: str, *, limit: int | None = None,
     ) -> list[CatalogEntry]:
+        # RDR-241 (nexus-uwggq.1.6): raise, never []. The engine reads a blank filter as absent and lists the tenant.
+        if not physical_collection.strip():
+            raise ValueError("list_by_collection: physical_collection is blank; a blank name would list the whole tenant")
         params: dict = {"collection": physical_collection}
         if limit is not None:
             params["limit"] = limit
