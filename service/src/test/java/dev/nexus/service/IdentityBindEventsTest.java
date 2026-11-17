@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.http.IdentityTestEnv.ev;
@@ -107,6 +108,45 @@ class IdentityBindEventsTest {
         assertThat(env.bind(t, id, "clear", 1, ev("sess-b", 60, 600)).status()).isEqualTo(200);
         assertThat(env.bind(t, id, "fork", 1, Map.of("session_id", "sess-c")).status()).isEqualTo(200);
         assertThat(env.bind(t, id, "refresh", 1, Map.of()).status()).isEqualTo(200);
+    }
+
+    @Test
+    void aClearForkOrRefreshNamingSomeProcessFieldsIsCheckedAgainstTheHolderOnThoseFields() {
+        String t = IdentityTestEnv.freshTenant();
+        String id = env.createSeat(t, "partial");
+        env.bind(t, id, "start", 0, ev("sess-a", 62, 620));
+        // The holder is host h1, pid 62, started_at 620. A request that names only some of them is still compared.
+        List<Map<String, Object>> wrong = List.of(
+            Map.of("host", "h1", "pid", 63),
+            Map.of("host", "h2", "pid", 62),
+            Map.of("pid", 63),
+            Map.of("host", "h2"),
+            Map.of("started_at", 621L),
+            Map.of("host", "h1", "pid", 62, "started_at", 621L));
+        for (String event : new String[] {"clear", "fork", "refresh"}) {
+            for (Map<String, Object> named : wrong) {
+                Map<String, Object> body = new java.util.LinkedHashMap<>(named);
+                body.put("session_id", "sess-z");
+                Resp r = env.bind(t, id, event, 1, body);
+                assertThat(r.status()).as(event + " " + named + ": " + r.body()).isEqualTo(409);
+                assertThat(r.error()).as(event + " " + named).isEqualTo("holder_mismatch");
+            }
+        }
+        assertThat(env.events(t, id)).as("a refused event wrote nothing").containsExactly("start");
+        // The same partial fields, when they match the holder, pass.
+        List<Map<String, Object>> right = List.of(
+            Map.of("host", "h1", "pid", 62),
+            Map.of("pid", 62),
+            Map.of("host", "h1"),
+            Map.of("started_at", 620L));
+        for (String event : new String[] {"clear", "fork", "refresh"}) {
+            for (Map<String, Object> named : right) {
+                Map<String, Object> body = new java.util.LinkedHashMap<>(named);
+                body.put("session_id", "sess-ok");
+                Resp r = env.bind(t, id, event, 1, body);
+                assertThat(r.status()).as(event + " " + named + ": " + r.body()).isEqualTo(200);
+            }
+        }
     }
 
     @Test

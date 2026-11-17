@@ -259,6 +259,21 @@ class IdentityFenceTest extends IdentityFenceHarness {
     }
 
     @Test
+    void aParkedTokenlessInOnAnUnleasedSeatIsLabelledUnattestedOnce() throws Exception {
+        Seat desktop = bindSeat("desktop-parked", 173, "unleased");
+        var parked = java.util.concurrent.CompletableFuture.supplyAsync(() -> post(null, "/v1/tuples/in",
+            Map.of("subspace", "mailbox/" + desktop.id(), "keys_pattern", Map.of("to", desktop.id()), "claimant", "desktop-mcp",
+                "lease_s", 60, "timeout_s", 20)));
+        Thread.sleep(1500);
+        assertThat(parked.isDone()).as("still waiting for mail").isFalse();
+        assertThat(mailTo(desktop.id(), "m-desk-parked", null).status()).isEqualTo(200);
+        Resp in = parked.get(25, java.util.concurrent.TimeUnit.SECONDS);
+        assertThat(in.status()).as(in.raw()).isEqualTo(200);
+        assertThat(in.text("claim_id")).as("the wake delivered the mail").isNotBlank();
+        assertThat(in.headers().allValues("X-Nexus-Unattested")).as("fenced twice, labelled once").hasSize(1);
+    }
+
+    @Test
     void aMailboxThatIsNotAnIdentitysIsNotFenced() {
         String sessionAddress = "sess-" + UUID.randomUUID();
         assertThat(mailTo(sessionAddress, "m-s", null).status()).isEqualTo(200);

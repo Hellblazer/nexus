@@ -312,17 +312,21 @@ public final class IdentityRepository {
     }
 
     /**
-     * A {@code clear}, {@code fork} or {@code refresh} that names a process (host, pid and {@code started_at}, or a
-     * {@code proc_start}) must name the one that holds the identity: each of them ends with a fresh identity token,
-     * and a caller that describes some other process is not the holder. A request that names none is unchanged (the
-     * contract leaves the fields optional, so the credential of the tenant remains the trust boundary for it).
+     * A {@code clear}, {@code fork} or {@code refresh} that names any field of a process (host, pid, {@code started_at}
+     * or {@code proc_start}) must agree with the one that holds the identity on every field it names: each of them ends
+     * with a fresh identity token, and a caller that describes some other process is not the holder. A request that
+     * names none is unchanged (the contract leaves the fields optional, so the credential of the tenant remains the
+     * trust boundary for it).
      */
     private static void requireNamedHolder(IdentityRecordsRecord rec, IdentityEvidence ev) {
-        if (!ev.hasProcess() && ev.procStart() == null) {
+        if (ev.host() == null && ev.pid() == null && ev.startedAt() == null && ev.procStart() == null) {
             return;
         }
         IdentityEvidence.Process cur = IdentityRows.holder(rec);
-        boolean ok = cur != null && (!ev.hasProcess() || sameProcess(cur, ev))
+        boolean ok = cur != null
+            && (ev.host() == null || ev.host().equals(cur.host()))
+            && (ev.pid() == null || ev.pid().equals(cur.pid()))
+            && (ev.startedAt() == null || ev.startedAt().equals(cur.startedAt()))
             && (ev.procStart() == null || cur.procStart() == null || ev.procStart().equals(cur.procStart()));
         if (!ok) {
             Map<String, Object> d = new LinkedHashMap<>();
