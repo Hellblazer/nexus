@@ -42,6 +42,18 @@ UPDATE nexus.settings SET v = 1;
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="o-inert-children-pass" author="fixture">
+        <comment>o-inert-children-pass</comment>
+        <sql splitStatements="false" stripComments="false">
+SELECT 1;
+        </sql>
+        <empty/>
+        <output message="x"/>
+        <tagDatabase tag="t1"/>
+        <stop message="x"/>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="o-sqlfile-passes" author="fixture">
         <comment>o-sqlfile-passes</comment>
         <sqlFile path="backfill.sql" relativeToChangelogFile="true"/>

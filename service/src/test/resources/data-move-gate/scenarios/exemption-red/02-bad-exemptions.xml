@@ -59,6 +59,27 @@ UPDATE nexus.plans p SET a = c.a FROM nexus.chunks c WHERE c.id = p.id;
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="ex-two-lines-one-names-a-growing-table" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row
+data-move-exempt: nexus.chunks: trust me</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+UPDATE nexus.chunks SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-two-lines-each-lifts-only-its-own-table" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row
+data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+UPDATE nexus.plans SET a = 1;
+UPDATE nexus.other SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="ex-without-a-reason" author="fixture">
         <comment>data-move-exempt: nexus.settings:</comment>
         <sql splitStatements="false" stripComments="false">

@@ -14,6 +14,18 @@ ALTER TABLE nexus.settings DROP COLUMN old_v;
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="g-two-exemption-lines-two-small-tables" author="fixture">
+        <comment>Touches two small tables.
+data-move-exempt: nexus.settings: one row per install
+data-move-exempt: nexus.plans: a few rows
+End.</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+DELETE FROM nexus.plans WHERE dead;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="g-exempt-reads-another-small-table" author="fixture">
         <comment>data-move-exempt: nexus.plans: a few rows</comment>
         <sql splitStatements="false" stripComments="false">

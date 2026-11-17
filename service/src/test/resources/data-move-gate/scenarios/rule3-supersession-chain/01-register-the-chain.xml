@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-supersession-chain. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="reg-a" author="fixture">
+        <comment>reg-a</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('m-a', 'UPDATE nexus.chain_a SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.chain_a WHERE dead', 'nexus', 'chain_a', 1000, 50, 60000, 'SELECT count(*) FROM nexus.chain_a WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.chain_a VALIDATE CONSTRAINT moved_check', 'm-a', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="reg-b" author="fixture">
+        <comment>reg-b</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('m-b', 'UPDATE nexus.chain_b SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.chain_b WHERE dead', 'nexus', 'chain_b', 1000, 50, 60000, 'SELECT count(*) FROM nexus.chain_b WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.chain_b VALIDATE CONSTRAINT moved_check', 'm-b', 'm-a');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="reg-c" author="fixture">
+        <comment>reg-c</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('m-c', 'UPDATE nexus.chain_c SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.chain_c WHERE dead', 'nexus', 'chain_c', 1000, 50, 60000, 'SELECT count(*) FROM nexus.chain_c WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.chain_c VALIDATE CONSTRAINT moved_check', 'm-c', 'm-b');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -44,7 +44,7 @@ import java.util.stream.Stream;
  * </ol>
  *
  * <p><b>Exemption line.</b> A line {@code data-move-exempt: <table>: <reason>} in the changeset's {@code <comment>}, naming a table
- * the changeset touches whose size does not grow with user data, lifts the rules for that table in that changeset. The RDR fixes
+ * the changeset touches whose size does not grow with user data, lifts the rules for that table in that changeset; a changeset touching two small tables carries one line for each. The RDR fixes
  * the meaning, not the spelling; this is the spelling. The line lifts only the findings whose table is the named one: a finding on
  * any other table stays, and so does one whose statement also names a table that grows or that a move drives (a subquery, a FROM).
  * That scope is narrower than the RDR sentence (which says the line lifts all three rules for the changeset); it is the review's
@@ -65,11 +65,13 @@ import java.util.stream.Stream;
  * so it cannot see which move a changeset waits for: it requires the precondition to name the label of one move that drives the
  * table, and the review checks it is the right one. The exemption line is checked for form, not for truth (that the table does
  * not grow is the review's). Not covered either: ADD COLUMN with an inline constraint, MATERIALIZED VIEW, TRUNCATE, a rename of
- * a table that a registered move names only in its template. The rules read {@code <sql>} only: a changeset whose child is a native
+ * a table that a registered move names only in its template, and {@code INSERT INTO t TABLE x} (it copies rows with no SELECT keyword
+ * for the rule to see; INSERT ... SELECT is what rule 1 names). The rules read {@code <sql>} only: a changeset whose child is a native
  * Liquibase change type ({@code update}, {@code modifyDataType}, {@code addNotNullConstraint}, {@code customChange} and the like)
  * is itself a finding ({@code opaque.native-change}) unless frozen or exempted for that change's {@code tableName}; a
- * {@code sqlFile} child passes, as the RDR says, and is counted and printed ({@code sqlFiles}) but never read. The shipped tree has
- * no native change and the test asserts it.
+ * {@code sqlFile} child passes, as the RDR says, and is counted and printed ({@code sqlFiles}) but never read. So do the children
+ * that cannot write or scan a table ({@code empty}, {@code output}, {@code tagDatabase}, {@code stop}, besides {@code rollback} and
+ * {@code validCheckSum}). The shipped tree has no native change and the test asserts it.
  *
  * <p>Reads {@code db/changelog} only. {@code db/vendor} holds the vendored library changelogs (ddl_utils, dml_utils), which are
  * not nexus changesets and never run as nexus's own schema.
@@ -207,9 +209,9 @@ class DataMoveChangesetGateTest {
     @Test
     void anExemptionLineForASmallTable_liftsTheFindingsOnThatTable() throws Exception {
         List<Entry> entries = scenario("exemption-green");
-        assertThat(entries).filteredOn(Entry::exempt).as("the exemption was applied, not merely absent a finding").hasSize(2);
+        assertThat(entries).filteredOn(Entry::exempt).as("the exemption was applied, not merely absent a finding").hasSize(3);
         assertThat(entries).filteredOn(e -> !e.findings().isEmpty() && e.unlifted().isEmpty())
-            .as("each exempt changeset has findings the line lifts").hasSize(2);
+            .as("each exempt changeset has findings the line lifts").hasSize(3);
     }
 
     @Test
@@ -220,6 +222,11 @@ class DataMoveChangesetGateTest {
     @Test
     void aNativeChangeType_isRed_unlessExemptedForItsTable_andASqlFileIsNotRead() throws Exception {
         scenario("opaque-native");
+    }
+
+    @Test
+    void aSupersessionChain_countsEveryLaterLabelForTheEarlierTables() throws Exception {
+        scenario("rule3-supersession-chain");
     }
 
     @Test

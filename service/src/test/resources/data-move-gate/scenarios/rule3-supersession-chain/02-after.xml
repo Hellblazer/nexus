@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-supersession-chain. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-newest-label-for-the-oldest-table" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-c' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-newest-label-for-the-oldest-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chain_a DROP COLUMN x;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-newest-label-for-the-middle-table" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-c' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-newest-label-for-the-middle-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chain_b DROP COLUMN x;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-middle-label-for-the-oldest-table" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-b' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-middle-label-for-the-oldest-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chain_a DROP COLUMN y;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-newest-label-for-its-own-table" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-c' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-newest-label-for-its-own-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chain_c DROP COLUMN x;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r-oldest-label-for-the-newest-table" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-a' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>r-oldest-label-for-the-newest-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chain_c DROP COLUMN y;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r-oldest-label-for-the-middle-table" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-a' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>r-oldest-label-for-the-middle-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chain_b DROP COLUMN y;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

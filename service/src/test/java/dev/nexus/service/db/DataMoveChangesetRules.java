@@ -104,9 +104,15 @@ final class DataMoveChangesetRules {
 
     // ---- reading -----------------------------------------------------------------------------------------------------
 
-    /** Children that are read ({@code sql}, {@code comment}, {@code preConditions}) or run nothing at boot; any other is {@link Opaque}. */
+    /**
+     * Children that are read ({@code sql}, {@code comment}, {@code preConditions}) or cannot write or scan a row of any table; any
+     * other is {@link Opaque}. The inert ones: {@code rollback} (never runs at boot), {@code validCheckSum} (a checksum
+     * declaration), {@code empty} (no change), {@code output} (prints a message), {@code tagDatabase} (writes one
+     * DATABASECHANGELOG tag row, Liquibase's own bookkeeping) and {@code stop} (halts the update with a message, so it runs no
+     * data statement). Each is a no-op for the question the gate asks, whether an upgrade boot rewrites a table that grows.
+     */
     private static final Set<String> READ_OR_NONEXECUTABLE =
-        Set.of("sql", "comment", "rollback", "preConditions", "validCheckSum");
+        Set.of("sql", "comment", "rollback", "preConditions", "validCheckSum", "empty", "output", "tagDatabase", "stop");
 
     static List<Changeset> read(List<Path> filesInOrder) throws Exception {
         List<Changeset> out = new ArrayList<>();
@@ -391,12 +397,20 @@ final class DataMoveChangesetRules {
     private static final class Moves {
         final Map<String, Set<String>> labelsByTable = new LinkedHashMap<>();
         final Map<String, String> tableOfLabel = new LinkedHashMap<>();
+        final Map<String, String> supersededBy = new LinkedHashMap<>();
 
+        /** Registers a move; its label counts for its own table and, down the chain of moves it supersedes, for each of theirs. */
         void register(Registration r) {
             tableOfLabel.put(r.label(), r.drivingTable());
+            if (r.supersedes() != null) supersededBy.put(r.label(), r.supersedes());
             labelsByTable.computeIfAbsent(r.drivingTable(), k -> new LinkedHashSet<>()).add(r.label());
-            String replaced = r.supersedes() == null ? null : tableOfLabel.get(r.supersedes());
-            if (replaced != null) labelsByTable.computeIfAbsent(replaced, k -> new LinkedHashSet<>()).add(r.label());
+            Set<String> seen = new LinkedHashSet<>();
+            String replaced = r.supersedes();
+            while (replaced != null && seen.add(replaced)) {
+                String table = tableOfLabel.get(replaced);
+                if (table != null) labelsByTable.computeIfAbsent(table, k -> new LinkedHashSet<>()).add(r.label());
+                replaced = supersededBy.get(replaced);
+            }
         }
 
         boolean drives(String table) {
@@ -430,12 +444,14 @@ final class DataMoveChangesetRules {
                 findings.add(new Finding("opaque.native-change", "<" + o.element() + (o.table() == null ? "" : " tableName=" + o.table())
                     + "> is a Liquibase change type the gate cannot read; write the change as <sql>", o.table(), ""));
             }
-            String exemptTable = exemption(cs, moves, findings);
+            Set<String> exemptTables = exemptions(cs, moves, findings);
             List<Finding> unlifted = new ArrayList<>();
             for (Finding f : findings) {
-                if (exemptTable == null || !lifts(exemptTable, f, moves)) unlifted.add(f);
+                boolean lifted = false;
+                for (String table : exemptTables) lifted |= lifts(table, f, moves);
+                if (!lifted) unlifted.add(f);
             }
-            out.add(new Entry(cs, findings, exemptTable != null, unlifted));
+            out.add(new Entry(cs, findings, !exemptTables.isEmpty(), unlifted));
         }
         return out;
     }
@@ -525,26 +541,34 @@ final class DataMoveChangesetRules {
     }
 
     /**
-     * The table of the changeset's exemption line when it is valid, else null (an invalid line adds an {@code exemption} finding). A
-     * valid line names a small table the changeset's statements name; it lifts only findings on that table (see {@link #lifts}).
+     * The tables of the changeset's valid exemption lines. Every {@code data-move-exempt:} line is read, so a changeset that
+     * touches two small tables can name both; each line lifts only findings on its own table (see {@link #lifts}). An invalid line
+     * adds an {@code exemption} finding and lifts nothing. A valid line names a small table the changeset names.
      */
-    private static String exemption(Changeset cs, Moves moves, List<Finding> findings) {
+    private static Set<String> exemptions(Changeset cs, Moves moves, List<Finding> findings) {
+        Set<String> valid = new LinkedHashSet<>();
         Matcher m = EXEMPTION.matcher(cs.comment());
-        if (!m.find()) return null;
-        String table = bare(m.group(1)).toLowerCase();
-        if (growsWithUserData(table) || moves.drives(table)) {
-            findings.add(new Finding("exemption", table + " grows with user data or is driven by a registered move, so it cannot be exempted"));
-            return null;
+        while (m.find()) {
+            String table = bare(m.group(1)).toLowerCase();
+            if (growsWithUserData(table) || moves.drives(table)) {
+                findings.add(new Finding("exemption", table + " grows with user data or is driven by a registered move, so it cannot be exempted"));
+                continue;
+            }
+            if (namedByTheChangeset(cs, table)) valid.add(table);
+            else findings.add(new Finding("exemption", "the changeset's statements never name " + table));
         }
+        return valid;
+    }
+
+    private static boolean namedByTheChangeset(Changeset cs, String table) {
         Pattern named = namesTable(table);
         for (Stmt s : cs.statements()) {
-            if (named.matcher(s.text()).find()) return table;
+            if (named.matcher(s.text()).find()) return true;
         }
         for (Opaque o : cs.opaque()) {
-            if (table.equals(o.table())) return table;
+            if (table.equals(o.table())) return true;
         }
-        findings.add(new Finding("exemption", "the changeset's statements never name " + table));
-        return null;
+        return false;
     }
 
     private static Pattern namesTable(String table) {
