@@ -526,7 +526,7 @@ def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict
     out.mkdir(parents=True)
     # -p loads the plugin before pytest puts the rootdir on sys.path.
     path = os.pathsep.join(p for p in (str(repo), os.environ.get("PYTHONPATH", "")) if p)
-    env = dict(os.environ, **ENV, NX_SURFACE_TRACE_OUT=str(out), PYTHONPATH=path)
+    env = dict(os.environ, **ENV, NX_SURFACE_TRACE_OUT=str(out), PYTHONPATH=path, TMPDIR=str(out.parent))
     argv = [*shlex.split(META_RUN), "-rs", "-p", "tests._surface_trace", *extra, test]
     proc = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, errors="replace")
     merged: dict[str, set[str]] = {}
@@ -543,6 +543,12 @@ def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict
     return merged, why
 
 
+def _outside(repo: Path) -> str:
+    tmp = os.path.realpath(tempfile.gettempdir())
+    root = os.path.realpath(repo)
+    return "/tmp" if tmp == root or tmp.startswith(root + os.sep) else tmp
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     from concurrent.futures import ThreadPoolExecutor
 
@@ -552,7 +558,10 @@ def cmd_build(args: argparse.Namespace) -> int:
     jobs = args.jobs or int(os.environ.get("LAB_CPUS") or os.cpu_count() or 2)
     print(f"tracing {len(files)} meta-test files, {jobs} at a time", flush=True)
     t0 = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="meta-surface-") as out:
+    # Outside the repo: a lab copy's TMPDIR is under it, where a whole-repo scan would read the
+    # temporary trees of the tests traced beside it.
+    scratch = _outside(repo)
+    with tempfile.TemporaryDirectory(prefix="meta-surface-", dir=scratch) as out:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             results = dict(zip(files, pool.map(
                 lambda ij: _trace_one(repo, ij[1], Path(out) / str(ij[0]), args.pytest_args), enumerate(files))))
@@ -560,7 +569,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     # (inside a lab copy TMPDIR is under the repo); a file whose trace failed is traced again alone.
     retry = [f for f in files if results[f][1] and not results[f][1].startswith("a skip")]
     for i, test in enumerate(retry):
-        with tempfile.TemporaryDirectory(prefix="meta-surface-retry-") as out:
+        with tempfile.TemporaryDirectory(prefix="meta-surface-retry-", dir=scratch) as out:
             again = _trace_one(repo, test, Path(out) / str(i), args.pytest_args)
         if not again[1]:
             print(f"  {test}: clean when traced alone", flush=True)
