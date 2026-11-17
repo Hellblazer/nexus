@@ -102,6 +102,7 @@ class _StorageBackendGuardGroup(click.Group):
         from nexus.config import PdfConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — deferred: keep CLI import surface light
+        from nexus.errors import BlankFilterError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.t2.http_token_store import TokenAdminAuthError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -109,6 +110,10 @@ class _StorageBackendGuardGroup(click.Group):
         try:
             return super().invoke(ctx)
         except StorageModeFlagError as exc:
+            raise click.UsageError(str(exc)) from exc
+        except BlankFilterError as exc:
+            # RDR-241 (nexus-uwggq.1.9): a catalog read was given a blank filter (a blank --collection, a
+            # whitespace owner) and refused to widen into a read of the whole catalog. A usage error, not a traceback.
             raise click.UsageError(str(exc)) from exc
         except SupersededCollectionWriteError as exc:
             # nexus-wwuzp: a write named a retired collection. The message

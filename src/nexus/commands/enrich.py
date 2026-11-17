@@ -1326,10 +1326,14 @@ def _resolve_enrich_targets(
                 continue
             found_any = False
             # Step 1: exact match on absolute or relative form.
-            for path_variant in (sp, sp.lstrip("/")):
-                tumbler_str = reader.lookup_doc_id_by_collection_and_path(
-                    collection_name or "", path_variant
-                )
+            for path_variant in filter(str.strip, (sp, sp.lstrip("/"))):  # skip a blank variant ("/" has no relative form)
+                # No collection means "any collection": the explicit owner-agnostic path lookup, never a blank
+                # collection (the engine reads a blank one as absent, and the client now refuses it; nexus-uwggq.1.9).
+                if collection_name:
+                    tumbler_str = reader.lookup_doc_id_by_collection_and_path(collection_name, path_variant)
+                else:
+                    by_path = reader.find_by_file_path(path_variant)
+                    tumbler_str = str(by_path.tumbler) if by_path is not None else ""
                 if tumbler_str:
                     target_tumblers.append(Tumbler.parse(tumbler_str))
                     found_any = True

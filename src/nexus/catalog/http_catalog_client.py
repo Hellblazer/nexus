@@ -100,7 +100,7 @@ from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
 from nexus.catalog.write_outcome import PreSendArgumentError
-from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused
+from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused, refuse_whitespace_filters as _refuse_ws, require_nonblank_filter as _nonblank
 
 _log = structlog.get_logger(__name__)
 
@@ -1755,7 +1755,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         params: dict = {}
         if owner_prefix:
-            params["owner_prefix"] = owner_prefix
+            params["owner_prefix"] = _nonblank("coverage_by_content_type", "owner_prefix", owner_prefix)
         result = self._get("/coverage", **params)
         rows = result.get("coverage", []) if result else []
         return [
@@ -2417,6 +2417,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         propagated like :meth:`purge_trash`, never swallowed, so callers can
         tell "engine too old" apart from "engine answered zero rows".
         """
+        _refuse_ws("gc_audit_list", collection=collection, operation=operation)
         result = self._get(
             "/gc_audit/list",
             collection=collection, operation=operation,
@@ -2449,7 +2450,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         params: dict = {"q": query}
         if content_type:
-            params["content_type"] = content_type
+            params["content_type"] = _nonblank("find", "content_type", content_type)
         if limit > 0:
             params["limit"] = limit
         return self._docs_from(self._get("/search", **params))
@@ -2504,6 +2505,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         it did before, and is not read as absence.
         """
         owner_prefix = str(owner) if owner else None
+        _refuse_ws("find_by_title_exact", owner=owner_prefix, content_type=content_type)
         backoff = getattr(self, "_by_title_backoff", None)
         route_absent = backoff is not None and _monotonic() - backoff < _BY_TITLE_RETRY_S
         if title and not route_absent:
@@ -2536,23 +2538,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def by_file_path(
         self, owner: Tumbler | str, file_path: str
     ) -> CatalogEntry | None:
-        # nexus-h9f1w / GH #1350: the service /list ignores file_path when owner
-        # is set and returns the FULL owner list, so a brand-new file's query
-        # yields docs[0] (an unrelated doc). Trusting docs[0] mis-attributed the
-        # new file's chunks to that doc, overwriting its manifest (silent data
-        # corruption). Filter by exact file_path client-side; correct regardless
-        # of the server-side bug (Fix B tracked separately).
-        result = self._get("/list", owner=str(owner), file_path=file_path)
+        # nexus-h9f1w / GH #1350: the service /list ignores file_path when owner is set and returns the FULL owner
+        # list, so a brand-new file's query yields docs[0] (an unrelated doc) and its manifest was overwritten.
+        # Filter by exact file_path client-side. A blank owner or path is read as absent (nexus-uwggq.1.9).
+        result = self._get("/list", owner=str(_nonblank("by_file_path", "owner", owner)),
+                           file_path=_nonblank("by_file_path", "file_path", file_path))
         docs = result.get("documents", []) if result else []
         match = [d for d in docs if d.get("file_path") == file_path]
         return _to_entry(match[0]) if match else None
 
     def by_source_uri(self, uri: str) -> CatalogEntry | None:
-        # nexus-h9f1w / GH #1350: same docs[0]-trust class as by_file_path.
-        # Defense-in-depth exact-match filter (the server currently filters
-        # source_uri correctly; this guards against an owner-list-leak-style
-        # regression and keeps the sibling lookups consistent).
-        result = self._get("/list", source_uri=uri)
+        # nexus-h9f1w / GH #1350: same docs[0]-trust class as by_file_path. Exact-match filter as defense in depth
+        # (the server filters source_uri correctly today); keeps the sibling lookups consistent.
+        result = self._get("/list", source_uri=_nonblank("by_source_uri", "uri", uri))
         docs = result.get("documents", []) if result else []
         match = [d for d in docs if d.get("source_uri") == uri]
         return _to_entry(match[0]) if match else None
@@ -2604,7 +2602,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # nexus-h9f1w / GH #1350: exact-match guard, same class as by_file_path.
         # The owner-agnostic /list routes to documentsByFilePath (exact eq) so
         # this is a no-op today; kept for consistency + regression defense.
-        result = self._get("/list", file_path=file_path)
+        result = self._get("/list", file_path=_nonblank("find_all_by_file_path", "file_path", file_path))
         docs = result.get("documents", []) if result else []
         return [_to_entry(d) for d in docs if d.get("file_path") == file_path]
 
@@ -2671,10 +2669,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return result
 
     def by_owner(self, owner: Tumbler | str) -> list[CatalogEntry]:
-        return self._docs_from(self._get("/list", owner=str(owner)))
+        return self._docs_from(self._get("/list", owner=str(_nonblank("by_owner", "owner", owner))))
 
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
-        return self._docs_from(self._get("/list", content_type=content_type))
+        return self._docs_from(self._get("/list", content_type=_nonblank("by_content_type", "content_type", content_type)))
 
     def list_scoped(
         self,
@@ -2690,7 +2688,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         The call must be scoped: an *owner* with at least one content type, or a *source_uri_prefix*.
         Anything else would reach the engine's tenant-wide or single-filter branches, so it raises
         here instead of listing the tenant.
+
+        ``""`` is "not given" (the defaults); a whitespace-only owner or prefix is refused, because the engine reads
+        it as absent (``wantsCombinedList``) and drops that scope: the whole tenant's documents of the type, or a page.
+        A blank content type is refused too: ``queryParamAll`` drops it, which would widen the owner to every type.
         """
+        _refuse_ws("list_scoped", owner=str(owner), source_uri_prefix=source_uri_prefix)
         if not source_uri_prefix and not (owner and content_types):
             raise ValueError(
                 "list_scoped needs an owner with content_types, or a source_uri_prefix; "
@@ -2700,13 +2703,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if owner:
             params["owner"] = str(owner)
         if content_types:
-            params["content_type"] = list(content_types)
+            params["content_type"] = [_nonblank("list_scoped", "content_types entry", t) for t in content_types]
         if source_uri_prefix:
             params["source_uri_prefix"] = source_uri_prefix
         return self._docs_from(self._get("/list", **params))
 
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
-        return self._docs_from(self._get("/list", corpus=corpus))
+        return self._docs_from(self._get("/list", corpus=_nonblank("by_corpus", "corpus", corpus)))
 
     def all_documents(
         self, limit: int = 0, *, content_type: str = "", offset: int = 0,
@@ -2714,7 +2717,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if limit > 0:
             params: dict = {"limit": limit, "offset": offset}
             if content_type:
-                params["content_type"] = content_type
+                params["content_type"] = _nonblank("all_documents", "content_type", content_type)
             return self._docs_from(self._get("/list", **params))
         # limit == 0 means UNBOUNDED (canonical semantics).
         if content_type:
@@ -2726,7 +2729,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             # (same as before xoimv, now by design instead of by omission) — so a single
             # request still returns ALL matching rows in one shot and a pagination loop
             # here would just re-fetch the same full set every page and never terminate.
-            return self._docs_from(self._get("/list", content_type=content_type))
+            return self._docs_from(self._get("/list", content_type=_nonblank("all_documents", "content_type", content_type)))
         # Unfiltered: the service always respects limit/offset here (listDocuments
         # defaults limit to 200 whether or not the caller sends one — unlike the filter
         # branches above, which stay unbounded when limit is absent, per nexus-xoimv), so
@@ -2747,9 +2750,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self, physical_collection: str, *, limit: int | None = None,
     ) -> list[CatalogEntry]:
         # RDR-241 (nexus-uwggq.1.6): raise, never []. The engine reads a blank filter as absent and lists the tenant.
-        if not physical_collection or not physical_collection.strip():
-            raise ValueError("list_by_collection: physical_collection is blank; a blank name would list the whole tenant")
-        params: dict = {"collection": physical_collection}
+        params: dict = {"collection": _nonblank("list_by_collection", "physical_collection", physical_collection)}
         if limit is not None:
             params["limit"] = limit
         return self._docs_from(self._get("/list", **params))
@@ -2817,7 +2818,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             result = self._get(
                 "/resolve",
                 file_path=source_path,  # wire key is file_path; canonical param is source_path
-                collection=collection,
+                collection=_nonblank("lookup_doc_id_by_collection_and_path", "collection", collection),
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -3324,9 +3325,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # njrcn.5: forward link_types to the server-side IN filter (no client-side
         # over-fetch). link_types takes precedence; else the single link_type.
         if link_types:
-            params["link_types"] = ",".join(link_types)
+            params["link_types"] = ",".join(_nonblank("links", "link_types entry", t) for t in link_types)
         elif link_type:
-            params["link_type"] = link_type
+            params["link_type"] = _nonblank("links", "link_type", link_type)
         result = self._get("/links", **params)
         return [_link_from_dict(r) for r in (result.get("links_from", []) if result else [])]
 
@@ -3338,9 +3339,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "in"}
         if link_types:
-            params["link_types"] = ",".join(link_types)
+            params["link_types"] = ",".join(_nonblank("links", "link_types entry", t) for t in link_types)
         elif link_type:
-            params["link_type"] = link_type
+            params["link_type"] = _nonblank("links", "link_type", link_type)
         result = self._get("/links", **params)
         return [_link_from_dict(r) for r in (result.get("links_to", []) if result else [])]
 
@@ -3358,13 +3359,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         offset: int = 0,
     ) -> list[CatalogLink]:
         params: dict = {"limit": limit, "offset": offset}
-        if from_t:            params["from_tumbler"] = from_t
-        if to_t:              params["to_tumbler"] = to_t
-        if link_type:         params["link_type"] = link_type
-        if created_by:        params["created_by"] = created_by
-        if created_at_before: params["created_at_before"] = created_at_before
-        if direction:         params["direction"] = direction
-        if tumbler:           params["tumbler"] = tumbler
+        if from_t:            params["from_tumbler"] = _nonblank("link_query", "from_t", from_t)
+        if to_t:              params["to_tumbler"] = _nonblank("link_query", "to_t", to_t)
+        if link_type:         params["link_type"] = _nonblank("link_query", "link_type", link_type)
+        if created_by:        params["created_by"] = _nonblank("link_query", "created_by", created_by)
+        if created_at_before: params["created_at_before"] = _nonblank("link_query", "created_at_before", created_at_before)
+        if direction:         params["direction"] = _nonblank("link_query", "direction", direction)
+        if tumbler:           params["tumbler"] = _nonblank("link_query", "tumbler", tumbler)
         result = self._get("/link_query", **params)
         return [_link_from_dict(r) for r in (result.get("links", []) if result else [])]
 
@@ -3382,6 +3383,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         Canonical parity: requires at least one filter (unless ``dry_run``), and
         ``dry_run=True`` returns the count that *would* be deleted (no deletion).
         """
+        # A whitespace filter is read as absent by the engine: with no other filter it deletes every link.
+        _refuse_ws("bulk_unlink", from_t=from_t, to_t=to_t, link_type=link_type, created_by=created_by, created_at_before=created_at_before)
         has_filter = any((from_t, to_t, link_type, created_by, created_at_before))
         if not has_filter and not dry_run:
             raise ValueError(
@@ -3736,6 +3739,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         no ``owner_id`` filter, so a caller that wants one corpus's rows keeps
         those whose ``owner_id`` matches.
         """
+        _refuse_ws("list_collections", lifecycle_state=lifecycle_state, content_type=content_type)
         result = self._get(
             "/collections/list", lifecycle_state=lifecycle_state, content_type=content_type,
         )

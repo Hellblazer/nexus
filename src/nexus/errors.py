@@ -791,6 +791,34 @@ class EngineOlderThanClientError(RuntimeError):
         super().__init__(f"{what}. {ENGINE_OLDER_THAN_CLIENT_REMEDY}")
 
 
+class BlankFilterError(ValueError):
+    """A catalog read was given a blank filter value (RDR-241, nexus-uwggq.1.6 and .1.9).
+
+    The engine's ``GET /list`` and ``GET /resolve`` read a blank filter as absent, and the catalog client drops
+    a ``""`` or ``None`` param before it sends, so a blank value turns a scoped read into a read of the whole
+    tenant (or of every collection). The client raises this before any request, never ``[]``, so a caller that
+    acts on the rows (a flag, a prune, a backfill) cannot read the absence as "nothing matched". The CLI boundary
+    (``nexus.cli``) renders it as a usage error. A ``ValueError`` so the callers of ``list_by_collection`` that
+    already catch one keep working."""
+
+
+def require_nonblank_filter(method: str, param: str, value: Any) -> Any:
+    """Return *value* when it names something; raise :class:`BlankFilterError` for ``None`` or a blank string."""
+    if value is None or not str(value).strip():
+        raise BlankFilterError(f"{method}: {param} is blank; a blank value is read as absent and widens the read to the whole catalog")
+    return value
+
+
+def refuse_whitespace_filters(method: str, **filters: Any) -> None:
+    """For an OPTIONAL filter, where ``None`` and ``""`` mean "no filter": refuse one that is only whitespace.
+
+    The engine reads a whitespace-only value as absent too, so it would silently drop the scope the caller asked
+    for. ``None`` and ``""`` pass (they are the documented "not given")."""
+    for param, value in filters.items():
+        if value is not None and value != "" and not str(value).strip():
+            require_nonblank_filter(method, param, "")
+
+
 class BatchWriteFailedError(NexusError):
     """A request of a multi-batch combined write did not land, or the engine's answer cannot be
     trusted (RDR-223, ``nexus.catalog.multi_batch_write``).

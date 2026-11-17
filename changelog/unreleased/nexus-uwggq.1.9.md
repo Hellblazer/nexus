@@ -1,0 +1,3 @@
+### Fixed
+
+- **A blank catalog filter is refused instead of widening the read.** The engine reads a blank filter as absent, so a blank or whitespace value in a path, owner, corpus, content type, source URI or source-URI prefix lookup returned documents from the whole catalog (or from every collection) rather than the scope asked for. The catalog client now refuses a blank value before any request, and the `nx` commands that reach it answer with a usage error (`Error: <lookup>: <name> is blank`) instead of a traceback. `nx enrich` with no collection still resolves a path across all collections, through an explicit path lookup.
