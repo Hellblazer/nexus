@@ -85,8 +85,9 @@ does not run on a managed deployment, which vacuums server-side.
 missing PG_PORT` / `psql binary not found` (local setup, not a sweep
 problem).
 
-**Cause**: this row reads `nexus.tuple_tenants.last_swept_at` alone. The
-sweep itself runs every `SWEEP_INTERVAL_HOURS` (six hours), with its first
+**Cause**: this row reads `nexus.tuple_tenants.last_swept_at` alone. A tenant
+is in that table once it has written a tuple or created an identity (RDR-253).
+The sweep itself, which has a fourth arm for identity retention, runs every `SWEEP_INTERVAL_HOURS` (six hours), with its first
 pass 60 seconds after engine boot (nexus-d94qm), as a second task
 on the same scheduler as the T1 crash-safety sweep, and this row's
 threshold (18 hours, three times the interval) is `NexusService.java`'s own

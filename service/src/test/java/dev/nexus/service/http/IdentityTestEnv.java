@@ -86,7 +86,7 @@ public final class IdentityTestEnv implements AutoCloseable {
     private final HttpServer server;
     private final HttpClient http = TestHttp.client();
 
-    private IdentityTestEnv() throws Exception {
+    private IdentityTestEnv(int pruneBatch, int pruneMaxBatches) throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -99,7 +99,7 @@ public final class IdentityTestEnv implements AutoCloseable {
         cfg.setAutoCommit(true);
         ds = new HikariDataSource(cfg);
         scope = new TenantScope(ds);
-        repo = new IdentityRepository(scope, clock);
+        repo = new IdentityRepository(scope, clock, pruneBatch, pruneMaxBatches);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/identity", new IdentityHandler(repo)).getFilters().add(new Filter() {
             @Override
@@ -122,7 +122,12 @@ public final class IdentityTestEnv implements AutoCloseable {
     }
 
     public static IdentityTestEnv start() throws Exception {
-        return new IdentityTestEnv();
+        return new IdentityTestEnv(5000, 20);
+    }
+
+    /** An environment whose retention prune takes {@code pruneBatch} rows a statement and {@code pruneMaxBatches} a pass. */
+    public static IdentityTestEnv start(int pruneBatch, int pruneMaxBatches) throws Exception {
+        return new IdentityTestEnv(pruneBatch, pruneMaxBatches);
     }
 
     /** A tenant no other test has used, so a test sees only its own rows. */

@@ -151,7 +151,8 @@ class IdentityCredentialRoutesTest {
         p.add(new Probe("work put", "POST", "/i999999/work", Map.of("kind", "wait", "ref", "x", "state", "running"), true));
         p.add(new Probe("work remove", "DELETE", "/i999999/work?kind=wait&ref=x", null, true));
         p.add(new Probe("work list", "GET", "/i999999/work", null, true));
-        p.add(new Probe("history", "GET", "/bindings?host=h1&pid=1&history=1", null, true));
+        p.add(new Probe("history", "GET", "/bindings?host=h1&pid=1&proc_start=2026-11-16T10:00:00Z&history=1", null, true));
+        p.add(new Probe("work owners", "GET", "/work?kind=wait&ref=x", null, true));
         return p;
     }
 
@@ -173,8 +174,22 @@ class IdentityCredentialRoutesTest {
             if (mint != 403) wrong.add(p.name() + ": a mint credential got " + mint);
             if (boardCi != 403) wrong.add(p.name() + ": a board-ci credential got " + boardCi);
         }
-        assertThat(examined).as("non-vacuity: routes examined").isGreaterThanOrEqualTo(28);
+        assertThat(examined).as("non-vacuity: routes examined").isGreaterThanOrEqualTo(29);
         assertThat(wrong).isEmpty();
+    }
+
+    @Test
+    void aMalformedCreateBodyFromAMintOrBoardCiCredentialIsRefusedNotParsed() throws Exception {
+        for (String token : new String[] {MINT_TOKEN, BOARD_CI_TOKEN}) {
+            var req = TestHttp.request("http://127.0.0.1:" + port + "/v1/identity")
+                .header("Authorization", "Bearer " + token).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{this is not json")).build();
+            assertThat(http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode()).as(token).isEqualTo(403);
+        }
+        var tenantReq = TestHttp.request("http://127.0.0.1:" + port + "/v1/identity")
+            .header("Authorization", "Bearer " + TENANT_TOKEN).header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString("{this is not json")).build();
+        assertThat(http.send(tenantReq, HttpResponse.BodyHandlers.ofString()).statusCode()).as("the tenant credential gets the 400").isEqualTo(400);
     }
 
     @Test

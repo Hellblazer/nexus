@@ -25,6 +25,8 @@ public final class IdentityWork {
 
     static final Set<String> KINDS = Set.of("watcher", "wait", "labrun", "worktree", "tmux");
     static final Set<String> STATES = Set.of("running", "done");
+    /** The most work rows one identity may hold; the next registration is refused with 409 {@code work_limit}. */
+    static final int MAX_PER_IDENTITY = 200;
 
     private final TenantScope scope;
     private final Clock clock;
@@ -62,8 +64,15 @@ public final class IdentityWork {
             throw new IdentityException(400, "bad_state", "state must be running or done");
         }
         return scope.withTenant(tenant, ctx -> {
-            IdentityRows.lock(ctx, tenant, id);
+            IdentityRows.lock(ctx, tenant, id);   // the lock also serializes the count below against another writer
             OffsetDateTime now = OffsetDateTime.now(clock);
+            boolean exists = ctx.fetchExists(IDENTITY_WORK, IDENTITY_WORK.TENANT_ID.eq(tenant)
+                .and(IDENTITY_WORK.IDENTITY_ID.eq(id)).and(IDENTITY_WORK.KIND.eq(kind)).and(IDENTITY_WORK.REF.eq(ref)));
+            if (!exists && ctx.fetchCount(IDENTITY_WORK, IDENTITY_WORK.TENANT_ID.eq(tenant)
+                    .and(IDENTITY_WORK.IDENTITY_ID.eq(id))) >= MAX_PER_IDENTITY) {
+                throw new IdentityException(409, "work_limit", id + " already holds " + MAX_PER_IDENTITY
+                    + " work rows; forget finished work first", Map.of("limit", MAX_PER_IDENTITY));
+            }
             ctx.insertInto(IDENTITY_WORK)
                 .set(IDENTITY_WORK.TENANT_ID, tenant).set(IDENTITY_WORK.IDENTITY_ID, id).set(IDENTITY_WORK.KIND, kind)
                 .set(IDENTITY_WORK.REF, ref).set(IDENTITY_WORK.STATE, state).set(IDENTITY_WORK.UPDATED_AT, now)
@@ -88,6 +97,14 @@ public final class IdentityWork {
             m.put("removed", n);
             return m;
         });
+    }
+
+    /** The identities that own one resource, by identity id. */
+    List<Map<String, Object>> owners(String tenant, String kind, String ref) {
+        requireKindAndRef(kind, ref);
+        return scope.withTenant(tenant, ctx -> ctx.selectFrom(IDENTITY_WORK).where(IDENTITY_WORK.TENANT_ID.eq(tenant))
+            .and(IDENTITY_WORK.KIND.eq(kind)).and(IDENTITY_WORK.REF.eq(ref)).orderBy(IDENTITY_WORK.IDENTITY_ID)
+            .fetch(r -> row(r.getIdentityId(), r.getKind(), r.getRef(), r.getState(), r.getUpdatedAt())));
     }
 
     /** The work of one identity, oldest registration first by kind and ref. */

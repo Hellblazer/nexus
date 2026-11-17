@@ -49,12 +49,20 @@ final class IdentityRetention {
     /** Identities tombstoned per pass and tenant; the next pass takes the rest. */
     static final int PASS_LIMIT = 200;
 
+    /** Rows one prune statement deletes, and statements a pass may run for each of the two prunes. */
+    static final int PRUNE_BATCH = 5000;
+    static final int PRUNE_MAX_BATCHES = 20;
+
     private final TenantScope scope;
     private final Clock clock;
+    private final int pruneBatch;
+    private final int pruneMaxBatches;
 
-    IdentityRetention(TenantScope scope, Clock clock) {
+    IdentityRetention(TenantScope scope, Clock clock, int pruneBatch, int pruneMaxBatches) {
         this.scope = scope;
         this.clock = clock;
+        this.pruneBatch = pruneBatch;
+        this.pruneMaxBatches = pruneMaxBatches;
     }
 
     /** What an identity owns, removed inside the caller's transaction; returns the counts removed. */
@@ -154,25 +162,8 @@ final class IdentityRetention {
                 return 1;
             });
         }
-        int[] pruned = scope.withTenant(tenant, ctx -> {
-            SweepBounds.applyStatementTimeout(ctx, statementTimeout);
-            var b2 = IDENTITY_BINDINGS.as("b2");
-            int bindings = ctx.deleteFrom(IDENTITY_BINDINGS)
-                .where(IDENTITY_BINDINGS.TENANT_ID.eq(tenant))
-                .and(IDENTITY_BINDINGS.AT.lt(now.minusDays(BINDING_RETENTION_DAYS)))
-                .and(IDENTITY_BINDINGS.SEQ.lt(DSL.field(DSL.select(DSL.max(b2.SEQ)).from(b2)
-                    .where(b2.TENANT_ID.eq(IDENTITY_BINDINGS.TENANT_ID))
-                    .and(b2.IDENTITY_ID.eq(IDENTITY_BINDINGS.IDENTITY_ID)))))
-                .execute();
-            int sessions = ctx.deleteFrom(IDENTITY_SESSIONS)
-                .where(IDENTITY_SESSIONS.TENANT_ID.eq(tenant))
-                .andNotExists(DSL.selectOne().from(IDENTITY_BINDINGS)
-                    .where(IDENTITY_BINDINGS.TENANT_ID.eq(IDENTITY_SESSIONS.TENANT_ID))
-                    .and(IDENTITY_BINDINGS.IDENTITY_ID.eq(IDENTITY_SESSIONS.IDENTITY_ID))
-                    .and(IDENTITY_BINDINGS.SESSION_ID.eq(IDENTITY_SESSIONS.SESSION_ID)))
-                .execute();
-            return new int[] {bindings, sessions};
-        });
+        int[] pruned = {pruneBindings(tenant, now.minusDays(BINDING_RETENTION_DAYS), statementTimeout),
+            pruneSessions(tenant, statementTimeout)};
         Map<String, Integer> out = new LinkedHashMap<>();
         out.put("tombstoned", tombstoned);
         out.put("bindings_pruned", pruned[0]);
@@ -182,6 +173,59 @@ final class IdentityRetention {
                 tombstoned, pruned[0], pruned[1]);
         }
         return out;
+    }
+
+    /**
+     * Deletes binding rows older than the cutoff, never an identity's newest, {@code pruneBatch} rows a statement in
+     * their own transaction, at most {@code pruneMaxBatches} statements a pass, so a large backlog progresses over
+     * passes and no single statement outruns the sweep's statement timeout. Returns the rows deleted.
+     */
+    private int pruneBindings(String tenant, OffsetDateTime cutoff, java.time.Duration statementTimeout) {
+        int total = 0;
+        for (int batch = 0; batch < pruneMaxBatches; batch++) {
+            int n = scope.withTenant(tenant, ctx -> {
+                SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+                var b = IDENTITY_BINDINGS.as("b");
+                var newest = IDENTITY_BINDINGS.as("newest");
+                var victims = ctx.select(b.TENANT_ID, b.IDENTITY_ID, b.SEQ).from(b)
+                    .where(b.TENANT_ID.eq(tenant)).and(b.AT.lt(cutoff))
+                    .and(b.SEQ.lt(DSL.field(DSL.select(DSL.max(newest.SEQ)).from(newest)
+                        .where(newest.TENANT_ID.eq(b.TENANT_ID)).and(newest.IDENTITY_ID.eq(b.IDENTITY_ID)))))
+                    .orderBy(b.AT, b.IDENTITY_ID, b.SEQ).limit(pruneBatch);
+                return ctx.deleteFrom(IDENTITY_BINDINGS)
+                    .where(DSL.row(IDENTITY_BINDINGS.TENANT_ID, IDENTITY_BINDINGS.IDENTITY_ID, IDENTITY_BINDINGS.SEQ).in(victims))
+                    .execute();
+            });
+            total += n;
+            if (n < pruneBatch) {
+                break;
+            }
+        }
+        return total;
+    }
+
+    /** Deletes session-index rows that no binding row of their identity names any more, batched like the bindings. */
+    private int pruneSessions(String tenant, java.time.Duration statementTimeout) {
+        int total = 0;
+        for (int batch = 0; batch < pruneMaxBatches; batch++) {
+            int n = scope.withTenant(tenant, ctx -> {
+                SweepBounds.applyStatementTimeout(ctx, statementTimeout);
+                var s = IDENTITY_SESSIONS.as("s");
+                var victims = ctx.select(s.TENANT_ID, s.SESSION_ID).from(s).where(s.TENANT_ID.eq(tenant))
+                    .andNotExists(DSL.selectOne().from(IDENTITY_BINDINGS)
+                        .where(IDENTITY_BINDINGS.TENANT_ID.eq(s.TENANT_ID))
+                        .and(IDENTITY_BINDINGS.IDENTITY_ID.eq(s.IDENTITY_ID))
+                        .and(IDENTITY_BINDINGS.SESSION_ID.eq(s.SESSION_ID)))
+                    .orderBy(s.AT, s.SESSION_ID).limit(pruneBatch);
+                return ctx.deleteFrom(IDENTITY_SESSIONS)
+                    .where(DSL.row(IDENTITY_SESSIONS.TENANT_ID, IDENTITY_SESSIONS.SESSION_ID).in(victims)).execute();
+            });
+            total += n;
+            if (n < pruneBatch) {
+                break;
+            }
+        }
+        return total;
     }
 
     /**

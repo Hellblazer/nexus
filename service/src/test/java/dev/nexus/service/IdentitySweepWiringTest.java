@@ -130,4 +130,51 @@ class IdentitySweepWiringTest {
         call("GET", "/" + live, null, 200);
         assertThat(call("GET", "/" + seat, null, 200)).containsEntry("kind", "seat");
     }
+
+    /**
+     * Observes that the sweep's statement timeout reaches the identity arm (NexusService passes it to runRetention). A
+     * second transaction holds the row lock of an identity that is due for a tombstone, so the arm's statement waits;
+     * PostgreSQL's statement_timeout counts that wait, so with a short timeout the arm fails (contained, reported as a
+     * tenant error) and the identity survives, and with a long one, once the lock is released, it is tombstoned.
+     */
+    @Test
+    void theSweepsStatementTimeoutReachesTheIdentityRetentionArm() throws Exception {
+        String due = (String) call("POST", "", Map.of("kind", "ephemeral", "created_by", "session",
+            "bind", bind("timeout-1", 31)), 200).get("id");
+        call("POST", "/" + due + "/bind", Map.of("event", "end", "expected_generation", 1), 200);
+        TenantScope scope = new TenantScope(ds);
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        scope.withTenant(TENANT, ctx -> ctx.update(IDENTITY_RECORDS).set(IDENTITY_RECORDS.ENDED_AT, now.minusDays(31))
+            .where(IDENTITY_RECORDS.TENANT_ID.eq(TENANT)).and(IDENTITY_RECORDS.ID.eq(due)).execute());
+
+        java.util.concurrent.CountDownLatch locked = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        Thread holder = Thread.ofVirtual().start(() -> scope.withTenant(TENANT, ctx -> {
+            ctx.selectFrom(IDENTITY_RECORDS).where(IDENTITY_RECORDS.TENANT_ID.eq(TENANT)).and(IDENTITY_RECORDS.ID.eq(due))
+                .forUpdate().fetchOne();
+            locked.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return null;
+        }));
+        try {
+            assertThat(locked.await(30, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            long start = System.nanoTime();
+            NexusService.TupleSweepRunResult blocked = service.runScheduledTupleSweep(now,
+                java.time.Duration.ofMillis(500), 300, 50, java.time.Duration.ofSeconds(60));
+            assertThat(blocked.incompleteCause()).as("the identity arm timed out on the held row").isEqualTo(NexusService.TupleSweepIncompleteCause.TENANT_ERROR);
+            assertThat(java.time.Duration.ofNanos(System.nanoTime() - start)).as("it gave up at the timeout, not when the lock was released")
+                .isLessThan(java.time.Duration.ofSeconds(20));
+            call("GET", "/" + due, null, 200);
+        } finally {
+            release.countDown();
+            holder.join();
+        }
+        NexusService.TupleSweepRunResult clear = service.runScheduledTupleSweep(now);
+        assertThat(clear.incompleteCause()).isEqualTo(NexusService.TupleSweepIncompleteCause.NONE);
+        call("GET", "/" + due, null, 404);
+    }
 }

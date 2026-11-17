@@ -151,6 +151,52 @@ class IdentityMembershipTest {
     }
 
     @Test
+    void theReverseLookupFindsEveryIdentityThatOwnsAResource() {
+        String t = IdentityTestEnv.freshTenant();
+        String a = env.createSeat(t, "owner-a");
+        String b = env.createSeat(t, "owner-b");
+        String c = env.createSeat(t, "owner-c");
+        env.post(t, "/" + b + "/work", Map.of("kind", "worktree", "ref", "/tmp/shared", "state", "running"));
+        env.post(t, "/" + a + "/work", Map.of("kind", "worktree", "ref", "/tmp/shared", "state", "done"));
+        env.post(t, "/" + c + "/work", Map.of("kind", "worktree", "ref", "/tmp/other", "state", "running"));
+        env.post(t, "/" + c + "/work", Map.of("kind", "tmux", "ref", "/tmp/shared", "state", "running"));
+        var r = env.get(t, "/work?kind=worktree&ref=/tmp/shared");
+        assertThat(r.status()).isEqualTo(200);
+        assertThat(r.list("owners")).extracting(m -> m.get("identity")).as("several owners, by identity id").containsExactly(a, b);
+        assertThat(r.list("owners")).extracting(m -> m.get("state")).containsExactly("done", "running");
+        assertThat(env.call(IdentityTestEnv.DATA, t, "GET", "/work?kind=tmux&ref=/tmp/shared", null).list("owners"))
+            .extracting(m -> m.get("identity")).containsExactly(c);
+        assertThat(env.get(t, "/work?kind=wait&ref=nobody").list("owners")).isEmpty();
+        assertThat(env.get(t, "/work?kind=bogus&ref=x").error()).isEqualTo("bad_kind");
+        assertThat(env.get(t, "/work").status()).isEqualTo(400);
+        assertThat(env.get(IdentityTestEnv.freshTenant(), "/work?kind=worktree&ref=/tmp/shared").list("owners")).as("another tenant").isEmpty();
+        assertThat(env.call("mint", t, "GET", "/work?kind=worktree&ref=/tmp/shared", null).status()).isEqualTo(403);
+    }
+
+    @Test
+    void anIdentityHoldsAtMostTwoHundredWorkRows() {
+        String t = IdentityTestEnv.freshTenant();
+        String id = env.createSeat(t, "busy");
+        for (int n = 1; n <= 200; n++) {
+            assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "watcher", "ref", "w" + n, "state", "running")).status())
+                .as("row %d", n).isEqualTo(200);
+        }
+        var over = env.post(t, "/" + id + "/work", Map.of("kind", "watcher", "ref", "w201", "state", "running"));
+        assertThat(over.status()).isEqualTo(409);
+        assertThat(over.error()).isEqualTo("work_limit");
+        assertThat(env.get(t, "/" + id + "/work").list("work")).hasSize(200);
+        // A change of state to a row that exists is not a new row, so it is allowed at the limit.
+        assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "watcher", "ref", "w7", "state", "done")).status()).isEqualTo(200);
+        // Forgetting one makes room for exactly one.
+        env.call(IdentityTestEnv.TENANT, t, "DELETE", "/" + id + "/work?kind=watcher&ref=w1", null);
+        assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "watcher", "ref", "w201", "state", "running")).status()).isEqualTo(200);
+        assertThat(env.post(t, "/" + id + "/work", Map.of("kind", "watcher", "ref", "w202", "state", "running")).error()).isEqualTo("work_limit");
+        // The limit is per identity.
+        String other = env.createSeat(t, "idle");
+        assertThat(env.post(t, "/" + other + "/work", Map.of("kind", "watcher", "ref", "w1", "state", "running")).status()).isEqualTo(200);
+    }
+
+    @Test
     void aDueLapseIsAppliedOnEveryReadAndAnUnleasedBindingsLivenessIsUnknown() {
         String t = IdentityTestEnv.freshTenant();
         env.clock.set(T0);

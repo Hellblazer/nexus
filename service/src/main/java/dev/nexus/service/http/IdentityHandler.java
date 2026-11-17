@@ -41,6 +41,7 @@ import java.util.Set;
  *   POST /v1/identity/&lt;id&gt;/work             {kind, ref, state}: register work the identity owns, or change its state
  *   DELETE /v1/identity/&lt;id&gt;/work?kind=&amp;ref=  forget it (idempotent)
  *   GET  /v1/identity/&lt;id&gt;/work             the work of one identity
+ *   GET  /v1/identity/work?kind=&amp;ref=        the identities that own that resource (several may)
  *   POST /v1/identity/&lt;id&gt;/memberships      {group, role}: join a group, or change the role (the join time stays)
  *   DELETE /v1/identity/&lt;id&gt;/memberships/&lt;group&gt;  leave a group (idempotent)
  *   GET  /v1/identity/&lt;id&gt;/memberships      the groups of one identity, in join order
@@ -48,7 +49,7 @@ import java.util.Set;
  *   GET  /v1/identity/alias/&lt;name&gt;         resolve a name; a retired one for 7 days with a notice, then 410
  *   GET  /v1/identity/sessions/&lt;session id&gt; the session index
  *   GET  /v1/identity/bindings?host=&amp;pid=    the live and lapsed holders on a host
- *   GET  /v1/identity/bindings?host=&amp;pid=&amp;proc_start=&amp;history=1  the newest binding row of every identity that ever
+ *   GET  /v1/identity/bindings?host=&amp;pid=&amp;proc_start=&amp;history=1  (all three required) the newest binding row of every identity that ever
  *                                          held that process, ended or released ones included (the in-place /restart rebind)
  * </pre>
  *
@@ -152,6 +153,14 @@ public final class IdentityHandler implements HttpHandler {
             case "rename" -> {
                 return rename(ex, tenant, method, scope, seg);
             }
+            case "work" -> {
+                if (seg.length != 1) throw notFound();
+                if (!"GET".equals(method)) throw methodNotAllowed();
+                require(Route.WORK_READ, scope);
+                Map<String, String> q = query(ex);
+                return Map.of("kind", String.valueOf(q.get("kind")), "ref", String.valueOf(q.get("ref")),
+                    "owners", repo.ownersOfWork(tenant, q.get("kind"), q.get("ref")));
+            }
             case "bindings" -> {
                 if (seg.length != 1) throw notFound();
                 if (!"GET".equals(method)) throw methodNotAllowed();
@@ -195,6 +204,9 @@ public final class IdentityHandler implements HttpHandler {
 
     private Map<String, Object> create(HttpExchange ex, String tenant, String method, String scope) throws IOException {
         if (!"POST".equals(method)) throw methodNotAllowed();
+        // Any scope that is neither a tenant/root nor a data credential is refused before the body is read; the
+        // kind-specific check (a seat is tenant-only) follows once the kind is known.
+        if (!tenantScope(scope) && !dataScope(scope)) throw forbidden(Route.CREATE, scope);
         Map<String, Object> body = readBody(ex);
         String kind = string(body, "kind");
         String display = string(body, "display_name");

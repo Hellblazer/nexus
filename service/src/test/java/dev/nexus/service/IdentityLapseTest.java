@@ -228,9 +228,13 @@ class IdentityLapseTest {
         assertThat(releasedRow).containsEntry("state", "unheld");
         // A different proc_start or pid matches nothing; pid and host are required.
         assertThat(env.get(t, "/bindings?host=hostH&pid=41&proc_start=1999-01-01T00:00:00Z&history=1").list("bindings")).isEmpty();
-        assertThat(env.get(t, "/bindings?host=hostH&pid=42&history=1").list("bindings")).extracting(m -> m.get("id"))
-            .containsExactly(other);
+        assertThat(env.get(t, "/bindings?host=hostH&pid=42&proc_start=" + evOn("hostH", "p4", 42, 420).get("proc_start") + "&history=1")
+            .list("bindings")).extracting(m -> m.get("id")).containsExactly(other);
+        // A pid alone can name a reused one: the history mode needs the proc_start too.
+        Resp pidOnly = env.get(t, "/bindings?host=hostH&pid=42&history=1");
+        assertThat(pidOnly.status()).isEqualTo(400);
+        assertThat(pidOnly.error()).isEqualTo("missing_process");
         assertThat(env.get(t, "/bindings?host=hostH&history=1").status()).isEqualTo(400);
-        assertThat(env.get(t, "/bindings?host=elsewhere&pid=41&history=1").list("bindings")).isEmpty();
+        assertThat(env.get(t, "/bindings?host=elsewhere&pid=41&proc_start=" + proc.get("proc_start") + "&history=1").list("bindings")).isEmpty();
     }
 }

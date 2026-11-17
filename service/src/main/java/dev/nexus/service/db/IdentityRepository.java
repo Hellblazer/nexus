@@ -72,9 +72,17 @@ public final class IdentityRepository {
     private final IdentityWork work;
 
     public IdentityRepository(TenantScope scope, Clock clock) {
+        this(scope, clock, IdentityRetention.PRUNE_BATCH, IdentityRetention.PRUNE_MAX_BATCHES);
+    }
+
+    /**
+     * As above, with the retention prune's batch size and the most batches a pass runs for each prune (production:
+     * 5000 and 20), so a test can show a backlog larger than one batch progresses over passes.
+     */
+    public IdentityRepository(TenantScope scope, Clock clock, int pruneBatch, int pruneMaxBatches) {
         this.scope = scope;
         this.clock = clock;
-        this.retention = new IdentityRetention(scope, clock);
+        this.retention = new IdentityRetention(scope, clock, pruneBatch, pruneMaxBatches);
         this.memberships = new IdentityMemberships(scope, clock);
         this.work = new IdentityWork(scope, clock);
     }
@@ -244,7 +252,7 @@ public final class IdentityRepository {
     private static void requireProcess(IdentityEvidence ev, boolean needSession) {
         if (ev == null || !ev.hasProcess() || (needSession && (ev.sessionId() == null || ev.sessionId().isBlank()))) {
             throw new IdentityException(400, "missing_evidence",
-                "session_id, host, pid and started_at are required" + (needSession ? "" : " (host, pid, started_at)"));
+                needSession ? "session_id, host, pid and started_at are required" : "host, pid and started_at are required");
         }
     }
 
@@ -755,23 +763,21 @@ public final class IdentityRepository {
 
     /**
      * The history mode of bindings-by-host: for every identity whose binding log has a row on {@code host} with
-     * {@code pid} (and {@code procStart} when given), its NEWEST such row, joined to the identity's current record,
+     * {@code pid} and {@code procStart}, its NEWEST such row, joined to the identity's current record,
      * most recent first. Unlike {@link #bindingsByHost} it finds an identity that {@code ended} or was released,
      * whose holder columns are cleared: the in-place {@code /restart} rebind (RDR-253 policy row 1) looks for the most
      * recent binding with the process's own pid and {@code proc_start}, "whatever the identity's state, ended
      * included".
      */
     public List<Map<String, Object>> bindingHistoryByProcess(String tenant, String host, Integer pid, String procStart) {
-        if (host == null || host.isBlank() || pid == null) {
-            throw new IdentityException(400, "missing_process", "host and pid are required for the history of a process");
+        if (host == null || host.isBlank() || pid == null || procStart == null || procStart.isBlank()) {
+            throw new IdentityException(400, "missing_process",
+                "host, pid and proc_start are required for the history of a process: a pid alone can name a reused one");
         }
         return scope.withTenant(tenant, ctx -> {
             OffsetDateTime now = now();
             var b = IDENTITY_BINDINGS;
-            var cond = b.TENANT_ID.eq(tenant).and(b.HOST.eq(host)).and(b.PID.eq(pid));
-            if (procStart != null && !procStart.isBlank()) {
-                cond = cond.and(b.PROC_START.eq(procStart));
-            }
+            var cond = b.TENANT_ID.eq(tenant).and(b.HOST.eq(host)).and(b.PID.eq(pid)).and(b.PROC_START.eq(procStart));
             var newest = DSL.max(b.AT);
             var seqs = DSL.max(b.SEQ);
             List<org.jooq.Record2<String, Integer>> found = ctx.select(b.IDENTITY_ID, seqs).from(b).where(cond)
@@ -825,6 +831,11 @@ public final class IdentityRepository {
     /** Forgets work; idempotent. */
     public Map<String, Object> removeWork(String tenant, String id, String kind, String ref) {
         return work.remove(tenant, id, kind, ref);
+    }
+
+    /** Every identity that owns the resource {@code kind}/{@code ref} (several may): the reverse of {@link #workOf}. */
+    public List<Map<String, Object>> ownersOfWork(String tenant, String kind, String ref) {
+        return work.owners(tenant, kind, ref);
     }
 
     /** The work of one identity. */

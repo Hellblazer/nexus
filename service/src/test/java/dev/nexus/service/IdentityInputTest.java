@@ -85,6 +85,7 @@ class IdentityInputTest {
             Resp r = env.post(t, "/delegated", Map.of("parent", parent, "bind", bind));
             assertThat(r.status()).as("bind %s", bind).isEqualTo(400);
             assertThat(r.error()).isEqualTo("missing_evidence");
+            assertThat(r.str("message")).isEqualTo("host, pid and started_at are required");
         }
         assertThat(env.post(t, "/delegated", Map.of("parent", parent)).status()).as("no bind object at all").isEqualTo(400);
         // No identity was made by the refusals: the next one is the seat's successor.
@@ -119,6 +120,18 @@ class IdentityInputTest {
         assertThat(ok.status()).isEqualTo(200);
         assertThat(env.rows(t, dev.nexus.service.jooq.nexus.Tables.IDENTITY_RECORDS, dev.nexus.service.jooq.nexus.Tables.IDENTITY_RECORDS.TENANT_ID))
             .as("the refusals made no identity: the seats p and okbound and the one that fit").isEqualTo(3);
+    }
+
+    @Test
+    void anyScopeThatIsNeitherTenantNorDataIsRefusedOnCreateBeforeTheBodyIsRead() {
+        String t = IdentityTestEnv.freshTenant();
+        for (String scope : new String[] {"mint", "mint-locked", "board-ci", "nonsense"}) {
+            for (String body : new String[] {"{not json", "[1]", "", "{\"kind\":\"seat\",\"name\":\"x\",\"created_by\":\"sam\"}"}) {
+                assertThat(env.callRaw(scope, t, "POST", "", body).status()).as("%s with '%s'", scope, body).isEqualTo(403);
+            }
+        }
+        assertThat(env.callRaw(TENANT, t, "POST", "", "{not json").status()).as("a tenant credential gets the 400").isEqualTo(400);
+        assertThat(env.callRaw(DATA, t, "POST", "", "{not json").status()).isEqualTo(400);
     }
 
     @Test
