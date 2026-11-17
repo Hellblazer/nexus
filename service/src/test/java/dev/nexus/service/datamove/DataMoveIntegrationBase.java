@@ -171,11 +171,18 @@ abstract class DataMoveIntegrationBase {
         return DataMoveRuns.progress(ctx(), label);
     }
 
-    /** The worker's CALL backend: the session named {@link #CALL_APPLICATION_NAME}, or -1. */
+    /**
+     * The worker's CALL backend: the newest client backend named {@link #CALL_APPLICATION_NAME}, or -1. pg_background
+     * workers copy the caller's settings, application_name included, and a previous test's call backend can still be
+     * exiting, so the name alone can match more than one row (develop run 44021463117).
+     */
     int callPid() {
         Integer pid = ctx().select(DSL.field(DSL.name("pid"), Integer.class))
             .from(table("pg_catalog", "pg_stat_activity"))
             .where(DSL.field(DSL.name("application_name"), String.class).eq(CALL_APPLICATION_NAME))
+            .and(DSL.field(DSL.name("backend_type"), String.class).eq("client backend"))
+            .orderBy(DSL.field(DSL.name("backend_start")).desc())
+            .limit(1)
             .fetchOne(0, Integer.class);
         return pid == null ? -1 : pid;
     }
