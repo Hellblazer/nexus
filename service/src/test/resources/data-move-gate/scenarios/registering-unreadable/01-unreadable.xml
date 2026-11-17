@@ -28,6 +28,24 @@ VALUES (lower('X'), 't', 'nexus', 'chunks', 1, 0, 1, 'v');
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="u-no-verification-column" author="fixture">
+        <comment>u-no-verification-column</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms)
+VALUES ('x', 't', 'nexus', 'chunks', 1, 0, 1);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="u-verification-is-an-expression" author="fixture">
+        <comment>u-verification-is-an-expression</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification)
+VALUES ('x', 't', 'nexus', 'chunks', 1, 0, 1, 'a' || 'b');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="u-wrong-value-count" author="fixture">
         <comment>u-wrong-value-count</comment>
         <sql splitStatements="false" stripComments="false">

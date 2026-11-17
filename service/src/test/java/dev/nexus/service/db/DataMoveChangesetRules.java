@@ -190,6 +190,11 @@ final class DataMoveChangesetRules {
      * text is kept in {@link Stmt#literals()}). The semicolons inside a mask are therefore never statement ends.
      */
     static List<Stmt> statements(String body) {
+        return statements(body, false);
+    }
+
+    /** As {@link #statements(String)}; with {@code maskQuotedNames} a double-quoted identifier is masked too (a {@code ""} escape ends one span and starts the next, so both are hidden). */
+    static List<Stmt> statements(String body, boolean maskQuotedNames) {
         StringBuilder masked = new StringBuilder();
         List<String> literals = new ArrayList<>();
         int n = body.length();
@@ -230,7 +235,8 @@ final class DataMoveChangesetRules {
             } else if (c == '"') {
                 int end = body.indexOf('"', i + 1);
                 if (end < 0) end = n - 1;
-                masked.append(body, i, end + 1);
+                if (maskQuotedNames) masked.append("\"q\"");
+                else masked.append(body, i, end + 1);
                 i = end + 1;
             } else if (c == '$' && (i == 0 || !identChar(body.charAt(i - 1)))) {
                 Matcher m = DOLLAR_TAG.matcher(body).region(i, n);
@@ -436,9 +442,14 @@ final class DataMoveChangesetRules {
                 } else {
                     for (Registration r : regs) {
                         moves.register(r);
-                        if (badPlaceholders(r.verification())) {
+                        if (r.verification().isBlank()) {
+                            findings.add(new Finding("r1.verification-empty", "the verification of move " + r.label()
+                                + " is empty; it is a SELECT of the rows still in the old shape, and the worker refuses an empty one"));
+                        } else if (badPlaceholders(r.verification())) {
                             findings.add(new Finding("r1.verification-placeholder", "the verification of move " + r.label()
-                                + " has a '?' or a $-digit placeholder other than a standalone $1; the worker refuses it as a permanent failure"));
+                                + " has a '?' or a $-digit placeholder the worker refuses (a permanent failure). Write jsonb_exists, "
+                                + "jsonb_exists_any or jsonb_exists_all for the jsonb ?, ?| and ?& operators, and chr(63) or E'\\x3f' for a ? in a "
+                                + "pattern. The tenant is the one standalone $1, never in a comment, string literal, dollar quote or quoted name"));
                         }
                     }
                 }
@@ -466,15 +477,20 @@ final class DataMoveChangesetRules {
 
     /**
      * A standalone {@code $1}: no word character and no {@code $} on either side. This is the boundary of the data-move worker's
-     * check of the verification query (MoveSql, bead nexus-f3yqd.2.14), which binds the tenant as the one parameter {@code $1}; the two
-     * must agree, so a verification this gate lets through is one the worker accepts. Exact regex: {@code (?<![\w$])\$1(?![\w$])}.
+     * check of the verification query (MoveSql, bead nexus-f3yqd.2.14), which binds the tenant as the one parameter {@code $1}. The gate checks this boundary and the
+     * raw-versus-masked count of {@link #badPlaceholders}; it does not parse the verification as SQL and does not check anything else
+     * the worker checks. Exact regex: {@code (?<![\w$])\$1(?![\w$])}.
      */
     static final Pattern STANDALONE_FIRST_PLACEHOLDER = Pattern.compile("(?<![\\w$])\\$1(?![\\w$])");
 
     /**
      * True when a verification query has a {@code ?}, a {@code $}-digit form that is not a standalone {@code $1} ({@code $2},
      * {@code $10}, {@code my$1}, {@code $1x}, {@code $$1}), or a standalone {@code $1} that sits in a comment, a string literal or a
-     * dollar-quoted body.
+     * dollar-quoted body or a double-quoted name.
+     *
+     * <p>A {@code ?} is found only as the character. An E-string escape such as {@code E'\x3f'} is deliberately not decoded: the
+     * worker sees no {@code ?} in that text either, so it is the way to put a question mark in a pattern ({@code chr(63)} is the
+     * other).
      *
      * <p>The last case is why this scans two ways. The worker (MoveSql, nexus-f3yqd.2.14) rewrites every {@code $1} to
      * {@code CAST(? AS text)} by TEXT, comments and quotes included, while pgjdbc skips comments, literals and dollar quotes when it
@@ -488,7 +504,7 @@ final class DataMoveChangesetRules {
         if (Pattern.compile("\\$\\d").matcher(STANDALONE_FIRST_PLACEHOLDER.matcher(verification).replaceAll(" ")).find()) return true;
         long raw = STANDALONE_FIRST_PLACEHOLDER.matcher(verification).results().count();
         long visible = 0;
-        for (Stmt st : statements(verification)) visible += STANDALONE_FIRST_PLACEHOLDER.matcher(st.text()).results().count();
+        for (Stmt st : statements(verification, true)) visible += STANDALONE_FIRST_PLACEHOLDER.matcher(st.text()).results().count();
         return raw != visible;
     }
 

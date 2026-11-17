@@ -159,6 +159,88 @@ INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, ch
         <rollback>SELECT 1;</rollback>
     </changeSet>
 
+    <changeSet id="v-first-placeholder-in-a-quoted-name" author="fixture">
+        <comment>v-first-placeholder-in-a-quoted-name</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-21', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, 'SELECT 1 FROM nexus.vtab WHERE "a $1 b" IS NULL AND a = $1', NULL, 'v-21', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="v-first-placeholder-in-a-quoted-name-with-an-escaped-quote" author="fixture">
+        <comment>v-first-placeholder-in-a-quoted-name-with-an-escaped-quote</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-22', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, 'SELECT 1 FROM nexus.vtab WHERE "a""$1" IS NULL AND a = $1', NULL, 'v-22', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="v-empty" author="fixture">
+        <comment>v-empty</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-23', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, '', NULL, 'v-23', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="v-whitespace-only" author="fixture">
+        <comment>v-whitespace-only</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-24', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, '  
+	 ', NULL, 'v-24', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-placeholder-with-a-cast" author="fixture">
+        <comment>g-placeholder-with-a-cast</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-25', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, 'SELECT 1 FROM nexus.vtab WHERE tenant_id = $1::text', NULL, 'v-25', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-placeholder-before-a-semicolon" author="fixture">
+        <comment>g-placeholder-before-a-semicolon</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-26', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, 'SELECT 1 FROM nexus.vtab WHERE tenant_id = $1;', NULL, 'v-26', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-placeholder-at-the-very-end" author="fixture">
+        <comment>g-placeholder-at-the-very-end</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-27', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, 'SELECT 1 FROM nexus.vtab WHERE tenant_id = $1', NULL, 'v-27', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-quoted-name-without-a-placeholder" author="fixture">
+        <comment>g-quoted-name-without-a-placeholder</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-28', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, 'SELECT 1 FROM nexus.vtab WHERE "a b" IS NULL AND a = $1', NULL, 'v-28', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-chr-63-and-an-escaped-question-mark" author="fixture">
+        <comment>g-chr-63-and-an-escaped-question-mark</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('v-29', 'UPDATE nexus.vtab SET a = 1', 'nexus', 'vtab', 1000, 50, 60000, 'SELECT 1 FROM nexus.vtab WHERE a LIKE ''%'' || chr(63) || ''%'' AND b LIKE E''%\x3f%'' AND c = $1', NULL, 'v-29', NULL);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
     <changeSet id="g-tenant-or-null" author="fixture">
         <comment>g-tenant-or-null</comment>
         <sql splitStatements="false" stripComments="false">
