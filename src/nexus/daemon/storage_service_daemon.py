@@ -4149,7 +4149,7 @@ def stop_storage_service(
     )
     if invisible:
         outcome = dataclasses.replace(outcome, invisible=tuple(invisible))
-    if outcome.refused or outcome.stubborn or outcome.invisible:
+    if outcome.refused or outcome.stubborn or outcome.invisible or outcome.unsignalled:
         # The marker said "this service is meant to stay down". It must be
         # written BEFORE the signal (the signal itself can produce the exit the
         # launcher would otherwise answer with a respawn), so it cannot wait for
