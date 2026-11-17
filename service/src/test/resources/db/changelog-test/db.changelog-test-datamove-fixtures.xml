@@ -8,6 +8,8 @@
       plain_rows    (a text, b text, c bytea) key, 100000 rows, no tenant column, autovacuum off (the bloat scenario)
       tenant_rows   FORCE row-level security keyed on nexus.tenant, plus nexus.chunks' owner-read shape (a permissive SELECT
                     policy USING (true) for the migrating role); tenants default, acme, globex, orphan and sl/ash (an id with a slash), 200 rows each
+      chunk_leafed  nexus.chunks' shape: LIST (embedding_model) then LIST (tenant_id), a four-column key (tenant_id, collection, chash
+                    bytea, embedding_model), 150 rows per leaf (nexus-f3yqd.2.21)
       leafed        LIST (model) then LIST (tenant_id), the shape of nexus.chunks with a three-column key; models m1 and m2,
                     tenants default, acme and globex, 150 rows per leaf; every leaf carries its own copy of the policies
                     (nexus.partition_copy_access does that for chunks)
@@ -80,6 +82,39 @@ CREATE POLICY tenant_isolation ON dm_test.leafed
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 CREATE POLICY owner_read ON dm_test.leafed FOR SELECT TO nexus_admin_dmlutils USING (true);
+
+-- chunk_leafed: nexus.chunks' exact shape (nexus-f3yqd.2.21): LIST (embedding_model) then LIST (tenant_id) and a FOUR-column
+-- primary key (tenant_id, collection, chash bytea, embedding_model); models m1 and m2, tenants default, acme and globex,
+-- two collections and 150 rows per leaf, each leaf with its own copy of the policies
+CREATE TABLE dm_test.chunk_leafed (
+    tenant_id text NOT NULL, collection text NOT NULL, chash bytea NOT NULL, embedding_model text NOT NULL, payload text,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, collection, chash, embedding_model)
+) PARTITION BY LIST (embedding_model);
+DO $$
+DECLARE m text; t text; part text; leaf text;
+BEGIN
+    FOREACH m IN ARRAY ARRAY['m1', 'm2'] LOOP
+        part := 'chunk_leafed_' || m;
+        EXECUTE format('CREATE TABLE dm_test.%I PARTITION OF dm_test.chunk_leafed FOR VALUES IN (%L) PARTITION BY LIST (tenant_id)', part, m);
+        FOREACH t IN ARRAY ARRAY['default', 'acme', 'globex'] LOOP
+            leaf := part || '_' || t;
+            EXECUTE format('CREATE TABLE dm_test.%I PARTITION OF dm_test.%I FOR VALUES IN (%L)', leaf, part, t);
+            EXECUTE format('ALTER TABLE dm_test.%I ENABLE ROW LEVEL SECURITY', leaf);
+            EXECUTE format('ALTER TABLE dm_test.%I FORCE ROW LEVEL SECURITY', leaf);
+            EXECUTE format('CREATE POLICY tenant_isolation ON dm_test.%I USING (tenant_id = current_setting(%L, true)) WITH CHECK (tenant_id = current_setting(%L, true))',
+                           leaf, 'nexus.tenant', 'nexus.tenant');
+            EXECUTE format('CREATE POLICY owner_read ON dm_test.%I FOR SELECT TO nexus_admin_dmlutils USING (true)', leaf);
+            EXECUTE format('INSERT INTO dm_test.chunk_leafed (tenant_id, collection, chash, embedding_model, payload) SELECT %L, ''c'' || (g %% 2), decode(md5(g::text || %L || %L), ''hex''), %L, ''p'' || g FROM generate_series(1, 150) g', t, t, m, m);
+        END LOOP;
+    END LOOP;
+END $$;
+ALTER TABLE dm_test.chunk_leafed ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dm_test.chunk_leafed FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.chunk_leafed
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+CREATE POLICY owner_read ON dm_test.chunk_leafed FOR SELECT TO nexus_admin_dmlutils USING (true);
 
 -- tenant_id, and no row-level security at all: one run reads every row, a run per tenant would read them N times
 CREATE TABLE dm_test.tenant_plain (

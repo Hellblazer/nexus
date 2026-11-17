@@ -22,8 +22,7 @@ import java.util.concurrent.TimeUnit;
  * worker's other behaviour (row-security modes, pause and supersede, stop, orphans, the failure and finisher seams) is
  * {@link DataMoveWorkerBehaviourIntegrationTest}.
  *
- * <p>Out of scope here, with their own beads: the nexus.chunks four-column key (nexus-f3yqd.2.21, dml_utils PR #3),
- * verification and {@code on_complete} (.14), the failure classes, backoff and pause (.15).
+ * <p>Out of scope here, with their own beads: verification and {@code on_complete} (.14), the failure classes, backoff and pause (.15).
  */
 class DataMoveWorkerIntegrationTest extends DataMoveIntegrationBase {
 
@@ -152,6 +151,37 @@ class DataMoveWorkerIntegrationTest extends DataMoveIntegrationBase {
         }
         assertEveryRowMovedOnce("leafed", 900);
         assertEachRowTouchedByItsOwnTenant("leafed");
+    }
+
+    // ── scenario 1, second leg: nexus.chunks' four-column key, two-level partitioned (nexus-f3yqd.2.21) ──────
+
+    @Test
+    void chunksShaped_fourColumnKey_everyRowOnce_doneNeverFallsAndEqualsTotal() throws Exception {
+        register("m-chunks", "chunk_leafed", 50, 0);
+
+        assertThat(LeafCatalog.tenantLeaves(ctx(), "dm_test", "chunk_leafed", "acme")).extracting(l -> l.leaf().name())
+            .containsExactly("chunk_leafed_m1_acme", "chunk_leafed_m2_acme");
+        var cycle = async(worker(installed(), null)::runCycle);
+        var samples = sampleUntilDone(cycle, "m-chunks");
+
+        assertDoneNeverFalls(samples);
+        // one run per leaf, none partition-wise, each of the four-column key
+        TreeSet<String> expected = new TreeSet<>();
+        for (String tenant : List.of("default", "acme", "globex")) {
+            for (String model : List.of("m1", "m2")) {
+                expected.add("m-chunks/" + tenant + "/chunk_leafed_" + model + "_" + tenant);
+            }
+        }
+        assertThat(activeRuns("m-chunks")).isEqualTo(expected);
+        assertThat(partitionWiseRuns("m-chunks")).isZero();
+        for (String run : expected) {
+            assertThat(DataMoveRuns.activeRun(ctx(), run).total()).as(run).isEqualTo(3);
+        }
+        var end = progress("m-chunks");
+        assertThat(end.total()).isEqualTo(18);
+        assertThat(end.done()).isEqualTo(end.total());
+        assertEveryRowMovedOnce("chunk_leafed", 900);
+        assertEachRowTouchedByItsOwnTenant("chunk_leafed");
     }
 
     @Test
