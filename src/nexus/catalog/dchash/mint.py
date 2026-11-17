@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from nexus.aspect_readers import NOTE_URI_SCHEME
 from nexus.catalog.dchash.source import dchash_source, read_canonical
 from nexus.catalog.dchash.text import text_hash
 from nexus.catalog.types import CatalogEntry
 
 _PDF_TYPES = frozenset({"paper", "pdf"})
-_NOTE_SCHEME = "nx-note://"
 
 
 def _is_pdf(entry: CatalogEntry) -> bool:
@@ -45,7 +45,7 @@ def _source_path(catalog: Any, tumbler: str) -> Path:
         raise ValueError(f"{tumbler} is a PDF; dchash spans need a text source")
     path = (
         None
-        if (entry.source_uri or "").startswith(_NOTE_SCHEME)
+        if (entry.source_uri or "").startswith(NOTE_URI_SCHEME)
         else dchash_source(entry, catalog)
     )
     if path is None:
