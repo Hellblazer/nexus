@@ -324,9 +324,20 @@ class TestTheCliSeparatesTheUnidentifiedFromTheIdentifiedButUnsignalled:
             assert false_claim not in out, (false_claim, out)
 
     def test_a_pid_that_is_both_a_lease_survivor_and_unsignalled_is_reported_once(self, tmp_path: Path) -> None:
-        outcome = ssd.StopOutcome(pids=(), stubborn=(4242,), source="lease", lease_seen=True, unsignalled=(4242,))
+        """The lease path as stop_storage_service builds it: the root-owned supervisor is in ``pids`` (it was
+        'signalled' from the lease), in ``stubborn`` (the kill failed), and in ``unsignalled`` (the sweep found it)."""
+        outcome = ssd.StopOutcome(
+            pids=(4242,), stubborn=(4242,), source="lease", lease_seen=True, unsignalled=(4242,),
+        )
         out = _invoke(outcome, tmp_path)[0].output
         assert "survived" not in out
+        assert "Storage service stopped" not in out, "it was not stopped"
+        assert out.count("4242") == 1, out
+
+    def test_pids_that_were_stopped_are_still_listed_beside_an_unsignalled_one(self, tmp_path: Path) -> None:
+        outcome = ssd.StopOutcome(pids=(100, 4242), stubborn=(4242,), source="lease", lease_seen=True, unsignalled=(4242,))
+        out = _invoke(outcome, tmp_path)[0].output
+        assert "Storage service stopped (pid(s)=100)." in out
         assert out.count("4242") == 1, out
 
 

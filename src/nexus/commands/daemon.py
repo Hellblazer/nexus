@@ -1570,8 +1570,12 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
 
     config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     outcome = stop_storage_service(config_dir=config_dir)
-    pid = outcome.pids[0] if outcome.pids else None
-    pids_str = ", ".join(str(p) for p in outcome.pids)
+    # A pid the stop identified but could not signal was not stopped, though the lease path counts the
+    # supervisor in ``pids`` (nexus-f3yqd.2.22): it is reported once, below, and never as "stopped".
+    unsignalled = set(outcome.unsignalled)
+    stopped = [p for p in outcome.pids if p not in unsignalled]
+    pid = stopped[0] if stopped else None
+    pids_str = ", ".join(str(p) for p in stopped)
     refused_pids = {r.pid for r in outcome.refused}
 
     # Honest-output contract (nexus-oyo2g): a lease MISS is never proof
@@ -1584,7 +1588,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # printed, never just the first (review finding 1) — a partial pid
     # list is a partial truth for a command whose entire point here is
     # honest reporting.
-    if (outcome.refused or outcome.invisible or outcome.unsignalled) and not outcome.pids:
+    if (outcome.refused or outcome.invisible or outcome.unsignalled) and not stopped:
         # Printed below, with the refusal, the invisible-supervisor warning or the unsignalled-member
         # failure; "stopped" or "already stopped" would both be false here.
         pass
@@ -1633,7 +1637,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             else "No storage service lease was found"
         )
         click.echo(
-            f"{lease_clause}, but {len(outcome.pids)} live process(es) "
+            f"{lease_clause}, but {len(stopped)} live process(es) "
             f"were found on the system — signalled pid(s) {pids_str}."
         )
     else:
@@ -1682,8 +1686,6 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # was never signalled: "survived SIGKILL" would be false for it, and the
     # refusal block below already says what happened (nexus-f9bgu.17 round 2,
     # measured on Windows 11).
-    # An unsignalled pid is reported once, below, and never as a survivor of a SIGKILL it did not receive.
-    unsignalled = set(outcome.unsignalled)
     killed_survivors = [p for p in outcome.stubborn if p not in refused_pids and p not in unsignalled]
     if killed_survivors:
         click.echo(
