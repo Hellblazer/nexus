@@ -12,6 +12,7 @@ stop; a tokenless write to a threads entry is refused.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 
@@ -27,6 +28,9 @@ T1 = "2026-11-17T09:00:00Z"
 @pytest.fixture
 def step2(world: World) -> World:
     """The world, after checking the engine issues identity tokens: skip (or fail, when required) otherwise."""
+    # The hook stamps the token file's expiry from the world's clock. These tests send the token to a real engine, whose
+    # tokens live one real hour, and the client does not send a token its file records as expired: so the clock is real.
+    world.now = time.time()
     probe = world.seat("probe-seat")
     world.process(90, name="probe-seat", os_start=T1, session_id="probe")
     out = world.hook(90, "startup", "probe")
@@ -53,7 +57,7 @@ def _entry(identity: str, session: str) -> str:
 
 
 @pytest.mark.t2_tenant
-def test_the_first_write_after_clear_succeeds_a_child_from_before_it_still_writes_and_a_superseded_process_is_stopped(
+def test_a_threads_write_after_clear_works_with_the_new_token_and_the_old_one_and_a_superseded_process_is_stopped(
         step2: World, monkeypatch: pytest.MonkeyPatch) -> None:
     world = step2
     alpha = world.seat("alpha")
@@ -67,11 +71,11 @@ def test_the_first_write_after_clear_succeeds_a_child_from_before_it_still_write
     cleared = world.hook(100, "clear", "s2")
     new_token = read_token_file(token_path(world.identity_dir, 100, 100_000)).token
     assert cleared.generation == 1 and new_token and new_token != old_token
-    store.put("threads", "alpha", _entry(alpha, "s2"))                         # the first write after /clear: no refusal
+    store.put("threads", "alpha", _entry(alpha, "s2"))                         # a threads write after /clear: no refusal (a threads write never checks the session id, so this proves the generation held, not the stamp)
     # a Bash child from before the /clear holds the old token in its (cached) view: still the same generation
-    monkeypatch.setattr(token_header, "identity_headers", lambda: {"X-Nexus-Identity-Token": old_token})
     from nexus.db.t2 import _refreshable_client
-    monkeypatch.setattr(_refreshable_client, "identity_headers", lambda: {"X-Nexus-Identity-Token": old_token})
+    monkeypatch.setattr(_refreshable_client, "fenced_identity_headers",
+                        lambda method, path: {"X-Nexus-Identity-Token": old_token})
     store.put("threads", "alpha", _entry(alpha, "s2"))
 
     # process 100 crashes, 101 takes the seat at generation 2: 100's token is for generation 1
@@ -85,22 +89,25 @@ def test_the_first_write_after_clear_succeeds_a_child_from_before_it_still_write
 
 @pytest.mark.t2_tenant
 def test_a_refresh_at_half_life_rewrites_the_one_token_file_and_the_hook_files_stay_readable(step2: World) -> None:
+    """One clock drives the hook that writes the file's expiry, the lease and the test (``world.now``, real time here)."""
     world = step2
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "s1")
     path = token_path(world.identity_dir, 100, 100_000)
     first = read_token_file(path)
+    assert first.token and first.expires_at == pytest.approx(world.now + 3600, abs=5), "the file's expiry is one hour on the shared clock"
     lease = IdentityLease(client_factory=lambda: world.data_client, config_dir=world.config_dir, claude_pid=100,
-                          procs=world.procs, clock=lambda: first.written_at, client_version=VERSION, sleep=lambda s: None)
-    assert lease.tick().adopted and not lease.tick().refreshed, "a fresh token is not refreshed"
-    clock = [first.expires_at - 1_000.0]                                      # less than half of the hour left
-    lease._clock = lambda: clock[0]
-    lease._next_renew = 0.0
+                          procs=world.procs, clock=lambda: world.now, client_version=VERSION, sleep=lambda s: None)
+    start = lease.tick()
+    assert start.adopted and start.renewed and not start.refreshed, "a fresh token is not refreshed"
+    assert read_token_file(path).token == first.token
+    world.now = first.expires_at - 1_000.0                                    # less than half of the hour left
     report = lease.tick()
     second = read_token_file(path)
     assert report.refreshed and second.token and second.token != first.token and second.generation == first.generation == 1
-    assert [p.name for p in world.identity_dir.iterdir() if p.name.endswith(".token")] == ["100.100000.token"]
+    assert second.expires_at > first.expires_at
+    assert [p.name for p in world.identity_dir.iterdir() if p.name.endswith(".token") and p.name.startswith("100.")] == ["100.100000.token"]
     assert world.events(alpha) == ["start"], "a refresh is not a new binding"
 
 

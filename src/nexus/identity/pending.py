@@ -13,6 +13,7 @@ The name carries the OS start time so a pid reused after a crash never adopts a 
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -58,12 +59,17 @@ def write_pending(directory: Path, record: Pending, start_epoch: int) -> Path:
     path = pending_path(directory, record.claude_pid, start_epoch)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
     stamped = Pending(**{**asdict(record), "written_at": record.written_at or time.time()})
-    fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)  # owner-only before a byte is written, on Windows too
     try:
-        os.write(fd, json.dumps(asdict(stamped)).encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.replace(str(tmp), str(path))
+        fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)  # owner-only before a byte is written, on Windows too
+        try:
+            os.write(fd, json.dumps(asdict(stamped)).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return path
 
 

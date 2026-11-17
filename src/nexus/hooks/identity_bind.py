@@ -99,11 +99,12 @@ def _run(result: IdentityResult, session_id: str, source: str, env: Mapping[str,
          procs: Processes | Any | None, client: Any, config_dir: Path | None, clock: Callable[[], float],
          sleep: Callable[[float], None]) -> None:
     from nexus.identity.bind_client import IdentityClient, IdentityUnavailableError  # noqa: PLC0415
-    from nexus.identity.pending import Pending, write_pending  # noqa: PLC0415
-    from nexus.identity.sweep import clean_local_files, sweep_host  # noqa: PLC0415
     from nexus.identity.token_file import identity_dir  # noqa: PLC0415
 
-    if (env.get("NX_IDENTITY_TOKEN") or "").strip() or (env.get("NX_SESSION_ID") or "").strip():
+    if (env.get("NX_IDENTITY_TOKEN") or "").strip():
+        return
+    if (env.get("NX_SESSION_ID") or "").strip():
+        result.notices.append("identity: this process inherited NX_SESSION_ID (a nested subprocess), so it binds nothing")
         return
     if claude_pid is None:
         from nexus.session import _command_name_of, find_immediate_claude_pid  # noqa: PLC0415
@@ -135,6 +136,19 @@ def _run(result: IdentityResult, session_id: str, source: str, env: Mapping[str,
     except IdentityUnavailableError as exc:
         result.notices.append(f"identity: not bound, no engine to bind against ({exc})")
         return
+    try:
+        _bind_and_sweep(result, engine, facts, source, env, procs, directory, host, claude_pid, proc_start, session_id, clock, sleep)
+    finally:
+        if client is None:
+            engine.close()
+
+
+def _bind_and_sweep(result: IdentityResult, engine: Any, facts: LaunchFacts, source: str, env: Mapping[str, str],
+                    procs: Processes | Any, directory: Path, host: str, claude_pid: int, proc_start: str | None,
+                    session_id: str, clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+    from nexus.identity.pending import Pending, write_pending  # noqa: PLC0415
+    from nexus.identity.sweep import clean_local_files, sweep_host  # noqa: PLC0415
+
     binder = SessionBinder(client=engine, procs=procs, identity_dir=directory, clock=clock, sleep=sleep)
 
     if source != "compact" and not binder.await_registry(facts):

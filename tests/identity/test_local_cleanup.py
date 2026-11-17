@@ -15,10 +15,10 @@ T0 = "2026-11-17T08:00:00Z"
 T1 = "2026-11-17T09:00:00Z"
 
 
-def _token(directory: Path, pid: int, started_at: int, identity: str) -> None:
+def _token(directory: Path, pid: int, started_at: int, identity: str, registry_dir: str | None = None) -> None:
     write_token_file(token_path(directory, pid, started_at),
                      TokenFile(identity=identity, generation=1, token=None, expires_at=None, session_id="s", pid=pid,
-                               started_at=started_at, proc_start=T0, host=HOST))
+                               started_at=started_at, proc_start=T0, host=HOST, registry_dir=registry_dir))
 
 
 def test_local_cleanup_removes_token_files_of_gone_processes_and_stale_pending_files(tmp_path: Path) -> None:
@@ -28,9 +28,9 @@ def test_local_cleanup_removes_token_files_of_gone_processes_and_stale_pending_f
     directory = tmp_path / "identity"
     procs.start(100, T0, started_at=100_000)
     procs.start(200, T1, started_at=200_000)
-    _token(directory, 100, 100_000, "i1")               # alive: stays
-    _token(directory, 200, 111_000, "i2")               # pid 200 restarted in place (startedAt differs): gone
-    _token(directory, 300, 300_000, "i3")               # no process, no registry file: gone
+    _token(directory, 100, 100_000, "i1", str(procs.sessions_dir))               # alive: stays
+    _token(directory, 200, 111_000, "i2", str(procs.sessions_dir))               # pid 200 restarted in place (startedAt differs): gone
+    _token(directory, 300, 300_000, "i3", str(procs.sessions_dir))               # no process, no registry file: gone
     live = write_pending(directory, Pending(session_id="s", source="startup", seat=None, os_start=T0, claude_pid=100),
                          epoch_seconds(T0))
     stale = write_pending(directory, Pending(session_id="s", source="startup", seat=None, os_start=T1, claude_pid=300),
@@ -50,3 +50,23 @@ def test_a_token_file_the_hook_just_wrote_is_never_removed(tmp_path: Path) -> No
     own = token_path(directory, 400, 400_000)
     clean_local_files(directory, procs, host=HOST, own_token=own)
     assert own.exists()
+
+
+def test_cleanup_leaves_the_files_of_a_claude_under_another_config_dir_alone(tmp_path: Path) -> None:
+    """The token file names the registry directory its process used; one that is not this reader's is not judged, however
+    absent its registry file looks from here. Stale temp files a crashed writer left are removed, a fresh one is not."""
+    import os
+    import time
+
+    procs = FakeProcesses(tmp_path / "sessions")
+    directory = tmp_path / "identity"
+    _token(directory, 600, 600_000, "i6", str(tmp_path / "other" / "sessions"))      # another profile, no file here
+    _token(directory, 601, 601_000, "i7")                                              # no registry_dir recorded at all
+    old = directory / "700.1.token.123.abc.tmp"
+    new = directory / "700.1.token.123.def.tmp"
+    old.write_text("{}")
+    new.write_text("{}")
+    os.utime(old, (time.time() - 3_600, time.time() - 3_600))
+    report = clean_local_files(directory, procs, host=HOST)
+    assert report.token_files_removed == [] and token_path(directory, 600, 600_000).exists() and token_path(directory, 601, 601_000).exists()
+    assert report.tmp_files_removed == [old.name] and new.exists() and not old.exists()

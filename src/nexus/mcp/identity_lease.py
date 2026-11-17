@@ -27,6 +27,7 @@ only while a ``directory/<name>`` lease is armed, and identity must be renewed f
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
@@ -41,8 +42,10 @@ from nexus.identity import token_contract
 from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body
 from nexus.identity.binder import LaunchFacts, SessionBinder
 from nexus.identity.holder import Processes, epoch_seconds, normalise_instant, read_registry_entry
-from nexus.identity.pending import Pending, delete_pending, take_pending
-from nexus.identity.token_file import TokenFile, ancestor_token_path, delete_token_file, identity_dir, read_token_file, write_token_file
+from nexus.identity.pending import delete_pending, take_pending
+from nexus.identity.token_file import (
+    TokenFile, ancestor_token_path, delete_token_file, identity_dir, read_token_file, update_token_file,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -69,11 +72,17 @@ class TickReport:
 
 
 class IdentityLease:
-    """This MCP server's binding, kept alive. *claude_pid* is the nearest Claude ancestor."""
+    """This MCP server's binding, kept alive. *claude_pid* is the nearest Claude ancestor.
+
+    Two locks. ``_tick_lock`` serialises a heartbeat and a shutdown and is held across the engine calls; ``_lock``
+    guards the in-memory state only and is never held across I/O, so a caller on the asyncio loop
+    (:meth:`adopt_marker`) is never made to wait on the engine. *close_client* makes the lease close the engine client
+    the factory made (production); a test that shares its client leaves it open."""
 
     def __init__(self, *, client_factory: Callable[[], Any], config_dir: Path, claude_pid: int,
                  procs: Processes | Any | None = None, clock: Callable[[], float] = time.time,
-                 client_version: str | None = None, sleep: Callable[[float], None] = time.sleep) -> None:
+                 client_version: str | None = None, sleep: Callable[[float], None] = time.sleep,
+                 close_client: bool = False) -> None:
         self._factory = client_factory
         self._idir = identity_dir(config_dir)
         self._claude_pid = claude_pid
@@ -81,7 +90,10 @@ class IdentityLease:
         self._clock = clock
         self._sleep = sleep
         self._version = client_version
+        self._close_client = close_client
+        self._client: Any = None
         self._lock = threading.RLock()
+        self._tick_lock = threading.Lock()
         self.identity: str | None = None
         self.generation: int | None = None
         self.token: str | None = None
@@ -105,24 +117,37 @@ class IdentityLease:
         registry file exists."""
         return ancestor_token_path(self._idir, self._claude_pid, self._procs.sessions_dir)
 
-    def _evidence_process(self) -> dict[str, Any]:
+    def _engine(self) -> Any:
+        """One engine client for the life of the lease, rebuilt after a failure to reach the engine."""
+        if self._client is None:
+            self._client = self._factory()
+        return self._client
+
+    def _drop_engine(self) -> None:
+        client, self._client = self._client, None
+        if client is not None and self._close_client and hasattr(client, "close"):
+            with contextlib.suppress(Exception):
+                client.close()
+
+    def _process_evidence(self) -> dict[str, Any]:
+        """The process a refresh, fork or end speaks for: host, Claude pid, ``startedAt`` and OS start time."""
         entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
-        return {"started_at": entry.started_at if entry else None}
+        record = read_token_file(self.token_path()) if self.token_path() is not None else None
+        start = (record.proc_start if record else None) or normalise_instant(self._procs.os_start(self._claude_pid))
+        return {"host": self._procs.host, "pid": self._claude_pid, "started_at": entry.started_at if entry else None,
+                "proc_start": start}
 
     # ── one heartbeat ───────────────────────────────────────────────────────
 
     def due(self) -> bool:
-        """Whether a heartbeat is due now: every second inside the startup window while unbound, else every 60."""
-        now = self._clock()
-        if not self.bound and now - self._started < STARTUP_WINDOW_S:
-            return now >= self._next_heartbeat
-        return now >= self._next_heartbeat
+        """Whether a heartbeat is due now (every second inside the startup window while unbound, else every 60)."""
+        return self._clock() >= self._next_heartbeat
 
     def tick(self) -> TickReport:
         """One heartbeat: re-read the token file, bind from a pending file while unbound, then renew, refresh and
         append a fork row as due. Never raises: a failure is logged and the next heartbeat tries again."""
         report = TickReport()
-        with self._lock:
+        with self._tick_lock:
             now = self._clock()
             unbound_early = not self.bound and now - self._started < STARTUP_WINDOW_S
             self._next_heartbeat = now + (STARTUP_POLL_S if unbound_early else HEARTBEAT_S)
@@ -133,6 +158,7 @@ class IdentityLease:
                 if self.bound:
                     self._maintain(now, report)
             except IdentityUnavailableError as exc:
+                self._drop_engine()                      # the endpoint may have moved: resolve it again next time
                 report.error = f"engine unavailable: {exc}"
                 _log.debug("identity_lease_engine_unavailable", error=str(exc))
             except IdentityApiError as exc:
@@ -154,52 +180,57 @@ class IdentityLease:
         return self._adopt(record)
 
     def _adopt(self, record: TokenFile) -> bool:
-        changed = (record.identity, record.generation) != (self.identity, self.generation)
-        newer_token = record.token != self.token
-        if not changed and not newer_token and record.session_id == self.session_id:
-            return False
-        if changed and self.superseded and self.identity is not None:
-            _log.info("identity_lease_readopted", old=self.identity, new=record.identity, generation=record.generation)
-        if changed:
-            self.superseded = False
-            self._next_renew = 0.0
-        self.identity, self.generation = record.identity, record.generation
-        self.token, self.token_expires_at = record.token, record.expires_at
-        if record.session_id:
-            self.session_id = record.session_id
-            self._known_sessions.add(record.session_id)
-        return True
+        with self._lock:
+            changed = (record.identity, record.generation) != (self.identity, self.generation)
+            newer_token = record.token != self.token
+            if not changed and not newer_token and record.session_id == self.session_id:
+                return False
+            if changed and self.superseded and self.identity is not None:
+                _log.info("identity_lease_readopted", old=self.identity, new=record.identity, generation=record.generation)
+            if changed:
+                self.superseded = False
+                self._next_renew = 0.0
+            self.identity, self.generation = record.identity, record.generation
+            self.token, self.token_expires_at = record.token, record.expires_at
+            if record.session_id:
+                self.session_id = record.session_id
+            self._known_sessions.update(record.session_ids)
+            if record.session_id:
+                self._known_sessions.add(record.session_id)
+            return True
 
     def adopt_marker(self, *, identity: str | None, generation: int | None, token_file: str | None) -> bool:
         """Adopt the identity a T1 handoff marker names, reading the token file it points at. The path must be this
-        process's own token file: a marker naming another path is ignored, never followed."""
+        process's own token file: a marker naming another path is ignored, never followed. The file is read before
+        the state lock is taken, so this never waits on an engine call a heartbeat has in flight."""
         if not identity or token_file is None:
             return False
-        with self._lock:
-            own = self.token_path()
-            if own is None or Path(token_file) != own:
-                _log.warning("identity_marker_path_rejected", marker_path=token_file, own=str(own) if own else None)
-                return False
-            record = read_token_file(own)
-            if record is None or record.identity != identity or (generation is not None and record.generation != generation):
-                return False
-            return self._adopt(record)
+        own = self.token_path()
+        if own is None or Path(token_file) != own:
+            _log.warning("identity_marker_path_rejected", marker_path=token_file, own=str(own) if own else None)
+            return False
+        record = read_token_file(own)
+        if record is None or record.identity != identity or (generation is not None and record.generation != generation):
+            return False
+        return self._adopt(record)
 
     # ── bound: renew, refresh, fork ─────────────────────────────────────────
 
     def _maintain(self, now: float, report: TickReport) -> None:
-        client = self._factory()
+        with self._lock:
+            identity, generation = self.identity, self.generation
+        client = self._engine()
         if now >= self._next_renew:
-            self._fork_if_unknown(client, report)
             try:
-                client.renew(self.identity, self.generation, self._version)
+                self._fork_if_unknown(client, report)
+                client.renew(identity, generation, self._version)
                 report.renewed = True
             except IdentityApiError as exc:
                 if token_contract.is_stale_generation(exc.status, exc.code):
                     self._superseded(exc)
                     return
                 if exc.status == 409 and exc.code in ("not_held", "identity_not_held"):  # Step 1 / Step 2 spellings
-                    _log.info("identity_lease_not_held", identity=self.identity, state=exc.body.get("state"))
+                    _log.info("identity_lease_not_held", identity=identity, state=exc.body.get("state"))
                     return  # the seat was released or ended under this process: the token file will say what is next
                 raise
             self._next_renew = now + HEARTBEAT_S
@@ -207,8 +238,11 @@ class IdentityLease:
             self._refresh(client, now, report)
 
     def _refresh(self, client: Any, now: float, report: TickReport) -> None:
+        with self._lock:
+            identity, generation = self.identity, self.generation
         try:
-            view = client.bind(self.identity, "refresh", self.generation, evidence_body(client_version=self._version))
+            view = client.bind(identity, "refresh", generation,
+                               evidence_body(client_version=self._version, **self._process_evidence()))
         except IdentityApiError as exc:
             if token_contract.is_stale_generation(exc.status, exc.code):
                 self._superseded(exc)
@@ -217,26 +251,33 @@ class IdentityLease:
         token, life = token_contract.token_from_response(view)
         if token is None:
             return  # an engine that issues none (Step 1): nothing to rewrite
-        self.token, self.token_expires_at = token, token_contract.expires_at(life, now=now)
-        if life:
-            self.token_life_s = life
+        with self._lock:
+            self.token, self.token_expires_at = token, token_contract.expires_at(life, now=now)
+            if life:
+                self.token_life_s = life
         self._rewrite_file()
         report.refreshed = True
 
     def _rewrite_file(self) -> None:
+        """Write the lease's token (and session id) into the process's token file, as one compare-and-swap under the
+        file lock: the hook may have rewritten the file meanwhile (a ``/clear``, a cross-seat ``/resume``), and a
+        lease that still holds the old identity must not put it back. A file that names another identity or
+        generation than this lease's, or that is gone, is left as it is: the next heartbeat adopts it."""
         path = self.token_path()
-        if path is None or self.identity is None or self.generation is None:
+        with self._lock:
+            identity, generation, token, expires, sid = (self.identity, self.generation, self.token,
+                                                         self.token_expires_at, self.session_id)
+        if path is None or identity is None or generation is None:
             return
-        entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
-        if entry is None or entry.started_at is None:
-            return
-        prior = read_token_file(path)
-        write_token_file(path, TokenFile(
-            identity=self.identity, generation=self.generation, token=self.token, expires_at=self.token_expires_at,
-            session_id=self.session_id or (prior.session_id if prior else None), pid=self._claude_pid,
-            started_at=entry.started_at, proc_start=(prior.proc_start if prior else None) or normalise_instant(self._procs.os_start(self._claude_pid)),
-            host=self._procs.host,
-        ))
+
+        def swap(current: TokenFile | None) -> TokenFile | None:
+            if current is None or (current.identity, current.generation) != (identity, generation):
+                return None
+            ids = current.session_ids + ((sid,) if sid and sid not in current.session_ids else ())
+            return TokenFile(**{**current.__dict__, "token": token, "expires_at": expires,
+                                "session_id": sid or current.session_id, "session_ids": ids, "written_at": 0.0})
+
+        update_token_file(path, swap)
 
     def _fork_if_unknown(self, client: Any, report: TickReport) -> None:
         """``/branch``: a session id in the registry entry of this process that the index does not know."""
@@ -251,23 +292,28 @@ class IdentityLease:
         except IdentityApiError as exc:
             if exc.status != 404:
                 raise
-        prior = self.session_id
-        view = client.bind(self.identity, "fork", self.generation, evidence_body(session_id=sid, prior_session_id=prior,
-                                                                                client_version=self._version))
-        self._known_sessions.add(sid)
-        self.session_id = sid
+        with self._lock:
+            identity, generation, prior = self.identity, self.generation, self.session_id
+        view = client.bind(identity, "fork", generation, evidence_body(
+            session_id=sid, prior_session_id=prior, client_version=self._version, **self._process_evidence()))
         token, life = token_contract.token_from_response(view)
-        if token is not None:
-            self.token, self.token_expires_at = token, token_contract.expires_at(life, now=self._clock())
+        with self._lock:
+            self._known_sessions.add(sid)
+            self.session_id = sid
+            if token is not None:
+                self.token, self.token_expires_at = token, token_contract.expires_at(life, now=self._clock())
         self._rewrite_file()
         report.forked = True
-        _log.info("identity_lease_fork_row", identity=self.identity, session_id=sid, prior=prior)
+        _log.info("identity_lease_fork_row", identity=identity, session_id=sid, prior=prior)
 
     def _superseded(self, exc: IdentityApiError) -> None:
-        if not self.superseded:
-            _log.error("identity_lease_superseded", identity=self.identity, generation=self.generation,
-                       detail=str(exc), consequence="another process holds this identity now; this server stops writing identity state")
-        self.superseded = True
+        with self._lock:
+            first = not self.superseded
+            self.superseded = True
+            identity, generation = self.identity, self.generation
+        if first:
+            _log.error("identity_lease_superseded", identity=identity, generation=generation, detail=str(exc),
+                       consequence="another process holds this identity now; this server stops writing identity state")
 
     # ── unbound: the pending bind ───────────────────────────────────────────
 
@@ -287,7 +333,7 @@ class IdentityLease:
                             claude_pid=self._claude_pid, proc_start=start, client_version=self._version,
                             seat=pending.seat, name=pending.name, pane=pending.pane)
         facts.with_registry(entry)
-        binder = SessionBinder(client=self._factory(), procs=self._procs, identity_dir=self._idir, allow_privileged=False,
+        binder = SessionBinder(client=self._engine(), procs=self._procs, identity_dir=self._idir, allow_privileged=False,
                                clock=self._clock, sleep=self._sleep)
         outcome = binder.bind(facts)
         if outcome.action == "unbound":
@@ -309,27 +355,34 @@ class IdentityLease:
         Claude process is gone: a server shutting down under a live Claude (a ``/mcp`` reconnect) leaves the
         binding and the file for its successor, which has no hook to bind it again. A server that stopped writing
         because it was superseded sends nothing. Best effort and never raises."""
-        with self._lock:
-            try:
-                if wait_for_claude:
-                    deadline = self._clock() + CLAUDE_EXIT_WAIT_S
-                    while self._procs.alive(self._claude_pid) and self._clock() < deadline:
-                        self._sleep(0.1)
-                if self._procs.alive(self._claude_pid):
-                    return
-                if self.identity is not None and self.generation is not None and not self.superseded:
-                    try:
-                        self._factory().bind(self.identity, "end", self.generation, evidence_body(client_version=self._version))
-                    except IdentityApiError as exc:
-                        _log.info("identity_end_refused", identity=self.identity, error=str(exc))
-                path = self.token_path()
-                if path is not None:
-                    delete_token_file(path)
-                else:
-                    for stale in self._idir.glob(f"{self._claude_pid}.*.token"):
-                        delete_token_file(stale)
-            except Exception as exc:  # noqa: BLE001 — shutdown is best effort
-                _log.warning("identity_shutdown_failed", error=f"{type(exc).__name__}: {exc}")
+        got = self._tick_lock.acquire(timeout=1.0)        # a heartbeat stuck in a call must not hold the exit hostage
+        try:
+            if wait_for_claude:
+                deadline = self._clock() + CLAUDE_EXIT_WAIT_S
+                while self._procs.alive(self._claude_pid) and self._clock() < deadline:
+                    self._sleep(0.1)
+            if self._procs.alive(self._claude_pid):
+                return
+            with self._lock:
+                identity, generation, superseded = self.identity, self.generation, self.superseded
+            if identity is not None and generation is not None and not superseded:
+                try:
+                    self._engine().bind(identity, "end", generation,
+                                        evidence_body(client_version=self._version, **self._process_evidence()))
+                except IdentityApiError as exc:
+                    _log.info("identity_end_refused", identity=identity, error=str(exc))
+            path = self.token_path()
+            if path is not None:
+                delete_token_file(path)
+            else:
+                for stale in self._idir.glob(f"{self._claude_pid}.*.token"):
+                    delete_token_file(stale)
+        except Exception as exc:  # noqa: BLE001 — shutdown is best effort
+            _log.warning("identity_shutdown_failed", error=f"{type(exc).__name__}: {exc}")
+        finally:
+            self._drop_engine()
+            if got:
+                self._tick_lock.release()
 
 
 # ── the process's one lease ─────────────────────────────────────────────────
@@ -357,7 +410,7 @@ def start() -> IdentityLease | None:
         if pid <= 0 or not _command_name_of(pid).lower().startswith("claude"):
             return None
         lease = IdentityLease(client_factory=IdentityClient.from_config, config_dir=_nx_config.nexus_config_dir(), claude_pid=pid,
-                              client_version=client_version())
+                              client_version=client_version(), close_client=True)
         _STOP.clear()
         _THREAD = threading.Thread(target=_run, args=(lease,), name="nx-identity-lease", daemon=True)
         _LEASE = lease

@@ -33,6 +33,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableErro
 from nexus.identity.holder import (
     GONE, Processes, RegistryEntry, check_holder, holder_process, read_registry_entry,
 )
-from nexus.identity.token_file import TokenFile, token_path, write_token_file
+from nexus.identity.token_file import TokenFile, token_path, update_token_file
 
 REGISTRY_WAIT_S: float = 5.0
 REGISTRY_POLL_S: float = 0.1
@@ -123,13 +124,24 @@ class SessionBinder:
 
     # ── entry ───────────────────────────────────────────────────────────────
 
+    def _is_this_process(self, facts: LaunchFacts, entry: RegistryEntry) -> bool:
+        """Whether a registry file is this process's own, not a stale one a crashed earlier owner of the pid left (Claude
+        deletes its file only on a clean exit): its ``sessionId`` is the payload's and its ``procStart`` is the
+        process's OS start time. ``procStart`` is compared off Windows only: Windows' spelling of it is not known."""
+        if entry.session_id and facts.session_id and entry.session_id != facts.session_id:
+            return False
+        if getattr(self._procs, "platform", "") != "win32" and entry.proc_start and facts.proc_start:
+            return entry.proc_start == facts.proc_start
+        return True
+
     def await_registry(self, facts: LaunchFacts) -> bool:
         """Fill *facts* from the process's registry file, waiting up to 5 seconds for the hook's own file to be
-        written (the hook may run first, ``253-research-10`` (5)). True when the file was found."""
+        written (the hook may run first, ``253-research-10`` (5)). A file that is not this process's (a stale one from
+        a crashed earlier owner of the pid) is waited past, as if absent. True when the file was found."""
         deadline = self._clock() + REGISTRY_WAIT_S
         while True:
             entry = read_registry_entry(facts.claude_pid, self._procs.sessions_dir)
-            if entry is not None and entry.started_at is not None:
+            if entry is not None and entry.started_at is not None and self._is_this_process(facts, entry):
                 facts.with_registry(entry)
                 return True
             if self._clock() >= deadline:
@@ -162,6 +174,8 @@ class SessionBinder:
             resumed = self._resume(facts, own)
             if resumed is not None:
                 return resumed
+            if own is not None:
+                return self._unindexed_with_own(facts, own)
         return self._startup(facts, rebind=facts.source == "startup")
 
     # ── evidence ────────────────────────────────────────────────────────────
@@ -180,7 +194,7 @@ class SessionBinder:
         holder = view.get("holder")
         if not isinstance(holder, Mapping) or view.get("state") not in ("live", "lapsed"):
             return None
-        verdict = check_holder(holder, procs=self._procs, host=facts.host)
+        verdict = check_holder(holder, procs=self._procs, host=facts.host, identity_dir=self._idir)
         return holder_process(holder) if verdict.state == GONE else None
 
     # ── own identity ────────────────────────────────────────────────────────
@@ -199,18 +213,25 @@ class SessionBinder:
 
     def _keep(self, facts: LaunchFacts, own: Mapping[str, Any]) -> BindOutcome | None:
         """``clear`` and ``fork``: same generation, new session id. None when the engine will not (the seat was
-        taken or ended meanwhile): the caller then binds the process as a new start."""
+        taken or ended meanwhile): the caller then binds the process as a new start. A credential that may not send
+        ``clear`` (the data credential of a mint-only install) sends the same change as ``fork``, which it may."""
         if not self._privileged and facts.source == "clear":
             return None
         prior = (own.get("holder") or {}).get("session_id")
+        event = facts.source
         try:
-            view = self._client.bind(own["id"], facts.source, int(own["generation"]),
-                                     self._evidence(facts, prior_session_id=prior))
+            try:
+                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+            except IdentityApiError as exc:
+                if exc.status != 403 or event != "clear":
+                    raise
+                event = "fork"
+                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
         except IdentityApiError as exc:
             if exc.status == 409:
                 return None
             raise
-        return self._finish(facts, view, facts.source, row=f"{facts.source}_in_process", action="bound")
+        return self._finish(facts, view, event, row=f"{facts.source}_in_process", action="bound")
 
     def _resume(self, facts: LaunchFacts, own: Mapping[str, Any] | None) -> BindOutcome | None:
         try:
@@ -232,20 +253,64 @@ class SessionBinder:
             return self._switch(facts, own, view)
         return self._take(facts, view, "resume", row_prefix="resume")
 
+    @staticmethod
+    def _reservation_over(view: Mapping[str, Any], facts: LaunchFacts) -> bool:
+        """A seat lapsed on another host whose 10-minute reservation has ended: free to take, as the engine reads it."""
+        holder = view.get("holder") or {}
+        until = view.get("reserved_until")
+        if view.get("state") != "lapsed" or not holder or holder.get("host") == facts.host or not isinstance(until, str):
+            return False
+        try:
+            return datetime.now(timezone.utc) >= datetime.fromisoformat(until.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+
+    def _close_own(self, facts: LaunchFacts, own: Mapping[str, Any]) -> str | None:
+        """End an ephemeral identity this process holds, or release a seat it holds. None on success; the notice to
+        print when the credential may not do it (the data credential of a mint-only install: release is the tenant's)."""
+        closing = "release" if own.get("kind") == "seat" else "end"
+        try:
+            self._client.bind(own["id"], closing, int(own["generation"]), self._evidence(facts))
+        except IdentityApiError as exc:
+            if exc.status == 403:
+                return (f"identity: this credential may not {closing} {own.get('name') or own['id']}, so the session keeps it "
+                        f"(a data credential cannot release a seat)")
+            raise
+        return None
+
     def _switch(self, facts: LaunchFacts, own: Mapping[str, Any], target: Mapping[str, Any]) -> BindOutcome:
         """A ``/resume`` in a process that already holds a different identity: the process switches when the
-        resumed seat is free, and keeps what it has (printing the holder) when it is live elsewhere."""
+        resumed seat is free (its holder gone, or its other-host reservation over), and keeps what it has (printing
+        the holder) when it is live elsewhere."""
         if not self._privileged:
             return BindOutcome("unchanged", "resume_switch_refused", identity=own["id"], generation=int(own["generation"]))
-        if target.get("state") in ("live", "lapsed") and self._holder_gone(target, facts) is None:
+        if (target.get("state") in ("live", "lapsed") and self._holder_gone(target, facts) is None
+                and not self._reservation_over(target, facts)):
             reason = self._held_notice(target, facts)
             return BindOutcome("unchanged", "resume_other_held", identity=own["id"], generation=int(own["generation"]),
                                kind=own.get("kind"), alias=own.get("name"), notices=[reason])
-        closing = "release" if own.get("kind") == "seat" else "end"
-        self._client.bind(own["id"], closing, int(own["generation"]), self._evidence(facts))
+        refused = self._close_own(facts, own)
+        if refused is not None:
+            return BindOutcome("unchanged", "resume_switch_forbidden", identity=own["id"], generation=int(own["generation"]),
+                               kind=own.get("kind"), alias=own.get("name"), notices=[refused])
         outcome = self._take(facts, target, "resume", row_prefix="resume_switch")
         outcome.switched_from = own["id"]
         return outcome
+
+    def _unindexed_with_own(self, facts: LaunchFacts, own: Mapping[str, Any]) -> BindOutcome:
+        """A ``resume`` of an id no index has (or of an ended ephemeral) in a process that already holds an identity:
+        the process does not start a second identity beside the one it holds. When the launch names another seat that
+        seat is taken and the old identity closed; otherwise the process keeps its identity and the new session id is
+        added to it (a ``fork`` row)."""
+        named = facts.seat or facts.name
+        seat_id = self._seat_named(named, from_env=bool(facts.seat))[0] if named else None
+        if seat_id is not None and seat_id != own["id"] and self._privileged and self._close_own(facts, own) is None:
+            outcome = self._startup(facts, rebind=False)
+            outcome.switched_from = own["id"]
+            return outcome
+        prior = (own.get("holder") or {}).get("session_id")
+        view = self._client.bind(own["id"], "fork", int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+        return self._finish(facts, view, "fork", row="resume_unindexed_reuse", action="unchanged")
 
     def _startup(self, facts: LaunchFacts, *, rebind: bool) -> BindOutcome:
         if rebind and facts.proc_start:
@@ -265,30 +330,31 @@ class SessionBinder:
 
     def _rebind(self, facts: LaunchFacts) -> BindOutcome | None:
         """Row 1: the most recent binding on this host with this process's pid and start time, whatever the
-        identity's state, ``ended`` included, when no other process holds that identity now."""
+        identity's state, ``ended`` included, when no other process holds that identity now. Only the most recent
+        identity is considered."""
         assert facts.proc_start is not None
         for row in self._client.history(facts.host, facts.claude_pid, facts.proc_start):
             if row.get("kind") == "delegated":
                 continue
+            # only the most recent identity of the process: an older one belongs to an earlier life of the pid
             state = row.get("state")
             holder = row.get("holder") or {}
             if state in ("live", "lapsed"):
                 ours = (holder.get("host") == facts.host and holder.get("pid") == facts.claude_pid
                         and holder.get("proc_start") == facts.proc_start)
                 if not ours:
-                    continue  # held by another process now: try the next identity
+                    return None  # held by another process now
                 if holder.get("started_at") == facts.started_at:
                     return BindOutcome("unchanged", "startup_already_bound", identity=row["id"],
                                        generation=int(row["generation"]), kind=row.get("kind"), alias=row.get("name"))
             elif state not in ("unheld", "ended"):
-                continue
-            gone = self._holder_gone(row, facts)
+                return None
             try:
                 view = self._client.bind(row["id"], "start", int(row["generation"]),
-                                         self._evidence(facts, holder_gone=gone))
+                                         self._evidence(facts, holder_gone=self._holder_gone(row, facts)))
             except IdentityApiError as exc:
                 if exc.status == 409:
-                    continue
+                    return None
                 raise
             return self._finish(facts, view, "start", row="startup_rebind", action="bound")
         return None
@@ -349,11 +415,18 @@ class SessionBinder:
         """Write the process's token file from the bind's answer and describe the result."""
         token, lifetime = token_contract.token_from_response(view)
         path = token_path(self._idir, facts.claude_pid, facts.started_at or 0)
-        write_token_file(path, TokenFile(
-            identity=view["id"], generation=int(view["generation"]), token=token,
-            expires_at=token_contract.expires_at(lifetime, now=self._clock()), session_id=facts.session_id,
-            pid=facts.claude_pid, started_at=facts.started_at or 0, proc_start=facts.proc_start, host=facts.host,
-        ))
+
+        def record(current: TokenFile | None) -> TokenFile:
+            # session ids accumulate under one identity (a /clear keeps it); another identity starts the list again
+            earlier = current.session_ids if current is not None and current.identity == view["id"] else ()
+            ids = earlier + ((facts.session_id,) if facts.session_id and facts.session_id not in earlier else ())
+            return TokenFile(
+                identity=view["id"], generation=int(view["generation"]), token=token,
+                expires_at=token_contract.expires_at(lifetime, now=self._clock()), session_id=facts.session_id,
+                pid=facts.claude_pid, started_at=facts.started_at or 0, proc_start=facts.proc_start, host=facts.host,
+                registry_dir=str(self._procs.sessions_dir), session_ids=ids)
+
+        update_token_file(path, record)
         outcome = BindOutcome(action, row, identity=view["id"], generation=int(view["generation"]), event=event,
                               kind=view.get("kind"), alias=view.get("name"), token_file=path)
         if view.get("name") and facts.name and facts.name != view["name"]:

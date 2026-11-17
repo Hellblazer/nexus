@@ -35,11 +35,11 @@ def _leg(world: World, pid: int, source: str, sid: str, *, env: dict | None = No
 
 def test_the_hook_leg_binds_sweeps_hands_the_marker_the_identity_and_skips_children(world: World) -> None:
     alpha, crashed = world.seat("alpha"), world.seat("crashed")
-    world.process(300, name="crashed", os_start=T1)
+    world.process(300, name="crashed", os_start=T1, session_id="c-sid")
     _leg(world, 300, "startup", "c-sid")
     world.procs.stop(300, keep_registry=True)                       # crashed: the sweep reports it
 
-    world.process(100, name="alpha-renamed", entrypoint="cli")
+    world.process(100, name="alpha-renamed", entrypoint="cli", session_id="sid-1")
     started = _leg(world, 100, "startup", "sid-1", env={"NX_SEAT": "alpha"})
     assert (started.outcome.identity, started.outcome.action, started.outcome.generation) == (alpha, "bound", 1)
     assert any("display name is 'alpha-renamed' but the seat is 'alpha'" in n for n in started.notices)
@@ -47,6 +47,7 @@ def test_the_hook_leg_binds_sweeps_hands_the_marker_the_identity_and_skips_child
     assert handoff_fields(started, "startup") == {}, "a startup spawns a new MCP server: no marker fields"
     assert world.identity(crashed)["state"] == "lapsed"
 
+    world.procs.set_session(100, "sid-2")
     cleared = _leg(world, 100, "clear", "sid-2")
     fields = handoff_fields(cleared, "clear")
     assert fields["identity"] == alpha and fields["generation"] == 1
@@ -55,7 +56,8 @@ def test_the_hook_leg_binds_sweeps_hands_the_marker_the_identity_and_skips_child
 
     # a delegated child and a nested subprocess that inherited its parent's session id bind nothing
     assert _leg(world, 100, "startup", "child-sid", env={"NX_IDENTITY_TOKEN": "/x/y.token"}).outcome is None
-    assert _leg(world, 100, "startup", "parent-sid", env={"NX_SESSION_ID": "parent-sid"}).outcome is None
+    inherited = _leg(world, 100, "startup", "parent-sid", env={"NX_SESSION_ID": "parent-sid"})
+    assert inherited.outcome is None and inherited.notices == ["identity: this process inherited NX_SESSION_ID (a nested subprocess), so it binds nothing"]
     assert world.indexed("sid-2")["identity"] == alpha
     with pytest.raises(Exception):
         world.indexed("child-sid")

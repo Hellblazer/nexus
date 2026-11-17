@@ -36,6 +36,9 @@ IDENTITY_TOKEN_HEADER: str = "X-Nexus-Identity-Token"
 #: The 409 code of a fenced write from a superseded generation: the client's stop-writing signal.
 SUPERSEDED_CODE: str = "generation_superseded"
 
+#: ``409`` code of a fenced write for an identity nobody holds (Step 2).
+NOT_HELD_CODE: str = "identity_not_held"
+
 #: Step 1's spelling of a stale expected generation on bind and renew. A renewal that gets either has been
 #: superseded: the process no longer holds the generation it carries.
 CONFLICT_CODE: str = "generation_conflict"

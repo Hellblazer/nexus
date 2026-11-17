@@ -263,6 +263,19 @@ def process_age_seconds(
     return max(0.0, now() - _unix_from_filetime(created))
 
 
+def process_creation_unix(pid: int, api: WinProcessInfoApi) -> float | None:
+    """The Unix time *pid* was created at (the FILETIME ``GetProcessTimes`` reports, converted), or None when it is
+    gone or unreadable. A fixed instant for the life of the process, unlike :func:`process_age_seconds`, which moves."""
+    handle = _open(api, pid)
+    if handle is None:
+        return None
+    try:
+        created = api.creation_filetime(handle)
+    finally:
+        api.close(handle)
+    return None if created is None else _unix_from_filetime(created)
+
+
 def process_image_path(pid: int, api: WinProcessInfoApi) -> str:
     """Full image path of *pid*, or ``""`` when gone or unreadable."""
     handle = _open(api, pid)

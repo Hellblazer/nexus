@@ -26,7 +26,7 @@ class _Time:
         self.now += seconds
 
 
-class _NoEngine:
+class _NoEngine:  # noqa: D101
     def __getattr__(self, name: str):
         raise AssertionError(f"the engine must not be called before the registry file exists: {name}")
 
@@ -49,3 +49,23 @@ def test_launch_name_comes_from_the_claude_command_line_when_the_registry_has_no
     assert launch_name_from_args("/x/claude -n marginalia --resume abc") == "marginalia"
     assert launch_name_from_args("claude --name=halcyon") == "halcyon"
     assert launch_name_from_args("claude --resume abc") is None and launch_name_from_args("") is None
+
+
+def test_a_registry_file_that_is_not_this_processs_is_waited_past_like_an_absent_one(tmp_path: Path) -> None:
+    """Claude deletes its registry file only on a clean exit. A crashed earlier owner of the pid leaves one behind: its
+    sessionId is not the payload's and its procStart is not this process's OS start time, so its startedAt would be
+    wrong. The hook waits past it (5 s, then the pending file) and takes the right one when it appears."""
+    from nexus.identity.binder import LaunchFacts, SessionBinder
+
+    procs = FakeProcesses(tmp_path / "sessions")
+    procs.start(700, T0, registry=False)
+    procs.write_registry(700, 111, "2026-11-10T00:00:00Z", session_id="old-owner-sid")     # stale: other session and start
+    clock = _Time()
+    binder = SessionBinder(client=_NoEngine(), procs=procs, identity_dir=tmp_path / "identity", clock=clock, sleep=clock.sleep)
+    facts = LaunchFacts(source="startup", session_id="sid-new", host=procs.host, claude_pid=700, proc_start=T0)
+    assert binder.await_registry(facts) is False and clock.now - 1_000.0 >= 4.9 and facts.started_at is None
+
+    procs.write_registry(700, 222, "2026-11-10T00:00:00Z", session_id="sid-new")           # right session, wrong start
+    assert binder.await_registry(facts) is False
+    procs.write_registry(700, 333, T0, session_id="sid-new")                               # this process's own file
+    assert binder.await_registry(facts) is True and facts.started_at == 333

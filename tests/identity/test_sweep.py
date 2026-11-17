@@ -37,7 +37,7 @@ class RacingClient(IdentityClient):
 def _token(world: World, pid: int, started_at: int, identity: str) -> None:
     write_token_file(token_path(world.identity_dir, pid, started_at),
                      TokenFile(identity=identity, generation=1, token=None, expires_at=None, session_id="s", pid=pid,
-                               started_at=started_at, proc_start=T0, host=HOST))
+                               started_at=started_at, proc_start=T0, host=HOST, registry_dir=str(world.procs.sessions_dir)))
 
 
 def test_the_sweep_marks_a_crashed_holder_gone_and_leaves_its_own_process_delegated_identities_and_a_rebound_binding_alone(world: World) -> None:
@@ -70,7 +70,7 @@ def test_the_sweep_marks_a_crashed_holder_gone_and_leaves_its_own_process_delega
     assert world.identity(delegated)["state"] == "live"
     assert (world.identity(rebound)["generation"], world.identity(rebound)["holder"]["pid"]) == (2, 106)
 
-    again = sweep_host(world.client, world.procs, host=HOST, own=(102, 102_000))
+    again = sweep_host(world.client, world.procs, host=HOST, own=(102, 102_000), identity_dir=world.identity_dir)
     assert again.recorded_gone == [] and again.checked >= 1, "a second verdict for the same holder answers recorded:false"
     assert world.events(crashed).count("gone") == 1
 

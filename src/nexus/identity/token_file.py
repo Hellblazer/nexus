@@ -14,11 +14,13 @@ A delegated child's file is named by ``NX_IDENTITY_TOKEN`` and has the same shap
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import time
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Iterator
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -34,7 +36,7 @@ class TokenFile:
 
     identity: str
     generation: int
-    token: str | None
+    token: str | None = field(repr=False)
     expires_at: float | None
     session_id: str | None
     pid: int
@@ -42,6 +44,13 @@ class TokenFile:
     proc_start: str | None
     host: str | None = None
     written_at: float = 0.0
+    #: The Claude registry directory (``<claude config>/sessions``) this process's registry file lives in. A holder
+    #: check reads one registry directory only; a holder recorded under another one is not this reader's to judge.
+    registry_dir: str | None = None
+    #: Every session id this process has had under the identity named above (``/clear``, ``/branch`` and resume add
+    #: one; a cross-seat switch starts the list again). A Bash child whose ``CLAUDE_CODE_SESSION_ID`` is in the list
+    #: needs no engine lookup to be known to belong to the identity.
+    session_ids: tuple[str, ...] = ()
 
 
 def identity_dir(config_dir: Path) -> Path:
@@ -58,21 +67,62 @@ def parse_token_name(path: Path) -> tuple[int, int] | None:
     return (int(m["pid"]), int(m["started_at"])) if m else None
 
 
-def write_token_file(path: Path, record: TokenFile) -> None:
-    """Publish *record* at *path*: a temp file created 0600 (so no moment has wider permissions), then one atomic
-    rename, so a concurrent reader never sees a torn file."""
-    path = Path(path)
+def _publish(path: Path, record: TokenFile) -> None:
     from nexus._winsec import make_user_dir, open_private  # noqa: PLC0415 — deferred: hook import cost
 
     make_user_dir(path.parent)
     stamped = TokenFile(**{**asdict(record), "written_at": record.written_at or time.time()})
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-    fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)  # owner-only before a byte is written, on Windows too
     try:
-        os.write(fd, json.dumps(asdict(stamped)).encode("utf-8"))
+        fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)  # owner-only before a byte is written, on Windows too
+        try:
+            os.write(fd, json.dumps(asdict(stamped)).encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(path))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def write_token_file(path: Path, record: TokenFile) -> None:
+    """Publish *record* at *path*: a temp file created 0600 (so no moment has wider permissions), then one atomic
+    rename, so a concurrent reader never sees a torn file. A failed write removes its temp file."""
+    _publish(Path(path), record)
+
+
+@contextlib.contextmanager
+def locked(path: Path) -> Iterator[None]:
+    """Hold the file lock of the token file at *path* (``<name>.lock``, advisory, every writer here takes it): a
+    read-modify-write of the file is then one step, so the hook's rewrite and the server's cannot interleave."""
+    from nexus._locking import lock_fd, unlock_fd  # noqa: PLC0415 — deferred: hook import cost
+    from nexus._winsec import make_user_dir, open_private  # noqa: PLC0415
+
+    make_user_dir(Path(path).parent)
+    fd = open_private(Path(path).with_name(Path(path).name + ".lock"), os.O_CREAT | os.O_WRONLY)
+    try:
+        lock_fd(fd, blocking=True)
+        yield
     finally:
-        os.close(fd)
-    os.replace(str(tmp), str(path))
+        try:
+            unlock_fd(fd)
+        finally:
+            os.close(fd)
+
+
+def update_token_file(path: Path, mutate: Callable[[TokenFile | None], TokenFile | None]) -> TokenFile | None:
+    """Compare-and-swap: under the file lock, read the current record, let *mutate* return the record to write (or
+    None to leave the file as it is, for a caller that finds it names another identity or generation than the one it
+    meant to update). Returns what the file holds afterwards."""
+    path = Path(path)
+    with locked(path):
+        current = read_token_file(path)
+        updated = mutate(current)
+        if updated is None:
+            return current
+        _publish(path, updated)
+        return updated
 
 
 def _opt_int(value: Any) -> int | None:
@@ -103,16 +153,17 @@ def read_token_file(path: Path) -> TokenFile | None:
         identity=identity, generation=generation, token=_opt_str(data.get("token")),
         expires_at=_opt_num(data.get("expires_at")), session_id=_opt_str(data.get("session_id")), pid=pid,
         started_at=started_at, proc_start=_opt_str(data.get("proc_start")), host=_opt_str(data.get("host")),
-        written_at=_opt_num(data.get("written_at")) or 0.0,
+        written_at=_opt_num(data.get("written_at")) or 0.0, registry_dir=_opt_str(data.get("registry_dir")),
+        session_ids=tuple(x for x in (data.get("session_ids") or ()) if isinstance(x, str) and x)
+        if isinstance(data.get("session_ids"), list) else (),
     )
 
 
 def delete_token_file(path: Path) -> None:
-    """Best-effort, idempotent delete."""
-    try:
-        Path(path).unlink()
-    except OSError:
-        pass
+    """Best-effort, idempotent delete, of the file and its lock."""
+    for victim in (Path(path), Path(path).with_name(Path(path).name + ".lock")):
+        with contextlib.suppress(OSError):
+            victim.unlink()
 
 
 def token_files(directory: Path) -> list[Path]:
