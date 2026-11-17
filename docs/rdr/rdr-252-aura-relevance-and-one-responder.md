@@ -291,18 +291,22 @@ characters, the bound RDR-253 Step 1's membership routes already apply;
 `nexus_rdr/252-research-8` F3). The first write is an insert that fails if a live record has
 the name, so two concurrent formations leave one; it also writes the
 leader's membership, in the same transaction. A disband removes every
-membership of the group, the leader's included. A disbanded name is
-re-formed by the former leader while it is live, or by any live, leased seat
-when it is not; the engine treats the re-form as a first write (the writer
-names itself leader and becomes the only member), resets `formed_at`,
-`ended_at`, `ends`, the deadlines and `serves`, and writes the disband and
-the re-form to `gc_audit`. The leader
+membership of the group, the leader's included, inside the group route's
+transaction; this cascade is the engine's own and is exempt from the
+membership check and the leader-remove rule, as RDR-253's pruning is. A join
+to a disbanded group is refused. `ended_at` is set once and cleared only by
+a re-form. A disbanded name is re-formed by the former leader while it is
+live, or by any live, leased seat when it is not; the engine locks the
+record row, treats the re-form as a first write (the writer names itself
+leader and becomes the only member, and every field is the form call's), and
+writes the disband and the re-form to `gc_audit` with the old record's
+fields, so the history survives. The leader
 of a first write, and any new leader, must be a live, leased seat and, for a
 new leader, a member of the group. An update (a new leader, `ended_at`, a
 deadline, `serves`) changes the one row in place, by the current leader,
 under the level-1 check. When the leader identity is `ended`, `unheld`,
-`lapsed` with a recorded `gone`, or live but `unleased` (a Desktop holder,
-which cannot write a group record), or has been purged, Sam's tenant credential may set a new leader
+`lapsed` with a recorded `gone`, or in state `live` with lease `unleased`
+(a Desktop holder, liveness unknown, which cannot write a group record), Sam's tenant credential may set a new leader
 or `ended_at`; the engine refuses it otherwise, and writes it to `gc_audit`
 with operation `group_override`, in the same transaction, as RDR-253's purge
 does.
@@ -313,8 +317,9 @@ a `--done` write by the topic's base name, so no repository name is coded in
 the engine; a topic no live group serves gets no owner rows. A topic is
 served by at most one live group: each `serves` entry is a base topic name
 (the address-segment pattern, no `--`), and every write that can make a group
-serve a topic (form, re-form, `set --serves`, `set --ends`) takes a Postgres
-advisory lock keyed on each topic and refuses a second live server.
+serve a topic (form, re-form, `set --serves`, `set --ends`; nothing else can
+clear `ended_at`) takes the stamper's per-topic advisory lock for each topic,
+in sorted order, and refuses a second live server.
 
 Membership is a row in RDR-253's membership table (the RDR's `member/<id>`),
 one per group the identity belongs to: `group=<name> role=<leader|member>` (`nexus_rdr/252-research-4`
@@ -372,7 +377,8 @@ a `claude -p` child is owned by the seat that dispatched it
 directory (`directory/<name>`) is not read.
 
 **Trust and attestation.** Only the group's leader may write the group record,
-apart from the audited operator override above;
+apart from the audited operator override and a re-form of a disbanded name,
+both above;
 only an identity may write its own membership; the push record names its
 pusher by the engine's stamp. JDR-002 sets the starting point: the tenant
 (from the bearer token) is the security boundary, `from`, claimant and
@@ -428,7 +434,7 @@ none resolves, it writes no record and the push still succeeds. It writes a
 record only when the pushed branch is `develop`. An unstamped record still
 links its `base` to its tip in the chain; only its pusher is unknown. The `board/ci/<topic>`
 template's doc block gains the push script and the stamper as writers, and the `from` doc says
-`github`, `engine` or an identity id.
+`github`, `engine`, `unknown` or an identity id.
 
 **Develop's state from commit order.** The push records' `base` and `tip`
 chain gives the order of develop's tips; arrival time never orders two tips
@@ -445,11 +451,13 @@ release back-merge), the chain has a gap: the stamper orders by the CI post's
 own times past the gap, and the owner of a red across a gap is the leader,
 `reason=chain_gap`.
 
-**The owner, stamped once.** On each `--done` write of a topic a live group serves, the
+**The owner, stamped once.** On each `--done` write, the
 stamper (Java, in the engine, run on that write; Sam, 2026-11-16, refining
 answer 5 once `nexus_rdr/252-research-1` F5 showed the CI adapter is an AWS
 Lambda in the conexus repository, not part of the engine) works out
-develop's state and, when it changed, posts one row to
+develop's state and, when it changed, posts one row (an owner row only when a
+live group serves the topic; a clear row for any topic with an open owner
+row) to
 `board/ci/nexus-develop--owner`:
 
 ```
@@ -493,6 +501,12 @@ with `suspects_total` giving the full count.
   covers its tip as a suspect.
 
 The Lambda adapter is unchanged and keeps its write-only `board-ci` scope.
+That scope is per template, so it reaches every `board/ci/<topic>` subspace
+(`nexus_rdr/252-research-9` F2), and the token lives in a public Lambda. So
+Step 1 adds an engine refusal: a `board-ci`-scoped write to a subspace whose
+topic ends `--owner` or `--push` is refused with 403, leaving the adapter
+only its own posts; owner, clear, ack and push rows come from sessions and
+the stamper.
 The stamper ships in an engine release. Alternative 2 below keeps "every
 session computes" as the fallback design.
 
@@ -500,7 +514,7 @@ session computes" as the fallback design.
 
 ```toml
 [load]
-group = "push-train"      # loaded only in sessions that are members
+group = "push-train"      # loaded only in sessions that are members; must be the group that serves the trigger's topic
 ```
 
 Load is evaluated when the session's MCP server starts, the only time auras
@@ -518,7 +532,7 @@ each with its own urgency, in the manner of DBM's typed warnings:
 | State | Display | Channel wake | Local action |
 |---|---|---|---|
 | Owner | "Develop is red at <sha>, first red in your push. Diagnose it." (for a red the leader takes, the text names the `reason` instead) | Yes | Diagnose; acknowledge |
-| Escalated (the identity an `escalated` row names) | "Develop is red at <sha>; no one acknowledged. Raise an ask to Sam." | Yes | Raise an RDR-245 ask |
+| Escalated (the identity an `escalated` row names, or every member when `owner` is null) | "Develop is red at <sha>; no one acknowledged. Raise an ask to Sam." | Yes | Raise an RDR-245 ask (with `owner` null, the first member to act raises it; the ask is visible on the board, so the others see it) |
 | Next up | "Develop is red at <sha>; <owner> owns it. You are next up." | Yes | Stand by; take it if not acknowledged |
 | Everyone else in the group | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | No (block only) | Hold its own pushes until green |
 
@@ -542,7 +556,10 @@ and today an argument can come only from the tuple or a literal. So:
   rewritten at load and on each identity change the heartbeat sees, and
   removed when the server exits. `nx aura list` reads the file of its
   nearest Claude ancestor process, as a Bash child's `nx` finds its token
-  file, and removes any file whose process is gone. It is a
+  file, and removes a file whose holder RDR-253's holder check finds gone
+  (no registry file with that pid and `startedAt`, or a pid whose OS start
+  time differs, which covers an in-place `/restart`). With no Claude
+  ancestor, `nx aura list` lists the files without claiming one. It is a
   source, not a reserved argument name, so RDR-242's header grammar is
   unchanged; `nx aura check` accepts it for any declared string argument.
 - `display.channel` accepts, besides `true` and `false`, the name of a
@@ -566,8 +583,9 @@ Assignments re-shows a changed assignment. A newer red whose earliest suspect
 is unchanged posts a refreshed row: the new sha, the current row's owner,
 `next` and `handoffs` carried over (so a hand-off is kept), the same
 `episode_at`, and `refresh: true`. The procedure wakes only on a row with
-`refresh: false`. After an `escalated` row a refresh carries `reason=escalated`
-too.
+`refresh: false`. A refresh carries the `reason` of the row it refreshes, so a
+refresh after an `escalated` row carries `reason=escalated`. A hand-off row
+carries `reason=handoff`.
 
 **Acknowledgement.** The owner writes `from=<identity id> kind=ack sha=<sha>`
 (stamped) to `board/ci/nexus-develop--owner` with an ordinary tool, MCP or a
@@ -594,8 +612,10 @@ owner row with `reason=escalated`, naming the leader if live and otherwise the
 first live member, with `next` null; with nobody live it names no one
 (`owner` null). That row's display, a fourth state, says to raise an RDR-245
 ask to Sam: to the identity it names, or, with `owner` null, to every member,
-each woken, and shown again to any member whose server starts while the red
-is open. The stamper re-issues no row after an
+each woken. Board subscriptions begin when a server starts, so a server that
+starts after the row does not see it (`nexus_rdr/252-research-9` F1); it shows
+the next owner, refresh or clear row. The stamper posts no hand-off and no
+second `escalated` row after an
 `escalated` one, and the timer rebuild skips a red whose latest row is
 `escalated`. Unvalidated: the research found no protocol to copy.
 
@@ -692,7 +712,8 @@ A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
   never lands or no live group serves the topic.
 - **Wrong group write**: at level 1 the engine refuses a member write not
   from the member's own identity at its current generation, a group write not
-  from the leader's, and a tokenless write to either (bar RDR-253's
+  from the leader's (bar the audited override and a re-form of a disbanded
+  name), and a tokenless write to either (bar RDR-253's
   `unleased` exception, for memberships only). A tenant-token holder can still bind a seat and write
   as it (JDR-002, RDR-253); level 3 is later work.
 - **Wrong pusher**: the stamper uses the push record's stamp, never `from`; an
@@ -759,8 +780,8 @@ leader's membership; updates in place; deadline values bounded to 5 to 240
 minutes; a first or new leader a live, leased seat (a new leader also a
 member); the operator override with the tenant credential, allowed only in
 the states named above and written to `gc_audit`; the `serves` checks
-under a per-topic advisory lock; re-forming and disband as above; and the
-level-1 check (the writer's identity is
+under a per-topic advisory lock; re-forming and disband as above; the refusal of a `board-ci`-scoped write
+to a `--owner` or `--push` subspace; and the level-1 check (the writer's identity is
 the stored record's leader at its current generation; the first write's
 writer is the leader it names), built on RDR-253's identity token and fence
 code. Memberships use RDR-253's permanent membership rows and their fence. The
@@ -794,7 +815,8 @@ topic (clear rows still posted for a topic with an open owner row);
 #### Step 4: `[load]`, `self.identity` and the result-driven wake; `ci_develop_red` moved onto the owner post
 
 Client, after RDR-253 Step 3: `[load]` read from the identity's memberships at server
-start, with one group read per named group; `nx aura list` naming a
+start, with one group read per named group; `nx aura check` warning when an aura's `[load]` group is not the group
+serving its trigger topic; `nx aura list` naming a
 switched or unbound identity, read from the server's state file; `nx group
 form <name> --serves <topic>`, `nx group set <name>` (leader, deadlines,
 `ends`, `serves`), `nx group disband <name>`, `nx group override <name>`
@@ -871,12 +893,15 @@ None.
   again; a bad name is refused.
 - Membership rules: an ephemeral or delegated identity cannot join a group
   that has a record; the leader cannot leave.
-- Group writes: two concurrent first writes leave one record; the first
+- Group writes: two concurrent re-forms of one disbanded name leave one; a
+  join to a disbanded group is refused; the override is accepted for a leader
+  in state `live` with lease `unleased`; two concurrent first writes leave one record; the first
   write adds the leader's membership; a new leader that is not a live,
   leased member is refused; a deadline outside 5 to 240 is refused; the
   operator override with the tenant credential is accepted and audited.
 - Disbanded or missing group: with `ended_at` set, `ends` passed or no
-  record, the stamper posts no owner row and `[load]` does not load; a green
+  record, the stamper posts no owner row and `[load]` does not load; for a
+  topic with an open owner row, a green
   still posts a clear row.
 - Permanence: a membership and a group record still read 60 days after they
   were written, with no renewals.
@@ -888,8 +913,9 @@ None.
   route; the live case needs RDR-253 Step 4's dispatch).
 - Unrecorded tip: a red on a tip in no push record goes to the leader
   (`no_record`).
-- Escalation: two missed deadlines give one `escalated` row and no more,
-  also across an engine restart.
+- Escalation: two missed deadlines give one `escalated` row and no hand-off
+  or second `escalated` row after it, also across an engine restart; a
+  refresh after it carries `reason=escalated`.
 - Identity switch: after a cross-seat `/resume`, `nx aura list` reports the
   mismatch until a reconnect; an unbound start loads no group-gated aura.
 - `nx group join` refuses an ephemeral identity; `join`, `leave` and
@@ -899,7 +925,12 @@ None.
 - Push script: a `--skip-lock` push writes the record; a push to another
   branch writes none.
 - `[load]`: a non-member never subscribes; an unknown key is refused.
-- No channel wake for "everyone else"; a wake on re-surfacing.
+- No channel wake for "everyone else"; a wake on a new owner row, none on a
+  refresh.
+- `nx aura check` warns when an aura's `[load]` group is not the group that
+  serves its trigger topic.
+- The engine refuses a `board-ci`-scoped write to a `--owner` or `--push`
+  subspace.
 
 ## Validation
 
@@ -959,7 +990,8 @@ Release: Steps 1 and 3 need an engine release, Steps 2 and 4 a conexus
 release that pins it. Noise: no wake for everyone else. Data lifetime: push,
 owner and clear rows share the CI posts' three-day retention; group records
 and memberships are permanent rows, a membership removed when its seat
-leaves the group.
+leaves the group, when the group is disbanded, or when RDR-253's retention
+prunes an ephemeral or delegated identity.
 Dependency: every step waits on RDR-253 Phase 1 Steps 1 to 3.
 
 ### Proportionality
@@ -1023,3 +1055,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-17: Gate round 2 — PASSED (0 Critical, 6 Significant, 0 ship-blocker(s)); blob `7fea8aebbd8e`; critique `nexus_rdr/252-gate-critique-2026-11-17-r2`.
 - 2026-11-17: post-gate fixes, all fourteen at Sam's direction ("Fix all, then accept"; `nexus_rdr/252-research-7`): the stamper serialized per topic by an advisory lock shared with the timer; a newer red with the same owner refreshes the row and keeps the ack and deadline; `nx group form`, `set`, `disband` and `override`; groups in a table and memberships on RDR-253 Step 1's routes; the serving group found by `serves`, not coded in the engine; push, owner, clear and ack rows on a new `board/coord/<topic>` template with its own cap; seat-only leaders and members; the override in RDR-253's purge states, audited in `gc_audit`; a Desktop server loads only when it knows its identity; `owner_unleased` first; the server's state file for `nx aura list`; group names, re-forming a disbanded name; acks across a refresh; the escalated row with nobody live.
 - 2026-11-17: fix check `252-fix-check-b01405db2a50` passed 3-0; its counted items fixed (`nexus_rdr/252-research-8`): back to `board/ci/<topic>` (its cap counts each subspace, so nothing was crowded out, and the aura grammar takes it); refreshed rows carry `episode_at`, `refresh` and `handoffs`, keep the current owner and do not wake; `serves` format, keys within `serves`, one live group per topic under an advisory lock; re-forming a disbanded name by the former leader or, when it is not live, another seat, starting with no other members; disband removes memberships; the override also for an `unleased` or purged leader; the escalated display with nobody live; clear rows only for a topic with an open owner row; the aura state file keyed and cleaned like RDR-253's token files; the serving group in place of `push-train` in the stamper rules; Activation forms with `--serves`.
+- 2026-11-17: fix check `252-fix-check-b03c30cf28aa` failed (2 counted BLOCKS-PLANNING: a start-time replay with no mechanism, and the `board-ci` token reaching owner rows); fixed once (`nexus_rdr/252-research-9`): the replay promise dropped (a late server shows the next row); the engine refuses a `board-ci`-scoped write to `--owner` and `--push`; the stamper runs on every `--done` write, owner rows only for a served topic and clear rows for any open red; refreshes carry their row's reason and hand-offs `reason=handoff`; the null-owner escalated display; re-form named in the leader-only rules, locked, every field the form call's, history kept in `gc_audit`; the disband cascade exempt from the membership checks, no join to a disbanded group, `ended_at` cleared only by re-form; one lock order shared with the stamper; the override for an `unleased` leader stated in RDR-253's terms; the state-file cleanup by RDR-253's holder check; the aura's group tied to the serving group.
