@@ -206,7 +206,7 @@ ranges:
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| dml_utils (Hellblazer/dml_utils, 28b0b3aa9, PR #2 merged on PR #1's a6cd544) | Yes | Launcher needs pg_background; per-chunk routine does not; bytea keys supported; `run_migration_chunks_committing` is the committing procedure |
+| dml_utils (Hellblazer/dml_utils, 9196f4b1c, PR #3 merged on PR #2's 28b0b3aa9, itself on PR #1's a6cd544) | Yes | Launcher needs pg_background; per-chunk routine does not; bytea keys supported; `run_migration_chunks_committing` is the committing procedure; primary and ordered keys of up to four columns (PR #3) |
 | pg_background (vibhorkum/pg_background) | Yes, v2.0.4 (tag and pinned commit) | Runs SQL in a background worker with its own transaction. No shared_preload_libraries needed (verified on four platforms). Calls POSIX random() (one site, polling jitter). PostgreSQL License |
 | nexus PG bundle (scripts/build_pg_bundle.sh, build_pg_bundle_windows.py) | Yes | Before this RDR: PG, pgvector and contrib, with no pg_background. With Phase 1 Step 2, pg_background v2.0.4 is in every bundle, and the contrib checks fail closed without it |
 
@@ -255,14 +255,19 @@ ranges:
   role's name is fixed by the library (its default-privilege changeset names
   `dml_utils_owner`). Applied with psql in Liquibase order, not through
   Liquibase — **Method**: Spike
-- [ ] dml_utils, once it takes a four-column primary key, drives one
+- [x] dml_utils, once it takes a four-column primary key, drives one
   `nexus.chunks` leaf as a plain table: four key columns, the leaf being one
   (embedding model, tenant) partition of the two-level list partitioning
   (vectors-030 lines 530 and 675), never the parent and never partition-wise
-  (The move worker, step 2) — **Status**: Unverified; the spikes used a
-  three-column, one-level stand-in over the parent — **Method**: Spike with the
-  four-column change (bead nexus-f3yqd.2.21), together with the per-leaf run
-  assumption above
+  (The move worker, step 2) — **Status**: Verified 2026-11-17 (nexus-f3yqd.2.21,
+  develop 98307288f..596d18f2a): on dml_utils 9196f4b1c,
+  DataMoveWorkerIntegrationTest's chunks-shaped leg (two-level LIST by model
+  then tenant, primary key (tenant_id, collection, chash bytea,
+  embedding_model), per-leaf FORCE RLS) runs one plain run per leaf, none
+  partition-wise, every row exactly once, `done` never falling and ending equal
+  to `total`; a plain table whose first and fourth key columns both vary moves
+  every row once; on the earlier pin the same leg fails at run creation with
+  22023 ("at most 3 are supported") — **Method**: integration test
 - [x] Liquibase applies the vendored ddl_utils and dml_utils changelogs as
   `nexus_admin` with the session role `dml_utils_owner` — **Status**:
   Verified 2026-11-16 (T2 nexus_rdr/246-research-7): Liquibase 4.29.0, the
@@ -402,7 +407,13 @@ a *background worker* is a pg_background process in the database.
   binds a tenant id for a per-tenant run and NULL for the table-wide run, and
   the query filters on `tenant_id = $1 OR $1 IS NULL`. It never reads
   `nexus.tenant`, so the two runs differ only in the bound value. It runs in a
-  READ ONLY transaction, so it cannot write;
+  READ ONLY transaction, so it cannot write. `$1` is its only placeholder and
+  stands outside comments, string literals, dollar quotes and quoted names;
+  the text holds no `?` (a jsonb test is written with `jsonb_exists` and its
+  kin, a literal question mark as `chr(63)`), and no `$2` or higher. The
+  changeset gate refuses a registering INSERT whose verification breaks these
+  rules, and the move worker refuses to run one (a permanent failure), because
+  the JDBC driver binds `?` and would otherwise change the query's meaning;
 - `on_complete`, NULL or the SQL that finishes the new shape once the move is
   verified (a VALIDATE CONSTRAINT, dropping the old column, swapping a table);
 - the changeset id that registered it;
@@ -663,7 +674,8 @@ per-tenant verification run there must therefore filter by `tenant_id`
 itself (the bound tenant in the verification query does this). Any other
 driving table has only the tenant policy (a census of CREATE POLICY in the
 changelogs finds `tenant_isolation` everywhere and the owner-read policy only
-on `nexus.chunks`), so the move adds the same owner-read SELECT policy for
+on `nexus.chunks`), so the move adds the same owner-read SELECT policy, named
+`<table>_owner_read`, for
 the migrating role (`TO CURRENT_USER`, the vectors-029 pattern) in its own
 changeset, ordered after the registering changeset. That changeset carries
 vectors-029's guard: a precondition that skips it (MARK_RAN) when `nexus_svc`,
@@ -681,10 +693,15 @@ the move blocked until a new changeset adds the policy. The same holds on
 after the policy exists is caught at boot: `ChunksIsolationCheck`, which today
 refuses boot when any permissive policy other than `tenant_isolation` on
 `nexus.chunks` or the centroid trees applies to the role serving traffic, is
-extended to every driving table an open or failed row in `nexus.data_moves`
-names (a completed move's table keeps its owner-read policy until a changeset
-drops it, and stays in scope until then; a table that no longer exists
-contributes no policy and passes). A table counts as chunk-family for
+extended, as `DrivingTableIsolationCheck`, to every driving table a row in
+`nexus.data_moves` names, in any state (a completed move's table keeps its
+owner-read policy until a changeset drops it, and stays in scope until then; a
+table that no longer exists contributes no policy and passes), other than
+`nexus.chunks`, which `ChunksIsolationCheck` already covers. On a partitioned
+driving table other than `nexus.chunks` it checks the parent, since such a move
+runs over the parent (The move worker, step 2). A registry it cannot read
+refuses boot, as the chunks check does. The check runs at boot only; /v1/status
+does not repeat it. A table counts as chunk-family for
 `on_complete` when the driving table or any table `on_complete` names is in
 the family.
 
@@ -860,11 +877,15 @@ the old move without an UPDATE.
 **The check that stops a new boot move.** `DataMoveChangesetGateTest` is an
 engine test that reads every changelog. It has three rules.
 
-1. *Row DML.* It refuses UPDATE, DELETE, INSERT ... SELECT, ALTER COLUMN TYPE,
-   a generated column re-added and CREATE TABLE AS. The SQL inside an INSERT
+1. *Row DML.* It refuses UPDATE, DELETE, MERGE, INSERT ... SELECT, ALTER
+   COLUMN TYPE, a generated column re-added, CREATE TABLE AS, a data-modifying
+   WITH and SELECT INTO. The SQL inside an INSERT
    into `nexus.data_moves` (the template, the verification query,
    `on_complete`) is a string value and not DML. A changeset whose only DML is
-   one INSERT into `nexus.data_moves` passes this rule.
+   one INSERT into `nexus.data_moves` passes this rule, unless its verification
+   breaks the placeholder rules (The registry) or the gate cannot read the
+   INSERT (no named columns, a SELECT form, a label that is not a literal),
+   which is refused.
 2. *Boot scans.* On a table that grows with user data it refuses an ADD
    CONSTRAINT without NOT VALID, a VALIDATE CONSTRAINT and a SET NOT NULL,
    which scan the whole table at boot while writing almost nothing. The
@@ -873,7 +894,8 @@ engine test that reads every changelog. It has three rules.
    `nexus.catalog_links` and `nexus.topic_assignments`,
    listed in the test. An ADD CONSTRAINT ... NOT VALID passes.
 3. *Waiting for a move.* A changeset that runs a destructive statement (DROP
-   COLUMN, DROP TABLE, a rename) on a table some registered move drives must
+   COLUMN, with or without the COLUMN keyword, DROP TABLE, or a rename of the
+   table or a column) on a table some registered move drives must
    carry a precondition on that move's `completed_at` with
    `onFail="CONTINUE"` (Finishing a move); on a chunk-family table it is
    refused outright, by the CONTINUE-precondition lint, and the step belongs
@@ -882,15 +904,28 @@ engine test that reads every changelog. It has three rules.
    this rule only for what it adds: the new shape (new tables and nullable
    columns) and NOT VALID constraints; a destructive statement in it is
    refused like any other. The test matches by table
-   name, so it cannot see which move a changeset depends on; the review checks
-   that the precondition names the right label.
+   name: it requires the precondition to name `nexus.data_moves`,
+   `completed_at` and the literal label of a move that drives the table (a
+   superseded move's label and its replacement's both count), and the review
+   checks that it is the right one.
 
-An exemption line, naming a table whose size does not grow with user data and
-the reason, lifts all three rules for that changeset. The frozen list of
-changesets that existed when the gate landed (derived from the changelogs at
-that commit and stored as a resource) exempts them from all three rules.
+An exemption line, `data-move-exempt: <table>: <reason>` in the changeset's
+comment, naming a table the changeset touches whose size does not grow with
+user data, lifts the three rules for that table in that changeset: a finding
+on any other table stays, and so does one whose statement also names a table
+that grows or that a move drives. A line naming a rule 2 table, a chunk table,
+a driven table or a table the changeset does not touch is itself refused. The
+verification placeholder rules are never lifted. The frozen list holds the
+shipped changesets the rules find when the gate landed (the offenders, not
+every changeset; derived from the changelogs at that commit and stored as a
+resource) and exempts them from all three rules. An entry with no finding, or
+one in or after the last include at the freeze, fails the test, so the list
+only shrinks.
 
-The static check reads changelog text only: DML inside a `sqlFile`, a
+The static check reads changelog text only, the `<sql>` of each changeset: a
+native Liquibase change type (`update`, `modifyDataType`,
+`addNotNullConstraint`, `customChange` and the like) is refused unless frozen
+or exempt, and DML inside a `sqlFile`, a
 function body or a DO block's dynamic SQL passes it, and so does a
 non-concurrent CREATE INDEX. nexus-f3yqd.1's write gate, which measures the
 WAL an upgrade boot writes, is the backstop for DML the static check cannot
@@ -1013,8 +1048,8 @@ launcher that upstream does not test.
 
 - [ ] All Critical Assumptions verified
 - [x] bytea keys merged in Hellblazer/dml_utils (PR #1, a6cd544, 2026-11-10). Sam ruled 2026-11-16 to pin merged commits rather than wait for releases; he may tag releases later. ddl_utils is pinned at 5f088e2
-- [x] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR, Hellblazer/dml_utils#2, merge commit 28b0b3aa9, 2026-11-16); nexus pins 28b0b3aa9, since a6cd544 has bytea keys but no procedure. Its bloat test (RunMigrationChunksBloatTest) is green in the PR's Maven Build run 43900555823 on a tree identical to 28b0b3aa9's
-- [ ] a four-column primary key supported in Hellblazer/dml_utils (Step 1's third change) before any move over nexus.chunks, the Minimum Viable Validation's move included; nexus re-pins to the commit that carries it
+- [x] the committing procedure entry point merged in Hellblazer/dml_utils (Step 1's second PR, Hellblazer/dml_utils#2, merge commit 28b0b3aa9, 2026-11-16); nexus pinned 28b0b3aa9 until the four-column change (next item), since a6cd544 has bytea keys but no procedure. Its bloat test (RunMigrationChunksBloatTest) is green in the PR's Maven Build run 43900555823 on a tree identical to 28b0b3aa9's
+- [x] a four-column primary key supported in Hellblazer/dml_utils (Step 1's third change, Hellblazer/dml_utils#3, merge commit 9196f4b1c, 2026-11-17) before any move over nexus.chunks, the Minimum Viable Validation's move included; nexus re-pinned to 9196f4b1c (nexus-f3yqd.2.21, develop 98307288f..596d18f2a). The re-pin adds changesets 011 and 012 and changes ten runOnChange changesets (005 and nine library functions), which re-apply idempotently; no other applied changeset changed
 - [x] pg_background in the bundle on all four platforms, in a released bundle that the engine substrate pins (engine-service-v0.1.194's bundles carry pg_background 2.0)
 - [ ] ddl_utils installed ahead of dml_utils in the engine's schema setup (Step 4)
 - [ ] the superuser bootstrap creates pg_background, the three library roles and their grants: `nexus.db.pg_provision` locally (Step 4) and the db-host configuration in the cloud (Activation Step 1)
@@ -1043,13 +1078,14 @@ PR also covers resume and states the partitioned-table finding. Merged as
 PR #1 (a6cd544). A second PR, merged as PR #2 (28b0b3aa9), adds a PROCEDURE entry point that takes the
 same parameters as `run_migration_chunks` and COMMITs after each chunk launch
 and poll round. A third change lets dml_utils chunk on a primary key of four
-columns, which nexus.chunks has; until it lands, a move over nexus.chunks is
-refused when its run is created. The second is a restructured coordinator, not a wrapper: the
+columns, which nexus.chunks has; it merged as PR #3 (9196f4b1c), and before
+it a move over nexus.chunks was refused when its run was created. The second is a restructured coordinator, not a wrapper: the
 function's loop sits inside a block with an EXCEPTION handler, where
 PL/pgSQL refuses a COMMIT. The PR comes with a test
 that a mid-run VACUUM finds no dead row held back by the coordinator (Sam's
-choice, 2026-11-16). Nexus pins dml_utils at 9196f4b1c (the merge of PR #3, the four-column change,
-on PR #2's 28b0b3aa9: bytea keys, the procedure and four-column keys), and
+choice, 2026-11-16). Nexus pins dml_utils at 9196f4b1c (the merge of PR #3,
+four-column keys, on 28b0b3aa9, the merge of PR #2: bytea keys and the
+committing procedure), and
 ddl_utils at 5f088e2 (Sam, 2026-11-16), until releases are tagged.
 
 #### Step 2: pg_background in the PG bundle
@@ -1333,3 +1369,4 @@ the first registered move.
 - 2026-11-16: Install sequence step 2 names where the install runs (inside SchemaMigrator.migrate, under the migration lock, after the index-builder decision), the SET-ROLE precondition, the per-walk Database, the lock_timeout and the finally; step 3 lists the failure kinds. Wording matched to the reviewed code of nexus-f3yqd.2.11.
 - 2026-11-16: worker wording to nexus-f3yqd.2.13's reviewed code (grant 3): a table is tenant-scoped when it has a tenant column and row-level security on, FORCE or not, since `dml_utils_owner`'s boundary scan is policy-bound even where the owning admin is exempt; `requireUnrestrictedView` applies only where row security can hide rows from the admin; the install check reads `pg_proc`; worker start ends another boot's `nexus-data-move-` coordinators, only under the singleton lock; the row is re-read before each CALL, and a superseded move runs no further.
 - 2026-11-17: two failure classes approved by Sam ("yes to both, write them in", session linda, ask rdr246-failure-wording): a CALL that returns with its run neither completed nor cancelled is transient unless this pass recorded a permanent chunk error, and any failure to open or authenticate a database connection is transient, never `failed:` (nexus-f3yqd.2.15).
+- 2026-11-17: wording to landed, reviewed code (grant 3): the changeset gate as built (nexus-f3yqd.2.19: MERGE, data-modifying WITH and SELECT INTO under rule 1; DROP without COLUMN and table or column renames under rule 3, whose precondition names a driving move's literal label; the exemption line scoped to its table; the frozen list as the shipped offenders; native change types refused; the verification placeholder rules); the driving-table isolation check (nexus-f3yqd.2.16: every registry row in any state, nexus.chunks left to ChunksIsolationCheck, a partitioned driving table checked at its parent, `<table>_owner_read`, boot only); the four-column re-pin to 9196f4b1c and its verified Critical Assumption (nexus-f3yqd.2.21).
