@@ -23,17 +23,17 @@ DECLARE
     l_pack_expression text;
 BEGIN
     -- The boundary-key columns and kinds must be one-dimensional, 1-based and
-    -- the same non-empty length of one to three. A different lower bound, a
+    -- the same non-empty length of one to four. A different lower bound, a
     -- multidimensional array, an empty array or a length mismatch would index
     -- the wrong element or render a degenerate statement.
     IF pg_catalog.array_ndims(i_key_columns) IS DISTINCT FROM 1
         OR pg_catalog.array_lower(i_key_columns, 1) IS DISTINCT FROM 1
         OR pg_catalog.array_ndims(i_key_kinds) IS DISTINCT FROM 1
         OR pg_catalog.array_lower(i_key_kinds, 1) IS DISTINCT FROM 1
-        OR pg_catalog.cardinality(i_key_kinds) NOT BETWEEN 1 AND 3
+        OR pg_catalog.cardinality(i_key_kinds) NOT BETWEEN 1 AND 4
         OR pg_catalog.cardinality(i_key_columns) IS DISTINCT FROM pg_catalog.cardinality(i_key_kinds)
     THEN
-        RAISE EXCEPTION 'boundary-key columns and kinds must be one-dimensional, 1-based and of the same non-empty length of one to three'
+        RAISE EXCEPTION 'boundary-key columns and kinds must be one-dimensional, 1-based and of the same non-empty length of one to four'
             USING ERRCODE = '22023';
     END IF;
 
@@ -105,7 +105,7 @@ COMMENT ON FUNCTION dml_utils_lib.boundary_key_descriptor_sql(
     name[],
     text[]
     ) IS
-    'Validates a one-to-three-column boundary key and returns the SQL fragments '
+    'Validates a one-to-four-column boundary key and returns the SQL fragments '
         'that read, order and pack it (idN aliases, ascending ORDER BY, descending '
         'ORDER BY and the migration_key row expression from '
         'boundary_key_pack_expression). Shared by the single-relation and per-leaf '

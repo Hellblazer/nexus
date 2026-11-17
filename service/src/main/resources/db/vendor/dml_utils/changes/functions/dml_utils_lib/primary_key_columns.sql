@@ -31,8 +31,8 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
-    IF l_key_column_count > 3 THEN
-        RAISE EXCEPTION 'table %.% has a % column primary key; at most 3 are supported',
+    IF l_key_column_count > 4 THEN
+        RAISE EXCEPTION 'table %.% has a % column primary key; at most 4 are supported',
             i_schema_name, i_table_name, l_key_column_count
             USING ERRCODE = '22023';
     END IF;
@@ -62,4 +62,4 @@ $$;
 COMMENT ON FUNCTION dml_utils_lib.primary_key_columns IS
     'Returns the primary-key columns in key order, raising '
         'invalid_parameter_value (22023) when the table has no primary key or more '
-        'than 3 key columns.';
+        'than 4 key columns.';

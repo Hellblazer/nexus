@@ -4,14 +4,23 @@
         xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
-    <!-- The migration_run ordered-key shape check, in its original form and as
-         widened for bytea. Changesets 009 and 010 and 009's rollback expand these
-         into their SQL files, so the expression is written once and cannot drift
-         between them. Quotes are doubled because the expression is passed to the
-         ddl_utils helpers as a string literal. -->
+    <!-- The migration_run ordered-key shape check in each form it has had: the
+         original (up to three columns, four kinds), widened for bytea, and
+         widened to four columns. Changesets 009 to 012 and their rollbacks expand
+         these into their SQL files, so each expression is written once and cannot
+         drift between them. The earlier two keep their names and values so the
+         changesets that already ran on an installed database expand unchanged.
+         Quotes are doubled because the expression is passed to the ddl_utils
+         helpers as a string literal. -->
     <property name="ordered_key_shape_check_expression"
               value="ordered_key_columns IS NULL
         OR (pg_catalog.cardinality(ordered_key_columns) BETWEEN 1 AND 3
+        AND pg_catalog.cardinality(ordered_key_kinds)
+                = pg_catalog.cardinality(ordered_key_columns)
+        AND ordered_key_kinds &lt;@ ARRAY [''bigint'', ''text'', ''uuid'', ''timestamptz'', ''bytea'']::text[])"/>
+    <property name="ordered_key_shape_check_expression_four_columns"
+              value="ordered_key_columns IS NULL
+        OR (pg_catalog.cardinality(ordered_key_columns) BETWEEN 1 AND 4
         AND pg_catalog.cardinality(ordered_key_kinds)
                 = pg_catalog.cardinality(ordered_key_columns)
         AND ordered_key_kinds &lt;@ ARRAY [''bigint'', ''text'', ''uuid'', ''timestamptz'', ''bytea'']::text[])"/>
@@ -169,6 +178,33 @@
                  relativeToChangelogFile="true"/>
         <rollback>
             <sqlFile path="rollback/010-validate-ordered-key-shape-check-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Lets a run record an ordered key of four columns, the shape of the
+         nexus chunks key (tenant, collection, hash, embedding model). Like 009
+         it replaces the check on migration_run through the ddl_utils helpers, so
+         it runs after the functions and triggers includes and adds the new check
+         NOT VALID; the next changeset validates it. The routines and the boundary
+         key check in 005 take a four-column key by then, and the key type needs
+         no change: its arrays are as long as the key. -->
+    <changeSet id="011-allow-four-column-ordered-key" author="hellblazer" dbms="postgresql">
+        <sqlFile path="sql_changes/011-allow-four-column-ordered-key.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/011-allow-four-column-ordered-key-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Validates the check the previous changeset added NOT VALID, outside a
+         transaction for the same reason as 010. -->
+    <changeSet id="012-validate-four-column-ordered-key-check" author="hellblazer"
+               dbms="postgresql" runInTransaction="false">
+        <sqlFile path="sql_changes/012-validate-four-column-ordered-key-check.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/012-validate-four-column-ordered-key-check-rollback.sql"
                      relativeToChangelogFile="true"/>
         </rollback>
     </changeSet>

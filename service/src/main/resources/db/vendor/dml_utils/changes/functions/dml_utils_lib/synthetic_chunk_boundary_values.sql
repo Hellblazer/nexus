@@ -20,15 +20,15 @@ DECLARE
     l_start        text;
     l_end          text;
 BEGIN
-    -- The kinds must be one-dimensional, 1-based and one to three entries.
+    -- The kinds must be one-dimensional, 1-based and one to four entries.
     -- cardinality alone does not catch the last two, and indexing a non-1-based
     -- or multidimensional array would read a slice or an out-of-range subscript.
     IF i_key_kinds IS NULL
         OR pg_catalog.array_ndims(i_key_kinds) IS DISTINCT FROM 1
         OR pg_catalog.array_lower(i_key_kinds, 1) IS DISTINCT FROM 1
-        OR pg_catalog.cardinality(i_key_kinds) NOT BETWEEN 1 AND 3
+        OR pg_catalog.cardinality(i_key_kinds) NOT BETWEEN 1 AND 4
     THEN
-        RAISE EXCEPTION 'key kinds must be a one-dimensional, 1-based array of one to three entries'
+        RAISE EXCEPTION 'key kinds must be a one-dimensional, 1-based array of one to four entries'
             USING ERRCODE = '22023';
     END IF;
 

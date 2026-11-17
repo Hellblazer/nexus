@@ -94,8 +94,8 @@ BEGIN
             USING ERRCODE = '0A000';
     END IF;
 
-    IF l_index.indnkeyatts NOT BETWEEN 1 AND 3 THEN
-        RAISE EXCEPTION 'ordered-key index %.% has % key columns; one to three are supported',
+    IF l_index.indnkeyatts NOT BETWEEN 1 AND 4 THEN
+        RAISE EXCEPTION 'ordered-key index %.% has % key columns; one to four are supported',
             i_schema_name, i_index_name, l_index.indnkeyatts
             USING ERRCODE = '22023';
     END IF;
@@ -123,5 +123,5 @@ COMMENT ON FUNCTION dml_utils_lib.assert_ordered_key_index_usable(
     'Validates the index-level ordered-key contract: the named table exists, the '
         'OID exists, the OID belongs to that table and is the index the name '
         'resolves to, the index is a unique valid/ready/live btree, is not partial '
-        'or expression-based, has one to three key columns and is ascending with '
+        'or expression-based, has one to four key columns and is ascending with '
         'NULLS LAST. The per-column checks live in ordered_key_column_attributes.';

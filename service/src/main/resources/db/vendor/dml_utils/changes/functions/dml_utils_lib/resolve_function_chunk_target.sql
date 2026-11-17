@@ -18,7 +18,7 @@ DECLARE
     l_argument_type_list text;
 BEGIN
     -- Resolve the driving table's primary key in key order; this also validates
-    -- the schema/table exist and that the key has one to three supported columns.
+    -- the schema/table exist and that the key has one to four supported columns.
     o_primary_key_columns := dml_utils_lib.primary_key_columns(
             i_schema_name => i_table_schema_name,
             i_table_name => i_table_name);

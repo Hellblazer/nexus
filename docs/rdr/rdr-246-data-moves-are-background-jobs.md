@@ -1048,8 +1048,8 @@ refused when its run is created. The second is a restructured coordinator, not a
 function's loop sits inside a block with an EXCEPTION handler, where
 PL/pgSQL refuses a COMMIT. The PR comes with a test
 that a mid-run VACUUM finds no dead row held back by the coordinator (Sam's
-choice, 2026-11-16). Nexus pins dml_utils at 28b0b3aa9 (the merge of PR #2: bytea keys and the
-procedure), then the commit that carries the four-column change, and
+choice, 2026-11-16). Nexus pins dml_utils at 9196f4b1c (the merge of PR #3, the four-column change,
+on PR #2's 28b0b3aa9: bytea keys, the procedure and four-column keys), and
 ddl_utils at 5f088e2 (Sam, 2026-11-16), until releases are tagged.
 
 #### Step 2: pg_background in the PG bundle

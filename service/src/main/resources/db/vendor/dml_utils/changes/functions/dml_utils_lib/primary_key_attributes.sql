@@ -18,7 +18,7 @@ $$
 DECLARE
     l_key_column_count smallint;
 BEGIN
-    -- Validate the schema/table exist and that the primary key is one to three
+    -- Validate the schema/table exist and that the primary key is one to four
     -- columns. This is the base reader (primary_key_columns delegates here), so
     -- it performs the checks itself rather than calling back into a helper.
     PERFORM dml_utils_lib.assert_schema_exists(i_schema_name => i_schema_name);
@@ -40,8 +40,8 @@ BEGIN
             USING ERRCODE = '22023';
     END IF;
 
-    IF l_key_column_count > 3 THEN
-        RAISE EXCEPTION 'table %.% has a % column primary key; at most 3 are supported',
+    IF l_key_column_count > 4 THEN
+        RAISE EXCEPTION 'table %.% has a % column primary key; at most 4 are supported',
             i_schema_name, i_table_name, l_key_column_count
             USING ERRCODE = '22023';
     END IF;
@@ -86,4 +86,4 @@ COMMENT ON FUNCTION dml_utils_lib.primary_key_attributes IS
     'Returns the primary-key columns in key order with, per column, its ordinal '
         'position, name, type oid, type and collapsed boundary kind (bigint, text, '
         'uuid, timestamptz or bytea; NULL for an unsupported type). Validates the '
-        'schema/table and the one-to-three-column limit.';
+        'schema/table and the one-to-four-column limit.';

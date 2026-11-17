@@ -17,9 +17,9 @@ DECLARE
 BEGIN
     IF pg_catalog.array_ndims(i_key_kinds) IS DISTINCT FROM 1
         OR pg_catalog.array_lower(i_key_kinds, 1) IS DISTINCT FROM 1
-        OR pg_catalog.cardinality(i_key_kinds) NOT BETWEEN 1 AND 3
+        OR pg_catalog.cardinality(i_key_kinds) NOT BETWEEN 1 AND 4
     THEN
-        RAISE EXCEPTION 'key kinds must be one-dimensional, 1-based and have one to three entries'
+        RAISE EXCEPTION 'key kinds must be one-dimensional, 1-based and have one to four entries'
             USING ERRCODE = '22023';
     END IF;
 
@@ -88,6 +88,6 @@ END;
 $$;
 
 COMMENT ON FUNCTION dml_utils_lib.boundary_key_pack_expression(text[]) IS
-    'Builds the migration_key row expression for a one-to-three-column boundary '
+    'Builds the migration_key row expression for a one-to-four-column boundary '
         'key, placing each kind''s idN term in its position-aligned array. Shared '
         'by boundary_key_descriptor_sql.';
