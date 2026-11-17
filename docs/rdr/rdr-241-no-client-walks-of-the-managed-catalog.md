@@ -331,7 +331,11 @@ draft's claims point at.
   `nx catalog backfill source-uri` exists to rewrite the `chroma://` ones. A
   registered scheme spelled in capitals (`HTTPS://`) is counted under its
   scheme today; a case-sensitive per-scheme read would drop it, which is
-  outside this assumption (nexus-uwggq.1.5 stops for Sam if its diff shows it). Checked before the switch ships by
+  outside this assumption. Sam decided on 2026-11-16 (ask uwggq15-scheme-case,
+  option C, "Use the engine route instead") that registered schemes in any case
+  stay checked, so the `--check-references` switch (nexus-uwggq.1.5) moves to
+  Phase 2 behind an engine route that matches the scheme prefix without regard
+  to case. Checked before the switch ships by
   running the check on one fixture before and after and diffing the reports
   — **Method**: Test
 - [ ] An engine filter on `author` or on a `meta` key answers in one statement
@@ -686,8 +690,11 @@ Expected count after this phase: 21 calls.
 
 ### Phase 2: Engine routes, then client (days, with an engine release)
 
-Three routes, each a repository method, a handler case, a `/version` flag and
-engine tests against real Postgres (`CatalogBoundedReadRoutes` and its tests are
+Four routes, each a repository method, a handler case, a `/version` flag and
+engine tests against real Postgres. The fourth, added by Sam's 2026-11-16
+decision (option C), lists documents whose `source_uri` starts with a scheme
+prefix matched without regard to case; `nx doctor --check-references`
+(nexus-uwggq.1.5) switches to it, and the spike covers its statement (`CatalogBoundedReadRoutes` and its tests are
 the pattern). Sized in days because of the engine release and the paired client
 release, not because the routes are large; the estimate is mine and unmeasured.
 
@@ -878,3 +885,4 @@ the next one without the ratchet.
   only, hours) and Phase 2 (engine and client, days). Status stays draft.
 - 2026-11-16: Gate round 1 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); blob `641b2a2bd7fe`; critique `nexus_rdr/241-gate-critique-2026-11-16-r1`.
 - 2026-11-16: The acknowledged assumption on `nx doctor --check-references` corrected to match the code (standing grant 3; nexus-uwggq.1.4 golden test and its critique T2 `nexus/critique-0d91dac32-nexus-uwggq.1.4-2026-11-16-r1`): unregistered-scheme rows report "unknown", not "not stattable", and never set the exit code; the fixture holds two such rows; an upper-case registered scheme is outside the assumption.
+- 2026-11-16: Sam chose the engine route for registered schemes in any case (ask uwggq15-scheme-case, option C, superseding his earlier option A): the `--check-references` switch (nexus-uwggq.1.5) moves from Phase 1 to Phase 2, which gains a fourth route, a case-insensitive scheme-prefix list.
