@@ -361,3 +361,17 @@ def test_a_listed_directory_selects_a_path_added_or_deleted_in_it_and_not_an_edi
     (repo / "docs/a.md").unlink()
     sel = mt.select(repo, ["docs/a.md"], "base", manifest)
     assert sel.selected["tests/test_scan.py"] == "lists the directory losing docs/a.md"
+
+
+def test_the_manifest_round_trips_through_its_inverted_gzip_form_byte_for_byte(tmp_path: Path) -> None:
+    manifest = {"built_from": "abc", "tests": {
+        "tests/test_a.py": {"sha256": "1", "opened": ["docs/a.md", "src/x.py"], "statted": [], "listed": ["docs"],
+                            "prefixes": ["scripts"], "opaque": []},
+        "tests/test_b.py": {"sha256": "2", "opened": ["src/x.py"], "statted": ["README.md"], "listed": ["docs"],
+                            "prefixes": [], "opaque": ["bash x.sh"], "incomplete": "a skip"},
+    }}
+    first, second = tmp_path / "1.gz", tmp_path / "2.gz"
+    mt.write_manifest(first, manifest)
+    assert mt.load_manifest(first) == manifest
+    mt.write_manifest(second, mt.load_manifest(first))
+    assert first.read_bytes() == second.read_bytes()
