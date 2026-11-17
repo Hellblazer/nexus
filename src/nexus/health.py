@@ -10128,8 +10128,15 @@ def _check_pending_rungs() -> list[HealthResult]:
     # A rung that declined to read a managed catalog says so with the shared INTERACTIVE_REMEDY text.
     # Each with its own reason's first clause: rdr192-manifest-backfill's says whether an older completion still
     # answers the engine's reaper gate or none is recorded and the reaper stays refused.
+    # On a local engine the decline is doctor's bounded reads, not the managed rule, so the reason is left out there.
+    from nexus.upgrade_ladder.auto_guard import managed_service  # noqa: PLC0415 — deferred to avoid module-load cost
+
+    try:
+        managed = managed_service()
+    except Exception:  # noqa: BLE001 — unknown mode: names only, as before
+        managed = False
     not_checked = [
-        f"{name} ({status.pending_detail.split('; ')[0]})" for name, status in statuses
+        f"{name} ({status.pending_detail.split('; ')[0]})" if managed else name for name, status in statuses
         if not status.applicable and INTERACTIVE_REMEDY in (status.pending_detail or "")
     ]
     if not pending and not not_checked:

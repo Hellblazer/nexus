@@ -1171,6 +1171,7 @@ def test_doctor_names_the_declined_backfill_with_its_reason_and_the_interactive_
         status = tenant.rung(managed_fn=lambda: True).detect()
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry(()))
     monkeypatch.setattr("nexus.upgrade_ladder.runner.pending_rungs", lambda _reg: [(RUNG_NAME, status)])
+    monkeypatch.setattr("nexus.upgrade_ladder.auto_guard.managed_service", lambda: True)
     (row,) = health._check_pending_rungs()
     assert row.warn and not row.ok
     assert f"not checked: {RUNG_NAME} (no completion is recorded, so the engine's reaper stays refused)" in row.detail
@@ -1182,7 +1183,48 @@ def test_the_version_change_callout_names_the_declined_backfill_once_with_the_co
     tenant.record = _record("1.0.0")
     rung = tenant.rung(managed_fn=lambda: True)
     monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: (rung,))
+    monkeypatch.setattr("nexus.upgrade_ladder.auto_guard.managed_service", lambda: True)
     (line,) = upgrade_finish.pending_data_rung_callout()
     assert line.startswith(f"data rung '{RUNG_NAME}' not checked — the completion recorded at package version 1.0.0")
     assert line.endswith("run `nx upgrade` interactively")
     assert upgrade_finish.pending_data_rung_callout(upgrade_walks_ladder=True) == []
+
+
+def test_on_a_local_engine_doctor_names_a_declined_rung_without_the_managed_reason_and_the_callout_is_silent(
+    monkeypatch,
+) -> None:
+    """Under doctor's bounded reads a local engine declines too, but the session-start upgrade runs the rung there:
+    no "run interactively" line, and no reason that speaks of a managed service."""
+    reason = f"unattended `nx upgrade --auto` does not scan a managed catalog; {INTERACTIVE_REMEDY}"
+    declined = RungStatus(applicable=False, converged=False, pending_detail=reason)
+    monkeypatch.setattr("nexus.upgrade_ladder.auto_guard.managed_service", lambda: False)
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: LadderRegistry(()))
+    monkeypatch.setattr("nexus.upgrade_ladder.runner.pending_rungs", lambda _reg: [(RUNG_NAME, declined)])
+    (row,) = health._check_pending_rungs()
+    assert f"not checked: {RUNG_NAME} (each answers" in row.detail, row.detail
+
+    class _Declining:
+        name = RUNG_NAME
+
+        def detect(self) -> RungStatus:
+            return declined
+
+    monkeypatch.setattr("nexus.upgrade_ladder.registry.default_registry", lambda: (_Declining(),))
+    assert upgrade_finish.pending_data_rung_callout() == []
+
+
+class _Failing(_Dependent):
+    def detect(self) -> RungStatus:
+        raise RuntimeError("boom")
+
+
+def test_a_hard_failure_after_a_declined_rung_stays_a_failure() -> None:
+    """Only a deferral earlier in the walk softens a later failure to a deferral (an engine outage); a decline is not
+    an outage, so a failure after one is reported as the failure it is."""
+    tenant = FakeTenant({"knowledge__a": 7})
+    failing = _Failing("some-later-rung")
+    with unattended_run():
+        report = LadderRunner(LadderRegistry((tenant.rung(managed_fn=lambda: True), failing)),
+                              InMemoryCompletionLedger()).run()
+    assert [(r.name, r.outcome) for r in report.runs] == [
+        (RUNG_NAME, RungOutcome.SKIPPED_NOT_APPLICABLE), ("some-later-rung", RungOutcome.FAILED)]

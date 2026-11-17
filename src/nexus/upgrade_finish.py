@@ -3450,9 +3450,14 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     # managed catalog or table reports itself not applicable instead (an interactive `nx upgrade` still
     # scans). nexus-mjmjl: and bounded on a local engine too, as in `nx doctor`: the first command after a
     # version change must not spend minutes in one rung's dry-run scan of a large local store.
-    from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY  # noqa: PLC0415 — deferred, CLI startup cost
+    from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service  # noqa: PLC0415 — deferred, CLI startup cost
     from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
 
+    # On a local engine a decline here is the bounded reads, and the session-start upgrade runs the rung anyway.
+    try:
+        managed = managed_service()
+    except Exception:  # noqa: BLE001 — unknown mode: no declined lines
+        managed = False
     lines: list[str] = []
     for rung in rungs:
         try:
@@ -3465,7 +3470,7 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
             continue
         if not status.pending:
             if (
-                not status.applicable and not upgrade_walks_ladder
+                managed and not status.applicable and not upgrade_walks_ladder
                 and INTERACTIVE_REMEDY in (status.pending_detail or "")
             ):
                 # Declined this unattended check (a managed service): said once here, per version change, with the
