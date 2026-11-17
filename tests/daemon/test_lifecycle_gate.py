@@ -134,6 +134,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # never delivered twice; non-blocking with a budgeted wait, no lease, no
     # heartbeat, no election.
     "hooks/mailbox_drain.py",
+    # The identity token file's sibling ``<file>.lock`` (RDR-253 Step 3, nexus-hczdo.1.4):
+    # serializes the hook's and the MCP server's read-modify-write of one token file so
+    # a cross-seat switch is never overwritten. A critical section around one file;
+    # no lease, no election.
+    "identity/token_file.py",
     # The aspect validation files' sibling ``<file>.lock`` (nexus-z1d0l.1.6): serializes append and the
     # end-of-run prune of aspect_validation.jsonl / aspect_validation_failures.jsonl across concurrent
     # `nx enrich aspects --validate-sample` runs. A critical section around one file, no lease, no
