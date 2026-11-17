@@ -568,15 +568,25 @@ class TestRoleUniquenessScanTest {
                     }
                 }
             }
-            if (users.size() > 1) {
+            // nexus-f3yqd.2.16: a class that only ever takes a dedicated container (and declares nothing exclusive, so
+            // never touches the shared cluster) creates its roles on a cluster of its own, where no other class's role of
+            // that name can collide. nexus_svc as the migrating role (the single-role posture) is created that way by
+            // more than one class, each on its own container.
+            Set<String> sharing = new TreeSet<>();
+            for (String cls : users) {
+                if (!c.dedicated().contains(cls) || !c.exclusive().getOrDefault(cls, Set.of()).isEmpty()) {
+                    sharing.add(cls);
+                }
+            }
+            if (sharing.size() > 1) {
                 List<String> undeclared = new ArrayList<>();
-                for (String cls : users) {
+                for (String cls : sharing) {
                     if (!c.exclusive().getOrDefault(cls, Set.of()).contains(role)) {
                         undeclared.add(cls);
                     }
                 }
                 if (!undeclared.isEmpty()) {
-                    problems.add("role " + role + " is created by " + users + " and " + undeclared + " do not declare it "
+                    problems.add("role " + role + " is created by " + sharing + " and " + undeclared + " do not declare it "
                         + "exclusive: on the shared cluster the first creator's password and attributes win. Give each "
                         + "class its own name, or declare it in startEmptyDatabase(...) in every one");
                 }
@@ -922,6 +932,24 @@ class TestRoleUniquenessScanTest {
                 + " PgContainerHelper.createLoginRole(su, \"nexus_diag\", \"pw\", true); } }";
             assertThat(roles(fixture("A", dataMove))).as(boot).isEmpty();
         }
+    }
+
+    /** nexus-f3yqd.2.16: two classes that each take a container of their own may create the same fixed role. */
+    @Test
+    void two_classes_on_dedicated_containers_may_create_the_same_role_but_a_shared_cluster_creator_may_not_join_them() {
+        String a = "class A { void f() { PgContainerHelper.startDataMove();"
+            + " PgContainerHelper.bootstrapNonSuperuserOwner(su, \"owner_x\", \"pw\"); } }";
+        String b = "class B { void f() { PgContainerHelper.startDedicated();"
+            + " PgContainerHelper.bootstrapNonSuperuserOwner(su, \"owner_x\", \"pw\"); } }";
+        String shared1 = "class C { void f() { PgContainerHelper.bootstrapNonSuperuserOwner(su, \"owner_x\", \"pw\"); } }";
+        String shared2 = "class D { void f() { PgContainerHelper.bootstrapNonSuperuserOwner(su, \"owner_x\", \"pw\"); } }";
+        assertThat(roles(fixture("A", a, "B", b))).isEmpty();
+        assertThat(roles(fixture("A", a, "C", shared1))).as("one shared-cluster creator beside a dedicated one").isEmpty();
+        assertThat(roles(fixture("C", shared1, "D", shared2))).singleElement().asString().contains("owner_x");
+        String mixed = "class E { void f() { PgContainerHelper.startDedicated(); PgContainerHelper.startEmptyDatabase(\"other_y\");"
+            + " PgContainerHelper.bootstrapNonSuperuserOwner(su, \"owner_x\", \"pw\"); } }";
+        assertThat(roles(fixture("A", a, "E", mixed, "C", shared1))).as("a class that also uses the shared cluster still counts")
+            .singleElement().asString().contains("owner_x");
     }
 
     @Test

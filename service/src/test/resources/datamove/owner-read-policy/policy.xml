@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-246 Step 4 (nexus-f3yqd.2.16), the POLICY half of the owner-read pattern: the changeset that lets the migrating role
+    read every tenant's rows of a driving table other than nexus.chunks, so a data move can verify and finish it. THE
+    PATTERN A REAL MOVE COPIES. It follows the changeset that registers the move (register.xml here), never joins it.
+    Parameters: ${driving_schema}, ${driving_table}; a real changeset writes the two literals.
+
+    WHY ITS OWN CHANGESET. A Liquibase precondition skips its whole changeset. The guard below must skip the policy where
+    a role subject to row-level security would inherit it; if it sat on the registering changeset it would skip the new
+    shape and the nexus.data_moves INSERT as well, and the move would never be registered in the single-role posture.
+
+    THE POLICY. FOR SELECT only, USING (true), TO CURRENT_USER, which binds it to whoever runs this changeset (the
+    migrating role, the owner of the table). Permissive policies are OR-ed with tenant_isolation, so the migrating role
+    reads every tenant's rows and nothing else changes: it can still write only the rows of the tenant a session carries.
+    The name is <table>_owner_read, never tenant_isolation, the name ChunksIsolationCheck and DrivingTableIsolationCheck
+    exempt as the one policy meant to bind the service role. The same shape as vectors-029's chunks_gate_probe_owner_read.
+
+    THE GUARD (never remove it). TO CURRENT_USER is safe only while NO role that row-level security binds has the migrating
+    role's privileges. In the single-role posture the migrating role IS nexus_svc: the policy would read TO nexus_svc USING
+    (true) and the service role would read every tenant's rows of this table with no error anywhere. The same holds for any
+    login role that is a member of the migrating role and inherits it. So the changeset is skipped (onFail=MARK_RAN) when
+    nexus_svc is, or has the privileges of, the migrating role, or when any other login role that is neither SUPERUSER nor
+    BYPASSRLS has them. The predicate is vectors-029's, word for word; pg_has_role(..., 'USAGE') is the has_privs_of_role test
+    the policy engine applies, and honours a grant's INHERIT option.
+
+    WHAT SKIPPING MEANS. In the single-role posture the move is registered, the service role never gains a cross-tenant
+    read, the admin connection cannot see every row, and the move is reported blocked (MovePreflight). MARK_RAN is decided
+    once: an install that later moves to two roles keeps the move blocked until a NEW changeset adds the policy.
+
+    THE POST-CONDITION is the guard re-checked inside the changeset: the DO block RAISEs, which aborts the changeset and
+    rolls its DDL back, unless the policy names exactly the migrating role and no role the guard protects has its
+    privileges. It fires only if the precondition was removed or drifted.
+
+    WHAT THE GUARD CANNOT SEE: a membership granted after this changeset ran. DrivingTableIsolationCheck refuses boot when
+    a permissive policy other than tenant_isolation on a driving table of nexus.data_moves applies to the serving role.
+
+    Rollback drops the policy. DDL only, no row DML, so the gate's rules 1 to 3 have nothing to read here.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="owner-read-policy-1" author="nexus-f3yqd.2.16">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_catalog.pg_roles r WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE'))) OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE') AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin)</sqlCheck>
+        </preConditions>
+        <comment>Owner-read SELECT policy ${driving_table}_owner_read on ${driving_schema}.${driving_table} for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP POLICY IF EXISTS ${driving_table}_owner_read ON ${driving_schema}.${driving_table};
+CREATE POLICY ${driving_table}_owner_read ON ${driving_schema}.${driving_table}
+    FOR SELECT TO CURRENT_USER USING (true);
+
+DO $post$
+DECLARE
+    me            oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    pol_roles     oid[];
+    exposed_roles text;
+BEGIN
+    SELECT pol.polroles INTO pol_roles
+      FROM pg_catalog.pg_policy pol
+     WHERE pol.polrelid = '${driving_schema}.${driving_table}'::regclass AND pol.polname = '${driving_table}_owner_read';
+    IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+        RAISE EXCEPTION 'owner-read policy ${driving_table}_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+    END IF;
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+      FROM pg_catalog.pg_roles r
+     WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+        OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+            AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+    IF exposed_roles IS NOT NULL THEN
+        RAISE EXCEPTION 'role(s) % have the privileges of the migrating role %; the owner-read policy would apply to them and let them read every tenant''s rows of ${driving_schema}.${driving_table}', exposed_roles, current_user;
+    END IF;
+END
+$post$;
+        </sql>
+        <rollback>
+            <sql>DROP POLICY IF EXISTS ${driving_table}_owner_read ON ${driving_schema}.${driving_table}</sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

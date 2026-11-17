@@ -282,6 +282,18 @@ public final class Main {
             System.exit(1);
         }
 
+        // nexus-f3yqd.2.16 (RDR-246): the same question of every driving table a registered data move names, whose
+        // owner-read policy (a changeset of its own, vectors-029's guard) reads every tenant's rows for the migrating
+        // role. The tables come from nexus.data_moves on the ADMIN connection (the service role holds no grant on it);
+        // the policies are asked about on the SERVICE pool. See DrivingTableIsolationCheck.
+        try {
+            dev.nexus.service.db.DrivingTableIsolationCheck.verifyAtStartup(ds, adminConnection);
+        } catch (dev.nexus.service.db.DrivingTableIsolationCheck.IsolationException e) {
+            ds.close();
+            log.error("event=driving_table_isolation_check_failed error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
+
         // nexus-b1adx: the service role must not be BYPASSRLS. vectors-039-1's partition_copy_access skips BYPASSRLS
         // grantees, so such a role would get no DML on any tenant leaf or model partition made after it, and RLS
         // would not bind it. Not part of ChunksIsolationCheck, whose contract passes a BYPASSRLS role on purpose.

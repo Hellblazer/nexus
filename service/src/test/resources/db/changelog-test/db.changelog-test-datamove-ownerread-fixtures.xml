@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.16 (RDR-246 Step 4; nexus-zrcj7: no SQL strings in Java, tests included): the driving tables of
+    the owner-read policy tests, rebuilt from nothing on every run. Schema dm_ownerread, owned by the migrating role of
+    the posture under test: nexus_admin_dmlutils (DmlUtilsTestFixtures#ADMIN) where that role exists, the two-role posture,
+    and nexus_svc where it does not, the single-role one. Superuser, runAlways; run through
+    DataMoveOwnerReadPolicyIntegrationTest and DataMoveOwnerReadSingleRoleIntegrationTest. No parameter, so no
+    placeholder for RawSqlGateTest to classify.
+
+      rows, other   FORCE row-level security keyed on nexus.tenant and NO policy for the migrating role: the state
+                    forced_noread of the data-move fixtures, which the owner-read changeset
+                    (datamove/owner-read-policy/policy.xml) turns into a table a move can read. tenants default, acme and
+                    globex, 100 rows each, with the move's counter n and touched_by. nexus_svc is granted SELECT, UPDATE
+                    on both, as it is on every tenant table (a no-op where it owns them).
+      dm_ownerread_login
+                    a LOGIN role with no privilege of its own, the "another login role" of the guard's second branch
+                    (password dm_ownerread_login_pw, DataMoveOwnerReadPolicyIntegrationTest#LOGIN_PASSWORD); it is
+                    granted nothing here, the tests grant it the migrating role (datamove/owner-read-policy/membership.xml).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-ownerread-fixtures-1" author="nexus-f3yqd.2.16" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+DROP SCHEMA IF EXISTS dm_ownerread CASCADE;
+CREATE SCHEMA dm_ownerread;
+
+DO $$
+DECLARE
+    t     text;
+    own   text := CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_admin_dmlutils')
+                       THEN 'nexus_admin_dmlutils' ELSE 'nexus_svc' END;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dm_ownerread_login') THEN
+        CREATE ROLE dm_ownerread_login LOGIN PASSWORD 'dm_ownerread_login_pw' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    END IF;
+    FOREACH t IN ARRAY ARRAY['rows', 'other'] LOOP
+        EXECUTE format('CREATE TABLE dm_ownerread.%I (tenant_id text NOT NULL, id bigint NOT NULL, payload text, n integer NOT NULL DEFAULT 0, touched_by text, PRIMARY KEY (tenant_id, id))', t);
+        EXECUTE format('ALTER TABLE dm_ownerread.%I ENABLE ROW LEVEL SECURITY', t);
+        EXECUTE format('ALTER TABLE dm_ownerread.%I FORCE ROW LEVEL SECURITY', t);
+        EXECUTE format('CREATE POLICY tenant_isolation ON dm_ownerread.%I USING (tenant_id = current_setting(%L, true)) WITH CHECK (tenant_id = current_setting(%L, true))',
+                       t, 'nexus.tenant', 'nexus.tenant');
+        EXECUTE format('INSERT INTO dm_ownerread.%I (tenant_id, id, payload) SELECT x, g, ''p'' || g FROM unnest(ARRAY[''default'', ''acme'', ''globex'']) x, generate_series(1, 100) g', t);
+        EXECUTE format('ALTER TABLE dm_ownerread.%I OWNER TO %I', t, own);
+        EXECUTE format('GRANT SELECT, UPDATE ON dm_ownerread.%I TO nexus_svc', t);
+    END LOOP;
+    EXECUTE format('ALTER SCHEMA dm_ownerread OWNER TO %I', own);
+END $$;
+GRANT USAGE ON SCHEMA dm_ownerread TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
