@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import pytest
+
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL = REPO_ROOT / ".claude" / "skills" / "release" / "SKILL.md"
