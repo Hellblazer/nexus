@@ -51,9 +51,9 @@ only the companies of the top six vector chunks. Code read at sha 1ecf3ca6d
 confirms this: the boundary's input is the trailing operator run's hydrated
 inputs, and the final run's anchor scan reports `anchors_scanned=6`.
 
-The number 6 has an older origin. RDR-097 RF-6 split a 10-chunk generator
-context 60/40 between a vector stream and a graph stream, to keep the generator
-precise. RDR-147's resolution branch reused the 6 without sizing it for its own
+The number 6 has an older origin. RDR-097 set the defaults 6 and 4 as "a
+60/40 split per RF-6", RF-6 dividing the model's input budget between a vector
+stream and a graph stream (rdr-097 lines 81 and 107; 250-research-10). RDR-147's resolution branch reused the 6 without sizing it for its own
 purpose. No record sizes the anchor set.
 
 Measured on the final RDR-147 run (both runs, issue5): recall 0.407, precision
@@ -234,7 +234,8 @@ Sam chose 2026-11-15 (ask `rdr250-lever`, option 2): a budget of 20 as plan 10's
 default now, then Option E (anchor scan over all evidence) with a precision filter.
 The record supports two separate levers, one per gap; this choice is Gap 1's.
 
-The budget of 20 shipped as plan 10's default in 4a25a7c5a (Phase 1 Step 1). It
+The budget of 20 shipped as the default of plan 10 and of plan 8
+(`entity-resolution`) in 4a25a7c5a (Phase 1 Step 1). It
 needed no code: measured at F1 0.764 with precision 0.967, inside the gate
 (250-research-2, 250-research-3).
 
@@ -349,7 +350,7 @@ keep their meaning (the anchors only), so existing readers are unchanged.
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | Lexical leg for hop 1 (Option A) | `search --lexical`, the engine's FTS and trigram union (shared probe from nexus-bbtc2) | Reuse: a flag exists; inside plan 10 at budget 20 it measured precision 0.853 (250-research-2) |
-| Anchor budget of 20 (Step 1) | Plan 10 binding `vector_budget_chunks` | Reuse: default changed to 20 in 4a25a7c5a |
+| Anchor budget of 20 (Step 1) | Plan 10 and plan 8 binding `vector_budget_chunks` | Reuse: both defaults changed to 20 in 4a25a7c5a |
 | Key scan over the search pool (Option E) | `coverage_ledger.py` `_resolve_anchors`, `find_key_tokens` | Extend: scan the pool's chunks as well as the anchors |
 | Pool chunk texts (Option E) | `BoundaryView.fetch`, the repair's accounted chunk fetch | Reuse |
 | Precision filter (Option E) | `CoverageBoundary._assess`, the boundary's assessment pass, and its `supports` records | Reuse: one assessment pass, one call per pack, over candidate-key chunks only |
@@ -460,7 +461,7 @@ passed the pre-registered bar (250-research-8).
 ### Consequences
 
 - Option E changes a coverage boundary RDR-232 owns, and it needs a precision filter to meet the gate.
-- The budget of 20, now plan 10's default (4a25a7c5a), widens the rank and generate context and the assessor's packs for every `hybrid-factual-lookup` call. Cost per call measured 0.03 to 0.17 USD, not materially above budget 6 (T2 `nexus_rdr/io7tw-paid-mvv-2026-11-15`, Findings).
+- The budget of 20, now the default of plan 10 and plan 8 (4a25a7c5a), widens the rank and generate context and the assessor's packs for every `hybrid-factual-lookup` and `entity-resolution` call that does not bind the budget. Cost per call measured 0.03 to 0.17 USD, not materially above budget 6 (T2 `nexus_rdr/io7tw-paid-mvv-2026-11-15`, Findings).
 - The filter adds one assessment call per pack of candidate-key chunks, only when the switch is on and the pool has candidate keys.
 
 ### Risks and Mitigations
@@ -529,9 +530,9 @@ as changing promotion criteria.
 
 ### Phase 1: Code Implementation
 
-#### Step 1: Plan 10's `vector_budget_chunks` default from 6 to 20
+#### Step 1: The `vector_budget_chunks` default of plans 10 and 8 from 6 to 20
 
-Shipped as 4a25a7c5a. `conexus/plans/builtin/hybrid-factual-lookup.yml`, no code. Installs get it at their next `nx plan reseed`.
+Shipped as 4a25a7c5a: `conexus/plans/builtin/hybrid-factual-lookup.yml` and `entity-resolution.yml`, plus a test, no code. Installs get it at their next `nx plan reseed`.
 
 #### Step 2: The pool key scan, behind the switch
 
@@ -601,7 +602,7 @@ for the control; the filter's assessment call took 5 to 13 s of that
 
 - **Contradictions**: The Approach, Technical Design and Implementation Plan name one design (Option E with a support-verdict filter, behind a switch). Option A's earlier "unmeasured" lines were updated to the paid measurement.
 - **Assumptions**: The anchor-key assumption is verified at N=20 (250-research-2, 250-research-3). The filter's precision was observed once in the MVV, unreplicated (250-research-5, 250-research-8). The unfiltered Option E projection (250-research-4) stays assumed; it is the reason the filter is part of the design, and no number in the design depends on it. The switch stays off by default.
-- **Scope**: Gap 1 only. Gap 2 (Options A and B) and the resolution branch's entry variance are named and left out.
+- **Scope**: Gap 1 only; Step 1 moved plan 8's default with plan 10's, on the same HERB evidence. Gap 2 (Options A and B) and the resolution branch's entry variance are named and left out.
 - **Cross-cutting**: The change sits in the coverage boundary that RDR-232 owns. RDR-232 bounds the boundary to "at most one repair and one terminal reduction" (rdr-232 line 2058), and records a repair as costing "about 5 search calls and one reassessment call" (line 603). Under the switch, the pool filter is one more assessment pass inside that one repair: the MVV saw 3 `operator_check` calls per issue5 answer with the pool on against 2 off (250-research-9); a key8 row whose pool phase made no filter call had none extra. A reader that treats two assessment passes per run as fixed sees 3 under the switch. The change reuses the boundary's fetch and assessment calls, adds no engine surface, and leaves `anchors_scanned` and the switch-off path unchanged.
 - **Proportionality**: One switch, one fetch and one assessment call per pack, no new dependency. The paid MVV is Sam's go.
 
@@ -610,7 +611,7 @@ for the control; the filter's assessment call took 5 to 13 s of that
 1. Answered 2026-11-15 (option 2): budget 20 as the default now, then Option E with a precision filter. Which lever or levers to build. Options E and B need code. Option A is a flag, and it fails the precision gate without a filter. A budget of 20 needs no code and passes the gate on issue5 (measured, one run).
 2. Answered 2026-11-15: the paid run was made, for 3.37 USD (Key Discoveries). The budget-20 repeat was run the same day (three runs, Key Discoveries).
 3. Answered 2026-11-16: the held-out set run was key8 (8 questions, frozen by hash in 250-research-7), not the RDR-147 20-question set, which has no scorer in the harness.
-4. Answered 2026-11-15: the plan 10 default changes (option 2).
+4. Answered 2026-11-15: the plan 10 default changes (option 2); 4a25a7c5a moved plan 8's with it (250-research-10).
 5. Answered 2026-11-16 (signed as written, 250-research-7; the MVV passed, 250-research-8). The MVV's pass criteria, set before the run: precision at or above 0.95 over the answered issue5 rows, F1 above the budget-20 measurement of 0.764, join completeness 1.0, and the held-out set reported. F1 rather than recall alone, so a widened pool cannot pass by naming more companies.
 6. The resolution branch's entry variance (run d, 250-research-3; in the MVV, 6 of 8 key8 rows did not enter it) is unowned: no bead tracks it. It is outside this RDR. Whether it gets a bead is Sam's call.
 
@@ -635,3 +636,4 @@ for the control; the filter's assessment call took 5 to 13 s of that
 - 2026-11-16: The MVV ran (2.65 USD) and passed the pre-registered bar: issue5 .827/.967/.878, join completeness 1.0, against a same-sandbox control of .667/.967/.764. Key Discoveries, Critical Assumptions, Prerequisites, Performance Expectations, Risks (answer cost) and Open Question 5 record it.
 - 2026-11-17: Gate round 1 — BLOCKED (1 Critical, 5 Significant, 0 ship-blocker(s)); blob `9049a3d75ef3`; critique `nexus_rdr/250-gate-critique-2026-11-17-r1`.
 - 2026-11-17: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); blob `238fe91bba26`; critique `nexus_rdr/250-gate-critique-2026-11-17-r2`.
+- 2026-11-17: Accepted (Sam). Grant 3 wording amend to match the reviewed build: Step 1 and its sites name plan 8 with plan 10, and the Problem Statement states RDR-097's 6/4 origin in RDR-097's words.
