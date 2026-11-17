@@ -1172,7 +1172,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return cannot_say({404: SensitiveListUnavailable.UNSUPPORTED, 503: SensitiveListUnavailable.TIMEOUT}
                               .get(status, SensitiveListUnavailable.FAILED))
         except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports it unavailable
-            _log.info("http_catalog_client.sensitive_documents_unavailable", error=scrub_transport_error(exc, self._base_url))
+            _log.info("http_catalog_client.sensitive_documents_unavailable", error=scrub_transport_error(exc, getattr(self, "_base_url", "")))
             return cannot_say(SensitiveListUnavailable.FAILED)
         answer = sensitive_answer(result)
         if answer is None:
