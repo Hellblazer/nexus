@@ -634,3 +634,4 @@ for the control; the filter's assessment call took 5 to 13 s of that
 - 2026-11-16: Sam chose to build and measure before the gate. Technical Design follows the build after review round 1: two-phase resolution (anchors first, then the pool within its own bounds), counted filter calls and cost, partial verdicts, cap_full and the other skip reasons.
 - 2026-11-16: The MVV ran (2.65 USD) and passed the pre-registered bar: issue5 .827/.967/.878, join completeness 1.0, against a same-sandbox control of .667/.967/.764. Key Discoveries, Critical Assumptions, Prerequisites, Performance Expectations, Risks (answer cost) and Open Question 5 record it.
 - 2026-11-17: Gate round 1 — BLOCKED (1 Critical, 5 Significant, 0 ship-blocker(s)); blob `9049a3d75ef3`; critique `nexus_rdr/250-gate-critique-2026-11-17-r1`.
+- 2026-11-17: Gate round 2 — PASSED (0 Critical, 4 Significant, 0 ship-blocker(s)); blob `238fe91bba26`; critique `nexus_rdr/250-gate-critique-2026-11-17-r2`.
