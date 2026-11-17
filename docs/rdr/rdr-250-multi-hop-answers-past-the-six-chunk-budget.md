@@ -2,7 +2,8 @@
 title: "Multi-hop answers read past the six-chunk generator budget"
 id: RDR-250
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-17
 priority: low
 author: Hal Hildebrand
 reviewed-by: self
@@ -238,10 +239,10 @@ assumption, with no run. **Code-read** means read from source at the named sha.
 
 - [x] The companies of the top N anchors are the companies the answer names, at N above 6. Status: Verified at N=20 on issue5 (paid run, 2026-11-15); N=40 and above unmeasured. Method: Spike.
 - [x] Generation names exactly the anchor-key companies when N is above 6. Status: Verified at N=20 in 19 of 20 answers over four runs; the one miss did not enter the resolution branch and named ids. Method: Spike.
-- [ ] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Observed once, unreplicated, so not checked: in one MVV pass on issue5 the filter kept 4 of 4 gold keys on 2 of 5 questions, and pooled precision was .950, at the bar (250-research-5, 250-research-8, 250-research-9). Replication is not measured: the budget-20 repeat (250-research-3) predates the filter, and its variance was the resolution branch's entry (250-research-10). Method: Spike.
-- [ ] Option E's gain holds beyond the five issue questions. Status: Unverified. The held-out key8 run kept no pool key and had no switch-off control (250-research-9), so it says nothing either way; the turn-on criteria (250-turn-on-criteria) require replicates and a set outside HERB. Method: Spike.
-- [ ] Option A's gain is not specific to HERB's template overlap. Status: Unverified. This RDR does not claim it generalises. Method: Spike on a second corpus.
-- [ ] Option B assumes entity keys sit in retrievable announcement chunks. Status: Unverified in general; true on HERB. Method: Spike.
+- [deferred: nexus-w8d30] A precision filter keeps precision at or above 0.95 on the widened pool. Status: Observed once, unreplicated, so not checked: in one MVV pass on issue5 the filter kept 4 of 4 gold keys on 2 of 5 questions, and pooled precision was .950, at the bar (250-research-5, 250-research-8, 250-research-9). Replication is not measured: the budget-20 repeat (250-research-3) predates the filter, and its variance was the resolution branch's entry (250-research-10). Method: Spike.
+- [deferred: nexus-w8d30] Option E's gain holds beyond the five issue questions. Status: Unverified. The held-out key8 run kept no pool key and had no switch-off control (250-research-9), so it says nothing either way; the turn-on criteria (250-turn-on-criteria) require replicates and a set outside HERB. Method: Spike.
+- [deferred: nexus-io7tw] Option A's gain is not specific to HERB's template overlap. Status: Unverified. This RDR does not claim it generalises. Method: Spike on a second corpus.
+- [deferred: nexus-io7tw] Option B assumes entity keys sit in retrievable announcement chunks. Status: Unverified in general; true on HERB. Method: Spike.
 
 ## Proposed Solution
 
@@ -640,7 +641,7 @@ separately: the run records do not mark which assessment call was the filter's.
 4. Answered 2026-11-15: the plan 10 default changes (option 2); 4a25a7c5a moved plan 8's with it (250-research-10).
 5. Answered 2026-11-16 (signed as written, 250-research-7; the MVV passed, 250-research-8). The MVV's pass criteria, set before the run: precision at or above 0.95 over the answered issue5 rows, F1 above the budget-20 measurement of 0.764, join completeness 1.0, and the held-out set reported. F1 rather than recall alone, so a widened pool cannot pass by naming more companies.
 6. The resolution branch's entry variance (run d, 250-research-3; in the MVV, 6 of 8 key8 rows did not enter it) is outside this RDR. It is tracked as a comment on bead nexus-io7tw (halcyon, 2026-11-17: no new bead during the burn-down).
-7. Turning the switch on by default. Answered 2026-11-17: Sam adopted five turn-on criteria and funded one HERB measurement window (T2 `nexus_rdr/250-turn-on-criteria`, pre-registered before any run). The decision is halcyon's to carry to Sam; the measurement has not yet run (the first attempt stopped before any call). The default flip is a separate change.
+7. Turning the switch on by default. Answered 2026-11-17: Sam adopted five turn-on criteria and funded one HERB measurement window (T2 `nexus_rdr/250-turn-on-criteria`, pre-registered before any run). The decision is halcyon's to carry to Sam, tracked as bead nexus-w8d30 (Sam authorized it 2026-11-17); the measurement runs under that bead. The default flip is a separate change.
 
 ## References
 
