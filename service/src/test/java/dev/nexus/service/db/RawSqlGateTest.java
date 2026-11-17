@@ -449,6 +449,15 @@ class RawSqlGateTest {
             // identifier, key or prefix is concatenated in Java. Plain JDBC Statement.execute, as PciBuilderSession's
             // does. Single-homed: AdminDdlSession#ddl, for the chunk constraints and the catalog TTL CHECK alike.
             "runDdl", Map.of(".execute(sql)", 1))),
+        Map.entry("MoveSql.java", Map.of(
+            // SANCTIONED RAW (RDR-246, nexus-f3yqd.2.14): a data move's verification query and on_complete are SQL text
+            // that a changeset registered in nexus.data_moves (the registry's own columns); the worker runs them and
+            // concatenates nothing into them. The verification is a SELECT with the tenant as its one bind parameter and
+            // runs in a READ ONLY transaction; on_complete is DDL (VALIDATE CONSTRAINT, DROP COLUMN, renames) that has no
+            // typed jOOQ form and runs in the one transaction that also sets completed_at. Single-homed: MoveSql, called
+            // from VerifyingFinisher only.
+            "countRows", Map.of(".prepareStatement(sql)", 1),
+            "runOnComplete", Map.of(".execute(sql)", 1))),
         Map.entry("PgContainerHelper.java", Map.of(
             // SANCTIONED RAW (nexus-cbo4a batch 10): replayPart is the one site of the changeset-replay idiom
             // (PgContainerHelper#replayChangeset / #replayChangesetRollback). It executes ONE product changeset's

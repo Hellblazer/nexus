@@ -1,0 +1,1 @@
+ALTER TABLE dm_test.tenant_plain VALIDATE CONSTRAINT tenant_plain_new_shape

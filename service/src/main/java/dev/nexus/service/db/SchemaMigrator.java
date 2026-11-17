@@ -889,14 +889,6 @@ public final class SchemaMigrator {
     }
 
     /**
-     * The {@code application_name} prefix of the per-collection index builder's backend (RDR-227). Equal to
-     * {@code PciBuilderSession.APPLICATION_NAME_PREFIX}; held here too because {@code db} does not depend on
-     * {@code vectors}, and {@code PciBuilderSessionIntegrationTest}/{@code PciBuilderTerminationIntegrationTest}
-     * pin the two together through the real backend's name.
-     */
-    static final String PCI_BUILDER_APPLICATION_NAME_PREFIX = "nexus-pci-builder-";
-
-    /**
      * RDR-227 Migrations (nexus-43ulx.17): end every per-collection index builder backend in this database. A walk
      * that alters a leaf queues behind an in-flight {@code CREATE INDEX CONCURRENTLY}, and the build waits for the
      * walk's transactions in turn; ending the build's session settles it. Terminate, never cancel: a cancel ends the
@@ -923,22 +915,7 @@ public final class SchemaMigrator {
      * @param why the {@code reason=...} fields of the log line
      */
     private static void terminatePciBuilders(Connection conn, String why) {
-        var pid = DSL.field(DSL.name("pid"), Integer.class);
-        try {
-            int terminated = 0;
-            for (Boolean ended : DSL.using(conn, SQLDialect.POSTGRES)
-                    .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
-                    .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                    .where(pciBuilderBackends())
-                    .fetch(0, Boolean.class)) {
-                if (Boolean.TRUE.equals(ended)) {
-                    terminated++;
-                }
-            }
-            log.info("event=pci_builders_terminated count={} {}", terminated, why);
-        } catch (DataAccessException e) {
-            log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
-        }
+        PciBuilders.terminate(DSL.using(conn, SQLDialect.POSTGRES), why);
     }
 
     /**
@@ -974,11 +951,7 @@ public final class SchemaMigrator {
     /** The walk has only runAlways (or self-retrying) work: say how many builder backends it leaves running, and what it let pass. */
     private static void logPciBuildersKept(Connection conn, List<ChangeSet> retrying) {
         try {
-            Integer count = DSL.using(conn, SQLDialect.POSTGRES)
-                .selectCount()
-                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                .where(pciBuilderBackends())
-                .fetchOne(0, Integer.class);
+            int count = PciBuilders.count(DSL.using(conn, SQLDialect.POSTGRES));
             log.info("event=pci_builders_kept count={} reason=only_run_always_pending retrying={}", count, retrying.size());
             for (ChangeSet cs : retrying) {
                 log.info("event=pci_build_kept_for_retrying id={} reason=self_retrying_precondition",
@@ -987,15 +960,6 @@ public final class SchemaMigrator {
         } catch (DataAccessException e) {
             log.warn("event=pci_builders_count_failed cause=\"{}\"", e.toString());
         }
-    }
-
-    /** Builder-named backends of this database other than this session. */
-    private static org.jooq.Condition pciBuilderBackends() {
-        var applicationName = DSL.field(DSL.name("application_name"), String.class);
-        var datname = DSL.field(DSL.name("datname"), String.class);
-        return applicationName.startsWith(PCI_BUILDER_APPLICATION_NAME_PREFIX)
-            .and(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
-            .and(datname.eq(DSL.function("current_database", SQLDataType.VARCHAR)));
     }
 
     /**

@@ -153,7 +153,7 @@ public final class DataMoveWorker implements AutoCloseable {
 
     /**
      * The worker an engine boots with: system clock, the in-memory {@link MoveStates} the doctor line reads, and the
-     * pass-and-stop failure handling and verification the later beads replace.
+     * pass-and-stop failure handling the failure-class bead replaces, and the verifying finisher.
      *
      * @param engineApplicationName the engine pool's per-boot application name ({@code BackendReaper.newApplicationName});
      *                              its nonce names this worker's connections
@@ -165,7 +165,7 @@ public final class DataMoveWorker implements AutoCloseable {
                                         String engineApplicationName, boolean singletonLockHeld) {
         String nonce = BackendReaper.bootNonce(engineApplicationName);
         return new DataMoveWorker(admin, installer, settings, APPLICATION_NAME_PREFIX + nonce, Clock.systemUTC(),
-            new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS, MoveFinisher.RUNS_ONLY, singletonLockHeld);
+            new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher(), singletonLockHeld);
     }
 
     /** The worker's in-memory view of its moves. */
@@ -418,10 +418,18 @@ public final class DataMoveWorker implements AutoCloseable {
      */
     private boolean fail(DataMove move, DSLContext ctx, FailureHandler.Stage stage, String runLabel, String schema,
                          String table, String tenant, long errorMark, SQLException raised, String detail) {
+        return report(new FailureHandler.Failure(move, stage, runLabel, schema, table, tenant, errorMark, raised, detail,
+            ctx));
+    }
+
+    /** {@link #fail} for a failure that is already built (the finisher's). */
+    private boolean report(FailureHandler.Failure failure) {
+        DataMove move = failure.move();
+        FailureHandler.Stage stage = failure.stage();
+        String detail = failure.detail();
         FailureHandler.Disposition d;
         try {
-            d = failures.onFailure(new FailureHandler.Failure(move, stage, runLabel, schema, table, tenant, errorMark,
-                raised, detail, ctx));
+            d = failures.onFailure(failure);
         } catch (RuntimeException e) {
             d = FailureHandler.Disposition.blocked(detail + " (the failure handler failed: "
                 + FailureHandler.oneLine(e.toString()) + ")");
@@ -490,12 +498,18 @@ public final class DataMoveWorker implements AutoCloseable {
     }
 
     private void finish(DataMove move, List<String> tenants, DSLContext ctx) {
+        if (stopped) {   // the runs are complete and the next boot finds them so: nothing starts after a stop
+            return;
+        }
         MoveFinisher.Result result = finisher.finish(new MoveFinisher.Context(move, tenants, ctx, admin, applicationName));
         switch (result.outcome()) {
             case COMPLETED -> states.forget(move.label());
             case FAILED -> states.failed(move, result.reason());
             case BLOCKED -> states.blocked(move, result.reason());
             case LEFT_OPEN -> states.runsComplete(move);
+            case REPORT -> report(result.failure());
+            case PAUSED -> states.paused(result.move());
+            case GONE -> states.forget(move.label());
         }
     }
 

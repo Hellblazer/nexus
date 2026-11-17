@@ -112,11 +112,26 @@ final class CallConnection implements AutoCloseable {
      */
     void clearTenant() {
         setTenantSetting(null);
-        String left = ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR,
-            DSL.val(TenantScope.DEFAULT_TENANT_GUC), DSL.inline(true))).fetchOne(0, String.class);
+        String left = tenantSetting();
         if (left != null && !left.isEmpty()) {
             throw new IllegalStateException("the call connection still carries nexus.tenant after RESET");
         }
+    }
+
+    /** {@code current_setting('nexus.tenant', true)}: null or empty when the session carries no tenant. */
+    String tenantSetting() {
+        return ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR,
+            DSL.val(TenantScope.DEFAULT_TENANT_GUC), DSL.inline(true))).fetchOne(0, String.class);
+    }
+
+    /** The raw connection, for a statement the typed routine does not cover (a verification run, {@link MoveSql}). */
+    Connection connection() {
+        return conn;
+    }
+
+    /** The jOOQ context on this connection (autocommit, unless the caller has begun a transaction on {@link #connection}). */
+    DSLContext ctx() {
+        return ctx;
     }
 
     private void setTenantSetting(String value) {

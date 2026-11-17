@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.14: the new shape's CHECK on dm_test.tenant_plain, added NOT VALID (old-shape rows may stay) so a move's
+    on_complete can VALIDATE it once the move is verified. Superuser, runAlways. Run through
+    DataMoveTestFixtures#addNewShapeCheck, after the fixtures are rebuilt.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-new-shape-check-1" author="nexus-f3yqd.2.14" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE dm_test.tenant_plain ADD CONSTRAINT tenant_plain_new_shape CHECK (n = 1) NOT VALID;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

@@ -29,6 +29,24 @@ public interface FailureHandler {
         CANCELLED,
         /** A CALL returned and the run is neither complete nor cancelled. */
         INCOMPLETE,
+        /**
+         * A verification run could not be completed (nexus-f3yqd.2.14): the query raised ({@link Failure#raised} is what it
+         * raised, 57014 for {@code statement_timeout_ms}), or a connection it needs could not be shown clean
+         * ({@code raised} null, {@link Failure#detail} says why). {@link Failure#tenant} names the tenant of the run, or
+         * is null for the table-wide run.
+         */
+        VERIFICATION,
+        /**
+         * Every verification ran and at least one returned rows (nexus-f3yqd.2.14): old-shape rows remain.
+         * {@link Failure#raised} is null and {@link Failure#detail} carries the count per tenant and table-wide.
+         */
+        VERIFICATION_NONEMPTY,
+        /**
+         * {@code on_complete} and the {@code completed_at} UPDATE ran in one transaction and it failed (nexus-f3yqd.2.14):
+         * {@link Failure#raised} is what raised (57014 for {@code statement_timeout_ms}, 55P03 for its {@code lock_timeout}),
+         * and neither took effect.
+         */
+        ON_COMPLETE,
         /** Anything else the pass did not expect (a surprise from a query, say). */
         PASS
     }

@@ -143,6 +143,12 @@ abstract class DataMoveIntegrationBase {
         DataMoveTestFixtures.register(ctx(), label, table, chunkSize, sleepMs);
     }
 
+    void register(String label, String table, int chunkSize, int sleepMs, String supersedes, String templateResource,
+                  String verificationResource, int statementTimeoutMs, String onCompleteResource) {
+        DataMoveTestFixtures.register(ctx(), label, table, chunkSize, sleepMs, supersedes, templateResource,
+            verificationResource, statementTimeoutMs, onCompleteResource);
+    }
+
     int countWhere(String table, Condition where) {
         return ctx().fetchCount(table("dm_test", table), where);
     }
@@ -169,6 +175,33 @@ abstract class DataMoveIntegrationBase {
 
     DataMoveRuns.Progress progress(String label) {
         return DataMoveRuns.progress(ctx(), label);
+    }
+
+    static final Field<String> LABEL = DSL.field(DSL.name("label"), String.class);
+    static final Field<java.time.OffsetDateTime> COMPLETED_AT =
+        DSL.field(DSL.name("completed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE);
+
+    /** {@code completed_at} of the registered move, or null while it is open. */
+    java.time.OffsetDateTime completedAt(String label) {
+        return ctx().select(COMPLETED_AT).from(table("nexus", "data_moves")).where(LABEL.eq(label)).fetchOne(COMPLETED_AT);
+    }
+
+    /** The runs of {@code label} done by a worker that stops there (no finisher): the state the finish starts from. */
+    void runsOnly(String label) {
+        assertThat(worker(installed(), null).runCycle()).isEqualTo(1);
+        assertThat(completedAt(label)).as("no completion without a finisher").isNull();
+    }
+
+    /** The finish of {@code label} by {@code finisher}, on an admin session of the pass, as the worker calls it. */
+    MoveFinisher.Result finish(VerifyingFinisher finisher, String label, String table, List<String> tenants) {
+        DataMove move = DataMoveRegistry.reload(ctx(), label).orElseThrow();
+        try (var session = adminSession(table)) {
+            return finisher.finish(new MoveFinisher.Context(move, tenants, session.ctx(), adminConnection, WORKER_NAME));
+        }
+    }
+
+    MoveFinisher.Result finish(String label, String table, List<String> tenants) {
+        return finish(new VerifyingFinisher(), label, table, tenants);
     }
 
     /**

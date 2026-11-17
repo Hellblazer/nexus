@@ -45,6 +45,28 @@ final class DataMoveTestFixtures {
         run(su, "drop-library-roles");
     }
 
+    /** {@code dm_test.tenant_plain} gains {@code CHECK (n = 1) NOT VALID}: what a move's on_complete VALIDATEs. */
+    static void addNewShapeCheck(Connection su) throws Exception {
+        run(su, "new-shape-check");
+    }
+
+    /**
+     * One walk of the changeset that drops {@code dm_test.tenant_plain.touched_by} behind a precondition on the
+     * completion of the move {@code oc-validate} ({@code onFail="CONTINUE"}); the walks share one changelog table.
+     */
+    static void walkGatedDrop(Connection su) throws Exception {
+        run(su, "gated-drop");
+    }
+
+    /** A role-level {@code nexus.tenant} on the migrating role: its next session carries a tenant. */
+    static void setAdminTenant(Connection su) throws Exception {
+        run(su, "admin-tenant-set");
+    }
+
+    static void resetAdminTenant(Connection su) throws Exception {
+        run(su, "admin-tenant-reset");
+    }
+
     static void holdWorkerSlots(Connection su) throws Exception {
         run(su, "hold-slots");
     }
@@ -73,15 +95,26 @@ final class DataMoveTestFixtures {
     /** As the shorter form, naming the move it supersedes (or none) and the template resource. */
     static void register(DSLContext ctx, String label, String table, int chunkSize, int sleepMs, String supersedes,
                          String templateResource) {
+        register(ctx, label, table, chunkSize, sleepMs, supersedes, templateResource, "verification.sql", 60_000, null);
+    }
+
+    /**
+     * Registers a move with its own verification and {@code on_complete} (resource names; null for no {@code on_complete})
+     * and {@code statement_timeout_ms}.
+     */
+    static void register(DSLContext ctx, String label, String table, int chunkSize, int sleepMs, String supersedes,
+                         String templateResource, String verificationResource, int statementTimeoutMs,
+                         String onCompleteResource) {
         ctx.insertInto(DSL.table(DSL.name("nexus", "data_moves")))
             .columns(DSL.field(DSL.name("label"), String.class), DSL.field(DSL.name("template"), String.class),
                 DSL.field(DSL.name("driving_schema"), String.class), DSL.field(DSL.name("driving_table"), String.class),
                 DSL.field(DSL.name("chunk_size"), Integer.class), DSL.field(DSL.name("sleep_ms"), Integer.class),
                 DSL.field(DSL.name("statement_timeout_ms"), Integer.class),
                 DSL.field(DSL.name("verification"), String.class), DSL.field(DSL.name("changeset_id"), String.class),
-                DSL.field(DSL.name("supersedes"), String.class))
-            .values(label, resource(templateResource), "dm_test", table, chunkSize, sleepMs, 60_000,
-                resource("verification.sql"), "test-" + label, supersedes)
+                DSL.field(DSL.name("supersedes"), String.class), DSL.field(DSL.name("on_complete"), String.class))
+            .values(label, resource(templateResource), "dm_test", table, chunkSize, sleepMs, statementTimeoutMs,
+                resource(verificationResource), "test-" + label, supersedes,
+                onCompleteResource == null ? null : resource(onCompleteResource))
             .execute();
     }
 

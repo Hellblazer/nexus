@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.14: a role-level nexus.tenant on the migrating role, so a fresh session of it carries a tenant before any
+    statement runs (the case the table-wide verification's check exists for). Superuser, runAlways. Undone by
+    db.changelog-test-datamove-admin-tenant-reset.xml; run through DataMoveTestFixtures#setAdminTenant.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-admin-tenant-set-1" author="nexus-f3yqd.2.14" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+ALTER ROLE nexus_admin_dmlutils SET nexus.tenant = 'acme';
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

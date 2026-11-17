@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.14: the "later changeset" of RDR-246, Finishing a move, on a table outside the chunk family: it drops the
+    old column of dm_test.tenant_plain, behind a precondition on the completion of the move labelled oc-validate with
+    onFail="CONTINUE", so it is skipped (and left unrecorded) on every walk until that move's completed_at is set, then
+    applies. Not runAlways: it is recorded when it applies. Superuser; run through DataMoveTestFixtures#walkGatedDrop under
+    one fixed databasechangelog table, so the second walk sees the first walk's (absent) record.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-gated-drop-1" author="nexus-f3yqd.2.14">
+        <preConditions onFail="CONTINUE">
+            <sqlCheck expectedResult="1">
+                SELECT count(*) FROM nexus.data_moves WHERE label = 'oc-validate' AND completed_at IS NOT NULL
+            </sqlCheck>
+        </preConditions>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE dm_test.tenant_plain DROP COLUMN touched_by;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
