@@ -514,8 +514,7 @@ retried after the move's backoff with the move `blocked:`: no free slot; a
 missing install or role; an admin connection that cannot see every row; a
 verification run or `on_complete` that hits `statement_timeout_ms`, or an
 `on_complete` that hits its `lock_timeout` (SQLSTATE 55P03); a lost connection
-or a stopped engine; a CALL that returns with its run neither completed nor
-cancelled, which the next pass resumes;
+or a stopped engine;
 a chunk error dml_utils recorded with SQLSTATE 40001 (serialization), 40P01
 (deadlock), 55P03 (lock not available) or 57014 (statement cancelled), which
 live writers cause, or in class 53 (insufficient resources) or 57P01, 57P02
@@ -1328,4 +1327,4 @@ the first registered move.
 - 2026-11-16: per-leaf fix check passed (round 2: two of three critics PASS, no counted defect); its findings applied: the four-column Critical Assumption retargeted to a plain leaf, the assumption count (seven of ten, three open), the CHECK count, the `error_id` mark on a run with no error rows, the leaf list read as `nexus_admin` once per tenant per pass, and the new-leaf test scenario.
 - 2026-11-16: Sam approved the amendment (the retry, pause and cancelled-run rule; recorded and raised SQLSTATE classes; per-leaf runs on `nexus.chunks`; the registry access contract) into the accepted RDR, "Approve as written", asked in wren's session after halcyon's check that grant 3 does not cover new design.
 - 2026-11-16: Install sequence step 2 names where the install runs (inside SchemaMigrator.migrate, under the migration lock, after the index-builder decision), the SET-ROLE precondition, the per-walk Database, the lock_timeout and the finally; step 3 lists the failure kinds. Wording matched to the reviewed code of nexus-f3yqd.2.11.
-- 2026-11-16: worker wording to nexus-f3yqd.2.13's reviewed code (grant 3): a table is tenant-scoped when it has a tenant column and row-level security on, FORCE or not, since `dml_utils_owner`'s boundary scan is policy-bound even where the owning admin is exempt; `requireUnrestrictedView` applies only where row security can hide rows from the admin; the install check reads `pg_proc`; a CALL that returns with the run neither completed nor cancelled is transient; worker start ends another boot's `nexus-data-move-` coordinators, only under the singleton lock; the row is re-read before each CALL, and a superseded move runs no further.
+- 2026-11-16: worker wording to nexus-f3yqd.2.13's reviewed code (grant 3): a table is tenant-scoped when it has a tenant column and row-level security on, FORCE or not, since `dml_utils_owner`'s boundary scan is policy-bound even where the owning admin is exempt; `requireUnrestrictedView` applies only where row security can hide rows from the admin; the install check reads `pg_proc`; worker start ends another boot's `nexus-data-move-` coordinators, only under the singleton lock; the row is re-read before each CALL, and a superseded move runs no further.
