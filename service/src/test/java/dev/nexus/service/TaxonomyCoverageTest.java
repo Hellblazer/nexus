@@ -29,6 +29,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -373,14 +374,51 @@ class TaxonomyCoverageTest {
     }
 
     /**
-     * The count over 50,000 live chunks, 5 of them unassigned, in one statement and a bounded time (unlike
-     * taxonomy_unassigned_chashes it is not paged). Seeded set-based, as TaxonomyUnassignedChashesRepositoryTest does.
+     * The count over 50,000 live chunks, 5 of them unassigned, in one statement and a bounded time, first with the
+     * planner holding NO statistics on the manifest (catalog_document_chunks), then with the manifest analyzed. The
+     * first state is a fresh install, a restore or a tenant import between a large ingest and autovacuum's first
+     * ANALYZE: taxonomy-022's per-chunk chunk_live_owners probe read the whole manifest once per chunk there and ran
+     * past the 30 s bound (develop CI, ea8a47528); taxonomy-023 counts set-based. Autovacuum is off for the manifest
+     * and its statistics are cleared, so the state is pinned and asserted rather than left to a race.
      */
     @Test
-    void scale_fiftyThousandLiveChunks_areCountedInOneBoundedStatement() throws Exception {
+    void scale_fiftyThousandLiveChunks_areCountedInABoundedTime_withAndWithoutManifestStatistics() throws Exception {
         Coll c = collection(TENANT, 1024, "scale", true);
         int total = 50_000;
         List<Integer> unassignedIdx = List.of(1000, 15000, 25000, 35000, 49000);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext suDsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.setTableStorageParams(su, CATALOG_DOCUMENT_CHUNKS, Map.of("autovacuum_enabled", "false"));
+            try {
+                PgCatalogProbes.clearStatistics(suDsl, "nexus", "catalog_document_chunks");
+                seedScale(c, "scale-doc", total, unassignedIdx);
+                assertThat(PgCatalogProbes.statisticRows(suDsl, "nexus", "catalog_document_chunks"))
+                    .as("precondition: the manifest has no statistics").isZero();
+                assertBoundedCount(c, total, unassignedIdx.size(), "no manifest statistics");
+
+                PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
+                assertThat(PgCatalogProbes.statisticRows(suDsl, "nexus", "catalog_document_chunks"))
+                    .as("precondition: the manifest is analyzed").isPositive();
+                assertBoundedCount(c, total, unassignedIdx.size(), "manifest analyzed");
+            } finally {
+                PgContainerHelper.resetTableStorageParams(su, CATALOG_DOCUMENT_CHUNKS, "autovacuum_enabled");
+            }
+        }
+    }
+
+    private void assertBoundedCount(Coll c, int total, int unassigned, String state) {
+        long started = System.nanoTime();
+        Counts counts = read(fresh(), c);
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+        assertThat(counts).as(state).isEqualTo(new Counts(true, total, unassigned));
+        assertThat(counts.routable()).isTrue();
+        // A bound only: it catches the quadratic plan (over 30 s at 50k), not a constant factor (about 0.2 s here).
+        assertThat(elapsedMs).as("%s: 50k live chunks counted in a bounded time", state).isLessThan(15_000L);
+    }
+
+    /** {@code total} live chunks of {@code c}, owned by one live document {@code doc}, assigned except at {@code unassignedIdx}. */
+    private void seedScale(Coll c, String doc, int total, List<Integer> unassignedIdx) throws Exception {
         seed(dsl -> {
             var series = DSL.generateSeries(1, total).as("s", "i");
             Field<Integer> i = series.field("i", Integer.class);
@@ -391,12 +429,12 @@ class TaxonomyCoverageTest {
                         DSL.val(VectorSeeds.vecXY(1024, 1f, 0f), CHUNKS.EMBEDDING_1024)).from(series))
                 .execute();
             dsl.insertInto(CATALOG_DOCUMENTS)
-                .set(CATALOG_DOCUMENTS.TENANT_ID, c.tenant()).set(CATALOG_DOCUMENTS.TUMBLER, "scale-doc")
-                .set(CATALOG_DOCUMENTS.TITLE, "scale-doc").onConflictDoNothing().execute();
+                .set(CATALOG_DOCUMENTS.TENANT_ID, c.tenant()).set(CATALOG_DOCUMENTS.TUMBLER, doc)
+                .set(CATALOG_DOCUMENTS.TITLE, doc).onConflictDoNothing().execute();
             dsl.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                     CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                     CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .select(dsl.select(DSL.val(c.tenant(), CATALOG_DOCUMENT_CHUNKS.TENANT_ID), DSL.inline("scale-doc"), i,
+                .select(dsl.select(DSL.val(c.tenant(), CATALOG_DOCUMENT_CHUNKS.TENANT_ID), DSL.inline(doc), i,
                         indexChash(i), i, DSL.val(c.name(), CATALOG_DOCUMENT_CHUNKS.COLLECTION),
                         DSL.val(c.model(), CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)).from(series))
                 .execute();
@@ -410,17 +448,6 @@ class TaxonomyCoverageTest {
                     .from(series).where(i.notIn(unassignedIdx)))
                 .execute();
         });
-
-        long started = System.nanoTime();
-        Counts counts = read(fresh(), c);
-        long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
-
-        assertThat(counts).isEqualTo(new Counts(true, total, unassignedIdx.size()));
-        assertThat(counts.routable()).isTrue();
-        // A bound only: it catches an order-of-magnitude regression (the 50k rows read in about a second), not a plan
-        // shape. The function is not inlined, so a plain EXPLAIN shows one Function Scan and says nothing of its body;
-        // its body plan is not asserted here.
-        assertThat(elapsedMs).as("50k live chunks counted in one bounded statement").isLessThan(15_000L);
     }
 
     private static Field<byte[]> indexChash(Field<Integer> i) {
