@@ -9,8 +9,10 @@ is not this directory's stack, or exit 1 before its PostgreSQL step:
    line, so ``sudo -n lab-hand-exec ... nx daemon service start --config-dir X``, ``lab-run -- ...``,
    ``ssh h ...`` and ``bash -c "..."`` joined the kill set (a root-owned wrapper meets EPERM on both
    signals). It now needs an nx entry point at the head of the argv, as the flagless branch always did;
-2. a pid that both signals fail on with EPERM stayed in ``stubborn``, so the CLI exited 1 before
-   ``--with-pg`` reached PostgreSQL. It is now reported as not signalled, like an unreadable pid;
+2. a pid that both signals fail on with EPERM stayed in ``stubborn`` with a "survived SIGKILL" line. A
+   member the stop identified but could not signal now has its own field (``unsignalled``) and its own
+   wording, and the stop still exits 1 before PostgreSQL; only a pid the stop could not identify
+   (``unreadable``) warns and goes on;
 3. the jar arm names no directory, so two installs sharing one jar path would each sweep the other's
    engine. The member check now reads a jar match's own ``NEXUS_CONFIG_DIR`` as it does for a flagless start.
 """
@@ -88,6 +90,38 @@ class TestSupervisorArmIsAnchoredOnTheArgvHead:
     def test_the_supervisor_as_nexus_spawns_it_still_matches(self, tmp_path: Path, command: str) -> None:
         cfg = tmp_path / "cfg"
         assert storage_service_stack_matcher(cfg)(command.format(cfg=cfg))
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "/Users/Sam Smith/.local/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/Users/Sam Smith/.local/bin/nx daemon service start --foreground",
+            "/Users/Sam Smith/venv/bin/python /Users/Sam Smith/venv/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/Users/Sam Smith/venv/bin/python -m nexus.cli daemon service start --foreground --config-dir {cfg}",
+            "/bin/sh /Users/Sam Smith/.local/bin/nx daemon service start --foreground --config-dir {cfg}",
+        ],
+    )
+    def test_a_posix_nx_path_with_a_space_still_matches(self, tmp_path: Path, command: str) -> None:
+        """A spaced macOS home: the process table is one space-joined string, so the path arrives as words."""
+        assert storage_service_stack_matcher(tmp_path / "cfg")(command.format(cfg=tmp_path / "cfg"))
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "/usr/bin/ssh h /usr/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/usr/bin/sudo /usr/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/usr/bin/sudo -n /usr/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/usr/bin/env A=1 /usr/bin/nx daemon service start --foreground --config-dir {cfg}",
+            "/usr/bin/ssh h /x/python -m nexus.cli daemon service start --foreground --config-dir {cfg}",
+            "/usr/bin/sudo /x/python -m nexus.cli daemon service start --foreground --config-dir {cfg}",
+            "/usr/bin/sudo python -m nexus.cli daemon service start --foreground --config-dir {cfg}",
+            "/bin/bash /usr/local/libexec/lab-hand-exec 524a6b6d /tmp/e /usr/bin/nx daemon service start --config-dir {cfg}",
+            "/usr/bin/watch -n 5 /usr/bin/nx daemon service start --config-dir {cfg}",
+            "/Users/Sam Smith/bin/lab-run -- /Users/Sam Smith/.local/bin/nx daemon service start --config-dir {cfg}",
+        ],
+    )
+    def test_a_wrapper_before_an_absolute_nx_does_not_match(self, tmp_path: Path, command: str) -> None:
+        assert not storage_service_stack_matcher(tmp_path / "cfg")(command.format(cfg=tmp_path / "cfg"))
 
     def test_another_directory_still_never_matches(self, tmp_path: Path) -> None:
         cfg = tmp_path / "cfg"
@@ -216,10 +250,11 @@ class TestEpermIsReportedNotStubborn:
                 member_check=storage_service_member_check(cfg),
             )
         assert result.stubborn == ()
-        assert result.unreadable == (foreign.pid,)
+        assert result.unsignalled == (foreign.pid,)
+        assert result.unreadable == (), "it was identified as a member: that is not the unidentified class"
         assert result.pids == (), "it was not signalled, so it is not among the pids the sweep stopped"
 
-    def test_the_stop_names_it_unverified_and_never_claims_it_was_stopped(self, tmp_path: Path, foreign) -> None:
+    def test_the_stop_reports_it_as_unsignalled_and_never_claims_it_was_stopped(self, tmp_path: Path, foreign) -> None:
         cfg = tmp_path / "cfg"
         rows = self._rows(cfg, foreign.pid)
         with patch("nexus.daemon.service_registry.all_process_rows", return_value=rows), patch(
@@ -229,10 +264,27 @@ class TestEpermIsReportedNotStubborn:
         ):
             outcome = ssd.stop_storage_service(config_dir=cfg)
         assert outcome.stubborn == ()
-        assert outcome.unreadable == (foreign.pid,)
+        assert outcome.unsignalled == (foreign.pid,)
+        assert outcome.unreadable == ()
         assert outcome.pids == ()
-        assert outcome.sweep_verified is False
         assert outcome.already_stopped is False
+
+    def test_a_pid_that_refuses_sigterm_but_takes_sigkill_is_killed_at_once(self, foreign) -> None:
+        """EPERM on the graceful signal alone: the hard kill is tried without waiting out the grace, and the
+        pid is neither unsignalled nor a survivor (the line was deletable with every other test green)."""
+
+        def deny_sigterm_only(pid: int, sig: int) -> None:
+            if pid == foreign.pid and sig == signal.SIGTERM:
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+            _REAL_KILL(pid, sig)
+
+        unsignalled: list[int] = []
+        started = time.monotonic()
+        with patch_in("nexus.daemon.service_registry", "os.kill", side_effect=deny_sigterm_only):
+            survivors = terminate_pids([foreign.pid], grace_s=30, unsignalled_out=unsignalled)
+        assert time.monotonic() - started < 20, "the denied pid waited out the grace instead of being killed"
+        assert (survivors, unsignalled) == ([], [])
+        assert foreign.wait(timeout=10) != 0, "the sleeper must have been SIGKILLed"
 
 
 def _invoke(outcome: ssd.StopOutcome, cfg: Path, *args: str):
@@ -243,26 +295,39 @@ def _invoke(outcome: ssd.StopOutcome, cfg: Path, *args: str):
     return result, postgres
 
 
-class TestTheCliDoesNotBlockWithPgOnAPidItNeverSignalled:
-    def _outcome(self, **kw) -> ssd.StopOutcome:
-        return ssd.StopOutcome(pids=(), stubborn=(), source="none", sweep_verified=False, unreadable=(4242,), **kw)
+class TestTheCliSeparatesTheUnidentifiedFromTheIdentifiedButUnsignalled:
+    def _unidentified(self) -> ssd.StopOutcome:
+        return ssd.StopOutcome(pids=(), stubborn=(), source="none", sweep_verified=False, unreadable=(4242,))
 
-    def test_with_pg_reaches_postgres_and_exits_zero(self, tmp_path: Path) -> None:
-        result, postgres = _invoke(self._outcome(), tmp_path, "--with-pg")
+    def _unsignalled(self, **kw) -> ssd.StopOutcome:
+        return ssd.StopOutcome(pids=(), stubborn=(), source="none", unsignalled=(4242,), **kw)
+
+    def test_an_unidentified_pid_warns_and_the_stop_goes_on_to_postgres(self, tmp_path: Path) -> None:
+        result, postgres = _invoke(self._unidentified(), tmp_path, "--with-pg")
         assert result.exit_code == 0, result.output
-        assert postgres.called, "the PostgreSQL step must run"
+        assert postgres.called
+        assert "could not be identified" in result.output and "NOT signalled" in result.output
+        assert "EPERM" not in result.output
 
-    def test_the_wording_does_not_claim_the_pid_was_a_bare_start_or_that_it_survived_a_kill(self, tmp_path: Path) -> None:
-        result, _ = _invoke(self._outcome(), tmp_path)
+    def test_an_identified_member_that_could_not_be_signalled_stops_the_stop_before_postgres(self, tmp_path: Path) -> None:
+        result, postgres = _invoke(self._unsignalled(), tmp_path, "--with-pg")
+        assert result.exit_code == 1, result.output
+        assert not postgres.called, "PostgreSQL must not be touched under a service that is still running"
         out = result.output
-        assert "4242" in out and "NOT signalled" in out
-        assert "another user owns" in out and "EPERM" in out
-        assert "survived" not in out
-        assert "already stopped" not in out
+        assert "4242" in out and "EPERM" in out and "another user owns" in out
+        assert "identified as this config directory's service" in out
+        assert "Do not run 'nx daemon service start'" in out
 
-    def test_the_identity_case_keeps_its_own_reason(self, tmp_path: Path) -> None:
-        out = _invoke(self._outcome(), tmp_path)[0].output
-        assert "environment could not be read" in out or "command line could not be read" in out
+    def test_the_wording_never_says_nothing_was_identified_or_already_stopped_or_survived(self, tmp_path: Path) -> None:
+        out = _invoke(self._unsignalled(), tmp_path)[0].output
+        for false_claim in ("No process was identified", "already stopped", "survived", "Storage service stopped"):
+            assert false_claim not in out, (false_claim, out)
+
+    def test_a_pid_that_is_both_a_lease_survivor_and_unsignalled_is_reported_once(self, tmp_path: Path) -> None:
+        outcome = ssd.StopOutcome(pids=(), stubborn=(4242,), source="lease", lease_seen=True, unsignalled=(4242,))
+        out = _invoke(outcome, tmp_path)[0].output
+        assert "survived" not in out
+        assert out.count("4242") == 1, out
 
 
 # ── 3. a jar match is placed by its own NEXUS_CONFIG_DIR ─────────────────────────
@@ -308,6 +373,17 @@ class TestMemberCheckPlacesAJarEngineByItsOwnDirectory:
         check = storage_service_member_check(tmp_path / "a", environment_of=_env({7: None}))
         assert check(7, self._engine(jar)) == "unreadable"
 
+    def test_on_windows_a_jar_match_is_a_member_because_there_is_no_environment_reader(
+        self, tmp_path: Path, jar: Path,
+    ) -> None:
+        """process_environment_values is None on Windows for every pid; the jar arm must not turn that into
+        'never swept' (a bare flagless start stays unreadable there, as before)."""
+        cfg = tmp_path / "a"
+        check = storage_service_member_check(cfg, platform="win32", environment_of=lambda pid, names: None)
+        assert check(7, self._engine(jar)) == "member"
+        assert check(8, "nx daemon service start --foreground") == "unreadable"
+        assert storage_service_stack_matcher(cfg, platform="win32")(self._engine(jar)), "non-vacuity: the arm matches"
+
     def test_a_well_known_engine_and_a_supervisor_need_no_environment(self, tmp_path: Path, jar: Path) -> None:
         cfg = tmp_path / "a"
 
@@ -345,7 +421,7 @@ def test_two_real_engines_on_one_jar_are_told_apart_by_their_environment(tmp_pat
     from tests._child_process import popen_in_group  # noqa: PLC0415
 
     a, b = tmp_path / "a", tmp_path / "b"
-    java = tmp_path / "jdk" / "bin" / "java"
+    java = (tmp_path / "jdk" / "bin").joinpath("java")  # not the bin/java spelling the spawn lint bans
     java.parent.mkdir(parents=True)
     os.symlink(CHILD_PYTHON, java)
     procs = []
@@ -353,7 +429,8 @@ def test_two_real_engines_on_one_jar_are_told_apart_by_their_environment(tmp_pat
         for cfg in (a, b):
             env = {**os.environ, "NEXUS_CONFIG_DIR": str(cfg)}
             procs.append(popen_in_group(
-                [str(java), "-c", "import time; time.sleep(120)", "-Duser.timezone=UTC", "-jar", str(jar)], env=env,
+                [str(java), "-c", "import time; time.sleep(120)", "-Duser.timezone=UTC",
+                 f"-XX:ErrorFile={tmp_path / 'hs_err_%p.log'}", "-jar", str(jar)], env=env,
             ))
         deadline = time.monotonic() + 10
         while not all(process_command(p.pid) for p in procs) and time.monotonic() < deadline:

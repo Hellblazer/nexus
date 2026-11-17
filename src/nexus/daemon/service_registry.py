@@ -2692,7 +2692,7 @@ def _is_bare_supervisor_head(command: str, *, windows: bool = False) -> bool:
     if not verb or (head and not head[-1].isspace()):
         return False
     tokens = head.split()
-    if windows and _is_single_exe_head(head):
+    if (windows and _is_single_exe_head(head)) or _is_spaced_posix_head(head):
         return True
     if len(tokens) == 3:
         return _path_base(tokens[0]).startswith("python") and tokens[1:] == ["-m", "nexus.cli"]
@@ -2709,6 +2709,32 @@ def _is_bare_supervisor_head(command: str, *, windows: bool = False) -> bool:
 def _path_base(token: str) -> str:
     """The last component of a POSIX or Windows path, lowercased."""
     return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _is_spaced_posix_head(head: str) -> bool:
+    """POSIX: *head* is one or two ABSOLUTE programs, spaces inside a path allowed (``/Users/Sam Smith/.local/bin/nx``).
+
+    The process table is one space-joined string, so such a path arrives as words and the token test cannot
+    place it. A new path starts at ``" /"``: the head is cut there, after dropping a trailing ``-m nexus.cli``,
+    and must be ``<nx>``, ``<python or shell> <nx>`` or ``<python> -m nexus.cli``. A wrapper puts a non-program
+    first (``sudo -n /usr/bin/nx``, ``ssh h /usr/bin/nx``, ``lab-run -- /x/nx``) or a third program in the chain,
+    and is refused.
+    """
+    text = head.strip()
+    if not text.startswith("/"):
+        return False
+    module_form = text.endswith(" -m nexus.cli")
+    parts = text.removesuffix(" -m nexus.cli").split(" /")
+    if module_form:
+        return len(parts) == 1 and _path_base(parts[0]).startswith("python")
+    if len(parts) == 1:
+        return _path_base(parts[0]) in _NX_ENTRY_POINT_NAMES
+    interpreter = _path_base(parts[0])
+    return (
+        len(parts) == 2
+        and (interpreter.startswith("python") or interpreter in _SUPERVISOR_HEAD_SHELLS)
+        and _path_base(parts[1]) in _NX_ENTRY_POINT_NAMES
+    )
 
 
 def _is_single_exe_head(head: str) -> bool:
@@ -2934,7 +2960,8 @@ def storage_service_member_check(
     pid (``ProcessSweepResult.unreadable``) so the caller can say the stop was
     not verified. The same holds for a JVM running the ``NEXUS_SERVICE_JAR``
     jar (nexus-f3yqd.2.22): the jar path names no directory, so an engine
-    another install launched from the same jar is ``other``. Every other
+    another install launched from the same jar is ``other``; Windows, which
+    has no environment reader, takes a jar match as a ``member``. Every other
     command (an explicit ``--config-dir`` supervisor, the well-known engine)
     is ``member`` unchanged.
     """
@@ -2949,17 +2976,19 @@ def storage_service_member_check(
     if jar_marker is not None and windows:
         jar_marker = jar_marker.lower()
 
-    def _names_no_directory(command: str) -> bool:
-        if _is_flagless_start_command(command, windows=windows):
-            return True
-        # nexus-f3yqd.2.22: a JVM running the opt-in jar names no directory either, and two installs can
-        # share one jar path, so it is placed by its own environment too.
+    def _is_jar_engine(command: str) -> bool:
         return jar_marker is not None and jar_launch_command_matches(
             command.lower() if windows else command, jar_marker,
         )
 
     def _check(pid: int, command: str) -> MemberVerdict:
-        if not _names_no_directory(command):
+        # nexus-f3yqd.2.22: a JVM running the opt-in jar names no directory either, and two installs can
+        # share one jar path, so it is placed by its own environment too. Windows has no environment
+        # reader (every read is None), so a jar match is a member there, as it was before the check.
+        jar_engine = _is_jar_engine(command)
+        if jar_engine and windows:
+            return "member"
+        if not jar_engine and not _is_flagless_start_command(command, windows=windows):
             return "member"
         owner = process_config_dir(pid, platform=platform, environment_of=environment_of)
         if owner is None:
@@ -3017,13 +3046,16 @@ class ProcessSweepResult:
     #: (another session; nexus-f9bgu.17). They were not signalled and not
     #: killed, and they are also among ``stubborn`` while still running.
     refused: tuple[GracefulStopSend, ...] = ()
-    #: Candidates that were NOT signalled and may still be running, so a
-    #: caller must not report the sweep as verified while this is non-empty:
-    #: ones the ``member_check`` could not place in any directory (an
-    #: unreadable or malformed environment, nexus-oacd3), and ones both
-    #: signals failed on with EPERM because another user owns them
-    #: (nexus-f3yqd.2.22). They are in neither ``found`` nor ``stubborn``.
+    #: Candidates the ``member_check`` could not place in any directory (an
+    #: unreadable or malformed environment, nexus-oacd3). They were NOT
+    #: signalled and may still be running, so a caller must not report the
+    #: sweep as verified while this is non-empty.
     unreadable: tuple[int, ...] = ()
+    #: Members, identified as this directory's stack, that both signals failed
+    #: on with EPERM because another user owns them (nexus-f3yqd.2.22). They
+    #: are still running and were never stopped; in neither ``found`` nor
+    #: ``stubborn``, so they are not mistaken for survivors of a SIGKILL.
+    unsignalled: tuple[int, ...] = ()
 
     @property
     def pids(self) -> tuple[int, ...]:
@@ -3138,5 +3170,5 @@ def sweep_matching_processes(
     return ProcessSweepResult(
         available=True, error=None,
         found=tuple((p, c) for p, c in found if p not in unsignalled), stubborn=stubborn,
-        refused=tuple(refused), unreadable=(*unreadable, *unsignalled),
+        refused=tuple(refused), unreadable=tuple(unreadable), unsignalled=tuple(unsignalled),
     )
