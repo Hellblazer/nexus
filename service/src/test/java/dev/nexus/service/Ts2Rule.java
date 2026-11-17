@@ -7,8 +7,10 @@ import java.util.List;
 /**
  * RDR-225's TS2 rule, as {@link ReadPathLeafPruningIntegrationTest} applies it to the planning p95 of one search
  * family at 2 tenants and at 300: p95 at 300 at most 2x the 2-tenant p95 (counted only when the two differ by more
- * than {@link #RATIO_MIN_DIFF_MS}) and at most {@link #CAP_MS}. Kept apart from the test so the rule and the
- * per-set verdict are tested on recorded figures without a container.
+ * than {@link #RATIO_MIN_DIFF_MS}) and at most {@link #CAP_MS}. The rule is applied to each set's pair of figures,
+ * and a family fails only when every set fails (see {@link #judge}); RDR-225 recorded the lowest p95 of five sets
+ * per side. Kept apart from the test so the rule and the per-set verdict are tested on recorded figures without a
+ * container.
  */
 final class Ts2Rule {
 
@@ -40,12 +42,11 @@ final class Ts2Rule {
      * The verdict on one family's sets, each a {@code {2-tenant p95, 300-tenant p95}} pair in ms timed in
      * alternation: the family violates TS2 only when every set does. The figures are the best set's: the passing set
      * with the lowest ratio of 300-tenant to 2-tenant p95, or, when none passes, the set with the lowest ratio, so
-     * a set that caught a burst of load on one side only is not the one shown. Taking the lowest of each column on
-     * its own, as the test did before, could pair a 2-tenant set that missed a burst of load with 300-tenant sets
-     * that all caught one: one loaded run read 2.27/4.12, 4.11/4.08, 4.37/4.33, 4.69/4.52, 4.74/4.49 for
-     * search_topic_set 384, which column minima turn into 2.27 against 4.08 (1.8x, 1.8 ms apart) although after the
-     * first set no pair differs by more than 0.3 ms. A planning cost that grows with the tenant count is in every
-     * pair.
+     * a set that caught a burst of load on one side only is not the one shown. The old design took the lowest p95 of
+     * the 2-tenant sets and the lowest of the 300-tenant sets, each column on its own, timed minutes apart; under
+     * load that failed pruned families whose plans had not grown: plain_search 1024 read 1.41 ms at 2 tenants and
+     * 4.63 ms at 300 (3.3x, 3.2 ms apart), a pair no set of the new design has produced. A planning cost that grows
+     * with the tenant count is in every pair.
      */
     static Figures judge(List<double[]> pairs) {
         if (pairs.isEmpty()) {

@@ -702,8 +702,8 @@ class ReadPathLeafPruningIntegrationTest {
     /**
      * Sets per family. A set is a PAIR, the 2-tenant and the 300-tenant p95 of plans timed in alternation (see
      * {@link #ts2SetOnce}), and the rule is applied to each pair: a family fails only when every set fails, and
-     * its figures are those of its best set (see {@link Ts2Rule#judge}). The bound is the RDR's: p95 at 300
-     * tenants at most 2x the 2-tenant p95 (see {@link Ts2Rule#RATIO_MIN_DIFF_MS}) and at most 25 ms.
+     * its figures are those of its best set (see {@link Ts2Rule#judge}). The bound in each pair is the RDR's: p95 at
+     * 300 tenants at most 2x the 2-tenant p95 (see {@link Ts2Rule#RATIO_MIN_DIFF_MS}) and at most 25 ms.
      */
     private static final int TS2_ATTEMPTS = 5;
     /** Families whose body is not inlined into the caller's statement: the call is timed, with its inner planning. */
@@ -737,19 +737,38 @@ class ReadPathLeafPruningIntegrationTest {
             PgContainerHelper.createDatabase(su, TS2_CTL_DB);
         }
         try (Connection ctl = superuserTo(TS2_CTL_DB)) {
-            ctl.setAutoCommit(true);
-            PgContainerHelper.runSuperuserTestChangelog(ctl, "db/changelog-test/db.changelog-test-database-clone.xml",
-                "databasechangelog_test_database_clone",
-                Map.of("sourceDb", pg.getDatabaseName(), "cloneDb", TS2_MANY_DB));
+            PgContainerHelper.cloneDatabase(ctl, pg.getDatabaseName(), TS2_MANY_DB);
         }
     }
 
-    /** The number of chunk leaves of the model of {@code coll}, one per tenant. */
-    private static int chunkLeavesOfModel(DSLContext d, String coll) {
-        String leaf = chunkLeaf(coll, TA);
+    /**
+     * The number of leaves of {@code table} ({@code chunks} or {@code taxonomy_centroids}) of the model of
+     * {@code coll}, one per tenant, as the session of {@code d} sees them.
+     */
+    private static int leavesOfModel(DSLContext d, String table, String coll) {
+        String leaf = table.equals("chunks") ? chunkLeaf(coll, TA) : centroidLeaf(coll, TA);
         String modelPrefix = leaf.substring(0, leaf.indexOf("_t_") + 3);
         return d.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_class")),
             DSL.field(DSL.name("relname"), String.class).likeRegex("^" + modelPrefix + "[0-9a-f]{16}$"));
+    }
+
+    /**
+     * Non-vacuity, on the pools that are timed: the two databases differ by exactly the 298 tenants, in the chunk
+     * leaves and the taxonomy-centroid leaves (the taxonomy families plan against those) of every measured model.
+     * Counted through {@code ts2Few} and {@code ts2Many} themselves, so a pool that points at the wrong database
+     * fails here, not only a clone that was never grown.
+     */
+    private void requireTs2Databases() {
+        for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
+            for (String table : List.of("chunks", "taxonomy_centroids")) {
+                int few = ts2Few.withTenant(TA, c -> leavesOfModel(c, table, coll));
+                int many = ts2Many.withTenant(TA, c -> leavesOfModel(c, table, coll));
+                // the fixture's two tenants, and any the schema makes of its own (one, today)
+                assertThat(few).as("%s leaves of %s's model seen by the 2-tenant pool", table, coll).isBetween(2, 3);
+                assertThat(many - few).as("%s leaves of %s's model added for TS2, 300-tenant pool minus 2-tenant pool",
+                    table, coll).isEqualTo(TS2_TENANTS - 2);
+            }
+        }
     }
 
     private Ts2Rule.Figures ts2Figures(String family, String coll, int attempts) {
@@ -810,14 +829,16 @@ class ReadPathLeafPruningIntegrationTest {
     }
 
     /**
-     * TS2, as the RDR writes it: every search family planned 200 times per set at 2 tenants and at 300, p95 at 300 at most
-     * twice the 2-tenant p95 (counted only when the two differ by more than {@link Ts2Rule#RATIO_MIN_DIFF_MS} ms) and
-     * at most 25 ms. A family is timed as EXPLAIN of its call (parse and plan, no
+     * TS2, per RDR-225: every search family planned {@value #TS2_SAMPLES} times per set at 2 tenants and at 300, p95
+     * at 300 at most twice the 2-tenant p95 (counted only when the two differ by more than
+     * {@link Ts2Rule#RATIO_MIN_DIFF_MS} ms) and at most 25 ms. The rule is applied to each set's pair of p95s, not to
+     * the lowest p95 of each column across sets as RDR-225 recorded it, and a family fails only when EVERY set fails
+     * (Sam, 2026-11-17; {@link Ts2Rule#judge}). A family is timed as EXPLAIN of its call (parse and plan, no
      * execution) when it is inlined into the caller's statement, and as the call itself when it is not (a
      * plpgsql function plans its own statements at call time: the probe, assign_from_chashes, cross_preview;
      * their inputs are four rows, so the call is dominated by planning). The 2-tenant and 300-tenant figures come
-     * from two databases of one cluster, timed in alternation (see {@link #ts2SetOnce}), and the rule is applied
-     * per set (see {@link Ts2Rule#judge}). The numbers are printed for the record, with every set's pair.
+     * from two databases of one cluster, timed in alternation (see {@link #ts2SetOnce}). The numbers are printed
+     * for the record, with every set's pair.
      */
     @Test
     void ts2_planningAt300Tenants_isWithinTwiceTheTwoTenantP95_andUnder25ms() throws Exception {
@@ -840,22 +861,11 @@ class ReadPathLeafPruningIntegrationTest {
                 }
             }
             long tenantsDone = System.nanoTime();
-            // non-vacuity: the two databases differ by exactly the 298 tenants, in every measured model
-            try (Connection fewSu = pg.createConnection(""); Connection manySu = superuserTo(TS2_MANY_DB)) {
-                for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
-                    int fewLeaves = chunkLeavesOfModel(DSL.using(fewSu, SQLDialect.POSTGRES), coll);
-                    int manyLeaves = chunkLeavesOfModel(DSL.using(manySu, SQLDialect.POSTGRES), coll);
-                    // the fixture's two tenants, and any the schema makes of its own (one, today)
-                    assertThat(fewLeaves).as("chunk leaves of %s's model in the 2-tenant database", coll)
-                        .isBetween(2, 3);
-                    assertThat(manyLeaves - fewLeaves).as("chunk leaves of %s's model added for TS2", coll)
-                        .isEqualTo(TS2_TENANTS - 2);
-                }
-            }
             try (HikariDataSource fewDs = svcPool("rp-ts2-few", pg.getJdbcUrl());
                  HikariDataSource manyDs = svcPool("rp-ts2-many", urlFor(TS2_MANY_DB))) {
                 ts2Few = new TenantScope(fewDs);
                 ts2Many = new TenantScope(manyDs);
+                requireTs2Databases();
                 ts2Body(started, tenantsDone);
             }
         } finally {
@@ -877,9 +887,9 @@ class ReadPathLeafPruningIntegrationTest {
         }
         long warmDone = System.nanoTime();
         List<String> failures = new ArrayList<>();
-        StringBuilder table = new StringBuilder("TS2 planning p95 (ms), the best of " + TS2_ATTEMPTS + " sets of "
-            + TS2_SAMPLES + " plans per database, alternating; a family fails when every set fails; sets as "
-            + "2-tenant/300-tenant\n");
+        StringBuilder table = new StringBuilder("TS2 planning p95 (ms), " + TS2_ATTEMPTS + " sets of "
+            + TS2_SAMPLES + " plans per database, alternating, the rule applied to each set's pair; a family fails "
+            + "when every set fails, and the figures shown are the best set's; sets as 2-tenant/300-tenant\n");
         for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
             for (String family : FAMILIES) {
                 if (family.equals("cross_preview") && !coll.equals(CTX_1)) continue;

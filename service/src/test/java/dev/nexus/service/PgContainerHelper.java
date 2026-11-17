@@ -1768,6 +1768,20 @@ public final class PgContainerHelper {
         DSL.using(su, SQLDialect.POSTGRES).createDatabase(DSL.name(name)).execute();
     }
 
+    /**
+     * {@code CREATE DATABASE dst TEMPLATE src} (nexus-7fku2.1.1), through {@code db.changelog-test-database-clone.xml}:
+     * jOOQ's {@code createDatabase} has no TEMPLATE clause. {@code ctl} must be a connection to a THIRD database, and
+     * {@code src} must have no other session (PostgreSQL refuses a template in use). Both names go through
+     * {@link #requireTestIdentifier}.
+     */
+    public static void cloneDatabase(Connection ctl, String src, String dst) throws Exception {
+        requireTestIdentifier(src);
+        requireTestIdentifier(dst);
+        ctl.setAutoCommit(true);
+        runSuperuserTestChangelog(ctl, "db/changelog-test/db.changelog-test-database-clone.xml",
+            "databasechangelog_test_database_clone", Map.of("sourceDb", src, "cloneDb", dst));
+    }
+
     /** {@code DROP DATABASE IF EXISTS name} (nexus-cbo4a batch 11), jOOQ {@code dropDatabaseIfExists}; autocommit as in {@link #createDatabase}. */
     public static void dropDatabaseIfExists(Connection su, String name) throws SQLException {
         requireTestIdentifier(name);
