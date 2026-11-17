@@ -76,6 +76,18 @@ rationale stopped being true. The close critiques found it.
 
 *Drift: internal contradiction.*
 
+**The MVV's filter result did not replicate.** The turn-on measurement
+(2026-11-17, T2 `nexus_rdr/250-turn-on-run-2026-11-17`, bead nexus-w8d30) ran
+issue5 twice more with the switch on. The first pass matched the MVV exactly,
+keeping the same four gold ids. The second kept none: the filter rejected the
+same four ids on the same evidence, and the answer scored the control's .764.
+In the run that alternated on and off per question, no pass kept an id either.
+The passes that kept ids were each the first after a sandbox start, and their
+calls cost two to four times more. The cause is not known. The MVV's one pass
+was the lucky case, so the switch stays off.
+
+*Drift: unvalidated assumption.*
+
 ## What to carry forward
 
 - Before a paid run on a reused sandbox, check that its engine meets the
@@ -84,3 +96,5 @@ rationale stopped being true. The close critiques found it.
 - A cost comparison between two arms runs them interleaved, or both cold.
 - When a design is built before its gate, say so in the RDR and treat the
   tests as the record; the prose will follow the code.
+- A model-call filter is measured on at least two passes before its result
+  is reported as a pass; one pass can be the lucky one.
