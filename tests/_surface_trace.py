@@ -35,7 +35,7 @@ import pytest
 
 _OUT = os.environ.get("NX_SURFACE_TRACE_OUT")
 _ROOT = os.path.realpath(os.getcwd())
-_SKIP_PARTS = {".git", ".venv", "__pycache__", "target", "node_modules"}
+_SKIP_PARTS = {".git", ".venv", "__pycache__", "target", "node_modules", ".lab-remote"}
 _GIT_ENUMERATORS = {"ls-files", "grep", "ls-tree", "diff", "status"}
 _TREE_WALKERS = {"rg", "grep", "find", "fd"}
 #: Tools that read process or host state, never the repo's files: not opaque.

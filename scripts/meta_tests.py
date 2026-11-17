@@ -23,8 +23,9 @@ Each Python meta-test's surface is derived, never declared: ``build`` runs
 each test file in its own pytest process under ``tests/_surface_trace.py``
 and writes what it read to ``tests/meta_surfaces.json.gz``, with a hash of the
 file, the tests/ modules it imports and the conftests above it. A changed path
-selects a test when the test opened or statted it, listed its directory (for a
-new directory, its first ancestor that exists at the base), ran a subprocess
+selects a test when the test opened or statted it, listed its directory and the
+path was added or deleted (for a new directory, its first ancestor that exists
+at the base), ran a subprocess
 that enumerates a subtree holding it, or imports it directly (a ``src/nexus``
 or ``tests`` module). A test runs whatever the diff when the manifest does not
 hold it, that hash changed since the build, its traced run failed or skipped,
@@ -253,8 +254,18 @@ def changed_paths(repo: Path, base: str) -> list[str]:
     return sorted(names)
 
 
-def base_dirs(repo: Path, base: str) -> set[str]:
-    return {""} | {d for d in git(repo, "ls-tree", "-r", "-d", "--name-only", base).splitlines() if d}
+@dataclass
+class BaseTree:
+    """What existed at the base: a changed path absent here was added; one absent from the
+    worktree now was deleted. Only those two change a directory's listing."""
+    dirs: set[str]
+    files: set[str]
+
+
+def base_tree(repo: Path, base: str) -> BaseTree:
+    files = {f for f in git(repo, "ls-tree", "-r", "--name-only", base).splitlines() if f}
+    dirs = {""} | {d for f in files for d in _ancestors(f)}
+    return BaseTree(dirs=dirs, files=files)
 
 
 def _ancestors(path: str) -> list[str]:
@@ -280,7 +291,7 @@ def select(repo: Path, changed: list[str], base: str, manifest: dict | None = No
     surfaces: dict = (manifest or {}).get("tests", {})
     known = python_meta_tests(repo)
     sel = Selection(known=known, java_known=java_meta_tests(repo), changed=changed)
-    existing = base_dirs(repo, base) if changed else {""}
+    existing = base_tree(repo, base) if changed else BaseTree(dirs={""}, files=set())
     changed_tests = [p for p in changed if p.startswith("tests/") and p.endswith(".py")]
 
     for test, kinds in known.items():
@@ -306,7 +317,7 @@ def select(repo: Path, changed: list[str], base: str, manifest: dict | None = No
         if not any(entry.get(k) for k in ("opened", "statted", "listed", "prefixes")):
             sel.always[test] = "the trace recorded no read (a cached or shared scan?): surface unknown"
             continue
-        hit = _hit(test, entry, changed, existing, module_files(repo, test))
+        hit = _hit(test, entry, changed, existing, module_files(repo, test), repo)
         if hit:
             sel.selected[test] = hit
     if any(p.startswith(JAVA_SURFACE) for p in changed):
@@ -316,7 +327,7 @@ def select(repo: Path, changed: list[str], base: str, manifest: dict | None = No
     return sel
 
 
-def _hit(test: str, entry: dict, changed: list[str], existing: set[str], imports: set[str]) -> str | None:
+def _hit(test: str, entry: dict, changed: list[str], existing: BaseTree, imports: set[str], repo: Path) -> str | None:
     opened = set(entry.get("opened", ())) | set(entry.get("statted", ()))
     listed = set(entry.get("listed", ()))
     prefixes = list(entry.get("prefixes", ()))
@@ -329,8 +340,11 @@ def _hit(test: str, entry: dict, changed: list[str], existing: set[str], imports
             return f"imports {p}"
         if _prefix_hit(p, prefixes):
             return f"enumerates a subtree holding {p}"
-        if _listed_hit(p, listed, existing):
-            return f"lists the directory of {p}"
+        # A listing changes only when an entry comes or goes; an edit to a file the test only
+        # listed does not reach it (an edit to a file it read is caught above).
+        added_or_deleted = p not in existing.files or not (repo / p).exists()
+        if added_or_deleted and _listed_hit(p, listed, existing.dirs):
+            return f"lists the directory {'gaining' if (repo / p).exists() else 'losing'} {p}"
     return None
 
 
@@ -506,20 +520,15 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 def compact(kinds: dict) -> dict[str, list[str]]:
     """One test's traced reads, less what selects nothing more: a path under a recorded
-    prefix, a file in a directory the test also lists, a stat of a path it opened."""
+    prefix, a stat of a path it opened."""
     prefixes = sorted(_minimal_prefixes(kinds.get("prefixes", ())))
 
     def free(p: str) -> bool:
         return not _prefix_hit(p, prefixes)
 
     listed = sorted(p for p in kinds.get("listed", ()) if free(p))
-    listed_set = set(listed)
-
-    def loose(p: str) -> bool:
-        return free(p) and (p.rsplit("/", 1)[0] if "/" in p else "") not in listed_set
-
-    opened = sorted(p for p in kinds.get("opened", ()) if loose(p))
-    statted = sorted(p for p in kinds.get("statted", ()) if loose(p) and p not in opened)
+    opened = sorted(p for p in kinds.get("opened", ()) if free(p))
+    statted = sorted(p for p in kinds.get("statted", ()) if free(p) and p not in opened)
     return {"opened": opened, "statted": statted, "listed": listed, "prefixes": prefixes,
             "opaque": sorted(kinds.get("opaque", ()))}
 
