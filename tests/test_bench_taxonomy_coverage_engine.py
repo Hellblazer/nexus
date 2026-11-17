@@ -6,7 +6,10 @@ real engine substrate: the script's measure path reads ``/v1/vectors/stats`` thr
 
 The clients are built inside the test, after ``t2_service_env`` has pointed the process at the
 minted substrate tenant, and handed to the script's functions; the script itself reads no
-environment on this path."""
+environment on this path.
+
+One test, three sections, one tenant: the storage-touch ceiling counts tests that mint a tenant, and
+the three checks seed collections of their own, so they share one without touching each other."""
 from __future__ import annotations
 
 import hashlib
@@ -23,6 +26,7 @@ from bench.taxonomy_coverage import build_report, measure_collections, rebuild_s
 _PARTIAL = "knowledge__cov-partial__bge-base-en-v15-768__v1"
 _FULL = "knowledge__cov-full__bge-base-en-v15-768__v1"
 _BARE = "knowledge__cov-bare__bge-base-en-v15-768__v1"
+_PAGED = "knowledge__cov-paged__bge-base-en-v15-768__v1"
 _EMPTY = "knowledge__cov-empty__bge-base-en-v15-768__v1"
 #: topics.id is one global sequence in the substrate database, so each seeded topic needs its own id.
 _TOPIC_IDS = itertools.count(94001)
@@ -61,7 +65,7 @@ def _seed(collection: str, n: int, *, topic: bool, assigned: int = 0) -> list[st
     return ids
 
 
-def test_the_measure_path_reads_back_what_was_seeded(t2_service_env) -> None:
+def _measure_path_reads_back_what_was_seeded() -> None:
     ids = _seed(_PARTIAL, 10, topic=True, assigned=6)
     _seed(_FULL, 5, topic=True, assigned=5)
     _seed(_BARE, 3, topic=False)
@@ -111,14 +115,14 @@ def test_the_measure_path_reads_back_what_was_seeded(t2_service_env) -> None:
     assert report["coverage_below_0_9"] == 1
 
 
-def test_paging_follows_next_after_across_more_than_one_page(t2_service_env, monkeypatch) -> None:
+def _paging_follows_next_after_across_more_than_one_page(monkeypatch) -> None:
     """The real engine pages at the 1000 cap; seeding that many embedded chunks is slow, so this
     drives the same loop against the real route at a smaller page size (the route takes any
     limit from 1 to 1000) and checks the total against the seeded truth."""
-    _seed(_PARTIAL, 7, topic=True, assigned=2)
+    _seed(_PAGED, 7, topic=True, assigned=2)
     taxonomy = HttpTaxonomyStore()
     monkeypatch.setattr(cov, "PAGE_SIZE", 3)
-    result = cov.count_unassigned(taxonomy, _PARTIAL)
+    result = cov.count_unassigned(taxonomy, _PAGED)
     assert result.unassigned == 5
     assert result.pages == 2  # 3, then 2 (a short page ends the cursor)
 
@@ -126,7 +130,7 @@ def test_paging_follows_next_after_across_more_than_one_page(t2_service_env, mon
 _TOMB = "knowledge__cov-tomb__bge-base-en-v15-768__v1"
 
 
-def test_a_chunk_whose_only_owner_is_tombstoned_is_listed_unassigned_but_not_live(t2_service_env) -> None:
+def _a_chunk_whose_only_owner_is_tombstoned_is_listed_unassigned_but_not_live() -> None:
     """The two engine predicates differ here (the unassigned route needs a manifest reference, the
     stats count needs a live owner), so a row can read more unassigned than live. The script flags
     that row instead of clamping it."""
@@ -155,3 +159,9 @@ def test_a_chunk_whose_only_owner_is_tombstoned_is_listed_unassigned_but_not_liv
     assert row["non_live_chunks"] == len(ids)
     assert row["coverage_upper"] == 0.0  # 6 listed less 4 non-live = 2 unassigned of 2 live: exact here
     assert row["above_0_9"] is False and row["gate_uncertain"] is False
+
+
+def test_the_measure_path_against_the_real_engine(t2_service_env, monkeypatch) -> None:
+    _measure_path_reads_back_what_was_seeded()
+    _paging_follows_next_after_across_more_than_one_page(monkeypatch)
+    _a_chunk_whose_only_owner_is_tombstoned_is_listed_unassigned_but_not_live()
