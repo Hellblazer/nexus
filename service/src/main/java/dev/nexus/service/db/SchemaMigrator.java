@@ -952,6 +952,9 @@ public final class SchemaMigrator {
     private static void logPciBuildersKept(Connection conn, List<ChangeSet> retrying) {
         try {
             int count = PciBuilders.count(DSL.using(conn, SQLDialect.POSTGRES));
+            if (count < 0) {
+                return;   // the count failed and was logged: no line rather than count=-1
+            }
             log.info("event=pci_builders_kept count={} reason=only_run_always_pending retrying={}", count, retrying.size());
             for (ChangeSet cs : retrying) {
                 log.info("event=pci_build_kept_for_retrying id={} reason=self_retrying_precondition",

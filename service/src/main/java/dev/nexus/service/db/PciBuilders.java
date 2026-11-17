@@ -69,23 +69,31 @@ public final class PciBuilders {
      * @return how many backends were signalled, or -1 when the read or the signal failed
      */
     public static int terminate(DSLContext ctx, String why) {
-        var pid = DSL.field(DSL.name("pid"), Integer.class);
         try {
-            int terminated = 0;
-            for (Boolean ended : ctx
-                    .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
-                    .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                    .where(backends())
-                    .fetch(0, Boolean.class)) {
-                if (Boolean.TRUE.equals(ended)) {
-                    terminated++;
-                }
-            }
-            log.info("event=pci_builders_terminated count={} {}", terminated, why);
-            return terminated;
+            return terminateOrThrow(ctx, why);
         } catch (DataAccessException e) {
             log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
             return -1;
         }
+    }
+
+    /**
+     * {@link #terminate} without the swallow, for a caller inside a transaction: a failed statement aborts the transaction
+     * unless the caller runs this in a nested one (a savepoint) and catches what it throws.
+     */
+    public static int terminateOrThrow(DSLContext ctx, String why) {
+        var pid = DSL.field(DSL.name("pid"), Integer.class);
+        int terminated = 0;
+        for (Boolean ended : ctx
+                .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
+                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+                .where(backends())
+                .fetch(0, Boolean.class)) {
+            if (Boolean.TRUE.equals(ended)) {
+                terminated++;
+            }
+        }
+        log.info("event=pci_builders_terminated count={} {}", terminated, why);
+        return terminated;
     }
 }

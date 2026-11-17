@@ -187,10 +187,47 @@ class DataMoveOnCompleteIntegrationTest extends DataMoveIntegrationBase {
 
             assertThat(result.outcome()).as("the ALTER got its lock: the builder was ended first")
                 .isEqualTo(MoveFinisher.Outcome.COMPLETED);
-            assertThat(sessionsNamed(BUILDER_NAME)).isZero();
+            awaitNoSessions(BUILDER_NAME);
             assertThat(builder.isValid(2)).as("its session is gone").isFalse();
         }
         assertThat(completedAt("oc-chunks")).isNotNull();
+    }
+
+    // ── a superseding row committed after the last read ─────────────────────────────────────────────────
+
+    @Test
+    void aSupersedeCommittedAfterTheLastRead_stopsOnCompleteAndTheCompletionTogether() throws Exception {
+        registerValidating("oc-sup");
+        runsOnly("oc-sup");
+        DataMoveTestFixtures.addNewShapeCheck(su);
+        var finisher = new VerifyingFinisher();
+        finisher.beforeCompletionHook = () -> DataMoveTestFixtures.register(ctx(), "oc-sup-fix", "tenant_plain", 50, 0,
+            "oc-sup", "stamp-template.sql");
+
+        var result = finish(finisher, "oc-sup", "tenant_plain", List.of());
+
+        assertThat(result.outcome()).as("the move is replaced: nothing of it completes").isEqualTo(MoveFinisher.Outcome.GONE);
+        assertThat(validated()).as("on_complete did not run").isFalse();
+        assertThat(completedAt("oc-sup")).isNull();
+    }
+
+    // ── builders end only for a move that completes ─────────────────────────────────────────────────────
+
+    @Test
+    void aPauseSetAfterTheLastRead_endsNoIndexBuilder_evenOnTheChunkFamily() throws Exception {
+        register("oc-chunks-pause", "tenant_plain", 50, 0, "verification-tenant-plain.sql", 60_000, "on-complete-chunks.sql");
+        runsOnly("oc-chunks-pause");
+        var finisher = new VerifyingFinisher();
+        finisher.beforeCompletionHook = () -> DataMoveTestFixtures.pause(ctx(), "oc-chunks-pause", true);
+        try (Connection builder = builderHoldingChunks()) {
+            var result = finish(finisher, "oc-chunks-pause", "tenant_plain", List.of());
+
+            assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.PAUSED);
+            assertThat(sessionsNamed(BUILDER_NAME)).as("a build that took tens of minutes is not ended for a move that paused")
+                .isEqualTo(1);
+            assertThat(builder.isValid(2)).isTrue();
+        }
+        assertThat(completedAt("oc-chunks-pause")).isNull();
     }
 
     @Test

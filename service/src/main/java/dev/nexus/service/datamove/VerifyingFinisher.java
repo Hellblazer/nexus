@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 /**
  * What follows the runs (RDR-246, The move worker step 3; nexus-f3yqd.2.14). With every tenant's run complete:
@@ -34,15 +35,22 @@ import java.util.Optional;
  *       neither takes effect without the other.</li>
  * </ol>
  *
- * <p>The UPDATE goes first inside that transaction and carries {@code paused_at IS NULL}, so it takes the row's lock and
- * rechecks the pause atomically with the commit; when it matches no row the transaction ends having run nothing. On a
- * move over the chunk family ({@link ChunkFamily}) the per-collection index builders are ended first (best effort,
- * {@link PciBuilders}). {@code on_complete} runs under {@code SET LOCAL lock_timeout} below the move's
- * {@code statement_timeout_ms} on every move, so a lock it cannot get fails fast with 55P03 and no reader queues behind it.
+ * <p>The UPDATE goes first inside that transaction and carries {@code paused_at IS NULL} and no row that supersedes the
+ * move, so it takes the row's lock and rechecks both atomically with the commit; when it matches no row the transaction
+ * ends having run nothing. Only after it matched, on a move over the chunk family ({@link ChunkFamily}), are the
+ * per-collection index builders ended (best effort, {@link PciBuilders}), so a pause set after the last read ends no build.
+ * {@code on_complete} runs under {@code SET LOCAL lock_timeout} below the move's {@code statement_timeout_ms} on every
+ * move, so a lock it cannot get fails fast with 55P03 and no reader queues behind it.
+ *
+ * <p>A stop ({@link Context#stopped}) is read before the finish, between tenants, before the table-wide run and before the
+ * completion transaction, and ends the finish as {@link Outcome#LEFT_OPEN}; a verification already in flight is not
+ * cancelled, it is bounded by {@code statement_timeout_ms}.
  *
  * <p>Nothing here decides blocked or failed: a failure goes back as a {@link FailureHandler.Failure} ({@link
  * FailureHandler.Stage#VERIFICATION}, {@link FailureHandler.Stage#VERIFICATION_NONEMPTY}, {@link
- * FailureHandler.Stage#ON_COMPLETE}) for the worker to hand to the {@link FailureHandler}.
+ * FailureHandler.Stage#ON_COMPLETE}) for the worker to hand to the {@link FailureHandler}. A verification text the worker
+ * refuses to run ({@link MoveSql#refusal}) is a {@code VERIFICATION} failure with {@code raised} null and the rule in
+ * {@code detail}.
  */
 final class VerifyingFinisher implements MoveFinisher {
 
@@ -64,8 +72,14 @@ final class VerifyingFinisher implements MoveFinisher {
     /** Test seam: runs after the second read of the row and before the completion transaction, where a pause can slip in. */
     Runnable beforeCompletionHook;
 
+    /** Test seam: runs with the verification connection after each reset, so a test can read what the session carries. */
+    Consumer<CallConnection> afterResetHook;
+
     @Override
     public Result finish(Context context) {
+        if (context.stopped().getAsBoolean()) {
+            return Result.leftOpen();
+        }
         DSLContext admin = context.admin();
         Optional<DataMove> current = DataMoveRegistry.reload(admin, context.move().label());
         if (current.isEmpty()) {
@@ -76,6 +90,11 @@ final class VerifyingFinisher implements MoveFinisher {
             return Result.paused(move);
         }
 
+        Optional<String> refused = MoveSql.refusal(move.verification());
+        if (refused.isPresent()) {
+            return Result.report(failure(admin, move, FailureHandler.Stage.VERIFICATION, null, null,
+                "the verification of " + move.label() + " was not run: " + refused.get()));
+        }
         Result verification = verify(context, move);
         if (verification != null) {
             return verification;
@@ -93,6 +112,9 @@ final class VerifyingFinisher implements MoveFinisher {
         if (hook != null) {
             hook.run();
         }
+        if (context.stopped().getAsBoolean()) {
+            return Result.leftOpen();
+        }
         return complete(admin, move);
     }
 
@@ -106,6 +128,9 @@ final class VerifyingFinisher implements MoveFinisher {
             if (tenantPass && context.tenants().isEmpty()) {
                 continue;
             }
+            if (context.stopped().getAsBoolean()) {
+                return Result.leftOpen();
+            }
             CallConnection conn;
             try {
                 conn = CallConnection.open(context.adminConnection(),
@@ -116,10 +141,10 @@ final class VerifyingFinisher implements MoveFinisher {
                         + FailureHandler.oneLine(e.getMessage())));
             }
             try {
-                Result raised = tenantPass ? verifyTenants(context, move, conn, found)
+                Result ended = tenantPass ? verifyTenants(context, move, conn, found)
                     : verifyTableWide(context, move, conn, found);
-                if (raised != null) {
-                    return raised;
+                if (ended != null) {
+                    return ended;
                 }
             } finally {
                 conn.close();
@@ -140,6 +165,9 @@ final class VerifyingFinisher implements MoveFinisher {
 
     private Result verifyTenants(Context context, DataMove move, CallConnection conn, Map<String, Long> found) {
         for (String tenant : context.tenants()) {
+            if (context.stopped().getAsBoolean()) {
+                return Result.leftOpen();
+            }
             try {
                 conn.useTenant(tenant);
                 long rows = readOnlyCount(conn, move, tenant);
@@ -147,6 +175,10 @@ final class VerifyingFinisher implements MoveFinisher {
                     found.put("tenant " + tenant, rows);
                 }
                 conn.clearTenant();   // a connection that cannot be shown clean never runs another tenant's query
+                Consumer<CallConnection> hook = afterResetHook;
+                if (hook != null) {
+                    hook.accept(conn);
+                }
             } catch (SQLException | RuntimeException e) {
                 return Result.report(failure(context.admin(), move, FailureHandler.Stage.VERIFICATION, tenant, sqlOf(e),
                     "the verification for tenant " + tenant + " could not run: " + describe(e)));
@@ -198,9 +230,6 @@ final class VerifyingFinisher implements MoveFinisher {
 
     private Result complete(DSLContext admin, DataMove move) {
         String onComplete = move.onComplete();
-        if (onComplete != null && ChunkFamily.touches(move)) {
-            PciBuilders.terminate(admin, "reason=data_move_on_complete move=" + move.label());
-        }
         int statementMs = move.statementTimeoutMs();
         int lockMs = lockTimeoutMs(statementMs);
         boolean completed;
@@ -208,8 +237,9 @@ final class VerifyingFinisher implements MoveFinisher {
             completed = admin.transactionResult(cfg -> {
                 DSLContext tx = cfg.dsl();
                 PgSession.setStatementAndLockBounds(tx, statementMs, lockMs);
-                // the row's lock, and the pause and the supersede read under it, are this transaction's: a pause set
-                // after the last read matches no row here, and then nothing below runs
+                // the row's lock, and the pause and the supersede read under it, are this transaction's: a pause or a
+                // superseding row committed after the last read matches no row here, and then nothing below runs
+                var superseding = MOVES.as("s");
                 int updated = tx.update(MOVES)
                     .set(DSL.field(DSL.name("completed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE),
                         DSL.currentOffsetDateTime())
@@ -217,11 +247,23 @@ final class VerifyingFinisher implements MoveFinisher {
                     .and(DSL.field(DSL.name("completed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE).isNull())
                     .and(DSL.field(DSL.name("failed_at"), SQLDataType.TIMESTAMPWITHTIMEZONE).isNull())
                     .and(DSL.field(DSL.name("paused_at"), SQLDataType.TIMESTAMPWITHTIMEZONE).isNull())
+                    .and(DSL.notExists(DSL.selectOne().from(superseding)
+                        .where(DSL.field(DSL.name("s", "supersedes"), String.class).eq(move.label()))))
                     .execute();
                 if (updated == 0) {
                     return false;
                 }
                 if (onComplete != null) {
+                    if (ChunkFamily.touches(move)) {
+                        // only now: the move is known to complete, so no pause or supersede ends a build for nothing
+                        // best effort: a savepoint keeps a refused signal from aborting the transaction
+                        try {
+                            tx.transaction(nested -> PciBuilders.terminateOrThrow(nested.dsl(),
+                                "reason=data_move_on_complete move=" + move.label()));
+                        } catch (DataAccessException e) {
+                            log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
+                        }
+                    }
                     tx.connection(c -> MoveSql.runOnComplete(c, onComplete));
                 }
                 return true;
@@ -229,7 +271,7 @@ final class VerifyingFinisher implements MoveFinisher {
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
             return Result.report(failure(admin, move, FailureHandler.Stage.ON_COMPLETE, null, raised,
-                "on_complete of " + move.label() + " did not complete (nothing was changed): "
+                "on_complete of " + move.label() + " did not complete: "
                     + FailureHandler.oneLine(raised != null ? "sqlstate=" + raised.getSQLState() + " " + raised.getMessage()
                         : e.getMessage())));
         }
@@ -260,6 +302,9 @@ final class VerifyingFinisher implements MoveFinisher {
     }
 
     private static String describe(Exception e) {
+        if (e instanceof MoveSql.Refused) {
+            return e.getMessage();
+        }
         SQLException sql = sqlOf(e);
         return FailureHandler.oneLine(sql != null ? "sqlstate=" + sql.getSQLState() + " " + sql.getMessage() : e.toString());
     }

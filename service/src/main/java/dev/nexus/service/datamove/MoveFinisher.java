@@ -6,6 +6,7 @@ import dev.nexus.service.db.AdminConnection;
 import org.jooq.DSLContext;
 
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 /**
  * What happens once every run of every listed tenant is complete: the per-tenant and table-wide verification and
@@ -24,10 +25,18 @@ public interface MoveFinisher {
     /**
      * What the finisher is given: the move, the tenants the pass ran it for (empty for a table with no tenant scope), the
      * admin connection of the pass, and the admin values, so it can open the dedicated per-tenant connections the
-     * verification runs on and the separate table-wide one ({@link CallConnection#open}).
+     * verification runs on and the separate table-wide one ({@link CallConnection#open}); {@code stopped} says whether the
+     * worker has been stopped, which a finisher reads between its steps and answers with {@link Outcome#LEFT_OPEN}.
      */
     record Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
-                   String applicationName) { }
+                   String applicationName, BooleanSupplier stopped) {
+
+        /** A context whose worker is never stopped (a test, or a finisher run on its own). */
+        public Context(DataMove move, List<String> tenants, DSLContext admin, AdminConnection adminConnection,
+                       String applicationName) {
+            this(move, tenants, admin, adminConnection, applicationName, () -> false);
+        }
+    }
 
     /** How the finish ended. */
     enum Outcome {

@@ -49,7 +49,7 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
     // ── a verified move completes ────────────────────────────────────────────────────────────────────────
 
     @Test
-    void everyRunCompleteAndEveryVerificationEmpty_completesTheMove_andLeavesNoVerificationConnection() {
+    void everyRunCompleteAndEveryVerificationEmpty_completesTheMove_andLeavesNoVerificationConnection() throws Exception {
         var seen = new CopyOnWriteArrayList<FailureHandler.Failure>();
         register("v-ok", "tenant_rows", 50, 0);
         var w = worker(installed(), null, handler(seen), new VerifyingFinisher());
@@ -60,8 +60,8 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
         assertThat(seen).isEmpty();
         assertThat(w.states().state("v-ok")).as("a completed move is no longer reported").isEmpty();
         assertEveryRowMovedOnce("tenant_rows", 1000);
-        assertThat(sessionsNamed(WORKER_NAME + "-verify")).isZero();
-        assertThat(sessionsNamed(WORKER_NAME + "-verify-all")).isZero();
+        awaitNoSessions(WORKER_NAME + "-verify");
+        awaitNoSessions(WORKER_NAME + "-verify-all");
         assertThat(w.runCycle()).as("a completed move is not worked again").isZero();
     }
 
@@ -243,7 +243,7 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
     }
 
     @Test
-    void aVerificationThatOutlastsStatementTimeoutMs_isReportedAsTheTimeout_andTheMoveIsNotCompleted() {
+    void aVerificationThatOutlastsStatementTimeoutMs_isReportedAsTheTimeout_andTheMoveIsNotCompleted() throws Exception {
         register("v-slow", "tenant_plain", 50, 0, null, "stamp-template.sql", "verification-sleep.sql", 1_000, null);
         runsOnly("v-slow");
 
@@ -256,7 +256,114 @@ class DataMoveVerificationIntegrationTest extends DataMoveIntegrationBase {
         assertThat(result.failure().raised().getSQLState()).as("query_canceled: statement_timeout").isEqualTo("57014");
         assertThat(elapsedSeconds).as("the bound, not the 30 s sleep").isLessThan(15);
         assertThat(completedAt("v-slow")).isNull();
-        assertThat(sessionsNamed(WORKER_NAME + "-verify-all")).as("the connection is closed").isZero();
+        awaitNoSessions(WORKER_NAME + "-verify-all");   // the connection is closed
+    }
+
+    // ── a verification text the worker will not run ─────────────────────────────────────────────────────
+
+    @Test
+    void aVerificationWithAQuestionMark_isRefusedBeforeItRuns_asAVerificationFailureNamingTheRule() throws Exception {
+        register("v-qmark", "tenant_rows", 50, 0, null, "stamp-template.sql", "verification-question-mark.sql", 60_000, null);
+        runsOnly("v-qmark");
+
+        var result = finish("v-qmark", "tenant_rows", List.of("acme"));
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION);
+        assertThat((Throwable) result.failure().raised()).isNull();
+        assertThat(result.reason()).contains("contains a '?'").contains("was not run");
+        assertThat(completedAt("v-qmark")).isNull();
+        awaitNoSessions(WORKER_NAME + "-verify");
+    }
+
+    @Test
+    void aDollarOneInsideAStringLiteral_isRefusedByTheDriversParameterCount_notRewrittenIntoTheLiteral() {
+        register("v-literal", "tenant_rows", 50, 0, null, "stamp-template.sql", "verification-dollar-literal.sql", 60_000, null);
+        runsOnly("v-literal");
+
+        var result = finish("v-literal", "tenant_rows", List.of("acme"));
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION);
+        assertThat((Throwable) result.failure().raised()).isNull();
+        assertThat(result.reason()).contains("has 3 $1 but the driver sees 2 bind parameters");
+        assertThat(completedAt("v-literal")).isNull();
+    }
+
+    @Test
+    void aValidVerification_bindsTheTenantToEveryOccurrenceThroughTheDriver() throws Exception {
+        register("v-bind", "tenant_rows", 50, 0);
+        runsOnly("v-bind");
+        insertOldShapeRow("acme", 5000);
+        String text = DataMoveTestFixtures.resource("verification.sql");
+
+        try (var conn = CallConnection.open(adminConnection, WORKER_NAME + "-bind")) {
+            assertThat(MoveSql.countRows(conn.connection(), text, "acme", 10)).as("its own row").isEqualTo(1);
+            assertThat(MoveSql.countRows(conn.connection(), text, "globex", 10)).as("another tenant's: none").isZero();
+            assertThat(MoveSql.countRows(conn.connection(), text, null, 10)).as("null binds the OR $1 IS NULL half").isEqualTo(1);
+        }
+    }
+
+    // ── a stop ───────────────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void aStopBeforeTheFinish_startsNothing() throws Exception {
+        register("v-stop0", "tenant_rows", 50, 0);
+        runsOnly("v-stop0");
+
+        var result = finish(new VerifyingFinisher(), "v-stop0", "tenant_rows", List.of("acme", "globex"), () -> true);
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.LEFT_OPEN);
+        assertThat(completedAt("v-stop0")).isNull();
+        assertThat(sessionsNamed(WORKER_NAME + "-verify")).isZero();
+    }
+
+    @Test
+    void aStopBetweenTenants_endsTheFinishThere_andCompletesNothing() {
+        register("v-stop1", "tenant_rows", 50, 0);
+        runsOnly("v-stop1");
+        var calls = new AtomicInteger();
+        var verified = new AtomicInteger();
+        var finisher = new VerifyingFinisher();
+        finisher.afterResetHook = conn -> verified.incrementAndGet();
+        // reads: the finish, the tenant pass, the first tenant (false); the second tenant (true)
+        var result = finish(finisher, "v-stop1", "tenant_rows", List.of("default", "acme", "globex", "orphan", "sl/ash"),
+            () -> calls.incrementAndGet() >= 4);
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.LEFT_OPEN);
+        assertThat(verified.get()).as("one tenant was verified before the stop").isEqualTo(1);
+        assertThat(completedAt("v-stop1")).isNull();
+    }
+
+    @Test
+    void aStopAfterTheVerification_endsTheFinishBeforeTheCompletionTransaction() {
+        register("v-stop2", "tenant_rows", 50, 0);
+        runsOnly("v-stop2");
+        var stopped = new AtomicBoolean();
+        var finisher = new VerifyingFinisher();
+        finisher.beforeCompletionHook = () -> stopped.set(true);
+
+        var result = finish(finisher, "v-stop2", "tenant_rows", List.of("acme"), stopped::get);
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.LEFT_OPEN);
+        assertThat(completedAt("v-stop2")).as("the verification was empty and the move would have completed").isNull();
+    }
+
+    // ── the connection between tenants ───────────────────────────────────────────────────────────────────
+
+    @Test
+    void theVerificationConnectionCarriesNoTenant_afterEachReset() {
+        register("v-reset", "tenant_rows", 50, 0);
+        runsOnly("v-reset");
+        var carried = new CopyOnWriteArrayList<String>();
+        var finisher = new VerifyingFinisher();
+        finisher.afterResetHook = conn -> carried.add(String.valueOf(conn.tenantSetting()));
+
+        var result = finish(finisher, "v-reset", "tenant_rows", List.of("default", "acme", "globex"));
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
+        assertThat(carried).as("one reading per tenant, each of an empty setting").hasSize(3)
+            .allSatisfy(setting -> assertThat(setting).isIn("", "null"));
     }
 
     // ── a pause ──────────────────────────────────────────────────────────────────────────────────────────

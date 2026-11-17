@@ -501,7 +501,8 @@ public final class DataMoveWorker implements AutoCloseable {
         if (stopped) {   // the runs are complete and the next boot finds them so: nothing starts after a stop
             return;
         }
-        MoveFinisher.Result result = finisher.finish(new MoveFinisher.Context(move, tenants, ctx, admin, applicationName));
+        MoveFinisher.Result result = finisher.finish(new MoveFinisher.Context(move, tenants, ctx, admin, applicationName,
+            () -> stopped));
         switch (result.outcome()) {
             case COMPLETED -> states.forget(move.label());
             case FAILED -> states.failed(move, result.reason());

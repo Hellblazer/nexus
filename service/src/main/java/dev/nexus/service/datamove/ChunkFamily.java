@@ -8,15 +8,18 @@ import java.util.regex.Pattern;
 
 /**
  * Whether a move is over the chunk family (RDR-246, Finishing a move): {@code nexus.chunks}, its leaves
- * ({@code chunks_m...}) and every table with a foreign key into it. A DROP or ALTER on one takes ACCESS EXCLUSIVE on every
- * chunk leaf, where it queues behind a {@code CREATE INDEX CONCURRENTLY}, so a move that finishes there ends the index
- * builders first. A move counts as chunk-family when its driving table is in the family (schema {@code nexus}) or
- * {@code on_complete} names a table that is.
+ * ({@code chunks_m...}), the partition helpers ({@code partition_...}), the index builder ({@code pci_...}) and every table
+ * with a foreign key into {@code nexus.chunks}. A DROP or ALTER on one takes ACCESS EXCLUSIVE on every chunk leaf, where it
+ * queues behind a {@code CREATE INDEX CONCURRENTLY}, so a move that finishes there ends the index builders first. A move
+ * counts as chunk-family when its driving table is in the family (schema {@code nexus}) or {@code on_complete} names a
+ * table or routine that is.
  *
- * <p>The family is the one {@code tests/test_changelog_continue_precondition_chunks_lint.py} keeps ({@code _FK_TABLES} and
- * its derivation test). The names are matched in the {@code on_complete} text, normalised the way that lint does (quotes
- * dropped, whitespace around dots collapsed, lowercased), with or without a schema. A name in a comment or a literal counts
- * too: the cost of a false positive is one ended build, which the pass restarts; the cost of a miss is a queue behind it.
+ * <p>The family is the one {@code tests/test_changelog_continue_precondition_chunks_lint.py} keeps (its {@code _FK_TABLES}
+ * and {@code _FORBIDDEN} patterns); {@code ChunkFamilyLintPinTest} reads that file and fails when this list or these patterns
+ * differ from it. The names are matched in the {@code on_complete} text, normalised the way that lint does (quotes dropped,
+ * whitespace around dots collapsed, lowercased), with or without a schema. A name in a comment or a literal counts too: the
+ * cost of a false positive is one ended build, which the pass restarts; the cost of a miss is a queue behind it, which
+ * {@code lock_timeout} turns into a retry.
  */
 final class ChunkFamily {
 
@@ -26,8 +29,14 @@ final class ChunkFamily {
     static final List<String> FOREIGN_KEY_TABLES =
         List.of("catalog_document_chunks", "topic_assignments", "chunk_orphaned_at");
 
+    /**
+     * The lint's name patterns, as regular-expression source and in its order: {@code nexus.chunks}, a chunk leaf, a partition
+     * helper, the index builder.
+     */
+    static final List<String> NAME_PATTERNS = List.of("\\bchunks\\b", "\\bchunks_m", "\\bpartition_", "\\bpci_");
+
     private static final Pattern NAMES = Pattern.compile(
-        "\\bchunks\\b|\\bchunks_m|\\b(?:" + String.join("|", FOREIGN_KEY_TABLES) + ")\\b");
+        String.join("|", NAME_PATTERNS) + "|\\b(?:" + String.join("|", FOREIGN_KEY_TABLES) + ")\\b");
 
     /** True when the move's driving table is in the family, or its {@code on_complete} names a table that is. */
     static boolean touches(DataMove move) {

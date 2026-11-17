@@ -194,9 +194,16 @@ abstract class DataMoveIntegrationBase {
 
     /** The finish of {@code label} by {@code finisher}, on an admin session of the pass, as the worker calls it. */
     MoveFinisher.Result finish(VerifyingFinisher finisher, String label, String table, List<String> tenants) {
+        return finish(finisher, label, table, tenants, () -> false);
+    }
+
+    /** As {@link #finish(VerifyingFinisher, String, String, List)}, with the worker's stop flag a test controls. */
+    MoveFinisher.Result finish(VerifyingFinisher finisher, String label, String table, List<String> tenants,
+                               java.util.function.BooleanSupplier stopped) {
         DataMove move = DataMoveRegistry.reload(ctx(), label).orElseThrow();
         try (var session = adminSession(table)) {
-            return finisher.finish(new MoveFinisher.Context(move, tenants, session.ctx(), adminConnection, WORKER_NAME));
+            return finisher.finish(
+                new MoveFinisher.Context(move, tenants, session.ctx(), adminConnection, WORKER_NAME, stopped));
         }
     }
 
@@ -279,5 +286,17 @@ abstract class DataMoveIntegrationBase {
     int sessionsNamed(String applicationName) {
         return ctx().fetchCount(table("pg_catalog", "pg_stat_activity"),
             DSL.field(DSL.name("application_name"), String.class).eq(applicationName));
+    }
+
+    /**
+     * Waits until no session is named {@code applicationName}, at most 10 s: a closed connection's backend exits a moment
+     * later, so a count read right after the close can still see it.
+     */
+    void awaitNoSessions(String applicationName) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (sessionsNamed(applicationName) > 0 && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat(sessionsNamed(applicationName)).as("sessions named %s", applicationName).isZero();
     }
 }
