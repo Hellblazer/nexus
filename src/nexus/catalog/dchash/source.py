@@ -70,11 +70,21 @@ def read_canonical(path: Path) -> str:
     return canonical_text(path.read_bytes())
 
 
-def span_status(span_hash: str, end: int, doc: tuple[str, int] | None) -> str:
-    """The status of a parsed span against a document read as (hash, length), or None when unreadable.
+def span_status(
+    span: str, doc: tuple[str, int] | None, *, entry_found: bool = True
+) -> str:
+    """The status of *span*: the one mapping the status check, the resolver and the link audit share.
 
-    The one mapping both :func:`dchash_status` and the link audit use.
+    *doc* is the document's canonical text as (hash, length), or None when it could not be
+    read; *entry_found* is False when the entry is gone. Order: malformed, missing,
+    unreadable, changed, out_of_range, ok.
     """
+    try:
+        span_hash, _start, end = parse_dchash_span(span)
+    except ValueError:
+        return MALFORMED
+    if not entry_found:
+        return MISSING
     if doc is None:
         return UNREADABLE
     doc_hash, doc_len = doc
@@ -86,12 +96,19 @@ def span_status(span_hash: str, end: int, doc: tuple[str, int] | None) -> str:
 
 
 def read_doc(path: Path | None) -> tuple[str, int] | None:
-    """(hash, length) of the canonical text at *path*, or None when there is no path or it cannot be read."""
+    """(hash, length) of the canonical text at *path*, or None when there is no path or it cannot be read.
+
+    Read failures (OSError, a decode error, a path with a NUL byte) become None; nothing else is caught.
+    """
     if path is None:
         return None
     try:
         text = read_canonical(path)
-    except (OSError, UnicodeDecodeError):
+    except (
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+    ):  # ValueError: a NUL byte in the path
         return None
     return text_hash(text), len(text)
 
@@ -101,13 +118,11 @@ def dchash_status(entry: CatalogEntry | None, span: str, catalog: Any | None) ->
 
     ``httpx.HTTPError`` and ``RuntimeError`` from the catalog propagate.
     """
-    try:
-        span_hash, _start, end = parse_dchash_span(span)
-    except ValueError:
-        return MALFORMED
     if entry is None:
-        return MISSING
-    return span_status(span_hash, end, read_doc(dchash_source(entry, catalog)))
+        return span_status(span, None, entry_found=False)
+    if span_status(span, None) == MALFORMED:
+        return MALFORMED
+    return span_status(span, read_doc(dchash_source(entry, catalog)))
 
 
 def resolve_dchash_text(
@@ -115,16 +130,16 @@ def resolve_dchash_text(
 ) -> str | None:
     """The passage *span* names, or None when it does not resolve exactly.
 
-    Every exception becomes None (and a ``dchash_span_unresolved`` log line), so
-    a bad span or an engine outage never breaks ``nx catalog show``.
+    Every exception becomes None (and a ``dchash_span_unresolved`` log line), so a
+    bad span or an engine outage inside this branch never breaks ``nx catalog show``.
     """
     try:
-        span_hash, start, end = parse_dchash_span(span)
+        _hash, start, end = parse_dchash_span(span)
         path = dchash_source(entry, catalog)
         if path is None:
             return None
         text = read_canonical(path)
-        if text_hash(text) != span_hash or end > len(text):
+        if span_status(span, (text_hash(text), len(text))) != OK:
             return None
         return text[start:end]
     except Exception as exc:  # noqa: BLE001 — the read path never raises (RDR-171 S-A)

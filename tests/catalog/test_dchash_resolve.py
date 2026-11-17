@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from nexus.catalog import catalog_spans
 from nexus.catalog.dchash import (
@@ -16,6 +17,7 @@ from nexus.catalog.dchash import (
     dchash_source,
     dchash_status,
     resolve_dchash_text,
+    span_status,
     text_hash,
 )
 from nexus.catalog.tumbler import Tumbler
@@ -225,6 +227,33 @@ def test_status_unreadable_no_path() -> None:
     assert dchash_status(entry, f"dchash:{'a' * 64}:0-1", None) == "unreadable"
 
 
+def test_status_unreadable_nul_in_path() -> None:
+    entry = _entry(source_uri="file:///tmp/a\x00b")
+    assert dchash_status(entry, f"dchash:{'a' * 64}:0-1", None) == "unreadable"
+
+
+def test_offsets_are_code_points_past_the_bmp(tmp_path: Path) -> None:
+    body = "\U0001f600\U0001f600 x " + PASSAGE + "\n"
+    f = tmp_path / "a.md"
+    f.write_text(body, encoding="utf-8")
+    entry = _entry(source_uri=f"file://{f}")
+    start = body.index(PASSAGE)
+    assert start == 5
+    span = f"dchash:{text_hash(body)}:{start}-{start + len(PASSAGE)}"
+    assert resolve_dchash_text(entry, span, None) == PASSAGE
+
+
+def test_unresolved_logs_the_tumbler_and_error_class(tmp_path: Path) -> None:
+    entry = _entry(file_path="a.md", tumbler="1.2.9")
+    cat = FakeCatalog(
+        FakeOwner("repo", str(tmp_path)), entry, raises=RuntimeError("down")
+    )
+    with capture_logs() as logs:
+        assert resolve_dchash_text(entry, f"dchash:{'a' * 64}:0-1", cat) is None
+    hit = [e for e in logs if e["event"] == "dchash_span_unresolved"]
+    assert hit and hit[0]["tumbler"] == "1.2.9" and hit[0]["error"] == "RuntimeError"
+
+
 def test_status_out_of_range(tmp_path: Path) -> None:
     f = tmp_path / "a.md"
     f.write_text(BODY)
@@ -260,3 +289,28 @@ def test_engine_error_read_path_none_audit_raises(
     assert catalog_spans.resolve_span_text_for_entry(entry, span, catalog=cat) is None
     with pytest.raises(type(exc)):
         dchash_status(entry, span, cat)
+
+
+@pytest.mark.parametrize(
+    ("span", "doc", "found", "want"),
+    [
+        ("dchash:bad", ("a" * 64, 9), True, "malformed"),
+        ("dchash:bad", None, False, "malformed"),
+        (f"dchash:{'a' * 64}:0-1", None, False, "missing"),
+        (f"dchash:{'a' * 64}:0-1", None, True, "unreadable"),
+        (f"dchash:{'a' * 64}:0-1", ("b" * 64, 9), True, "changed"),
+        (f"dchash:{'a' * 64}:0-10", ("a" * 64, 9), True, "out_of_range"),
+        (f"dchash:{'a' * 64}:0-9", ("a" * 64, 9), True, "ok"),
+    ],
+)
+def test_span_status_is_the_one_mapping(
+    span: str, doc: tuple[str, int] | None, found: bool, want: str
+) -> None:
+    assert span_status(span, doc, entry_found=found) == want
+
+
+def test_malformed_span_reads_no_file(tmp_path: Path) -> None:
+    entry = _entry(file_path="a.md")
+    cat = FakeCatalog(FakeOwner("repo", str(tmp_path)), entry)
+    assert dchash_status(entry, "dchash:bad", cat) == "malformed"
+    assert cat.calls == 0

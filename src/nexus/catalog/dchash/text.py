@@ -24,7 +24,7 @@ _DCHASH_SPAN: re.Pattern[str] = re.compile(
 def canonical_text(raw: bytes) -> str:
     """Return the canonical text of *raw*; a UnicodeDecodeError propagates."""
     text = raw.decode("utf-8")
-    if text.startswith("﻿"):
+    if text.startswith("\ufeff"):
         text = text[1:]
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -43,7 +43,10 @@ def parse_dchash_span(span: str) -> tuple[str, int, int]:
     m = _DCHASH_SPAN.fullmatch(span)
     if m is None:
         raise ValueError(f"malformed dchash span: {span!r}")
-    start, end = int(m.group(2)), int(m.group(3))
+    try:
+        start, end = int(m.group(2)), int(m.group(3))
+    except ValueError:  # more digits than int() accepts
+        raise ValueError(f"malformed dchash span (offset too long): {span!r}") from None
     if start >= end:
         raise ValueError(f"malformed dchash span (start must be below end): {span!r}")
     return m.group(1), start, end

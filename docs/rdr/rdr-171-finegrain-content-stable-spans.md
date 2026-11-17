@@ -90,8 +90,8 @@ transclusion) needs the same thing.
 - The Python client resolves a span with `resolve_span_text_for_entry(entry, span, catalog=...)` in
   `catalog_spans.py`, given an already-resolved `CatalogEntry`.
 - A catalog entry carries `file_path` and `source_uri`. `file_path` is repo-relative for documents
-  indexed from a repository and absolute for single files, which belong to a *curator* owner (an
-  owner with no repository); `source_uri` is a `file://` URI for a file, an `nx-note://` URI for a
+  indexed from a repository and absolute for single files outside any git checkout, which belong to
+  a *curator* owner (an owner with no repository); `source_uri` is a `file://` URI for a file, an `nx-note://` URI for a
   note, other schemes stored as given, and empty on legacy rows and for a relative path whose owner
   has no repository root (171-research-7, -9). `HttpCatalogClient.resolve_path(tumbler)` turns a
   repository document into an absolute path and returns `None` for a curator-owned one
@@ -368,7 +368,7 @@ a caller needs PDFs, notes or edit survival (Sam, 2026-11-16).
   `link_audit`.
 - A non-UTF-8 source has no canonical text: minting refuses it with the decode error; status reports
   `unreadable`.
-- `nx catalog show` never crashes on a `dchash:` span, because the resolver turns every error,
+- `nx catalog show` never crashes inside the `dchash:` branch, because it turns every error,
   the catalog client's `httpx.HTTPError` and `RuntimeError` included, into `None`. The status and
   the audit let those two propagate.
 

@@ -29,10 +29,10 @@ def test_prefix() -> None:
         (b"a\rb", "a\nb"),
         (b"a\r\r\nb", "a\n\nb"),
         (b"\xef\xbb\xbfabc", "abc"),
-        (b"\xef\xbb\xbf\xef\xbb\xbfabc", "﻿abc"),
-        (b"x\xef\xbb\xbfy", "x﻿y"),
+        (b"\xef\xbb\xbf\xef\xbb\xbfabc", "\ufeffabc"),
+        (b"x\xef\xbb\xbfy", "x\ufeffy"),
         (b"  trailing  \n\n", "  trailing  \n\n"),
-        ("é".encode(), "é"),
+        ("e\u0301".encode(), "e\u0301"),
         (b"", ""),
     ],
 )
@@ -46,8 +46,18 @@ def test_canonical_text_strict_utf8() -> None:
 
 
 def test_text_hash_is_lowercase_sha256_of_utf8() -> None:
-    assert text_hash("hé") == hashlib.sha256("hé".encode()).hexdigest()
-    assert text_hash("x") == text_hash("x").lower()
+    assert text_hash("h\u00e9") == hashlib.sha256("h\u00e9".encode()).hexdigest()
+    assert (
+        text_hash("h\u00e9")
+        == "7dfbe0eab96510b11c9a2671d83019cd52953211294db5f917ffa0b7cc84f534"
+    )
+
+
+def test_offsets_count_a_non_bmp_character_once() -> None:
+    text = "\U0001f600ab"
+    assert len(text) == 3
+    _h, start, end = parse_dchash_span(f"dchash:{text_hash(text)}:1-3")
+    assert text[start:end] == "ab"
 
 
 def test_crlf_and_lf_hash_alike() -> None:
@@ -80,11 +90,13 @@ def test_parse_ok(span: str, want: tuple[str, int, int]) -> None:
         f"dchash:{'A' * 64}:0-5",
         f"dchash:{'a' * 63}:0-5",
         f"dchash:{'a' * 65}:0-5",
-        f"dchash:{H}:١-٢",
+        f"dchash:{H}:\u0661-\u0662",
+        f"dchash:{H}:\uff10-\uff15",
         f"DCHASH:{H}:0-5",
         f"chash:{H}:0-5",
         f"chash:{H}",
         "",
+        f"dchash:{H}:0-{'9' * 5000}",
     ],
 )
 def test_parse_refuses(span: str) -> None:
