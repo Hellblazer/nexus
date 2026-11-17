@@ -12,7 +12,7 @@ import java.nio.charset.Charset;
  * trace with its causes, before the bytes are written. One pass over a string the layout built anyway; a line that
  * holds no secret costs the scan and nothing else.
  */
-public final class MaskingPatternLayoutEncoder extends PatternLayoutEncoder {
+public class MaskingPatternLayoutEncoder extends PatternLayoutEncoder {
 
     @Override
     public byte[] encode(ILoggingEvent event) {

@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * nexus-f3yqd.2.18: the log encoder masks a line, its stack trace and its causes, through the appender, and
@@ -156,6 +157,67 @@ class LogMaskingTest {
     }
 
     @Test
+    void anEncoderThatDoesNotStart_isNotSwappedIn_andTheAppenderKeepsLogging() {
+        var plain = new PatternLayoutEncoder();
+        var appender = appender(plain);
+        var failing = new MaskingPatternLayoutEncoder() {
+            @Override
+            public void start() { /* never starts */ }
+        };
+
+        assertThat(LogMasking.install(context, () -> failing)).isZero();
+
+        assertThat(appender.getEncoder()).isSameAs(plain);
+        assertThat(appender.isStarted()).isTrue();
+        context.getLogger("dev.nexus.test").info("still {}", "here");
+        assertThat(logged()).isEqualTo("INFO dev.nexus.test [-] - still here\n");
+    }
+
+    @Test
+    void anEncoderThatThrows_leavesTheAppenderAsItWas_andTheInstallReturns() {
+        var plain = new PatternLayoutEncoder();
+        var appender = appender(plain);
+
+        assertThat(LogMasking.install(context, () -> {
+            throw new IllegalStateException("no encoder for you, password=" + PW);
+        })).isZero();
+
+        assertThat(appender.getEncoder()).isSameAs(plain);
+        context.getLogger("dev.nexus.test").info("still here");
+        assertThat(logged()).contains("still here");
+    }
+
+    @Test
+    void aConsoleAppenderWhoseEncoderDoesNotStart_keepsLogging() {
+        var console = new ch.qos.logback.core.ConsoleAppender<ILoggingEvent>();
+        var plain = new PatternLayoutEncoder();
+        plain.setContext(context);
+        plain.setPattern(PATTERN);
+        plain.start();
+        console.setContext(context);
+        console.setEncoder(plain);
+        console.start();
+        Logger logger = context.getLogger("dev.nexus.test");
+        logger.setAdditive(false);
+        logger.addAppender(console);
+        java.io.PrintStream original = System.out;
+        System.setOut(new java.io.PrintStream(out, true, StandardCharsets.UTF_8));
+        try {
+            assertThat(LogMasking.install(context, () -> new MaskingPatternLayoutEncoder() {
+                @Override
+                public void start() { /* never starts */ }
+            })).isZero();
+            logger.info("console still logging");
+        } finally {
+            System.setOut(original);
+        }
+
+        assertThat(console.getEncoder()).isSameAs(plain);
+        assertThat(console.isStarted()).isTrue();
+        assertThat(logged()).contains("console still logging");
+    }
+
+    @Test
     void anAppenderThatIsNotAPatternLayout_isLeftAlone() {
         var appender = new OutputStreamAppender<ILoggingEvent>();
         appender.setContext(context);
@@ -174,7 +236,85 @@ class LogMaskingTest {
         logger.setAdditive(false);
         logger.addAppender(appender);
 
-        assertThat(LogMasking.install(context)).isZero();
+        List<String> warnings = installWarnings(() -> assertThat(LogMasking.install(context)).isZero());
         assertThat(appender.getEncoder()).isSameAs(layoutEncoder);
+        assertThat(warnings).as("it says what it left unmasked").singleElement().satisfies(w -> assertThat(w)
+            .contains("event=log_masking_unmasked").contains("OutputStreamAppender["));
+    }
+
+    /** The WARN lines {@link LogMasking} writes while {@code body} runs. */
+    private static List<String> installWarnings(Runnable body) {
+        Logger logger = (Logger) org.slf4j.LoggerFactory.getLogger(LogMasking.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage).toList();
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    @Test
+    void anAppenderThatIsNotAnOutputStreamAppender_isNamedInTheUnmaskedWarning() {
+        var other = new ch.qos.logback.core.read.ListAppender<ILoggingEvent>();
+        other.setName("audit");
+        other.setContext(context);
+        other.start();
+        Logger logger = context.getLogger("dev.nexus.test");
+        logger.setAdditive(false);
+        logger.addAppender(other);
+
+        List<String> warnings = installWarnings(() -> assertThat(LogMasking.install(context)).isZero());
+
+        assertThat(warnings).singleElement().satisfies(w -> assertThat(w).contains("event=log_masking_unmasked")
+            .contains("ListAppender[audit]"));
+    }
+
+    @Test
+    void anEncoderThatDoesNotStart_isNamedInTheUnmaskedWarning() {
+        var plain = new PatternLayoutEncoder();
+        var appender = appender(plain);
+        appender.setName("console-like");
+
+        List<String> warnings = installWarnings(() -> assertThat(LogMasking.install(context, () -> new MaskingPatternLayoutEncoder() {
+            @Override
+            public void start() { /* never starts */ }
+        })).isZero());
+
+        assertThat(warnings).anySatisfy(w -> assertThat(w).contains("event=log_masking_unmasked").contains("console-like"));
+    }
+
+    @Test
+    void aPatternAppenderAnAsyncWrapperHolds_isMasked_andNothingIsWarnedAbout() {
+        var plain = new PatternLayoutEncoder();
+        plain.setContext(context);
+        plain.setPattern(PATTERN);
+        plain.start();
+        var inner = new OutputStreamAppender<ILoggingEvent>();
+        inner.setName("inner");
+        inner.setContext(context);
+        inner.setEncoder(plain);
+        inner.setOutputStream(out);
+        inner.start();
+        var async = new ch.qos.logback.classic.AsyncAppender();
+        async.setName("async");
+        async.setContext(context);
+        async.addAppender(inner);
+        async.start();
+        Logger logger = context.getLogger("dev.nexus.test");
+        logger.setAdditive(false);
+        logger.addAppender(async);
+
+        List<String> warnings = installWarnings(() -> assertThat(LogMasking.install(context)).isEqualTo(1));
+        logger.error("through the wrapper {}", PW, trace());
+        async.stop();   // drains the queue
+
+        assertThat(warnings).isEmpty();
+        assertThat(inner.getEncoder()).isInstanceOf(MaskingPatternLayoutEncoder.class);
+        assertThat(logged()).doesNotContain(PW).contains("through the wrapper <redacted>");
     }
 }

@@ -117,6 +117,20 @@ public final class Main {
         String dbUrl  = requireEnv("NX_DB_URL");
         String dbUser = requireEnv("NX_DB_USER");
         String dbPass = requireEnv("NX_DB_PASS");
+        // nexus-f3yqd.2.18: the database passwords stay out of every log line, stack traces included, and out of the texts the
+        // data-move worker records and reports. Set here, before any pool or lock connects and before another thread logs, from
+        // the values the migration and the worker use (NX_DB_ADMIN_PASS is what AdminConnection.resolve takes when it is set).
+        // A masking install that fails is logged and the engine boots without it: it must never be the reason one does not.
+        dev.nexus.service.log.SecretMask.add(dbPass);
+        dev.nexus.service.log.SecretMask.add(System.getenv("NX_DB_ADMIN_PASS"));
+        try {
+            int masking = dev.nexus.service.log.LogMasking.install();   // it logs what it masked and what it could not
+            if (masking == 0) {
+                log.warn("event=log_masking_inactive reason=\"no appender masks: the engine's log lines are not scrubbed of the passwords\"");
+            }
+        } catch (Throwable t) {
+            log.warn("event=log_masking_not_installed cause=\"{}\"", dev.nexus.service.log.SecretMask.mask(t.toString()));
+        }
         int poolSize  = intEnv("NX_POOL_SIZE", 10);
         // RDR-248 (nexus-csayy.2): the export session tunables, checked before any pool or listener exists, like the
         // other environment values: a bad one is one clean line and exit 1, never a stack trace out of the service's
@@ -254,11 +268,8 @@ public final class Main {
         // setups where the application role also owns the schema.
         // RDR-227: the resolved admin values stay in scope for the per-collection index builder.
         var adminConnection = dev.nexus.service.db.AdminConnection.resolve(System::getenv, dbUrl, dbUser, dbPass);
-        // nexus-f3yqd.2.18: the credentials the engine resolved stay out of its log lines, stack traces included, and out of
-        // the texts the data-move worker records and reports. Set once, here, from the values the worker and the migration use.
+        // nexus-f3yqd.2.18: the admin password the worker and the migration connect with (added with the others at the top)
         dev.nexus.service.log.SecretMask.add(adminConnection.password());
-        dev.nexus.service.log.SecretMask.add(dbPass);
-        dev.nexus.service.log.LogMasking.install();
         var migrationDs = buildMigrationDataSource(adminConnection);
         // nexus-f3yqd.2.11 (RDR-246): the vendored ddl_utils and dml_utils changelogs apply first, as dml_utils_owner,
         // when the engine has a separate admin role; the installer keeps why they did not, for the data-move worker.

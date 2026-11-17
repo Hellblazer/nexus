@@ -13,6 +13,7 @@ import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.DefaultConfiguration;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -44,6 +45,12 @@ class DataMoveLogEventsTest extends DataMoveIntegrationBase {
     @BeforeAll
     void maskTheAdminPassword() {
         SecretMask.add(ADMIN_PASSWORD);
+    }
+
+    /** The password was added for these tests only: the rest of the fork's classes run without it. */
+    @AfterAll
+    void forgetTheAdminPassword() {
+        SecretMask.reset();
     }
 
     /** Every message the {@code datamove} loggers write while {@code body} runs, whatever its event name. */
