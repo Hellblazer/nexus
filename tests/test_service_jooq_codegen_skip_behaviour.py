@@ -19,26 +19,26 @@ that never reaches its stamp phase (``generate-sources`` alone, a Ctrl-C, a fail
 codegen, a ``-Dnexus.jooq.regenerate=true`` run killed mid-write) is exactly what used to
 leave an old stamp over a new tree.
 
-Ant is taken from ``~/.m2`` (any engine build puts it there) or downloaded once from
-Maven Central, and verified against pinned SHA-256 digests either way. A machine with no
-JVM, or with neither source of Ant, FAILS this file instead of skipping it: a skip would
-turn the safety net into a pass over nothing.
+Ant is taken from the jars committed in ``tests/fixtures/ant-1.10.12/`` and verified against
+pinned SHA-256 digests, on every host, so a local run takes the path the hosted lint job takes. The
+file makes no network fetch: that job runs no Maven build, so it has no ``~/.m2``, and a download
+from Maven Central failed there on a 404 and on HTTP 429 (nexus-9st84 and its follow-up). A machine
+with no JVM, or whose committed jars are missing or altered, FAILS this file instead of skipping
+it, naming where it looked: a skip would turn the safety net into a pass over nothing.
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
-import http.client
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,6 +54,7 @@ _RECIPE = "src/build/java/dev/nexus/build/PgContainerRecipe.java"
 _GENERATOR = {"main": "src/build/jooq/jooq-main.xml", "test": "src/build/jooq/jooq-test.xml"}
 
 _ANT_VERSION = "1.10.12"  # what maven-antrun-plugin 3.1.0 declares
+_ANTRUN_PLUGIN_VERSION = "3.1.0"  # the plugin version _ANT_VERSION is for; a pom test pins it
 _ANT_JARS = {
     "ant": "5c6a438c3ebe7a306eba452b09fa307b0e60314926177920bca896c4a504eaf6",
     "ant-launcher": "42a7ca7e7bb777fe7ee75a5ed4cc529c766bc43486367fdaad0ab4a32ee9c249",
@@ -67,111 +68,172 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-#: nexus-9st84: Maven Central answered a transient 404 for this pinned, existing artifact once in
-#: thirty develop runs (CI 39720885850), and one bare urlopen errored the whole module at setup. The
-#: download now tries each host up to three times, waiting 10 then 20 s between rounds; the pinned
-#: sha256 still decides. A body cut short (IncompleteRead) is retried like a refused connection.
-_CENTRAL_HOSTS = ("https://repo.maven.apache.org/maven2", "https://repo1.maven.org/maven2")
-_FETCH_ATTEMPTS = 3
-_FETCH_WAIT_S = 10.0
-_urlopen = urllib.request.urlopen  # module-local seam: a test replaces this, never urllib's own
+#: The jars committed beside the tests (tests/fixtures/ant-1.10.12/PROVENANCE.md carries source and
+#: license). The only source: ~/.m2 is not read, so every host runs the path the hosted lint job runs.
+_VENDORED_DIR = Path(__file__).resolve().parent / "fixtures" / f"ant-{_ANT_VERSION}"
 
 
-def _download(rel: str, dest: Path, *, wait=time.sleep) -> None:
-    """Fetch *rel* from Maven Central into *dest* (via a per-process part file), retrying a
-    transient failure. The caller checks the digest."""
-    errors: list[str] = []
-    for attempt in range(_FETCH_ATTEMPTS):
-        for host in _CENTRAL_HOSTS:
-            try:
-                with _urlopen(f"{host}/{rel}", timeout=60) as r:
-                    data = r.read()
-            except (OSError, http.client.HTTPException) as exc:  # URLError/HTTPError, timeouts, cut-short bodies
-                errors.append(f"{host} attempt {attempt + 1}: {exc}")
-                continue
-            part = dest.with_suffix(f".part.{os.getpid()}")
-            try:
-                part.write_bytes(data)
-                part.replace(dest)
-            finally:
-                part.unlink(missing_ok=True)
-            return
-        if attempt + 1 < _FETCH_ATTEMPTS:
-            wait(_FETCH_WAIT_S * (attempt + 1))
-    raise AssertionError(f"could not download {rel} from Maven Central: " + "; ".join(errors))
+def _ant_jar(name: str, *, vendored_dir: Path | None = None) -> Path:
+    """The pinned Ant jar *name* from the committed fixtures; never from ~/.m2 or the network.
 
-
-def _ant_jar(name: str) -> Path:
+    A missing jar, or one whose digest differs from the pin, raises naming the path and what was
+    found there.
+    """
     jar = f"{name}-{_ANT_VERSION}.jar"
-    rel = f"org/apache/ant/{name}/{_ANT_VERSION}/{jar}"
-    local = Path.home() / ".m2" / "repository" / rel
-    if local.is_file() and _sha256(local) == _ANT_JARS[name]:
-        return local
-    cached = Path(tempfile.gettempdir()) / f"nexus-ant-{_ANT_VERSION}" / jar
-    if not (cached.is_file() and _sha256(cached) == _ANT_JARS[name]):
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        _download(rel, cached)
-    assert _sha256(cached) == _ANT_JARS[name], f"{jar}: digest differs from the pinned one"
-    return cached
+    path = (vendored_dir if vendored_dir is not None else _VENDORED_DIR) / jar
+    if not path.is_file():
+        raise AssertionError(f"no usable {jar}: looked in {path} (absent)")
+    if _sha256(path) != _ANT_JARS[name]:
+        raise AssertionError(
+            f"no usable {jar}: looked in {path} (digest differs from the pinned {_ANT_JARS[name]})"
+        )
+    return path
 
 
-class _FakeResponse:
-    def __init__(self, data: bytes) -> None:
-        self._data = data
+#: Run in a child interpreter: every socket connect and name lookup raises, then both jars resolve. The patch lives in the child, so no other test in this worker sees it
+#: (tests/test_module_seam.py bans a process-wide stdlib patch).
+_OFFLINE_CHILD = """
+import importlib.util, socket, sys
 
-    def __enter__(self) -> "_FakeResponse":
-        return self
+def refuse(*a, **k):
+    raise ConnectionRefusedError("network fetch refused: the Ant jars must resolve offline")
 
-    def __exit__(self, *exc: object) -> None:
-        return None
-
-    def read(self) -> bytes:
-        return self._data
-
-
-def _scripted_urlopen(outcomes: list, seen: list[str]):
-    """An urlopen stand-in: each call pops the next outcome, an exception to raise or bytes to return."""
-    def fake(url: str, timeout: float) -> _FakeResponse:
-        seen.append(url)
-        outcome = outcomes.pop(0)
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return _FakeResponse(outcome)
-    return fake
+socket.socket.connect = refuse
+socket.getaddrinfo = refuse
+spec = importlib.util.spec_from_file_location("ant_resolution", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+sys.modules["ant_resolution"] = mod
+spec.loader.exec_module(mod)
+for name in sorted(mod._ANT_JARS):
+    print(name, mod._ant_jar(name))
+"""
 
 
-def _http_404(url: str) -> urllib.error.HTTPError:
-    return urllib.error.HTTPError(url, 404, "Not Found", None, None)
-
-
-def test_a_transient_central_failure_is_retried_and_the_jar_lands(tmp_path, monkeypatch) -> None:
-    """nexus-9st84: a 404 from one host, then a body cut short from the other, then the bytes."""
-    seen: list[str] = []
-    waits: list[float] = []
-    monkeypatch.setattr(
-        sys.modules[__name__], "_urlopen",
-        _scripted_urlopen([_http_404("a"), http.client.IncompleteRead(b"half"), b"jar-bytes"], seen),
+def test_the_jars_resolve_with_every_network_connect_refused() -> None:
+    """nexus-9st84 follow-up: with the network cut, both jars still resolve from the committed
+    copies, and the guard really bites (a connect in the same child fails)."""
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", _OFFLINE_CHILD, str(Path(__file__).resolve())],
+        capture_output=True, text=True, timeout=120, check=False,
     )
-    dest = tmp_path / "ant.jar"
-    _download("org/apache/ant/ant/1.10.12/ant-1.10.12.jar", dest, wait=waits.append)
-    assert dest.read_bytes() == b"jar-bytes"
-    assert [u.split("/org/apache/")[0] for u in seen] == list(_CENTRAL_HOSTS) + [_CENTRAL_HOSTS[0]]
-    assert waits == [_FETCH_WAIT_S]
-    assert not list(tmp_path.glob("*.part.*")), "the part file is renamed into place, not left behind"
-
-
-def test_a_download_that_never_succeeds_fails_loud_after_every_attempt(tmp_path, monkeypatch) -> None:
-    seen: list[str] = []
-    waits: list[float] = []
-    calls = _FETCH_ATTEMPTS * len(_CENTRAL_HOSTS)
-    monkeypatch.setattr(
-        sys.modules[__name__], "_urlopen", _scripted_urlopen([_http_404("x")] * calls, seen),
+    assert out.returncode == 0, out.stderr
+    resolved = dict(line.split(" ", 1) for line in out.stdout.splitlines())
+    assert sorted(resolved) == sorted(_ANT_JARS)
+    assert all(Path(path).parent == _VENDORED_DIR for path in resolved.values()), resolved
+    guard = subprocess.run(
+        [sys.executable, "-I", "-c", _OFFLINE_CHILD.split("spec =")[0] + "socket.create_connection(('192.0.2.1', 9))"],
+        capture_output=True, text=True, timeout=60, check=False,
     )
-    with pytest.raises(AssertionError, match="could not download org/apache/ant"):
-        _download("org/apache/ant/ant/1.10.12/ant-1.10.12.jar", tmp_path / "ant.jar", wait=waits.append)
-    assert len(seen) == calls
-    assert waits == [_FETCH_WAIT_S * n for n in range(1, _FETCH_ATTEMPTS)]
-    assert not (tmp_path / "ant.jar").exists()
+    assert guard.returncode != 0 and "network fetch refused" in guard.stderr, guard.stderr
+
+
+_FETCH_PROGRAMS = frozenset({"curl", "wget"})
+_SUBPROCESS_CALLS = frozenset({"run", "Popen", "call", "check_call", "check_output", "system", "popen"})
+
+
+def _fetch_subprocess_calls(source: str) -> tuple[int, list[int]]:
+    """(subprocess-style calls examined, line numbers of those whose first argument names curl or wget)."""
+    examined, hits = 0, []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
+        if name not in _SUBPROCESS_CALLS:
+            continue
+        examined += 1
+        first = node.args[0]
+        if isinstance(first, (ast.List, ast.Tuple)) and first.elts:
+            first = first.elts[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            words = first.value.split()
+            if words and Path(words[0]).name in _FETCH_PROGRAMS:
+                hits.append(node.lineno)
+    return examined, hits
+
+
+def test_this_file_imports_no_network_client_and_runs_no_fetch_program() -> None:
+    """The download is gone for good: nothing here may import a client, or shell out to curl or
+    wget, that could bring it back."""
+    source = Path(__file__).read_text(encoding="utf-8")
+    imported = {
+        alias.name.split(".")[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module.split(".")[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert not imported & {"urllib", "http", "requests", "httpx", "socket", "ssl", "ftplib"}, imported
+    examined, hits = _fetch_subprocess_calls(source)
+    assert examined >= 3, f"the scan examined {examined} subprocess calls; it is looking at the wrong thing"
+    assert not hits, f"curl or wget is run at lines {hits}"
+
+
+def test_the_fetch_program_scan_catches_the_shapes_it_claims_to() -> None:
+    """Non-vacuity of the scan above, on snippets (never on this file's own lines)."""
+    for snippet in (
+        'subprocess.run(["curl", "-O", url])',
+        'subprocess.check_output(("/usr/bin/wget", url))',
+        'subprocess.Popen("curl -fsSL x")',
+        'os.system("wget x")',
+    ):
+        examined, hits = _fetch_subprocess_calls(snippet)
+        assert (examined, len(hits)) == (1, 1), snippet
+    assert _fetch_subprocess_calls('subprocess.run(["java", "-version"])') == (1, [])
+
+
+def test_the_pinned_ant_is_the_one_the_poms_antrun_plugin_declares() -> None:
+    """``_ANT_VERSION`` and the committed jars are for maven-antrun-plugin ``_ANTRUN_PLUGIN_VERSION``;
+    if the pom moves the plugin (or overrides its Ant), this harness would run a different Ant than
+    the build does."""
+    ns = {"m": "http://maven.apache.org/POM/4.0.0"}
+    root = ET.parse(_POM).getroot()
+    plugins = [
+        pl for pl in root.iterfind(".//m:plugin", ns)
+        if pl.findtext("m:artifactId", namespaces=ns) == "maven-antrun-plugin"
+    ]
+    versions = {pl.findtext("m:version", namespaces=ns) for pl in plugins} - {None}
+    advice = (
+        f"service/pom.xml declares maven-antrun-plugin {sorted(versions)}, but this file's Ant "
+        f"{_ANT_VERSION} is for {_ANTRUN_PLUGIN_VERSION}: update _ANTRUN_PLUGIN_VERSION, _ANT_VERSION, "
+        "_ANT_JARS and the jars in tests/fixtures/ant-<version>/ (with PROVENANCE.md) together"
+    )
+    assert versions == {_ANTRUN_PLUGIN_VERSION}, advice
+    overrides = [
+        d.findtext("m:artifactId", namespaces=ns)
+        for pl in plugins
+        for d in pl.iterfind("m:dependencies/m:dependency", ns)
+        if d.findtext("m:groupId", namespaces=ns) == "org.apache.ant"
+    ]
+    assert not overrides, f"the pom overrides the antrun plugin's Ant with {overrides}: {advice}"
+
+
+def test_the_committed_jars_are_the_pinned_ones() -> None:
+    """Both committed jars resolve, at the pinned digest."""
+    for name, digest in _ANT_JARS.items():
+        found = _ant_jar(name)
+        assert found.parent == _VENDORED_DIR
+        assert found.stat().st_size > 1000, f"{found} is empty or truncated"
+        assert _sha256(found) == digest
+
+
+def test_a_missing_jar_fails_loud_naming_where_it_looked(tmp_path: Path) -> None:
+    with pytest.raises(AssertionError) as err:
+        _ant_jar("ant", vendored_dir=tmp_path / "vendored")
+    msg = str(err.value)
+    assert f"no usable ant-{_ANT_VERSION}.jar" in msg
+    assert str(tmp_path / "vendored") in msg and "(absent)" in msg
+
+
+def test_a_committed_jar_with_the_wrong_digest_fails_loud(tmp_path: Path) -> None:
+    vendored = tmp_path / "vendored"
+    vendored.mkdir()
+    (vendored / f"ant-{_ANT_VERSION}.jar").write_bytes(b"tampered")
+    with pytest.raises(AssertionError, match="digest differs from the pinned"):
+        _ant_jar("ant", vendored_dir=vendored)
 
 
 @pytest.fixture(scope="module")
