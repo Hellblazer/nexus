@@ -748,10 +748,9 @@ class AspectExtractionWorker:
                 )
                 return ExtractFail(uri="", reason=SENSITIVE_DOCUMENT, detail="document is sensitive")
             except Exception as exc:  # noqa: BLE001 — extract is best-effort; the verdict map routes the failure
-                _log.warning(
-                    "aspect_worker_extract_raised",
-                    collection=row.collection, source_path=row.source_path, exc_info=True,
-                )
+                # Not logged here: the verdict map logs every ExtractRaised once, as
+                # aspect_worker_extract_raised with this row's collection, source path and
+                # traceback. Logging it here too drew each failure's traceback twice (nexus-bpikw).
                 return ExtractRaised(exc)
 
         if len(rows) == 1:
