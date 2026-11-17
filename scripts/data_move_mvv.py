@@ -571,7 +571,9 @@ def scenario_crash_resume(eng: Engine, a: argparse.Namespace) -> tuple[dict, boo
         if (move_row(eng) or {}).get("completed") or time.monotonic() > deadline:
             raise MvvError("the move finished or stalled before a chunk was caught in flight")
         snap = in_flight_snapshot(eng)
-        if snap["done_chunks"] * 1000 >= total_rows * a.kill_at and snap["updates_in_flight"]:
+        # a chunk that has been running a while, so the transaction holds real uncommitted work to roll back
+        aged = [u for u in snap["updates_in_flight"] if int(u["xact_age_s"] or 0) >= a.min_chunk_age_s]
+        if snap["done_chunks"] * 1000 >= total_rows * a.kill_at and aged:
             break
         time.sleep(0.1)
     log(f"crash-resume: {snap['done_chunks']} chunks done, {len(snap['updates_in_flight'])} in flight: {snap['updates_in_flight']}")
@@ -867,6 +869,8 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--jar", type=Path, required=True)
     sc.add_argument("--sleep-ms", type=int, default=None, help="NX_DATA_MOVE_SLEEP_MS for the engine (default: the registered 0)")
     sc.add_argument("--kill-at", type=float, default=0.4, help="kill-resume, crash-resume: fraction of rows moved at the kill")
+    sc.add_argument("--min-chunk-age-s", type=float, default=3.0,
+                    help="crash-resume: the in-flight chunk's transaction must be at least this old at the stop")
     sc.add_argument("--settle-s", type=float, default=5.0)
     sc.add_argument("--move-timeout", type=float, default=1800.0)
     sc.add_argument("--rate", type=float, default=20.0, help="load: requests a second")
