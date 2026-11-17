@@ -1,0 +1,84 @@
+# Seed and keep warm the Maven caches on MAIN for the runs that can read nothing else.
+#
+# A run triggered by a tag (engine-service-release.yml) restores only caches saved on its own ref or on the
+# default branch (main), and a release PR into main reads main too. CI does not run on pushes to main, so without
+# this workflow main holds no `package` or `native` entry and every tag run resolves the whole build from Maven
+# Central (tag run 43818086627: "maven cache is not found"). Same isolation as pg-bundle-cache-seed.yml.
+#
+# Each job restores through .github/actions/maven-cache, so the key cannot drift from the callers'. On an exact
+# hit the job does nothing more: the restore itself marks the entry used, which is the keep-warm (entries unused
+# for 7 days are evicted, and engine tags can be further apart). On a miss it runs the build its class names; Maven
+# resolves every artifact that build uses into ~/.m2, and actions/cache saves only when the job passes, so a saved
+# entry holds all a passing build of that class needed.
+name: maven-cache-seed
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'service/pom.xml'
+      - 'service/.mvn/**'
+      - '.github/actions/maven-cache/**'
+      - '.github/workflows/maven-cache-seed.yml'
+  schedule:
+    - cron: '17 5 * * 1'  # Monday 05:17 UTC, inside the 7-day eviction window
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maven-cache-seed-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  seed:
+    name: seed ${{ matrix.class }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        class: [package, native]
+    env:
+      # The seed builds from the checked-in codegen inputs, never a cached jOOQ tree (ci.yml's trip-wire does the same).
+      NX_JOOQ_CACHE: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Set up GraalVM 25.0.3
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Restore the Maven cache and set Central retries
+        id: m2
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: ${{ matrix.class }}
+
+      - name: Build the shaded jar (package class)
+        if: steps.m2.outputs.cache-hit != 'true' && matrix.class == 'package'
+        working-directory: service
+        run: ./mvnw -B -ntp -e -DskipTests package
+
+      - name: Generate jOOQ sources (native class)
+        if: steps.m2.outputs.cache-hit != 'true' && matrix.class == 'native'
+        working-directory: service
+        run: ./mvnw -B -ntp -e generate-sources
+
+      - name: Build the native image (native class, the trip-wire's quick build)
+        # The native profile checks the built executable (verify-native-truststore), so only a real build resolves
+        # and proves everything a native leg needs.
+        if: steps.m2.outputs.cache-hit != 'true' && matrix.class == 'native'
+        working-directory: service
+        run: ./mvnw -B -ntp -e -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=11g package
+
+      - name: Say whether this run seeded or kept warm
+        run: |
+          if [ "${{ steps.m2.outputs.cache-hit }}" = true ]; then
+            echo "maven-cache-seed: ${{ matrix.class }} entry hit on main; the restore kept it warm, nothing built"
+          else
+            echo "maven-cache-seed: ${{ matrix.class }} entry missed; built, saved at job end"
+          fi

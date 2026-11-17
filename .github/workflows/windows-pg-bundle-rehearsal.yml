@@ -183,6 +183,7 @@ on:
       - .github/actions/resolve-windows-python/**
       - .github/actions/windows-engine-leg/**
       - .github/actions/windows-job-cleanup/**
+      - .github/actions/maven-cache/**
       - .github/workflows/windows-pg-bundle-rehearsal.yml
   workflow_dispatch:
 
@@ -287,7 +288,7 @@ jobs:
       - name: Restore the Maven cache and set Central retries
         uses: ./.github/actions/maven-cache
         with:
-          job-class: codegen
+          job-class: package
 
       - name: Run jOOQ codegen
         working-directory: service

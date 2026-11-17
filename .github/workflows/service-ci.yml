@@ -27,6 +27,7 @@ on:
     paths:
       - 'service/**'
       - '.github/workflows/service-ci.yml'
+      - '.github/actions/maven-cache/**'
   pull_request:
     branches: [main, develop]
 
@@ -77,6 +78,7 @@ jobs:
             service:
               - 'service/**'
               - '.github/workflows/service-ci.yml'
+              - '.github/actions/maven-cache/**'
 
       # nexus-jh1f2 cut 6 (Sam 2026-11-10): on a release PR (a pull request into main) whose
       # service/ tree is byte-identical to the engine tag the release pins

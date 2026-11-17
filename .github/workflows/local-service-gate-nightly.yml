@@ -136,7 +136,7 @@ jobs:
           distribution: "graalvm"
 
       - name: Restore the Maven cache and set Central retries (dev-jar build)
-        # This scheduled run saves under main, the scope a tag release run and a release PR can restore from.
+        # A scheduled run saves under main; maven-cache-seed.yml is what keeps main's entries for tag runs.
         uses: ./.github/actions/maven-cache
         with:
           job-class: package
@@ -416,7 +416,7 @@ jobs:
           distribution: "graalvm"
 
       - name: Restore the Maven cache and set Central retries (dev-jar build)
-        # This scheduled run saves under main, the scope a tag release run and a release PR can restore from.
+        # A scheduled run saves under main; maven-cache-seed.yml is what keeps main's entries for tag runs.
         uses: ./.github/actions/maven-cache
         with:
           job-class: package
