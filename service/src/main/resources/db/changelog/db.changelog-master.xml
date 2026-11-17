@@ -2232,6 +2232,20 @@
     <include file="db/changelog/identity-003-work-by-resource.xml"/>
 
     <!--
+        Bead nexus-hczdo.1.2 (RDR-253 Step 2): nexus.identity_tokens, the identity tokens, in a table of their own
+        (not session_tokens: a new mint must not delete the old process's token). Needs identity_records, so it sits
+        here and not beside service-tokens-006. DDL only. After identity-003, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/service-tokens-007-identity-tokens.xml"/>
+
+    <!--
+        Bead nexus-hczdo.1.2 (RDR-253 Step 2): nexus.memory.identity, the T2 identity stamp. DDL only (one nullable
+        ADD COLUMN). After service-tokens-007, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/memory-006-identity-stamp.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

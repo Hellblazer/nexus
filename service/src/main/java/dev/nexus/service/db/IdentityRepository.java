@@ -50,6 +50,11 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  *       check to find, so 30 days lapsed is enough for it.</li>
  *   <li>A renewal and a refresh write no binding row unless they revive a lapsed identity; only {@code revive}
  *       and the events of the policy table are rows.</li>
+ *   <li>(Step 2) A stale generation on an event of a process that already holds the identity ({@code clear},
+ *       {@code fork}, {@code refresh}, {@code end}) or on {@code renew} is {@code 409 generation_superseded}, the
+ *       client heartbeat's stop-writing signal and the code the fences answer; a stale generation on an event
+ *       that takes the seat ({@code start}, {@code resume}, {@code takeover}), on {@code release} or on
+ *       {@code gone} is the lost compare-and-set, {@code 409 generation_conflict}.</li>
  * </ul>
  */
 public final class IdentityRepository {
@@ -265,6 +270,24 @@ public final class IdentityRepository {
             "the identity is at generation " + rec.getGeneration() + ", not " + expected, d);
     }
 
+    /**
+     * The refusal of a holder that has been superseded (RDR-253 Step 2): the identity is at a later generation than
+     * the caller's. Distinct from {@link #conflict}, which is also the answer to a lost compare-and-set on
+     * {@code start}: this one is the client heartbeat's stop-writing signal, and the fences answer the same code.
+     */
+    static IdentityException superseded(IdentityRecordsRecord rec, int expected) {
+        Map<String, Object> d = new LinkedHashMap<>();
+        d.put("expected_generation", expected);
+        d.put("current_generation", rec.getGeneration());
+        d.put("state", rec.getState());
+        d.put("holder", IdentityRows.view(rec, null).get("holder"));
+        return new IdentityException(409, "generation_superseded",
+            "the identity is at generation " + rec.getGeneration() + "; generation " + expected + " has been superseded", d);
+    }
+
+    /** The events of a process that already holds the identity: a stale generation on one of these is a superseded holder. */
+    private static final Set<String> HOLDER_EVENTS = Set.of("clear", "fork", "refresh", "end");
+
     private static IdentityException held(IdentityRecordsRecord rec) {
         Map<String, Object> d = new LinkedHashMap<>();
         d.put("state", rec.getState());
@@ -286,6 +309,29 @@ public final class IdentityRepository {
         d.put("holder", IdentityRows.view(rec, null).get("holder"));
         return new IdentityException(409, "holder_mismatch",
             "the verdict names a process that is not the identity's current holder", d);
+    }
+
+    /**
+     * A {@code clear}, {@code fork} or {@code refresh} that names a process (host, pid and {@code started_at}, or a
+     * {@code proc_start}) must name the one that holds the identity: each of them ends with a fresh identity token,
+     * and a caller that describes some other process is not the holder. A request that names none is unchanged (the
+     * contract leaves the fields optional, so the credential of the tenant remains the trust boundary for it).
+     */
+    private static void requireNamedHolder(IdentityRecordsRecord rec, IdentityEvidence ev) {
+        if (!ev.hasProcess() && ev.procStart() == null) {
+            return;
+        }
+        IdentityEvidence.Process cur = IdentityRows.holder(rec);
+        boolean ok = cur != null && (!ev.hasProcess() || sameProcess(cur, ev))
+            && (ev.procStart() == null || cur.procStart() == null || ev.procStart().equals(cur.procStart()));
+        if (!ok) {
+            Map<String, Object> d = new LinkedHashMap<>();
+            d.put("state", rec.getState());
+            d.put("generation", rec.getGeneration());
+            d.put("holder", IdentityRows.view(rec, null).get("holder"));
+            throw new IdentityException(409, "holder_mismatch",
+                "the request names a process that is not the identity's current holder", d);
+        }
     }
 
     private static boolean isHeld(IdentityRecordsRecord rec) {
@@ -333,14 +379,20 @@ public final class IdentityRepository {
             OffsetDateTime now = now();
             IdentityRows.lapseIfDue(ctx, rec, now);
             if (rec.getGeneration() != expectedGeneration.intValue()) {
-                throw conflict(rec, expectedGeneration);
+                throw HOLDER_EVENTS.contains(event) && expectedGeneration < rec.getGeneration()
+                    ? superseded(rec, expectedGeneration) : conflict(rec, expectedGeneration);
             }
             int before = rec.getGeneration();
             boolean noop = false;
             switch (event) {
                 case "start", "resume", "takeover" -> acquire(ctx, rec, event, evidence, now);
                 case "clear", "fork" -> keep(ctx, rec, event, evidence, now);
-                case "refresh" -> renewLocked(ctx, rec, evidence.clientVersion(), now);
+                case "refresh" -> {
+                    if (isHeld(rec)) {
+                        requireNamedHolder(rec, evidence);
+                    }
+                    renewLocked(ctx, rec, evidence.clientVersion(), now);
+                }
                 case "end" -> noop = end(ctx, rec, evidence, now);
                 case "release" -> noop = release(ctx, rec, evidence, now);
                 default -> throw new IllegalStateException(event);
@@ -398,6 +450,7 @@ public final class IdentityRepository {
         if (ev.sessionId() == null || ev.sessionId().isBlank()) {
             throw new IdentityException(400, "missing_evidence", "session_id is required for " + event);
         }
+        requireNamedHolder(rec, ev);
         if ("lapsed".equals(rec.getState())) {
             revive(rec);
         }
@@ -491,7 +544,7 @@ public final class IdentityRepository {
             OffsetDateTime now = now();
             IdentityRows.lapseIfDue(ctx, rec, now);
             if (rec.getGeneration() != generation.intValue()) {
-                throw conflict(rec, generation);
+                throw generation < rec.getGeneration() ? superseded(rec, generation) : conflict(rec, generation);
             }
             renewLocked(ctx, rec, clientVersion, now);
             rec.update();

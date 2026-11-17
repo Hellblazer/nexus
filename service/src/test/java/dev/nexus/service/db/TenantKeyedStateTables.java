@@ -604,9 +604,10 @@ final class TenantKeyedStateTables {
         )) {
             notKeyed.put(f, JOOQ_COLUMN);
         }
-        // PRINCIPAL (7)
+        // PRINCIPAL (9)
         for (String f : List.of(
             "NexusService.TupleTenantCursor.tenantId",
+            "IdentityTokenStore.Principal.tenantId",
             "ReembedRunner.Turn.tenant",
             "RequestContext.Principal.tenant",
             "RequestLedger.RetentionPass.tenant",

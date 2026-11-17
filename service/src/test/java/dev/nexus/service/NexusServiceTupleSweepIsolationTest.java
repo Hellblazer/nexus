@@ -87,6 +87,9 @@ class NexusServiceTupleSweepIsolationTest {
         }
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            // RDR-253 Step 2: the sweep's identity-retention arm removes the identity scope of identities that are
+            // gone, so the role reads and deletes t1.scratch, as nexus_svc does in production.
+            PgContainerHelper.grantT1ScratchTo(su, SVC_ROLE);
         }
 
         var cfg = new com.zaxxer.hikari.HikariConfig();

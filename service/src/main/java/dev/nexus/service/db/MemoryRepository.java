@@ -687,7 +687,8 @@ public final class MemoryRepository {
             var candidates = ctx.select(MEMORY.ID, MEMORY.ACCESS_COUNT, MEMORY.TTL_DAYS, MEMORY.TIMESTAMP)
                                 .from(MEMORY)
                                 .where(MEMORY.TTL_DAYS.isNotNull()
-                                    .and(MEMORY.QUARANTINED_AT.isNull()))
+                                    .and(MEMORY.QUARANTINED_AT.isNull())
+                                    .and(IdentityLine.notFenced())) // RDR-253: a fenced threads entry is never swept
                                 .fetch();
 
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -732,7 +733,8 @@ public final class MemoryRepository {
                                         .and(MEMORY.ROLLED_UP_AT.isNotNull())
                                         // A replaced row (quarantined, ttl NULL) is never reaped, even
                                         // if a rollup raced the replace and marked it (nexus-ov3zi).
-                                        .and(MEMORY.TTL_DAYS.isNotNull()))
+                                        .and(MEMORY.TTL_DAYS.isNotNull())
+                                        .and(IdentityLine.notFenced())) // RDR-253: nor reaped
                                     .returning(MEMORY.ID)
                                     .fetch(MEMORY.ID);
             if (!deleted.isEmpty()) {
@@ -1175,7 +1177,7 @@ public final class MemoryRepository {
                 var existing = ctx.selectFrom(MEMORY)
                                   .where(MEMORY.PROJECT.eq(project)
                                       .and(MEMORY.TITLE.ne(title))
-                                      .and(NOT_QUARANTINED))
+                                      .and(NOT_QUARANTINED).and(IdentityLine.notFenced())) // RDR-253: never a fenced entry
                                   .fetch();
                 long bestId = -1L;
                 double bestJaccard = 0.0;
@@ -1206,6 +1208,7 @@ public final class MemoryRepository {
                     ctx.update(MEMORY)
                        .set(MEMORY.CONTENT,   merged)
                        .set(MEMORY.TIMESTAMP, now)
+                       .set(MEMORY.IDENTITY,  (String) null) // RDR-253: the handler re-stamps for a token
                        .where(MEMORY.ID.eq(bestId))
                        .execute();
                     return new long[]{bestId, 1L}; // 1 = merged
@@ -1390,6 +1393,7 @@ public final class MemoryRepository {
                 // keep it, so the conflict branch clears both quarantine stamps.
                 .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
                 .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                .set(MEMORY.IDENTITY, (String) null) // RDR-253: the overwrite drops the old stamp
                 .execute();
             log.debug("event=memory_import_batch tenant={} rows={}", tenant, rows.size());
             return rows.size();
@@ -1439,6 +1443,7 @@ public final class MemoryRepository {
                         // keep it, so the conflict branch clears both quarantine stamps.
                         .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
                         .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                        .set(MEMORY.IDENTITY, (String) null) // RDR-253: the overwrite drops the old stamp
                         .returning(MEMORY.ID)
                         .fetchOne();
 
@@ -1490,6 +1495,7 @@ public final class MemoryRepository {
                         // keep it, so the conflict branch clears both quarantine stamps.
                         .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
                         .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                        .set(MEMORY.IDENTITY, (String) null) // RDR-253: the overwrite drops the old stamp
                         .returning(MEMORY.ID)
                         .fetchOne();
 

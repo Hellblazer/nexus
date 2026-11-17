@@ -10,6 +10,7 @@ import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.IdentityEvidence;
 import dev.nexus.service.db.IdentityException;
 import dev.nexus.service.db.IdentityRepository;
+import dev.nexus.service.db.IdentityTokenStore;
 import dev.nexus.service.db.TokenStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,7 +33,8 @@ import java.util.Set;
  *   POST /v1/identity/delegated            {parent, display_name?, bind:{evidence}}: a delegated identity, generation 1
  *   POST /v1/identity/rename               {old, new}: retire the old alias, take the new, retitle the board entry
  *   POST /v1/identity/&lt;id&gt;/promote         {name}: an ephemeral identity becomes a seat
- *   POST /v1/identity/&lt;id&gt;/bind            {event, expected_generation, ...evidence, holder_gone?}: the compare-and-set
+ *   POST /v1/identity/&lt;id&gt;/bind            {event, expected_generation, ...evidence, holder_gone?}: the compare-and-set; an
+ *                                          event after which the caller holds the identity also returns an identity_token
  *   POST /v1/identity/&lt;id&gt;/gone            {expected_generation, holder_gone}: record that the holder is gone
  *   POST /v1/identity/&lt;id&gt;/renew           {generation, client_version?}
  *   POST /v1/identity/&lt;id&gt;/purge           {operator:true}: remove the fenced state of an identity that is not live
@@ -42,8 +44,8 @@ import java.util.Set;
  *   DELETE /v1/identity/&lt;id&gt;/work?kind=&amp;ref=  forget it (idempotent)
  *   GET  /v1/identity/&lt;id&gt;/work             the work of one identity
  *   GET  /v1/identity/work?kind=&amp;ref=        the identities that own that resource (several may)
- *   POST /v1/identity/&lt;id&gt;/memberships      {group, role}: join a group, or change the role (the join time stays)
- *   DELETE /v1/identity/&lt;id&gt;/memberships/&lt;group&gt;  leave a group (idempotent)
+ *   POST /v1/identity/&lt;id&gt;/memberships      {group, role}: join a group, or change the role (the join time stays); fenced
+ *   DELETE /v1/identity/&lt;id&gt;/memberships/&lt;group&gt;  leave a group (idempotent); fenced
  *   GET  /v1/identity/&lt;id&gt;/memberships      the groups of one identity, in join order
  *   GET  /v1/identity/groups/&lt;group&gt;        the roster of a group, in join order
  *   GET  /v1/identity/alias/&lt;name&gt;         resolve a name; a retired one for 7 days with a notice, then 410
@@ -70,10 +72,39 @@ public final class IdentityHandler implements HttpHandler {
     /** The bind events the MCP server's data credential may send: pending bind, fork row, refresh and end. */
     public static final Set<String> DATA_EVENTS = Set.of("start", "resume", "fork", "refresh", "end");
 
-    private final IdentityRepository repo;
+    /** The bind events after which the caller holds the identity, so the response carries a token for the binding. */
+    static final Set<String> TOKEN_EVENTS = Set.of("start", "resume", "takeover", "clear", "fork", "refresh");
 
-    public IdentityHandler(IdentityRepository repo) {
+    private final IdentityRepository repo;
+    private final IdentityTokenStore tokens;
+    private final IdentityFence fence;
+
+    public IdentityHandler(IdentityRepository repo, IdentityTokenStore tokens, IdentityFence fence) {
         this.repo = repo;
+        this.tokens = tokens;
+        this.fence = fence;
+    }
+
+    /**
+     * Adds the identity token of the binding {@code view} describes ({@code identity_token},
+     * {@code identity_token_expires_in_seconds}) when the identity is held; a binding that ended or released
+     * the seat gets none. The token names the generation the view reports, so a refresh (the same generation)
+     * and a {@code clear} or {@code fork} (a new session id under the same generation) mint another token for the
+     * binding they keep, and every earlier token of it keeps working until it expires.
+     */
+    private Map<String, Object> withToken(String tenant, Map<String, Object> view) {
+        Object state = view.get("state");
+        if (!"live".equals(state) && !"lapsed".equals(state)) {
+            return view;
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> holder = (Map<String, Object>) view.get("holder");
+        IdentityTokenStore.Issued issued = tokens.issue(tenant, (String) view.get("id"),
+            ((Number) view.get("generation")).intValue(), holder == null ? null : (String) holder.get("proc_start"));
+        Map<String, Object> out = new LinkedHashMap<>(view);
+        out.put("identity_token", issued.rawToken());
+        out.put("identity_token_expires_in_seconds", issued.expiresInSeconds());
+        return out;
     }
 
     private static boolean tenantScope(String scope) {
@@ -217,7 +248,7 @@ public final class IdentityHandler implements HttpHandler {
         }
         if ("ephemeral".equals(kind)) {
             require(Route.CREATE_EPHEMERAL, scope);
-            return repo.createEphemeral(tenant, display, createdBy, evidence(map(body, "bind")));
+            return withToken(tenant, repo.createEphemeral(tenant, display, createdBy, evidence(map(body, "bind"))));
         }
         throw new IdentityException(400, "bad_kind", "kind must be seat or ephemeral");
     }
@@ -228,8 +259,8 @@ public final class IdentityHandler implements HttpHandler {
         if (!"POST".equals(method)) throw methodNotAllowed();
         require(Route.DELEGATED, scope);
         Map<String, Object> body = readBody(ex);
-        return repo.createDelegated(tenant, string(body, "parent"), string(body, "display_name"),
-            evidence(map(body, "bind")));
+        return withToken(tenant, repo.createDelegated(tenant, string(body, "parent"), string(body, "display_name"),
+            evidence(map(body, "bind"))));
     }
 
     private Map<String, Object> rename(HttpExchange ex, String tenant, String method, String scope, String[] seg)
@@ -252,6 +283,7 @@ public final class IdentityHandler implements HttpHandler {
         if (seg.length == 3 && "memberships".equals(seg[1])) {
             if (!"DELETE".equals(method)) throw methodNotAllowed();
             require(Route.MEMBER_WRITE, scope);
+            fence.requireOwner(ex, tenant, id);
             return repo.leaveGroup(tenant, id, seg[2]);
         }
         if (seg.length != 2) throw notFound();
@@ -279,6 +311,7 @@ public final class IdentityHandler implements HttpHandler {
                 if (!"POST".equals(method)) throw methodNotAllowed();
                 require(Route.MEMBER_WRITE, scope);
                 Map<String, Object> body = readBody(ex);
+                fence.requireOwner(ex, tenant, id);
                 return repo.joinGroup(tenant, id, string(body, "group"), string(body, "role"));
             }
             case "bindings" -> {
@@ -303,7 +336,8 @@ public final class IdentityHandler implements HttpHandler {
                     throw new IdentityException(403, "forbidden",
                         "a '" + scope + "' credential may not send the '" + event + "' event");
                 }
-                return repo.bind(tenant, id, event, integer(body, "expected_generation"), evidence(body));
+                Map<String, Object> bound = repo.bind(tenant, id, event, integer(body, "expected_generation"), evidence(body));
+                return TOKEN_EVENTS.contains(event) ? withToken(tenant, bound) : bound;
             }
             case "gone" -> {
                 if (!"POST".equals(method)) throw methodNotAllowed();

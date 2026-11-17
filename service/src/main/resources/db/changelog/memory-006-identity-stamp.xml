@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-hczdo.1.2 (RDR-253 Phase 1 Step 2): T2 identity stamping.
+
+    nexus.memory.identity: the identity (an i<digits> id) of the token a row was last written with, or NULL for a
+    row written without an identity token. The engine writes it from the request's identity token, never from
+    the request body, as JDR-002's sender_session is written; a write without a token leaves it NULL, and a write
+    to an unleased seat's family that was accepted without a token (labelled unattested) leaves it NULL too. It
+    is a label: nothing reads it to decide an ownership check (the threads-entry fence reads the identity: line
+    of the stored entry, RDR-253 Fencing), and the column holds no row's ownership.
+
+    Nullable, no default, no index: ALTER TABLE ... ADD COLUMN of a nullable column without a default rewrites
+    nothing, so the change is metadata only however large the table is.
+
+    DDL only: one ADD COLUMN. No data mutation of any existing row, so no DATA EFFECT line applies per
+    scripts/data_effect_lint.py's own scope. Nothing is backfilled and nothing runs at boot. Placed after
+    service-tokens-007 and before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="memory-006-1" author="nexus-hczdo.1.2">
+        <comment>nexus.memory.identity (RDR-253): the identity of the token a row was last written with; NULL when written without one. A label, not an ownership record.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.memory ADD COLUMN identity TEXT;
+        </sql>
+        <rollback>ALTER TABLE nexus.memory DROP COLUMN IF EXISTS identity</rollback>
+    </changeSet>
+</databaseChangeLog>

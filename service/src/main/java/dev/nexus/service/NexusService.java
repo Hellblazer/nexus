@@ -709,6 +709,7 @@ public final class NexusService {
         var pipelineRepo  = new PipelineRepository(tenantScope);
         this.catalogRepo  = new CatalogRepository(tenantScope);
         this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
+        var identityFence = new dev.nexus.service.http.IdentityFence(new dev.nexus.service.db.IdentityFenceReads(tenantScope)); // RDR-253
 
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
@@ -796,7 +797,7 @@ public final class NexusService {
         // /v1/memory, plans, telemetry, t1, taxonomy, aspects, chash, remap, ladder, pipeline, identity: one place.
         dev.nexus.service.http.TenantDataRoutes.register(server, authFilter, memoryRepo, planRepo, telemetryRepo,
                 scratchRepo, taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage, aspectRepo, chashRepo, remapRepo,
-                ladderRepo, pipelineRepo, identityRepo);
+                ladderRepo, pipelineRepo, identityRepo, tokenStore.identityTokens(), identityFence);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18). The
         // combined-write orchestration seam (nexus-kl2z6 increment 1) rides
@@ -883,7 +884,7 @@ public final class NexusService {
         // route is simply absent (404) rather than a 503 stub.
         if (tupleTemplateRegistry != null) {
             this.tupleRepo = TupleRepository.fromEnv(tenantScope, tupleTemplateRegistry);
-            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo));
+            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo, identityFence));
             tuplesCtx.getFilters().addAll(authFilter);
         } else {
             this.tupleRepo = null;
@@ -2208,7 +2209,6 @@ public final class NexusService {
     int dataSweepFailuresForTenant(String tenant) {
         return dataSweepFailuresByTenant.getOrDefault(tenant, 0);
     }
-
 
     /** Stop the HTTP server, TTL sweep scheduler, and purge-trash VACUUM
      *  executor immediately. */
