@@ -329,6 +329,7 @@ def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
             "pool_scanned": r.pool_scanned, "pool_candidate_keys": len(r.pool_candidate_keys), "pool_keys_kept": len(r.pool_keys_kept),
             "pool_keys_rejected": len(r.pool_keys_rejected), "pool_filter_calls": r.pool_filter_calls,
             "pool_filter_cost_usd": r.pool_filter_cost_usd, "pool_reason": r.pool_reason,
+            "pool_need_s": r.pool_need_s, "pool_room_s": r.pool_room_s,
         })
     return counts
 

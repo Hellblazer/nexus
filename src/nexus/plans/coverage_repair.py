@@ -340,6 +340,9 @@ class RepairReport:
     pool_reason: str = ""
     #: The summed cost of the filter's calls as the run accounted them, or ``None`` when the view cannot say.
     pool_filter_cost_usd: float | None = None
+    #: When the pool was skipped for time or budget: the seconds one assessment call needs and the seconds the filter had.
+    pool_need_s: float | None = None
+    pool_room_s: float | None = None
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -365,7 +368,7 @@ class RepairReport:
             # Additive, and only with the pool switch on: with it off the wire is what it was.
             wire.update({
                 "pool_scanned": self.pool_scanned, "pool_filter_calls": self.pool_filter_calls, "pool_reason": self.pool_reason,
-                "pool_filter_cost_usd": self.pool_filter_cost_usd,
+                "pool_filter_cost_usd": self.pool_filter_cost_usd, "pool_need_s": self.pool_need_s, "pool_room_s": self.pool_room_s,
             })
             for name in ("pool_candidate_keys", "pool_keys_kept", "pool_keys_rejected"):
                 pool_values: tuple[str, ...] = getattr(self, name)

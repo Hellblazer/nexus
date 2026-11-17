@@ -137,13 +137,13 @@ class _Tally:
 
 def _fields(
     *, scanned: int = 0, candidates: Sequence[str] = (), kept: Sequence[str] = (), calls: int = 0, cost: float | None = None,
-    reason: str = "",
+    reason: str = "", need_s: float | None = None, room_s: float | None = None,
 ) -> dict[str, Any]:
     kept_set = set(kept)
     return {
         "pool_key_scan": True, "pool_scanned": scanned, "pool_candidate_keys": tuple(candidates), "pool_keys_kept": tuple(kept),
         "pool_keys_rejected": tuple(k for k in candidates if k not in kept_set), "pool_filter_calls": calls,
-        "pool_filter_cost_usd": cost, "pool_reason": reason,
+        "pool_filter_cost_usd": cost, "pool_reason": reason, "pool_need_s": need_s, "pool_room_s": room_s,
     }
 
 
@@ -173,19 +173,20 @@ def _need_s(first: CoverageResult, env: PoolEnv) -> float:
     return max(env.min_call_s, a.latency_ms / 1000.0 / waves)
 
 
-def _short(view: BoundaryView, env: PoolEnv, need_s: float) -> str:
-    """The skip reason when one assessment call does not fit beside the reassessment's reserve, else ``""``."""
+def _short(view: BoundaryView, env: PoolEnv, need_s: float) -> tuple[str, float]:
+    """``(reason, room_s)``: the skip reason when one assessment call does not fit beside the reassessment's reserve (else
+    ``""``), and the seconds of room the filter had, which the report names beside the seconds one call needs."""
+    room = _filter_end(env) - time.monotonic()
+    remaining = view.remaining_seconds()
+    if remaining is not None:
+        room = min(room, remaining)
     usd = view.remaining_usd()
     if usd is not None:
         left = usd - (env.usd_reserve or 0.0)
         estimate = view.assessment_cost_estimate()
         if left <= 0 or (estimate is not None and left < estimate):
-            return "filter_skipped_budget"
-    room = _filter_end(env) - time.monotonic()
-    remaining = view.remaining_seconds()
-    if remaining is not None:
-        room = min(room, remaining)
-    return "filter_skipped_deadline" if room < need_s else ""
+            return "filter_skipped_budget", room
+    return ("filter_skipped_deadline" if room < need_s else ""), room
 
 
 def _verdict(report: AssessmentReport, tally: _Tally) -> str:
@@ -252,8 +253,9 @@ async def _phase(
     if view.fetch is None:
         return _with(base, _fields(reason="no_fetch"))
     need_s = _need_s(first, env)
-    if why := _short(view, env, need_s):  # nothing is started that one assessment call could not follow
-        return _with(base, _fields(reason=why))
+    why, room_s = _short(view, env, need_s)
+    if why:  # nothing is started that one assessment call could not follow
+        return _with(base, _fields(reason=why, need_s=round(need_s, 3), room_s=round(room_s, 3)))
     try:
         fetched = await view.fetch(hits, timeout=max(MIN_REPAIR_QUERY_S, (env.fetch_until - time.monotonic()) * FETCH_TIME_SHARE))
     except Exception as exc:  # noqa: BLE001 — a failed pool fetch leaves the anchors' keys as phase A resolved them
@@ -278,13 +280,17 @@ async def _phase(
     if not candidates:
         return _with(base, _fields(scanned=scanned))
 
-    def closed(reason: str) -> Any:
-        return _with(base, _fields(scanned=scanned, candidates=candidates, calls=tally.calls, cost=tally.cost, reason=reason))
+    def closed(reason: str, room_s: float | None = None) -> Any:
+        need = None if room_s is None else round(need_s, 3)
+        return _with(base, _fields(
+            scanned=scanned, candidates=candidates, calls=tally.calls, cost=tally.cost, reason=reason, need_s=need,
+            room_s=None if room_s is None else round(room_s, 3)))
 
     if not env.facets:
         return closed("no_facets")
-    if why := _short(view, env, need_s):
-        return closed(why)
+    why, room_s = _short(view, env, need_s)
+    if why:
+        return closed(why, room_s)
     cand_set = set(candidates)
     carriers = [a for a, keys in pool if any(k in cand_set for k in keys)]
 
@@ -311,7 +317,7 @@ async def _phase(
     except Exception as exc:  # noqa: BLE001 — a failed filter keeps no pool key; phase A's keys stand
         _log.warning("nx_answer_pool_filter_failed", error=type(exc).__name__)
     spent1 = view.assessment_cost_spent()
-    tally.cost = None if spent0 is None or spent1 is None else round(max(0.0, spent1 - spent0), 6)
+    tally.cost = None if spent1 is None else round(max(0.0, spent1 - (spent0 or 0.0)), 6)
     if report is None:
         supported.clear()
         reason = "filter_timeout" if tally.timed_out else "filter_failed"
@@ -329,8 +335,9 @@ async def _phase(
     pairs = sorted(((a, k) for a, keys in kept_chunks for k in keys if k in kept_keys), key=lambda p: order[p[1]])
     # the overflow past the room the cap leaves is named in tokens_dropped by the join
     joined = await env.join(
-        view, pairs, {}, cap=room, resolve_until=env.fetch_until - MIN_REPAIR_QUERY_S, fetch_until=env.fetch_until)
-    if joined.failure:
+        view, pairs, {}, cap=room, resolve_until=env.fetch_until - 2 * MIN_REPAIR_QUERY_S, fetch_until=env.fetch_until)
+    if joined.failure:  # the kept keys joined nothing: none is kept, and the reason overrides an earlier one
         _log.warning("nx_answer_pool_resolve_failed", why=joined.failure[:80])
-        return _with(base, {**fields, "pool_reason": reason or "pool_resolve_failed"})
+        return _with(base, _fields(
+            scanned=scanned, candidates=candidates, calls=tally.calls, cost=tally.cost, reason="pool_resolve_failed"))
     return _merge(base, joined, fields)

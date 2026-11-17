@@ -568,6 +568,100 @@ async def test_the_run_summary_carries_the_pool_counts_only_with_the_switch_on()
     assert off and not [k for k in off if k.startswith("pool_")], "off is the summary it always was"
 
 
+class _SecondResolveFails(PoolDispatcher):
+    """``resolve`` answers phase A's keys and raises for the pool's (the call that names only CUST-0007)."""
+
+    async def __call__(self, tool: str, args: dict) -> dict:
+        if tool == "resolve" and args["tokens"] == [_tok(7)]:
+            self.calls.append((tool, dict(args)))
+            raise RuntimeError("catalog down for the pool keys")
+        return await super().__call__(tool, args)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_second_resolve_moves_the_kept_keys_to_rejected_and_overrides_an_earlier_reason() -> None:
+    """Two packs, the one holding CUST-0008 raises (``filter_partial_failure``), the one that cites CUST-0007 completes; then
+    the pool's own resolve fails. Nothing is kept, both candidates are rejected, the reason is the later one, and the anchors'
+    keys stand."""
+    def check(items: str, instruction: str) -> Any:
+        payload = json.loads(items)
+        if payload[0]["id"].startswith("p") and _tok(8) in payload[0]["text"]:
+            return RuntimeError("one pack's call failed")
+        return CHECK(items, instruction)
+
+    d = _SecondResolveFails([_anchor(1, _tok(1)), _anchor(2, _tok(2))], [_cited(7, _tok(7)), _uncited(8, _tok(8))], check)
+    r = _cov(await _run(d, pool_on(max_anchors_per_call=1), plan=POOL_PLAN)).repair
+    assert r.pool_reason == "pool_resolve_failed"
+    assert r.pool_keys_kept == () and r.pool_keys_rejected == (_tok(7), _tok(8)) and r.pool_candidate_keys == (_tok(7), _tok(8))
+    assert r.pool_filter_calls == 2, "the filter's calls are still counted"
+    assert r.resolution_entered and r.resolved == (_tok(1), _tok(2)) and r.joined_added == 2 and r.outcome == "completed"
+
+
+@pytest.mark.asyncio
+async def test_the_pools_resolve_stops_two_seconds_before_the_end_of_the_retrieval_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[float, float]] = []
+    real = CoverageBoundary._join_keys
+
+    async def spy(self: CoverageBoundary, view: Any, pairs: Any, scan: Any, *, cap: int, resolve_until: float, fetch_until: float) -> Any:
+        seen.append((resolve_until, fetch_until))
+        return await real(self, view, pairs, scan, cap=cap, resolve_until=resolve_until, fetch_until=fetch_until)
+
+    d = _fixture()
+    view, first = await _view_and_first(d)
+    monkeypatch.setattr(CoverageBoundary, "_join_keys", spy)
+    until = time.monotonic() + 30
+    await pool_on()._resolve_anchors(view, first, resolve_until=until, fetch_until=until)
+    assert len(seen) == 2 and seen[0] == (until, until), "phase A keeps the stamps it was given"
+    assert seen[1] == (until - 2.0, until), "the pool's resolve ends two seconds early, leaving its record fetch the rest"
+
+
+@pytest.mark.asyncio
+async def test_a_pool_skipped_for_time_reports_the_seconds_one_call_needs_and_the_seconds_it_had(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A deadline of 100 s gives the repair 30 s and its retrieval window 12 s; a tail of 8 s leaves the filter about 4 s, under the
+    5 s one call needs. The wire and the run summary carry both numbers, and only with the switch on."""
+    from nexus.plans.run_summary import _resolution_counts  # noqa: PLC0415 — the summary's own builder
+
+    monkeypatch.setattr(coverage_pool, "_TAIL_S", 8.0)
+    d = _fixture()
+    cov = _cov(await _run(d, pool_on(), plan=POOL_PLAN, deadline=time.monotonic() + 100))
+    r = cov.repair
+    assert r.pool_reason == "filter_skipped_deadline" and r.pool_scanned == 0 and d.pool_fetches() == []
+    assert r.pool_need_s == pytest.approx(5.0) and r.pool_room_s is not None and 0 < r.pool_room_s < 5.0
+    assert r.to_wire()["pool_need_s"] == r.pool_need_s and r.to_wire()["pool_room_s"] == r.pool_room_s
+    counts = _resolution_counts(cov)
+    assert counts["pool_need_s"] == r.pool_need_s and counts["pool_room_s"] == r.pool_room_s
+    ran = _cov(await _run(_fixture(), pool_on(), plan=POOL_PLAN)).repair
+    assert ran.pool_need_s is None and ran.pool_room_s is None, "a pool that was not skipped names neither"
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_assessment_calls_report_no_cost_reports_the_filter_cost_as_unknown() -> None:
+    r = _cov(await _run(_fixture(), pool_on(), plan=POOL_PLAN)).repair
+    assert r.pool_filter_calls == 1 and r.pool_filter_cost_usd is None
+    assert r.to_wire()["pool_filter_cost_usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_filter_cut_by_the_outer_timeout_has_no_report_and_the_count_comes_from_the_tally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_assess`` never returns (it started one call through the counting check, then hung), so the outer ``wait_for`` cuts it
+    and there is no assessment report to read the calls from."""
+    async def hang(self: CoverageBoundary, facets: Any, anchors: Any, view: Any, reserve: Any = None, support_ids: Any = None) -> Any:  # noqa: ARG001
+        await view.check({"items": "[]", "check_instruction": ""}, timeout=1.0)
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(coverage_pool, "_TAIL_S", 0.5)
+    monkeypatch.setattr(coverage_pool, "MIN_REPAIR_QUERY_S", 0.1)
+    d = _fixture()
+    view, first = await _view_and_first(d)  # the first round assesses normally; only the pool's filter hangs
+    monkeypatch.setattr(CoverageBoundary, "_assess", hang)
+    started = time.monotonic()
+    res = await replace(pool_on(), min_call_s=0.5)._resolve_anchors(view, first, resolve_until=started + 5.0, fetch_until=started + 2.5)
+    _anchors_resolved(res)
+    assert res.fields["pool_reason"] == "filter_timeout" and res.fields["pool_filter_calls"] == 1
+    assert res.fields["pool_keys_kept"] == () and res.fields["pool_keys_rejected"] == (_tok(7), _tok(8))
+    assert time.monotonic() - started < 6
+
+
 # ── the runner caller's wiring ────────────────────────────────────────────────────────────────────────────
 
 

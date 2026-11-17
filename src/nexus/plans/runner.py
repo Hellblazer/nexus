@@ -4303,12 +4303,14 @@ async def _plan_run_impl(
         ]
         return sum(costs) / len(costs) if costs else None
 
-    def _assessment_cost_spent() -> float:
-        """The summed known cost of the assessment calls so far (the records :func:`_assessment_cost_estimate` averages)."""
-        return sum(
+    def _assessment_cost_spent() -> float | None:
+        """The summed known cost of the assessment calls so far (the records :func:`_assessment_cost_estimate` averages), or
+        ``None`` when none of them carries a cost."""
+        costs = [
             r.cost_usd for r in step_records
             if r.operator == "operator_check" and r.step_index >= len(steps) and r.cost_usd is not None
-        )
+        ]
+        return sum(costs) if costs else None
 
     async def _run_coverage_boundary(
         texts: list[str], observed: bool, terminal_index: int,
