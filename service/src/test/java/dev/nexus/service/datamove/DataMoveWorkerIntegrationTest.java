@@ -157,7 +157,9 @@ class DataMoveWorkerIntegrationTest extends DataMoveIntegrationBase {
 
     @Test
     void chunksShaped_fourColumnKey_everyRowOnce_doneNeverFallsAndEqualsTotal() throws Exception {
-        register("m-chunks", "chunk_leafed", 50, 0);
+        // 150 rows a leaf in chunks of 5: 30 chunks a run, 180 in all, so a 20 ms sampler sees many chunks commit and "done
+        // never falls" is read over more than a handful of steps
+        register("m-chunks", "chunk_leafed", 5, 0);
 
         assertThat(LeafCatalog.tenantLeaves(ctx(), "dm_test", "chunk_leafed", "acme")).extracting(l -> l.leaf().name())
             .containsExactly("chunk_leafed_m1_acme", "chunk_leafed_m2_acme");
@@ -175,13 +177,32 @@ class DataMoveWorkerIntegrationTest extends DataMoveIntegrationBase {
         assertThat(activeRuns("m-chunks")).isEqualTo(expected);
         assertThat(partitionWiseRuns("m-chunks")).isZero();
         for (String run : expected) {
-            assertThat(DataMoveRuns.activeRun(ctx(), run).total()).as(run).isEqualTo(3);
+            assertThat(DataMoveRuns.activeRun(ctx(), run).total()).as(run).isEqualTo(30);
         }
         var end = progress("m-chunks");
-        assertThat(end.total()).isEqualTo(18);
+        assertThat(end.total()).isEqualTo(180);
+        assertThat(samples.stream().map(DataMoveRuns.Progress::done).distinct().count())
+            .as("distinct progress values the sampler saw").isGreaterThan(5);
         assertThat(end.done()).isEqualTo(end.total());
         assertEveryRowMovedOnce("chunk_leafed", 900);
         assertEachRowTouchedByItsOwnTenant("chunk_leafed");
+    }
+
+    @Test
+    void fourColumnKeyOnAPlainTable_whereTheFirstAndLastColumnsVary_everyRowOnce_andDoneEqualsTotal() throws Exception {
+        register("m-four", "four_key_plain", 100, 0);
+
+        var cycle = async(worker(installed(), null)::runCycle);
+        var samples = sampleUntilDone(cycle, "m-four");
+
+        assertDoneNeverFalls(samples);
+        assertThat(activeRuns("m-four")).containsExactly("m-four");
+        assertThat(partitionWiseRuns("m-four")).isZero();
+        var end = progress("m-four");
+        assertThat(end.total()).isEqualTo(40);
+        assertThat(end.done()).isEqualTo(end.total());
+        assertThat(countWhere("four_key_plain", DSL.field(DSL.name("k1"), String.class).isNotNull())).isEqualTo(4000);
+        assertEveryRowMovedOnce("four_key_plain", 4000);
     }
 
     @Test

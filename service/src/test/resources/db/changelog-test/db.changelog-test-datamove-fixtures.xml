@@ -10,6 +10,7 @@
                     policy USING (true) for the migrating role); tenants default, acme, globex, orphan and sl/ash (an id with a slash), 200 rows each
       chunk_leafed  nexus.chunks' shape: LIST (embedding_model) then LIST (tenant_id), a four-column key (tenant_id, collection, chash
                     bytea, embedding_model), 150 rows per leaf (nexus-f3yqd.2.21)
+      four_key_plain (text, text, bytea, bigint) key, 4000 rows, columns 1 and 4 vary and 1-3 repeat; no tenant column (nexus-f3yqd.2.21)
       leafed        LIST (model) then LIST (tenant_id), the shape of nexus.chunks with a three-column key; models m1 and m2,
                     tenants default, acme and globex, 150 rows per leaf; every leaf carries its own copy of the policies
                     (nexus.partition_copy_access does that for chunks)
@@ -115,6 +116,19 @@ CREATE POLICY tenant_isolation ON dm_test.chunk_leafed
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 CREATE POLICY owner_read ON dm_test.chunk_leafed FOR SELECT TO nexus_admin_dmlutils USING (true);
+
+-- four_key_plain: an unpartitioned table with a four-column primary key (text, text, bytea, bigint) where the first and the
+-- fourth columns both vary and the first three repeat across rows (a row's prefix is shared by about 11 others, told apart
+-- only by the fourth column), so the library's key order and its boundary pairs over all four columns are exercised
+-- (nexus-f3yqd.2.21). No tenant column, no row-level security: one plain run.
+CREATE TABLE dm_test.four_key_plain (
+    k1 text NOT NULL, k2 text NOT NULL, k3 bytea NOT NULL, k4 bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (k1, k2, k3, k4)
+);
+INSERT INTO dm_test.four_key_plain (k1, k2, k3, k4)
+SELECT 'a' || (g % 7), 'b' || (g % 5), decode(md5((g % 50)::text), 'hex'), g
+  FROM generate_series(1, 4000) g;
 
 -- tenant_id, and no row-level security at all: one run reads every row, a run per tenant would read them N times
 CREATE TABLE dm_test.tenant_plain (
