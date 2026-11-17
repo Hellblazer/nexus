@@ -412,8 +412,14 @@ a *background worker* is a pg_background process in the database.
   the text holds no `?` (a jsonb test is written with `jsonb_exists` and its
   kin, a literal question mark as `chr(63)`), and no `$2` or higher. The
   changeset gate refuses a registering INSERT whose verification breaks these
-  rules, and the move worker refuses to run one (a permanent failure), because
-  the JDBC driver binds `?` and would otherwise change the query's meaning;
+  rules, and the move worker refuses to run one (`MoveSql`, Stage
+  `VERIFICATION_REFUSED`, a permanent failure), because the JDBC driver binds
+  `?` and would otherwise change the query's meaning. The worker also compares
+  the driver's parameter count with the number of `$1` in the text and refuses
+  a mismatch, which catches a `$1` inside a string literal, a comment or a
+  quoted name. `MoveSql` is the one place a registry text reaches the server as
+  raw SQL (the verification query and `on_complete`); Sam sanctioned that site
+  on 2026-11-17;
 - `on_complete`, NULL or the SQL that finishes the new shape once the move is
   verified (a VALIDATE CONSTRAINT, dropping the old column, swapping a table);
 - the changeset id that registered it;
@@ -441,9 +447,16 @@ and written only as `nexus_admin`, the migrating role: by the registering
 changesets, by later changesets' completion preconditions and by the move
 worker. `nexus_svc` holds no privilege on it (its changeset revokes the
 default-privilege grant and the runAlways service-grant loop skips it), so
-nothing on the serving pool may read it: boot_work, `/v1/status` and the nx
-doctor line come from the move worker's in-memory state, which it fills on
-the admin connection. In the single-role posture the migrating role is
+nothing on the serving pool may read it. `grants-nexus-svc-1` also revokes any
+privilege `nexus_svc` holds on it, on each boot, but only where `nexus_svc`
+holds a table or column ACL entry on it and the migrating role owns the table.
+While `nexus_svc` still holds a privilege there, the move worker reports every
+open move `blocked:`. boot_work, `/v1/status` and the nx doctor line come from
+`MoveBootWork`, a sampler on its own thread and its own admin session that
+samples every 5 s. It reads
+the move rows and dml_utils' run tables from the database; the reason a move is
+blocked or failed and the CALL in flight come from the state the move worker
+last reported in memory (`MoveStates`). In the single-role posture the migrating role is
 `nexus_svc` itself and owns the table. A move's runs are selected with
 `label = '<label>' OR starts_with(label, '<label>/')`, never `LIKE`, since
 `_` and `%` are legal in a label.
@@ -512,10 +525,20 @@ move:
    paused move stops here), runs the verification query for each
    tenant under that tenant's setting, then once table-wide on a separate
    admin connection after checking that `current_setting('nexus.tenant',
-   true)` is empty there. If every run returns no rows, it reads the row once
-   more (a pause set now still stops it) and runs `on_complete`
-   (if any) and the UPDATE that sets `completed_at` in one transaction on the
-   admin connection, so a stop between them leaves neither; `on_complete`
+   true)` is empty there. A move with no tenant scope (step 2) has no tenant
+   runs and gets the table-wide run only. Every run executes before a non-empty
+   result is reported, so the failure carries the count of every tenant that
+   holds old-shape rows and of the table-wide run. A stop is read before the
+   finish, between tenants, before the table-wide run and before the completion
+   transaction, and ends the finish with the move left open; a verification
+   already in flight is not cancelled, it is bounded by `statement_timeout_ms`.
+   If every run returns no rows, it reads the row once more (a pause set now
+   still stops it) and opens one transaction on the admin connection. The
+   UPDATE that sets `completed_at` runs first in it and matches only a row that
+   is not paused, failed, completed or superseded, so a pause or a superseding
+   row committed after the last read matches nothing and nothing else runs.
+   Then `on_complete` (if any) runs in the same transaction, so a stop between
+   them leaves neither; `on_complete`
    holds DDL that PostgreSQL runs inside a transaction (VALIDATE CONSTRAINT,
    DROP COLUMN, renames), never CREATE INDEX CONCURRENTLY or another statement
    that cannot.
@@ -547,16 +570,24 @@ CALL). A recorded chunk error with any other SQLSTATE is permanent, 42501 and
 42883 included, because there it is the template's own fault (a function it
 names, or a table its role cannot write), and so is a recorded class 08
 error, since a chunk records its own statement's error, not the
-coordinator's connection. dml_utils records a chunk's error on a best-effort
-basis (its recorder swallows its own failure), so a template error it failed
-to record reads as raised; a 42501 or 42883 then retries as transient and
-shows "needs an operator" after the cap rather than `failed:`. That path is
-rare and stays visible. *Permanent*, which sets `failed_at`
+coordinator's connection. dml_utils records a chunk's error through an
+asynchronous background run, on a best-effort basis (its recorder swallows its
+own failure), so the row can arrive after the CALL has raised, and a template
+error it failed to record reads as raised. When a CALL raised 42501, 42883 or a
+class 08 error and no row is recorded above the mark, the move worker reads the
+rows once more after 750 ms (`DataMoveFailureHandler.RECORDER_WAIT`) before it
+calls the failure transient, since a recorded one of these is the template's
+own fault. The 750 ms is a heuristic window, not a guarantee; the recorder's
+latency was not measured. A 42501 or 42883 that is never recorded retries as
+transient and shows "needs an operator" after the cap rather than `failed:`.
+That path is rare and stays visible. *Permanent*, which sets `failed_at`
 and `failure`: an error with any other SQLSTATE (class 22 data, class 23
 integrity, the rest of class 42, class 3F such as `assert_schema_exists`'s
 3F000 for a missing driving schema, P0 PL/pgSQL, and anything else), a
-non-empty verification, and an `on_complete` that fails for a reason other
-than its statement or lock timeout. The move worker tells a recorded chunk
+driving schema or table that does not exist (the preflight raises 42P01 for
+it), a non-empty verification, a verification text the worker refuses
+(Stage `VERIFICATION_REFUSED`), and an `on_complete` that fails for a reason
+other than its statement or lock timeout. The move worker tells a recorded chunk
 error from a raised one by the run's `migration_error` rows: it reads the
 run's highest `error_id` before the CALL (0 when the run does not exist yet,
 since the first CALL creates it, and when it has no error rows), and a row above that mark is this pass's
@@ -564,7 +595,9 @@ chunk error, read with its own `sqlstate`. dml_utils never deletes
 `migration_error` rows on resume (only `delete_archived_migration_runs`
 does), so an older row says nothing about this pass, and an id mark, unlike a
 clock, needs no agreement between the engine and the database. An error the move worker cannot place in either list is permanent,
-so nothing loops. A failed move stays reported `failed:` across restarts, is
+so nothing loops. A failure the worker cannot write to the registry (the admin
+connection is gone) is reported `blocked:` with that said, never `failed:`,
+because a failure not recorded in the row would be retried by the next boot. A failed move stays reported `failed:` across restarts, is
 not retried, and does not hold up the moves behind it. The fix is a new move
 that supersedes it (Changing a move). A non-empty verification means an
 old-shape row exists: a writer that still produces the old shape, a template
@@ -578,7 +611,10 @@ always reports how many times it has been retried:
   `last_transient_at` and `last_transient` to the error. A pass that ends
   without a transient error sets all three back to 0 and NULL. `blocked:`
   shows "retry N, last <time>: <error>". The counter survives a restart,
-  being a column. An operator can clear it by SQL (Day 2 Operations).
+  being a column. An operator can clear it by SQL (Day 2 Operations). A stop
+  of the engine counts no retry: a pass that ends because the worker was
+  stopped (its CALL cancelled by the stop, or a connection not opened because of
+  it) is reported `blocked:` in memory and writes no count and no backoff.
 - *Cadence.* A blocked move is not retried before `last_transient_at` plus a
   backoff of min(30 s × 2^(min(N, 6)−1), 15 min), N being `transient_retries`
   (the exponent is clamped, since N keeps growing): 30 s, 1, 2, 4 and 8
@@ -602,8 +638,10 @@ always reports how many times it has been retried:
   open, so nothing more of it runs. A move with one table-wide run has one run,
   so a pause stops it only before that run starts, before its verification
   or before `on_complete`. boot_work reports the move `paused:` with `paused_by`; nx
-  doctor shows it as a note, not red, since an operator chose it. It resumes
-  when `paused_at` is set back to NULL. To stop a run in flight sooner, an
+  doctor shows it as a note, not red, since an operator chose it. A pass over a
+  paused move neither increments nor clears `transient_retries`, and
+  `last_transient_at` stays, so on resume the move waits out what remains of
+  its backoff. It resumes when `paused_at` is set back to NULL. To stop a run in flight sooner, an
   operator cancels the CALL's backend with `pg_cancel_backend`, using the pid
   the engine logs for each CALL (`event=data_move_call`). The CALL raises
   57014, a transient error that counts a retry; it does not set the run's
@@ -701,9 +739,9 @@ table that no longer exists contributes no policy and passes), other than
 driving table other than `nexus.chunks` it checks the parent, since such a move
 runs over the parent (The move worker, step 2). A registry it cannot read
 refuses boot, as the chunks check does. The check runs at boot only; /v1/status
-does not repeat it. A table counts as chunk-family for
+does not repeat it. A move counts as chunk-family for
 `on_complete` when the driving table or any table `on_complete` names is in
-the family.
+the family; the worker decides it by a name match (Finishing a move).
 
 The tenant list is the set the table-wide retire-keys routes check
 (ChunkKeysAdminHandler.java:97-100 and 116-119): the default tenant, every
@@ -804,14 +842,35 @@ total, unit, safeToStop, onStop, step). `done` and `total` are
 summed over the move's active runs (`archived_at IS NULL`), `unit: "chunks"`. A run with no rows has a total
 of zero. The runs summed are those whose name is the label or begins with
 `<label>/`. The total grows as each tenant's or leaf's run is created, so the fraction can
-fall while `done` only rises. `safe_to_stop: true` and `on_stop: "resumes from
+fall while `done` only rises: `done` is the high-water of the summed runs since
+the engine started, clamped to `total`, because a leaf dropped mid-move leaves
+both sums. The entry's id is `data-move:<label>`. `safe_to_stop: true` and `on_stop: "resumes from
 the last committed batch"`. The shape has no state field, so `what` begins
+`working:`, `queued:` (an open move the worker has not reached),
 `blocked:` (no pg_background, a library role or the dml_utils install; an
 admin session that cannot see every row; no free background worker slot; a
 verification timeout; with the retry count, and "needs an operator" past the
-cap), `paused:` (with `paused_by`) or `failed:` (with `failure`); nx doctor
-shows a red line for `blocked:` and `failed:` and a note for `paused:`, one
-line per move.
+cap), `failed:` (with the reduced `failure`), `paused:` (with `paused_by`),
+`stalled:` or `runs complete:` (verification pending). `stalled:` is shown when
+a CALL has completed no chunk for `NX_DATA_MOVE_STALL_MINUTES` (default 15,
+clamped to 1 to 1,440; a value that is not a whole number gives the default).
+The CALL connection has no socket timeout, so a silent network partition parks
+the worker until the keepalive gives up; `stalled:` makes that visible and
+cancels nothing, and an operator ends a dead CALL with `pg_cancel_backend` on
+the pid the engine logs, after which the worker retries it. `/v1/status` is
+unauthenticated, so an entry carries the move's label, a fixed class, the
+SQLSTATE where there is one, "retry N" and "needs an operator", and a few fixed
+phrases that name a role or a changeset (a missing library role, a library
+checksum failure's changeset). It never carries a tenant id, a leaf, a run
+label, a backend pid or PostgreSQL's message text; `MoveReasons.publicForm`
+reduces each reason to that. The full text is in the engine log
+(`event=data_move_blocked`, `data_move_failed`, `data_move_call`) and, for a
+failed move, in `nexus.data_moves.failure`. A worker that failed to start, or a
+reporter that failed to start, is published as a `blocked:` entry (ids
+`data-move-worker` and `data-move-boot-work`), so that an empty list is never
+read as no move open. nx doctor shows one red row per `blocked:` or `failed:`
+move, a warning per `stalled:` move and a note per `paused:` move, and a red
+row for each of those two entries.
 
 **Readers during a move.** Each move's RDR or bead states how readers behave
 while it runs: read both shapes, or keep the feature off until `completed_at`
@@ -832,11 +891,22 @@ such a body), because
 through it, and a DROP or ALTER on those tables takes ACCESS EXCLUSIVE, which
 would queue behind a `CREATE INDEX CONCURRENTLY`. A later finishing step on a
 chunk-family table is therefore a new move whose `on_complete` does it. The
-move worker runs `on_complete` on a chunk-family table under `SET LOCAL
-lock_timeout` below `statement_timeout_ms`, so a lock it cannot get fails fast
-as a transient `blocked:` (55P03) and readers never queue behind it; that is
-the guarantee. Before it, as a best effort, it ends the per-collection index
-builders (the query behind `SchemaMigrator.terminatePciBuilders`, extracted so
+move worker runs `on_complete`, on every move, under `SET LOCAL lock_timeout`
+of min(5 s, `statement_timeout_ms` / 2), at least 1 ms, so a lock it cannot get
+fails fast as a transient `blocked:` (55P03) and readers never queue behind it;
+on a chunk-family table that is the guarantee. `ChunkFamily` decides whether a
+move is chunk-family by a name match: over the driving table's name when its
+schema is `nexus`, and over the `on_complete` text, normalised the way the lint
+does (quotes dropped, whitespace around dots collapsed, lowercased), with or
+without a schema. A name in a comment or a string literal counts too: a false
+positive costs one ended build, which the reconciler restarts, and a miss costs
+a queue that `lock_timeout` turns into a retry. The names are the lint's, and
+`ChunkFamilyLintPinTest` fails when `ChunkFamily`'s list or patterns differ
+from those in `tests/test_changelog_continue_precondition_chunks_lint.py`. On a
+chunk-family move with an `on_complete`, as a best effort, it ends the
+per-collection index builders inside the completion transaction, after the
+completion UPDATE has matched its row, so a pause or a superseding row ends no
+build (the query behind `SchemaMigrator.terminatePciBuilders`, extracted so
 both callers share it; it selects every builder backend in the database, not
 one table's, and reason `data_move_on_complete` is logged). Unlike the
 migrator, the move worker does not hold the migration lock the builders
@@ -1021,11 +1091,20 @@ launcher that upstream does not test.
   still producing the old shape, a template that missed a case, or a tenant
   the list missed, caught by the table-wide run). The move is reported
   `failed:` with the count per tenant (`failed_at` set) and is not marked
-  complete; the fix is in the writer or the template, then a new move that
+  complete; every tenant's run and the table-wide run execute first, so the
+  count covers all of them. The fix is in the writer or the template, then a new move that
   supersedes it.
+- **The verification text is one the worker refuses** (a `?`, a `$` and digit
+  other than a standalone `$1`, or a `$1` the driver does not count as a
+  parameter): no verification query runs, and the move is `failed:`
+  (Stage `VERIFICATION_REFUSED`, `failed_at` set); the fix is a superseding move.
+- **The move worker or its boot_work reporter fails to start**: the engine
+  serves and publishes a `blocked:` entry (`data-move-worker` or
+  `data-move-boot-work`), which nx doctor shows red.
 - **A verification run times out**: transient; the move is `blocked:` and the
   verification runs again on the next pass.
-- **`on_complete` fails**: on `statement_timeout_ms` or `lock_timeout`
+- **`on_complete` fails**: it runs on every move under a `lock_timeout` of
+  min(5 s, `statement_timeout_ms` / 2), at least 1 ms. On `statement_timeout_ms` or `lock_timeout`
   (55P03) it is transient, the transaction rolls back with `completed_at`
   and `failed_at` unset, and the move is `blocked:` and retried on the next
   pass; on any other error the move is `failed:` with the error, and its
@@ -1168,9 +1247,13 @@ data-move test.
   policy for the migrating role in its own guarded changeset after the
   registering one, and `ChunksIsolationCheck` extended to every driving table
   in `nexus.data_moves`;
-- for `on_complete` on a chunk-family table: `SET LOCAL lock_timeout` and the
-  shared, extracted builder-termination query;
-- boot_work entries and the nx doctor line;
+- for `on_complete`: `SET LOCAL lock_timeout` on every move, and, on a
+  chunk-family table, the shared, extracted builder-termination query inside the
+  completion transaction;
+- boot_work entries from `MoveBootWork` and the nx doctor rows, the stall bound
+  `NX_DATA_MOVE_STALL_MINUTES`, the entries for a worker or reporter that did
+  not start, and the revoke of `nexus_svc`'s privileges on `nexus.data_moves`
+  in `grants-nexus-svc-1`;
 - the engine log events.
 
 #### Step 5: The gate
@@ -1261,8 +1344,8 @@ count after fixing its cause: `UPDATE nexus.data_moves SET transient_retries
 - **Scenario**: a move over a table outside the chunk family with an `on_complete` VALIDATE CONSTRAINT, and a later changeset that drops the old column with the completion precondition. **Verify**: the VALIDATE runs only after verification; the later changeset is skipped at each boot until `completed_at` is set, then applies.
 - **Scenario**: an install provisioned before this change. **Verify**: the storage daemon's grant backfill creates the extension, roles, grants and `liquibase` schema, and the next boot installs the libraries.
 - **Scenario**: the gate over the shipped changelogs. **Verify**: it is green (the frozen list exempts every shipped changeset from every rule), and a new changeset with a validating ADD CONSTRAINT on `nexus.catalog_documents`, or a destructive statement on a registered move's table without the precondition, is red. The template and verification text inside a registering INSERT are not flagged.
-- **Scenario**: a move over a chunk-family table whose `on_complete` drops a column, run while a per-collection index build is in flight on that table. **Verify**: the move worker ends the builder first, `on_complete` takes its lock within `lock_timeout` or reports `blocked:`, and no reader waits behind the move; a later-release CONTINUE changeset doing the same drop is red in the CONTINUE-precondition lint.
-- **Scenario**: `on_complete` on a chunk-family table while another session holds a conflicting lock. **Verify**: it fails with 55P03 within `lock_timeout`, `completed_at` and `failed_at` stay unset, the move reports `blocked:`, and the next pass completes it.
+- **Scenario**: a move over a chunk-family table whose `on_complete` drops a column, run while a per-collection index build is in flight on that table. **Verify**: inside the completion transaction, after the completion UPDATE has matched, the move worker ends the builder, `on_complete` takes its lock within `lock_timeout` or reports `blocked:`, and no reader waits behind the move; a pause set after the last read ends no builder; a later-release CONTINUE changeset doing the same drop is red in the CONTINUE-precondition lint.
+- **Scenario**: `on_complete` (on a chunk-family table or any other) while another session holds a conflicting lock. **Verify**: it fails with 55P03 within `lock_timeout` (min(5 s, `statement_timeout_ms` / 2), at least 1 ms), `completed_at` and `failed_at` stay unset, the move reports `blocked:`, and the next pass completes it.
 - **Scenario**: the single-role posture, a move over a table outside the chunk family. **Verify**: the policy changeset is MARK_RAN, the move is registered and `blocked:`, the service role reads only its tenant's rows, and the boot does not refuse.
 - **Scenario**: the two-role posture, a move over a table outside the chunk family, then the migrating role granted to the serving role. **Verify**: the owner-read policy exists, and the next boot refuses through the extended `ChunksIsolationCheck`.
 - **Scenario**: a new changeset with an UPDATE on chunks. **Verify**: DataMoveChangesetGateTest is red. Registering the same move through nexus.data_moves is green.
@@ -1370,3 +1453,4 @@ the first registered move.
 - 2026-11-16: worker wording to nexus-f3yqd.2.13's reviewed code (grant 3): a table is tenant-scoped when it has a tenant column and row-level security on, FORCE or not, since `dml_utils_owner`'s boundary scan is policy-bound even where the owning admin is exempt; `requireUnrestrictedView` applies only where row security can hide rows from the admin; the install check reads `pg_proc`; worker start ends another boot's `nexus-data-move-` coordinators, only under the singleton lock; the row is re-read before each CALL, and a superseded move runs no further.
 - 2026-11-17: two failure classes approved by Sam ("yes to both, write them in", session linda, ask rdr246-failure-wording): a CALL that returns with its run neither completed nor cancelled is transient unless this pass recorded a permanent chunk error, and any failure to open or authenticate a database connection is transient, never `failed:` (nexus-f3yqd.2.15).
 - 2026-11-17: wording to landed, reviewed code (grant 3): the changeset gate as built (nexus-f3yqd.2.19: MERGE, data-modifying WITH and SELECT INTO under rule 1; DROP without COLUMN and table or column renames under rule 3, whose precondition names a driving move's literal label; the exemption line scoped to its table; the frozen list as the shipped offenders; native change types refused; the verification placeholder rules); the driving-table isolation check (nexus-f3yqd.2.16: every registry row in any state, nexus.chunks left to ChunksIsolationCheck, a partitioned driving table checked at its parent, `<table>_owner_read`, boot only); the four-column re-pin to 9196f4b1c and its verified Critical Assumption (nexus-f3yqd.2.21).
+- 2026-11-17: wording to landed, reviewed code (grant 3), nexus-f3yqd.2.14, .2.15 and .2.17, develop commits 8cf174765..20b338640: `on_complete` runs under `lock_timeout` min(5 s, `statement_timeout_ms` / 2), at least 1 ms, on every move, and builder termination stays chunk-family only, decided by a name match pinned to the lint's list (`ChunkFamily`, `ChunkFamilyLintPinTest`); the completion UPDATE runs first and is guarded (not paused, failed, completed or superseded), with builders ended after it matched, inside the transaction; every run executes before a non-empty verification is reported, a move with no tenant scope gets the table-wide run only, a refused verification text is a permanent failure (Stage `VERIFICATION_REFUSED`; `MoveSql` sanctioned by Sam, 2026-11-17), and a stop is read between tenants and before completion; a missing driving schema or table is permanent, a raised 42501, 42883 or class 08 is read once more after 750 ms for dml_utils' asynchronous recorder, a paused pass and a stop count no retry, and an unwritable registry reports `blocked:`; boot_work entries come from `MoveBootWork` (own admin session, every 5 s) with the `working:`, `queued:`, `blocked:`, `failed:`, `paused:`, `stalled:` and `runs complete:` classes, carry no tenant, leaf, run label, pid or server text, `stalled:` after `NX_DATA_MOVE_STALL_MINUTES`, `done` as a clamped high-water, red entries for a worker or reporter that did not start, and `grants-nexus-svc-1` revoking `nexus_svc`'s privileges on `nexus.data_moves` where it can; nx doctor rows for each.
