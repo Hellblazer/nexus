@@ -556,6 +556,18 @@ async def test_the_filter_calls_and_their_cost_are_reported_and_a_cut_call_still
     assert off.pool_filter_cost_usd is None and "pool_filter_cost_usd" not in off.to_wire()
 
 
+@pytest.mark.asyncio
+async def test_the_run_summary_carries_the_pool_counts_only_with_the_switch_on() -> None:
+    from nexus.plans.run_summary import _resolution_counts  # noqa: PLC0415 — the summary's own builder
+
+    on = _resolution_counts(_cov(await _run(_fixture(usage_cost=0.01), pool_on(), plan=POOL_PLAN)))
+    assert (on["pool_scanned"], on["pool_candidate_keys"], on["pool_keys_kept"], on["pool_keys_rejected"]) == (4, 2, 1, 1)
+    assert (on["pool_filter_calls"], on["pool_reason"]) == (1, "") and on["pool_filter_cost_usd"] == pytest.approx(0.01)
+    assert on["resolution_entered"] is True, "the resolution counts are still there"
+    off = _resolution_counts(_cov(await _run(_fixture(), pool_off(), plan=POOL_PLAN)))
+    assert off and not [k for k in off if k.startswith("pool_")], "off is the summary it always was"
+
+
 # ── the runner caller's wiring ────────────────────────────────────────────────────────────────────────────
 
 

@@ -316,7 +316,7 @@ def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
     r = coverage.repair
     if not (r.resolution_entered or r.resolution_reason):
         return {}
-    return {
+    counts = {
         "resolution_entered": r.resolution_entered, "resolution_reason": r.resolution_reason,
         "resolution_resolved": len(r.resolved), "resolution_missing": len(r.missing),
         "resolution_ambiguous": len(r.ambiguous), "resolution_items_merged": r.joined_added,
@@ -324,6 +324,13 @@ def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
         # ``unavailable`` (the ledger is not rewritten), so a reader that counts answers reads this flag beside it.
         "resolution_generated_on_join": r.generated_on_join,
     }
+    if r.pool_key_scan:  # RDR-250 (nexus-io7tw): counts only, and only with the pool switch on
+        counts.update({
+            "pool_scanned": r.pool_scanned, "pool_candidate_keys": len(r.pool_candidate_keys), "pool_keys_kept": len(r.pool_keys_kept),
+            "pool_keys_rejected": len(r.pool_keys_rejected), "pool_filter_calls": r.pool_filter_calls,
+            "pool_filter_cost_usd": r.pool_filter_cost_usd, "pool_reason": r.pool_reason,
+        })
+    return counts
 
 
 def build_run_summary(
