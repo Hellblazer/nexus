@@ -4669,6 +4669,12 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # so swapping the literal would make the test assert the opposite thing.
     "tests/test_hf29s_cross_family_ranking.py::test_bge_factor_is_the_measured_ratio_within_1e_6",
     "tests/test_hf29s_cross_family_ranking.py::test_a_listed_model_does_not_log_as_unlisted",
+    # Reason class "real-value interlock" (nexus-7fku2.1.7): asserts the 11 real collection
+    # names RDR-134's committed coverage baseline (bench/results/rdr134-taxonomy-coverage-
+    # 2026-11-16.json, measured on the cloud engine) puts below the 0.9 gate. The names carry
+    # voyage-context-3 because those are the collections measured; it reads a file and
+    # asserts no cloud-mode behaviour.
+    "tests/test_bench_taxonomy_ab_gate.py::TestLoadGates::test_the_saved_baseline",
 })
 
 
