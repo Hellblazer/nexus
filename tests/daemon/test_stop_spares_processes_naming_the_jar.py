@@ -111,7 +111,8 @@ class TestSweepWithRealProcesses:
         self, tmp_path: Path, jar: Path,
     ) -> None:
         cfg = tmp_path / "cfg"
-        java = tmp_path / "jdk" / "bin" / "java"
+        # A stand-in JVM named java (POSIX only: this class skips Windows, where the launcher is java.exe).
+        java = (tmp_path / "jdk" / "bin").joinpath("java")
         java.parent.mkdir(parents=True)
         os.symlink(CHILD_PYTHON, java)
         driver = spawn_sleeper(["scenario", "upgrade", "--work", str(tmp_path / "w"), "--jar", str(jar)])
@@ -120,7 +121,8 @@ class TestSweepWithRealProcesses:
             from tests._child_process import popen_in_group  # noqa: PLC0415
 
             engine = popen_in_group(
-                [str(java), "-c", "import time; time.sleep(120)", "-Duser.timezone=UTC", "-jar", str(jar)],
+                [str(java), "-c", "import time; time.sleep(120)", "-Duser.timezone=UTC",
+                 f"-XX:ErrorFile={tmp_path / 'hs_err_%p.log'}", "-jar", str(jar)],
             )
             self._visible(driver.pid)
             self._visible(engine.pid)
