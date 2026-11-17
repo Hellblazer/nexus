@@ -556,6 +556,15 @@ def cmd_build(args: argparse.Namespace) -> int:
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             results = dict(zip(files, pool.map(
                 lambda ij: _trace_one(repo, ij[1], Path(out) / str(ij[0]), args.pytest_args), enumerate(files))))
+    # A whole-repo scan can read another test's temporary files while the two run side by side
+    # (inside a lab copy TMPDIR is under the repo); a file whose trace failed is traced again alone.
+    retry = [f for f in files if results[f][1] and not results[f][1].startswith("a skip")]
+    for i, test in enumerate(retry):
+        with tempfile.TemporaryDirectory(prefix="meta-surface-retry-") as out:
+            again = _trace_one(repo, test, Path(out) / str(i), args.pytest_args)
+        if not again[1]:
+            print(f"  {test}: clean when traced alone", flush=True)
+            results[test] = again
     tests = {}
     for test in files:
         reads, why = results[test]
