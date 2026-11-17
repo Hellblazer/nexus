@@ -268,22 +268,35 @@ was rejected: it scored F1 at most 0.825 in simulation, and citation alone caps
 precision near 0.83 (250-research-5). Whether support-citation reaches 0.95 is
 unmeasured, so the MVV measures it.
 
-**Resolution.** Kept candidate keys join the anchors' keys, in anchor-first
-order, before the `max_repair_items` cap (12, `coverage_repair.py:110`). The cap
+**Resolution, in two phases.** Phase A resolves and joins the anchors' keys
+exactly as the switch-off path does, before any pool work, so the switch-on
+result is never below the switch-off one. Phase B then fetches the pool, runs
+the filter, and resolves the kept pool keys in a second `resolve` call. Pool
+keys get what the `max_repair_items` cap (12, `coverage_repair.py:110`) leaves
+after the anchors' tokens, and overflow is named in `tokens_dropped`. The cap
 does not bind on HERB at 40 (at most 11 keys, 250-research-6). A joined item for
 a pool key uses the pool chunk's text as its anchor text, so it enters the
 generator the way an anchor key's joined item does today. The generator's own
 input of 20 chunks does not change.
 
-**Failure is closed.** No candidate key is kept, and the branch runs on the
-anchors alone as today, when the fetch fails; when the assessment raises, every
-call replies unusably, or any call fails (a partial verdict keeps nothing); when
-the USD allowance is spent or below one call's mean cost
-(`assessment_cost_estimate`, unknown proceeds); when less than the boundary's
-minimum call time is left; or when the filter outlives its share of the repair's
-retrieval allowance (`FILTER_TIME_SHARE`, half the time left, at least 1 s, so
-it cannot leave `resolve` short). Every candidate is then named in
-`pool_keys_rejected`, and `pool_reason` names the cause.
+**Budget and failure.** Phase B is bounded by the boundary's remaining answer
+time and USD, after reserving what the later reassessment's planned calls need.
+Its window is the repair's fetch deadline minus 3 s kept for the second
+`resolve` and its fetch, and one call is sized as the first assessment's latency
+per wave of calls, at least the boundary's minimum call time. If that window, or
+the USD left after the reassessment's reserve, cannot fit one call, phase B is
+skipped before the pool fetch (`filter_skipped_deadline`,
+`filter_skipped_budget`) rather than started and cut. When phase A's resolve
+failed (`resolution_failed`) or the anchors already fill the cap (`cap_full`),
+phase B does not run, so no call is spent that cannot change the answer.
+An empty reply for a pack is a reject verdict, not a failure. When some filter
+calls fail, keys that completed calls cited as support are kept and the failed
+packs' candidates are rejected (`filter_partial_failure`). No pool key is kept
+when the fetch fails, the assessment raises or every call fails
+(`filter_failed`), or the phase raises anything else (`pool_error`). Candidates
+the pack size cap left unread are rejected (`filter_unread`). Every rejected
+candidate is named in `pool_keys_rejected`, and phase A's result stands in every
+case.
 
 **Switch.** `NX_ANSWER_POOL_KEY_SCAN`, default off. Off, the code path is not
 entered and the report carries no pool fields. On, the scan runs only where the
@@ -294,9 +307,13 @@ later decision, after the MVV.
 
 **Report.** The resolution fields gain `pool_scanned` (pool chunks fetched),
 `pool_candidate_keys`, `pool_keys_kept` and `pool_keys_rejected` (both by name),
-`pool_filter_calls`, and `pool_reason` when the pool was skipped or closed.
-`anchors_scanned` keeps its meaning (the anchors only), so existing readers of it
-are unchanged.
+`pool_filter_calls` (calls started, counted on every path, a cut call included),
+`pool_filter_cost_usd` (the known assessment cost spent during the filter, read
+through a `BoundaryView.assessment_cost_spent` hook the runner fills; a cut call
+reports no cost), and `pool_reason` when
+the pool was skipped or closed. The run summary's resolution counts carry the
+same figures, so telemetry shows them. `anchors_scanned` and `anchor_key_ids`
+keep their meaning (the anchors only), so existing readers are unchanged.
 
 ### Existing Infrastructure Audit
 
@@ -306,7 +323,7 @@ are unchanged.
 | Anchor budget of 20 (Step 1) | Plan 10 binding `vector_budget_chunks` | Reuse: default changed to 20 in 4a25a7c5a |
 | Key scan over the search pool (Option E) | `coverage_ledger.py` `_resolve_anchors`, `find_key_tokens` | Extend: scan the pool's chunks as well as the anchors |
 | Pool chunk texts (Option E) | `BoundaryView.fetch`, the repair's accounted chunk fetch | Reuse |
-| Precision filter (Option E) | `BoundaryView.check` and `_pack`, the coverage assessment call; `FacetFinding.evidence_ids` | Reuse: one more assessment call per pack, over candidate-key chunks only |
+| Precision filter (Option E) | `CoverageBoundary._assess`, the boundary's assessment pass, and its `supports` records | Reuse: one assessment pass, one call per pack, over candidate-key chunks only |
 | Key-bearing filter (Option B) | None | New: an engine content-pattern filter |
 | Entity-key pattern | `entity.collections` in config | Reuse for B and E |
 
@@ -452,7 +469,7 @@ develop code. It uses the RDR-147 MVV harness: a fresh sandbox, bge-768, plan
 set to `CUST-\d{4}`. It reports join completeness, per-run precision over the
 answers that name a company, recall and F1 on issue5, `resolution_entered` per
 row, the pool fields (keys kept and rejected by name), and the filter's added
-cost per question (`pool_filter_calls` times the mean assessment-call cost). Its baselines are
+cost per question (`pool_filter_cost_usd`, with `pool_filter_calls` beside it). Its baselines are
 the budget-20 measurement, F1 0.764 (250-research-2), and the RDR-147 F1 0.500
 (147-research-17).
 
@@ -484,10 +501,10 @@ is dropped and named in `pool_keys_rejected`, so this step changes no answer.
 
 #### Step 3: The precision filter
 
-Pack the candidate-key chunks with `_pack`, send them through `view.check`
-against the question's facets, keep a key whose chunk is cited in a `covered`
-facet's `evidence_ids`, and join kept keys before the `max_repair_items` cap.
-Fail closed as Technical Design states.
+Run the candidate-key chunks through the boundary's assessment pass
+(`_assess`), keep a key only when a `supports` record cites its chunk, and
+resolve kept keys in phase B within the cap left after the anchors. Budget and
+failure as Technical Design states.
 
 #### Step 4: The MVV
 
@@ -515,6 +532,8 @@ None.
 - **Scenario**: Switch on, a pool key the assessment cites. **Verify**: The key is resolved and joined; `pool_scanned` is the non-anchor id count, `pool_keys_kept` names it, and `anchors_scanned` still counts the anchors only.
 - **Scenario**: Switch on, a pool key the assessment does not cite. **Verify**: The key is not resolved and is named in `pool_keys_rejected`. This is the non-vacuity check: the filter must be able to reject.
 - **Scenario**: The filter call fails, returns malformed records, or the allowance is short. **Verify**: No candidate key is kept, the anchors' keys still resolve, and `pool_reason` names the cause.
+- **Scenario**: A slow pool fetch or a filter cut by its deadline. **Verify**: The anchors' keys still resolve (no `failure`), and `pool_filter_calls` counts the cut call.
+- **Scenario**: Two filter packs, one failing. **Verify**: Keys the completed pack supported are kept, and the failed pack's candidates are rejected with `filter_partial_failure`.
 - **Scenario**: A plan with no `search` step. **Verify**: No pool, and `pool_reason` says so.
 - **Scenario**: More keys than `max_repair_items`. **Verify**: Anchor keys fill the cap first, and dropped keys are named in `tokens_dropped`.
 
@@ -566,3 +585,4 @@ estimated here.
 - 2026-11-15: Draft created from nexus-io7tw and its research record. Not gated, not accepted.
 - 2026-11-15: Sam chose ask `rdr250-lever` option 2; Approach, Phase 1 and Open Questions 1 and 4 record it, and plan 10's default budget moves to 20. The budget-20 repeat (three runs) is in Key Discoveries.
 - 2026-11-16: Gate preparation (elsinore, with linda): Technical Design for Option E with the support-verdict precision filter; Approach records option 2 and Step 1 as shipped (4a25a7c5a); Finalization Gate written; Open Questions 5 (MVV pass criteria) and 6 (branch-entry variance); research records 250-research-1 to -6.
+- 2026-11-16: Sam chose to build and measure before the gate. Technical Design follows the build after review round 1: two-phase resolution (anchors first, then the pool within its own bounds), counted filter calls and cost, partial verdicts, cap_full and the other skip reasons.
