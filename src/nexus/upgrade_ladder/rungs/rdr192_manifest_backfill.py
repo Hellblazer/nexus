@@ -133,6 +133,7 @@ import structlog
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
@@ -817,6 +818,20 @@ class Rdr192ManifestBackfillRung:
             return RungStatus(applicable=True, converged=True)
         if (pinned := self._sweep_pin()) is not None:
             return RungStatus(applicable=False, converged=False, pending_detail=pinned)
+        if refuses_managed_unattended(self.managed_fn):
+            # converge() refuses this run anyway (nexus-75w5d). Said here, as the sibling data rungs do, the walk
+            # skips the rung with no deferral warning and `nx doctor` lists it once as not checked; refused only
+            # in converge, it logged a warning at every unattended session start after each version bump.
+            held = (
+                f"the completion recorded at package version {record.package_version} stands (the engine's gate "
+                "reads a record at any version)"
+                if record is not None else "no completion is recorded, so the engine's reaper stays refused"
+            )
+            reason = (
+                f"{held}; unattended `nx upgrade` does not census a managed service's collections "
+                f"(one engine scan each); {INTERACTIVE_REMEDY}{ledger_error}"
+            )
+            return RungStatus(applicable=False, converged=False, pending_detail=reason)
 
         if record is not None:
             state = (

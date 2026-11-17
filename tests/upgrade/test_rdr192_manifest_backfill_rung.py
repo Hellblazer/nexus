@@ -22,10 +22,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from structlog.testing import capture_logs
 
 import nexus.catalog.factory as factory
 import nexus.db as nexus_db
 from nexus.db.http_vector_client import VectorServiceError
+from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY
 from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import LadderRegistry, default_registry
@@ -46,6 +48,7 @@ from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
     require_rdr192_backfill_complete,
 )
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+from nexus.upgrade_ladder.unattended import unattended_run
 from tests.upgrade.conftest import InMemoryCompletionLedger
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -1031,6 +1034,51 @@ def test_an_unattended_converge_on_a_managed_service_censuses_nothing_and_defers
     assert "interactive `nx upgrade`" in result.detail
     assert tenant.censuses == 0 and tenant.backfilled == []
     assert tenant.lock.entered == 0, "refused before the lock"
+
+
+
+@pytest.mark.parametrize("record", [None, "1.0.0"], ids=["no-record", "older-record"])
+def test_an_unattended_detect_on_a_managed_service_is_not_applicable_and_names_the_interactive_command(record) -> None:
+    """The observability look-back (2026-11-17): refused only in converge, the rung read pending at every unattended
+    session start after a version bump and logged a ladder_rung_deferred warning each time (608 over 232 upgrades on
+    one managed install). Refused in detect, as the sibling data rungs are: the walk skips it with no warning, and
+    `nx doctor` lists it once under "not checked", whose fix is an interactive `nx upgrade`."""
+    tenant = FakeTenant({"knowledge__a": 7})
+    tenant.record = None if record is None else _record(record)
+    with unattended_run():
+        status = tenant.rung(managed_fn=lambda: True).detect()
+    assert not status.applicable and not status.pending
+    assert INTERACTIVE_REMEDY in status.pending_detail
+    if record is not None:
+        assert record in status.pending_detail, "an older record is named: the engine gate reads it at any version"
+    assert tenant.censuses == 0
+
+
+def test_an_unattended_managed_detect_still_converges_on_a_record_at_the_installed_version() -> None:
+    tenant = FakeTenant({"knowledge__a": 7})
+    tenant.record = _record()
+    with unattended_run():
+        status = tenant.rung(managed_fn=lambda: True).detect()
+    assert status.applicable and status.converged
+
+
+def test_an_interactive_managed_detect_and_an_unattended_local_one_still_read_pending() -> None:
+    for managed, unattended in ((True, False), (False, True)):
+        tenant = FakeTenant({"knowledge__a": 7})
+        with unattended_run(unattended):
+            status = tenant.rung(managed_fn=lambda m=managed: m).detect()
+        assert status.pending, f"managed={managed} unattended={unattended}"
+
+
+def test_an_unattended_walk_on_a_managed_service_skips_the_rung_without_a_deferral_warning() -> None:
+    tenant = FakeTenant({"knowledge__a": 7})
+    tenant.record = _record("1.0.0")
+    ledger = InMemoryCompletionLedger()
+    with unattended_run(), capture_logs() as logs:
+        report = LadderRunner(LadderRegistry((tenant.rung(managed_fn=lambda: True),)), ledger).run()
+    assert [r.outcome for r in report.runs] == [RungOutcome.SKIPPED_NOT_APPLICABLE]
+    assert not [e for e in logs if e["event"] == "ladder_rung_deferred"]
+    assert tenant.censuses == 0 and tenant.lock.entered == 0
 
 
 def test_an_unattended_converge_on_a_local_engine_and_an_interactive_one_on_a_managed_service_still_census() -> None:
