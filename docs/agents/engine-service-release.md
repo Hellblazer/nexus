@@ -117,7 +117,7 @@ A step that finishes a move (VALIDATE CONSTRAINT on a check added NOT VALID, dro
 
 A changeset with `onFail="CONTINUE"` on a chunk-family table is refused by `tests/test_changelog_continue_precondition_chunks_lint.py`, because the migrator does not count a self-retrying changeset as schema work, and a DROP or ALTER there takes ACCESS EXCLUSIVE and would queue behind an index build the migrator was told to leave running. A VALIDATE CONSTRAINT never goes in a later changeset on a table the gate's second rule lists.
 
-The lock timeout is on every `on_complete`, as RDR-246's Failure Modes section says. Its "Finishing a move" section and its Phase 1 engine-side step still tie the `lock_timeout` to a chunk-family `on_complete`; the code, and this section, do not. The Test Plan scenario for an `on_complete` that meets a conflicting lock (RDR-246, near line 1265) is written for a chunk-family table as well. A second difference is in the RDR's Progress text (near lines 444 and 799 to 812): it describes `boot_work` as filled from the move worker's in-memory state and lists only `blocked:`, `paused:` and `failed:`, while the code has a separate reporter and adds `working:`, `queued:`, `runs complete:` and `stalled:`, plus the two engine entries above. Both notes come out when the RDR wording pass lands.
+The lock timeout is on every `on_complete`.
 
 #### Writing the verification query
 
