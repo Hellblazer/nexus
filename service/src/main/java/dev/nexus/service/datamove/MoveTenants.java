@@ -16,10 +16,9 @@ import java.util.List;
 import java.util.TreeSet;
 
 /**
- * The tenants a move runs for (RDR-246, Row-level security). It is the set the table-wide retire-keys routes check
- * ({@code ChunkKeysAdminHandler}): the default tenant, every tenant holding a {@code nexus.service_tokens} row (revoked
+ * The tenants a move runs for (RDR-246, Row-level security): the default tenant, every tenant holding a {@code nexus.service_tokens} row (revoked
  * or expired included), and every tenant that holds rows in the driving table. The rows are found by one probe on the admin
- * connection ({@code ChunkConstraintAdmin}'s probe is the precedent), bounded by {@link #PROBE_STATEMENT_TIMEOUT}; on a
+ * connection, bounded by {@link #PROBE_STATEMENT_TIMEOUT}; on a
  * table partitioned one tenant per leaf (nexus.chunks) the leaf bounds name the tenants, so no scan runs. The worker builds
  * the list at the start of each pass.
  */
@@ -27,7 +26,7 @@ final class MoveTenants {
 
     private MoveTenants() { /* static */ }
 
-    /** The probe's statement bound, as {@code ChunkConstraintAdmin}'s probe has. */
+    /** The probe's statement bound. */
     static final String PROBE_STATEMENT_TIMEOUT = "10min";
 
     /** The GUC the probe bounds; set through {@code AdminDdlSession#setSession} only (NetworkBoundStatementTimeoutGateTest). */
