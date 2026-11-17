@@ -1472,6 +1472,7 @@ def test_the_verb_is_registered_under_t3() -> None:
 # ── no automatic trigger ─────────────────────────────────────────────────────
 
 
+@pytest.mark.census
 class TestNoAutomaticTrigger:
     """Slice C of nexus-6pfgb.43 (the upgrade-ladder rung that sweeps every install) shipped after the 2026-11-08 cloud
     dry runs were read. The only callers of the routes are the verb and that one rung (``retire-keys-sweep``), which runs

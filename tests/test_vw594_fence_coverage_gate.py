@@ -56,6 +56,10 @@ from dataclasses import dataclass
 
 import pytest
 
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
 

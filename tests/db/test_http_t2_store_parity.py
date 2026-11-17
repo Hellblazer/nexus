@@ -35,6 +35,10 @@ import inspect
 
 import pytest
 
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
+
 from tests.db.t2_store_contract import (
     T2_STORE_RETURNS,
     _UNIVERSAL_IGNORE,

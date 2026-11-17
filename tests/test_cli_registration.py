@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
+
 COMMANDS_DIR = Path(__file__).parent.parent / "src" / "nexus" / "commands"
 
 # Files that are NOT top-level click command groups (helpers, hidden internals, and subcommand modules that

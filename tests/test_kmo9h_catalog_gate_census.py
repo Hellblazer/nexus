@@ -26,6 +26,10 @@ from pathlib import Path
 
 import pytest
 
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
+
 import nexus
 import nexus.catalog.factory as factory
 

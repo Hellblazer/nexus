@@ -255,7 +255,7 @@ def test_a_docs_only_change_gets_the_docs_readers_and_no_code_checks(
         BEAD_MANIFEST,
         FOLD_CHECK,  # CHANGELOG.md changed
     ]
-    assert set(_commands(out)) == {"code", "docs"}
+    assert set(_commands(out)) == {"code", "docs", "meta"}
 
 
 def test_docs_beside_code_still_get_the_docs_readers(repo: Path) -> None:
@@ -271,7 +271,34 @@ def test_an_unclassified_path_is_listed_and_still_code(repo: Path) -> None:
     out = _Run(repo)()
     assert out["unclassified"] == ["data/blob.bin"]
     assert out["code"] is True
-    assert set(_commands(out)) == {"code"}
+    assert set(_commands(out)) == {"code", "meta"}
+
+
+META = "uv run python scripts/meta_tests.py run --base base"
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"docs/a.md": "a\n"},
+        {"src/nexus/x.py": "x = 1\n"},
+        {"service/A.java": "x\n"},
+        {"data/blob.bin": "b\n"},
+    ],
+)
+def test_every_non_empty_diff_runs_the_meta_tests_it_reaches_right_after_the_jar(
+    repo: Path, files: dict[str, str]
+) -> None:
+    """The census and lint meta-tests (scripts/meta_tests.py) run on a docs push as on a code
+    push: docs_reference_rot reds a docs-only push. They come right after the gate jar, the
+    cheapest pytest a push gets, and they are the only check of class meta."""
+    _change(repo, files)
+    out = _Run(repo)()
+    assert _bare(_commands(out)["meta"]) == [META]
+    commands = [c["command"] for c in out["checks"]]
+    assert commands.index(next(c for c in commands if "meta_tests.py" in c)) == 1
+    [meta] = [c for c in out["checks"] if c["class"] == "meta"]
+    assert meta["heavy"] is False
 
 
 def test_counts_come_from_diff_stat(repo: Path) -> None:
@@ -438,6 +465,8 @@ def test_a_base_with_shell_characters_reaches_the_tools_intact(
     out = _Run(repo)(base)
     tenant = _shell(repo, stubs, _command(out, "tests that mint a tenant"))
     assert f"<--base={base}>" in tenant
+    meta = _shell(repo, stubs, _command(out, "the census and lint meta-tests"))
+    assert meta[meta.index("<--base>") + 1] == f"<{base}>"
     assert _operands(_shell(repo, stubs, _command(out, "ruff check"))) == ["src/x.py"]
     assert not (repo / "pwned").exists()
 
