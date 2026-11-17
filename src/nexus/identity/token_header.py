@@ -174,7 +174,27 @@ def is_fenced(method: str, path: str) -> bool:
     return False
 
 
+def is_send(method: str, path: str) -> bool:
+    """A mailbox send (``out``): open to any caller, so never refused, but it carries the token when the file holds a live
+    one, so ``sender_session`` is stamped from the identity's current binding (RDR-253 Step 2, ``TupleHandler``)."""
+    parts = [p for p in path.split("/") if p]
+    return method.upper() != "GET" and parts[:3] == ["v1", "tuples", "out"]
+
+
 _VERIFIED: set[str] = set()
+_LEASE_OWNER = False
+_RESOLVER_DOWN_UNTIL = 0.0
+#: How long an engine that could not be asked is not asked again (seconds): a session-id check is a courtesy, and a
+#: process whose engine is down must not pay a connect timeout on every write.
+RESOLVER_BACKOFF_S: float = 30.0
+
+
+def set_lease_owner(owner: bool) -> None:
+    """Called by the MCP server's identity lease: this process owns the binding, so its spawn-time session id is not
+    evidence of anything. After a cross-seat ``/resume`` the server still has the session id it started with (it never
+    sees the new one), which the index maps to the old identity; checking it would refuse every write of the server."""
+    global _LEASE_OWNER
+    _LEASE_OWNER = owner
 
 
 def _resolver_client() -> Any:
@@ -189,7 +209,10 @@ def _verify_session(record: TokenFile) -> None:
     without asking; an id it does not list (a ``/branch`` the lease has not yet recorded) is asked of the engine,
     once. An engine that cannot be asked does not block the write: the fence is the engine's, this is the early,
     readable refusal."""
+    global _RESOLVER_DOWN_UNTIL
     sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    if _LEASE_OWNER or time.monotonic() < _RESOLVER_DOWN_UNTIL:
+        return
     if (not sid or sid == record.session_id or sid in record.session_ids or sid in _VERIFIED
             or (os.environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip()):
         return
@@ -201,10 +224,12 @@ def _verify_session(record: TokenFile) -> None:
     try:
         client = _resolver_client()
     except Exception:  # noqa: BLE001 — cannot ask: send, and let the engine's fence decide
+        _RESOLVER_DOWN_UNTIL = time.monotonic() + RESOLVER_BACKOFF_S
         return
     try:
         got = resolve_identity(client=client, env={"CLAUDE_CODE_SESSION_ID": sid}, claude_pid=ancestor[0] if ancestor else None)
     except Exception:  # noqa: BLE001 — an engine that cannot answer does not block the write
+        _RESOLVER_DOWN_UNTIL = time.monotonic() + RESOLVER_BACKOFF_S
         return
     finally:
         close = getattr(client, "close", None)
@@ -229,19 +254,30 @@ def identity_headers() -> dict[str, str]:
 
 def fenced_identity_headers(method: str, path: str) -> dict[str, str]:
     """The identity header for this request: the token of this process's token file when the engine fences the request
-    and the file holds a live token and the process's session still belongs to the file's identity; else ``{}``.
-    Raises ``IdentityConflictError`` for a process whose session id names another identity than its token file."""
-    return identity_headers() if is_fenced(method, path) else {}
+    (or it is a send, which only stamps) and the file holds a live token and the process's session still belongs to the
+    file's identity; else ``{}``. A fenced request raises ``IdentityConflictError`` for a process whose session id names
+    another identity than its token file; a send does not raise, it goes without the token."""
+    if is_fenced(method, path):
+        return identity_headers()
+    if is_send(method, path):
+        try:
+            return identity_headers()
+        except Exception:  # noqa: BLE001 — a send is open to anyone: a stale child sends it unstamped rather than not at all
+            return {}
+    return {}
 
 
-def retry_headers_after_401(sent: Mapping[str, str]) -> dict[str, str] | None:
-    """After a 401 on a request that carried an identity token: re-read the file once. The new header when the file
-    now holds a different, usable token; None when nothing was attached, nothing changed or nothing is usable (the
-    caller then lets the 401 stand: no tokenless retry)."""
+def retry_headers_after_401(sent: Mapping[str, str], path: str = "") -> dict[str, str] | None:
+    """After a 401 on a request that carried an identity token: re-read the file once. The complete headers to resend
+    with: *sent* carrying the file's new token when it holds a different, usable one; for a send (``out``), which any
+    caller may make, *sent* without the token when nothing newer exists (once: the stamp is a courtesy and the mail is
+    not). None otherwise: a fenced write is never resent without its token."""
     attached = sent.get(token_contract.IDENTITY_TOKEN_HEADER)
     if not attached:
         return None
     record = current(now=time.time())
-    if record is None or record.token == attached:
-        return None
-    return token_contract.headers(record.token)
+    if record is not None and record.token != attached:
+        return {**sent, **token_contract.headers(record.token)}
+    if is_send("POST", path):
+        return {k: v for k, v in sent.items() if k != token_contract.IDENTITY_TOKEN_HEADER}
+    return None

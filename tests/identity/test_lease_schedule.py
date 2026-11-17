@@ -242,3 +242,70 @@ def test_the_lease_reuses_one_engine_client_closes_it_on_shutdown_and_rebuilds_a
     procs.stop(100, keep_registry=False)
     lease.shutdown(wait_for_claude=False)
     assert made[1].closed
+
+
+def test_a_call_that_was_out_when_a_marker_moved_the_lease_changes_nothing_of_the_new_identity(tmp_path: Path) -> None:
+    """The heartbeat's refresh (or a refused renewal) is about the identity it was sent for. If adopt_marker moved the
+    lease to another identity while the call was in flight, its answer must neither overwrite the new token nor flag the
+    new identity superseded."""
+    import threading
+
+    for outcome in ("refresh_answers", "renew_refused"):
+        now = [1_000.0]
+        lease, engine, _ = _setup(tmp_path / outcome, now)
+        _file(tmp_path / outcome, "tok-0", expires_at=now[0] + 1_000)        # a refresh is due
+        lease.tick()                                                          # adopts i1 (the first call may refresh)
+        lease._next_renew = 0.0
+        lease.token_expires_at = now[0] + 1_000
+        entered, release = threading.Event(), threading.Event()
+        if outcome == "refresh_answers":
+            orig = engine.bind
+
+            def slow(identity: str, event: str, generation: int, evidence: Any = None) -> dict:
+                entered.set()
+                release.wait(10)
+                return orig(identity, event, generation, evidence)
+
+            engine.bind = slow                        # type: ignore[method-assign]
+            engine.renew = lambda *a, **k: {}        # type: ignore[method-assign]
+        else:
+            def refuse(*a: Any, **k: Any) -> dict:
+                entered.set()
+                release.wait(10)
+                raise IdentityApiError(409, "generation_superseded", "i1 is at generation 2", {})
+
+            engine.renew = refuse                    # type: ignore[method-assign]
+        worker = threading.Thread(target=lease.tick, daemon=True)
+        worker.start()
+        assert entered.wait(5)
+        _file(tmp_path / outcome, "tok-i2", expires_at=now[0] + 3600, generation=4)
+        write_token_file(token_path(tmp_path / outcome / "config" / "identity", 100, 100_000),
+                         TokenFile(identity="i2", generation=4, token="tok-i2", expires_at=now[0] + 3600, session_id="sid-1",
+                                   pid=100, started_at=100_000, proc_start=T0))
+        own = str(token_path(tmp_path / outcome / "config" / "identity", 100, 100_000))
+        assert lease.adopt_marker(identity="i2", generation=4, token_file=own)
+        release.set()
+        worker.join(5)
+        assert (lease.identity, lease.generation, lease.token) == ("i2", 4, "tok-i2"), outcome
+        assert not lease.superseded, outcome
+
+
+def test_the_swap_never_regresses_the_session_id_the_hook_wrote(tmp_path: Path) -> None:
+    """The hook wrote s2 (a /clear) after the lease last read the file; the lease's refresh still thinks s1. The file keeps
+    s2: it is later in the file's own list."""
+    from nexus.identity.token_file import read_token_file
+
+    now = [1_000.0]
+    lease, engine, _ = _setup(tmp_path, now)
+    _file(tmp_path, "tok-0", expires_at=now[0] + 3600)
+    lease.tick()
+    path = token_path(tmp_path / "config" / "identity", 100, 100_000)
+    write_token_file(path, TokenFile(identity="i1", generation=1, token="tok-0", expires_at=now[0] + 3600, session_id="s2",
+                                     pid=100, started_at=100_000, proc_start=T0, session_ids=("sid-1", "s2")))
+    lease.token, lease.token_expires_at = "tok-refreshed", now[0] + 3600
+    lease._rewrite_file()
+    kept = read_token_file(path)
+    assert (kept.session_id, kept.session_ids, kept.token) == ("s2", ("sid-1", "s2"), "tok-refreshed")
+    lease.session_id = "branch"                       # a fork the lease just made is newer than anything in the file
+    lease._rewrite_file()
+    assert read_token_file(path).session_id == "branch"

@@ -18,8 +18,11 @@ On the holder's own host the check is, in order:
    time, so the probe runs ``ps`` under ``TZ=UTC`` (Windows reads the process creation FILETIME); a probe that
    cannot read a start time answers **unknown**, never gone, and the caller treats unknown as running.
 
-The check reads one registry directory, ``CLAUDE_CONFIG_DIR/sessions``. A Claude under another config directory writes
-its file elsewhere, so a holder it bound is judged gone only when its token file names THIS directory as its registry.
+The registry legs (1) read one registry directory, ``CLAUDE_CONFIG_DIR/sessions``. A Claude under another config
+directory writes its file elsewhere, so with an identity directory the registry is consulted only for a holder whose token
+file names THIS directory; any other holder (or one with no token file) is judged by the pid probe and the start-time
+compare alone, which do not depend on a directory: gone if the pid is dead or was reused, else unknown, and unknown is
+never reported gone.
 
 A holder on another host is judged by its lease alone and the check says **other_host**. A crashed process leaves
 its registry file behind, so file presence alone never decides: the probe does.
@@ -216,26 +219,37 @@ def check_holder(holder: Mapping[str, Any], *, procs: Processes | Any, host: str
     """Whether the process *holder* names still exists (module docstring). *holder* is a binding's
     ``{host, pid, started_at, proc_start}``.
 
-    This reads ONE registry directory, ``procs.sessions_dir``: a Claude running under another ``CLAUDE_CONFIG_DIR``
-    writes its registry file somewhere else, and its absence here proves nothing. With *identity_dir*, the holder's
-    token file says which registry directory the holder used; an absent registry file then means gone only when the
-    token file names this reader's directory, and anything else is unknown (never gone)."""
+    The registry legs read ONE registry directory, ``procs.sessions_dir``: a Claude running under another
+    ``CLAUDE_CONFIG_DIR`` writes its registry file somewhere else, so an absent file there proves nothing and a file with
+    its pid there may be a stale leftover of another process. With *identity_dir* the holder's token file says which
+    directory the holder used, and this is applied BEFORE the registry is read: a holder whose token file does not name
+    this reader's directory (or that has no token file) is judged by the two legs that do not depend on a directory,
+    the pid probe and the OS start time against ``proc_start``. A dead or reused pid is gone; anything else is
+    unknown. A holder that was restarted in place (same pid and start time, a new ``startedAt``) cannot be told
+    from a running one without its registry file, so it stays unknown."""
     here = host if host is not None else procs.host
     if holder.get("host") != here:
         return Verdict(OTHER_HOST, f"held on {holder.get('host')}, not on {here}")
     pid = _int(holder.get("pid"))
     if pid is None:
         return Verdict(UNKNOWN, "the binding names no pid")
+    if identity_dir is not None:
+        from nexus.identity.token_file import read_token_file, token_path  # noqa: PLC0415 — token_file imports holder lazily
+
+        started_at = _int(holder.get("started_at"))
+        record = read_token_file(token_path(identity_dir, pid, started_at)) if started_at is not None else None
+        if record is None or record.registry_dir != str(procs.sessions_dir):
+            where = "no token file records" if record is None else f"its token file records {record.registry_dir}, not"
+            note = f"{where} {procs.sessions_dir} as its registry directory"
+            if not procs.alive(pid):
+                return Verdict(GONE, f"pid {pid} is not running ({note})")
+            recorded = normalise_instant(holder.get("proc_start"))
+            started = procs.os_start(pid) if recorded is not None else None
+            if started is not None and started != recorded:
+                return Verdict(GONE, f"pid {pid} started {started}, not {recorded} (the pid was reused; {note})")
+            return Verdict(UNKNOWN, f"pid {pid} is running or cannot be judged without its registry file: {note}")
     entry = read_registry_entry(pid, procs.sessions_dir)
     if entry is None:
-        if identity_dir is not None:
-            from nexus.identity.token_file import read_token_file, token_path  # noqa: PLC0415 — token_file imports holder lazily
-
-            started_at = _int(holder.get("started_at"))
-            record = read_token_file(token_path(identity_dir, pid, started_at)) if started_at is not None else None
-            if record is None or record.registry_dir != str(procs.sessions_dir):
-                where = "no token file records" if record is None else f"its token file records {record.registry_dir}, not"
-                return Verdict(UNKNOWN, f"no registry file for pid {pid} in {procs.sessions_dir}, and {where} that directory as its own")
         return Verdict(GONE, f"no registry file for pid {pid}")
     if entry.started_at != holder.get("started_at"):
         return Verdict(GONE, f"pid {pid} now has startedAt {entry.started_at}, not {holder.get('started_at')} (restarted)")

@@ -124,11 +124,12 @@ def test_windows_reads_the_process_creation_time_as_a_fixed_utc_instant() -> Non
     assert os_start_time(999, platform="win32", win_api=_Api()) is None
 
 
-def test_a_holder_registered_under_another_claude_config_dir_is_never_judged_gone_by_this_one(
+def test_a_holder_of_another_claude_config_dir_is_judged_by_the_pid_probe_and_start_time_alone(
         procs: FakeProcesses, tmp_path: Path) -> None:
-    """A Claude under another CLAUDE_CONFIG_DIR writes its registry file somewhere this reader does not look: an absent
-    file proves nothing. Gone only when the holder's own token file names THIS registry directory; unknown otherwise,
-    including a holder with no token file at all."""
+    """A Claude under another CLAUDE_CONFIG_DIR writes its registry file somewhere this reader does not look. With an
+    identity directory the registry is consulted only for a holder whose token file names THIS directory; any other
+    holder (another directory recorded, or no token file) is judged by the two legs that need no directory: a dead pid
+    or a reused one is gone, anything else is unknown, never gone."""
     from nexus.identity.token_file import TokenFile, token_path, write_token_file
 
     d = tmp_path / "identity"
@@ -138,11 +139,38 @@ def test_a_holder_registered_under_another_claude_config_dir_is_never_judged_gon
             identity="i1", generation=1, token=None, expires_at=None, session_id="s", pid=500, started_at=500_000,
             proc_start=T0, host=HOST, registry_dir=registry_dir))
 
+    other = str(tmp_path / "other-profile" / "sessions")
+    procs.start(500, T0, started_at=500_000, registry=False)                  # running, its file is in another profile
     assert check_holder(_holder(), procs=procs, identity_dir=d).state == UNKNOWN              # no token file
-    token(str(tmp_path / "other-profile" / "sessions"))
+    token(other)
     assert check_holder(_holder(), procs=procs, identity_dir=d).state == UNKNOWN              # another profile's
+    procs.procs[500] = "2026-11-17T09:30:00Z"                                                  # the pid was reused
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == GONE
+    procs.stop(500)                                                                            # dead: gone, whatever the dir
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == GONE
     token(str(procs.sessions_dir))
-    assert check_holder(_holder(), procs=procs, identity_dir=d).state == GONE                 # this reader's own
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == GONE                 # this reader's own: registry legs
+
+
+def test_a_stale_same_pid_file_in_this_readers_dir_does_not_vouch_for_a_holder_of_another_dir(
+        procs: FakeProcesses, tmp_path: Path) -> None:
+    """The holder's token file names another profile. A leftover registry file with the same pid (another process, long
+    gone) sits in THIS reader's directory with the holder's startedAt: reading it would call the holder alive or dead
+    by the leftover's say. The gate applies before the registry is read, so only the pid probe speaks."""
+    from nexus.identity.token_file import TokenFile, token_path, write_token_file
+
+    d = tmp_path / "identity"
+    write_token_file(token_path(d, 500, 500_000), TokenFile(
+        identity="i1", generation=1, token=None, expires_at=None, session_id="s", pid=500, started_at=500_000,
+        proc_start=T0, host=HOST, registry_dir=str(tmp_path / "other-profile" / "sessions")))
+    procs.write_registry(500, 500_000, T0)                  # the leftover: same pid, same startedAt, in this directory
+    procs.procs[500] = T0                                   # and the pid is running (the other profile's holder)
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == UNKNOWN
+    procs.stop(500)                                         # the leftover's file is still there; the holder is dead
+    assert check_holder(_holder(), procs=procs, identity_dir=d).state == GONE
+    # without the gate (no identity directory) the file is believed, as before
+    procs.procs[500] = T0
+    assert check_holder(_holder(), procs=procs).state == RUNNING
 
 
 def test_a_holder_on_another_host_is_judged_by_its_lease_alone(procs: FakeProcesses) -> None:

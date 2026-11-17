@@ -227,7 +227,7 @@ class IdentityLease:
                 report.renewed = True
             except IdentityApiError as exc:
                 if token_contract.is_stale_generation(exc.status, exc.code):
-                    self._superseded(exc)
+                    self._superseded(exc, identity, generation)
                     return
                 if exc.status == 409 and exc.code in ("not_held", "identity_not_held"):  # Step 1 / Step 2 spellings
                     _log.info("identity_lease_not_held", identity=identity, state=exc.body.get("state"))
@@ -245,13 +245,15 @@ class IdentityLease:
                                evidence_body(client_version=self._version, **self._process_evidence()))
         except IdentityApiError as exc:
             if token_contract.is_stale_generation(exc.status, exc.code):
-                self._superseded(exc)
+                self._superseded(exc, identity, generation)
                 return
             raise
         token, life = token_contract.token_from_response(view)
         if token is None:
             return  # an engine that issues none (Step 1): nothing to rewrite
         with self._lock:
+            if (self.identity, self.generation) != (identity, generation):
+                return  # a marker moved the lease to another identity while the call was out: this token is the old one's
             self.token, self.token_expires_at = token, token_contract.expires_at(life, now=now)
             if life:
                 self.token_life_s = life
@@ -274,8 +276,12 @@ class IdentityLease:
             if current is None or (current.identity, current.generation) != (identity, generation):
                 return None
             ids = current.session_ids + ((sid,) if sid and sid not in current.session_ids else ())
+            # never regress the session id: a hook that wrote a newer one (a /clear) after this lease last read the
+            # file is later in the file's own list than the lease's
+            newer = current.session_id if (current.session_id and sid in current.session_ids and current.session_id in ids
+                                           and ids.index(current.session_id) > ids.index(sid)) else sid
             return TokenFile(**{**current.__dict__, "token": token, "expires_at": expires,
-                                "session_id": sid or current.session_id, "session_ids": ids, "written_at": 0.0})
+                                "session_id": newer or current.session_id, "session_ids": ids, "written_at": 0.0})
 
         update_token_file(path, swap)
 
@@ -299,6 +305,8 @@ class IdentityLease:
         token, life = token_contract.token_from_response(view)
         with self._lock:
             self._known_sessions.add(sid)
+            if (self.identity, self.generation) != (identity, generation):
+                return  # moved to another identity while the call was out: the fork row belongs to the old one
             self.session_id = sid
             if token is not None:
                 self.token, self.token_expires_at = token, token_contract.expires_at(life, now=self._clock())
@@ -306,11 +314,14 @@ class IdentityLease:
         report.forked = True
         _log.info("identity_lease_fork_row", identity=identity, session_id=sid, prior=prior)
 
-    def _superseded(self, exc: IdentityApiError) -> None:
+    def _superseded(self, exc: IdentityApiError, identity: str | None, generation: int | None) -> None:
+        """Flag this lease superseded, but only if it still holds the (identity, generation) the refused call was made for:
+        a marker that moved it to another identity meanwhile makes the refusal about the old one, not about this."""
         with self._lock:
+            if (self.identity, self.generation) != (identity, generation):
+                return
             first = not self.superseded
             self.superseded = True
-            identity, generation = self.identity, self.generation
         if first:
             _log.error("identity_lease_superseded", identity=identity, generation=generation, detail=str(exc),
                        consequence="another process holds this identity now; this server stops writing identity state")
@@ -412,6 +423,9 @@ def start() -> IdentityLease | None:
         lease = IdentityLease(client_factory=IdentityClient.from_config, config_dir=_nx_config.nexus_config_dir(), claude_pid=pid,
                               client_version=client_version(), close_client=True)
         _STOP.clear()
+        from nexus.identity import token_header  # noqa: PLC0415 — deferred: server start cost
+
+        token_header.set_lease_owner(True)      # this server's spawn-time session id says nothing about its identity
         _THREAD = threading.Thread(target=_run, args=(lease,), name="nx-identity-lease", daemon=True)
         _LEASE = lease
         _THREAD.start()
@@ -441,6 +455,9 @@ def shutdown() -> None:
         thread.join(timeout=1.0)
     if lease is not None:
         lease.shutdown()
+        from nexus.identity import token_header  # noqa: PLC0415
+
+        token_header.set_lease_owner(False)
 
 
 def current() -> IdentityLease | None:

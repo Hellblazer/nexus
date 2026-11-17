@@ -7,7 +7,7 @@ from pathlib import Path
 
 from nexus.identity.holder import epoch_seconds
 from nexus.identity.pending import Pending, pending_path, write_pending
-from nexus.identity.sweep import clean_local_files
+from nexus.identity.sweep import SweepReport, clean_local_files
 from nexus.identity.token_file import TokenFile, token_path, write_token_file
 from tests.identity.fakes import HOST, FakeProcesses
 
@@ -35,7 +35,7 @@ def test_local_cleanup_removes_token_files_of_gone_processes_and_stale_pending_f
                          epoch_seconds(T0))
     stale = write_pending(directory, Pending(session_id="s", source="startup", seat=None, os_start=T1, claude_pid=300),
                           epoch_seconds(T1))
-    report = clean_local_files(directory, procs, host=HOST)
+    report = clean_local_files(directory, procs, host=HOST, report=SweepReport(swept=True))
     assert sorted(report.token_files_removed) == ["200.111000.token", "300.300000.token"]
     assert report.pending_files_removed == [stale.name]
     assert token_path(directory, 100, 100_000).exists() and live.exists() and not stale.exists()
@@ -62,11 +62,13 @@ def test_cleanup_leaves_the_files_of_a_claude_under_another_config_dir_alone(tmp
     directory = tmp_path / "identity"
     _token(directory, 600, 600_000, "i6", str(tmp_path / "other" / "sessions"))      # another profile, no file here
     _token(directory, 601, 601_000, "i7")                                              # no registry_dir recorded at all
+    procs.procs[600] = T0                                                              # both running
+    procs.procs[601] = T0
     old = directory / "700.1.token.123.abc.tmp"
     new = directory / "700.1.token.123.def.tmp"
     old.write_text("{}")
     new.write_text("{}")
     os.utime(old, (time.time() - 3_600, time.time() - 3_600))
-    report = clean_local_files(directory, procs, host=HOST)
+    report = clean_local_files(directory, procs, host=HOST, report=SweepReport(swept=True))
     assert report.token_files_removed == [] and token_path(directory, 600, 600_000).exists() and token_path(directory, 601, 601_000).exists()
     assert report.tmp_files_removed == [old.name] and new.exists() and not old.exists()

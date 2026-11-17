@@ -1439,9 +1439,9 @@ class RefreshableHttpStoreMixin:
         url = self._base_url + path
         before_request()  # nexus-ldf2s: every attempt, retries included, passes the request gate
         resp = self._client.request(method, url, headers=(sent := {**self._auth_headers(), **fenced_identity_headers(method, path)}), **kwargs)
-        if resp.status_code == 401 and (fresh := retry_headers_after_401(sent)):  # RDR-253 Step 3: re-read the token file once
+        if resp.status_code == 401 and (fresh := retry_headers_after_401(sent, path)):  # RDR-253 Step 3: re-read the token file once
             before_request()
-            resp = self._client.request(method, url, headers={**sent, **fresh}, **kwargs)
+            resp = self._client.request(method, url, headers=fresh, **kwargs)
         self._note_data_token_response(resp)
         self._raise_for_status(resp, path)
         if not resp.content:

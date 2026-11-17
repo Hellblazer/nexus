@@ -85,6 +85,7 @@ def token_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     token_header.reset_for_tests()
     yield path
     token_header.reset_for_tests()
+    token_header.set_lease_owner(False)
 
 
 def _write(path: Path, token: str | None, expires_at: float | None = 4_000_000_000.0, generation: int = 3) -> None:
@@ -111,17 +112,18 @@ def test_the_token_is_sent_only_when_the_file_holds_a_live_one(serve, token_path
 
 def test_only_a_request_the_engine_fences_carries_the_token(serve, token_path: Path) -> None:
     """An identity token the engine cannot resolve is a 401 on every route it rides: an unfenced read or write must not
-    carry one. Fenced: memory writes and mailbox claims; not fenced: reads, a send (out), expire, search."""
+    carry one. Fenced: memory writes and mailbox claims; a send (out) carries it to stamp sender_session; not fenced:
+    reads, expire, search."""
     _write(token_path, "tok-a")
     server = serve([(200, {"ok": True})] * 8)
     store = _store(server.url)
     store._post("/v1/tuples/in", {})                              # a claim: fenced
     store._get("/v1/memory/all")                                  # a read
-    store._post("/v1/tuples/out", {})                             # a send is open to anyone
+    store._post("/v1/tuples/out", {})                             # a send: open to anyone, carries the token to be stamped
     store._post("/v1/memory/expire", {})                          # a tenant-wide sweep
     store._post("/v1/memory/search", {}, mutates=False)           # a search
     store._delete("/v1/memory/delete", {"project": "p"})          # a write: fenced
-    assert server.tokens_sent() == ["tok-a", None, None, None, None, "tok-a"]
+    assert server.tokens_sent() == ["tok-a", None, "tok-a", None, None, "tok-a"]
 
 
 def test_a_process_with_no_claude_ancestor_walks_the_process_table_once_not_per_request(
@@ -236,3 +238,66 @@ def test_a_delegated_child_sends_the_token_its_environment_names(serve, tmp_path
     _store(server.url)._post("/v1/memory/put", {})
     assert server.tokens_sent() == ["child-token"]
     token_header.reset_for_tests()
+
+
+def test_a_send_that_gets_a_401_falls_back_once_without_the_token(serve, token_path: Path) -> None:
+    """The engine answers 401 for an identity token it cannot resolve, on every route. A send is open to anyone: it is
+    resent once without the token (unstamped) rather than lost. A claim is never resent without one."""
+    _write(token_path, "tok-same")
+    server = serve([(401, {"error": "unauthorized"}), (200, {"ok": True})])
+    assert _store(server.url)._post("/v1/tuples/out", {}) == {"ok": True}
+    assert server.tokens_sent() == ["tok-same", None]
+
+
+def test_an_engine_that_cannot_be_asked_is_not_asked_again_for_thirty_seconds(
+        serve, token_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session-id check is a courtesy: with the resolver's engine down, one failed attempt, then none for 30 s, so a
+    write does not pay a connect timeout each time."""
+    write_token_file(token_path, TokenFile(identity="i2", generation=1, token="tok-i2", expires_at=4_000_000_000.0,
+                                           session_id="new-sid", pid=4242, started_at=4_242_000, proc_start=None,
+                                           session_ids=("new-sid",)))
+    attempts: list[int] = []
+
+    def down() -> None:
+        attempts.append(1)
+        raise ConnectionError("engine down")
+
+    monkeypatch.setattr(token_header, "_resolver_client", down)
+    monkeypatch.setattr(token_header, "_RESOLVER_DOWN_UNTIL", 0.0)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "unlisted-sid")
+    server = serve([(200, {"ok": True})] * 3)
+    store = _store(server.url)
+    for _ in range(3):
+        store._post("/v1/memory/put", {})
+    assert len(attempts) == 1 and server.tokens_sent() == ["tok-i2"] * 3
+    monkeypatch.setattr(token_header, "_RESOLVER_DOWN_UNTIL", 0.0)               # the backoff expires
+    store._post("/v1/memory/put", {})
+    assert len(attempts) == 2
+
+
+def test_the_server_that_owns_the_lease_is_not_refused_for_its_spawn_time_session_id_but_a_child_is(
+        serve, token_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """After a cross-seat /resume inside the process the MCP server keeps the session id it started with (it never sees the
+    new one), which the index maps to the OLD identity. The server owns the binding: its writes go. A Bash child started
+    before the switch carries the same id and no lease: refused."""
+    from nexus.identity.resolver import IdentityConflictError
+    from tests.identity.fakes import FakeClient
+
+    write_token_file(token_path, TokenFile(identity="i2", generation=2, token="tok-i2", expires_at=4_000_000_000.0,
+                                           session_id="resumed-sid", pid=4242, started_at=4_242_000, proc_start=None,
+                                           session_ids=("resumed-sid",)))
+    row = {"identity": "i1", "generation": 1, "current_generation": 1, "kind": "seat", "state": "live"}
+    monkeypatch.setattr(token_header, "_resolver_client", lambda: FakeClient(sessions={"spawn-sid": row}))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "spawn-sid")
+    server = serve([(200, {"ok": True})] * 2)
+    store = _store(server.url)
+    try:
+        token_header.set_lease_owner(True)
+        store._post("/v1/memory/put", {})
+        assert server.tokens_sent() == ["tok-i2"]
+        token_header.set_lease_owner(False)
+        with pytest.raises(IdentityConflictError):
+            store._post("/v1/memory/put", {})
+        assert len(server.seen) == 1
+    finally:
+        token_header.set_lease_owner(False)
