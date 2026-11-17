@@ -259,21 +259,24 @@ code (research 3); lane D, outside systems (research 4).
 
 ### Technical Design
 
-**Identity records.** New engine templates, all tenant-scoped:
+**Identity records.** New engine tables, all tenant-scoped, not tuples: a
+tuple expires (a refire is clamped to `created_at` plus the template's
+retention), and the compare-and-set on the generation needs one transaction.
+Only the mailbox's `address_kind` gains `identity`.
 
 ```
-identity/<id>    dims: kind=seat|ephemeral|delegated  parent=<id or none>  generation=<n>  state=unheld|live|lapsed|ended
-                 body: {"display_name": "<name or null>", "created_by": "<sam|restart|session|dispatch>", "created_at": "<UTC>", "ended_at": null}
-alias/<name>     dims: identity=<id>  state=live|retired
-                 body: {"since": "<UTC>", "retired_at": null, "renamed_to": null}
-binding/<id>     dims: event=start|clear|resume|fork|takeover|release|rename|end|lapse|revive|gone  generation=<n>  lease=leased|unleased
-                 body: {"session_id": "<uuid>", "host": "<hostname>", "pid": <n>, "started_at": <ms>,
-                        "proc_start": "<UTC, to the second>", "pane": "<tmux pane or null>", "client_version": "<conexus version>",
-                        "prior_session_id": "<uuid or null>",
-                        "holder_gone": {"host": "<hostname>", "pid": <n>, "started_at": <ms>, "proc_start": "<UTC>"} or null, "at": "<UTC>"}
-session/<session id>   dims: identity=<id>  generation=<n>        (the session index)
-member/<id>      dims: group=<name>  role=<leader|member>          (memberships; RDR-252 re-keys onto this)
-work/<id>        dims: kind=<watcher|wait|labrun|worktree|tmux>  ref=<text>  state=running|done   (background work and owned resources; a label, not fenced)
+identity_records      id  kind=seat|ephemeral|delegated  parent=<id or none>  generation=<n>  state=unheld|live|lapsed|ended
+                      display_name=<name or null>  created_by=<sam|restart|session|dispatch>  created_at=<UTC>  ended_at=<UTC or null>
+identity_aliases      name  identity=<id>  state=live|retired  since=<UTC>  retired_at=<UTC or null>  renamed_to=<name or null>
+identity_bindings     identity=<id>  seq  event=start|clear|resume|fork|takeover|release|rename|end|lapse|revive|gone  generation=<n>  lease=leased|unleased
+                      session_id=<uuid>  host=<hostname>  pid=<n>  started_at=<ms>  proc_start=<UTC, to the second>  pane=<tmux pane or null>
+                      client_version=<conexus version>  prior_session_id=<uuid or null>
+                      holder_gone={host, pid, started_at, proc_start} or null  at=<UTC>
+identity_sessions     session_id  identity=<id>  generation=<n>        (the session index)
+identity_counters     one row per tenant; last_n only rises
+identity_memberships  (identity, group)  role=leader|member  joined_at=<UTC>   (RDR-252 re-keys onto this; the join time stays when the role changes)
+identity_work         (identity, kind, ref)  kind=watcher|wait|labrun|worktree|tmux  state=running|done   (background work and owned resources;
+                      state updated in place, no expiry; a label, not fenced)
 ```
 
 The identity record holds the current generation and state, so pruning
@@ -313,7 +316,9 @@ rebinding. It appends a binding row with event `gone` under the same
 compare-and-set on the generation, and only when the verdict's host, pid,
 `startedAt` and `proc_start` match the identity's current binding, so a sweep
 cannot mark a binding that was rebound a moment earlier; the row sets the
-identity's state to `lapsed`, whatever its lease. A route lists the bindings
+identity's state to `lapsed`, whatever its lease, and a recorded `gone` frees
+the seat. A second `gone` for the same holder appends no row and answers
+`recorded: false`. A route lists the bindings
 whose host is a given host. At every SessionStart, after its own bind or
 rebind, the hook lists the live, lapsed and `unleased` bindings on its host,
 skips its own process's binding and every delegated identity (a delegated
@@ -326,8 +331,11 @@ the SessionStart hook, the `nx identity` commands, the MCP server (renewal,
 refresh, `end`, the `/branch` fork row and the pending bind below) and the `nx` operator dispatcher (a delegated identity's
 `start`, renewal and `end`); the hook and the commands authenticate with the
 tenant credential the `nx` CLI already uses, the MCP server with the data
-credential it holds. Any holder of that
-credential can bind any seat, as any can mint a session token today
+credential it holds. The data credential may start, resume, fork, refresh and
+end a binding and create an ephemeral identity; it may not take over, release
+or clear. Seat create, promote, rename, `gone`, delegated create and purge
+take the tenant credential (the root token counts as one) only. Any holder of
+the data credential can still bind any seat with those events, as any can mint a session token today
 (`SessionTokenHandler.java:97-118`): the bind guards against a confused
 session, not a hostile one, as JDR-002 says.
 
@@ -504,16 +512,19 @@ a family whose owner's current binding is `unleased` (a Desktop seat) is
 accepted without an identity token and labelled unattested: the exception is
 keyed on the target, since a Desktop MCP server holds no token at all
 (JDR-002, F17). A person can remove the fenced state of an
-identity whose state is `ended`, or `lapsed` with its holder gone, with `nx
-identity purge <id> --operator`: an engine route taking the tenant
-credential, refused for a `live` identity, and logged in the engine's audit
-log with the caller and what it removed. A tombstoned identity's remaining
-rows are already gone.
+identity with `nx identity purge <id> --operator`: an engine route taking the
+tenant credential. It is refused unless the identity is `ended`, or `lapsed`
+with a recorded `gone`, so it is also refused for a `live` identity and an
+`unheld` one. It is logged in the engine's `gc_audit` table with the caller
+and what it removed (operations `identity_purge` and `identity_tombstone`; the
+actor of a purge is `operator:<scope>:<hash prefix>`). A purge of a seat keeps
+its record, aliases and bindings. A tombstoned identity's remaining rows are
+already gone.
 
 | Family | Store and handler | Who may write | Checked operations | Checks |
 |---|---|---|---|---|
 | Mailbox `mailbox/<id>` | tuple space, `TupleHandler` | any identity may send (`out`) | the owner's `in`, `inp`, `ack`, `nack`, `renew`, `release` | ownership and generation; a send is a label, as today |
-| Membership `member/<id>` | tuple space, `TupleHandler` | the owner only | `out`, and the claim family used to remove one (`in`, `inp`, `ack`, `nack`, `renew`, `release`) | ownership and generation |
+| Membership `identity_memberships` | table, `IdentityHandler`, the `/v1/identity/<id>/memberships` routes | the owner only | join, leave and role change | ownership and generation |
 | Threads entry | T2 memory, project `threads`, `MemoryHandler` | the owner only | `put` (including `replaces`), `put_or_merge`, `merge`, `import`, `import_batch`, `delete`, `restore`, `summaries` on an entry carrying an `identity: <id>` line | ownership and generation, read against the stored entry; a new entry may name only the writer's own identity, and a write that removes or changes the line is refused; the tenant-wide sweeps `expire` and `reap` skip such entries |
 | Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`; the scope is never closed by `session/close` and is excluded from `sweep` | ownership and generation |
 
@@ -549,7 +560,9 @@ permanent. Ephemeral and delegated identities are tombstoned 30 days after
 they end, or after 30 days spent lapsed with their holder gone (a crashed
 session's identity; a seat that lapses in a sleep and revives is not
 counted), and an `unleased` ephemeral 30 days after the holder check finds
-its process gone: their identity, binding, session-index, membership,
+its process gone. That clock starts at the engine time the `gone` row was
+recorded. A delegated identity has no registry file for a holder check to
+find, so 30 days lapsed is enough for it. Their identity, binding, session-index, membership,
 background-work and scratch rows and their threads entry are pruned, their
 mailbox is emptied, and the counter keeps their numbers. Token files are
 local: the MCP server deletes its own at shutdown, the dispatcher its
@@ -590,24 +603,32 @@ seat's alias differ.
   record; it lives as long as the identity. T2 holds what is permanent:
   records a seat writes carry its identity, and a seat's own notes live in
   project `identity/<id>`, keyed by id so a rename moves nothing.
-- **Memberships and push records.** Memberships are `member/<id>`; RDR-252,
-  still a draft, re-keys its groups onto them, and its push records carry the
-  identity token's stamp, so the owner of a red is a seat.
-- **Background work.** Watchers, waits and lab runs register under
-  `work/<id>` so the checkpoint lists them by identity after a `/clear`. It is
+- **Memberships and push records.** Memberships are the `identity_memberships`
+  table, written through the `/v1/identity/<id>/memberships` routes: a join
+  keeps `joined_at` on a role change, a leave is idempotent, and the list reads
+  by identity and by group in join order. RDR-252, still a draft, re-keys its
+  groups onto them, and its push records carry the identity token's stamp, so
+  the owner of a red is a seat.
+- **Background work.** Watchers, waits and lab runs register as
+  `identity_work` rows, keyed (identity, kind, ref), through
+  `POST /v1/identity/<id>/work`, so the checkpoint lists them by identity after
+  a `/clear`. The state is updated in place and the row has no expiry. It is
   a label, not a fenced family: a lab run on another host has no token file.
+  A reverse lookup by (kind, ref), `GET /v1/identity/work?kind=&ref=`, returns
+  all owners of a resource. An identity holds at most 200 work rows (409
+  `work_limit`).
   Watchers and waits are Bash children of the seat's process and write as the
   seat across `/clear`.
 - **Who reads liveness (Gap 4).** `nx identity alive <seat|pid>` answers from
   the binding and the holder check. Three consumers move onto it in Phase 1,
-  each reading ownership from `work/<id>`, where a session registers what it
+  each reading ownership through the work routes, where a session registers what it
   owns (`kind=worktree` with the path, `kind=tmux` with the server name, and
   its running watchers, waits and lab runs): worktree removal (a worktree is
   removed only when its owning identity is not alive, not when `ps` misses
   it); the sandbox and tmux cleanup helpers (a server is stopped only when its
   owning identity's process is gone, never by name pattern); and the restart
   round's readiness check in the restart script (a session reports its
-  `work/<id>` entries in state `running`). Bead ownership stays out:
+  work rows in state `running`). Bead ownership stays out:
   Sam ruled on 2026-10-03 that bead claims cannot name a session (project
   memory `project_bead_claims_cannot_name_a_session`; incident I-42 in
   `nexus_rdr/253-research-1`), so beads keep the git user and the board names
@@ -620,7 +641,7 @@ seat's alias differ.
 | Session token, `sender_session` stamp | Yes (JDR-002) | Becomes an identity token carrying identity and generation |
 | MCP 60-second heartbeat thread | Yes (`subscriptions.py`) | Renews the binding |
 | SessionStart hook with `source` | Yes | Binds per the policy table (start, resume, clear, fork) |
-| Restart script with `-n` | Yes | Restart unchanged (the new start finds the old holder gone); its readiness check reads `work/<id>` (Step 6) |
+| Restart script with `-n` | Yes | Restart unchanged (the new start finds the old holder gone); its readiness check reads the identity's work rows (Step 6) |
 | Catalog tumbler allocator | Yes (`catalog/tumbler.py`) | Pattern for the never-reused id counter |
 | T1 handoff marker | Yes (`hooks/__init__.py`, `mcp/core.py`) | Carries the binding to the MCP server; kept |
 | Directory lease, session markers, `current_session` | Yes | Fallbacks in Phase 1, retired in Phase 2 |
@@ -688,7 +709,7 @@ Self-certifying identifiers, signed binding events, witnesses.
 - A seat's mail, board entry, scratch, memberships and background work
   survive `/clear`, resume, restart, rename and reboot.
 - A superseded process can no longer write a seat's identity-owned state.
-- New engine routes and templates mean an engine release before the client
+- New engine routes and tables mean an engine release before the client
   work can ship.
 
 ### Risks and Mitigations
@@ -765,27 +786,32 @@ in a later release.
 
 #### Step 1: Engine records and routes
 
-The `identity`, `alias`, `binding`, `session`, `member` and `work` templates;
-the `mailbox` template's `identity` address kind; the per-tenant id counter
-with `i<digits>` reserved; the compare-and-set `bind` (start, resume, clear,
+The `identity_records`, `identity_aliases`, `identity_bindings`,
+`identity_sessions`, `identity_counters`, `identity_memberships` and
+`identity_work` tables; the `mailbox` template's `identity` address kind; the
+per-tenant id counter with `i<digits>` reserved; the compare-and-set `bind` (start, resume, clear,
 fork, takeover, release, refresh, end) under the policy table, with the
 `holder_gone` verdict recorded from the client's evidence (the check itself is
 client work, Step 3); the routes `nx
 identity` needs (create, promote, alive, delegated create, session lookup,
-bindings by host); `proc_start` in the binding row and the bind evidence;
+bindings by host, and its history mode, `GET
+/v1/identity/bindings?host=&pid=&proc_start=&history=1`, where `proc_start` is
+required); an ephemeral create by the data credential; the membership and work
+routes; `proc_start` in the binding row and the bind evidence;
 renewal (which carries and stores the MCP server's client version), lazy
 `lapse` with its 10-minute reservation, and `revive`; the `gone` route with
 its holder-match guard and compare-and-set; the
 `unleased` lease; the rename call that retitles the threads entry; retention
-and tombstones, including threads entries of tombstoned identities; the
+and tombstones, including threads entries of tombstoned identities, with
+tenant registration with the sweep (the sweep's identity-retention arm); the
 operator override.
 
 #### Step 2: Identity tokens and the four fences
 
 Tokens carrying identity and generation, one-hour lifetime, refreshed through
 `bind`; the ownership and generation checks on every listed operation in
-`TupleHandler`, `MemoryHandler` (project `threads`) and `ScratchHandler` (the
-new identity scope); refusal of tokenless writes except sends and writes to
+`TupleHandler`, `IdentityHandler` (the memberships routes), `MemoryHandler`
+(project `threads`) and `ScratchHandler` (the new identity scope); refusal of tokenless writes except sends and writes to
 `unleased` seats; `ScratchHandler`'s session-scope check accepting every
 session id the index maps to the token's identity and generation; `expire`,
 `reap`, `sweep` and `session/close` kept off
@@ -830,8 +856,8 @@ identity-shaped `from` guard.
 
 #### Step 6: Identity scratch, per-identity T2, memberships and background work
 
-The identity T1 scope in the client; project `identity/<id>`; memberships on
-`member/<id>`; `work/<id>` registration; the three liveness consumers (worktree
+The identity T1 scope in the client; project `identity/<id>`; memberships through
+the membership routes; work registration through the work routes; the three liveness consumers (worktree
 removal, sandbox and tmux cleanup, the restart readiness check) moved onto
 `nx identity alive`.
 
@@ -917,7 +943,7 @@ None.
 
 ### Testing Strategy
 
-Engine tests for the templates, the bind policy and the four fences; client
+Engine tests for the tables, the bind policy and the four fences; client
 tests for the resolver, hooks, handover and delegation against a real engine;
 the MVV as one live run with a test seat.
 
@@ -970,7 +996,7 @@ days, the last one always.
 ### Proportionality
 
 New engine records (identity, alias, binding, session index, membership,
-background work), one bind route with several events, four fences in three
+background work), one bind route with several events, four fences in four
 handlers, one resolver and a token file, against 46 incidents in five
 months, three of them P0. Phase 1 ships as one engine release and three
 client releases.
@@ -1010,3 +1036,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-16: accept fix check `nexus_rdr/253-fix-check-224682f97eef` (FAIL, one counted blocking defect) fixed: Step 4 drops the take-over guards from release; `proc_start` in the binding and bind evidence, compared as UTC instants; the empty in-place `/restart` rebind binds a new generation by its own policy row; the `gone` row with a holder-match guard and compare-and-set, the bindings-by-host route, and a sweep that skips its own process and delegated identities; the pending file keyed by pid and OS start time, bound by the MCP server and deleted; Sam's decision 1 restored (the restart script creates seats for sessions it relaunches under a user-set name).
 - 2026-11-16: accept residual dispositions: residuals 1-8 of `253-gate-latest` fixed in the text by 9206b2cca and 530195c73 (fix checks `253-fix-check-224682f97eef` FAIL, `253-fix-check-125b505e41d3` PASS 3-0); its four counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
 - 2026-11-16: gate fix check `253-fix-check-88e4ee8da3a2` rerun at Sam's direction in the format the accept guard counts: PASS 3-0, 0 BLOCKS-PLANNING; accepted.
+- 2026-11-17: wording amended to match reviewed Step 1 code (grant 3), commit 5ce1ef63b.
