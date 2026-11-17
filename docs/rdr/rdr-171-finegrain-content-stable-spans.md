@@ -208,14 +208,17 @@ curator-owned single file (171-research-9), or no catalog is given, the path
 otherwise `None`.
 
 **Minting.** `dchash_span(catalog, tumbler, start, end) -> str` reads the source's canonical text,
-checks `start < end <= len(text)`, and returns the span. `dchash_span_for_passage(catalog, tumbler,
+checks `0 <= start < end <= len(text)`, and returns the span. `dchash_span_for_passage(catalog, tumbler,
 passage: str) -> str` refuses an empty passage, applies the same line-end normalization to it, finds
 it in the canonical text, and returns its span; it raises when the passage occurs zero times or more
-than once, overlapping occurrences included. Both refuse a PDF (`content_type` `pdf`) and a document
-with no file source by name before reading anything. Both are functions taking a catalog reader, so
-the client's write whitelist does not change. `nx catalog span <tumbler> --passage TEXT` (or
-`--start/--end`) prints a span; it lives in a new `commands/catalog_cmds/span.py`, and its help
-recommends `--passage`.
+than once, overlapping occurrences included. Both refuse a PDF (`content_type` `paper` or `pdf`, or a
+`.pdf` suffix in any case on `file_path` or on the path of `source_uri`, since `nx index pdf`
+registers PDFs as `paper` and the repository pass registers them as `prose`) and a document with no
+file source (an `nx-note://` `source_uri`, or no source `dchash_source` can name) by name before
+reading anything. Both are functions taking a catalog reader, so the client's write whitelist does
+not change. `nx catalog span <tumbler>` takes `--passage TEXT` or `--start N --end N`, exclusive
+modes (both, neither, or one offset alone is a usage error), and prints a span; it lives in a new
+`commands/catalog_cmds/span.py`, and its help recommends `--passage`.
 
 **Resolution.** A new branch in `resolve_span_text_for_entry`, before its final `return None`, for a
 span starting `dchash:`. It parses, reads the source through `dchash_source`, and returns
@@ -415,8 +418,9 @@ document with a stale `dchash:` link prints it and the rest of its links.
 #### Step 3: Minting
 
 `dchash_span`, `dchash_span_for_passage` and `nx catalog span`. Tests: empty, zero, multiple and
-overlapping passage matches refused; a passage typed with CRLF found; `start >= end` refused; a PDF
-or a note refused by name; the minted span resolves to the passage.
+overlapping passage matches refused; a passage typed with CRLF found; `start >= end` and a negative
+`start` refused; a `paper` entry, a `prose` entry whose path ends `.PDF`, and a note refused by name
+before the file is read; the minted span resolves to the passage; the CLI modes are exclusive.
 
 #### Step 4: Write validation
 
