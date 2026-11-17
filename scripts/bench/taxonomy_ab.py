@@ -16,6 +16,11 @@ Ground truth: bench/queries spike_5q (``ground_truth``) and golden sets
 declared before the run in T2 nexus_rdr/134-research-9.
 
     uv run python scripts/bench/taxonomy_ab.py --out /tmp/ab.json
+
+``--gate-from <taxonomy_coverage report>`` applies RDR-134's 0.9 coverage gate: the collections that
+report marks status ``ok`` and below the gate are left out of the topic ranking and searched unscoped
+in every ON arm (their OFF rows are reused, no extra search). Without it the run is as it was.
+``taxonomy_ab_compare.py`` prints a saved run against a gated one.
 """
 from __future__ import annotations
 
@@ -67,14 +72,20 @@ def _rows(hits: Any) -> list[dict[str, Any]]:
     return rows
 
 
-def arm_off(t3: Any, query: str, colls: list[str], calls: dict[str, int]) -> list[dict[str, Any]]:
+def arm_off(t3: Any, query: str, colls: list[str], calls: dict[str, int],
+            per_coll: dict[str, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
+    """``per_coll``, when given, also receives each collection's own rows (the gated run reuses
+    them as the unscoped search of a collection the gate leaves unrouted)."""
     rows: list[dict[str, Any]] = []
     for c in colls:
         calls["search"] += 1
         hits = t3.search(query, [c], n_results=FETCH, sensitivity="include")
-        for r in _rows(hits):
+        own = _rows(hits)
+        for r in own:
             r["collection"] = r["collection"] or c
             rows.append(r)
+        if per_coll is not None:
+            per_coll[c] = own
     return sorted(rows, key=lambda r: r["distance"])
 
 
@@ -115,8 +126,11 @@ def select(ranked: dict[str, list[tuple[str, float]]], mode: str, param: float) 
 
 
 def arm_on(t3: Any, query: str, chosen: list[tuple[str, str]], calls: dict[str, int],
-           empty: list[str] | None = None) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+           empty: list[str] | None = None,
+           extra: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """``extra`` is rows already fetched unscoped (the gated collections); they merge with the
+    topic-scoped rows by distance and chunk hash."""
+    rows: list[dict[str, Any]] = list(extra) if extra else []
     for c, label in chosen:
         calls["topic_search"] += 1
         hits = _rows(t3.search_topic_scoped(query, label, c, n_results=FETCH, sensitivity="include"))
@@ -149,64 +163,65 @@ def score(rows: list[dict[str, Any]], gt: dict[str, int], catalog: Any) -> dict[
             "top3": top[:3], "unresolved": len(graded) - len(resolved)}
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--queries", nargs="+", type=Path, default=[
-        Path("bench/queries/spike_5q.yaml"), Path("bench/queries/golden_v1.yaml"),
-        Path("bench/queries/golden_heldout_v1.yaml")])
-    ap.add_argument("--s1", default="rdr__1-1__voyage-context-3__v1")
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--out", type=Path, required=True)
-    a = ap.parse_args(argv)
+def load_gate(path: Path) -> set[str]:
+    """The collections RDR-134's 0.9 coverage gate leaves unrouted, read from a
+    ``taxonomy_coverage.py`` report: status ``ok`` and below the gate. A collection with no
+    taxonomy (status ``no_taxonomy``) is never routable and is not listed here. Refuses a
+    partial report and a report that gates nothing (a gate that matches no collection would
+    make the gated run a copy of the ungated one)."""
+    report = json.loads(path.read_text())
+    if not report.get("complete"):
+        raise ValueError(f"{path}: the coverage report is not complete")
+    rows = report.get("collections")
+    if not isinstance(rows, list):
+        raise ValueError(f"{path}: no 'collections' list")
+    gated = {r["collection"] for r in rows if r.get("status") == "ok" and r.get("above_0_9") is False}
+    if not gated:
+        raise ValueError(f"{path}: no collection is below the gate; nothing to unroute")
+    return gated
 
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
-    from nexus.db import make_t3  # noqa: PLC0415
-    from nexus.db.t2 import T2Database  # noqa: PLC0415
 
-    queries = load_queries(a.queries)
-    if a.limit:
-        queries = queries[: a.limit]
-    t3 = make_t3()
-    catalog = make_catalog_reader()
-    variants = [("band", 0.03), ("band", 0.06), ("cband", 0.03), ("topk", 1)]
-    results: list[dict[str, Any]] = []
-    with T2Database(default_db_path()) as t2:
-        tax = t2.taxonomy
-        cstore = tax._centroid
-        with_topics = {c for c in tax.get_distinct_collections()}
-        allc = [c for c in t3.list_collections() if isinstance(c, str)] if hasattr(t3, "list_collections") else []
-        s2 = sorted(c for c in with_topics
-                    if c.split("__")[0] in ("rdr", "docs", "knowledge") and (not allc or c in allc))
-        sets = {"S1": [a.s1], "S2": s2}
-        for q in queries:
-            row: dict[str, Any] = {"qid": q["qid"], "text": q["text"], "gt": q["gt"]}
-            vec_cache: dict[str, list[float]] = {}
-            for sname, colls in sets.items():
-                calls = {"search": 0, "embed": 0, "ann": 0, "topic_search": 0}
-                t0 = time.monotonic()
-                off = score(arm_off(t3, q["text"], colls, calls), q["gt"], catalog)
-                off["s"] = time.monotonic() - t0
-                t0 = time.monotonic()
-                ranked = rank_topics(t3, cstore, tax, q["text"], colls, calls, vec_cache)
-                rank_s = time.monotonic() - t0
-                row[sname] = {"OFF": off}
-                for mode, p in variants:
-                    t0 = time.monotonic()
-                    chosen = select(ranked, mode, p)
-                    empty: list[str] = []
-                    on = score(arm_on(t3, q["text"], chosen, calls, empty), q["gt"], catalog)
-                    on["empty_topics"] = empty
-                    on["s"] = time.monotonic() - t0 + rank_s
-                    on["n_topics"] = len(chosen)
-                    on["n_colls"] = len({c for c, _ in chosen})
-                    row[sname][f"{mode}{p}"] = on
-                row[sname]["calls"] = calls
-            results.append(row)
-            print(q["qid"], {s: round(row[s]["OFF"]["ndcg3"], 2) for s in sets},
-                  {s: {k: round(v["ndcg3"], 2) for k, v in row[s].items() if k not in ("OFF", "calls")} for s in sets},
-                  file=sys.stderr, flush=True)
+def measure_query(q: dict[str, Any], sets: dict[str, list[str]], variants: list[tuple[str, float]],
+                  t3: Any, catalog: Any, tax: Any, cstore: Any,
+                  gated: frozenset[str] | set[str] = frozenset()) -> dict[str, Any]:
+    """One question: the OFF arm and every ON variant, on each set.
 
+    A collection in ``gated`` is not routed: it is left out of the topic ranking (so it sets no
+    band) and its unscoped OFF rows join every ON arm, the way a collection with no topics is
+    searched unscoped in ``taxonomy_ab2``. With ``gated`` empty nothing differs from the
+    ungated run."""
+    row: dict[str, Any] = {"qid": q["qid"], "text": q["text"], "gt": q["gt"]}
+    vec_cache: dict[str, list[float]] = {}
+    for sname, colls in sets.items():
+        calls = {"search": 0, "embed": 0, "ann": 0, "topic_search": 0}
+        unscoped = [c for c in colls if c in gated]
+        routed = [c for c in colls if c not in gated]
+        per_coll: dict[str, list[dict[str, Any]]] | None = {} if unscoped else None
+        t0 = time.monotonic()
+        off = score(arm_off(t3, q["text"], colls, calls, per_coll), q["gt"], catalog)
+        off["s"] = time.monotonic() - t0
+        t0 = time.monotonic()
+        ranked = rank_topics(t3, cstore, tax, q["text"], routed, calls, vec_cache)
+        rank_s = time.monotonic() - t0
+        extra = [r for c in unscoped for r in (per_coll or {}).get(c, [])] or None
+        row[sname] = {"OFF": off}
+        for mode, p in variants:
+            t0 = time.monotonic()
+            chosen = select(ranked, mode, p)
+            empty: list[str] = []
+            on = score(arm_on(t3, q["text"], chosen, calls, empty, extra), q["gt"], catalog)
+            on["empty_topics"] = empty
+            on["s"] = time.monotonic() - t0 + rank_s
+            on["n_topics"] = len(chosen)
+            on["n_colls"] = len({c for c, _ in chosen})
+            if unscoped:
+                on["n_unscoped"] = len(unscoped)
+            row[sname][f"{mode}{p}"] = on
+        row[sname]["calls"] = calls
+    return row
+
+
+def summarize(results: list[dict[str, Any]], sets: dict[str, list[str]]) -> dict[str, Any]:
     summary: dict[str, Any] = {"n": len(results), "S2_collections": len(sets["S2"])}
     for sname in sets:
         arms = [k for k in results[0][sname] if k != "calls"]
@@ -224,7 +239,62 @@ def main(argv: list[str] | None = None) -> int:
                 d["d_recall10"] = d["recall10"] - statistics.mean(r[sname]["OFF"]["recall10"] for r in results)
                 d["topics"] = statistics.mean(r[sname][arm]["n_topics"] for r in results)
             summary[sname][arm] = d
-    a.out.write_text(json.dumps({"summary": summary, "sets": sets, "results": results}, indent=1))
+    return summary
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--queries", nargs="+", type=Path, default=[
+        Path("bench/queries/spike_5q.yaml"), Path("bench/queries/golden_v1.yaml"),
+        Path("bench/queries/golden_heldout_v1.yaml")])
+    ap.add_argument("--s1", default="rdr__1-1__voyage-context-3__v1")
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--gate-from", type=Path, default=None, metavar="COVERAGE_JSON",
+                    help="apply RDR-134's 0.9 coverage gate: the collections this taxonomy_coverage "
+                         "report marks status ok and below the gate are searched unscoped in every ON arm "
+                         "instead of topic-routed")
+    a = ap.parse_args(argv)
+
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415
+    from nexus.db import make_t3  # noqa: PLC0415
+    from nexus.db.t2 import T2Database  # noqa: PLC0415
+
+    gate = load_gate(a.gate_from) if a.gate_from else None  # before any engine call: a bad file costs nothing
+    queries = load_queries(a.queries)
+    if a.limit:
+        queries = queries[: a.limit]
+    t3 = make_t3()
+    catalog = make_catalog_reader()
+    variants = [("band", 0.03), ("band", 0.06), ("cband", 0.03), ("topk", 1)]
+    results: list[dict[str, Any]] = []
+    with T2Database(default_db_path()) as t2:
+        tax = t2.taxonomy
+        cstore = tax._centroid
+        with_topics = {c for c in tax.get_distinct_collections()}
+        allc = [c for c in t3.list_collections() if isinstance(c, str)] if hasattr(t3, "list_collections") else []
+        s2 = sorted(c for c in with_topics
+                    if c.split("__")[0] in ("rdr", "docs", "knowledge") and (not allc or c in allc))
+        sets = {"S1": [a.s1], "S2": s2}
+        gated: set[str] = set()
+        if gate is not None:
+            gated = gate & {c for colls in sets.values() for c in colls}
+            if not gated:
+                raise SystemExit(f"--gate-from {a.gate_from}: none of its {len(gate)} gated collections is in S1 or S2")
+        for q in queries:
+            row = measure_query(q, sets, variants, t3, catalog, tax, cstore, gated)
+            results.append(row)
+            print(q["qid"], {s: round(row[s]["OFF"]["ndcg3"], 2) for s in sets},
+                  {s: {k: round(v["ndcg3"], 2) for k, v in row[s].items() if k not in ("OFF", "calls")} for s in sets},
+                  file=sys.stderr, flush=True)
+
+    summary = summarize(results, sets)
+    out: dict[str, Any] = {"summary": summary, "sets": sets, "results": results}
+    if gate is not None:
+        out["gate"] = {"from": str(a.gate_from), "unrouted": sorted(gated),
+                       "gate_not_in_sets": sorted(gate - gated)}
+    a.out.write_text(json.dumps(out, indent=1))
     print(json.dumps(summary, indent=1))
     return 0
 
