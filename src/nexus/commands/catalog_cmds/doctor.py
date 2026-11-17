@@ -40,6 +40,11 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+#: The exit status of ``--sensitive-with-aspects`` when its row could not look ("not checked": the engine's
+#: sensitive list is unavailable, capped or unreadable). It differs from pass (0), fail (1) and a usage error (2):
+#: a gate that could not run must not read as a pass (the nexus-moht0 doctrine). A FAIL in the same run wins (1).
+EXIT_COULD_NOT_CHECK = 3
+
 
 @click.command("doctor")
 @click.option(
@@ -162,7 +167,8 @@ _log = structlog.get_logger(__name__)
     help=(
         "RDR-243 (nexus-rfvyy.6.17): FAIL for a sensitive document that already has an aspect row or "
         "a queued aspect task; prints `nx enrich delete --tumbler <t>` for each. Not applicable "
-        "(never a pass) on a tenant with no sensitive documents."
+        "(never a pass) on a tenant with no sensitive documents. Exits 3 when the row reads "
+        "'not checked' (the engine's sensitive list did not answer); a FAIL still exits 1."
     ),
 )
 @click.option(
@@ -239,6 +245,7 @@ def doctor_cmd(
         )
 
     overall_pass = True
+    could_not_check = False
     json_payload: dict = {}
 
     if collections_drift:
@@ -342,7 +349,7 @@ def doctor_cmd(
             overall_pass = False
 
     # RDR-243 (nexus-rfvyy.6.17): the sensitivity rows. The text and the verdicts live in
-    # nexus.catalog.sensitivity_doctor, which `nx doctor` prints through too. Only the FAIL row gates.
+    # nexus.catalog.sensitivity_doctor, which `nx doctor` prints through too. Only the FAIL row gates; the gating row reading "not checked" exits EXIT_COULD_NOT_CHECK.
     for wanted, check in (
         (sensitive_in_aspect_eligible, "check_sensitive_in_aspect_eligible"),
         (sensitive_with_aspects, "check_sensitive_with_aspects"),
@@ -364,12 +371,16 @@ def doctor_cmd(
             _printed_anything = True
         if report["status"] == _sd.FAIL:
             overall_pass = False
+        elif check == "check_sensitive_with_aspects" and _sd.is_not_checked(report):
+            could_not_check = True
 
     if as_json:
         click.echo(json.dumps(json_payload, indent=2))
 
     if not overall_pass:
         raise click.exceptions.Exit(1)
+    if could_not_check:
+        raise click.exceptions.Exit(EXIT_COULD_NOT_CHECK)
 
 
 def _run_collections_drift() -> dict:

@@ -228,11 +228,15 @@ Four rows report on the flag. `nx doctor` prints them in its sweep, and `nx cata
 | Row | Option on `nx catalog doctor` | Result |
 | --- | --- | --- |
 | `sensitive_in_aspect_eligible` | `--sensitive-in-aspect-eligible` | WARN for a flagged document whose collection has an aspect extractor or already holds aspect rows. Nothing has leaked yet; the document is exposed to the next index run. |
-| `sensitive_with_aspects` | `--sensitive-with-aspects` | FAIL (exit 1) for a flagged document that already has an aspect row or a queued aspect task. It leaked before it was flagged. The row prints `nx enrich delete --tumbler <tumbler>` for each. This is the only row that gates the sweep. |
+| `sensitive_with_aspects` | `--sensitive-with-aspects` | FAIL (exit 1) for a flagged document that already has an aspect row or a queued aspect task. It leaked before it was flagged. The row prints `nx enrich delete --tumbler <tumbler>` for each. This is the only row that gates the sweep. When it reads "not checked" (below) the command exits 3, "could not check". |
 | `sensitive_in_external_embedder` | `--sensitive-in-external-embedder` | WARN for a flagged document in a collection embedded by an external service: a Voyage model token, or a legacy name with none. |
 | `sensitivity_mcp_output` | `--sensitivity-mcp-output` | Reports `withhold` or `flag`. WARN on `flag`, on a value it does not recognise, or when the config cannot be read. |
 
-The three document rows read "not applicable", never a pass, on a tenant with no flagged documents, on an engine without `catalog_sensitivity_supported`, and when the catalog cannot be read: a row that examined nothing proves nothing. `sensitivity_mcp_output` is a config row and is always applicable.
+The three document rows read the engine's bounded list of flagged documents (`GET /sensitive`; engine-service 0.1.188 adds it) and never scan the catalog. They read "not applicable", never a pass, on a tenant with no flagged documents: a row that examined nothing proves nothing.
+
+When the list does not answer, each row reads "not checked:" with the cause and what to do: the engine does not offer the list (a local engine needs engine-service 0.1.188 or later; on a managed engine the public edge must allow it), its capabilities could not be read, it did not answer in time, it could not be reached or failed, or its answer could not be read (each of the last three says to run `nx doctor` again). The same reading appears when the engine does not advertise `catalog_sensitivity_supported`, when no catalog is available, and when the catalog cannot be read. A tenant with more than 10,000 flagged documents reads "not checked: more than 10,000 sensitive documents" and points to `nx catalog list --sensitive --owner <owner>`.
+
+A "not checked" row does not gate `nx doctor`, so its exit code does not change. `nx catalog doctor --sensitive-with-aspects` is the dedicated check and exits 3, "could not check", when its row reads "not checked": a gate that could not run must not read as a pass. Exit 0 is a pass, 1 a fail (a fail wins over 3), and 2 a usage error. The two WARN rows keep their documented behaviour and do not change the exit status. `sensitivity_mcp_output` is a config row and is always applicable.
 
 ## When something is refused
 

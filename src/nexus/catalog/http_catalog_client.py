@@ -1150,10 +1150,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         ``None`` is "cannot say", never "none": the engine does not advertise ``catalog_sensitive_list_supported``
         (no request is sent then), the route answers 404 or 503 (the engine's own statement timeout), or the body is
-        malformed or inconsistent (an uncapped list whose length is not ``count``). A caller walks the catalog
-        instead on ``None``. Sent once, with a bound of its own, as :meth:`manifest_section_label_fillable` is.
+        malformed or inconsistent (an uncapped list whose length is not ``count``). Nothing walks the catalog
+        in its place (RDR-241). Sent once, with a bound of its own, as :meth:`manifest_section_label_fillable` is.
         ``strict=True`` raises :class:`SensitiveListUnavailable` (its ``reason`` names which) in place of ``None``,
-        for a caller that must not walk instead (``nx catalog list --sensitive``).
+        for a caller that reports the cause (``nx catalog list --sensitive``, the doctor rows).
         """
         def cannot_say(reason: str) -> dict | None:
             if strict:
@@ -1171,7 +1171,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             _log.info("http_catalog_client.sensitive_documents_unavailable", status=status)
             return cannot_say({404: SensitiveListUnavailable.UNSUPPORTED, 503: SensitiveListUnavailable.TIMEOUT}
                               .get(status, SensitiveListUnavailable.FAILED))
-        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller walks instead
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports it unavailable
             _log.info("http_catalog_client.sensitive_documents_unavailable", error=str(exc))
             return cannot_say(SensitiveListUnavailable.FAILED)
         answer = sensitive_answer(result)

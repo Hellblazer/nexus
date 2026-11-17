@@ -25,13 +25,16 @@ Each check returns one report dict::
 engine that does not advertise ``catalog_sensitivity_supported``, and a catalog that cannot be read are all
 ``not_applicable`` and never ``pass``: a row that examined nothing proves nothing (the nexus-7zhag and
 nexus-moht0 doctrines), and a row that read nothing must not go red on a virgin box. ``fail`` and ``warn``
-need a sensitive document actually met.
+need a sensitive document actually met. A ``not_applicable`` row whose reason starts "not checked:" could not
+look (:func:`is_not_checked`); "no sensitive documents in this catalog" looked and found none.
 
 The collaborators are injectable (``reader``, ``aspects``, ``queue``, ``select``) for tests; the defaults
 are the production handles. The sensitive set comes from the engine's bounded list (``GET /sensitive``,
-engine 0.1.188) and only from it (RDR-241): when the list is unavailable (the engine does not advertise it, the
-route answers 404 or 503, a reader without it) or capped, each row is ``not_applicable`` with a reason that
-starts "not checked:" and names the cause. No row ever walks the catalog, and a "not checked" row never gates.
+engine-service 0.1.188 adds it) and only from it (RDR-241): when the list is unavailable (the engine does not
+advertise it, the route answers 404 or 503, a reader without it) or capped, each row is ``not_applicable`` with
+a reason that starts "not checked:", names the cause and says what to do. No row ever walks the catalog. A
+"not checked" row never gates ``nx doctor``; ``nx catalog doctor --sensitive-with-aspects`` exits
+``EXIT_COULD_NOT_CHECK`` for it.
 """
 from __future__ import annotations
 
@@ -42,6 +45,8 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import structlog
+
+from nexus._log_safe_url import scrub_transport_error
 
 _log = structlog.get_logger(__name__)
 
@@ -115,10 +120,46 @@ def sensitive_answer(result: object) -> dict | None:
 #: saves nothing. A tenant with more reads "not checked": the rows do not walk the catalog to cover the rest.
 _SENSITIVE_LIST_LIMIT = 10_000
 
-NOT_CHECKED_UNAVAILABLE = (
-    "not checked: the engine's sensitive list is unavailable (it needs engine-service 0.1.188 or later)"
+#: Every reason that says a row could not look starts with this; :func:`is_not_checked` reads it back.
+NOT_CHECKED_PREFIX = "not checked:"
+
+#: The "not checked" reason for each way the engine's list fails to answer. Each is true for every input that
+#: produces it and says what to do (nexus-uwggq.1.8). ``UNSUPPORTED`` is the one cause about the engine; the rest
+#: are a retry.
+_NOT_CHECKED_BY_CAUSE: dict[str, str] = {
+    SensitiveListUnavailable.UNSUPPORTED: (
+        f"{NOT_CHECKED_PREFIX} the engine does not offer the sensitive list (a local engine needs engine-service "
+        "0.1.188 or later; on a managed engine the public edge must allow it)"
+    ),
+    SensitiveListUnavailable.PROBE_FAILED: (
+        f"{NOT_CHECKED_PREFIX} the engine's capabilities could not be read; run nx doctor again"
+    ),
+    SensitiveListUnavailable.TIMEOUT: f"{NOT_CHECKED_PREFIX} the engine did not answer in time; run nx doctor again",
+    SensitiveListUnavailable.FAILED: (
+        f"{NOT_CHECKED_PREFIX} the engine could not be reached or failed; run nx doctor again"
+    ),
+    SensitiveListUnavailable.MALFORMED: (
+        f"{NOT_CHECKED_PREFIX} the engine's answer could not be read; run nx doctor again"
+    ),
+}
+NOT_CHECKED_UNSUPPORTED = _NOT_CHECKED_BY_CAUSE[SensitiveListUnavailable.UNSUPPORTED]
+NOT_CHECKED_CAPPED = (
+    f"{NOT_CHECKED_PREFIX} more than {_SENSITIVE_LIST_LIMIT:,} sensitive documents; "
+    "list them with nx catalog list --sensitive --owner <owner>"
 )
-NOT_CHECKED_CAPPED = f"not checked: more than {_SENSITIVE_LIST_LIMIT:,} sensitive documents"
+
+
+def is_not_checked(report: dict) -> bool:
+    """Did the row fail to look (as opposed to looking and finding no sensitive document)?"""
+    return report["status"] == NOT_APPLICABLE and str(report["reason"]).startswith(NOT_CHECKED_PREFIX)
+
+
+def _scrubbed(exc: BaseException, reader: Any) -> str:
+    """*exc*'s text through the transport scrubber (it can quote a URL's credentials or a bearer token); the
+    reader's own base URL, when it has one, is what the scrubber checks the text against."""
+    url = getattr(reader, "_base_url", "")
+    return scrub_transport_error(exc, url if isinstance(url, str) else "")
+
 
 #: The read shared inside :func:`one_walk`: ``(documents, not-applicable reason)``, or unset outside one.
 _SHARED: contextvars.ContextVar[dict[str, tuple[list[Any], str | None]] | None] = contextvars.ContextVar(
@@ -142,27 +183,33 @@ def one_walk() -> Iterator[None]:
 def _sensitive_documents(name: str, reader: Any) -> tuple[list[Any], dict | None]:
     """``(documents, None)`` or ``([], a not-applicable report)``."""
     shared = _SHARED.get() if reader is None else None
-    if shared is not None and "walk" in shared:
-        documents, reason = shared["walk"]
+    if shared is not None and "read" in shared:
+        documents, reason = shared["read"]
         return (documents, None) if reason is None else ([], _report(name, NOT_APPLICABLE, reason))
     documents, reason = _read_sensitive(name, reader)
     if shared is not None:
-        shared["walk"] = (documents, reason)
+        shared["read"] = (documents, reason)
     return (documents, None) if reason is None else ([], _report(name, NOT_APPLICABLE, reason))
 
 
 def _bounded_sensitive(reader: Any) -> tuple[dict | None, str]:
-    """``(answer, cause)``: the engine's bounded sensitive list, or ``(None, the "not checked" reason)`` if the
-    reader has no such read, it fails, or it cannot say. There is no walk behind it."""
+    """``(answer, "")``, or ``(None, the "not checked" reason)`` if the reader has no such read, it fails, or it
+    cannot say. The read is strict: the client names why it has no answer (:class:`SensitiveListUnavailable`) and
+    the reason says that cause, not a guess. There is no walk behind it."""
     bounded = getattr(reader, "sensitive_documents", None)
     if not callable(bounded):
-        return None, NOT_CHECKED_UNAVAILABLE
+        return None, NOT_CHECKED_UNSUPPORTED
     try:
-        answer = bounded(limit=_SENSITIVE_LIST_LIMIT)
+        answer = bounded(limit=_SENSITIVE_LIST_LIMIT, strict=True)
+    except SensitiveListUnavailable as exc:
+        _log.info("sensitivity_doctor_sensitive_list_unavailable", cause=exc.reason)
+        return None, _NOT_CHECKED_BY_CAUSE.get(exc.reason, _NOT_CHECKED_BY_CAUSE[SensitiveListUnavailable.FAILED])
     except Exception as exc:  # noqa: BLE001 — best-effort read; a failure is "not checked", never "no sensitive documents"
-        _log.info("sensitivity_doctor_bounded_read_failed", error=str(exc))
-        return None, f"not checked: the sensitive list could not be read ({type(exc).__name__}: {exc})"
-    return (answer, "") if isinstance(answer, dict) else (None, NOT_CHECKED_UNAVAILABLE)
+        _log.info("sensitivity_doctor_bounded_read_failed", error=_scrubbed(exc, reader))
+        return None, _NOT_CHECKED_BY_CAUSE[SensitiveListUnavailable.FAILED]
+    if isinstance(answer, dict):
+        return answer, ""
+    return None, _NOT_CHECKED_BY_CAUSE[SensitiveListUnavailable.MALFORMED]
 
 
 def _read_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
@@ -173,17 +220,18 @@ def _read_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
 
             reader = make_catalog_reader()
         if reader is None:
-            return [], "no catalog is available"
+            return [], f"{NOT_CHECKED_PREFIX} no catalog is available; run nx doctor again once the service is running"
         probe = getattr(reader, "catalog_sensitivity_probe", None)
         if callable(probe):
             supported, version = probe()
             if supported is not True:
-                what = f"engine {version} does not advertise catalog_sensitivity_supported" if version else \
-                    "the engine's capabilities could not be read"
-                return [], what
-        # F30 (nexus-f3yqd.6): an engine with the bounded route (0.1.188) answers in one indexed read. On
-        # ``None`` (the flag is absent, a 404 or 503) or a capped list the rows are "not checked": RDR-241
-        # removed the catalog walk that stood here.
+                what = (
+                    f"engine {version} does not advertise catalog_sensitivity_supported; a newer engine-service "
+                    "is needed" if version else "the engine's capabilities could not be read; run nx doctor again"
+                )
+                return [], f"{NOT_CHECKED_PREFIX} {what}"
+        # F30 (nexus-f3yqd.6): an engine with the bounded route answers in one indexed read. Where it does not
+        # answer, or the list is capped, the rows are "not checked": RDR-241 removed the catalog walk that stood here.
         answer, cause = _bounded_sensitive(reader)
         if answer is None:
             return [], cause
@@ -194,8 +242,9 @@ def _read_sensitive(name: str, reader: Any) -> tuple[list[Any], str | None]:
             for d in answer.get("documents", [])
         ]
     except Exception as exc:  # noqa: BLE001 — an unreadable catalog is not a finding; the row is not applicable, never red
-        _log.warning("sensitivity_doctor_catalog_unreadable", check=name, error=str(exc))
-        return [], f"the catalog could not be read ({type(exc).__name__}: {exc})"
+        detail = _scrubbed(exc, reader)
+        _log.warning("sensitivity_doctor_catalog_unreadable", check=name, error=detail)
+        return [], f"{NOT_CHECKED_PREFIX} the catalog could not be read ({type(exc).__name__}: {detail}); run nx doctor again"
     if not documents:
         return [], "no sensitive documents in this catalog"
     return documents, None
@@ -225,9 +274,11 @@ def check_sensitive_in_aspect_eligible(
             if reasons:
                 why_by_collection[collection] = " and ".join(reasons)
     except Exception as exc:  # noqa: BLE001 — cannot tell: not applicable with the cause, never a false red or a false pass
-        _log.warning("sensitivity_doctor_eligible_unreadable", error=str(exc))
-        return _report(IN_ELIGIBLE, NOT_APPLICABLE, f"the aspect state could not be read ({type(exc).__name__}: {exc})",
-                       len(documents))
+        detail = _scrubbed(exc, aspects)
+        _log.warning("sensitivity_doctor_eligible_unreadable", error=detail)
+        return _report(IN_ELIGIBLE, NOT_APPLICABLE,
+                       f"{NOT_CHECKED_PREFIX} the aspect state could not be read ({type(exc).__name__}: {detail}); "
+                       "run nx doctor again", len(documents))
     findings = [
         {"tumbler": str(d.tumbler), "collection": d.physical_collection, "why": why_by_collection[d.physical_collection]}
         for d in documents if d.physical_collection in why_by_collection
@@ -299,9 +350,11 @@ def check_sensitive_with_aspects(
             if whys:
                 findings.append({"tumbler": tumbler, "collection": d.physical_collection, "why": " and ".join(whys)})
     except Exception as exc:  # noqa: BLE001 — cannot tell: not applicable with the cause, never a false red or a false pass
-        _log.warning("sensitivity_doctor_with_aspects_unreadable", error=str(exc))
-        return _report(WITH_ASPECTS, NOT_APPLICABLE, f"the aspect state could not be read ({type(exc).__name__}: {exc})",
-                       len(documents))
+        detail = _scrubbed(exc, aspects)
+        _log.warning("sensitivity_doctor_with_aspects_unreadable", error=detail)
+        return _report(WITH_ASPECTS, NOT_APPLICABLE,
+                       f"{NOT_CHECKED_PREFIX} the aspect state could not be read ({type(exc).__name__}: {detail}); "
+                       "run nx doctor again", len(documents))
     return _report(WITH_ASPECTS, FAIL if findings else PASS, "", len(documents), findings)
 
 
@@ -376,6 +429,8 @@ def render_text(report: dict, *, limit: int = 50) -> list[str]:
             lines.append("  Sensitive content is returned to the session model with a [sensitive] badge. "
                          "Set sensitivity.mcp_output to withhold to stop that.")
         return lines
+    if is_not_checked(report):
+        return [f"[ ] {name}: {report['reason']}"]
     if status == NOT_APPLICABLE:
         return [f"[ ] {name}: not applicable - {report['reason']}"]
     total = report["sensitive_documents"]
