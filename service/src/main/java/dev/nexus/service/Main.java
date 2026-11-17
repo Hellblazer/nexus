@@ -656,6 +656,9 @@ public final class Main {
         // own admin connections, after the listener is bound. It reads the library install the migration above recorded.
         // Never takes the engine down: a worker that cannot start is logged and the engine serves without it.
         var dataMoveWorker = startDataMoveWorker(adminConnection, dmlUtilsInstaller, applicationName, singletonLock != null);
+        // nexus-f3yqd.2.17: each open or failed move is an entry of /v1/status boot_work, sampled on its own thread
+        // because the worker's is in a CALL for hours; nx doctor turns a blocked: or failed: one into a red row.
+        var moveBootWork = startMoveBootWork(bootWork, dataMoveWorker, adminConnection);
 
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
@@ -705,6 +708,9 @@ public final class Main {
             service.stop();
             if (dataMoveWorker != null) {
                 dataMoveWorker.stop();   // cancels a CALL in flight at the server; the run resumes at the next boot
+            }
+            if (moveBootWork != null) {
+                moveBootWork.close();
             }
             stopPciReconciler.run();
             // nexus-g17tf: right after the listener stops and the reconciler's stop
@@ -773,6 +779,28 @@ public final class Main {
             throw e;
         } catch (Throwable e) {   // a LinkageError or an initializer failure is the worker's, not the engine's
             log.error("event=data_move_worker_not_started cause=\"{}\"", e.toString(), e);
+            return null;
+        }
+    }
+
+    /** The reporter of {@link #startDataMoveWorker}'s worker, or null when there is no worker or it cannot start; never throws. */
+    private static dev.nexus.service.datamove.MoveBootWork startMoveBootWork(BootWorkRegistry bootWork,
+            dev.nexus.service.datamove.DataMoveWorker worker, dev.nexus.service.db.AdminConnection admin) {
+        if (worker == null) {
+            // no worker: say so, or nx doctor reads "no data move is open" from an engine that works none
+            dev.nexus.service.datamove.MoveBootWork.reportWorkerNotRunning(bootWork);
+            return null;
+        }
+        try {
+            var reporter = new dev.nexus.service.datamove.MoveBootWork(bootWork, worker, admin);
+            reporter.start();
+            return reporter;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {
+            log.error("event=data_move_boot_work_not_started cause=\"{}\"", e.toString(), e);
+            // the worker runs and nothing reports its moves: say so, or nx doctor reads green over unseen moves
+            dev.nexus.service.datamove.MoveBootWork.reportReporterNotRunning(bootWork);
             return null;
         }
     }

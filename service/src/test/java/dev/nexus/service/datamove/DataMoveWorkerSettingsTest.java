@@ -71,8 +71,37 @@ class DataMoveWorkerSettingsTest {
         states.blocked(m, "no install");
         assertThat(states.state("a").orElseThrow().since()).isEqualTo(clock.now);
 
+        // nexus-f3yqd.2.17 (M3): a retry in flight is working, and the first blocked time survives it and the next block
+        Instant firstBlocked = states.state("a").orElseThrow().firstBlockedAt();
+        assertThat(firstBlocked).isEqualTo(first);
+        clock.now = clock.now.plus(Duration.ofMinutes(1));
+        states.working(m);
+        var retrying = states.state("a").orElseThrow();
+        assertThat(retrying.kind()).isEqualTo(MoveStates.Kind.WORKING);
+        assertThat(retrying.reason()).isNull();
+        assertThat(retrying.firstBlockedAt()).isEqualTo(firstBlocked);
+        clock.now = clock.now.plus(Duration.ofMinutes(1));
+        states.blocked(m, "no install");
+        assertThat(states.state("a").orElseThrow().firstBlockedAt()).as("still one stretch of blocks").isEqualTo(firstBlocked);
+        states.runsComplete(m);
+        assertThat(states.state("a").orElseThrow().firstBlockedAt()).isNull();
+        states.blocked(m, "again");
+        assertThat(states.state("a").orElseThrow().firstBlockedAt()).as("a new stretch").isEqualTo(clock.now);
+
+        // a CALL in flight is the worker's to report and goes with the move
+        states.callStarted(m, "a/default", 4242);
+        assertThat(states.call("a")).hasValueSatisfying(c -> {
+            assertThat(c.runLabel()).isEqualTo("a/default");
+            assertThat(c.pid()).isEqualTo(4242);
+            assertThat(c.startedAt()).isEqualTo(clock.now);
+        });
+        states.callEnded(m);
+        assertThat(states.call("a")).isEmpty();
+
         states.working(move("b"));
+        states.callStarted(move("b"), "b", 1);
         states.retainOnly(Set.of("b"), Set.of());
+        assertThat(states.call("b")).isPresent();
         assertThat(states.state("a")).isEmpty();
         assertThat(states.snapshot()).extracting(MoveStates.State::label).containsExactly("b");
 

@@ -179,6 +179,11 @@ public final class DataMoveWorker implements AutoCloseable {
         return states;
     }
 
+    /** The name of this worker's connections: the prefix a sibling that reads for it ({@link MoveBootWork}) names its own with. */
+    public String applicationName() {
+        return applicationName;
+    }
+
     /** Starts the worker thread. A second call does nothing. */
     public synchronized void start() {
         if (loop != null || stopped) {
@@ -390,7 +395,6 @@ public final class DataMoveWorker implements AutoCloseable {
     }
 
     private void workMove(DataMove listed) {
-        boolean wasBlocked = states.state(listed.label()).map(s -> s.kind() == MoveStates.Kind.BLOCKED).orElse(false);
         DataMove move = listed;
         String schema = listed.drivingSchema();
         String table = listed.drivingTable();
@@ -422,9 +426,7 @@ public final class DataMoveWorker implements AutoCloseable {
                 states.paused(move);
                 return;
             }
-            if (!wasBlocked) {
-                states.working(move);   // a blocked move keeps the time it first was blocked
-            }
+            states.working(move);   // a retry that runs for hours is working; the state keeps the time it was first blocked
             Optional<MovePreflight.Miss> blocked = MovePreflight.check(session, move, installer);
             if (blocked.isPresent()) {
                 fail(move, ctx, FailureHandler.Stage.PREFLIGHT, null, schema, table, null, 0, blocked.get().raised(),
@@ -637,6 +639,7 @@ public final class DataMoveWorker implements AutoCloseable {
                 conn.useTenant(tenant);
             }
             log.info("event=data_move_call label={} run={} pid={}", move.label(), runLabel, conn.backendPid());
+            states.callStarted(move, runLabel, conn.backendPid());
             conn.call(move.template(), drivingSchema, drivingTable, runLabel, move.chunkSize(), sleepMs);
         } catch (SQLException e) {
             if (stopped) {   // stop() cancelled the CALL at the server (57014): the engine's stop, not a failure to count
@@ -645,6 +648,7 @@ public final class DataMoveWorker implements AutoCloseable {
             return fail(move, ctx, FailureHandler.Stage.CALL, runLabel, drivingSchema, drivingTable, tenant, errorMark, e,
                 "run " + runLabel + " raised sqlstate=" + e.getSQLState() + ": " + FailureHandler.oneLine(e.getMessage()));
         } finally {
+            states.callEnded(move);
             endSession(conn);
         }
         Runnable afterCall = afterCallHook;

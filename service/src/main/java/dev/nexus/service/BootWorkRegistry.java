@@ -90,6 +90,23 @@ public final class BootWorkRegistry {
         }
     }
 
+    /**
+     * Replace what an already registered entry says, in one step: the words, the counts and the inner level, keeping its
+     * place, its {@code startedAt}, its unit and its stop notes. For work whose state changes while it runs (a data move
+     * goes from working to blocked and back), where {@link #register} would restart the clock. Does nothing for an id that
+     * is not registered.
+     */
+    public void update(String id, String what, Long done, Long total, Step step) {
+        Objects.requireNonNull(what, "what");
+        synchronized (lock) {
+            Entry old = entries.get(id);
+            if (old != null) {
+                entries.put(id, new Entry(old.id(), what, old.startedAt(), done, total, old.unit(), old.safeToStop(),
+                    old.onStop(), step));
+            }
+        }
+    }
+
     /** End the work: the entry leaves the list. Idempotent. */
     public void finish(String id) {
         synchronized (lock) {

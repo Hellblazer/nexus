@@ -13610,6 +13610,8 @@ def run_health_checks(
     results.extend(_step("_check_storage_service_health", lambda: _check_storage_service_health()))
     results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
     results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
+    from nexus.data_moves_health import check_data_moves  # noqa: PLC0415 — deferred: the module imports this one
+    results.extend(_step("check_data_moves", lambda: check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
     results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c

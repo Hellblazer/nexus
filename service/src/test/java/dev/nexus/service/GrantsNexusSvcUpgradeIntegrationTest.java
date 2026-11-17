@@ -55,6 +55,7 @@ class GrantsNexusSvcUpgradeIntegrationTest {
     private static final String GRANTS_FILE = "db/changelog/grants-nexus-svc.xml";
     private static final String OLD_GRANTS_FILE = "db/old-grants/grants-nexus-svc.xml";
     private static final String DATAMOVES_INCLUDE = "<include file=\"db/changelog/datamoves-001-registry.xml\"/>";
+    private static final String REVOKE_MARKER = "-- nexus.data_moves (RDR-246) is admin-connection only: nexus_svc holds NO privilege";
     private static final List<String> DML = List.of("SELECT", "INSERT", "UPDATE", "DELETE");
 
     @TempDir
@@ -121,6 +122,121 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         }
     }
 
+    /**
+     * nexus-f3yqd.2.17: a rollback to engine-service-v0.1.194 re-grants DML on the registry (that loop has no exclusion), and
+     * the exclusion alone does not take it back on the roll-forward. The boot after it must.
+     */
+    @Test
+    void aRollbackThatRegrantsDmlOnTheRegistry_isUndoneByTheNextBoot() throws Exception {
+        try (var pg = PgContainerHelper.startEmptyDatabase();
+             Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            DSLContext sctx = DSL.using(su, SQLDialect.POSTGRES);
+            migrate(pg.getJdbcUrl());
+            assertThat(hasAnyPrivilege(sctx)).as("a fresh boot leaves nexus_svc nothing on the registry").isFalse();
+
+            // what 0.1.194's loop does on its boot
+            sctx.grant(DSL.privilege("SELECT"), DSL.privilege("INSERT"), DSL.privilege("UPDATE"), DSL.privilege("DELETE"))
+                .on(DSL.table(DSL.name("nexus", "data_moves"))).to(DSL.role(DSL.name(SVC_ROLE))).execute();
+            assertThat(hasAnyPrivilege(sctx)).as("non-vacuity: the re-grant took").isTrue();
+            for (String priv : DML) {
+                assertThat(hasTablePriv(sctx, "nexus.data_moves", priv)).as(priv + " re-granted").isTrue();
+            }
+
+            migrate(pg.getJdbcUrl());
+
+            assertThat(hasAnyPrivilege(sctx)).as("the next boot takes every privilege back").isFalse();
+            assertThat(hasTablePriv(sctx, "nexus.chunks", "INSERT"))
+                .as("non-vacuity: the loop still grants a sibling table").isTrue();
+            assertThat(PgCatalogProbes.relationOwner(sctx, "nexus", "data_moves")).isEqualTo(ADMIN_ROLE);
+        }
+    }
+
+    /** The REVOKE's second branch: a grant on a column only, with nothing in the table's own ACL, is taken back too. */
+    @Test
+    void aColumnOnlyGrantToNexusSvcOnTheRegistry_isRevokedAtBoot() throws Exception {
+        try (var pg = PgContainerHelper.startEmptyDatabase();
+             Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            DSLContext sctx = DSL.using(su, SQLDialect.POSTGRES);
+            migrate(pg.getJdbcUrl());
+
+            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-data-moves-column-grant.xml",
+                "databasechangelog_test_data_moves_column_grant", java.util.Map.of());
+            for (String priv : DML) {
+                assertThat(hasTablePriv(sctx, "nexus.data_moves", priv))
+                    .as("non-vacuity: the table's own ACL gives nexus_svc no " + priv).isFalse();
+            }
+            assertThat(hasAnyPrivilege(sctx)).as("non-vacuity: the column grant took").isTrue();
+
+            migrate(pg.getJdbcUrl());
+
+            assertThat(hasAnyPrivilege(sctx)).as("the next boot takes the column grant back").isFalse();
+        }
+    }
+
+    /**
+     * The single-role posture: where the migrating role is nexus_svc itself it owns the registry, and an owner that
+     * revoked its own rights would lock out the one connection that works it. The changeset, replayed as nexus_svc on a
+     * registry nexus_svc owns, leaves its privileges alone.
+     */
+    @Test
+    void whereTheMigratingRoleIsNexusSvcItself_theRevokeIsSkipped() throws Exception {
+        try (var pg = PgContainerHelper.startEmptyDatabase();
+             Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-single-role-registry.xml",
+                "databasechangelog_test_single_role_registry", java.util.Map.of());
+            DSLContext sctx = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(PgCatalogProbes.relationOwner(sctx, "nexus", "data_moves")).isEqualTo(SVC_ROLE);
+            assertThat(hasAnyPrivilege(sctx)).as("non-vacuity: the owner holds its own privileges").isTrue();
+
+            try (Connection svc = DriverManager.getConnection(pg.getJdbcUrl(), SVC_ROLE, PgContainerHelper.SVC_PASSWORD)) {
+                PgContainerHelper.replayChangeset(svc, GRANTS_FILE, GRANTS_ID);
+            }
+
+            assertThat(hasAnyPrivilege(sctx)).as("the owner keeps its privileges").isTrue();
+            for (String priv : DML) {
+                assertThat(hasTablePriv(sctx, "nexus.data_moves", priv)).as(priv).isTrue();
+            }
+        }
+    }
+
+    /** What the registry's ACL gives nexus_svc: any table privilege, or any column privilege. */
+    private static boolean hasAnyPrivilege(DSLContext ctx) {
+        for (String priv : List.of("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")) {
+            if (hasTablePriv(ctx, "nexus.data_moves", priv)) {
+                return true;
+            }
+        }
+        var column = DSL.function("has_any_column_privilege", SQLDataType.BOOLEAN,
+            DSL.val(SVC_ROLE), DSL.val("nexus.data_moves"), DSL.val("SELECT,INSERT,UPDATE,REFERENCES"));
+        return Boolean.TRUE.equals(ctx.select(column).fetchOne(column));
+    }
+
+    private static void migrate(String url) {
+        var cfg = new com.zaxxer.hikari.HikariConfig();
+        cfg.setJdbcUrl(url);
+        cfg.setUsername(ADMIN_ROLE);
+        cfg.setPassword(ADMIN_PASS);
+        cfg.setMaximumPoolSize(2);
+        try (var ds = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+            SchemaMigrator.migrate(ds);
+        }
+    }
+
+    /** The text of {@link #REVOKE_MARKER} to the end of its DO block, cut out: the changeset as it stood before the REVOKE. */
+    static String withoutTheRevoke(String grants) {
+        int from = grants.indexOf(REVOKE_MARKER);
+        assertThat(from).as("the changeset carries the REVOKE block").isPositive();
+        int opening = grants.indexOf("$$", from);   // the DO block's dollar quote, then its close
+        int to = grants.indexOf("$$;\n", opening + 2) + "$$;\n".length();
+        return grants.substring(0, from) + grants.substring(to + 1);
+    }
+
     /** Writes old-master.xml and the old grants file under {@link #tmp}. */
     private void writeOldChangelog() throws Exception {
         String master = read("db/changelog/db.changelog-master.xml");
@@ -137,9 +253,18 @@ class GrantsNexusSvcUpgradeIntegrationTest {
             + "          AND NOT (n.nspname = 'nexus' AND c.relname = 'data_moves')\n";
         assertThat(grants).as("the loop carries the exclusion").contains(exclusion);
         grants = grants.replace(exclusion, "");
-        int from = grants.indexOf("<validCheckSum>9:", grants.indexOf("id=\"" + GRANTS_ID + "\""));
-        int to = grants.indexOf("</validCheckSum>", from) + "</validCheckSum>".length();
-        grants = grants.substring(0, from) + grants.substring(to);
+        grants = withoutTheRevoke(grants);
+        // every validCheckSum entry: the old text carried none (the comment above them is outside the checksum)
+        int removed = 0;
+        int idAt = grants.indexOf("id=\"" + GRANTS_ID + "\"");
+        // only this changeset's: grants-004 below carries one of its own
+        for (int from = grants.indexOf("<validCheckSum>9:", idAt);
+             from >= 0 && from < grants.indexOf("</changeSet>", idAt); from = grants.indexOf("<validCheckSum>9:", from)) {
+            int to = grants.indexOf("</validCheckSum>", from) + "</validCheckSum>".length();
+            grants = grants.substring(0, from) + grants.substring(to);
+            removed++;
+        }
+        assertThat(removed).as("the changeset lists two earlier checksums").isEqualTo(2);
         String root = "<databaseChangeLog\n";
         assertThat(grants).contains(root);
         grants = grants.replace(root, "<databaseChangeLog logicalFilePath=\"" + GRANTS_FILE + "\"\n");

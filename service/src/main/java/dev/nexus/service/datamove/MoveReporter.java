@@ -25,6 +25,12 @@ public interface MoveReporter {
     /** Every run of every listed tenant is complete; verification and {@code on_complete} are the finisher's. */
     void runsComplete(DataMove move);
 
+    /** A CALL for the run has begun on the dedicated connection whose server backend is {@code pid}. */
+    void callStarted(DataMove move, String runLabel, int pid);
+
+    /** The CALL has returned or raised. */
+    void callEnded(DataMove move);
+
     /** The move is no longer open (completed, or superseded) and nothing more is to be said of it. */
     void forget(String label);
 }

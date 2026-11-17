@@ -60,6 +60,24 @@ final class DataMoveRegistry {
         return admin.selectDistinct(supersedes).from(MOVES).where(supersedes.isNotNull()).fetch(supersedes);
     }
 
+    /** A move that failed for good: its label and the failure it recorded. */
+    record FailedMove(String label, String failure) { }
+
+    /**
+     * The failed moves no row supersedes, oldest first: reported until a move replaces them (RDR-246, Day 2 Operations), so
+     * a failure recorded before an engine restart is still said after it.
+     */
+    static List<FailedMove> failedMoves(DSLContext admin) {
+        var m = MOVES.as("m");
+        var s = MOVES.as("s");
+        return admin.select(text("m", "label"), text("m", "failure"))
+            .from(m)
+            .where(stamp("m", "failed_at").isNotNull())
+            .and(DSL.notExists(DSL.selectOne().from(s).where(text("s", "supersedes").eq(text("m", "label")))))
+            .orderBy(stamp("m", "registered_at"), text("m", "label"))
+            .fetch(r -> new FailedMove(r.value1(), r.value2() == null ? "" : r.value2()));
+    }
+
     private static List<DataMove> openMoves(DSLContext admin, Condition extra) {
         var m = MOVES.as("m");
         var s = MOVES.as("s");

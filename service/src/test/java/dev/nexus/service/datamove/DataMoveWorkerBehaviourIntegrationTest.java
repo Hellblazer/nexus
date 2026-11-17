@@ -166,7 +166,9 @@ class DataMoveWorkerBehaviourIntegrationTest extends DataMoveIntegrationBase {
         var second = w.states().state("b-since").orElseThrow();
 
         assertThat(second.reason()).isEqualTo(first.reason());
-        assertThat(second.since()).as("blocked since").isEqualTo(first.since());
+        // the retry itself was working (nexus-f3yqd.2.17), so `since` restarted with it; the first blocked time is what stays
+        assertThat(first.firstBlockedAt()).isNotNull();
+        assertThat(second.firstBlockedAt()).as("blocked since").isEqualTo(first.firstBlockedAt());
         assertThat(second.updatedAt()).isAfter(first.updatedAt());
     }
 

@@ -279,6 +279,54 @@ class MainPciWiringTest {
     }
 
     /**
+     * nexus-f3yqd.2.17: the data-move boot_work reporter. Started once after the worker, from the registry the status route
+     * reads (the same {@code bootWork}), closed in the shared shutdown steps beside the worker's stop; and an engine whose
+     * worker did not start says so in boot_work, or nx doctor reads "no data move is open" from an engine that works none.
+     * None of those fails any other test, so the text is pinned.
+     */
+    @Test
+    void theDataMoveReporterStartsAfterTheWorker_closesWithIt_andANoWorkerBootSaysSo() throws Exception {
+        String src = code(main());
+        int worker = src.indexOf("var dataMoveWorker = startDataMoveWorker(");
+        int reporter = src.indexOf("var moveBootWork = startMoveBootWork(bootWork, dataMoveWorker, adminConnection);");
+        int bind = src.indexOf("service.bootWork(bootWork);");
+        int block = shutdownSteps(src);
+        int blockEnd = matchingClose(src, src.indexOf('{', block));
+        String steps = src.substring(block, blockEnd);
+
+        assertThat(worker).isPositive();
+        assertThat(reporter).as("built from the one registry, after the worker it reads").isGreaterThan(worker);
+        assertThat(bind).as("that registry is the one the status route reads").isLessThan(reporter);
+        assertThat(src.indexOf("var moveBootWork =", reporter + 1)).as("one reporter").isNegative();
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, reporter)).as("a top-level statement of main, not under a condition").isEqualTo(mainDepth);
+        assertThat(precedingToken(src, reporter)).isIn(";", "}");
+
+        int workerStop = steps.indexOf("dataMoveWorker.stop();");
+        int reporterClose = steps.indexOf("moveBootWork.close();");
+        assertThat(workerStop).as("the worker is stopped in the shared shutdown steps").isPositive();
+        assertThat(reporterClose).as("and the reporter closed after it, in the same steps").isGreaterThan(workerStop);
+
+        int method = src.indexOf("MoveBootWork startMoveBootWork(");
+        assertThat(method).isPositive();
+        String body = src.substring(method, matchingClose(src, src.indexOf('{', method)));
+        int noWorker = body.indexOf("if (worker == null)");
+        int says = body.indexOf("MoveBootWork.reportWorkerNotRunning(bootWork);");
+        int ret = body.indexOf("return null;", noWorker);
+        assertThat(noWorker).isPositive();
+        assertThat(says).as("a missing worker is reported to boot_work").isGreaterThan(noWorker);
+        assertThat(ret).as("before the method gives up on it").isGreaterThan(says);
+        int build = body.indexOf("new dev.nexus.service.datamove.MoveBootWork(");
+        assertThat(build).as("and the reporter is built after").isGreaterThan(ret);
+        int caught = body.indexOf("catch (Throwable e)", build);
+        int saysReporter = body.indexOf("MoveBootWork.reportReporterNotRunning(bootWork);", caught);
+        assertThat(caught).as("a reporter that cannot be built or started is caught").isGreaterThan(build);
+        assertThat(saysReporter).as("and boot_work says so, or nx doctor reads green over unseen moves")
+            .isGreaterThan(caught);
+        assertThat(body.indexOf("return null;", saysReporter)).as("before the method gives up on it").isPositive();
+    }
+
+    /**
      * nexus-dxsjc: the leaf bloat sweep behind {@code chunks_leaf_bloat} on {@code /v1/status}. Without the start call
      * the cache never fills and the doctor row reads the object as "reads failing" forever; without the bind the route
      * omits the key and every client reads "cannot tell"; without the stop the daemon thread outlives the pool. None

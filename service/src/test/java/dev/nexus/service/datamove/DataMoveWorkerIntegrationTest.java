@@ -267,6 +267,8 @@ class DataMoveWorkerIntegrationTest extends DataMoveIntegrationBase {
         // transaction the 100 chunk workers commit. Sampled through the run, it stays within a few transactions of now (a
         // null is the best case and is not counted against it).
         assertThat(samples).as("samples of the CALL backend").isGreaterThanOrEqualTo(20);
+        assertThat(xminAges).as("non-vacuity: at least one sample held a backend_xmin (every null would pass the bound below)")
+            .isNotEmpty();
         assertThat(xminAges).as("age of the coordinator's backend_xmin, in transactions").allMatch(a -> a <= 40);
         long end = relationSize("dm_test.plain_rows");
         // each of the 100000 rows is rewritten once. A coordinator holding one snapshot across the move keeps every dead

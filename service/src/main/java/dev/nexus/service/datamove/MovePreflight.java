@@ -5,6 +5,7 @@ package dev.nexus.service.datamove;
 import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.DmlUtilsInstaller;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -59,7 +60,7 @@ final class MovePreflight {
     static Optional<Miss> check(AdminDdlSession session, DataMove move, DmlUtilsInstaller installer) {
         Optional<String> install = installer.status().blockedReason();
         if (install.isPresent()) {
-            return Optional.of(Miss.named(install.get()));
+            return Optional.of(Miss.named(MoveReasons.withInstallHint(install.get())));
         }
         DSLContext ctx = session.ctx();
         try {
@@ -68,6 +69,10 @@ final class MovePreflight {
                 // state the grant and the row-security read below would otherwise blur into "cannot see every row"
                 return Optional.of(new Miss("the driving table " + move.drivingTableLabel() + " does not exist",
                     new SQLException("the driving table " + move.drivingTableLabel() + " does not exist", "42P01")));
+            }
+            Optional<String> leaked = servingRolePrivilege(ctx);
+            if (leaked.isPresent()) {
+                return Optional.of(Miss.named(leaked.get()));
             }
             grant(session, move);
             if (!committingEntryPointInstalled(ctx)) {
@@ -101,6 +106,69 @@ final class MovePreflight {
             .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
             .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(move.drivingSchema()))
             .and(DSL.field(DSL.name("c", "relname"), String.class).eq(move.drivingTable())));
+    }
+
+    /** The serving role, which RDR-246 gives no privilege on the registry. */
+    static final String SERVING_ROLE = "nexus_svc";
+
+    /**
+     * Where the engine runs on two roles, the serving role holds no privilege on {@code nexus.data_moves}: the move worker
+     * is the registry's one reader, on the admin connection. A privilege GRANTED to it there, on the table or on a column
+     * (a rollback to an engine that granted it, and a boot that did not take it back because the migrating role does not
+     * own the table), is a posture the RDR does not allow, so every open move is blocked with the reason until it is gone.
+     * Read from the table's and columns' ACLs, so a privilege the role merely inherits through a membership in the
+     * migrating role does not count: that posture has its own refusal ({@code DrivingTableIsolationCheck}). Not applied
+     * where the connection IS {@value #SERVING_ROLE} (one role, which owns the table) or where that role does not exist.
+     *
+     * @return the reason, or empty when the posture holds
+     */
+    static Optional<String> servingRolePrivilege(DSLContext ctx) {
+        boolean roleExists = ctx.fetchExists(DSL.selectOne().from(DSL.table(DSL.name("pg_catalog", "pg_roles")))
+            .where(DSL.field(DSL.name("rolname"), String.class).eq(SERVING_ROLE)));
+        if (!roleExists || SERVING_ROLE.equals(ctx.select(DSL.currentUser()).fetchOne(0, String.class))) {
+            return Optional.empty();
+        }
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        var a = DSL.table(DSL.name("pg_catalog", "pg_attribute")).as("a");
+        var aclType = SQLDataType.VARCHAR.getArrayDataType();
+        Field<String[]> tableAcl = DSL.field(DSL.name("c", "relacl")).cast(aclType);
+        Field<String[]> columnAcl = DSL.field(DSL.name("a", "attacl")).cast(aclType);
+        var rows = ctx.select(tableAcl, columnAcl,
+                DSL.function("pg_get_userbyid", SQLDataType.VARCHAR, DSL.field(DSL.name("c", "relowner"))))
+            .from(c).join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .leftJoin(a).on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("c", "oid")))
+                .and(DSL.field(DSL.name("a", "attacl")).isNotNull()))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq("data_moves"))
+            .fetch();
+        boolean held = false;
+        String owner = "unknown";
+        for (var row : rows) {
+            owner = row.value3();
+            held |= grantsTo(row.value1(), SERVING_ROLE) || grantsTo(row.value2(), SERVING_ROLE);
+        }
+        if (!held) {
+            return Optional.empty();
+        }
+        return Optional.of(SERVING_ROLE + " holds a privilege on nexus.data_moves, which the engine's serving role must not "
+            + "hold (RDR-246): the boot's grants step takes it back only where the migrating role owns the table, and its "
+            + "owner here is " + owner + ". As that role run: REVOKE ALL ON TABLE nexus.data_moves FROM " + SERVING_ROLE);
+    }
+
+    /** Whether an ACL ({@code grantee=privileges/grantor} entries; an empty grantee is PUBLIC) gives {@code role} a privilege. */
+    static boolean grantsTo(String[] acl, String role) {
+        if (acl == null) {
+            return false;
+        }
+        for (String item : acl) {
+            int eq = item.indexOf('=');
+            int slash = item.indexOf('/', eq + 1);
+            if (eq > 0 && item.substring(0, eq).equals(role) && slash > eq + 1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -53,6 +53,11 @@ final class TenantKeyedStateTables {
         + "sweep step's stack; the long-lived holders of tenant principals are the keyed entries (TokenCache.map)";
     private static final String DATA_MOVE_STATES = "the data-move worker's view of its open moves, by move label (kind, "
         + "reason, times): nexus.data_moves is a global registry with no tenant column, so nothing here is a tenant's";
+    private static final String DATA_MOVE_REPORT = "the data-move boot_work reporter's own bookkeeping, by move label or "
+        + "boot_work id (counts, times, what one sample read): nexus.data_moves is a global registry with no tenant column, "
+        + "so nothing here is a tenant's";
+    private static final String DATA_MOVE_REPORT_SESSION = "the data-move boot_work reporter's own admin connection, kept "
+        + "between samples; it reads the global registry and the dml_utils runs and carries no tenant setting";
     private static final String DATA_MOVE_HANDLE = "the data-move worker's own thread, one per engine; holds no data";
     private static final String DATA_MOVE_CALL = "the data-move worker's one call connection (or the statement in flight "
         + "on it), kept so a stop can cancel it; it carries a tenant setting only for the length of one run, cleared (or "
@@ -160,6 +165,14 @@ final class TenantKeyedStateTables {
         notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
         // nexus-f3yqd.2.13 (RDR-246): the data-move worker. The registry it works is global, with no tenant column.
         notKeyed.put("MoveStates.byLabel", DATA_MOVE_STATES);
+        notKeyed.put("MoveStates.calls", DATA_MOVE_STATES);   // nexus-f3yqd.2.17: the CALL in flight, by move label
+        notKeyed.put("MoveBootWork.DbReader.session", DATA_MOVE_REPORT_SESSION);
+        notKeyed.put("MoveBootWork.published", DATA_MOVE_REPORT);
+        notKeyed.put("MoveBootWork.highestDone", DATA_MOVE_REPORT);
+        notKeyed.put("MoveBootWork.lastAdvance", DATA_MOVE_REPORT);
+        notKeyed.put("MoveBootWork.Snapshot.open", DATA_MOVE_REPORT);
+        notKeyed.put("MoveBootWork.Snapshot.failed", DATA_MOVE_REPORT);
+        notKeyed.put("MoveBootWork.Snapshot.progress", DATA_MOVE_REPORT);
         notKeyed.put("DataMoveWorker.loop", DATA_MOVE_HANDLE);
         notKeyed.put("DataMoveWorker.callConnection", DATA_MOVE_CALL);
         notKeyed.put("CallConnection.running", DATA_MOVE_CALL);
