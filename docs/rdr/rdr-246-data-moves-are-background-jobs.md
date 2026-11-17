@@ -547,7 +547,15 @@ Failures are classified by what the move worker can read. *Transient*,
 retried after the move's backoff with the move `blocked:`: no free slot; a
 missing install or role; an admin connection that cannot see every row; a
 verification run or `on_complete` that hits `statement_timeout_ms`, or an
-`on_complete` that hits its `lock_timeout` (SQLSTATE 55P03); a lost connection
+`on_complete` that hits its `lock_timeout` (SQLSTATE 55P03); a verification run
+or `on_complete` that loses its connection (class 08), meets a shutdown or
+startup (57P01, 57P02, 57P03) or a busy host (class 53), and an `on_complete`
+that meets a deadlock (40P01) or a serialization failure (40001), since the
+verification only reads and the completion transaction rolls back whole, so a
+retry is safe (the verification's READ ONLY session, at the default isolation
+with no `lock_timeout`, cannot meet 40001 or 55P03, so those stay permanent
+there); a verification that fails with no SQLSTATE (a fault inside the
+engine, or a connection that still carries a tenant); a lost connection
 or a stopped engine, and any failure to open or authenticate a connection to
 the database, whatever its SQLSTATE, since a connection or credential fault is
 the environment's, not the move's; a CALL that returns with its run neither
@@ -586,8 +594,12 @@ integrity, the rest of class 42, class 3F such as `assert_schema_exists`'s
 3F000 for a missing driving schema, P0 PL/pgSQL, and anything else), a
 driving schema or table that does not exist (the preflight raises 42P01 for
 it), a non-empty verification, a verification text the worker refuses
-(Stage `VERIFICATION_REFUSED`), and an `on_complete` that fails for a reason
-other than its statement or lock timeout. The move worker tells a recorded chunk
+(Stage `VERIFICATION_REFUSED`), a verification run that raises any other
+error (42501 and 42883 included: the verification runs only after every run
+completed, as the admin role whose read of the driving table step 1 already
+checked, so a function it cannot find or a table it cannot read is the
+verification text's own fault), and an `on_complete` that fails for any other
+reason. The move worker tells a recorded chunk
 error from a raised one by the run's `migration_error` rows: it reads the
 run's highest `error_id` before the CALL (0 when the run does not exist yet,
 since the first CALL creates it, and when it has no error rows), and a row above that mark is this pass's
@@ -627,8 +639,10 @@ always reports how many times it has been retried:
   backoff, `blocked:` adds "needs an operator". nx doctor shows every
   `blocked:` move red already; the cap only changes the text. The move is
   never made `failed:` for transient errors: a busy slot, a missing grant or
-  a missing install is not the move's fault, and `failed:` would need a
-  superseding move to clear.
+  a missing install before or during its runs is not the move's fault, and
+  `failed:` would need a superseding move to clear. A grant or function the
+  verification text needs and does not find after the runs completed is the
+  text's fault, and the move is `failed:` (above).
 - *Pause.* A move with `paused_at` set is open but not worked. The move
   worker reads the row before each pass, before each run's CALL, before the
   verification and again before `on_complete` (steps 2 and 3), so a pause
@@ -849,7 +863,7 @@ the last committed batch"`. The shape has no state field, so `what` begins
 `working:`, `queued:` (an open move the worker has not reached),
 `blocked:` (no pg_background, a library role or the dml_utils install; an
 admin session that cannot see every row; no free background worker slot; a
-verification timeout; with the retry count, and "needs an operator" past the
+verification or `on_complete` that a later pass can clear; with the retry count, and "needs an operator" past the
 cap), `failed:` (with the reduced `failure`), `paused:` (with `paused_by`),
 `stalled:` or `runs complete:` (verification pending). `stalled:` is shown when
 a CALL has completed no chunk for `NX_DATA_MOVE_STALL_MINUTES` (default 15,
@@ -1101,11 +1115,19 @@ launcher that upstream does not test.
 - **The move worker or its boot_work reporter fails to start**: the engine
   serves and publishes a `blocked:` entry (`data-move-worker` or
   `data-move-boot-work`), which nx doctor shows red.
-- **A verification run times out**: transient; the move is `blocked:` and the
-  verification runs again on the next pass.
+- **A verification run times out, loses its connection or meets a busy or
+  restarting host**: transient; the move is `blocked:` and the verification
+  runs again on the next pass. A connection the verification cannot open is a
+  connection failure, transient whatever its SQLSTATE.
+- **A verification run raises any other error** (a function it names does not
+  exist, a table it reads is not granted, a syntax error): permanent; the move
+  is `failed:` with the error, and the fix is a superseding move with a
+  corrected verification.
 - **`on_complete` fails**: it runs on every move under a `lock_timeout` of
-  min(5 s, `statement_timeout_ms` / 2), at least 1 ms. On `statement_timeout_ms` or `lock_timeout`
-  (55P03) it is transient, the transaction rolls back with `completed_at`
+  min(5 s, `statement_timeout_ms` / 2), at least 1 ms. On `statement_timeout_ms`, `lock_timeout`
+  (55P03), a lost connection (class 08), a shutdown or startup (57P01,
+  57P02, 57P03), a busy host (class 53), a deadlock (40P01) or a serialization
+  failure (40001) it is transient, the transaction rolls back with `completed_at`
   and `failed_at` unset, and the move is `blocked:` and retried on the next
   pass; on any other error the move is `failed:` with the error, and its
   finishing step is fixed by a superseding move.
@@ -1454,3 +1476,4 @@ the first registered move.
 - 2026-11-17: two failure classes approved by Sam ("yes to both, write them in", session linda, ask rdr246-failure-wording): a CALL that returns with its run neither completed nor cancelled is transient unless this pass recorded a permanent chunk error, and any failure to open or authenticate a database connection is transient, never `failed:` (nexus-f3yqd.2.15).
 - 2026-11-17: wording to landed, reviewed code (grant 3): the changeset gate as built (nexus-f3yqd.2.19: MERGE, data-modifying WITH and SELECT INTO under rule 1; DROP without COLUMN and table or column renames under rule 3, whose precondition names a driving move's literal label; the exemption line scoped to its table; the frozen list as the shipped offenders; native change types refused; the verification placeholder rules); the driving-table isolation check (nexus-f3yqd.2.16: every registry row in any state, nexus.chunks left to ChunksIsolationCheck, a partitioned driving table checked at its parent, `<table>_owner_read`, boot only); the four-column re-pin to 9196f4b1c and its verified Critical Assumption (nexus-f3yqd.2.21).
 - 2026-11-17: wording to landed, reviewed code (grant 3), nexus-f3yqd.2.14, .2.15 and .2.17, develop commits 8cf174765..20b338640: `on_complete` runs under `lock_timeout` min(5 s, `statement_timeout_ms` / 2), at least 1 ms, on every move, and builder termination stays chunk-family only, decided by a name match pinned to the lint's list (`ChunkFamily`, `ChunkFamilyLintPinTest`); the completion UPDATE runs first and is guarded (not paused, failed, completed or superseded), with builders ended after it matched, inside the transaction; every run executes before a non-empty verification is reported, a move with no tenant scope gets the table-wide run only, a refused verification text is a permanent failure (Stage `VERIFICATION_REFUSED`; `MoveSql` sanctioned by Sam, 2026-11-17), and a stop is read between tenants and before completion; a missing driving schema or table is permanent, a raised 42501, 42883 or class 08 is read once more after 750 ms for dml_utils' asynchronous recorder, a paused pass and a stop count no retry, and an unwritable registry reports `blocked:`; boot_work entries come from `MoveBootWork` (own admin session, every 5 s) with the `working:`, `queued:`, `blocked:`, `failed:`, `paused:`, `stalled:` and `runs complete:` classes, carry no tenant, leaf, run label, pid or server text, `stalled:` after `NX_DATA_MOVE_STALL_MINUTES`, `done` as a clamped high-water, red entries for a worker or reporter that did not start, and `grants-nexus-svc-1` revoking `nexus_svc`'s privileges on `nexus.data_moves` where it can; nx doctor rows for each.
+- 2026-11-17: verification and `on_complete` failure classes to the code of nexus-f3yqd.2.15's follow-up and its critique (decided by linda under Sam's "keep things moving" rule, reversible): a verification run is transient for its timeout, a lost connection, a shutdown, a busy host (class 53) or a fault with no SQLSTATE, and an open failure of its connection is a connection failure; any other error it raises is permanent, 42501 and 42883 included; an `on_complete` is also transient for a lost connection, a shutdown, a busy host, a deadlock or a serialization failure, since its transaction rolls back whole.
