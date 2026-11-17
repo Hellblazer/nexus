@@ -38,7 +38,7 @@ def _entry(
         content_type="prose",
         file_path=file_path,
         corpus="",
-        physical_collection="docs__1-2__voyage-context-3__v1",
+        physical_collection="docs__1-2__bge-base-en-v15-768__v1",
         chunk_count=1,
         head_hash="",
         indexed_at="",
@@ -178,7 +178,7 @@ def test_rechunk_survival_reads_no_chunks(tmp_path: Path) -> None:
     span = _span(BODY)
     before = catalog_spans.resolve_span_text_for_entry(entry, span, catalog=None)
     entry.chunk_count = 7
-    entry.physical_collection = "docs__1-2__voyage-context-3__v2"
+    entry.physical_collection = "docs__1-2__bge-base-en-v15-768__v2"
     assert (
         catalog_spans.resolve_span_text_for_entry(entry, span, catalog=None)
         == before
