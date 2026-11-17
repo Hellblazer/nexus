@@ -166,7 +166,7 @@ def test_the_doctor_runs_the_row_on_the_status_it_fetched(monkeypatch):
     def stepper(_progress):
         def step(name, fn):
             ran.append(name)
-            return list(fn()) if name == "check_data_moves" else []
+            return list(fn()) if name == "_check_data_moves" else []
         return step
 
     monkeypatch.setattr(health, "_row_stepper", stepper)
@@ -174,7 +174,7 @@ def test_the_doctor_runs_the_row_on_the_status_it_fetched(monkeypatch):
 
     results, _local = health.run_health_checks(engine_status=status)
 
-    assert "check_data_moves" in ran
+    assert "_check_data_moves" in ran
     assert [r.label for r in _red(results)] == ["Data move m1"]
     assert any(r.label == SUMMARY_LABEL for r in results)
 
@@ -219,3 +219,29 @@ def test_the_hints_say_where_the_text_the_status_leaves_out_is():
     assert any("event=data_move_blocked" in h for h in rows["Data move b"].fix_suggestions)
     assert any("SELECT failure FROM nexus.data_moves WHERE label = 'f'" in h for h in rows["Data move f"].fix_suggestions)
     assert any("event=data_move_call" in h and "NX_DATA_MOVE_STALL_MINUTES" in h for h in rows["Data move s"].fix_suggestions)
+
+
+def test_the_sweeps_row_is_a_check_star_name_so_a_blanket_stub_covers_it(monkeypatch):
+    """Doctor tests step over the sweep by replacing every ``health._check_*``; a data-move row outside that name would
+    fetch the engine's status for real and trip the storage-touch guard (develop red 20b338640). With every ``_check_*``
+    replaced, running the sweep's data-move step must call the replacement and never reach the engine."""
+    called: list[str] = []
+    for name in dir(health):
+        if name.startswith("_check_") and callable(getattr(health, name)):
+            monkeypatch.setattr(health, name, lambda *a, _n=name, **k: called.append(_n) or [])
+
+    def boom(*a, **k):
+        raise AssertionError("the sweep's data-move step reached past the stub")
+
+    monkeypatch.setattr(http_status, "fetch_engine_status", boom)
+    monkeypatch.setattr("nexus.data_moves_health.check_data_moves", boom)
+
+    def stepper(_progress):
+        def step(name, fn):
+            return list(fn()) if name == "_check_data_moves" else []
+        return step
+
+    monkeypatch.setattr(health, "_row_stepper", stepper)
+    health.run_health_checks(engine_status={"boot_work": []})
+
+    assert "_check_data_moves" in called

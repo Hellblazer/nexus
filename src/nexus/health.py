@@ -4800,6 +4800,15 @@ def _status_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
+def _check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """RDR-246 data moves (nexus-f3yqd.2.17): ``nexus.data_moves_health.check_data_moves``. Named ``_check_*`` here, like
+    every other row of the sweep, so a test that steps over the sweep's ``_check_*`` rows steps over this one too instead
+    of letting it fetch the engine's status for real."""
+    from nexus.data_moves_health import check_data_moves  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_data_moves(engine_status)
+
+
 def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """nexus-20onx (RDR-223 P3.2): has the engine seen a chunk write with no owner?
 
@@ -13610,8 +13619,7 @@ def run_health_checks(
     results.extend(_step("_check_storage_service_health", lambda: _check_storage_service_health()))
     results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
     results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
-    from nexus.data_moves_health import check_data_moves  # noqa: PLC0415 — deferred: the module imports this one
-    results.extend(_step("check_data_moves", lambda: check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
+    results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
     results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c
