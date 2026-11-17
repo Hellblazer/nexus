@@ -35,8 +35,8 @@ from nexus.catalog.tumbler import Tumbler
     "--type", "link_type", required=True,
     help="Link type (e.g. cites, implements, supersedes, relates, quotes, comments, or any custom type)",
 )
-@click.option("--from-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', or 'chash:<hex>:<start>-<end>'")
-@click.option("--to-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', or 'chash:<hex>:<start>-<end>'")
+@click.option("--from-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'")
+@click.option("--to-span", default="", help="Span: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'")
 def link_cmd(
     from_tumbler: str, to_tumbler: str, link_type: str,
     from_span: str, to_span: str,
@@ -54,7 +54,10 @@ def link_cmd(
       --to-span "3:100-250"            chars 100-250 of chunk 3 in T3
       --from-span "chash:<sha256hex>"  content-addressed chunk (preferred)
       --from-span "chash:<sha256hex>:100-250"  character range within a chunk
-    Content-hash spans survive re-indexing. Use 'nx catalog show' to see resolved span text.
+      --to-span "dchash:<sha256hex>:100-250"   character range in the document's text; make one with 'nx catalog span'
+    A dchash span survives re-chunking of unchanged text; a chash span does not, because
+    re-chunking changes the chunk's text and so its hash. A malformed dchash span is refused.
+    Use 'nx catalog show' to see resolved span text.
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 

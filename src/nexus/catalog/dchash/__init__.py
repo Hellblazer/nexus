@@ -8,6 +8,7 @@ from here inside a method, and a top-level import back would be a cycle).
 from nexus.catalog.dchash.text import (
     DCHASH_PREFIX,
     canonical_text,
+    check_link_span,
     parse_dchash_span,
     text_hash,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "DCHASH_PREFIX",
     "STATUSES",
     "canonical_text",
+    "check_link_span",
     "dchash_source",
     "dchash_status",
     "parse_dchash_span",

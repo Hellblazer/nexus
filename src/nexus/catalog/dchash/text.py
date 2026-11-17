@@ -50,3 +50,13 @@ def parse_dchash_span(span: str) -> tuple[str, int, int]:
     if start >= end:
         raise ValueError(f"malformed dchash span (start must be below end): {span!r}")
     return m.group(1), start, end
+
+
+def check_link_span(span: str) -> None:
+    """Refuse a link span that starts with ``dchash:`` but does not parse.
+
+    Raises ValueError naming the span. Any other span, ``""`` included, returns
+    without a check: the chash and line forms are not revalidated here.
+    """
+    if span.startswith(DCHASH_PREFIX):
+        parse_dchash_span(span)

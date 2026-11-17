@@ -665,8 +665,8 @@ def catalog_link(
         description="Link type: a built-in (cites, implements, implements-heuristic, supersedes, relates, quotes, comments) or a custom string.",
     )],
     created_by: Annotated[str, Field(description="Who or what created this link.")] = "user",
-    from_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the source.")] = "",
-    to_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the target.")] = "",
+    from_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the source: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'.")] = "",
+    to_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the target: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'.")] = "",
 ) -> dict:
     """Create a relationship between two catalog documents.
 

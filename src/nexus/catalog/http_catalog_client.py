@@ -176,6 +176,15 @@ _LINKS_BATCH_PAGE = 1000
 #: 32767 bind-parameter ceiling.
 _REGISTER_MANY_PAGE = 1000
 
+
+def _check_spans(*spans: str) -> None:
+    """RDR-171: refuse a malformed ``dchash:`` span (ValueError) before any request goes out."""
+    from nexus.catalog.dchash import check_link_span  # noqa: PLC0415 — deferred: loading the client never loads dchash
+
+    for span in spans:
+        check_link_span(span)
+
+
 #: Page size for find_all_by_file_paths POSTs (nexus-1vc0n). Deliberately the
 #: generic QUOTAS.MAX_RECORDS_PER_WRITE (300), not the 1000 the other batch
 #: endpoints here use — the bead's own instruction was to respect the
@@ -3190,6 +3199,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         allow_dangling: bool = False,
         **meta: object,
     ) -> bool:
+        _check_spans(from_span, to_span)
         payload: dict = {
             "from_tumbler": str(from_t),
             "to_tumbler": str(to_t),
@@ -3227,6 +3237,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # the "if absent" contract holds. (TOCTOU is acceptable: the canonical
         # cross-process path is not atomic either, and the common case is a re-index
         # where the row already exists and we correctly no-op.)
+        _check_spans(from_span, to_span)  # RDR-171: before the existence read, so a bad span sends nothing
         existing = self.link_query(
             from_t=str(from_t), to_t=str(to_t), link_type=link_type, limit=1
         )
@@ -3257,6 +3268,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *edges*, not in its page. The engine answers a transient database error 503 with nothing
         written, so the transport's retry of the whole page is safe.
         """
+        _check_spans(*(e.get(k) or "" for e in edges for k in ("from_span", "to_span")))  # RDR-171: all pages, before the first
         out: dict = {"created": 0, "skipped": 0, "unresolved": []}
         for start in range(0, len(edges), _LINKS_BATCH_PAGE):
             result = self._post("/links/upsert_many", {"edges": edges[start:start + _LINKS_BATCH_PAGE]}) or {}
