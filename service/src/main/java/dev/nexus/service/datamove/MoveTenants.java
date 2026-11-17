@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.datamove;
 
+import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.TenantConstants;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -49,15 +50,19 @@ final class MoveTenants {
     /**
      * The tenants to run the move for, found by the probe of the driving table: the default tenant first, then the rest in
      * name order. The probe reads every tenant's rows, so the admin session must see them all (the pass checks that before
-     * it builds the list). The statement bound is set for the probe and put back after it.
+     * it builds the list). The session's statement bound is {@link #PROBE_STATEMENT_TIMEOUT} for the probe, and what it was
+     * before after it ({@code AdminDdlSession#setSession} is the one route to a statement bound outside PgSession).
      */
-    static List<String> byProbe(DSLContext admin, String schema, String table) {
-        setStatementTimeout(admin, PROBE_STATEMENT_TIMEOUT);
+    static List<String> byProbe(AdminDdlSession session, String schema, String table) {
+        DSLContext admin = session.ctx();
+        String prior = admin.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("statement_timeout")))
+            .fetchOne(0, String.class);
+        session.setSession("statement_timeout", PROBE_STATEMENT_TIMEOUT);
         try {
             return list(admin, admin.selectDistinct(TENANT_ID).from(DSL.table(DSL.name(schema, table)))
                 .where(TENANT_ID.isNotNull()).fetch(TENANT_ID));
         } finally {
-            setStatementTimeout(admin, null);
+            session.setSession("statement_timeout", prior);
         }
     }
 
@@ -75,11 +80,5 @@ final class MoveTenants {
         out.add(TenantConstants.DEFAULT_TENANT);
         out.addAll(rest);
         return out;
-    }
-
-    /** {@code statement_timeout} for the session; null puts it back to its default (as {@code RESET}). */
-    private static void setStatementTimeout(DSLContext admin, String value) {
-        admin.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("statement_timeout"),
-            DSL.val(value, SQLDataType.VARCHAR), DSL.inline(false))).fetch();
     }
 }

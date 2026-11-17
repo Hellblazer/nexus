@@ -296,12 +296,15 @@ class DataMoveWorkerBehaviourIntegrationTest extends DataMoveIntegrationBase {
     @Test
     void theProbeOfATableWithoutALeafMode_isBoundedAndFindsTheTenantsOfTheRows() throws Exception {
         PgContainerHelper.seedServiceToken(ctx(), "tok-only", "only-a-token", "t");
-        assertThat(MoveTenants.byProbe(ctx(), "dm_test", "tenant_plain"))
-            .containsExactly("default", "acme", "globex", "only-a-token");
-        assertThat(MoveTenants.byLeafBounds(ctx(), List.of("acme", "globex")))
-            .as("leaf bounds, no scan: bounds, the tokens and the default").containsExactly("default", "acme", "globex",
-                "only-a-token");
-        assertThat(ctx().select(DSL.function("current_setting", String.class, DSL.val("statement_timeout")))
-            .fetchOne(0, String.class)).as("the bound does not outlive the probe").isNotEqualTo("10min");
+        try (var session = adminSession("tenant_plain")) {
+            assertThat(MoveTenants.byProbe(session, "dm_test", "tenant_plain"))
+                .containsExactly("default", "acme", "globex", "only-a-token");
+            assertThat(MoveTenants.byLeafBounds(session.ctx(), List.of("acme", "globex")))
+                .as("leaf bounds, no scan: bounds, the tokens and the default")
+                .containsExactly("default", "acme", "globex", "only-a-token");
+            assertThat(session.ctx().select(DSL.function("current_setting", String.class, DSL.val("statement_timeout")))
+                .fetchOne(0, String.class)).as("the bound does not outlive the probe")
+                .isNotEqualTo(MoveTenants.PROBE_STATEMENT_TIMEOUT);
+        }
     }
 }

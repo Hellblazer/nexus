@@ -384,7 +384,7 @@ public final class DataMoveWorker implements AutoCloseable {
                 fail(move, ctx, FailureHandler.Stage.PREFLIGHT, null, schema, table, null, 0, null, blocked.get());
                 return;
             }
-            passOver(move, ctx);
+            passOver(move, session);
         } catch (RuntimeException e) {
             // one move's surprise is that move's failure; the moves behind it still run (the session is closed: no admin context)
             fail(move, null, FailureHandler.Stage.PASS, null, schema, table, null, 0, null,
@@ -418,7 +418,8 @@ public final class DataMoveWorker implements AutoCloseable {
     }
 
     /** Step 2: the runs, then what follows them. */
-    private void passOver(DataMove move, DSLContext ctx) {
+    private void passOver(DataMove move, AdminDdlSession session) {
+        DSLContext ctx = session.ctx();
         String schema = move.drivingSchema();
         String table = move.drivingTable();
         boolean tenantScoped;
@@ -436,7 +437,7 @@ public final class DataMoveWorker implements AutoCloseable {
                     tenants = MoveTenants.byLeafBounds(ctx, LeafCatalog.tenantLeaves(ctx, schema, table, null).stream()
                         .map(LeafCatalog.TenantLeaf::tenant).toList());
                 } else {
-                    tenants = MoveTenants.byProbe(ctx, schema, table);
+                    tenants = MoveTenants.byProbe(session, schema, table);
                 }
             }
         } catch (DataAccessException e) {

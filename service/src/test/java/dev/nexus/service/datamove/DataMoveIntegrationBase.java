@@ -223,6 +223,13 @@ abstract class DataMoveIntegrationBase {
             DSL.function("to_regclass", Object.class, DSL.val(relation)))).fetchOne(0, Long.class);
     }
 
+    /** An admin session on {@code dm_test.<table>}, as the worker opens one; the caller closes it. */
+    dev.nexus.service.db.AdminDdlSession adminSession(String table) {
+        return dev.nexus.service.db.AdminDdlSession.open(adminConnection,
+            new dev.nexus.service.db.AdminDdlSession.Settings(WORKER_NAME + "-probe", 0L, "test", "dm_test", table, "none"),
+            false);
+    }
+
     /** How many sessions the server shows under {@code applicationName}. */
     int sessionsNamed(String applicationName) {
         return ctx().fetchCount(table("pg_catalog", "pg_stat_activity"),

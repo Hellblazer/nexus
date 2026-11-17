@@ -96,9 +96,11 @@ class DataMoveWorkerIntegrationTest extends DataMoveIntegrationBase {
         register("m-rls", "tenant_rows", 50, 0);
 
         assertThat(MoveTenants.hasTenantColumn(ctx(), "dm_test", "tenant_rows")).isTrue();
-        assertThat(MoveTenants.byProbe(ctx(), "dm_test", "tenant_rows"))
-            .as("the default tenant, then every other: tokens and the probe")
-            .containsExactly("default", "acme", "globex", "orphan", "sl/ash");
+        try (var session = adminSession("tenant_rows")) {
+            assertThat(MoveTenants.byProbe(session, "dm_test", "tenant_rows"))
+                .as("the default tenant, then every other: tokens and the probe")
+                .containsExactly("default", "acme", "globex", "orphan", "sl/ash");
+        }
         assertThat(ctx().fetchCount(table("nexus", "service_tokens"), TENANT_ID.eq("orphan"))).isZero();
 
         assertThat(worker(installed(), null).runCycle()).isEqualTo(1);
