@@ -828,7 +828,37 @@ async def test_with_the_switch_on_each_filter_call_is_one_event_and_one_log_entr
 async def test_a_reply_that_carries_no_usage_has_a_null_output_token_count() -> None:
     r = _cov(await _run(_fixture(), pool_on(), plan=POOL_PLAN)).repair
     (entry,) = _filter_log(r)
-    assert entry["output_tokens"] is None and entry["reply_chars"] > 0 and entry["supports"], "the stub's check carries no usage"
+    assert entry["output_tokens"] is None and entry["reply_chars"] > 0 and entry["supports"], "the stub's check reports no usage"
+
+
+class _UsageDispatcher(PoolDispatcher):
+    """Reports a real-shaped ``DispatchUsage`` to the ambient sink on each assessment call, as ``claude_dispatch`` does."""
+
+    async def __call__(self, tool: str, args: dict) -> dict:
+        if tool == "operator_check":
+            from nexus.operators.dispatch import DispatchUsage, _ambient_usage_sink  # noqa: PLC0415
+
+            pool = any(i["id"].startswith("p") for i in json.loads(args["items"]))
+            _ambient_usage_sink.get().append(DispatchUsage(
+                model="m", cost_usd=0.01, input_tokens=912 if pool else 5, output_tokens=37 if pool else 3,
+                cache_creation_input_tokens=0, cache_read_input_tokens=0, duration_ms=1, duration_api_ms=1, num_turns=1))
+        return await super().__call__(tool, args)
+
+
+@pytest.mark.asyncio
+async def test_the_calls_usage_reaches_the_filter_log_and_no_other_reader_sees_a_difference() -> None:
+    """nexus-w8d30: the runner's check puts the call's token counts beside the reply, so ``output_tokens`` is real."""
+    def make() -> _UsageDispatcher:
+        return _UsageDispatcher(
+            [_anchor(1, _tok(1)), _anchor(2, _tok(2))],
+            [KEYLESS, _cited(7, _tok(7)), _uncited(8, _tok(8)), _cited(9, _tok(1))], CHECK)
+
+    cov = _cov(await _run(make(), pool_on(), plan=POOL_PLAN))
+    (entry,) = _filter_log(cov.repair)
+    assert entry["output_tokens"] == 37 and entry["outcome"] == "supports"
+    plain = _cov(await _run(_fixture(), pool_on(), plan=POOL_PLAN))
+    assert (cov.repair.pool_keys_kept, cov.repair.pool_keys_rejected, cov.state) == (
+        plain.repair.pool_keys_kept, plain.repair.pool_keys_rejected, plain.state), "usage changes no verdict"
 
 
 @pytest.mark.asyncio

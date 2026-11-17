@@ -4217,11 +4217,18 @@ async def _plan_run_impl(
             )
             raise
         _, result = _step_source(ASSESSMENT_OPERATOR, result)
+        rolled = _rollup_step_usage(usage)
         _record_step(
             step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
-            elapsed_ms=int((time.monotonic() - started) * 1000), ok=True, usage=_rollup_step_usage(usage),
+            elapsed_ms=int((time.monotonic() - started) * 1000), ok=True, usage=rolled,
         )
-        return result
+        counts = {
+            name: n for name in ("input_tokens", "output_tokens")
+            if rolled is not None and isinstance(n := getattr(rolled, name, None), int) and not isinstance(n, bool)
+        }
+        # nexus-w8d30: the call's token counts ride beside the reply so the pool filter can log them. The assessment reads
+        # only ``evidence`` from a reply, so a ``usage`` key changes nothing it reads; the dispatcher's own dict is not touched.
+        return {**result, "usage": counts} if counts else result
 
     async def _coverage_retrieval(tool: str, args: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         """One repair retrieval call (a targeted query or the chunk fetch) through the run's dispatcher,
