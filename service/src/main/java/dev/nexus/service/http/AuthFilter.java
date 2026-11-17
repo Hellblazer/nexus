@@ -237,7 +237,8 @@ public final class AuthFilter extends Filter {
                 // lookup routes, so a sent 404 with nothing thrown logs at INFO; every other failure WARN.
                 Level level = status == 404 && thrown == null ? Level.INFO : Level.WARN;
                 log.atLevel(level).log("event=request_failed method={} path={} status={} exception={} duration_ms={}",
-                    exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
+                    LogText.escapeControl(exchange.getRequestMethod()),
+                    LogText.escapeControl(exchange.getRequestURI().getPath()),
                     status == -1 ? "none" : Integer.toString(status),
                     thrown == null ? "none" : thrown.getClass().getName(),
                     (System.nanoTime() - startNanos) / 1_000_000L);
@@ -292,7 +293,8 @@ public final class AuthFilter extends Filter {
             boolean mintSurface = path.equals("/v1/data-tokens")
                 || path.startsWith("/v1/data-tokens/");
             if (!mintSurface) {
-                log.debug("event=auth_rejected path={} reason=mint_scope_data_path_forbidden", path);
+                log.debug("event=auth_rejected path={} reason=mint_scope_data_path_forbidden",
+                    LogText.escapeControl(path));
                 sendError(exchange, 403, "forbidden");
                 return;
             }
@@ -313,7 +315,7 @@ public final class AuthFilter extends Filter {
             if (!boardCiSurface) {
                 log.debug("event=auth_rejected path={} method={} "
                         + "reason=board_ci_scope_surface_forbidden",
-                        path, exchange.getRequestMethod());
+                        LogText.escapeControl(path), LogText.escapeControl(exchange.getRequestMethod()));
                 sendError(exchange, 403, "forbidden");
                 return;
             }
@@ -341,7 +343,8 @@ public final class AuthFilter extends Filter {
         String claimedTenant = exchange.getRequestHeaders().getFirst(TENANT_HEADER);
         if (claimedTenant != null && !claimedTenant.equals(tenant)) {
             log.debug("event=tenant_header_ignored claimed={} resolved={} path={}",
-                      claimedTenant, tenant, exchange.getRequestURI().getPath());
+                      LogText.escapeControl(claimedTenant), tenant,
+                      LogText.escapeControl(exchange.getRequestURI().getPath()));
         }
 
         // RDR-204 Phase 1 (bead nexus-ft04v.3): THIS is the single per-request
@@ -406,7 +409,7 @@ public final class AuthFilter extends Filter {
 
     private void reject(HttpExchange exchange, String reason) throws IOException {
         log.debug("event=auth_rejected path={} reason={}",
-                  exchange.getRequestURI().getPath(), reason);
+                  LogText.escapeControl(exchange.getRequestURI().getPath()), reason);
         sendError(exchange, 401, "unauthorized");
     }
 

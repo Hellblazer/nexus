@@ -1,0 +1,216 @@
+package dev.nexus.service;
+
+import ch.qos.logback.classic.Level;
+import dev.nexus.service.http.AuthFilter;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.stream.Stream;
+
+import static dev.nexus.service.AuthFilterCorrelationFixture.*;
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * nexus-dngtz.1.8: client text in an engine log line is escaped. The path, the method token and the
+ * claimed tenant header reach the {@link AuthFilter} lines decoded, so a {@code %0A} or a control
+ * character would write a real second line. Split from {@link AuthFilterCorrelationTest} to keep both
+ * under the file-size cap; the server, PG and probe come from {@link AuthFilterCorrelationFixture}.
+ */
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class AuthFilterLogEscapeTest {
+
+    private final AuthFilterCorrelationFixture fx = new AuthFilterCorrelationFixture();
+
+    @BeforeAll
+    void startAll() throws Exception {
+        fx.start();
+    }
+
+    @AfterAll
+    void stopAll() {
+        fx.close();
+    }
+
+    @BeforeEach
+    void resetProbe() {
+        fx.reset();
+    }
+
+    /** Every test ends here: the probe saw every request the client sent, and the MDC was empty. */
+    @AfterEach
+    void everyRequestWasProbedAndLeftTheMdcEmpty() throws Exception {
+        fx.awaitProbe();
+    }
+
+    /**
+     * nexus-dngtz.1.8: getRequestURI().getPath() is the decoded path, so {@code %0A} would write a
+     * real newline and forge a second log line. A missing token ends in 401, which writes both the
+     * DEBUG {@code auth_rejected} line and the WARN {@code request_failed} line. {@code %5C} is a
+     * backslash: it must come out doubled, so typed text cannot pass for an escape.
+     */
+    @Test
+    void aNewlineInTheRequestPathStaysOnOneLineInBothTheRequestFailedAndTheAuthRejectedLines() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        HttpResponse<String> r;
+        try (capture) {
+            r = fx.send("/v1/corr/x%0Aevent=forged%5Cx41", null, null, "cid-escape");
+            fx.awaitProbe();
+        }
+        assertThat(r.statusCode()).isEqualTo(401);
+        var failed = failureLines(capture);
+        assertThat(failed).as("exactly one request_failed event, not two").hasSize(1);
+        var rejected = capture.appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("event=auth_rejected")).toList();
+        assertThat(rejected).as("exactly one auth_rejected event").hasSize(1);
+        for (var e : List.of(failed.get(0), rejected.get(0))) {
+            String text = e.getFormattedMessage();
+            assertThat(text).contains("path=/v1/corr/x\\x0aevent=forged\\\\x41");
+            assertThat(text).doesNotContain("\n").doesNotContain("\r");
+        }
+    }
+
+    /**
+     * Writes one raw HTTP/1.1 request to the shared server and returns its status line. HttpClient
+     * refuses to send a control character in a method or a header value, so these tests bypass it.
+     * The request counts as sent. The server keeps the connection open, so only the status line is
+     * read, with a bounded socket timeout.
+     */
+    private String rawStatusLine(String requestLine, String extraHeaders) throws IOException {
+        try (var socket = new java.net.Socket()) {
+            socket.connect(new InetSocketAddress("127.0.0.1", fx.shared.port()), 5_000);
+            socket.setSoTimeout(10_000);
+            fx.sent.incrementAndGet();
+            socket.getOutputStream().write((requestLine + "\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+                + extraHeaders + "\r\n").getBytes(StandardCharsets.ISO_8859_1));
+            socket.getOutputStream().flush();
+            return new java.io.BufferedReader(new java.io.InputStreamReader(
+                socket.getInputStream(), StandardCharsets.ISO_8859_1)).readLine();
+        }
+    }
+
+    /** One raw method: what is sent, what the line must print, and whether the JDK may refuse it first. */
+    static Stream<org.junit.jupiter.params.provider.Arguments> rawMethods() {
+        return Stream.of(
+            // JDK 25.0.3 passes ESC to getRequestMethod(); 25.0.5 answers 400 itself, before any filter.
+            org.junit.jupiter.params.provider.Arguments.of("GE\u001bT", "GE\\x1bT", true),
+            // Both JDKs pass a tab and a C1 control in the method token.
+            org.junit.jupiter.params.provider.Arguments.of("GE\tT", "GE\\x09T", false),
+            org.junit.jupiter.params.provider.Arguments.of("GE\u009bT", "GE\\x9bT", false));
+    }
+
+    /**
+     * nexus-dngtz.1.8 fix round: the method token is client text too. HttpClient refuses to send a control
+     * character in a method, so this test writes the request line to a raw socket. A method the JDK
+     * refuses with its own 400 never reaches the filters and writes no engine line; every other row must
+     * reach them and print the escaped method.
+     */
+    @ParameterizedTest(name = "{1}")
+    @MethodSource("rawMethods")
+    void aControlCharacterInTheRequestMethodIsEscapedInTheRequestFailedLine(String method, String printed,
+                                                                           boolean jdkMayRefuse) throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        String status;
+        try (capture) {
+            status = rawStatusLine(method + " /v1/corr/x HTTP/1.1", "");
+            if (status != null && status.startsWith("HTTP/1.1 400")) {
+                fx.sent.decrementAndGet();   // refused by the JDK server: the probe filter never ran
+            } else {
+                fx.awaitProbe();
+            }
+        }
+        if (jdkMayRefuse && status != null && status.startsWith("HTTP/1.1 400")) {
+            assertThat(failureLines(capture)).as("a JDK-refused method writes no request_failed line").isEmpty();
+            return;
+        }
+        assertThat(status).as("the request reached the filters").startsWith("HTTP/1.1 401");
+        var failed = failureLines(capture);
+        assertThat(failed).as("exactly one request_failed event").hasSize(1);
+        String text = failed.get(0).getFormattedMessage();
+        assertThat(text).contains("method=" + printed + " path=/v1/corr/x status=401");
+        assertThat(text).doesNotContain(method).doesNotContain("\r").doesNotContain("\n");
+    }
+
+    /**
+     * nexus-dngtz.1.8 fix round: the claimed X-Nexus-Tenant header is client text. A raw socket, because
+     * HttpClient refuses a control character in a value. The JDK server turns a tab into a space and (25.0.5)
+     * refuses C0 and DEL in a value, so the test sends U+009B, which reaches the filter on both.
+     */
+    @Test
+    void aControlCharacterInTheClaimedTenantHeaderIsEscapedInTheTenantHeaderIgnoredLine() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        String status;
+        try (capture) {
+            status = rawStatusLine("GET /v1/corr?i=20 HTTP/1.1",
+                "Authorization: Bearer " + TOK_A + "\r\nX-Nexus-Tenant: other\u009bx\r\n");
+            fx.awaitProbe();
+        }
+        assertThat(status).startsWith("HTTP/1.1 200");
+        var lines = capture.appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("event=tenant_header_ignored")).toList();
+        assertThat(lines).as("exactly one tenant_header_ignored event").hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage()).contains("claimed=other\\x9bx resolved=tenant-a")
+            .doesNotContain("\u009b");
+    }
+
+    /** nexus-dngtz.1.8 fix round: the board-ci surface refusal logs the decoded path. */
+    @Test
+    void aNewlineInThePathOfABoardCiSurfaceRefusalStaysOnOneLine() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        HttpResponse<String> r;
+        try (capture) {
+            r = fx.send("/v1/corr/x%0Aevent=forged", TOK_BOARD_CI, null, "cid-escape-bci");
+            fx.awaitProbe();
+        }
+        assertThat(r.statusCode()).isEqualTo(403);
+        var lines = capture.appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("board_ci_scope_surface_forbidden")).toList();
+        assertThat(lines).as("exactly one board-ci refusal line").hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage()).contains("path=/v1/corr/x\\x0aevent=forged method=GET")
+            .doesNotContain("\n").doesNotContain("\r");
+    }
+
+    /** nexus-dngtz.1.8: the mint-scope 403 line logs the same decoded path, so it is escaped too. */
+    @Test
+    void aNewlineInThePathOfAMintScopeRefusalStaysOnOneLine() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        HttpResponse<String> r;
+        try (capture) {
+            r = fx.send("/v1/corr/x%0Aevent=forged", TOK_MINT, null, "cid-escape-mint");
+            fx.awaitProbe();
+        }
+        assertThat(r.statusCode()).isEqualTo(403);
+        var lines = capture.appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("mint_scope_data_path_forbidden")).toList();
+        assertThat(lines).as("non-vacuity: the refusal line was logged").hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage()).contains("path=/v1/corr/x\\x0aevent=forged")
+            .doesNotContain("\n").doesNotContain("\r");
+    }
+
+    /** nexus-dngtz.1.8 confirmation round: the board-ci refusal line also prints the method, escaped. */
+    @Test
+    void aControlCharacterInTheMethodOfABoardCiSurfaceRefusalIsEscaped() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        String status;
+        try (capture) {
+            status = rawStatusLine("GE\tT /v1/corr/x HTTP/1.1", "Authorization: Bearer " + TOK_BOARD_CI + "\r\n");
+            fx.awaitProbe();
+        }
+        assertThat(status).as("the request reached the filters").startsWith("HTTP/1.1 403");
+        var lines = capture.appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("board_ci_scope_surface_forbidden")).toList();
+        assertThat(lines).as("exactly one board-ci refusal line").hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage()).contains("path=/v1/corr/x method=GE\\x09T")
+            .doesNotContain("\t").doesNotContain("\n").doesNotContain("\r");
+    }
+}

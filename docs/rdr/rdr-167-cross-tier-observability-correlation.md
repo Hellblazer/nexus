@@ -373,7 +373,11 @@ doFilter(exchange, chain):
   missing, non-Bearer or unknown token has no tenant, so the pattern prints `-`.
   Fields: `event=request_failed`, method, path (no query string, as the
   existing `event=auth_rejected` line already logs the path only,
-  `AuthFilter.java:342-343`), status, exception and duration. Where a handler threw
+  `AuthFilter.java:411-412`), status, exception and duration. Method and path are
+  client text, so both are escaped with `LogText.escapeControl`: `getPath()` is the
+  decoded path, so a `%0A` would otherwise write a second line, and the method token
+  can carry control characters. A backslash is doubled and a control character is
+  written as `\xNN`. Where a handler threw
   and no status was sent, `getResponseCode()` is -1 and the client sees a dropped
   connection; the line then says `status=none` and names the exception class, and the
   exception is rethrown unchanged. A handler that sent 200 and then threw while

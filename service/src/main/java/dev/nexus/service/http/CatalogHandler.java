@@ -621,7 +621,7 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     private void sendTumblerGrammarViolation(HttpExchange exchange, String field, String value) throws IOException {
-        log.warn("event=catalog_handler_tumbler_grammar_violation field={} value={}", field, value);
+        log.warn("event=catalog_handler_tumbler_grammar_violation field={} value={}", field, LogText.escapeControl(value));
         HttpUtil.send(exchange, 400,
             "{\"error\":\"tumbler grammar violation\",\"rule\":\"tumbler-grammar\",\"field\":"
             + MAPPER.writeValueAsString(field) + ",\"value\":" + MAPPER.writeValueAsString(value) + "}");
