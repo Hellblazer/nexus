@@ -767,8 +767,14 @@ class AspectExtractionWorker:
         try:
             return list(_extract_aspects_batch(items, manifest_lookup=manifest_lookup))
         except Exception as exc:  # noqa: BLE001 — batch extract is best-effort; every row is routed on its own
-            _log.warning("aspect_worker_batch_extract_raised", row_count=len(rows), exc_info=True)
-            if _self_fault_reason(exc) is None and not _is_retryable(exc):
+            per_row = _self_fault_reason(exc) is None and not _is_retryable(exc)
+            # The traceback only where no row carries it on: otherwise every row's ExtractRaised
+            # reaches the verdict map, which logs it (nexus-bpikw).
+            _log.warning(
+                "aspect_worker_batch_extract_raised", row_count=len(rows),
+                error=type(exc).__name__, exc_info=per_row,
+            )
+            if per_row:
                 # A non-retryable batch failure is terminal for every row it is routed to
                 # (dead-lettered). One bad document must not take its healthy neighbours with
                 # it, so extract each row on its own and let each earn its own verdict. A self
