@@ -43,6 +43,7 @@ from nexus.db.client_identity import client_identity_headers
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
+from nexus.correlation import stamp_request
 
 
 class TokenAdminAuthError(httpx.HTTPStatusError):
@@ -189,7 +190,13 @@ class HttpTokenStore:
             # empty "Bearer " is an illegal header value, so send none and let
             # the endpoint's 401 name the problem.
             headers["Authorization"] = f"Bearer {self._auth_token}"
-        return httpx.Client(base_url=self._base_url, headers=headers, timeout=30.0)
+        # RDR-167 Step 2 (nexus-dngtz.1.3): the headers above are baked, so the correlation id is stamped
+        # per request instead (set to the bound id, removed when none is bound); every build, the rebind
+        # after a lease change included, goes through this method and so carries the hook.
+        return httpx.Client(
+            base_url=self._base_url, headers=headers, timeout=30.0,
+            event_hooks={"request": [stamp_request]},
+        )
 
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused, re-resolve the endpoint from the

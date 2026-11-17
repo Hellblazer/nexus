@@ -48,6 +48,21 @@ def correlation_headers() -> dict[str, str]:
     return {HEADER: cid} if cid is not None else {}
 
 
+def stamp_request(request: Any) -> None:
+    """httpx ``request`` event hook: set :data:`HEADER` to the bound id, or remove it when none is bound.
+
+    For an ``httpx.Client`` that bakes its default headers at construction (the scratch and token
+    stores): the hook runs on every request, so a client built during one call never sends that call's id
+    on a later one, and a client built before a bind still sends the later id. ``request`` is typed ``Any``
+    to keep this module free of an ``httpx`` import.
+    """
+    cid = _CORRELATION_ID.get()
+    if cid is not None:
+        request.headers[HEADER] = cid
+    else:
+        request.headers.pop(HEADER, None)
+
+
 def add_correlation_id(
     logger: Any, method: str, event_dict: MutableMapping[str, Any]
 ) -> MutableMapping[str, Any]:

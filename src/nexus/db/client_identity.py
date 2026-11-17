@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from nexus.correlation import correlation_headers
+
 #: The request header, spelled as the engine (``VectorHandler.CLIENT_VERSION_HEADER``) reads it.
 CLIENT_VERSION_HEADER: str = "X-Nexus-Client-Version"
 
@@ -48,5 +50,8 @@ def client_version() -> str:
 
 
 def client_identity_headers() -> dict[str, str]:
-    """The headers that name this client to the engine."""
-    return {CLIENT_VERSION_HEADER: client_version()}
+    """The headers that name this client to the engine: the version, and ``X-Correlation-ID`` when an id is
+    bound (RDR-167 Step 2). Read per call, so a caller that builds its headers per request sends the id
+    bound at that moment; the two stores that bake headers into their ``httpx.Client`` also carry the
+    ``nexus.correlation.stamp_request`` hook, which overrides what was baked."""
+    return {CLIENT_VERSION_HEADER: client_version(), **correlation_headers()}
