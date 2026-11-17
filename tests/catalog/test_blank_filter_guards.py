@@ -19,6 +19,7 @@ import pytest
 from click.testing import CliRunner
 
 import nexus.doc_sensitivity as ds
+import nexus.db.http_vector_client as hv
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.recovery_bundle import import_bundle
 from nexus.cli import _StorageBackendGuardGroup
@@ -466,3 +467,24 @@ def test_catalog_flags_uri_skips_a_blank_uri_instead_of_raising(uri: str, monkey
 
     monkeypatch.setattr(ds, "sensitive_tumbler_for_uri", _boom)
     assert catalog_flags_uri(uri, "  ") is False
+
+
+# The vector route's SQL builds ``LIKE subtree || '.%'`` unescaped too (vectors-049), and the MCP ``query`` and
+# ``search_metadata_scoped`` tools pass ``subtree`` straight through to it.
+@pytest.mark.parametrize("subtree", ["%", "1.%", "1_0", "1._", " ", "1.", ".1", "1 .2"])
+def test_search_metadata_scoped_refuses_a_subtree_that_is_not_a_tumbler_prefix(
+    monkeypatch: pytest.MonkeyPatch, subtree: str,
+) -> None:
+    posts: list[Any] = []
+    monkeypatch.setattr(hv, "_post", lambda path, body, **kw: posts.append((path, body)) or [])
+    with pytest.raises(BlankFilterError, match="search_metadata_scoped"):
+        hv.HttpVectorClient().search_metadata_scoped("q", ["docs__a__model-ctx__v1"], subtree=subtree, sensitivity="include")
+    assert posts == []
+
+
+def test_search_metadata_scoped_sends_a_tumbler_prefix_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    posts: list[Any] = []
+    monkeypatch.setattr(hv, "_post", lambda path, body, **kw: posts.append((path, body)) or [])
+    hv.HttpVectorClient().search_metadata_scoped("q", ["docs__a__model-ctx__v1"], subtree="1.2", sensitivity="include")
+    hv.HttpVectorClient().search_metadata_scoped("q", ["docs__a__model-ctx__v1"], sensitivity="include")
+    assert [body.get("subtree") for _, body in posts] == ["1.2", None]

@@ -4957,7 +4957,9 @@ class HttpVectorClient:
         if corpus is not None:
             body["corpus"] = corpus
         if subtree is not None:
-            body["subtree"] = subtree
+            # The SQL builds ``LIKE subtree || '.%'`` unescaped, so ``%`` or ``_`` would widen the scope to the tenant.
+            from nexus.errors import require_tumbler_prefix  # noqa: PLC0415 — deferred, as this module's other nexus.errors imports
+            body["subtree"] = require_tumbler_prefix("search_metadata_scoped", subtree)
         if where:
             body["where"] = where
         result = _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)

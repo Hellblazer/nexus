@@ -2855,7 +2855,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         The route guarantees COMPLETENESS, not index acceleration.
 
         *prefix* must be ASCII digits and dots: the engine does not escape ``%`` / ``_`` in the LIKE pattern, so
-        the client refuses anything else (engine-side escape is RDR-241 Phase 2).
+        the client refuses anything else (an engine-side escape is not yet planned; see the nexus-uwggq.1.9 notes).
         """
         result = self._get("/descendants", prefix=_tumbler_prefix("descendants", prefix))
         return result.get("documents", []) if result else []
