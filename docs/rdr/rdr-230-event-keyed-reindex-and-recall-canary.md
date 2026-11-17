@@ -2,7 +2,8 @@
 title: "Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes"
 id: RDR-230
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-17
 priority: medium
 author: Sam
 reviewed-by: self
@@ -1156,7 +1157,7 @@ drops the leftover; show the canary before and after reads within the Gap 1 bar.
 Not created; this list is for planning at acceptance. Each implementation bead
 is test-first: its failing test lands first in the same branch.
 
-**Phase 1: anchor and canary (no REINDEX)**
+**Phase 1 (CLOSED, 2026-11-17): anchor and canary (no REINDEX)**
 
 - P1.1 The anchor: `runComment` and its sanction; write after each build; adopt
   unanchored indexes; read it in the reconciler and the read half. Tests: a build
@@ -1231,7 +1232,7 @@ is test-first: its failing test lands first in the same branch.
 - P1.R Review gate (code-review-expert and substantive-critic; "Ship when the
   canary's tests are green on the substrate and the status fixture round-trips").
 
-**Phase 2: event-keyed REINDEX**
+**Phase 2 (CLOSED, 2026-11-17): event-keyed REINDEX**
 
 - P2.1 Thresholds re-read against P1.5 and P1.6; Sam confirms or changes them
   (Open Question 1).
@@ -1486,3 +1487,4 @@ bulk delete, both on an existing session under an existing lock.
 - 2026-11-06: Wording brought to the reviewed Phase 1 code (nexus-4lnn1.1.7): the seven admitting routes and the single-collection rule for the filtered scoped routes; the 30-day delete's typed per-tenant statement and its tenant source, leaf tenants included; a cross-model re-home deletes the source's ring; the anchor-changed recount trigger; the canary error retry wait.
 - 2026-11-06: Technical Design 7 follows Sam's answer to ask `pci-names-on-status` (option b): `/v1/status` carries the canary counts only, and the per-index list is `canary_indexes` on `GET /v1/admin/chunks-leaves`; adopted-index `size_ratio` is null and `deletes_since_build` counts since adoption.
 - 2026-11-15: Wording brought to the reviewed Phase 2 code (nexus-4lnn1.1.10): the REINDEX `statement_timeout` is the build's 6 hours; `reindexing` reads `in_flight` on `/v1/status`, `unanchored` joins `maintenance`, and `canary_indexes` gains `red_after_reindex` and the `after_reindex` trigger; the red-canary REINDEX needs ten queries (Sam, 2026-11-14) and a 24-hour floor read from the anchor; the size-change recount in Technical Design 2; the leaf rule's row floor; the trigger-label precedence, owed bulk deletes and owed anchors, and the REINDEX phase never failing the pass.
+- 2026-11-17: Closed. Both phases shipped (engine-service-v0.1.194, REINDEX on in the cloud since 2026-11-16 07:13Z); phase-review gate PASSED, T2 `nexus/phase-review-rdr-230-phases-1-2-2026-11-16`. The red_unfixed hold held through the 2026-11-17 backoff expiry and cleared on a green canary (T2 `conexus/reads-2026-11-17-code187-quiet`).
