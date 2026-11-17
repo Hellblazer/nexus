@@ -294,7 +294,8 @@ difference, band only>}`. Absent means today's behaviour, byte for byte.
 
 1. Coverage check: route the collection only if it has chunks and its
    coverage is at least 0.9. Coverage comes from
-   `taxonomy_coverage_counts_<dim>` (`taxonomy-022`): one row of
+   `taxonomy_coverage_counts_<dim>` (`taxonomy-022`, bodies replaced by
+   `taxonomy-023`): one row of
    (has_taxonomy, chunks, unassigned) over the collection's live chunks, the
    same live-chunk filter the plain search applies. It is cached per tenant
    and collection, and dropped by every store, assignment, topic, centroid or
@@ -366,7 +367,7 @@ order (`-13`); the benchmark orders by distance, while callers order by
 | Query vector | Engine query embedder in the search request | Reuse |
 | Centroid ranking | `taxonomy_ann_query_<dim>`, `TaxonomyCentroidRepository.annQuery` | Reuse |
 | Topic-restricted search | `search_topic_scoped_<dim>`, one per dimension (384, 768, 1024; first defined in `catalog-006`, redefined since, latest in `vectors-055`) | Extend: a set of topic ids, three functions |
-| Coverage | `taxonomy_coverage_counts_<dim>` (`taxonomy-022`; `taxonomy_unassigned_chashes_<dim>` pages chashes capped at 1000 with no count) | New, three functions, with a per-collection cache |
+| Coverage | `taxonomy_coverage_counts_<dim>` (`taxonomy-022`, set-based bodies in `taxonomy-023`; `taxonomy_unassigned_chashes_<dim>` pages chashes capped at 1000 with no count) | New, three functions, with a per-collection cache |
 | Multi-collection request and merge | `/v1/vectors/search-per-collection` | Extend with `topic_route` |
 | Capability flag | `GET /version`, `supports_chash_allow` pattern | Reuse the pattern |
 | Benchmark leg | `scripts/bench/taxonomy_ab.py`, `taxonomy_ab2.py` | New (RDR-179 Phase 4.2) |
@@ -523,7 +524,8 @@ them, and needs its own arm method, since the existing direct call
 #### Step 2: Coverage
 
 A cached per-collection coverage ratio from
-`taxonomy_coverage_counts_<dim>` (`taxonomy-022`), dropped as engine step 1
+`taxonomy_coverage_counts_<dim>` (`taxonomy-022`; `taxonomy-023` counts
+set-based), dropped as engine step 1
 says. Tests:
 an orphaned taxonomy (topics, no chunks) is never routed; a half-assigned
 collection reads below 0.9; projection rows do not count as assigned; a
@@ -702,3 +704,7 @@ The design reuses the RDR-156 routes rather than adding an index.
   over live chunks, because `taxonomy_unassigned_chashes_<dim>` returns
   capped pages with no count; the cache is dropped by every engine write
   route that changes a count input, with a ten-minute ceiling for the rest.
+- 2026-11-17: Step 2 count made set-based (`taxonomy-023`, nexus-7fku2.1.2
+  develop red): with no planner statistics on the manifest, `taxonomy-022`'s
+  per-chunk owner probe read the collection's whole manifest per chunk and
+  ran past the 30 s bound; the new bodies count by one aggregation.

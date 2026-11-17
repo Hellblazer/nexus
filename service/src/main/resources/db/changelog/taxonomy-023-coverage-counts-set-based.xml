@@ -12,8 +12,9 @@
     for collection_vector_stats.
     SHAPE. One UNION ALL of three scans over the collection (its chunks at the dimension, its live manifest rows, its
     assignments to its own topics), grouped by (tenant_id, chash), then two FILTERed counts. The only joins are to
-    catalog_documents and topics on their primary keys, so no statistics state makes it quadratic: measured 149 to
-    211 ms at 50k in all 16 combinations of analyzed and unanalyzed tables. Same counts as taxonomy-022: chunks is
+    catalog_documents and topics on their primary keys and no per-row probe remains: measured 149 to 211 ms at 50k
+    chunks (one document, one topic) in all 16 combinations of analyzed and unanalyzed chunks leaf, manifest,
+    documents and assignments with topics. Same counts as taxonomy-022: chunks is
     unique on (tenant_id, collection, chash), so one group per chash is one chunk; a collection with no centroids
     reads (false, 0, 0) without scanning.
     A NEW CHANGESET, not an edit of taxonomy-022: taxonomy-022 is on origin/develop, and a database that applied it

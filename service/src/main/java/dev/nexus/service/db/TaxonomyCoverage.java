@@ -18,7 +18,7 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_COVERAGE_COUNTS_768;
 
 /**
  * RDR-134 Step 2 (bead nexus-7fku2.1.2): the per-collection topic coverage the routed search gates on, read once
- * from {@code nexus.taxonomy_coverage_counts_<dim>} (taxonomy-022) and cached.
+ * from {@code nexus.taxonomy_coverage_counts_<dim>} (taxonomy-022; set-based bodies in taxonomy-023) and cached.
  *
  * <p><b>Coverage</b> is {@code 1 - unassigned / chunks} over the collection's live chunks. A collection is routed only
  * when {@link Counts#routable} holds: it has centroids, it has chunks, and its coverage is at least

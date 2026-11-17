@@ -45,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * nexus-7fku2.1.2 (RDR-134 Step 2): the per-collection coverage count ({@code nexus.taxonomy_coverage_counts_<dim>},
- * taxonomy-022) and the cache that serves it ({@link TaxonomyCoverage}).
+ * taxonomy-022, set-based bodies in taxonomy-023) and the cache that serves it ({@link TaxonomyCoverage}).
  *
  * <p>The function, at each dimension (it exists once per dimension, so a missed dimension is a hole nothing else
  * notices): an orphaned taxonomy (topics and a centroid, zero chunks) has no coverage and is never routed; a half
@@ -324,6 +324,36 @@ class TaxonomyCoverageTest {
         assertThat(read(fresh(), c))
             .as("4 live + l0; t0 and t1 are in neither count (taxonomy_unassigned_chashes would also list t0)")
             .isEqualTo(new Counts(true, 5, 3));
+    }
+
+    /**
+     * One chunk, many rows: taxonomy-023 groups its three arms by chash, so a chunk with two live owners (two documents)
+     * and two assignments to topics of its own collection is still one chunk and one assigned chunk. A count that
+     * joined the arms instead of grouping them would count d0 four times.
+     */
+    @ParameterizedTest(name = "at {0}")
+    @ValueSource(ints = {384, 768, 1024})
+    void aChunkWithTwoLiveOwnersAndTwoOwnTopicAssignments_isCountedOnce(int dim) throws Exception {
+        Coll c = collection(TENANT, dim, "dedup", true);
+        liveChunks(c, "k", 2, 1);
+        seed(dsl -> {
+            long second = dsl.insertInto(TOPICS)
+                .set(TOPICS.TENANT_ID, c.tenant()).set(TOPICS.LABEL, "second topic of " + c.name())
+                .set(TOPICS.COLLECTION, c.name()).set(TOPICS.CREATED_AT, SEED_TS)
+                .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
+            // d0: two live owners, assigned to both of the collection's topics
+            storeChunk(dsl, c, "d0");
+            ownBy(dsl, c, "d0", "live-doc-a-d0-" + c.name(), false);
+            ownBy(dsl, c, "d0", "live-doc-b-d0-" + c.name(), false);
+            assign(dsl, c, c.topic(), "d0");
+            assign(dsl, c, second, "d0");
+            // d1: two live owners, unassigned
+            storeChunk(dsl, c, "d1");
+            ownBy(dsl, c, "d1", "live-doc-a-d1-" + c.name(), false);
+            ownBy(dsl, c, "d1", "live-doc-b-d1-" + c.name(), false);
+        });
+
+        assertThat(read(fresh(), c)).as("k0, k1, d0, d1; k1 and d1 unassigned").isEqualTo(new Counts(true, 4, 2));
     }
 
     @ParameterizedTest(name = "at {0}")
