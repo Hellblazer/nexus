@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-igea9.5 (RDR-252 Phase 1 Step 1): the group record.
+
+    WHY A TABLE AND NOT A TUPLE TEMPLATE. A group lives until it is disbanded and its record stays after that until the
+    name is re-formed, so it needs no retention; a tuple row is clamped to its creation time plus the template's
+    retention however often it is re-sent. The first write is an insert that fails on an existing name, and an update
+    changes the one row in place, under a row lock: neither fits a tuple.
+
+    group_records: one row per (tenant, name). leader is an identity id (a label, not a foreign key: the override
+    exists for a leader whose identity is gone). ends is a UTC instant or NULL (open); ended_at is set once, by a
+    disband, and cleared only by a re-form, which rewrites the row in place. ack_deadline and the values of
+    ack_deadline_by_topic are whole minutes, 5 to 240 (the CHECK is the last line; the group route refuses first).
+    serves lists the base names of the board topics whose reds the group owns. "One live server per topic" is not a
+    constraint of the table: it is enforced by the per-(tenant, base topic) advisory lock of BoardTopicLock, taken by
+    every write that can make a group serve a topic.
+
+    Memberships are not here: identity_memberships (RDR-253) holds them, keyed by group name with no reference to this
+    table, because a group may have members before it has a record.
+
+    Tenant-scoped, ENABLE + FORCE row level security, the tenant_isolation policy of memory-001-baseline.xml. Grants:
+    grants-nexus-svc.xml and grants-nexus-diag.xml iterate every relation in schema nexus at execution time and run after
+    this file.
+
+    DDL only: CREATE TABLE, no data mutation of any existing row, so no DATA EFFECT line applies per
+    scripts/data_effect_lint.py's own scope. Nothing is backfilled and nothing runs at boot. Placed after
+    memory-006-identity-stamp.xml and before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="group-001-1" author="nexus-igea9.5">
+        <comment>nexus.group_records (RDR-252): the permanent group record, one row per (tenant, name). Tenant-scoped, RLS ENABLE+FORCE with memory-001-3's tenant_isolation policy shape.</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.group_records (
+    tenant_id             TEXT        NOT NULL,
+    name                  TEXT        NOT NULL,
+    leader                TEXT        NOT NULL,
+    purpose               TEXT,
+    requested_by          TEXT,
+    formed_at             TIMESTAMPTZ NOT NULL,
+    ends                  TIMESTAMPTZ,
+    ended_at              TIMESTAMPTZ,
+    ack_deadline          INTEGER     NOT NULL DEFAULT 20,
+    ack_deadline_by_topic JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    serves                TEXT[]      NOT NULL DEFAULT '{}',
+    CONSTRAINT group_records_pk PRIMARY KEY (tenant_id, name),
+    CONSTRAINT group_records_name_ck CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+    CONSTRAINT group_records_ack_deadline_ck CHECK (ack_deadline BETWEEN 5 AND 240)
+);
+
+ALTER TABLE nexus.group_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.group_records FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.group_records
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.group_records CASCADE</rollback>
+    </changeSet>
+</databaseChangeLog>

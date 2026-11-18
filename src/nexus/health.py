@@ -4403,6 +4403,9 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # tables exemption in tests/test_health_service_checks.py carries the
     # matching entry.
     "nexus.gc_audit",
+    # nexus.group_records: RDR-252 Step 1 (nexus-igea9.5, group-001-records.xml),
+    # the permanent group record; ENABLE + FORCE + tenant_isolation.
+    "nexus.group_records",
     "nexus.hook_failures",
     # nexus.identity_*: RDR-253 Step 1 (nexus-hczdo.1.1, identity-001-records.xml,
     # identity-002-work-and-indexes.xml), session identities, their aliases,

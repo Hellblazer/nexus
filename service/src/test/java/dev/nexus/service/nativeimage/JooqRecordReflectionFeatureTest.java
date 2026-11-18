@@ -320,7 +320,9 @@ class JooqRecordReflectionFeatureTest {
     // identity_aliases, identity_bindings, identity_sessions, identity_memberships and identity_work, one generated record type each.
     // 148 -> 149: nexus-hczdo.1.2 (RDR-253 Step 2), service-tokens-007-identity-tokens.xml added the table nexus.identity_tokens,
     // one generated record type (IdentityTokensRecord), +1. memory-006-identity-stamp.xml added a column, no record type.
-    private static final int EXPECTED_RECORD_TYPES = 149;
+    // 149 -> 150: nexus-igea9.5 (RDR-252 Step 1), group-001-records.xml added the table nexus.group_records, one generated
+    // record type (GroupRecordsRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 150;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

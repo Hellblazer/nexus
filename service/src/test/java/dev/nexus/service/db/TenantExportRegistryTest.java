@@ -105,7 +105,9 @@ class TenantExportRegistryTest {
             "claude_assisted_remediation_consents",
             // RDR-253 Step 1 (nexus-hczdo.1.1): seats are user-made and the counter must not restart in a restore.
             "identity_counters", "identity_records", "identity_aliases", "identity_bindings", "identity_sessions",
-            "identity_memberships", "identity_work");
+            "identity_memberships", "identity_work",
+            // RDR-252 Step 1 (nexus-igea9.5): the permanent group record.
+            "group_records");
         Set<String> derived = Set.of("taxonomy_centroids", "search_telemetry", "relevance_log",
             "nx_answer_runs", "nx_answer_steps", "chunk_orphaned_at");
         TenantExport.TABLES.forEach(t -> {
