@@ -182,6 +182,8 @@ class Rows:
         started = time.perf_counter()
         try:
             yield self._base.scoped(f"r{len(self.ran):02d}")
+        except pytest.exit.Exception:  # pytest.exit() ends the session, never a row failure (Exit subclasses Exception)
+            raise
         except (Exception, pytest.fail.Exception):  # noqa: BLE001 - kept and reported by check(), so one row's failure does not hide the next; Skipped and KeyboardInterrupt are not caught
             self.failed[name] = f"{traceback.format_exc()}(row ran {time.perf_counter() - started:.2f}s)"
         finally:
@@ -212,7 +214,8 @@ class Rows:
 
     def _report(self, expect: int) -> str:
         body = "\n\n".join(f"ROW {name!r} FAILED:\n{tb}" for name, tb in self.failed.items())
-        return f"{len(self.failed)} of {expect} rows failed: {sorted(self.failed)}\n\n{body}"
+        times = ", ".join(f"{name} {secs:.2f}s" for name, secs in self.seconds.items())
+        return f"{len(self.failed)} of {expect} rows failed: {sorted(self.failed)}\n\n{body}\n\nrow times: {times}"
 
     def check(self, expect: int) -> None:
         if len(self.ran) != expect:
