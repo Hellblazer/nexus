@@ -695,6 +695,35 @@ def uses_dev_channel(cmd: str) -> bool:
     return any(a.partition("=")[0] == DEV_CHANNEL_FLAG for a in args)
 
 
+#: The registry `nameSource` of a name the user set: `-n` at launch or `/rename` (RDR-253 Step 4, nexus-hczdo.1.5).
+USER_NAME_SOURCES = frozenset({"user"})
+
+
+def name_kind(s: dict) -> str:
+    """The one place the `nameSource` rule is stated.
+
+    "none": the session has no name. "user": its `nameSource` says the user set it. "derived": any other
+    `nameSource`, a name Claude Code generated. "unknown": no `nameSource` at all (an older Claude, or Desktop).
+
+    Seats are made only for "user": an unknown source is not taken for the user's. `-n` is passed back on relaunch
+    for "user" and for "unknown" (an older Claude relaunched with `-n` before this, and keeps doing so), never for
+    "derived": passed back, a derived name would become a user-set one and the next restart would make a seat of it."""
+    if not s.get("name"):
+        return "none"
+    source = s.get("nameSource")
+    if source is None:
+        return "unknown"
+    return "user" if source in USER_NAME_SOURCES else "derived"
+
+
+def user_named(s: dict) -> bool:
+    return name_kind(s) == "user"
+
+
+def passes_name(s: dict) -> bool:
+    return name_kind(s) in ("user", "unknown")
+
+
 def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> str:
     """The session's own flags, with --resume set to its CURRENT id (it changes after /clear).
 
@@ -724,9 +753,7 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
         if a.startswith("--name="):
             continue
         out.append(a)
-    # A name Claude Code derived is not passed back: `-n` would make it a user-set name, and the next restart
-    # would then mint a seat from it. An absent nameSource (an older Claude) keeps the old behaviour.
-    if s.get("name") and s.get("nameSource", "user") in USER_NAME_SOURCES:
+    if passes_name(s):  # name_kind says when: a derived name is not passed back
         out += ["-n", s["name"]]
     if not fresh:
         out += ["--resume", s["sessionId"]]
@@ -1728,15 +1755,6 @@ def _nx_binary() -> str:
     return shutil.which("nx") or "nx"
 
 
-#: The registry `nameSource` of a name the user set: `-n` at launch or `/rename`. A name Claude Code generated has
-#: another source, and a Desktop session has none (RDR-253 Step 4, nexus-hczdo.1.5).
-USER_NAME_SOURCES = frozenset({"user"})
-
-
-def user_named(s: dict) -> bool:
-    return bool(s.get("name")) and s.get("nameSource") in USER_NAME_SOURCES
-
-
 def _nx_identity(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([_nx_binary(), "identity", *args], capture_output=True, text=True, timeout=60)
 
@@ -1781,16 +1799,16 @@ def _ensure_seat(s: dict) -> str:
     if not named:
         return ""
     name = s["name"]
-    exists = _nx_identity("show", name)
+    exists = _nx_identity("show", "--", name)   # `--`: a name that starts with "-" is not an option
     if exists.returncode == 0:
         return f"seat {name} exists"
     if "unknown_name" not in exists.stdout + exists.stderr:
         return f"no seat made for {name}: {_identity_error(exists)}"
     if identity.get("kind") == "ephemeral" and identity.get("state") in ("live", "lapsed"):
-        done = _nx_identity("promote", identity["id"], name)
+        done = _nx_identity("promote", "--", identity["id"], name)
         return (f"promoted {identity['id']} to seat {name}" if done.returncode == 0
                 else f"could not promote {identity['id']} to {name}: {_identity_error(done)}")
-    made = _nx_identity("create", name, "--created-by", "restart")
+    made = _nx_identity("create", "--created-by", "restart", "--", name)
     return f"created seat {name}" if made.returncode == 0 else f"could not create seat {name}: {_identity_error(made)}"
 
 

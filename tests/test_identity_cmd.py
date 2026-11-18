@@ -12,6 +12,7 @@ import pytest
 from click.testing import CliRunner, Result
 
 from nexus.commands.identity_cmd import identity_group
+from nexus.identity.bind_client import IdentityApiError
 from nexus.identity.ops import CallerFacts, IdentityEnv
 from nexus.identity.token_file import read_token_file, token_path
 from tests.identity.fake_engine import FakeEngine
@@ -29,10 +30,12 @@ class Box:
         self.procs = FakeProcesses(tmp_path / "claude-sessions", host=HOST)
         self.identity_dir = tmp_path / "config" / "identity"
         self.facts = CallerFacts(claude_pid=0, ancestors=())
+        self.comm: dict[int, str] = {}                 # pid -> command name; every other pid is "claude"
 
     def env(self) -> IdentityEnv:
         return IdentityEnv(client=self.engine, procs=self.procs, identity_dir=self.identity_dir, environ={},
-                           caller=lambda: self.facts, clock=lambda: 1_000.0, client_version="9.9.9-test")
+                           caller=lambda: self.facts, clock=lambda: 1_000.0, client_version="9.9.9-test",
+                           command_name=lambda pid: self.comm.get(pid, "claude"))
 
     def run(self, *args: str) -> Result:
         return CliRunner().invoke(identity_group, list(args), obj={"identity_env": self.env()})
@@ -94,6 +97,57 @@ def test_take_over_from_a_plain_shell_is_refused(box: Box) -> None:
     result = box.run("claim", "alpha", "--take-over")
     assert result.exit_code != 0 and "no Claude" in result.output
     assert binds(box) == []
+
+
+def test_take_over_of_a_seat_the_callers_own_claude_process_holds_is_not_refused_as_an_ancestor(box: Box) -> None:
+    """The holder is the caller's own Claude process, which is in its ancestor chain but is not its own ancestor: the
+    ancestor guard exempts it, and the take-over of what the process already holds goes through."""
+    alpha = box.engine.stage(kind="seat", name="alpha", state="live", generation=2,
+                             holder=box.holder(200, session_id="sid-200"))
+    box.caller(200, ancestors=(200, 150, 1))
+    result = box.run("claim", "alpha", "--take-over")
+    assert result.exit_code == 0 and "ancestor" not in result.output, result.output
+    assert [(b[0], b[1]) for b in binds(box)] == [(alpha, "takeover")]
+    assert box.engine.bound(alpha)["generation"] == 2, "the same process: no new generation"
+
+
+@pytest.mark.parametrize("how", ["stale-file-pid-reused", "stale-file-process-gone", "comm-is-not-claude"])
+def test_a_registry_file_alone_is_not_a_claude_ancestor(box: Box, how: str) -> None:
+    """File presence never decides: a crashed Claude leaves its file behind. The pid must run with the OS start time the
+    file records, and be a claude."""
+    box.running_seat("alpha", 100)
+    box.caller(200)
+    if how == "stale-file-pid-reused":
+        box.procs.procs[200] = "2026-11-17T12:00:00Z"        # the pid now belongs to a later process
+    elif how == "stale-file-process-gone":
+        box.procs.stop(200)                                    # exited: its registry file is left behind
+    else:
+        box.comm[200] = "zsh"
+    result = box.run("claim", "alpha", "--take-over")
+    assert result.exit_code != 0 and "no Claude session ancestor" in result.output
+    assert binds(box) == []
+
+
+def test_a_take_over_that_loses_the_compare_and_set_reads_the_seat_again_once(box: Box) -> None:
+    alpha = box.running_seat("alpha", 100)
+    box.caller(200)
+    real_bind, raced = box.engine.bind, {"n": 0}
+
+    def racing(identity: str, event: str, generation: int, evidence: Any = None) -> Any:
+        if event == "takeover" and raced["n"] == 0:
+            raced["n"] += 1
+            box.engine.records[alpha]["generation"] += 1           # another claimant got in between the read and the bind
+        return real_bind(identity, event, generation, evidence)
+
+    box.engine.bind = racing                                        # type: ignore[method-assign]
+    result = box.run("claim", "alpha", "--take-over")
+    assert result.exit_code == 0, result.output
+    takeovers = [b for b in binds(box) if b[1] == "takeover"]
+    assert [b[2] for b in takeovers] == [1, 2], "the second attempt carries the generation read again"
+    # and a conflict that persists is an error after the second attempt, not a loop
+    box.engine.bind = lambda *a, **k: (_ for _ in ()).throw(IdentityApiError(409, "generation_conflict", "stale", {}))  # type: ignore[method-assign]
+    again = box.run("claim", "alpha", "--take-over")
+    assert again.exit_code != 0 and "generation_conflict" in again.output
 
 
 def test_take_over_needs_the_flag(box: Box) -> None:
@@ -278,6 +332,21 @@ def test_show_with_no_argument_names_the_callers_identity(box: Box) -> None:
     box.facts = CallerFacts(claude_pid=0, ancestors=())
     result = box.run("show")
     assert result.exit_code != 0 and "no identity" in result.output
+
+
+def test_a_delegated_childs_sentinel_token_file_means_no_identity_not_the_parents(box: Box, tmp_path: Path) -> None:
+    """NX_IDENTITY_TOKEN naming a file that holds no identity (the sentinel a dispatch with no delegated identity
+    gets) is "no identity"; the resolver would otherwise fall through to the session id and the Claude ancestor and
+    answer the parent's."""
+    from nexus.identity.ops import own_identity
+
+    box.running_seat("alpha", 100)
+    box.caller(100)
+    box.procs.write_registry(100, 100_000, T1, session_id="sid-100", name="alpha")
+    env = box.env()
+    assert own_identity(env) is not None, "without the variable the process is the seat's"
+    env.environ = {"NX_IDENTITY_TOKEN": str(tmp_path / "identity" / "delegated" / "none")}
+    assert own_identity(env) is None
 
 
 def test_show_all_lists_a_live_process_with_no_binding(box: Box) -> None:

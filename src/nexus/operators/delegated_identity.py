@@ -40,6 +40,9 @@ _log = structlog.get_logger(__name__)
 
 RENEW_INTERVAL_S: float = 60.0
 
+#: How long the dispatcher waits for the ``end`` call on its way out (the call itself is bounded by the client's timeout).
+END_TIMEOUT_S: float = 5.0
+
 
 def resolve_parent(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> str | None:
     """The identity this process dispatches for: the token file ``NX_IDENTITY_TOKEN`` names (this process is itself a
@@ -120,10 +123,24 @@ class DelegatedIdentity:
                 raise
             token, lifetime = token_contract.token_from_response(view)
             path = delegated_token_path(identity_dir, view["id"])
-            write_token_file(path, TokenFile(
-                identity=view["id"], generation=int(view["generation"]), token=token,
-                expires_at=token_contract.expires_at(lifetime, now=clock()), session_id=None, pid=pid,
-                started_at=started_at, proc_start=proc_start, host=procs.host, registry_dir=None))
+            try:
+                write_token_file(path, TokenFile(
+                    identity=view["id"], generation=int(view["generation"]), token=token,
+                    expires_at=token_contract.expires_at(lifetime, now=clock()), session_id=None, pid=pid,
+                    started_at=started_at, proc_start=proc_start, host=procs.host, registry_dir=None))
+            except BaseException:
+                # The identity exists and no child will ever carry its token: end it (best effort) rather than leave
+                # it live until it lapses, and do not leak the client.
+                try:
+                    engine.bind(view["id"], "end", int(view["generation"]))
+                except Exception:  # noqa: BLE001 — best effort; the dispatcher's lapse and the sweep are the backstop
+                    pass
+                if owned:
+                    try:
+                        engine.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                raise
         except (IdentityApiError, IdentityUnavailableError) as exc:
             _log.warning("delegated_identity_not_created", error=f"{type(exc).__name__}: {exc}")
             return None
@@ -152,15 +169,17 @@ class DelegatedIdentity:
         from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableError  # noqa: PLC0415
         from nexus.identity.token_file import TokenFile, read_token_file, write_token_file  # noqa: PLC0415
 
-        with self._lock:
-            if self._closed:
-                return False
-            try:
-                self._client.renew(self.identity, self._generation)
-                if self._lifetime is not None and self._clock() >= self._issued + self._lifetime / 2:
-                    view = self._client.bind(self.identity, "refresh", self._generation, self._evidence)
-                    token, lifetime = token_contract.token_from_response(view)
-                    if token:
+        if self._closed:
+            return False
+        try:
+            self._client.renew(self.identity, self._generation)
+            if self._lifetime is not None and self._clock() >= self._issued + self._lifetime / 2:
+                view = self._client.bind(self.identity, "refresh", self._generation, self._evidence)
+                token, lifetime = token_contract.token_from_response(view)
+                if token:
+                    with self._lock:  # only the file write is under the lock: finish() takes it for an instant, never behind HTTP
+                        if self._closed:
+                            return False
                         current = read_token_file(self.path)
                         base = current if current is not None else TokenFile(
                             identity=self.identity, generation=self._generation, token=None, expires_at=None,
@@ -169,29 +188,32 @@ class DelegatedIdentity:
                         write_token_file(self.path, TokenFile(**{**base.__dict__, "token": token,
                                                                  "expires_at": token_contract.expires_at(lifetime, now=self._clock())}))
                         self._token, self._lifetime, self._issued = token, lifetime, self._clock()
-            except IdentityApiError as exc:
-                if exc.status == 409 or exc.status == 404:
-                    _log.warning("delegated_identity_not_ours", identity=self.identity, code=exc.code)
-                    return False
-                _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))
-            except IdentityUnavailableError as exc:
-                _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))
-            return True
+        except IdentityApiError as exc:
+            if exc.status == 409 or exc.status == 404:
+                _log.warning("delegated_identity_not_ours", identity=self.identity, code=exc.code)
+                return False
+            _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))
+        except IdentityUnavailableError as exc:
+            _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))
+        return True
 
     # ── end ─────────────────────────────────────────────────────────────────
 
-    def finish(self) -> None:
-        """Stop renewing, delete the token file, append ``end``. Runs on every exit and never raises (the dispatch's
-        own outcome is not changed by it). Synchronous, as the dispatcher's other cleanup is: it may run inside a
-        cancelled task."""
-        from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableError  # noqa: PLC0415
+    def close_local(self) -> None:
+        """Stop renewing and delete the token file. Instant and safe on the event loop: no HTTP, and the lock is held
+        only for the flag and the unlink (a renewal in flight cannot rewrite the file afterwards)."""
         from nexus.identity.token_file import delete_token_file  # noqa: PLC0415
 
         if self._task is not None:
             self._task.cancel()
-        with self._lock:  # a renewal tick in flight finishes first and cannot rewrite the file afterwards
+        with self._lock:
             self._closed = True
             delete_token_file(self.path)
+
+    def _end(self) -> None:
+        """Append ``end`` and close an owned client. HTTP, so never on the event loop; never raises."""
+        from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableError  # noqa: PLC0415
+
         try:
             self._client.bind(self.identity, "end", self._generation)
         except (IdentityApiError, IdentityUnavailableError) as exc:
@@ -205,19 +227,53 @@ class DelegatedIdentity:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def finish(self) -> None:
+        """Stop renewing, delete the token file, append ``end``, synchronously (a thread, a test, a callback). Never
+        raises. The dispatcher uses :meth:`afinish`."""
+        self.close_local()
+        self._end()
+
+    async def afinish(self, timeout_s: float | None = None) -> None:
+        """What the dispatcher runs on every exit, on the event loop of an MCP server: the file goes at once, and the
+        ``end`` call runs in a thread the cancellation cannot interrupt (a cancelled dispatch still ends its identity)
+        while this waits at most *timeout_s* (default :data:`END_TIMEOUT_S`) for it: a hung engine stalls nobody
+        else's call, and the thread is bounded by the client's own timeout. Never raises, but a cancellation of the
+        caller during the wait propagates."""
+        self.close_local()
+        done = asyncio.ensure_future(asyncio.to_thread(self._end))
+        try:
+            await asyncio.wait_for(asyncio.shield(done), END_TIMEOUT_S if timeout_s is None else timeout_s)
+        except asyncio.TimeoutError:
+            _log.warning("delegated_identity_end_slow", identity=self.identity)
+
 
 def _finish_late(done: "asyncio.Future[DelegatedIdentity | None]") -> None:
     """End the identity a cancelled :func:`start_delegation` left behind, once its thread has finished."""
     if not done.cancelled() and done.exception() is None and done.result() is not None:
-        done.result().finish()
+        threading.Thread(target=done.result().finish, daemon=True).start()  # off the loop: this may run as it closes
+
+
+def _name_no_identity(env: MutableMapping[str, str]) -> None:
+    """The child gets no delegated identity: name a token file that does not exist in ``NX_IDENTITY_TOKEN``. The
+    variable's presence is what stops the child's hook from binding and what makes ``nx`` send no token (the explicit
+    file is read, found empty, and nothing is sent), so the child never falls back to a walk up to the parent's Claude
+    process and its token file. Without it, that walk is stopped only by the child's own process being recognised as
+    a Claude."""
+    from nexus import config  # noqa: PLC0415
+    from nexus.claude_child_env import apply_delegated_identity  # noqa: PLC0415
+    from nexus.identity.delegated import no_identity_path  # noqa: PLC0415
+    from nexus.identity.token_file import identity_dir  # noqa: PLC0415
+
+    env.update(apply_delegated_identity(env, str(no_identity_path(identity_dir(config.nexus_config_dir())))))
 
 
 async def start_delegation(env: MutableMapping[str, str], *, enabled: bool = True,
                            label: str | None = None) -> DelegatedIdentity | None:
     """The call site in ``claude_dispatch``: begin a delegated identity (off the loop), name its token file in *env*
-    (the child's environment) and start renewing. None, with *env* untouched, when disabled or when there is no
-    parent identity."""
+    (the child's environment) and start renewing. When there is none (disabled, no parent identity, or the engine
+    refused) the child's ``NX_IDENTITY_TOKEN`` names a file that does not exist, so it acts as no identity."""
     if not enabled:
+        _name_no_identity(env)
         return None
     # The create runs in a thread that cannot be interrupted. A cancellation that lands while it runs must not leave
     # the identity it makes live and its token file on disk: the caller never receives the handle, so nothing else
@@ -232,9 +288,10 @@ async def start_delegation(env: MutableMapping[str, str], *, enabled: bool = Tru
             begun.add_done_callback(_finish_late)
         else:
             if late is not None:
-                late.finish()
+                await late.afinish()
         raise
     if delegated is None:
+        _name_no_identity(env)
         return None
     from nexus.claude_child_env import apply_delegated_identity  # noqa: PLC0415
 

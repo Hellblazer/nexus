@@ -147,7 +147,7 @@ def _run(result: IdentityResult, session_id: str, source: str, env: Mapping[str,
 def _bind_and_sweep(result: IdentityResult, engine: Any, facts: LaunchFacts, source: str, env: Mapping[str, str],
                     procs: Processes | Any, directory: Path, host: str, claude_pid: int, proc_start: str | None,
                     session_id: str, clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
-    from nexus.identity.delegated import clean_delegated_files, sweep_delegated  # noqa: PLC0415
+    from nexus.identity.delegated import clean_delegated_files, clean_delegated_tmp, sweep_delegated  # noqa: PLC0415
     from nexus.identity.pending import Pending, write_pending  # noqa: PLC0415
     from nexus.identity.sweep import clean_local_files, sweep_host  # noqa: PLC0415
 
@@ -187,6 +187,7 @@ def _bind_and_sweep(result: IdentityResult, engine: Any, facts: LaunchFacts, sou
             sweep_delegated(engine, procs, report.delegated_views, host=host, report=report)
         if not report.forbidden:
             clean_delegated_files(directory, procs, host=host)
+            clean_delegated_tmp(directory)
     except Exception as exc:  # noqa: BLE001 — the sweep is housekeeping; the bind above already stands
         _log().warning("identity_sweep_failed", error=f"{type(exc).__name__}: {exc}")
 

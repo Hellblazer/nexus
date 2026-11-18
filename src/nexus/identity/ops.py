@@ -38,10 +38,11 @@ from nexus.identity.holder import (
     normalise_instant, read_registry_entry,
 )
 from nexus.identity.sweep import sweep_host
-from nexus.identity.token_file import TokenFile, token_path, update_token_file
+from nexus.identity.token_file import TokenFile, read_token_file, token_path, update_token_file
 
 _ID = re.compile(r"^i[0-9]+$")
 SDK_ENTRYPOINT = "sdk-cli"
+NX_IDENTITY_TOKEN_ENV = "NX_IDENTITY_TOKEN"
 RECENT_ROWS = 5
 
 
@@ -70,6 +71,12 @@ def real_caller_facts() -> CallerFacts:
     return CallerFacts(claude_pid=find_immediate_claude_pid(), ancestors=tuple(chain))
 
 
+def _real_command_name(pid: int) -> str:
+    from nexus.session import _command_name_of  # noqa: PLC0415 — deferred: heavy import
+
+    return _command_name_of(pid)
+
+
 @dataclass
 class IdentityEnv:
     client: Any
@@ -79,6 +86,8 @@ class IdentityEnv:
     caller: Callable[[], CallerFacts]
     clock: Callable[[], float] = time.time
     client_version: str | None = None
+    #: the command name of a pid (``claude`` for a Claude process); "" when unknown. The real one reads the process table.
+    command_name: Callable[[int], str] | None = None
 
     @property
     def host(self) -> str:
@@ -100,7 +109,8 @@ class IdentityEnv:
         except Exception:  # noqa: BLE001 — a development tree has no installed distribution
             client_version = None
         return cls(client=client, procs=Processes(), identity_dir=identity_dir(config.nexus_config_dir()),
-                   environ=os.environ, caller=real_caller_facts, client_version=client_version)
+                   environ=os.environ, caller=real_caller_facts, client_version=client_version,
+                   command_name=_real_command_name)
 
 
 # ── engine access ───────────────────────────────────────────────────────────
@@ -184,6 +194,11 @@ def own_identity(env: IdentityEnv) -> dict[str, Any] | None:
     session id, the process's token file), else the engine's binding for that process."""
     from nexus.identity.resolver import IdentityConflictError, resolve_identity  # noqa: PLC0415
 
+    explicit = (env.environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip()
+    if explicit and read_token_file(Path(explicit)) is None:
+        # A delegated child whose token file names no identity (a sentinel: its dispatcher made none) holds none. The
+        # resolver would fall through to the session id and the Claude ancestor's token file and answer the PARENT's.
+        return None
     facts = env.caller()
     claude_pid = facts.claude_pid if facts.claude_pid > 0 else None
     try:
@@ -399,35 +414,65 @@ def release(env: IdentityEnv, ref: str) -> list[str]:
 # ── claim ───────────────────────────────────────────────────────────────────
 
 
+def _claude_ancestor(env: IdentityEnv, facts: CallerFacts) -> Any:
+    """The registry entry of the caller's nearest Claude ancestor, verified to be a running Claude process: file
+    presence alone never decides (RDR "A holder that no longer exists"; a crashed Claude leaves its file behind, and
+    ``find_immediate_claude_pid`` falls back to the shell itself). The entry must name this pid's ``startedAt`` and
+    ``procStart``, the pid must run with that OS start time (the holder check's registry legs, reused), and its command
+    must be ``claude``. None when any of that fails."""
+    entry = read_registry_entry(facts.claude_pid, env.procs.sessions_dir) if facts.claude_pid > 0 else None
+    if entry is None or entry.started_at is None:
+        return None
+    verdict = check_holder({"host": env.host, "pid": facts.claude_pid, "started_at": entry.started_at,
+                            "proc_start": entry.proc_start}, procs=env.procs, host=env.host)
+    if verdict.state == GONE:
+        return None
+    if env.command_name is not None:
+        command = env.command_name(facts.claude_pid).lower()
+        if command and not command.startswith("claude"):
+            return None
+    return entry
+
+
 def claim(env: IdentityEnv, ref: str) -> list[str]:
     """``claim <seat> --take-over``: supersede the seat's holder with the caller's own Claude process."""
     facts = env.caller()
-    entry = read_registry_entry(facts.claude_pid, env.procs.sessions_dir) if facts.claude_pid > 0 else None
-    if entry is None or entry.started_at is None:
+    entry = _claude_ancestor(env, facts)
+    if entry is None:
         raise IdentityCommandError(
-            "no Claude session ancestor with a registry file: take-over binds the Claude process it runs under, so run it "
-            "from inside an interactive Claude Code session (a plain shell has none)")
+            "no Claude session ancestor: take-over binds the Claude process it runs under, so run it from inside an "
+            "interactive Claude Code session (a plain shell has none, and a registry file left by a Claude that has "
+            "exited, or by a pid since reused, is not one)")
     if entry.entrypoint not in INTERACTIVE_ENTRYPOINTS:
         raise IdentityCommandError(
             f"take-over runs only from an interactive Claude session (entrypoint cli or claude-desktop); this Claude "
             f"process has entrypoint {entry.entrypoint!r} (a claude -p child is sdk-cli)")
-    view = find(env, ref)
-    name = _name(view)
-    if view.get("kind") != "seat":
-        raise IdentityCommandError(f"{view['id']} is {view.get('kind')}, not a seat: only a seat is claimed")
-    holder = view.get("holder") or {}
-    holder_pid = holder.get("pid")
-    if (view.get("state") in ("live", "lapsed") and holder.get("host") == env.host and holder_pid != facts.claude_pid
-            and holder_pid in facts.ancestors):
-        raise IdentityCommandError(
-            f"{name} is held by pid {holder_pid}, an ancestor of this process: a child cannot take its parent's seat")
-    previous = _previous(env, facts.claude_pid, entry.started_at)
     proc_start = normalise_instant(env.procs.os_start(facts.claude_pid))
     evidence = evidence_body(
         session_id=entry.session_id, host=env.host, pid=facts.claude_pid, started_at=entry.started_at,
         proc_start=proc_start, pane=(env.environ.get("TMUX_PANE") or "").strip() or entry.tmux,
         client_version=env.client_version, lease="unleased" if entry.desktop else "leased")
-    bound = _call(env.client.bind, view["id"], "takeover", int(view["generation"]), evidence)
+    for attempt in (1, 2):
+        view = find(env, ref)
+        name = _name(view)
+        if view.get("kind") != "seat":
+            raise IdentityCommandError(f"{view['id']} is {view.get('kind')}, not a seat: only a seat is claimed")
+        holder = view.get("holder") or {}
+        holder_pid = holder.get("pid")
+        if (view.get("state") in ("live", "lapsed") and holder.get("host") == env.host
+                and holder_pid != facts.claude_pid and holder_pid in facts.ancestors):
+            raise IdentityCommandError(
+                f"{name} is held by pid {holder_pid}, an ancestor of this process: a child cannot take its parent's seat")
+        previous = _previous(env, facts.claude_pid, entry.started_at)
+        try:
+            bound = env.client.bind(view["id"], "takeover", int(view["generation"]), evidence)
+        except IdentityApiError as exc:
+            if exc.status == 409 and exc.code == "generation_conflict" and attempt == 1:
+                continue  # the seat moved between the read and the bind: read it again, once (as the hook's bind does)
+            raise IdentityCommandError(f"{exc.code or exc.status}: {exc.message}") from exc
+        except IdentityUnavailableError as exc:
+            raise IdentityCommandError(f"the engine is not answering ({exc})") from exc
+        break
     token, lifetime = token_contract.token_from_response(bound)
     _write_token(env, bound, token, lifetime, entry, proc_start)
     lines = [f"took over {name} ({view['id']}) at generation {bound['generation']}: pid {facts.claude_pid} holds it now"]

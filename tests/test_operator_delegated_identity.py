@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -23,7 +24,8 @@ import pytest
 from nexus.hooks.identity_bind import bind_at_session_start
 from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError
 from nexus.identity.delegated import (
-    check_dispatcher, clean_delegated_files, delegated_dir, delegated_token_path, sweep_delegated,
+    check_dispatcher, clean_delegated_files, clean_delegated_tmp, delegated_dir, delegated_token_path,
+    no_identity_path, sweep_delegated,
 )
 from nexus.identity.holder import GONE, OTHER_HOST, RUNNING, epoch_seconds
 from nexus.identity.sweep import sweep_host
@@ -186,6 +188,68 @@ async def test_the_renewal_task_renews_while_the_child_runs_and_stops_at_finish(
     assert len(box.engine.ids_called("renew")) == after
 
 
+def test_a_token_file_that_cannot_be_written_ends_the_identity_it_just_created(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The create succeeded and no child will ever carry its token: it must not stay live until it lapses, and the
+    client begin opened is closed."""
+    box.as_child_of_claude_100(monkeypatch)
+
+    def disk_full(*a: Any, **k: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("nexus.identity.token_file.write_token_file", disk_full)
+    assert DelegatedIdentity.begin(environ={}) is None
+    (delegated,) = box.delegated_ids()
+    assert box.events(delegated) == ["start", "end"] and box.engine.bound(delegated)["state"] == "ended"
+    assert ("close", ()) in box.engine.calls and not delegated_token_path(box.identity_dir, delegated).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_hung_engine_neither_stalls_the_event_loop_nor_the_dispatchs_exit(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """finish ran its HTTP and a lock wait on the nx-mcp event loop. Now the file goes at once, `end` runs in a thread, and
+    the caller waits for it only up to a bound: other MCP calls keep being served, and `end` still lands when it can."""
+    box.as_child_of_claude_100(monkeypatch)
+    handle = DelegatedIdentity.begin(environ={})
+    gate, real_bind = threading.Event(), box.engine.bind
+
+    def hung(identity: str, event: str, *a: Any, **k: Any) -> Any:
+        if event == "end":
+            gate.wait(10)
+        return real_bind(identity, event, *a, **k)
+
+    box.engine.bind = hung                                                  # type: ignore[method-assign]
+    ticks = {"n": 0}
+
+    async def ticker() -> None:
+        while True:
+            await asyncio.sleep(0.005)
+            ticks["n"] += 1
+
+    other_call = asyncio.ensure_future(ticker())
+    started = time.monotonic()
+    await handle.afinish(timeout_s=0.2)
+    waited = time.monotonic() - started
+    assert waited < 2.0, "the wait is bounded"
+    assert ticks["n"] >= 10, "the loop served other work while the engine hung"
+    assert not handle.path.exists(), "the token file is gone before the engine is asked"
+    assert box.events(handle.identity) == ["start"]
+    gate.set()                                                               # the engine answers: `end` still lands
+    for _ in range(200):
+        if box.events(handle.identity) == ["start", "end"]:
+            break
+        await asyncio.sleep(0.01)
+    other_call.cancel()
+    assert box.events(handle.identity) == ["start", "end"]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_granting_dispatch_whose_create_is_refused_runs_with_the_sentinel(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    box.as_child_of_claude_100(monkeypatch)
+    box.engine.refuse["create_delegated"] = IdentityApiError(403, "forbidden", "no", {})
+    seen = await _dispatch(box, spawn=_ok)
+    assert "raised" not in seen and seen["token_env"] == str(no_identity_path(box.identity_dir))
+    assert box.delegated_ids() == [] and not seen["file_at_spawn"]
+
+
 # ── start_delegation: the child's environment ───────────────────────────────
 
 
@@ -203,12 +267,44 @@ async def test_start_delegation_names_the_childs_own_token_file_in_place_of_the_
 
 
 @pytest.mark.asyncio
-async def test_a_dispatch_that_grants_no_tools_or_has_no_parent_is_left_alone(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
-    env = {"PATH": "/usr/bin"}
-    assert await start_delegation(env, enabled=True) is None and env == {"PATH": "/usr/bin"}, "no parent identity"
+async def test_a_child_with_no_delegated_identity_names_a_token_file_that_does_not_exist(
+        box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No parent identity, a tool-free dispatch, or an engine that refuses: the child's NX_IDENTITY_TOKEN names the
+    sentinel, so it acts as no identity and never falls back to a walk up to the parent's Claude and its token file
+    (the explicit token file is read first; its hook binds nothing; ``nx`` sends no token)."""
+    sentinel = str(no_identity_path(box.identity_dir))
+    env = {"PATH": "/usr/bin", "NX_IDENTITY_TOKEN": "/parent/i4.token"}
+    assert await start_delegation(env, enabled=True) is None and env["NX_IDENTITY_TOKEN"] == sentinel, "no parent identity"
     box.as_child_of_claude_100(monkeypatch)
-    assert await start_delegation(env, enabled=False) is None and env == {"PATH": "/usr/bin"}, "a tool-free child cannot reach nexus"
-    assert box.delegated_ids() == []
+    env = {"PATH": "/usr/bin"}
+    assert await start_delegation(env, enabled=False) is None and env["NX_IDENTITY_TOKEN"] == sentinel, "a tool-free child"
+    box.engine.refuse["create_delegated"] = IdentityApiError(403, "forbidden", "no", {})
+    env = {"PATH": "/usr/bin"}
+    assert await start_delegation(env, enabled=True) is None and env["NX_IDENTITY_TOKEN"] == sentinel, "a refused create"
+    assert not Path(sentinel).exists() and box.delegated_ids() == [] and env["PATH"] == "/usr/bin"
+    # what the sentinel means to the code that reads it: no token file, so nothing to send and nothing to resolve
+    assert read_token_file(Path(sentinel)) is None
+
+
+def test_the_sentinel_stops_the_ancestor_walk_for_the_token_header_and_the_hook(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the parent's Claude token file in reach (a child whose own process is not recognised as a Claude), a child
+    that names the sentinel sends no token and the hook binds nothing: neither falls back to the ancestor's file."""
+    from nexus.identity import token_header
+
+    box.as_child_of_claude_100(monkeypatch)                                    # the parent's token file exists
+    monkeypatch.setattr(token_header, "_ancestor", lambda: (100, box.identity_dir))
+    token_header.reset_for_tests()
+    monkeypatch.delenv("NX_IDENTITY_TOKEN", raising=False)
+    monkeypatch.setattr(token_header, "ancestor_token_path", lambda d, pid, sessions_dir=None: token_path(d, pid, 100_000))
+    assert token_header.current() is not None, "without the sentinel the walk finds the parent's token"
+    monkeypatch.setenv("NX_IDENTITY_TOKEN", str(no_identity_path(box.identity_dir)))
+    token_header.reset_for_tests()
+    assert token_header.current() is None, "with it, no token is sent"
+    box.procs.start(500, T1, session_id="sid-500", started_at=500_000)
+    result = bind_at_session_start("sid-500", "startup", env={"NX_IDENTITY_TOKEN": str(no_identity_path(box.identity_dir))},
+                                   claude_pid=500, procs=box.procs, client=box.engine, config_dir=box.config)
+    assert result.outcome is None and box.engine.calls == []
+    token_header.reset_for_tests()
 
 
 @pytest.mark.asyncio
@@ -233,7 +329,7 @@ async def test_a_cancellation_while_the_identity_is_being_created_still_ends_it(
         await task
     (delegated,) = box.delegated_ids()
     assert box.events(delegated) == ["start", "end"] and box.engine.bound(delegated)["state"] == "ended"
-    assert not delegated_token_path(box.identity_dir, delegated).exists() and env == {}
+    assert not delegated_token_path(box.identity_dir, delegated).exists() and "NX_IDENTITY_TOKEN" not in env
 
 
 # ── claude_dispatch: every exit path ────────────────────────────────────────
@@ -368,7 +464,8 @@ async def test_a_tool_free_dispatch_gets_no_delegated_identity_and_never_the_par
     box.as_child_of_claude_100(monkeypatch)
     monkeypatch.setenv("NX_IDENTITY_TOKEN", "/parent/i4.token")
     seen = await _dispatch(box, spawn=_ok, tools=None)
-    assert "raised" not in seen and seen["token_env"] is None, "the parent's token is stripped from every claude child"
+    assert "raised" not in seen and seen["token_env"] == str(no_identity_path(box.identity_dir)), \
+        "the parent's token is replaced by the sentinel: a child with no delegated identity acts as none"
     assert box.delegated_ids() == [] and box.engine.ids_called("create_delegated") == []
 
 
@@ -440,6 +537,41 @@ def test_the_hooks_cleanup_removes_a_dead_dispatchers_token_file_and_only_that(b
     assert delegated_token_path(box.identity_dir, alive).exists() and unreadable.exists()
     assert not delegated_token_path(box.identity_dir, dead).exists()
     assert clean_delegated_files(box.identity_dir / "missing", box.procs, host=HOST) == []
+
+
+def test_stale_temp_files_in_the_delegated_directory_are_removed_and_fresh_ones_are_not(box: Machine) -> None:
+    """A crashed dispatcher's half-written token file (`<name>.<pid>.<uuid>.tmp`): removed by the top-level rule's age
+    (older than 10 minutes), so the file a live dispatcher is writing this instant is never touched."""
+    directory = delegated_dir(box.identity_dir)
+    directory.mkdir(parents=True)
+    stale, fresh, other = directory / "i5.token.123.abc.tmp", directory / "i6.token.124.def.tmp", directory / "i7.token"
+    for path in (stale, fresh, other):
+        path.write_text("x", encoding="utf-8")
+    old = time.time() - 700
+    os.utime(stale, (old, old))
+    os.utime(other, (old, old))
+    assert clean_delegated_tmp(box.identity_dir) == [stale.name]
+    assert not stale.exists() and fresh.exists() and other.exists(), "only a stale temp file goes"
+    assert clean_delegated_tmp(box.identity_dir / "missing") == []
+
+
+def test_the_hook_removes_stale_delegated_temp_files_but_not_after_a_403(box: Machine) -> None:
+    box.procs.start(500, T1, session_id="sid-500", name="", started_at=500_000)
+    box.procs.procs[100] = T0
+    directory = delegated_dir(box.identity_dir)
+    directory.mkdir(parents=True)
+    stale = directory / "i5.token.1.abc.tmp"
+    stale.write_text("x", encoding="utf-8")
+    os.utime(stale, (time.time() - 700, time.time() - 700))
+    dead = _delegated(box, 301)
+    hook = lambda: bind_at_session_start("sid-500", "startup", env={}, claude_pid=500, procs=box.procs, client=box.engine,  # noqa: E731
+                                         config_dir=box.config, clock=lambda: 1_000.0, sleep=lambda s: None)
+    _forbid_gone(box)
+    hook()
+    assert stale.exists() and delegated_token_path(box.identity_dir, dead).exists(), "a sweep that ended on a 403 cleans nothing"
+    del box.engine.gone                                                       # the real route again
+    hook()
+    assert not stale.exists() and not delegated_token_path(box.identity_dir, dead).exists()
 
 
 def test_the_session_start_hook_runs_both_for_a_dead_dispatcher(box: Machine, tmp_path: Path) -> None:

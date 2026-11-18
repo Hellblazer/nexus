@@ -1937,7 +1937,7 @@ class CliBackend:
             # dispatch never minted (tool-free, or a failed mint).
             _close_dispatch_session(_minted_session_id, _minted_session_token)
             if _delegated is not None:  # RDR-253 Step 4: stop renewing, delete its token file, append `end`
-                _delegated.finish()
+                await _delegated.afinish()
             # nexus-vzy2v: delete the temp prompt file on every path -- success,
             # harness failure, timeout-kill, or a spawn failure that raised
             # before any of the above ran. Best-effort: an already-completed

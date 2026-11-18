@@ -62,6 +62,11 @@ class FakeNx:
         if self.down:
             return out(1, "Error: the engine is not answering (ConnectError)")
         verb, rest = args[0], list(args[1:])
+        if "--" in rest:                                          # click reads what follows `--` as arguments, never options
+            before, after = rest[:rest.index("--")], rest[rest.index("--") + 1:]
+            rest = before + after
+        elif verb in ("promote", "create") or (verb == "show" and rest[0] != "--session"):
+            raise AssertionError(f"a name goes after `--`, so a leading '-' is not an option: {args}")
         if verb == "show" and rest[0] == "--session":
             if self.show_returns_garbage:
                 return out(0, "not json")
@@ -75,11 +80,12 @@ class FakeNx:
             self.seats[name] = ident
             return out(0, f"{ident} is now the seat {name}")
         if verb == "create":
-            assert rest[1:] == ["--created-by", "restart"], rest
+            assert rest[:2] == ["--created-by", "restart"], rest
+            name = rest[2]
             ident = f"i{len(self.identities) + 1}"
-            self.identities[ident] = {"id": ident, "kind": "seat", "state": "unheld", "name": rest[0], "created_by": "restart"}
-            self.seats[rest[0]] = ident
-            return out(0, f"created seat {rest[0]} ({ident}), created by restart")
+            self.identities[ident] = {"id": ident, "kind": "seat", "state": "unheld", "name": name, "created_by": "restart"}
+            self.seats[name] = ident
+            return out(0, f"created seat {name} ({ident}), created by restart")
         raise AssertionError(args)
 
 
@@ -127,6 +133,35 @@ def test_a_name_the_user_did_not_set_gets_no_seat(crs, nx, source) -> None:
         s["nameSource"] = source
     assert crs.ensure_seat(s) == "" and verbs(nx) == ["show"], "only the session's own identity is looked up"
     assert crs.ensure_seat(session(name="")) == "" and "create" not in verbs(nx), "no name at all"
+
+
+def test_a_name_with_a_leading_dash_reaches_nx_as_an_argument_not_an_option(crs, nx) -> None:
+    nx.ephemeral("sid-1")
+    assert crs.ensure_seat(session(name="-rf")) == "promoted i1 to seat -rf"
+    for call in nx.calls:
+        if "-rf" in call:
+            assert call[call.index("-rf") - 1] in ("--", "i1"), call
+    assert ("show", "--", "-rf") in nx.calls and ("promote", "--", "i1", "-rf") in nx.calls
+    nx.identities.clear(), nx.seats.clear(), nx.sessions.clear()
+    assert crs.ensure_seat(session(name="-x")) == "created seat -x"
+    assert ("create", "--created-by", "restart", "--", "-x") in nx.calls
+
+
+@pytest.mark.parametrize(("source", "kind", "seat", "passed"),
+                         [("user", "user", True, True), ("generated", "derived", False, False),
+                          (None, "unknown", False, True), ("user", "none", False, False)],
+                         ids=["user", "derived", "unknown-older-claude", "no-name"])
+def test_the_name_source_rule_is_stated_once_and_both_decisions_follow_it(crs, source, kind, seat, passed) -> None:
+    """Seats only for a user-set name (an unknown source is not taken for one); `-n` is passed back for a user-set name
+    and for an unknown source (older Claude behaviour), never for a derived one."""
+    s = session(name="" if kind == "none" else "tamsin")
+    if source is None:
+        del s["nameSource"]
+    else:
+        s["nameSource"] = source
+    assert crs.name_kind(s) == kind
+    assert (crs.user_named(s), crs.passes_name(s)) == (seat, passed)
+    assert (" -n tamsin" in crs.relaunch_command({**s, "argv": "claude", "cwd": "/w"})) is passed
 
 
 def test_a_session_holding_another_seat_makes_no_seat_for_its_display_name_and_the_relaunch_carries_nx_seat(crs, nx) -> None:

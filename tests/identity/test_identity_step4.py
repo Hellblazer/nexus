@@ -215,7 +215,7 @@ def row_a_delegated_child_writes_its_own_threads_entry_reads_its_parents_and_is_
         store.put("threads", world.q("child"), _entry(handle.identity, "sc"))        # its own entry
         with pytest.raises(Exception) as refused:                                  # the parent's: not its to write
             store.put("threads", world.q("parent"), _entry(parent, "sc"))
-        assert "not_owner" in str(refused.value) or "403" in str(refused.value)
+        assert "403" in str(refused.value) and "not_owner" in str(refused.value), str(refused.value)
     handle.finish()
 
 

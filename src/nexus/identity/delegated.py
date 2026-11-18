@@ -19,6 +19,7 @@ and hands their views back in ``SweepReport.delegated_views``); :func:`sweep_del
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,12 @@ def delegated_dir(identity_dir: Path) -> Path:
 
 def delegated_token_path(identity_dir: Path, identity: str) -> Path:
     return delegated_dir(identity_dir) / f"{identity}.token"
+
+
+def no_identity_path(identity_dir: Path) -> Path:
+    """The token file a child names when its dispatcher made it no delegated identity: it never exists. The child's
+    ``NX_IDENTITY_TOKEN`` then reads as "this process is a delegated child (bind nothing) with no identity"."""
+    return delegated_dir(identity_dir) / "none"
 
 
 def check_dispatcher(holder: Mapping[str, Any], *, procs: Processes | Any, host: str | None = None) -> Verdict:
@@ -98,6 +105,27 @@ def sweep_delegated(client: Any, procs: Processes | Any, views: list[Mapping[str
         if answer.get("recorded"):
             recorded.append(view["id"])
     return recorded
+
+
+def clean_delegated_tmp(identity_dir: Path, *, now: float | None = None) -> list[str]:
+    """Delete the stale temp files in the delegated directory (a crashed dispatcher's half-written token file), by the
+    rule of the top-level :func:`~nexus.identity.sweep.clean_local_files`: older than ``TMP_MAX_AGE_S`` by mtime, so a
+    file a live dispatcher is writing this instant is never touched. Returns the names removed."""
+    from nexus.identity.sweep import TMP_MAX_AGE_S  # noqa: PLC0415 — sweep imports the token modules; deferred for the hook's import cost
+
+    removed: list[str] = []
+    moment = time.time() if now is None else now
+    try:
+        for tmp in Path(delegated_dir(identity_dir)).glob("*.tmp"):
+            try:
+                if moment - tmp.stat().st_mtime > TMP_MAX_AGE_S:
+                    tmp.unlink()
+                    removed.append(tmp.name)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
 
 
 def clean_delegated_files(identity_dir: Path, procs: Processes | Any, *, host: str) -> list[str]:
