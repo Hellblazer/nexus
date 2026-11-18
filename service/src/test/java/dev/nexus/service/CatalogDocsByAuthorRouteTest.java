@@ -64,7 +64,13 @@ class CatalogDocsByAuthorRouteTest extends Rdr241RouteTestBase {
     }
 
     @Test
-    void nonAsciiLettersFoldAsUnicodeDefaultLowercase_withNoNormalization() throws Exception {
+    void theClusterThisClassRunsOnHasAUnicodeCtype_soTheFoldTestBelowIsNotTheCCtypeCase() throws Exception {
+        // The C-ctype cluster the local bundle runs is CatalogDocsByAuthorFoldCtypeCTest's; this class is the other locale.
+        assertThat(databaseCtype()).isNotIn("C", "POSIX");
+    }
+
+    @Test
+    void nonAsciiLettersFoldAsUnicodeSimpleLowercase_withNoNormalization() throws Exception {
         String composed = "Müller";            // u with diaeresis, one code point
         String decomposed = "Müller";         // u + combining diaeresis
         insert(Row.of("6.1.1").author("José MÜLLER"), Row.of("6.1.2").author(composed),

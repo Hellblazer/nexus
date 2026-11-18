@@ -56,9 +56,14 @@ abstract class Rdr241RouteTestBase {
     /** Creates the role with {@code PgContainerHelper.bootstrapServiceRole(su, <literal constant>, <constant>)}: the census reads the literals. */
     abstract void bootstrapRole(Connection su) throws Exception;
 
+    /** The Postgres the class runs on: a clone on the per-fork shared cluster, which a subclass may replace with its own boot. */
+    PostgreSQLContainer<?> startPg() throws Exception {
+        return PgContainerHelper.start();
+    }
+
     @BeforeAll
     void startAll() throws Exception {
-        pg = PgContainerHelper.start();
+        pg = startPg();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
         }
@@ -135,6 +140,16 @@ abstract class Rdr241RouteTestBase {
                     .set(CATALOG_DOCUMENTS.DELETED_AT, r.deleted() ? OffsetDateTime.parse("2026-11-01T00:00:00+00:00") : null)
                     .execute();
             }
+        }
+    }
+
+    /** {@code pg_database.datctype} of the database the class runs on: {@code C} for the local bundle, a locale name on the test cluster. */
+    String databaseCtype() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var db = DSL.table(DSL.name("pg_catalog", "pg_database"));
+            return DSL.using(su, SQLDialect.POSTGRES).select(DSL.field(DSL.name("datctype"), String.class)).from(db)
+                .where(DSL.field(DSL.name("datname"), String.class).eq(DSL.function("current_database", String.class)))
+                .fetchOne(0, String.class);
         }
     }
 

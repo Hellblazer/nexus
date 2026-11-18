@@ -34,9 +34,17 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
  * test hook): a timeout is a {@code DataAccessException} holding SQLSTATE {@link CatalogRepository#QUERY_CANCELED}.
  * Rows are the {@code /list} document maps ({@link CatalogRepository#documentFields()}), metadata included.
  *
- * <p><b>Author</b> ({@link #authorWhere}): {@code lower(author) LIKE '%' || lower(:text) || '%' ESCAPE '\'}, which is
- * Python's {@code needle.lower() in author.lower()} under the database's lowercase: no normalization on either side,
- * and {@code \}, {@code %} and {@code _} in the text are literal.
+ * <p><b>Order.</b> Rows come in the engine's text order of {@code tumbler} (the database's collation of a text column), not
+ * in the integer order of a tumbler's segments: {@code 5.1.12} sorts before {@code 5.1.2}.
+ *
+ * <p><b>Author</b> ({@link #authorWhere}): {@code lower(author COLLATE "pg_c_utf8") LIKE '%' || lower(:text COLLATE
+ * "pg_c_utf8") || '%' ESCAPE '\'}. Case folds with the {@code pg_c_utf8} collation's Unicode SIMPLE case mapping (PostgreSQL 17,
+ * a builtin, so it needs neither ICU nor a locale), NOT with the database's own ctype: the local bundle is
+ * {@code initdb --no-locale} (C ctype), where a bare {@code lower()} folds ASCII only and a capital O with diaeresis would
+ * not match the small one. The oracle is Python's {@code needle.lower() in author.lower()}, which uses the FULL mapping; the
+ * two differ only for U+0130 (Python lowers it to "i" plus U+0307, the engine to "i") and for a capital sigma at the end of
+ * a word (Python's final sigma, the engine's medial one); {@code CatalogDocsByAuthorFoldBase} lists the pairs. No
+ * normalization on either side, and {@code \}, {@code %} and {@code _} in the text are literal.
  *
  * <p><b>Metadata</b> ({@link #metaWhere}): the reading rules of {@code catalog/meta_filter.py}, the client's oracle.
  */
@@ -69,6 +77,9 @@ public final class CatalogDocReads {
         }
     }
 
+    /** The builtin collation whose simple Unicode case mapping folds author text on every cluster, C ctype included (PostgreSQL 17). */
+    public static final String FOLD_COLLATION = "pg_c_utf8";
+
     private static final String INTEGER_TEXT = "^-?[0-9]+$";
     private static final Field<Integer> TOTAL = DSL.count().over().as("nx_total");
 
@@ -91,8 +102,10 @@ public final class CatalogDocReads {
 
     /** Live documents of the tenant whose author contains {@code text}, case-insensitively and literally. Public for plan tests. */
     public static Condition authorWhere(String tenant, String text) {
-        return liveOfTenant(tenant).and(DSL.lower(CATALOG_DOCUMENTS.AUTHOR)
-            .like(DSL.lower(DSL.val(containsPattern(text))), '\\'));
+        Field<String> author = CATALOG_DOCUMENTS.AUTHOR.collate(FOLD_COLLATION);
+        // the bound pattern is cast to a collatable type first: a bare ? carries no type for COLLATE to apply to
+        Field<String> pattern = DSL.val(containsPattern(text)).cast(SQLDataType.VARCHAR).collate(FOLD_COLLATION);
+        return liveOfTenant(tenant).and(DSL.lower(author).like(DSL.lower(pattern), '\\'));
     }
 
     /** {@code metadata->>key}, the key bound (user input). NULL for an absent key and for a JSON null; a boolean reads true or false. */
