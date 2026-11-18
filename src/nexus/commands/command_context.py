@@ -1205,8 +1205,7 @@ def deep_analysis(args: tuple[str, ...]) -> None:
     parts.extend([
         "### Tip",
         "",
-        "The deep-analyst uses mcp__plugin_conexus_sequential-thinking__sequentialthinking:"
-        " hypothesis -> evidence -> evaluation -> conclusion.",
+        "The deep-analyst works hypothesis -> evidence -> evaluation -> conclusion.",
         "For cross-cutting issues, this agent explores multiple components before converging on root cause.",
     ])
     print("\n".join(parts))
