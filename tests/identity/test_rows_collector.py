@@ -8,11 +8,14 @@ named; a table that is empty, or that lacks a ``row_*`` function the module defi
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tests.identity.conftest import Journey, Rows, run_journeys
+from tests.identity.test_identity_engine_journeys import JOURNEYS
 
 
 class _StandInWorld:
@@ -290,3 +293,24 @@ def test_a_module_cleanup_runs_after_its_rows_even_when_a_row_failed(monkeypatch
     with pytest.raises(pytest.fail.Exception):
         run_journeys(_StandInWorld(), (_journey("m", "m", row_breaks, cleanup=lambda: order.append("cleanup")),))  # type: ignore[arg-type]
     assert order == ["row", "cleanup"]
+
+
+def test_every_identity_module_with_a_rows_table_is_in_the_journeys_test() -> None:
+    """A module whose rows are not in JOURNEYS has no test and runs nothing; this makes that red (fold r3 review)."""
+    here = Path(__file__).parent
+    with_rows = sorted(
+        p.stem.removeprefix("test_") for p in here.glob("test_*.py")
+        if any(isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ROWS" for t in n.targets)
+               for n in ast.parse(p.read_text(encoding="utf-8")).body))
+    assert with_rows, "non-vacuity: the identity modules carry ROWS tables"
+    assert sorted(j.module for j in JOURNEYS) == with_rows, "every module with a ROWS table needs a JOURNEYS entry"
+
+
+def test_run_journeys_refuses_a_repeated_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NX_ROWS", raising=False)
+    def row_one(world) -> None:
+        pass
+
+    table, namespace = _table(row_one)
+    with pytest.raises(AssertionError, match="share a tag prefix"):
+        run_journeys(_StandInWorld(), [Journey("a", "xx", table, namespace), Journey("b", "xx", table, namespace)])

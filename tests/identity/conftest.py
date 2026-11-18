@@ -7,10 +7,9 @@ registry files live under ``tmp_path`` (never the real ``~/.claude``), an identi
 credential the MCP server uses. Clocks are fixed; the engine's own clock is not ours, so a lapse is staged by
 backdating the identity's last renewal in PG, the one thing a real engine cannot be told.
 
-A test module that asks for ``world`` carries ``pytestmark = pytest.mark.t2_tenant`` (every test in it mints one).
-
-One module, one tenant (the tenant ceiling, tests/storage_touch_ceiling.toml): a module with several independent rows
-runs them as ONE scenario test through ``rows`` (:class:`Rows`). Each row gets a ``scoped`` world on the shared
+The one test that asks for ``world`` is tests/identity/test_identity_engine_journeys.py, marked ``t2_tenant``; it
+mints the only tenant of these modules (the tenant ceiling, tests/storage_touch_ceiling.toml). Rows run through
+:class:`Rows`. Each row gets a ``scoped`` world on the shared
 tenant: its own host name (the engine looks holders up by host and pid, so rows never meet each other's bindings),
 its own process table, identity directory and clock, and a tag that qualifies every seat name, ``-n`` name and
 session id the harness sends (the engine keeps those per tenant). A row reads as if it had the tenant to itself; the
@@ -173,8 +172,8 @@ class Rows:
     also when fewer rows ran than the test expects (a row dropped from the list must not read as a pass).
 
     ``NX_ROWS=<substring>`` runs only the rows of a table whose function name contains the substring, to rerun one
-    row of a long table (``NX_ROWS=lapsed uv run pytest tests/identity/test_session_start_bind.py``); a value that
-    matches no row fails the test. Unset, every row runs."""
+    row of a long table (``NX_ROWS=session_start_bind::lapsed uv run pytest
+    tests/identity/test_identity_engine_journeys.py``); a value that matches no row fails the test. Unset, every row runs."""
 
     def __init__(self, world: World, *, prefix: str = "") -> None:
         self._base = world
@@ -283,6 +282,10 @@ def run_journeys(world: World, journeys: Sequence[Journey]) -> JourneyReport:
     whose ``module::row`` name contains it. A ``pytest.skip`` inside a row ends that module's remaining rows and is
     recorded the same way; ``KeyboardInterrupt`` and ``pytest.exit`` end the run, after the failures so far go to
     stderr. Returns the report of a run that did not fail."""
+    modules = [j.module for j in journeys]
+    tags = [j.tag for j in journeys]
+    assert len(set(modules)) == len(modules), f"two journeys share a module name: {modules}"
+    assert len(set(tags)) == len(tags), f"two journeys share a tag prefix, so their rows would share hosts and seats: {tags}"
     report = JourneyReport()
     only = os.environ.get("NX_ROWS", "")
     try:
@@ -349,7 +352,3 @@ def world(tmp_path: Path, t2_tenant: str) -> Iterator[World]:
     if made._data is not None:
         made._data.close()
 
-
-@pytest.fixture
-def rows(world: World) -> Rows:
-    return Rows(world)
