@@ -2,7 +2,10 @@
 """The MCP server's identity lease (``nexus.mcp.identity_lease``), one heartbeat at a time against a real engine, with
 the server's own credential (a ``data`` token: it may start, resume, fork, refresh and end, nothing else). Clocks are
 fixed (``world.now``); the engine's lapse is staged by backdating its last renewal. The tests that need the Step 2
-engine (tokens and fences) are in test_identity_token_engine.py and skip until it lands."""
+engine (tokens and fences) are in test_identity_token_engine.py and skip until it lands.
+
+The four rows are independent journeys; each runs on its own scoped world inside ONE tenant (``rows``, see
+tests/identity/conftest.py), so the module mints one tenant, not four."""
 from __future__ import annotations
 
 import pytest
@@ -10,10 +13,7 @@ import pytest
 from nexus.identity.bind_client import IdentityApiError, evidence_body
 from nexus.identity.token_file import read_token_file, token_path
 from nexus.mcp.identity_lease import HEARTBEAT_S, IdentityLease
-from tests.identity.conftest import T0, VERSION, World
-from tests.identity.fakes import HOST
-
-pytestmark = pytest.mark.t2_tenant
+from tests.identity.conftest import T0, VERSION, Rows, World
 
 T1 = "2026-11-17T09:00:00Z"
 
@@ -23,14 +23,14 @@ def _lease(world: World, pid: int) -> IdentityLease:
                          procs=world.procs, clock=lambda: world.now, client_version=VERSION, sleep=lambda s: None)
 
 
-def test_a_fresh_server_reads_its_token_file_renews_each_minute_and_a_sleep_lapses_and_revives_without_a_generation_change(world: World) -> None:
+def row_a_fresh_server_reads_its_token_file_renews_each_minute_and_a_sleep_lapses_and_revives_without_a_generation_change(world: World) -> None:
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "sid-1")
     lease = _lease(world, 100)
 
     first = lease.tick()
-    assert first.adopted and first.renewed and (lease.identity, lease.generation, lease.session_id) == (alpha, 1, "sid-1")
+    assert first.adopted and first.renewed and (lease.identity, lease.generation, lease.session_id) == (alpha, 1, world.q("sid-1"))
     assert world.identity(alpha)["client_version"] == VERSION, "the renewal carries and stores the server's client version"
     world.now += 10
     assert not lease.tick().renewed, "not due again for 60 seconds"
@@ -46,7 +46,7 @@ def test_a_fresh_server_reads_its_token_file_renews_each_minute_and_a_sleep_laps
     assert world.events(alpha) == ["start", "lapse", "revive"]
 
 
-def test_the_heartbeat_reread_follows_a_cross_seat_switch_when_the_marker_is_lost(world: World) -> None:
+def row_the_heartbeat_reread_follows_a_cross_seat_switch_when_the_marker_is_lost(world: World) -> None:
     """A ``/resume`` switches the process from alpha to gamma. The hook's marker write failed (the test never
     delivers one); the server's next heartbeat re-reads the token file and adopts gamma within a minute."""
     alpha, gamma = world.seat("alpha"), world.seat("gamma")
@@ -64,11 +64,11 @@ def test_the_heartbeat_reread_follows_a_cross_seat_switch_when_the_marker_is_los
     world.now += HEARTBEAT_S
     report = lease.tick()
     assert report.adopted and report.renewed and not report.superseded
-    assert (lease.identity, lease.generation, lease.session_id) == (gamma, 2, "g-old")
+    assert (lease.identity, lease.generation, lease.session_id) == (gamma, 2, world.q("g-old"))
     assert world.identity(alpha)["state"] == "unheld" and world.identity(gamma)["holder"]["pid"] == 100
 
 
-def test_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_only_from_its_own_token_file(world: World) -> None:
+def row_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_only_from_its_own_token_file(world: World) -> None:
     """``/branch`` runs no hook: the registry file gets a new session id the index does not know. On its next
     renewal the server maps it through the registry's pid and startedAt and appends the ``fork`` row."""
     alpha = world.seat("alpha")
@@ -77,14 +77,14 @@ def test_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted
     lease = _lease(world, 100)
     lease.tick()
 
-    world.procs.write_registry(100, 100_000, T0, session_id="branch-sid", name="alpha")
+    world.registry(100, 100_000, T0, session_id="branch-sid", name="alpha")
     world.now += HEARTBEAT_S
     report = lease.tick()
-    assert report.forked and lease.session_id == "branch-sid"
+    assert report.forked and lease.session_id == world.q("branch-sid")
     assert world.events(alpha) == ["start", "fork"]
     assert (world.indexed("branch-sid")["identity"], world.indexed("branch-sid")["generation"]) == (alpha, 1)
-    assert world.log(alpha)[-1]["prior_session_id"] == "sid-1"
-    assert read_token_file(token_path(world.identity_dir, 100, 100_000)).session_id == "branch-sid"
+    assert world.log(alpha)[-1]["prior_session_id"] == world.q("sid-1")
+    assert read_token_file(token_path(world.identity_dir, 100, 100_000)).session_id == world.q("branch-sid")
     world.now += HEARTBEAT_S
     assert not lease.tick().forked, "the id is known now: no second row"
 
@@ -92,10 +92,10 @@ def test_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted
     cleared = world.hook(100, "clear", "sid-2")
     own = str(token_path(world.identity_dir, 100, 100_000))
     assert not lease.adopt_marker(identity=alpha, generation=1, token_file=str(world.identity_dir / "999.999.token"))
-    assert lease.adopt_marker(identity=cleared.identity, generation=1, token_file=own) and lease.session_id == "sid-2"
+    assert lease.adopt_marker(identity=cleared.identity, generation=1, token_file=own) and lease.session_id == world.q("sid-2")
 
 
-def test_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when_claude_has_exited(world: World) -> None:
+def row_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when_claude_has_exited(world: World) -> None:
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "sid-1")
@@ -126,4 +126,17 @@ def test_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when
     current.shutdown(wait_for_claude=False)
     assert world.identity(alpha)["state"] == "ended" and world.events(alpha)[-1] == "end"
     assert not token_path(world.identity_dir, 101, 101_000).exists()
-    assert HOST  # the host constant is the evidence's; kept importable for sibling modules
+
+
+ROWS = (
+    row_a_fresh_server_reads_its_token_file_renews_each_minute_and_a_sleep_lapses_and_revives_without_a_generation_change,
+    row_the_heartbeat_reread_follows_a_cross_seat_switch_when_the_marker_is_lost,
+    row_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_only_from_its_own_token_file,
+    row_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when_claude_has_exited,
+)
+
+
+@pytest.mark.t2_tenant
+def test_the_mcp_identity_lease(rows: Rows) -> None:
+    """The lease's four journeys against one engine tenant; a failure names its row and the rows after it still run."""
+    rows.run(ROWS, globals())
