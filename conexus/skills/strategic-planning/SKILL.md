@@ -63,7 +63,7 @@ For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resourc
 
 ## Planning Methodology
 
-The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
+The agent's method:
 1. Analyze codebase to understand context and constraints
 2. Form hypothesis about optimal architecture approach
 3. Validate approach against existing patterns
