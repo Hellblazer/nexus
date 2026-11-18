@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from nexus.identity.bind_client import IdentityApiError
 from nexus.identity.holder import GONE, Processes, check_holder, epoch_seconds, holder_process
 from nexus.identity.pending import remove_stale
@@ -28,6 +30,8 @@ from nexus.identity.token_file import delete_token_file, parse_token_name, read_
 
 #: A temp file this old is a crashed writer's.
 TMP_MAX_AGE_S: float = 600.0
+
+_log = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -48,6 +52,8 @@ class SweepReport:
     #: identity id -> (pid, started_at) of every binding the sweep listed, so cleanup knows who the engine still has
     holders: dict[str, tuple[Any, Any]] = field(default_factory=dict)
     unjudged_other_registry: int = 0
+    #: identities whose ``gone`` the engine refused with an error other than 403/409; the sweep went on past each
+    failed: list[str] = field(default_factory=list)
     token_files_removed: list[str] = field(default_factory=list)
     tmp_files_removed: list[str] = field(default_factory=list)
     pending_files_removed: list[str] = field(default_factory=list)
@@ -59,7 +65,9 @@ def sweep_host(client: Any, procs: Processes | Any, *, host: str, own: tuple[int
     binding is skipped. The token file of every holder found gone is deleted too. A holder is judged only against the
     registry directory its own token file names (:func:`~nexus.identity.holder.check_holder`): one bound by a Claude
     under another ``CLAUDE_CONFIG_DIR`` is left alone, not reported gone. ``gone`` is the tenant credential's: a 403
-    ends the sweep quietly (``forbidden``), it is not an error."""
+    ends the sweep quietly (``forbidden``), it is not an error. Any other refusal of one row is logged and counted
+    (``failed``) and the sweep goes on: one failing row does not stop the rest (RDR-253 Test Plan). An engine that
+    cannot be reached at all still ends the sweep, by its own error."""
     report = SweepReport()
     views = client.bindings_by_host(host)
     report.listed = len(views)
@@ -98,7 +106,9 @@ def sweep_host(client: Any, procs: Processes | Any, *, host: str, own: tuple[int
             if exc.status == 409:  # rebound, or already recorded, since the read: not ours to mark
                 report.skipped_rebound += 1
                 continue
-            raise
+            report.failed.append(view["id"])
+            _log.warning("identity_sweep_gone_failed", identity=view["id"], status=exc.status, code=exc.code)
+            continue
         if answer.get("recorded"):
             report.recorded_gone.append(view["id"])
         if isinstance(holder.get("pid"), int) and isinstance(holder.get("started_at"), int):
