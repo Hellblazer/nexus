@@ -1149,8 +1149,8 @@ def last_engine_root_cause(log_path: Path, start_offset: int) -> str | None:
         if _ENGINE_LOGBACK_LINE.match(line):
             break
         if (m := _ENGINE_CAUSED_BY.match(line)) is not None:
-            cause = m.group("message").removeprefix("ERROR: ")
-    return None if cause is None else _reason_text(cause)
+            cause = m.group("message")
+    return None if cause is None else _reason_text(cause).removeprefix("ERROR: ")
 
 
 def last_supervisor_error_line(crash_log: Path, start_offset: int) -> str | None:
@@ -2572,7 +2572,7 @@ class StorageServiceSupervisor:
             self._kill_after_readiness_failure(proc)
             self._release_stale_changelog_lock(reason="migration_failed")
             raise StorageServiceStartError(
-                f"Schema migration failed on port {port}: {exc.raw_line}. "
+                f"Schema migration failed on port {port}: {_reason_text(exc.raw_line)}. "
                 f"Engine log: {self._log_path}"
             ) from exc
         except readiness.ReadinessStalledError as exc:

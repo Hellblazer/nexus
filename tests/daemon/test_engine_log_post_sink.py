@@ -81,7 +81,7 @@ def test_a_reason_that_starts_with_an_escaped_line_break_is_not_empty(tmp_path: 
         "Caused by: org.postgresql.util.PSQLException: \\x0a  ERROR: the real message\\x0aWhere: x\n",
         encoding="utf-8",
     )
-    assert ssd.last_engine_root_cause(log, 0) == "ERROR: the real message"
+    assert ssd.last_engine_root_cause(log, 0) == "the real message"
 
 
 def test_escaped_and_empty_thread_fields_still_parse() -> None:
