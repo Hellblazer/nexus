@@ -60,6 +60,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/substantive-critic.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
 - `conexus/agents/test-validator.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
 - `conexus/skills/orchestration/reference.md` -- the Working Rules sequential-thinking bullet no longer calls the thought a visible record (GH #1661)
+- `conexus/mcp/sequential_thinking.py` -- synced with upstream 2.2.0 (annotations, history bound); the tool and field descriptions describe a step log for the work instead of the model's own thinking, the text every session carries through alwaysLoad (GH #1661)
 - `conexus/skills/architecture/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
 - `conexus/skills/codebase-analysis/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
 - `conexus/skills/deep-analysis/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
