@@ -323,6 +323,15 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"vector_search_chash_allow_supported\":true");
     }
 
+    // ── nexus-7fku2.1.4 (RDR-134 Step 4): topic_route on POST /v1/vectors/search-per-collection ──
+
+    @Test
+    void versionAdvertisesTheTopicRouteAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendVectorTopicRouteCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"vector_topic_route_supported\":true");
+    }
+
     // ── nexus-rfvyy.7.4 (RDR-243 Phase 2): sensitivity=exclude on every chunk-text route ──
 
     @Test

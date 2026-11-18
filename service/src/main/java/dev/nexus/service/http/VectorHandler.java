@@ -873,7 +873,15 @@ public final class VectorHandler implements HttpHandler {
      * request budget (before a stage, or a statement cut by the request bound), pool or admission exhaustion and any
      * other transient database failure (SQLSTATE class 08, 53, 57P, 40001, 40P01, 55P03) fail the whole request with 503.
      * A bad {@code mode}, a {@code band} without a numeric {@code width} {@code >= 0}, or a name not in
-     * {@code collections} is a 400. The capability flag is Step 4's.
+     * {@code collections} is a 400. {@code GET /version} reports {@code vector_topic_route_supported} (nexus-7fku2.1.4).
+     *
+     * <p><strong>The other request fields</strong> (nexus-7fku2.1.4). {@code chash_allow} and a metadata {@code where}
+     * leave the whole request unrouted (every collection {@code skipped}); {@code thresholds} drop routed rows as
+     * they drop unscoped ones; {@code lexical} is not routed (each collection's lexical arm runs as it always does and
+     * its rows merge as today); {@code rerank}, {@code rerank_top_k}, {@code rerank_max_candidates}, {@code limit},
+     * {@code include_embeddings}, {@code embeddings_limit}, {@code content_chars} and {@code include_source_uri} act on
+     * the merged and enriched rows, routed and unscoped alike; and {@code sensitivity: "exclude"} is applied inside the
+     * routed search and inside its unscoped fallback.
      *
      * <p><strong>Rerank semantics.</strong> The rerank stage runs once over the merged rows (at
      * most {@code limit}), not once per batch of a client fan-out, so a row beyond the distance

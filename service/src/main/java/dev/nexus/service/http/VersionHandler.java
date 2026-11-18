@@ -57,6 +57,7 @@ import java.util.function.Supplier;
  *  "tenant_export_supported":true,
  *  "tenant_export_format_version":1,
  *  "tenant_import_supported":true,
+ *  "vector_topic_route_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -698,6 +699,26 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-7fku2.1.4 (RDR-134 Step 4) capability advertisement: does this engine accept {@code topic_route} on {@code
+     * POST /v1/vectors/search-per-collection} and search each listed prose collection inside the topics whose centroid
+     * is nearest the query, reporting {@code topic_route_status} on every {@code per_collection} entry?
+     *
+     * <p>An independent flag, and the only evidence: an engine without the feature ignores the unknown key and answers
+     * 200 with an UNROUTED search, with no status on any entry, so a client that wants routing must read this flag
+     * before it sends the key (an outage or an absent flag reads as unsupported, and the request goes unrouted).
+     * Always present, always {@code true} on an engine carrying the change.
+     *
+     * <p>The name is the feature's, as RDR-134 names it, not the route's: the {@code vector_search_} prefix of
+     * {@code vector_search_chash_allow_supported} covers a field that four routes share, and {@code topic_route} belongs
+     * to one. The edge allowlist, the Python client ({@code supports_topic_route}) and this method must spell it alike.
+     * Cloud clients see it only once the public conexus edge allowlists it (the {@code
+     * vector_search_chash_allow_supported} precedent): that allowlist entry is paired conexus work (Step 5).
+     */
+    static void appendVectorTopicRouteCapabilityField(StringBuilder body) {
+        body.append(",\"vector_topic_route_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -933,6 +954,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-csayy.2 (RDR-248): the tenant export session routes and their format version.
         appendTenantExportCapabilityField(body);
         appendTenantImportCapabilityField(body);
+        // nexus-7fku2.1.4 (RDR-134 Step 4): topic_route on POST /v1/vectors/search-per-collection.
+        appendVectorTopicRouteCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {
