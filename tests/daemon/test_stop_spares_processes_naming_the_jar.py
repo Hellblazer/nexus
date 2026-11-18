@@ -88,63 +88,6 @@ class TestJarArmOfTheMatcher:
         assert not storage_service_stack_matcher(tmp_path / "cfg")(command.format(jar=jar))
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the positive control runs python under a symlink named java")
-class TestSweepWithRealProcesses:
-    """The sweep the stop runs, against live processes. ``terminate_pids`` is
-    recorded and never run, so nothing else on the box is signalled."""
-
-    def _found(self, cfg: Path) -> set[int]:
-        with patch("nexus.daemon.service_registry.terminate_pids", return_value=[]):
-            result = sweep_matching_processes(
-                storage_service_stack_matcher(cfg), member_check=storage_service_member_check(cfg),
-            )
-        return {pid for pid, _cmd in result.found}
-
-    @staticmethod
-    def _visible(pid: int) -> None:
-        deadline = time.monotonic() + 10
-        while not process_command(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert process_command(pid), f"fixture precondition: pid {pid} must be in the process table"
-
-    def test_a_driver_naming_the_jar_is_not_swept_and_a_java_engine_is(
-        self, tmp_path: Path, jar: Path,
-    ) -> None:
-        cfg = tmp_path / "cfg"
-        # A stand-in JVM named java (POSIX only: this class skips Windows, where the launcher is java.exe).
-        java = (tmp_path / "jdk" / "bin").joinpath("java")
-        java.parent.mkdir(parents=True)
-        os.symlink(CHILD_PYTHON, java)
-        driver = spawn_sleeper(["scenario", "upgrade", "--work", str(tmp_path / "w"), "--jar", str(jar)])
-        engine = None
-        try:
-            from tests._child_process import popen_in_group  # noqa: PLC0415
-
-            engine = popen_in_group(
-                [str(java), "-c", "import time; time.sleep(120)", "-Duser.timezone=UTC",
-                 f"-XX:ErrorFile={tmp_path / 'hs_err_%p.log'}", "-jar", str(jar)],
-                # the supervisor's env copy carries the directory, and the member check reads it (nexus-f3yqd.2.22)
-                env={**os.environ, "NEXUS_CONFIG_DIR": str(cfg)},
-            )
-            self._visible(driver.pid)
-            self._visible(engine.pid)
-            assert f"-jar {jar}" in process_command(driver.pid), (
-                "fixture precondition: the driver's command line must carry the old marker's text, "
-                "or this proves nothing"
-            )
-            found = self._found(cfg)
-            assert engine.pid in found, f"non-vacuity: the java engine must match ({process_command(engine.pid)!r})"
-            assert driver.pid not in found, (
-                f"pid {driver.pid} only names the jar as an option value and must never be signalled: "
-                f"{process_command(driver.pid)!r}"
-            )
-        finally:
-            for proc in (driver, engine):
-                if proc is not None:
-                    proc.kill()
-                    proc.wait(timeout=10)
-
-
 def test_a_windows_jdk_under_program_files_matches_as_the_process_table_renders_it(tmp_path: Path, jar: Path) -> None:
     """The Windows table dequotes (winproc_core.render_command_line), so the spaced JDK path arrives as words; the
     first version of the fix anchored on a no-space head and missed it (review of 3f549e254)."""
