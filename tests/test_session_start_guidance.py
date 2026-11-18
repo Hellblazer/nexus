@@ -358,9 +358,9 @@ class TestGuidanceBlock:
 
 
 def test_guidance_imperative_does_not_tell_sessions_to_use_the_step_log_tool():
-    """nexus-cn11i (GH #1661): step-logging guidance in the system prompt, together with a message that names the
-    sequential-thinking tool, gets requests stopped with [reasoning_extraction]; the SessionStart guidance names it
-    nowhere, so no session receives that guidance from here."""
+    """nexus-cn11i (GH #1661): step-logging guidance in the system prompt, together with a task that demands a count
+    of recorded steps, gets requests stopped with [reasoning_extraction]; the SessionStart guidance carries no
+    sequential-thinking rule, so no session receives the guidance half from here."""
     lowered = GUIDANCE_IMPERATIVE.lower()
     assert "sequential" not in lowered and "sequentialthinking" not in lowered
 
