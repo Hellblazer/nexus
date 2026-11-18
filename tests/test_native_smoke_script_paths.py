@@ -40,6 +40,42 @@ pytestmark = pytest.mark.skipif(
     reason="the smoke script is bash and curls the engine",
 )
 
+def _sleep_stub(tick: float) -> str:
+    """The short ``sleep`` the scripts find first on PATH: one tick of a bounded wait loop.
+
+    The scripts bound their waits by a count of ``sleep 1`` ticks; the stub shortens each tick so a run takes
+    seconds. A tick spent while the fake engine is still starting (exec, interpreter, imports) is a tick the
+    engine never had: on a loaded CI worker the cloud shape's 90 ticks ran out before a 30 ms start finished
+    (develop run 44400504933). So the stub holds its tick while a fake the script started has not yet settled,
+    that is, has neither written its pid to ``$FAKE_SETTLED`` (serving, or hung on purpose) nor ended (an
+    ended process's args no longer name the fake). The bounds then count ticks of a settled engine only, and
+    a hung engine still meets the script's bound. A fake that never settles is held for once, about 30 s.
+    """
+    return f"""#!/bin/sh
+n=0
+while [ "$n" -lt 600 ]; do
+  pending=
+  for pid in $(pgrep -P "$PPID"); do
+    [ "$pid" = "$$" ] && continue
+    settled=
+    [ -f "$FAKE_SETTLED" ] && while read -r s; do [ "$s" = "$pid" ] && settled=1; done < "$FAKE_SETTLED"
+    [ -n "$settled" ] && continue
+    case "$(ps -o args= -p "$pid" 2>/dev/null)" in *"$FAKE_ENGINE"*) pending=$pid ;; esac
+  done
+  [ -z "$pending" ] && break
+  n=$((n + 1))
+  [ "$n" -lt 600 ] || echo "$pending" >> "$FAKE_SETTLED"
+  /bin/sleep 0.05
+done
+exec /bin/sleep {tick}
+"""
+
+
+def _stub_env(fake: Path, settled: Path) -> dict[str, str]:
+    assert shutil.which("pgrep") and shutil.which("ps"), "the sleep stub finds the fake engine with pgrep and ps"
+    return {"FAKE_ENGINE": str(fake), "FAKE_SETTLED": str(settled)}
+
+
 _DOCKER = """#!/bin/sh
 echo "$*" >> "$DOCKER_LOG"
 case "$1" in
@@ -49,10 +85,32 @@ case "$1" in
 esac
 """
 
+# Both fakes bind NX_SERVICE_PORT through this. The scripts pick the port with a bind-and-close probe
+# (free_port), so another process can take it before the fake binds: a parallel test's server, or
+# another run's probe. On develop run 44400504933 the cloud boot died there with EADDRINUSE, the only
+# shape that binds and the only one that failed; a stress run on chas (640 runs, 32 at once) showed
+# the same death twice. The fake retries until the holder lets go; the sleep stub holds the script's
+# ticks meanwhile, because the fake has not settled.
+_BIND = r'''
+import errno, time
+
+
+def bind_service_port(handler):
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            return http.server.HTTPServer(("127.0.0.1", int(os.environ["NX_SERVICE_PORT"])), handler)
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE or time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+'''
+
 # The fake engine: "exit" dies at once; "health" answers 200 {} to every GET, so the script
 # gets past its health wait and fails at its first real assertion (no migration in /version).
 _BIN = """#!/usr/bin/env python3
 import http.server, os, signal, sys
+""" + _BIND + """
 signal.alarm(120)  # never outlive a run whose bash was killed before its EXIT trap ran
 with open(os.environ["FAKE_BIN_PIDS"], "a") as f:
     f.write(f"{os.getpid()}\\n")
@@ -65,15 +123,18 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"{}")
     def log_message(self, *args):
         pass
-http.server.HTTPServer(("127.0.0.1", int(os.environ["NX_SERVICE_PORT"])), H).serve_forever()
+srv = bind_service_port(H)
+with open(os.environ["FAKE_SETTLED"], "a") as f:  # serving: the sleep stub's ticks count from here
+    f.write(f"{os.getpid()}\\n")
+srv.serve_forever()
 """
 
 
 def _run(tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0) -> tuple[subprocess.CompletedProcess[str], list[str], list[int]]:
     stubs = tmp_path / "stubs"
     stubs.mkdir(parents=True)
-    # A 50 ms sleep, not none: the script's waits stay short but keep room for the fake engine to start.
-    for name, body in (("docker", _DOCKER), ("sleep", "#!/bin/sh\nexec /bin/sleep 0.05\n")):
+    # 50 ms ticks: the script's waits stay short; the stub holds a tick while the fake is still starting.
+    for name, body in (("docker", _DOCKER), ("sleep", _sleep_stub(0.05))):
         (stubs / name).write_text(body)
         (stubs / name).chmod(0o755)
     fake = tmp_path / "nexus-service"
@@ -87,6 +148,7 @@ def _run(tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0) -> tu
         PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake),
         DOCKER_LOG=str(log), DOCKER_RUN_RC=str(run_rc), PG_READY_RC=str(ready_rc),
         FAKE_BIN_MODE=mode, FAKE_BIN_PIDS=str(pids), NX_NO_TELEMETRY="1",
+        **_stub_env(fake, tmp_path / "bin.settled"),
     )
     proc = subprocess.run(["bash", str(SMOKE)], cwd=SERVICE, env=env, capture_output=True, text=True, timeout=180)
     calls = log.read_text().splitlines() if log.exists() else []
@@ -269,6 +331,12 @@ def log(line):
     print(line, flush=True)
 
 
+def settle():
+    """Serving, or hung on purpose: the sleep stub's ticks count from here (an ending engine needs no call)."""
+    with open(SETTLED, "a") as f:
+        f.write(f"{os.getpid()}\n")
+
+
 def die(trace):
     print('Exception in thread "main" ' + trace, file=sys.stderr, flush=True)
     sys.exit(1)
@@ -278,6 +346,8 @@ bge = os.path.join(os.environ["NX_ONNX_MODEL_DIR"], "bge-base-en-v1.5", "onnx")
 model, tok = os.path.join(bge, "model.onnx"), os.path.join(bge, "tokenizer.json")
 present = os.path.exists(model) and os.path.exists(tok)
 key = bool(os.environ.get("NX_VOYAGE_API_KEY"))
+if not present:  # a slow start when a test asks for one: the cloud boot waits on readiness, neither on exit
+    time.sleep(START_DELAY)
 shown = "/opt/elsewhere/onnx" if DEFECT == "cloud-wrong-probe-path" else bge
 state = lambda p: "present" if os.path.exists(p) else "absent"
 said = (present or (DEFECT == "cloud-presence-wrong" and key)) and not (DEFECT == "truncated-presence-absent" and present)
@@ -301,6 +371,7 @@ if present:
     if DEFECT == "zero-boots":
         log("event=service_ready")
     if DEFECT == "zero-hangs":
+        settle()
         time.sleep(600)
     if DEFECT == "zero-fails-before-session":
         die("java.lang.RuntimeException: Failed to initialise Bge768Embedder: tokenizer refused")
@@ -324,6 +395,7 @@ if not key:
     }.get(DEFECT, "event=no_embedder_available remedy: set NX_VOYAGE_API_KEY or run nx init --service")
     log(remedy)
     if DEFECT == "neither-hangs":
+        settle()
         time.sleep(600)
     sys.exit(0 if DEFECT == "neither-exits-zero" else 1)
 
@@ -352,9 +424,17 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-srv = http.server.HTTPServer(("127.0.0.1", int(os.environ["NX_SERVICE_PORT"])), H)
+if PORT_HELD_FOR:  # another process takes the port after the script's probe, and lets go PORT_HELD_FOR s later
+    import subprocess
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import socket, sys, time; s = socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1]))); "
+         "s.listen(); print('held', flush=True); time.sleep(float(sys.argv[2]))",
+         os.environ["NX_SERVICE_PORT"], str(PORT_HELD_FOR)], stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline() == "held\n"
+srv = bind_service_port(H)
 if DEFECT != "cloud-never-ready":
     log("event=service_ready")
+settle()
 srv.serve_forever()
 '''
 
@@ -387,24 +467,30 @@ class _ShapesRun:
 
 def _run_shapes(
     tmp_path: Path, *, defect: str = "", db_url: str | None = None, require_shapes: bool = False,
-    borrowed_pg: tuple[str, str] | None = None, **docker_rc: int,
+    borrowed_pg: tuple[str, str] | None = None, tick: float = 0.1, start_delay: float = 0.0,
+    port_held_for: float = 0.0, **docker_rc: int,
 ) -> _ShapesRun:
     stubs = tmp_path / "stubs"
     stubs.mkdir(parents=True)
-    # 100 ms: the script's waits are 1 s loops (90 for readiness and for a failing boot's exit, 30
-    # after SIGTERM); a tenth keeps a run to seconds and leaves a loaded CI worker 9 s to bind a port.
-    for name, body in (("docker", _DOCKER), ("sleep", "#!/bin/sh\nexec /bin/sleep 0.1\n")):
+    # 100 ms ticks: the script's waits are 1 s loops (90 for readiness and for a failing boot's exit, 30
+    # after SIGTERM); a tenth keeps a run to seconds. The stub counts a tick only once the fake has settled
+    # (_sleep_stub), so a hung engine meets the 9 s bound and a slow start spends none of it.
+    for name, body in (("docker", _DOCKER), ("sleep", _sleep_stub(tick))):
         (stubs / name).write_text(body)
         (stubs / name).chmod(0o755)
-    log, pids = tmp_path / "docker.log", tmp_path / "bin.pids"
+    log, pids, settled = tmp_path / "docker.log", tmp_path / "bin.pids", tmp_path / "bin.settled"
     fake = tmp_path / "nexus-service"
-    fake.write_text(f"#!/usr/bin/env python3\nDEFECT = {defect!r}\nPIDS = {str(pids)!r}\n{_SHAPES_BODY}")
+    fake.write_text(
+        f"#!/usr/bin/env python3\nDEFECT = {defect!r}\nPIDS = {str(pids)!r}\nSETTLED = {str(settled)!r}\n"
+        f"START_DELAY = {start_delay!r}\nPORT_HELD_FOR = {port_held_for!r}\n{_BIND}{_SHAPES_BODY}"
+    )
     fake.chmod(0o755)
     scratch = tmp_path / "tmp"
     scratch.mkdir()
     base = {k: v for k, v in os.environ.items() if not k.startswith(("NX_DB_", "BOOT_SHAPES_", "NATIVE_SMOKE_"))}
     env = child_env_with_tmpdir(base, scratch)
     env.update(PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake), DOCKER_LOG=str(log), NX_NO_TELEMETRY="1")
+    env.update(_stub_env(fake, settled))
     env["NX_RC4PZ_AMBIENT"] = "1"  # the script boots under env -i; the fake records whether this leaked through
     env.update({k.upper(): str(v) for k, v in docker_rc.items()})
     if db_url is not None:
@@ -459,6 +545,29 @@ def test_every_boot_shape_passes_against_an_engine_that_answers_as_the_published
     assert len(dbs) == len(_SHAPES) == len(set(dbs)), run.calls
     assert [url for _, url in run.boots] == [f"jdbc:postgresql://localhost:{port}/{db}" for db in dbs], run.boots
     assert run.kept() == [], "a passing run removes its scratch dir"
+
+
+def test_a_port_taken_between_the_scripts_probe_and_the_engines_bind_still_passes_every_shape(tmp_path: Path) -> None:
+    """develop run 44400504933 (shard 1, xdist): the cloud shape FAILed on "reaches service_ready" with every
+    other shape passing. The fake died binding NX_SERVICE_PORT (EADDRINUSE): the script had probed the port
+    free and another process took it before the bind. Here a process holds the port for 2 s as the cloud boot
+    binds; the fake waits it out (_BIND) and the stub does not count those 2 s against the 9 s bound. Without
+    the retry the cloud shape fails exactly as CI's did."""
+    run = _run_shapes(tmp_path, port_held_for=2.0)
+    assert run.proc.returncode == 0, run.out
+    assert run.verdicts() == {shape: ("PASS", []) for shape in _SHAPES}, run.out
+    assert run.leftover == [], "every engine ended before the script did"
+
+
+def test_an_engine_that_starts_slower_than_the_scripts_bounds_still_passes_every_shape(tmp_path: Path) -> None:
+    """The script's bounds are counts of ``sleep`` ticks, and a plain stub's ticks run on while the fake
+    engine is still starting (or waiting out a taken port). Here 90 ticks are well under a second of stub
+    time and the cloud and neither boots start 3 s late; the shapes pass because a tick counts only once
+    the engine has settled (_sleep_stub). With a plain ``sleep 0.005`` stub this run fails both shapes."""
+    run = _run_shapes(tmp_path, tick=0.005, start_delay=3.0)
+    assert run.proc.returncode == 0, run.out
+    assert run.verdicts() == {shape: ("PASS", []) for shape in _SHAPES}, run.out
+    assert run.leftover == [], "every engine ended before the script did"
 
 
 def test_a_borrowed_container_is_used_and_never_started_or_removed(tmp_path: Path) -> None:
@@ -525,8 +634,9 @@ def test_each_check_fails_on_an_engine_that_breaks_it_and_nothing_else_does(
     for shape in _SHAPES:
         want = fails.get(shape, [])
         status, got = verdicts[shape]
-        assert status == ("FAIL" if want else "PASS"), (shape, run.out)
-        assert len(got) == len(want) and all(any(g.startswith(w) for g in got) for w in want), (shape, got, want)
+        # str messages: pytest prints a str whole, where a tuple's repr was cut before the failing check's line.
+        assert status == ("FAIL" if want else "PASS"), f"{shape}\n{run.out}"
+        assert len(got) == len(want) and all(any(g.startswith(w) for g in got) for w in want), f"{shape} {got} {want}\n{run.out}"
     assert "BOOT SHAPES FAIL" in run.out
     assert run.leftover == [], "the script ended every engine it started, the hung ones included"
     # A hung engine is killed by the script's 90-step bound (9 s here), not by the fake's 120 s alarm.
