@@ -218,10 +218,12 @@ def test_vector_service_probe_reachable(monkeypatch) -> None:
 # Verbatim (modulo indentation) tail of storage_service_native.log from the
 # real ms57z incident (GH #1390): engine-service v0.1.36 crash-looping on
 # catalog-013-2's VALIDATE CONSTRAINT because chunks_384 never had the
-# constraint created.
+# constraint created. The Main ERROR line is what every engine since then logs before the trace
+# (Main.java, event=schema_migration_failed); the doctor reads the changeset only in that trace (RDR-167).
 _REAL_INCIDENT_LOG_TAIL = """\
 2026-07-08T10:22:01.123Z INFO  dev.nexus.service.Main - starting nexus-service v0.1.36
 2026-07-08T10:22:01.456Z INFO  dev.nexus.service.db.SchemaMigrator - applying pending changesets
+2026-07-08 10:22:01,789 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration failed"
 dev.nexus.service.db.SchemaMigrator$MigrationException: Liquibase migration failed
   at dev.nexus.service.db.SchemaMigrator.migrate(SchemaMigrator.java:111)
   at dev.nexus.service.Main.main(Main.java:83)
@@ -230,6 +232,9 @@ Caused by: liquibase.exception.MigrationFailedException:
 Caused by: org.postgresql.util.PSQLException:
   ERROR: constraint "chunks_384_chash_len_check" of relation "chunks_384" does not exist
 """
+
+
+_MAIN_FAILED_LINE = '2026-07-08 10:22:01,789 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration failed"\n'
 
 
 def _write_service_log(config_dir, content: str) -> None:
@@ -293,7 +298,7 @@ def test_last_boot_failure_detail_distant_unrelated_error_not_attributed(
     log_path = tmp_path / "storage_service_native.log"
     padding = "\n".join(f"routine log line {i}" for i in range(80))
     log_path.write_text(
-        "Migration failed for changeset "
+        _MAIN_FAILED_LINE + "Migration failed for changeset "
         "db/changelog/catalog-013-chash-checks-validate.xml::catalog-013-2::nexus-e0hd2\n"
         + padding
         + "\nERROR: disk quota exceeded on /var/lib/postgresql/data\n",
@@ -319,7 +324,7 @@ def test_last_boot_failure_detail_bounded_tail_read(tmp_path) -> None:
     log_path = tmp_path / "storage_service_native.log"
     filler = "x" * (_BOOT_FAILURE_TAIL_BYTES + 4096)
     log_path.write_text(
-        "Migration failed for changeset db/changelog/x.xml::catalog-999-9::someone\n"
+        _MAIN_FAILED_LINE + "Migration failed for changeset db/changelog/x.xml::catalog-999-9::someone\n"
         + filler
     )
 
@@ -330,7 +335,7 @@ def test_last_boot_failure_detail_bounded_tail_read(tmp_path) -> None:
     # Sanity: the same marker at the END of a large file IS found.
     log_path.write_text(
         filler
-        + "\nMigration failed for changeset db/changelog/x.xml::catalog-999-9::someone\n"
+        + "\n" + _MAIN_FAILED_LINE + "Migration failed for changeset db/changelog/x.xml::catalog-999-9::someone\n"
         "Caused by: org.postgresql.util.PSQLException:\n"
         '  ERROR: relation "x" does not exist\n'
     )
@@ -360,7 +365,16 @@ def test_last_boot_failure_detail_ignores_the_marker_inside_a_logged_value(tmp_p
     )
     log_path.write_text(forged, encoding="utf-8")
     assert _last_boot_failure_detail(log_path) is None
-    log_path.write_text(real + forged, encoding="utf-8")
+    # the marker in an exception message on a trace line that is not under Main's failure line
+    in_value = (
+        "java.lang.IllegalStateException: bad name MigrationFailedException: Migration failed for changeset "
+        "e.xml::forged-3::x\n"
+    )
+    log_path.write_text(in_value + forged, encoding="utf-8")
+    assert _last_boot_failure_detail(log_path) is None
+    # in the real trace, a later exception message carrying the marker does not displace Liquibase's own
+    later = "Caused by: org.postgresql.util.PSQLException: ERROR: tenant Migration failed for changeset e.xml::forged-4::x\n"
+    log_path.write_text(_MAIN_FAILED_LINE + real + later + forged, encoding="utf-8")
     assert _last_boot_failure_detail(log_path) == "Liquibase changeset note-uri-001-1"
 
 

@@ -1222,11 +1222,11 @@ def _check_service_crossencoder_model() -> list[HealthResult]:
 #: meaningful drag on `nx doctor`.
 _BOOT_FAILURE_TAIL_BYTES: int = 64 * 1024
 
-#: Liquibase's failure marker ("Migration failed for changeset <path>::<id>::<author>"), only where Liquibase puts
-#: it: a line start or right after "MigrationFailedException: ", never in an engine logback line, whose message can
-#: carry client text (RDR-167, nexus-dngtz.1.11). An exception message on a trace line still could; display only.
+#: Liquibase's failure marker ("Migration failed for changeset <path>::<id>::<author>"), read only in the trace of
+#: Main's event=schema_migration_failed ERROR line, and its first match there, Liquibase's own outer wrapper: an
+#: ordinary line's message or a later exception message can carry client text (RDR-167, nexus-dngtz.1.11).
 _LIQUIBASE_CHANGESET_RE = re.compile(
-    r"(?m)^(?!\d{4}-\d\d-\d\d[ T])(?:[ \t]*|.*?\bMigrationFailedException: )Migration failed for changeset\s+"
+    r"Migration failed for changeset\s+"
     r"(?P<path>\S+?)::(?P<id>[^:\s]+)::(?P<author>\S+)")
 #: The SQL error one-liner Liquibase's PSQLException wrapper emits, usually
 #: a few lines after the changeset marker (e.g. "Caused by: ...PSQLException:
@@ -1249,9 +1249,9 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
     RDR (nexus-4m6i0.7): during a Liquibase-VALIDATE crash-loop (GH #1390 /
     ms57z) the service dies before it can answer any HTTP request, so the
     root cause has to come from its own log file, not a live probe. Reads at
-    most the last :data:`_BOOT_FAILURE_TAIL_BYTES` of *log_path* and looks
-    for the LAST ``Migration failed for changeset <path>::<id>::<author>``
-    marker plus, if present nearby, the SQL error one-liner that follows it.
+    most the last :data:`_BOOT_FAILURE_TAIL_BYTES` of *log_path*, takes the trace of the LAST migration-failed
+    line and the first ``Migration failed for changeset <path>::<id>::<author>`` in it, plus, if present nearby,
+    the SQL error one-liner that follows it.
 
     Returns ``None`` on ANY failure — missing file, not a regular file,
     unreadable, no marker found — this is diagnostic sugar layered on top of
@@ -1268,11 +1268,14 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
     except OSError:
         return None
 
-    matches = list(_LIQUIBASE_CHANGESET_RE.finditer(tail))
-    if not matches:
+    from nexus.daemon.readiness import RE_ENGINE_LINE, is_migration_failed_line  # noqa: PLC0415 - doctor-only path
+    lines = tail.splitlines()
+    at = next((i for i in range(len(lines) - 1, -1, -1) if is_migration_failed_line(lines[i])), None)
+    trace = [] if at is None else lines[at + 1 :]
+    trace = "\n".join(trace[: next((j for j, ln in enumerate(trace) if RE_ENGINE_LINE.match(ln)), len(trace))])
+    if (last := _LIQUIBASE_CHANGESET_RE.search(trace)) is None:
         return None
-    last = matches[-1]
-    changeset_id = last.group("id")
+    tail, changeset_id = trace, last.group("id")
 
     # Best-effort: scan forward from the marker for the nearest ERROR: line
     # (Liquibase wraps the underlying PSQLException a few lines below).

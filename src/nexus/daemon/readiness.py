@@ -90,7 +90,7 @@ PROGRESS_LOG_INTERVAL: float = 30.0
 #: - ``RE_RUNNING_CHANGESET`` matches Liquibase's OWN progress line,
 #:   written to its UI output channel — plain stdout, no logback prefix
 #:   (the real log shows it as a bare "Running Changeset: ..." line).
-#: - ``MARKER_WAITING_FOR_LOCK`` is Liquibase's OWN logger; with no SLF4J
+#: - ``RE_WAITING_FOR_LOCK`` is Liquibase's OWN logger; with no SLF4J
 #:   bridge wired into this service (verified against the shipped
 #:   liquibase-core jar — no ``liquibase-slf4j`` dependency, no
 #:   ``SLF4JBridgeHandler`` installed), it goes through
@@ -108,10 +108,13 @@ PROGRESS_LOG_INTERVAL: float = 30.0
 #: marker counts only where a client value cannot stand: as the FIRST token of
 #: the message of a logback line from the logger that emits it, or at the
 #: start of a bare Liquibase line. A marker anywhere else in a line, inside a
-#: quoted value or after other text, is ignored. The engine's sink converter
-#: escapes every control character in a message and in exception text, so no
-#: value can start a line of its own. Liquibase's JUL records get the same
-#: escape from the engine's JUL formatter. "Running Changeset:" lines are bare
+#: quoted value or after other text, is ignored. Anchoring holds only while no
+#: value can start a line of its own: that is the engine-side half of the same
+#: fix (RDR-167 option b), a logback converter escaping every control character
+#: in a message and in exception text, a JUL formatter doing the same for
+#: Liquibase's records, and an uncaught-exception handler logging through
+#: SLF4J. Against an engine without it, a value carrying a newline followed by
+#: a whole engine-shaped line still passes every anchor. "Running Changeset:" lines are bare
 #: Liquibase UI output carrying changeset ids from the engine's own changelog
 #: files, not client text, and are not escaped; they and the lock wait only
 #: widen a wait bound and name a changeset, never decide a phase or a failure.
@@ -140,7 +143,6 @@ MARKER_START = "event=schema_migration_start"
 MARKER_PENDING = "event=schema_migration_pending"
 MARKER_COMPLETE = "event=schema_migration_complete"
 MARKER_FAILED = "event=schema_migration_failed"
-MARKER_WAITING_FOR_LOCK = "Waiting for changelog lock"
 
 
 def engine_message(line: str, logger: str, level: str | None = None) -> str | None:

@@ -664,15 +664,15 @@ class TestMigrationLogScanner:
             MARKER_FAILED,
             MARKER_PENDING,
             MARKER_START,
-            MARKER_WAITING_FOR_LOCK,
             RE_PENDING,
             RE_RUNNING_CHANGESET,
+            RE_WAITING_FOR_LOCK,
         )
 
         assert MARKER_START == "event=schema_migration_start"
         assert MARKER_PENDING == "event=schema_migration_pending"
         assert MARKER_COMPLETE == "event=schema_migration_complete"
         assert MARKER_FAILED == "event=schema_migration_failed"
-        assert MARKER_WAITING_FOR_LOCK == "Waiting for changelog lock"
+        assert RE_WAITING_FOR_LOCK.match("INFO: Waiting for changelog lock....") is not None
         assert RE_RUNNING_CHANGESET.search("Running Changeset: a::b::c") is not None
         assert RE_PENDING.search("event=schema_migration_pending changesets=2") is not None

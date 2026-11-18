@@ -163,12 +163,12 @@ class _Harness:
                     listener = _HELD.pop(port)
                     listener.listen(16)
                     _ENGINE_SOCKETS.append(listener)
-                    self._scripted.append("INFO  SchemaMigrator - event=schema_migration_pending changesets=400")
+                    self._scripted.append("2026-11-17 02:10:03,114 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_pending changesets=400")
                     count = 80 if verdict == "advancing" else 10
                     self._scripted += [f"Running Changeset: db/changelog/cs-{n}.xml::cs-{n}::nexus-test" for n in range(count)]
                     if verdict == "advancing":
                         self._scripted += [
-                            "INFO  SchemaMigrator - event=schema_migration_complete new_changesets=400",
+                            "2026-11-17 02:10:04,114 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_complete new_changesets=400",
                             f"INFO  NexusService - event=service_started port={port}",
                         ]
                 elif verdict in ("ok", "wrong_port", "longer_port", "dies_after_ready"):
