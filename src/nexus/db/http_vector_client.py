@@ -63,8 +63,14 @@ from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import DEADLINE_OUTCOME_HEADER, is_deadline_abort, parse_retry_after
 from nexus.redact import redact_credentials
 from nexus.sensitivity import ReadSensitivity, check_read_sensitivity
+from nexus.topic_route import carry_entry_fields as _carry_topic_route_fields
+from nexus.topic_route import route_field as _topic_route_field
 
 _log = structlog.get_logger(__name__)
+
+#: The ``GET /version`` key under which the engine reports ``topic_route`` support (RDR-134 Step 4). Spelled once
+#: here; ``tests/tables/test_topic_route_status.py`` holds it equal to the engine's ``VersionHandler`` literal.
+TOPIC_ROUTE_CAPABILITY_FLAG = "vector_topic_route_supported"
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -4173,6 +4179,32 @@ class HttpVectorClient:
         self._chash_allow_fetched_at = _monotonic()
         return flag
 
+    #: RDR-134 Step 5a-i (nexus-7fku2.1.5): the longest a probed ``GET /version`` body is trusted for the
+    #: ``topic_route`` capability; the same bound as :attr:`_CHASH_ALLOW_TTL_S`.
+    _TOPIC_ROUTE_TTL_S: float = 300.0
+    _topic_route_flag: bool | None = None
+    _topic_route_fetched_at: float | None = None
+
+    def supports_topic_route(self) -> bool:
+        """Does the engine route a search-per-collection request by topic (``GET /version``'s
+        ``vector_topic_route_supported``, RDR-134 Step 4)? Only a JSON ``true`` counts. An engine without the
+        flag ignores the ``topic_route`` key and answers an unrouted search, and the public cloud edge trims
+        ``/version`` to an allowlist, so a flag it does not list reads the same: :meth:`search_per_collection`
+        reads this BEFORE it sends the field. Cached for :attr:`_TOPIC_ROUTE_TTL_S`. NEVER raises: a failed probe
+        is ``False``, which is the safe direction here (the request goes unrouted, as it does today)."""
+        fetched = self._topic_route_fetched_at
+        if self._topic_route_flag is not None and fetched is not None and _monotonic() - fetched < self._TOPIC_ROUTE_TTL_S:
+            return self._topic_route_flag
+        try:
+            info = _get("/version", tenant=self._tenant, timeout=10.0)
+            flag = isinstance(info, dict) and info.get(TOPIC_ROUTE_CAPABILITY_FLAG) is True
+        except Exception as exc:  # noqa: BLE001 — a capability probe never raises; unsupported is the safe answer
+            _log.warning("topic_route_probe_failed", error=str(exc))
+            flag = False
+        self._topic_route_flag = flag
+        self._topic_route_fetched_at = _monotonic()
+        return flag
+
     #: RDR-243 Phase 2 (nexus-rfvyy.7.8): the longest a real ``GET /version`` answer is trusted for the
     #: ``sensitivity=exclude`` capability. Only a real answer (true or false) is held; see
     #: :meth:`supports_sensitivity_exclude`.
@@ -4589,6 +4621,7 @@ class HttpVectorClient:
         content_chars: int | None = None,
         lexical: bool = False,
         chash_allow: Sequence[str] | None = None,
+        topic_route: Mapping[str, Any] | None = None,
         sensitivity: Sensitivity,
     ) -> dict | None:
         """Per-collection top-K over ONE embedding-model group via
@@ -4669,8 +4702,24 @@ class HttpVectorClient:
         ``per_collection`` entry. ``"lexical"`` is absent when the engine did
         not echo the field (it predates it and ignored it): the caller then
         runs the lexical leg on ``/hybrid-search`` itself.
+
+        *topic_route* (RDR-134 Step 5a-i, nexus-7fku2.1.5) asks the engine to search each named collection
+        inside the topic(s) nearest the query: ``{"mode": "top1"}`` or ``{"mode": "band", "width": w}``, with an
+        optional ``"collections"`` narrowing. Default off: a request without it is byte-identical to today's and
+        spends no capability probe. The field reaches the body only when (a) the request holds a prose-prefix
+        collection (knowledge, docs, rdr, paper), (b) it carries no *chash_allow* and no *where* (the engine
+        leaves such a request unrouted), and (c) :meth:`supports_topic_route` reads true; ``collections`` is then
+        always an explicit list of the prose names, never absent or null (the engine reads those as "route every
+        collection"), so a code collection never carries it. Each ``per_collection`` entry then carries
+        ``topic_route_status`` (``routed``, ``no_topics``, ``fallback`` or ``skipped``; absent on an arm that
+        errored) and, when the engine reports them, ``topic_route_error``, ``topic_route_coverage`` and
+        ``topic_route_topics``. ``ValueError`` for a mode or width the engine would refuse, before any request.
         """
         _check_sensitivity(sensitivity)  # before the write-off return: a bad value is never read as include
+        route_field = None
+        if topic_route is not None:
+            # Validated even when the request is left unrouted, so a bad value never hides behind a where.
+            route_field = _topic_route_field(topic_route, collection_names, where=where, chash_allow=chash_allow)
         if self._per_collection_written_off():
             return None
 
@@ -4704,6 +4753,8 @@ class HttpVectorClient:
             body["lexical"] = True
         if chash_allow is not None:
             body["chash_allow"] = list(chash_allow)  # nexus-jypmj: see search()
+        if route_field is not None and self.supports_topic_route():
+            body["topic_route"] = route_field  # RDR-134 Step 5a-i: only with the capability; see the docstring
         if rerank:
             body["rerank"] = True
             if rerank_top_k is not None:
@@ -4886,6 +4937,8 @@ class HttpVectorClient:
                 "error": entry.get("error"),
                 "error_kind": entry.get("error_kind"),
             })
+            # RDR-134 Step 5a-i: optional topic_route_* diagnostics, only when the engine sent them.
+            _carry_topic_route_fields(entry, entries[-1])
             if lexical:
                 lexical_ids = entry.get("lexical_ids")
                 if not isinstance(lexical_ids, list) or not all(
