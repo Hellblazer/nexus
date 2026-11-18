@@ -419,9 +419,15 @@ identity token the script reads as a Bash child of its session
 (`nexus_rdr/252-research-4` F3):
 
 ```
+key:   topic=nexus-develop--push   nonce: push-<tip>
 dims:  from=<identity id>  kind=push  sha=<tip>
 body:  {"base": "<develop sha before the push>", "n": <commits>}
 ```
+
+The nonce is required by the template's `keys+nonce` identity, and a retry of
+one push lands on the same tuple. The script releases the push lock before it
+writes the record and stops the write after 20 seconds
+(`NX_PUSH_RECORD_TIMEOUT_S`), so a slow tuple space never holds a push.
 
 The stamper trusts the record's stamp, never `from` (Sam's answer on gate
 finding S4): it maps the stamped session id to an identity through the
@@ -1057,3 +1063,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-17: fix check `252-fix-check-b01405db2a50` passed 3-0; its counted items fixed (`nexus_rdr/252-research-8`): back to `board/ci/<topic>` (its cap counts each subspace, so nothing was crowded out, and the aura grammar takes it); refreshed rows carry `episode_at`, `refresh` and `handoffs`, keep the current owner and do not wake; `serves` format, keys within `serves`, one live group per topic under an advisory lock; re-forming a disbanded name by the former leader or, when it is not live, another seat, starting with no other members; disband removes memberships; the override also for an `unleased` or purged leader; the escalated display with nobody live; clear rows only for a topic with an open owner row; the aura state file keyed and cleaned like RDR-253's token files; the serving group in place of `push-train` in the stamper rules; Activation forms with `--serves`.
 - 2026-11-17: fix check `252-fix-check-b03c30cf28aa` failed (2 counted BLOCKS-PLANNING: a start-time replay with no mechanism, and the `board-ci` token reaching owner rows); fixed once (`nexus_rdr/252-research-9`): the replay promise dropped (a late server shows the next row); the engine refuses a `board-ci`-scoped write to `--owner` and `--push`; the stamper runs on every `--done` write, owner rows only for a served topic and clear rows for any open red; refreshes carry their row's reason and hand-offs `reason=handoff`; the null-owner escalated display; re-form named in the leader-only rules, locked, every field the form call's, history kept in `gc_audit`; the disband cascade exempt from the membership checks, no join to a disbanded group, `ended_at` cleared only by re-form; one lock order shared with the stamper; the override for an `unleased` leader stated in RDR-253's terms; the state-file cleanup by RDR-253's holder check; the aura's group tied to the serving group.
 - 2026-11-17: accepted by Sam ("Accept and plan"); last fix check `252-fix-check-b460ee2181a5` PASS 3-0; its seven counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
+- 2026-11-18: wording matched to the reviewed Step 2 code (nexus-igea9.2, 5cf9ab46d): the push record's key and `push-<tip>` nonce, the lock released before the write, and the write's time bound.
