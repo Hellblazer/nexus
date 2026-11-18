@@ -1115,6 +1115,16 @@ Print a `dchash:<hash>:<start>-<end>` span for a passage of the document's sourc
 
 Refused (exit 1, with the reason): a PDF (content type `paper` or `pdf`, or a `.pdf` suffix on the file path or the source URI path), a document with no file source (an `nx-note://` note, or a source `nx` cannot find), an offset range outside `0 <= start < end <= length`, a passage that is empty, absent or repeated, a source file that is missing or cannot be read, and a source file that is not valid UTF-8. An empty TUMBLER is a usage error (exit 2). The span is checked against the file on disk, so it is only as current as that file.
 
+### nx catalog resolve
+
+```
+nx catalog resolve [TUMBLER | --tumbler T] [--owner OWNER] [--corpus CORPUS] [--json]
+```
+
+Resolve a document tumbler (or source URI), an owner (dotted tumbler or registered name) and/or a corpus to physical T3 collection names, for `nx search --corpus`. The same function as the MCP tool `resolve`. Prints one name per line, sorted and distinct; `--json` prints a JSON array instead. With several arguments the result is their union. No argument is a usage error (exit 2).
+
+`--corpus` takes a collection content type (`code`, `docs`, `rdr`, `knowledge`), which returns every live collection of that type, or a free-form document `corpus` label, matched exactly against each document's `corpus` metadata. A value that is both returns both sets. Indexing does not set a document's label to a content type, so `--corpus rdr` is the content-type form, never a label hit. A content type with no collections prints nothing (exit 0, `[]` with `--json`). A value that is neither a content type nor a label any document carries is refused (exit 1) with a message that names the value and lists the valid content types. A tumbler that is not dotted (the `1-2188` prefix `nx doctor` prints is not one) and an unknown or ambiguous owner name are refused the same way.
+
 ### nx catalog link-audit (hidden)
 
 ```

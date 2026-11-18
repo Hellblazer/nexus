@@ -325,6 +325,7 @@ from nexus.commands.catalog_cmds import ghost_sweep as _ghost_sweep_cmds  # noqa
 from nexus.commands.catalog_cmds import footnotes as _footnotes_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import sensitivity as _sensitivity_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import span as _span_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import resolve as _resolve_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -348,6 +349,7 @@ _ghost_sweep_cmds.register(catalog)
 _footnotes_cmds.register(catalog)
 _sensitivity_cmds.register(catalog)
 _span_cmds.register(catalog)
+_resolve_cmds.register(catalog)
 
 
 @catalog.command("init", hidden=True)
