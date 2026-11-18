@@ -78,6 +78,35 @@ def row_nx_seat_naming_no_seat_is_ephemeral_and_says_so(world: World) -> None:
     assert any(f"NX_SEAT={world.q('nosuchseat')} names no seat" in n for n in out.notices)
 
 
+def row_nx_seat_naming_a_renamed_seat_is_ephemeral_and_the_notice_names_the_new_name(world: World) -> None:
+    """Row: ``startup``, ``NX_SEAT`` naming no seat: "a seat that was renamed gets a notice naming its new name". The
+    old name still resolves for the 7-day grace (as retired); the hook must not bind the seat through it."""
+    seat = world.seat("old-name")
+    world.client._request("POST", "/rename", json={"old": world.q("old-name"), "new": world.q("new-name")})
+    world.process(100)
+    out = world.hook(100, "startup", "sid-a", seat="old-name")
+    assert out.action == "ephemeral" and out.kind == "ephemeral" and out.identity != seat
+    assert any(f"NX_SEAT={world.q('old-name')} was renamed to {world.q('new-name')}" in n for n in out.notices), out.notices
+    assert world.identity(seat)["state"] == "unheld" and "start" not in world.events(seat)
+
+
+def row_startup_naming_an_ended_seat_from_a_process_with_no_identity_binds_the_next_generation(world: World) -> None:
+    """Row: ``startup``, a seat named, unheld or ended: bound, new generation, event ``start``. The seat's last holder
+    ended cleanly (``ended``, no holder); a new process that holds nothing names it."""
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    assert world.hook(100, "startup", "sid-a").identity == alpha
+    world.client.bind(alpha, "end", 1)
+    world.procs.stop(100, keep_registry=False)
+    assert world.identity(alpha)["state"] == "ended"
+    world.process(101, name="alpha", os_start=T1)
+    out = world.hook(101, "startup", "sid-b")
+    assert (out.action, out.identity, out.generation, out.event) == ("bound", alpha, 2, "start")
+    shown = world.identity(alpha)
+    assert shown["state"] == "live" and shown["holder"]["pid"] == 101
+    assert world.events(alpha) == ["start", "end", "start"]
+
+
 def row_startup_naming_a_seat_live_elsewhere_is_ephemeral_and_the_remedy_is_printed_only_interactively(world: World) -> None:
     """Row: ``startup``, a seat live in another process: ephemeral; the hook prints the holder and, in an
     interactive session only, the remedy ``nx identity claim <seat> --take-over``."""
@@ -199,6 +228,46 @@ def row_resume_of_an_ended_ephemeral_identity_is_treated_as_startup(world: World
     out = world.hook(101, "resume", "sid-a")
     assert out.action == "ephemeral" and out.identity != first.identity
     assert world.indexed("sid-a")["identity"] == out.identity          # the index follows the new binding
+
+
+def row_resume_of_an_ended_delegated_identity_is_treated_as_startup_with_the_seat_the_launch_names(world: World) -> None:
+    """Row: ``resume``, the id's identity is an ephemeral or delegated identity that has ended: treated as ``startup``
+    with the seat the launch names (the ephemeral case is the row above)."""
+    alpha, parent = world.seat("alpha"), world.seat("parent")
+    child = world.client._request("POST", "/delegated", json={"parent": parent, "bind": evidence_body(
+        session_id=world.q("child-sid"), host=world.host, pid=900, started_at=900_000, proc_start=T0)})["id"]
+    world.client.bind(child, "end", 1)
+    assert (world.identity(child)["kind"], world.identity(child)["state"]) == ("delegated", "ended")
+    assert world.indexed("child-sid")["identity"] == child
+    world.process(100, name="alpha", os_start=T1)
+    out = world.hook(100, "resume", "child-sid")
+    assert (out.action, out.identity, out.generation, out.event) == ("bound", alpha, 1, "start")
+    assert world.indexed("child-sid")["identity"] == alpha                 # the index follows the new binding
+    assert world.events(child) == ["start", "end"]                         # the delegated identity is left as it was
+
+
+def row_resume_of_an_ended_or_an_unheld_seat_in_a_process_with_no_identity_binds_it_at_the_next_generation(world: World) -> None:
+    """Row: ``resume``, the resumed id's seat unheld or ended: bound, new generation (the process is new), event
+    ``resume``. One seat's holder ended cleanly; the other seat was released."""
+    ended, unheld = world.seat("ended"), world.seat("unheld")
+    world.process(100, name="ended")
+    world.process(101, name="unheld", os_start=T1)
+    assert world.hook(100, "startup", "ended-sid").identity == ended
+    assert world.hook(101, "startup", "unheld-sid").identity == unheld
+    world.client.bind(ended, "end", 1)
+    world.client.bind(unheld, "release", 1, evidence_body(
+        session_id=world.q("unheld-sid"), host=world.host, pid=101, started_at=101_000, proc_start=T1))
+    world.procs.stop(100, keep_registry=False)
+    world.procs.stop(101, keep_registry=False)
+    assert (world.identity(ended)["state"], world.identity(unheld)["state"]) == ("ended", "unheld")
+
+    world.process(200, os_start=T2)                                        # no name, no identity: only the index leads to the seat
+    world.process(201, os_start="2026-11-17T11:00:00Z")
+    for pid, sid, seat, was in ((200, "ended-sid", ended, "end"), (201, "unheld-sid", unheld, "release")):
+        out = world.hook(pid, "resume", sid)
+        assert (out.action, out.identity, out.generation, out.event) == ("bound", seat, 2, "resume"), sid
+        assert world.identity(seat)["state"] == "live" and world.identity(seat)["holder"]["pid"] == pid, sid
+        assert world.events(seat) == ["start", was, "resume"], sid
 
 
 def row_resume_of_a_seat_live_in_this_same_process_is_unchanged(world: World) -> None:
@@ -422,6 +491,8 @@ ROWS = (
     row_a_dash_n_name_that_is_no_seat_is_ephemeral_with_a_display_name_and_takes_no_alias,
     row_a_dash_n_that_matches_a_live_seat_binds_it_and_nx_seat_wins_over_it,
     row_nx_seat_naming_no_seat_is_ephemeral_and_says_so,
+    row_nx_seat_naming_a_renamed_seat_is_ephemeral_and_the_notice_names_the_new_name,
+    row_startup_naming_an_ended_seat_from_a_process_with_no_identity_binds_the_next_generation,
     row_startup_naming_a_seat_live_elsewhere_is_ephemeral_and_the_remedy_is_printed_only_interactively,
     row_startup_naming_a_lapsed_seat_whose_holder_still_runs_is_ephemeral,
     row_startup_naming_a_seat_whose_holder_is_gone_binds_the_next_generation_and_the_live_holder_needs_the_verdict,
@@ -429,6 +500,8 @@ ROWS = (
     row_each_restart_mode_finds_the_old_holder_gone_and_binds_the_next_generation_with_no_release_step,
     row_resume_of_an_unindexed_session_id_is_treated_as_startup_with_the_seat_the_launch_names,
     row_resume_of_an_ended_ephemeral_identity_is_treated_as_startup,
+    row_resume_of_an_ended_delegated_identity_is_treated_as_startup_with_the_seat_the_launch_names,
+    row_resume_of_an_ended_or_an_unheld_seat_in_a_process_with_no_identity_binds_it_at_the_next_generation,
     row_resume_of_a_seat_live_in_this_same_process_is_unchanged,
     row_resume_of_a_seat_live_in_another_process_is_ephemeral_with_the_holder,
     row_a_cross_seat_resume_switches_the_process_and_refuses_a_bash_child_from_before_the_switch,
