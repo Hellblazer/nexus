@@ -155,6 +155,12 @@ def _marks_in(tree: ast.AST) -> set[str]:
 
 
 def session_items_files(repo: Path) -> set[str]:
+    return {i.split("::", 1)[0] for i in session_items_nodeids(repo)}
+
+
+def session_items_nodeids(repo: Path) -> set[str]:
+    """The census node ids the guard registry names: the tests that judge session.items, not
+    their siblings in the same file."""
     tree = ast.parse((repo / CONFTEST).read_text())
     for node in ast.walk(tree):
         targets = []
@@ -167,7 +173,7 @@ def session_items_files(repo: Path) -> set[str]:
             if value is None:
                 break
             ids = [c.value for c in ast.walk(value) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
-            return {i.split("::", 1)[0] for i in ids}
+            return set(ids)
     raise SystemExit(f"meta_tests: {CONFTEST} no longer defines {SESSION_ITEMS_NAME}; update this script")
 
 
@@ -244,8 +250,8 @@ def module_files(repo: Path, test: str) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             names.add(node.module)
             names.update(f"{node.module}.{a.name}" for a in node.names)
-    # A bare name resolves as pytest makes it: scripts/ (pyproject pythonpath), the test's own
-    # directory (rootdir-relative import mode), then tests/.
+    # A bare name may resolve through scripts/ (pyproject pythonpath), the test's own directory
+    # or tests/.
     bare_roots = [repo / "scripts", (repo / test).parent, repo / "tests"]
     out: set[str] = set()
     for name in names:
@@ -257,16 +263,14 @@ def module_files(repo: Path, test: str) -> set[str]:
         else:
             bases = bare_roots
         parts = name.split(".")
+        # Every root that holds the name: which one pytest picks depends on the import mode and
+        # the directory, and taking all of them can only over-select.
         for base in bases:
-            found = False
             for i in range(1, len(parts) + 1):
                 stem = base.joinpath(*parts[:i])
                 for cand in (stem.with_suffix(".py"), stem / "__init__.py"):
                     if cand.is_file():
                         out.add(cand.relative_to(repo).as_posix())
-                        found = True
-            if found:
-                break
     return out
 
 
@@ -401,7 +405,9 @@ def select(repo: Path, changed: list[str], base: str, manifest: dict | None = No
         if not any(entry.get(k) for k in ("opened", "statted", "listed", "prefixes")):
             sel.always[test] = "the trace recorded no read (a cached or shared scan?): surface unknown"
             continue
-        hit = _hit(test, entry, changed, existing, module_files(repo, test), repo)
+        # Imports of the test file and of the tests/ helpers and conftests it pulls in.
+        imports = set().union(*(module_files(repo, m) for m in tests_closure(repo, test)))
+        hit = _hit(test, entry, changed, existing, imports, repo)
         if hit:
             sel.selected[test] = hit
     if any(p.startswith(JAVA_SURFACE) for p in changed):
@@ -531,11 +537,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             # Every meta-test in the picked files is integration- or slow-marked: nothing to judge here.
             print("no meta-test collected from the picked files (all deselected by -m)")
             code = 0
-        if is_guard and not code and not all(any(n.startswith(g + "::") for n in passed) for g in guards):
-            # A pass is the only evidence the guard judged anything; a skip also exits 0.
-            print("the session-items guard did not pass (it skipped, its invocation looked partial), so it judged"
-                  " nothing: run the full-corpus census job (push-train rule 1) for this push")
-            code = 1
+        census = {n for n in session_items_nodeids(repo) if n.split("::", 1)[0] in guards}
+        if is_guard:
+            # Only the census node's own PASSED line counts: a skip also exits 0, and its siblings
+            # in the guard file pass whether or not it judged anything.
+            if not census <= passed:
+                print("the session-items guard did not pass (it failed, or skipped because its invocation looked"
+                      " partial): run the full-corpus census job (push-train rule 1) for this push")
+                code = 1
+            elif code:
+                # The changed test files ran only so the guard could see them, with the engine off.
+                print(f"the session-items guard passed; the other failures above (exit {code}) are in the changed"
+                      " test files, run here without the engine: advisory, the full suite judges them")
+                code = 0
         rc = rc or code
     cmd = java_command(sel)
     if cmd:

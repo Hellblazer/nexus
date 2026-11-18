@@ -450,6 +450,8 @@ def test_the_guard_counts_only_when_it_passes_a_skip_reported_at_the_conftest_fa
     repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str], conftest_extra: str, rc: int
 ) -> None:
     _built_and_committed(repo, conftest_extra)
+    # A sibling beside the census in the guard file: its pass is no evidence the census judged.
+    (repo / "tests/test_guard.py").write_text("def test_guard():\n    pass\n\ndef test_sibling():\n    pass\n")
     (repo / "tests/test_plain.py").write_text("def test_p():\n    assert True\n")
     assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == rc
     out = capsys.readouterr().out
@@ -560,3 +562,38 @@ def test_the_tracer_sees_a_repo_command_run_from_a_temporary_cwd_and_other_spawn
     assert any("scripts/tool.sh" in o for o in got["opaque"]), got["opaque"]
     assert "sh -c true" in got["opaque"]  # os.system runs from the repo cwd
     assert not any(o == "true" for o in got["opaque"])  # nothing of the repo in it, run from elsewhere
+
+
+def test_select_reads_changed_names_from_stdin_one_per_line_or_nul_separated(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+    for data in ("docs/a b.md\ndocs/c.md\n", "docs/a b.md\0docs/c.md\0"):
+        monkeypatch.setattr(sys, "stdin", io.StringIO(data))
+        mt.main(["select", "--repo", str(repo), "--base", "base", "--names-from-stdin", "--json"])
+        assert json.loads(capsys.readouterr().out)["changed"] == ["docs/a b.md", "docs/c.md"]
+
+
+def test_a_failure_in_a_changed_test_file_is_advisory_when_the_guard_passes(
+    repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _built_and_committed(repo)
+    (repo / "tests/test_plain.py").write_text("def test_p():\n    assert False, 'needs the engine'\n")
+    assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == 0
+    assert "the session-items guard passed; the other failures above" in capsys.readouterr().out
+
+
+def test_a_scripts_module_imported_through_a_tests_helper_selects_the_test(repo: Path) -> None:
+    _write(repo, {
+        "scripts/checker.py": "C = 1\n",
+        "tests/_helper.py": "from checker import C\n",
+        "tests/test_bare.py": "import pytest\nimport _helper\npytestmark = pytest.mark.lint\n",
+    })
+    manifest = _manifest(repo, test_bare=READS)
+    assert mt.select(repo, ["scripts/checker.py"], "base", manifest).selected["tests/test_bare.py"] == (
+        "imports scripts/checker.py")
+
+
+def test_a_bare_name_present_in_two_roots_yields_both_files(repo: Path) -> None:
+    _write(repo, {"scripts/twin.py": "", "tests/twin.py": "", "tests/test_twin.py": "import twin\n"})
+    assert mt.module_files(repo, "tests/test_twin.py") == {"scripts/twin.py", "tests/twin.py"}
