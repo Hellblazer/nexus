@@ -3,9 +3,9 @@
 
 The engine's compare-and-set and policy are real (``tests/identity/conftest.py``); the machine is a process table
 under ``tmp_path``. The rows are independent journeys: each runs on its own scoped world (its own host, process
-table, seat names and session ids) inside ONE tenant, through ``rows`` (``test_the_session_start_policy_table``), so
-the module mints one tenant, not 22 (tests/storage_touch_ceiling.toml). A failing row names itself in the failure and
-does not stop the rows after it. A row's docstring names the row of the RDR's table it covers.
+table, seat names and session ids) inside the ONE tenant of tests/identity/test_identity_engine_journeys.py
+(tests/storage_touch_ceiling.toml); this module holds no test and mints no tenant. A failing row names itself in the
+failure and does not stop the rows after it. A row's docstring names the row of the RDR's table it covers.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 from nexus.identity.bind_client import IdentityApiError, evidence_body
 from nexus.identity.resolver import IdentityConflictError, resolve_identity
 from nexus.identity.token_file import TokenFile, read_token_file, token_path, write_token_file
-from tests.identity.conftest import T0, Rows, World
+from tests.identity.conftest import T0, World
 
 T1 = "2026-11-17T09:00:00Z"
 T2 = "2026-11-17T10:00:00Z"
@@ -441,10 +441,3 @@ ROWS = (
     row_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_it_or_closes_it_for_the_named_seat,
     row_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start,
 )
-
-
-@pytest.mark.t2_tenant
-def test_the_session_start_policy_table(rows: Rows) -> None:
-    """Every row of the table against one engine tenant (one tenant for the module's 22 rows). Each runs on a scoped
-    world, so a failure names its row and the rows after it still run."""
-    rows.run(ROWS, globals())

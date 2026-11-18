@@ -4,8 +4,9 @@ the server's own credential (a ``data`` token: it may start, resume, fork, refre
 fixed (``world.now``); the engine's lapse is staged by backdating its last renewal. The tests that need the Step 2
 engine (tokens and fences) are in test_identity_token_engine.py and skip until it lands.
 
-The four rows are independent journeys; each runs on its own scoped world inside ONE tenant (``rows``, see
-tests/identity/conftest.py), so the module mints one tenant, not four."""
+The four rows are independent journeys; each runs on its own scoped world inside the ONE tenant of
+tests/identity/test_identity_engine_journeys.py (see tests/identity/conftest.py). This module holds no test and mints no
+tenant."""
 from __future__ import annotations
 
 import pytest
@@ -13,7 +14,7 @@ import pytest
 from nexus.identity.bind_client import IdentityApiError, evidence_body
 from nexus.identity.token_file import read_token_file, token_path
 from nexus.mcp.identity_lease import HEARTBEAT_S, IdentityLease
-from tests.identity.conftest import T0, VERSION, Rows, World
+from tests.identity.conftest import T0, VERSION, World
 
 T1 = "2026-11-17T09:00:00Z"
 
@@ -134,9 +135,3 @@ ROWS = (
     row_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_only_from_its_own_token_file,
     row_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when_claude_has_exited,
 )
-
-
-@pytest.mark.t2_tenant
-def test_the_mcp_identity_lease(rows: Rows) -> None:
-    """The lease's four journeys against one engine tenant; a failure names its row and the rows after it still run."""
-    rows.run(ROWS, globals())

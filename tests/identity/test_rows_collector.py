@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.identity.conftest import Rows
+from tests.identity.conftest import Journey, Rows, run_journeys
 
 
 class _StandInWorld:
@@ -168,3 +168,125 @@ def test_a_keyboard_interrupt_propagates_and_the_failures_so_far_go_to_stderr(
     with pytest.raises(KeyboardInterrupt):
         _rows().run(table, namespace)
     assert "broke before the interrupt" in capsys.readouterr().err
+
+
+# ── run_journeys: every module's table from one test ────────────────────────────────────────────────────────────────
+
+
+def _journey(module: str, tag: str, *fns, **extra) -> Journey:
+    return Journey(module, tag, tuple(fns), {fn.__name__: fn for fn in fns}, **extra)
+
+
+def test_a_failure_in_one_module_is_named_with_its_module_and_the_other_modules_still_run(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NX_ROWS", raising=False)
+    tags: list[str] = []
+
+    def row_breaks(world) -> None:
+        tags.append(world.tag)
+        assert False, "alpha's row broke"
+
+    def row_fine(world) -> None:
+        tags.append(world.tag)
+
+    def row_also_fine(world) -> None:
+        tags.append(world.tag)
+
+    journeys = (_journey("alpha", "aa", row_breaks, row_fine), _journey("beta", "bb", row_also_fine))
+    with pytest.raises(pytest.fail.Exception) as err:
+        run_journeys(_StandInWorld(), journeys)  # type: ignore[arg-type]
+    message = str(err.value)
+    assert "1 failed of 3 rows run: ['alpha::row_breaks']" in message
+    assert "ROW 'alpha::row_breaks' FAILED" in message and "alpha's row broke" in message
+    assert "beta::row_also_fine" in message and "row_also_fine' FAILED" not in message, "the passing module is in the times, not the failures"
+    assert tags == ["aa-r01", "aa-r02", "bb-r01"], "each module's rows carry its own prefix: no two rows share a tag"
+
+
+def test_a_module_that_cannot_run_is_skipped_and_reported_while_the_others_run_and_the_require_env_makes_it_a_failure(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NX_ROWS", raising=False)
+    monkeypatch.delenv("NX_NEEDS", raising=False)
+    ran: list[str] = []
+
+    def row_needs_step2(world) -> None:
+        ran.append("needs")
+
+    def row_anywhere(world) -> None:
+        ran.append("anywhere")
+
+    def journeys():
+        return (_journey("tokens", "tk", row_needs_step2, precheck=lambda w: "the engine lacks the feature", require_env="NX_NEEDS"),
+                _journey("plain", "pl", row_anywhere))
+
+    report = run_journeys(_StandInWorld(), journeys())  # type: ignore[arg-type]
+    assert ran == ["anywhere"] and report.skipped == {"tokens": "the engine lacks the feature"}
+    assert report.ran == ["plain::row_anywhere"] and "SKIPPED module 'tokens': the engine lacks the feature" in report.text()
+    monkeypatch.setenv("NX_NEEDS", "1")
+    ran.clear()
+    with pytest.raises(pytest.fail.Exception) as err:
+        run_journeys(_StandInWorld(), journeys())  # type: ignore[arg-type]
+    assert ran == ["anywhere"], "the other module still ran"
+    assert "ROW 'tokens' FAILED" in str(err.value) and "NX_NEEDS=1, so this is a failure" in str(err.value)
+
+
+def test_a_skip_inside_a_row_skips_the_rest_of_its_module_only_and_a_run_of_skips_alone_fails(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NX_ROWS", raising=False)
+    ran: list[str] = []
+
+    def row_skips(world) -> None:
+        pytest.skip("not here")
+
+    def row_after_the_skip(world) -> None:
+        ran.append("after")
+
+    def row_other_module(world) -> None:
+        ran.append("other")
+
+    report = run_journeys(_StandInWorld(), (_journey("a", "a", row_skips, row_after_the_skip), _journey("b", "b", row_other_module)))  # type: ignore[arg-type]
+    assert ran == ["other"] and report.skipped["a"].startswith("skipped at row 'row_skips' after 0 of 2 rows")
+    with pytest.raises(pytest.fail.Exception, match="no row ran"):
+        run_journeys(_StandInWorld(), (_journey("only", "o", row_skips),))  # type: ignore[arg-type]
+
+
+def test_each_module_keeps_its_own_missing_row_check_and_nx_rows_matches_module_qualified_names(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    ran: list[str] = []
+
+    def row_one(world) -> None:
+        ran.append("one")
+
+    def row_two(world) -> None:
+        ran.append("two")
+
+    def row_forgotten(world) -> None:
+        ran.append("forgotten")
+
+    monkeypatch.delenv("NX_ROWS", raising=False)
+    forgetful = Journey("alpha", "aa", (row_one,), {"row_one": row_one, "row_forgotten": row_forgotten})
+    with pytest.raises(pytest.fail.Exception) as err:
+        run_journeys(_StandInWorld(), (forgetful, _journey("beta", "bb", row_two)))  # type: ignore[arg-type]
+    assert "row functions not in the table" in str(err.value) and "row_forgotten" in str(err.value) and ran == ["two"]
+
+    ran.clear()
+    journeys = (_journey("alpha", "aa", row_one), _journey("beta", "bb", row_two))
+    monkeypatch.setenv("NX_ROWS", "beta::")
+    assert run_journeys(_StandInWorld(), journeys).ran == ["beta::row_two"] and ran == ["two"]  # type: ignore[arg-type]
+    monkeypatch.setenv("NX_ROWS", "row_")
+    assert run_journeys(_StandInWorld(), journeys).ran == ["alpha::row_one", "beta::row_two"]  # type: ignore[arg-type]
+    monkeypatch.setenv("NX_ROWS", "no-such-row")
+    with pytest.raises(pytest.fail.Exception, match="no row ran"):
+        run_journeys(_StandInWorld(), journeys)  # type: ignore[arg-type]
+
+
+def test_a_module_cleanup_runs_after_its_rows_even_when_a_row_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NX_ROWS", raising=False)
+    order: list[str] = []
+
+    def row_breaks(world) -> None:
+        order.append("row")
+        raise AssertionError("x")
+
+    with pytest.raises(pytest.fail.Exception):
+        run_journeys(_StandInWorld(), (_journey("m", "m", row_breaks, cleanup=lambda: order.append("cleanup")),))  # type: ignore[arg-type]
+    assert order == ["row", "cleanup"]

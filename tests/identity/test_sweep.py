@@ -2,8 +2,9 @@
 """The SessionStart sweep (RDR-253 "Binding"): the hook reports gone holders on its host to ``gone``, skipping its own
 process and every delegated identity, and leaving alone a binding rebound since it read the list. Real engine.
 
-The two rows run on scoped worlds inside ONE tenant (``rows``, tests/identity/conftest.py): the sweep reads a whole
-host's bindings, and each row has its own host."""
+The two rows run on scoped worlds inside the ONE tenant of tests/identity/test_identity_engine_journeys.py
+(tests/identity/conftest.py): the sweep reads a whole host's bindings, and each row has its own host. This module holds
+no test and mints no tenant."""
 from __future__ import annotations
 
 from typing import Any
@@ -13,7 +14,7 @@ import pytest
 from nexus.identity.bind_client import IdentityApiError, IdentityClient, evidence_body
 from nexus.identity.sweep import sweep_host
 from nexus.identity.token_file import TokenFile, token_path, write_token_file
-from tests.identity.conftest import T0, Rows, World
+from tests.identity.conftest import T0, World
 
 T1 = "2026-11-17T09:00:00Z"
 T2 = "2026-11-17T10:00:00Z"
@@ -95,9 +96,3 @@ ROWS = (
     row_the_sweep_marks_a_crashed_holder_gone_and_leaves_its_own_process_delegated_identities_and_a_rebound_binding_alone,
     row_a_data_credential_cannot_report_gone_so_the_sweep_belongs_to_the_hook,
 )
-
-
-@pytest.mark.t2_tenant
-def test_the_sweep(rows: Rows) -> None:
-    """Both sweep journeys against one engine tenant; a failure names its row and the other row still runs."""
-    rows.run(ROWS, globals())
