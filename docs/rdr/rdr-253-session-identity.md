@@ -725,7 +725,10 @@ delegated identity, `kind=delegated parent=<id>`, with generation 1 and one
 own process (host, pid, `started_at` and `proc_start`), since the dispatcher has no
 registry file. A dispatch that grants no tools (its child loads no MCP server
 and cannot reach nexus), a dispatcher with no identity of its own, or an engine
-that refuses the create runs as before, with no delegated identity. The
+that refuses the create, gives the child no delegated identity: its
+`NX_IDENTITY_TOKEN` names a file that never exists
+(`~/.config/nexus/identity/delegated/none`), so the child binds nothing and an
+unreadable explicit token resolves to no identity, never to the parent's. The
 dispatcher passes the child, in place of any token the parent carried,
 `NX_IDENTITY_TOKEN` naming a token file it keeps current; the child's own SessionStart
 hook sees the variable and does not bind, and the resolver takes the

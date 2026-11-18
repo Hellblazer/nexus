@@ -197,7 +197,7 @@ def own_identity(env: IdentityEnv) -> dict[str, Any] | None:
     explicit = (env.environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip()
     if explicit and read_token_file(Path(explicit)) is None:
         # A delegated child whose token file names no identity (a sentinel: its dispatcher made none) holds none. The
-        # resolver would fall through to the session id and the Claude ancestor's token file and answer the PARENT's.
+        # resolver also answers None here; returning early skips the binding lookup by pid below as well.
         return None
     facts = env.caller()
     claude_pid = facts.claude_pid if facts.claude_pid > 0 else None
