@@ -15,8 +15,8 @@ T0 = "2026-11-17T08:00:00Z"
 
 
 class _Engine:
-    def __init__(self, views: list[dict[str, Any]], forbid: bool = False) -> None:
-        self.views, self.forbid, self.gone_calls = views, forbid, []
+    def __init__(self, views: list[dict[str, Any]], forbid: bool = False, fail: tuple[str, ...] = ()) -> None:
+        self.views, self.forbid, self.fail, self.gone_calls = views, forbid, fail, []
 
     def bindings_by_host(self, host: str, pid: int | None = None) -> list[dict[str, Any]]:
         return self.views
@@ -25,6 +25,8 @@ class _Engine:
         self.gone_calls.append(identity)
         if self.forbid:
             raise IdentityApiError(403, "forbidden", "a data credential may not call GONE", {})
+        if identity in self.fail:
+            raise IdentityApiError(500, "internal", "the engine broke on this row", {})
         return {"recorded": True}
 
 
@@ -85,3 +87,17 @@ def test_a_token_file_is_deleted_only_after_this_runs_sweep_dealt_with_its_holde
     removed = clean_local_files(directory, procs, host=HOST, report=report).token_files_removed
     assert sorted(removed) == ["100.100000.token", "102.102000.token"]
     assert token_path(directory, 101, 101_000).exists()
+
+
+def test_one_row_the_engine_refuses_does_not_stop_the_rest_and_keeps_its_token_file(tmp_path: Path) -> None:
+    """RDR-253 Test Plan: one failing row does not stop the sweep. Three crashed holders; the engine fails the first."""
+    procs = FakeProcesses(tmp_path / "sessions")
+    directory = tmp_path / "identity"
+    for pid in (100, 200, 300):
+        _token(directory, pid, str(procs.sessions_dir))                    # all three crashed under this config dir
+    engine = _Engine([_view("i100", 100), _view("i200", 200), _view("i300", 300)], fail=("i100",))
+    report = sweep_host(engine, procs, host=HOST, own=None, identity_dir=directory)
+    assert engine.gone_calls == ["i100", "i200", "i300"], "the sweep went on past the failing row"
+    assert report.failed == ["i100"] and report.recorded_gone == ["i200", "i300"]
+    assert token_path(directory, 100, 100_000).exists(), "the failed row's holder is not recorded gone, so its file stays"
+    assert not token_path(directory, 200, 200_000).exists() and not token_path(directory, 300, 300_000).exists()
