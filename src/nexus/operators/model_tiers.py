@@ -159,6 +159,15 @@ FLIPPED_OPERATORS: Final[frozenset[str]] = frozenset({
 #: claude-opus-5.
 STRONG_DEFAULT_ALIAS: Final[str] = "opus"
 
+#: nexus-w8d30 (Sam decision 2026-11-18): the model the RDR-250 pool filter's
+#: ``operator_check`` calls ask for, in place of the check tier's cheap alias.
+#: The 2026-11-17 stability probe (T2 nexus_rdr/250-stability-probe-2026-11-17)
+#: found the cheap tier's keep/reject verdict varied on identical input (one
+#: keep in ten calls). Read only by ``plans/runner.py``'s coverage check, and
+#: only for a call the pool filter marked; the boundary's own assessment keeps
+#: the check tier's routing.
+POOL_FILTER_ALIAS: Final[str] = _TIER_ALIASES["strong"]
+
 
 class UnknownTierError(ValueError):
     """Raised when a tier or operator name isn't in the resolver's known

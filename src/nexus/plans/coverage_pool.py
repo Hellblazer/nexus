@@ -21,7 +21,8 @@ first step of the run whose tool is ``search`` and whose output carries ``ids``;
 carry a candidate key go through the boundary's own assessment (``CoverageBoundary._assess``: its instruction, its facet
 groups, its packing by ``_pack``, its reply parsing, its budget and deadline checks), against the request's facets, and a
 key is kept when a ``supports`` record cites its chunk's item id (a covered facet's ``evidence_ids`` also holds its
-contradicting ids, so those are not read). Keys the anchors name are not filtered. Without the filter a pool key is projected
+contradicting ids, so those are not read). The filter's calls carry ``POOL_FILTER_KEY``, so the runner sends them on
+``model_tiers.POOL_FILTER_ALIAS``, not the check tier's model (nexus-w8d30). Keys the anchors name are not filtered. Without the filter a pool key is projected
 at precision 0.715, below the 0.95 gate (250-research-4), so the filter is part of the design. The MVV passed (250-research-8); the switch stays off by
 default until a separate decision turns it on. A pack the assessor answers with no evidence record is a reject verdict, not a failure.
 
@@ -59,7 +60,7 @@ from nexus.plans.reserved_stream import strip_source_note
 
 _log = structlog.get_logger(__name__)
 
-__all__ = ["DISPATCH_USAGE_KEY", "POOL_REASONS", "PoolEnv", "run_pool_phase"]
+__all__ = ["DISPATCH_USAGE_KEY", "POOL_FILTER_KEY", "POOL_REASONS", "PoolEnv", "run_pool_phase"]
 
 #: Why the pool was skipped or closed (``RepairReport.pool_reason``); empty when the scan ran through.
 POOL_REASONS: tuple[str, ...] = (
@@ -120,6 +121,10 @@ _FIELD_CAP = 80
 #: The key the runner's assessment check puts the call's token counts under (a runner-owned key, never read from the model's
 #: reply), and the attribute it gives an exception raised by a call. Only a run with the pool switch on carries it.
 DISPATCH_USAGE_KEY = "_nx_dispatch_usage"
+
+#: The arg the filter puts on each of its assessment calls (nexus-w8d30). The runner's coverage check removes it before the
+#: dispatch and sends the call on the pool filter's model (``model_tiers.POOL_FILTER_ALIAS``); the operator never sees it.
+POOL_FILTER_KEY = "_nx_pool_filter"
 _USAGE_INTS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
@@ -261,7 +266,7 @@ class _Tally:
             self.calls += 1
             ordinal = self.calls  # calls run side by side: the count may have moved on by the time this one ends
             try:
-                reply = await check(args, timeout=timeout)
+                reply = await check({**args, POOL_FILTER_KEY: True}, timeout=timeout)
             except (TimeoutError, asyncio.CancelledError) as exc:
                 self.timed_out = True
                 self._note(ordinal, args, None, exc, timed_out=True)

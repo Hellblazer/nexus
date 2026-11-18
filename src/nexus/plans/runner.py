@@ -4190,7 +4190,7 @@ async def _plan_run_impl(
         """One assessment call through the run's own dispatcher, accounted as a ``StepRecord``."""
         nonlocal _coverage_calls
         from nexus.plans.coverage_ledger import ASSESSMENT_OPERATOR  # noqa: PLC0415 — deferred; the ledger module imports this one's neighbours
-        from nexus.plans.coverage_pool import DISPATCH_USAGE_KEY  # noqa: PLC0415 — deferred, as above
+        from nexus.plans.coverage_pool import DISPATCH_USAGE_KEY, POOL_FILTER_KEY  # noqa: PLC0415 — deferred, as above
 
         # nexus-w8d30: with the pool switch on, the call's token counts ride beside the reply (and on a raised exception) under
         # this runner-owned key, for the pool filter's call log. The assessment reads only ``evidence``; with the switch off
@@ -4217,8 +4217,15 @@ async def _plan_run_impl(
             # for it. Otherwise the dispatcher's operator hydration lets the stream (still marked at the
             # terminal step, fed by a rank) observe this call's payload as the terminal input and record every
             # reserved item dropped, which the repair's second ledger then reads as a missing named source.
+            # nexus-w8d30 (Sam 2026-11-18): a call the pool filter marked asks for the pool filter's model, not the check
+            # tier's; the marker never reaches the operator. The tier kill switch (NX_OPERATOR_MODEL_TIERING=0) sends it
+            # bare, as it does every operator.
+            call_args = {k: v for k, v in args.items() if k != POOL_FILTER_KEY}
+            if args.get(POOL_FILTER_KEY) and "model" not in call_args and _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+                from nexus.operators.model_tiers import POOL_FILTER_ALIAS  # noqa: PLC0415 — deferred, as the default-path pin is
+                call_args["model"] = POOL_FILTER_ALIAS
             with _dispatch_mod.ambient_usage_sink(usage), reserved_scope(None):
-                raw = dispatch(ASSESSMENT_OPERATOR, {**args, "timeout": timeout})
+                raw = dispatch(ASSESSMENT_OPERATOR, {**call_args, "timeout": timeout})
                 result = await raw if inspect.iscoroutine(raw) else raw
             if not isinstance(result, dict):
                 raise PlanRunStepRefError(
