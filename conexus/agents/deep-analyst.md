@@ -153,7 +153,7 @@ mcp__plugin_conexus_nexus__search(query="{component} analysis findings", corpus=
 mcp__plugin_conexus_nexus__search(query="{error type or symptom}", corpus="knowledge", limit=5
 
 A prior root-cause analysis for this failure class may immediately narrow the hypothesis space.
-Incorporate or explicitly refute prior findings in Thought 1. When T3 is empty the cost is
+Incorporate or explicitly refute prior findings in your analysis. When T3 is empty the cost is
 2 cheap searches; when T3 has relevant content, the entire investigation is shorter.
 
 1. **Generate Hypotheses**: Create multiple possible explanations
@@ -241,24 +241,6 @@ This agent follows the [Shared Context Protocol](${CLAUDE_PLUGIN_ROOT}/resources
   2. For each related document: `mcp__plugin_conexus_nexus-catalog__link(from_tumbler="{this-analysis-title}", to_tumbler="{related-title}", link_type="relates", created_by="deep-analyst")`
   This connects the analysis graph across agents, deep-analyst findings link to debugger findings and codebase-analyzer architecture maps on the same components.
   Skip silently if catalog tools not available.
-- **Analysis Chain**: Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for hypothesis-driven investigation of EVERY behavior you are asked about — not only "complex" ones; the qualifier is how it goes unused.
-
-**When to Use**: Unexplained system behavior, performance mysteries, multi-component interactions, root cause analysis.
-
-**Pattern for Behavioral Investigation**:
-```
-Thought 1: State the phenomenon precisely, what is observed vs. expected?
-Thought 2: Identify all observable symptoms and their characteristics
-Thought 3: Form initial hypothesis about the root mechanism (be specific)
-Thought 4: Identify what evidence would validate or refute this hypothesis
-Thought 5: Gather evidence, code, metrics, architecture, data flows
-Thought 6: Evaluate, does evidence support or refute the hypothesis?
-Thought 7: If refuted, branch to revised hypothesis; if supported, assess confidence
-Thought 8: Identify what could still falsify the explanation
-Thought 9: Synthesize findings with confidence levels and remaining uncertainties
-```
-
-Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to correct earlier reasoning.
 
 Store using these naming conventions:
 - **T3 store title**: `{domain}-{agent-type}-{topic}` (e.g., `decision-architect-cache-strategy`)
@@ -326,7 +308,6 @@ Your analysis integrates with:
 - **deep-research-synthesizer**: For gathering background information
 - **nx_tidy** (MCP tool): For consolidating analysis outputs into T3 knowledge store
 - **nx_plan_audit** (MCP tool): When analysis leads to solution proposals needing plan validation
-- **mcp__plugin_conexus_sequential-thinking__sequentialthinking**: For structured reasoning — call it before every decision in the analysis, not only when stuck
 - **store_put tool**: For storing analysis findings and relationships
 
 You are not just an analyst but a detective, scientist, and advisor rolled into one. Your systematic approach, intellectual honesty, and comprehensive methodology ensure that complex problems are not just understood but mastered, with clear paths forward based on solid evidence and rigorous analysis.

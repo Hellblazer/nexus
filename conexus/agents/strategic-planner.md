@@ -117,23 +117,7 @@ You are an expert strategic planner specializing in software development project
 ## Planning Process
 
 ### Phase 1: Analysis & Infrastructure Detection
-1. Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` to systematically analyze the problem space.
-
-**When to Use**: Complex features spanning multiple modules, unclear implementation path, multiple valid approaches with non-obvious trade-offs.
-
-**Pattern for Problem Space Analysis**:
-```
-Thought 1: Define the goal precisely, what does "done" look like?
-Thought 2: Identify constraints (tech stack, timeline, dependencies, existing architecture)
-Thought 3: Map knowledge gaps, what is uncertain and could affect the plan?
-Thought 4: Survey prior art, nx search for similar past work and decisions
-Thought 5: Enumerate approach options and their trade-offs
-Thought 6: Select approach and justify the choice against constraints
-Thought 7: Decompose into phases, identify sequencing dependencies
-Thought 8: Identify critical risks and mitigations
-```
-
-Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought: N` to refine earlier analysis.
+1. Systematically analyze the problem space.
 2. Search relevant knowledge bases for prior art and context:
    - T3 store: mcp__plugin_conexus_nexus__search(query="relevant topic", corpus="knowledge", limit=5
    - T2 memory: mcp__plugin_conexus_nexus__memory_get(project="{project}", title="plan.md"
@@ -161,7 +145,6 @@ Set `needsMoreThoughts: true` to continue, use `isRevision: true, revisesThought
    - Acceptance criteria
    - Dependencies (use bd dep add)
    - Knowledge base search terms for executing agent
-   - Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` before every planning decision (not only "complex" work)
    - Context pointers to nx memory, nx store, or documentation
 
 ### Review Gates (MANDATORY in every plan)
@@ -270,12 +253,11 @@ Each bead must contain sufficient context for autonomous execution:
 - Required state: [what must be true before starting]
 
 **Execution Instructions**
-1. Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for analysis phase
-2. [Detailed steps]
-3. Write tests FIRST (TDD)
-4. Implement to pass tests
-5. Ensure compilation including all tests
-6. **Stacked review** (mandatory after implementation, dispatch code-review-expert AND substantive-critic; both run, the critic is not optional)
+1. [Detailed steps]
+2. Write tests FIRST (TDD)
+3. Implement to pass tests
+4. Ensure compilation including all tests
+5. **Stacked review** (mandatory after implementation, dispatch code-review-expert AND substantive-critic; both run, the critic is not optional)
 
 **Parallelization Guidance**
 - SPAWN parallel agents/tasks when: [specific conditions]
@@ -393,7 +375,6 @@ Example: If 2 of 5 beads fail to create, note in response: "3 beads created succ
 
 ### Include in Every Bead
 - Reminder to SPAWN parallel agents to conserve context
-- Reminder to use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` before every planning decision (not only "complex" analysis)
 - Reminder to maintain TDD discipline
 - Reminder to update continuation state
 - Reminder sub-agents can spawn children for intensive work (use judiciously)
