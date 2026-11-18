@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``nx catalog resolve``: a tumbler, owner or corpus to physical T3 collection names (GH #1668).
 
-The same function as the MCP tool ``resolve`` (``nexus.catalog.resolve_collections``).
+The same function as the MCP tool ``resolve`` (``nexus.catalog.lookup.resolve_collections``).
 The catalog comes through the module object (``_cat_cmd._get_catalog()``), so
 this module stays acyclic with ``nexus.commands.catalog`` and the
 ``patch("nexus.commands.catalog._get_catalog", ...)`` test seam works.
@@ -34,7 +34,7 @@ def resolve_cmd(tumbler_arg: str | None, tumbler_opt: str, owner: str, corpus: s
     \b
     --corpus takes either:
       a content type   code, docs, rdr or knowledge: every live collection of
-                       that type (an empty result means none exist)
+                       that type (empty when none is live)
       a corpus label   the free-form `corpus` label of documents, matched exactly
     Any other value is an error (exit 1) that lists the valid content types.
     """
@@ -46,7 +46,7 @@ def resolve_cmd(tumbler_arg: str | None, tumbler_opt: str, owner: str, corpus: s
 
     import httpx  # noqa: PLC0415 — keeps CLI startup light
 
-    from nexus.catalog.resolve_collections import resolve_collections  # noqa: PLC0415 — keeps CLI startup light
+    from nexus.catalog.lookup.resolve_collections import resolve_collections  # noqa: PLC0415 — keeps CLI startup light
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()

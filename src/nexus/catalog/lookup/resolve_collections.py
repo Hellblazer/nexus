@@ -11,7 +11,7 @@ so the two cannot drift.
   ``nexus.corpus.CONTENT_TYPES`` grammar): the live collections of that type
   (``cat.list_collections(lifecycle_state="live", content_type=...)``).
 
-Indexing never sets a document's label to ``rdr``, so before GH #1668
+The indexers do not set a document's label to ``rdr`` by default, so before GH #1668
 ``corpus="rdr"`` matched nothing and the empty answer looked like "no such
 collections". A value that is neither a content type nor a label any document
 carries now raises :class:`UnknownCorpusError`; a content type with no live

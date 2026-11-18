@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog.resolve_collections import (
+from nexus.catalog.lookup.resolve_collections import (
     UnknownCorpusError,
     resolve_collections,
 )

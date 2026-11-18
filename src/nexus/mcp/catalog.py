@@ -110,10 +110,10 @@ def _file_path_matches(entry_path: str, wanted: str) -> bool:
 def _parse_user_tumbler(raw: str, field: str):
     """Parse a caller-supplied tumbler, or raise a ValueError that says why (nexus-zdzm5).
 
-    The text lives in ``nexus.catalog.resolve_collections.parse_user_tumbler``,
+    The text lives in ``nexus.catalog.lookup.resolve_collections.parse_user_tumbler``,
     shared with ``nx catalog resolve``.
     """
-    from nexus.catalog.resolve_collections import parse_user_tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
+    from nexus.catalog.lookup.resolve_collections import parse_user_tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
     return parse_user_tumbler(raw, field)
 
@@ -831,7 +831,7 @@ def catalog_resolve(
     document corpus label, matched exactly against each document's `corpus`
     metadata. A value that is neither a content type nor a label any document
     carries is an error that lists the valid content types; a content type with
-    no collections returns `[]`.
+    no live collections returns `[]`.
 
     Use `search`/`query` (nexus server) with the returned collection names
     to search their content. Returns a sorted list of distinct physical
@@ -844,7 +844,7 @@ def catalog_resolve(
         # nexus-blk2 Part 2: dotted-tumbler form is required (e.g. "1.2.3"
         # for a document, "1.2" for an owner); the shared function turns a
         # dashed physical-collection prefix into an actionable diagnostic.
-        from nexus.catalog.resolve_collections import resolve_collections  # noqa: PLC0415 — function-local import avoids catalog import at module load
+        from nexus.catalog.lookup.resolve_collections import resolve_collections  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
         return resolve_collections(cat, tumbler=tumbler, owner=owner, corpus=corpus)
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error so the tool call never crashes the client
