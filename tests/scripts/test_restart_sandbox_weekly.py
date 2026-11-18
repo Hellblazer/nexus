@@ -109,7 +109,7 @@ def _snapshot(root: Path) -> dict[str, tuple[int, float]]:
 
 # ── a run ─────────────────────────────────────────────────────────────────────────────
 
-def test_a_passing_run_records_a_new_pass_under_the_sanhell_tmpdir(box) -> None:
+def test_a_passing_run_records_a_new_pass_under_the_given_tmpdir(box) -> None:
     r = _run(box)
     assert r.returncode == 0, r.stderr
     (call,) = _calls(box, "harness-calls")
