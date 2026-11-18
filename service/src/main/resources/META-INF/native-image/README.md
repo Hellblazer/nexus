@@ -76,8 +76,8 @@ descriptor's `name`.
   `<init>` only. Liquibase reaches BOTH sides of every change parameter: the setter at parse
   time (`AbstractChange.load`), and the getter at apply time (`MarkChangeSetRanGenerator` calls
   `getDescription()`, which reads each `*name` and `path` parameter, and
-  `CreateProcedureChange.generateCheckSum` falls back to a serialiser that reads every
-  parameter). The entries use `allDeclaredMethods` plus `allPublicMethods` rather than a
+  `CreateProcedureChange.generateCheckSum` calls `super.generateCheckSum()` on every checksum
+  version, which serialises every parameter through its getter). The entries use `allDeclaredMethods` plus `allPublicMethods` rather than a
   hand-kept list, so a Liquibase upgrade that adds a parameter stays covered. They live here and
   not in the traced file because a re-trace drops hand edits to that file.
   `service/src/test/java/dev/nexus/service/nativeimage/LiquibaseReflectionRegistrationTest.java`

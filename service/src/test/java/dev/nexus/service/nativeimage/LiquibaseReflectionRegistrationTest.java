@@ -53,9 +53,9 @@ import org.junit.jupiter.api.Test;
  *       ({@link ObjectUtil#getDescriptors}, with the {@code is} fallback for a {@code Boolean}
  *       getter). The write side runs at parse time ({@code AbstractChange.load}). The read side
  *       runs at apply time: {@code MarkChangeSetRanGenerator} calls {@code getDescription()}, which
- *       reads every parameter named {@code *name} or {@code path}, and a change that does not
- *       override {@code generateCheckSum} (CreateProcedureChange on the V8 path) serialises every
- *       parameter through its getter.</li>
+ *       reads every parameter named {@code *name} or {@code path}, and CreateProcedureChange's
+ *       checksum, on every checksum version, calls {@code super.generateCheckSum()}, which
+ *       serialises every parameter through its getter.</li>
  *   <li>For each serializable field of a precondition, its setter(s) ({@code ObjectUtil.setProperty}
  *       sets each XML attribute and the body through {@code set<Field>}).</li>
  * </ul>
