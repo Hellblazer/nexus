@@ -105,9 +105,11 @@ public final class GroupRepository {
 
     /**
      * Forms the group {@code body.name}, or re-forms it when a disbanded record has the name. The caller has checked
-     * that the writer is {@code body.leader}. {@code actor} names the writer for the audit row.
+     * that the writer is {@code body.leader}, and passes the generation of the writer's token, which the transaction
+     * checks again against the identity row it locks (a supersede between the handler's check and this write is
+     * refused). {@code actor} names the writer for the audit row.
      */
-    public Map<String, Object> form(String tenant, String actor, Map<String, Object> body) {
+    public Map<String, Object> form(String tenant, String actor, int tokenGeneration, Map<String, Object> body) {
         String name = GroupInput.text(body, "name");
         IdentityMemberships.requireGroup(name);
         String leader = GroupInput.text(body, "leader");
@@ -165,7 +167,8 @@ public final class GroupRepository {
             }
             BoardTopicLock.lockAll(ctx, tenant, serves);
             refuseSecondServer(ctx, tenant, name, serves, now);
-            requireLiveLeasedSeat(ctx, tenant, leader, now);
+            IdentityRecordsRecord writer = requireLiveLeasedSeat(ctx, tenant, leader, now);
+            requireCurrentProcess(writer, tokenGeneration);
             memberships.join(ctx, tenant, leader, name, "leader", now);
             GroupRecordsRecord rec = GroupRules.peek(ctx, tenant, name);
             if (reformed != null) {
@@ -184,10 +187,11 @@ public final class GroupRepository {
     /**
      * Changes the record in place: {@code leader}, {@code ends}, {@code ack_deadline}, {@code ack_deadline_by_topic}
      * (the whole map), {@code serves}; or {@code ended_at} alone, which disbands. {@code expectedLeader} is the
-     * leader the caller's level-1 check named.
+     * leader the caller's level-1 check named and {@code tokenGeneration} the generation of the caller's token, checked
+     * again here under the leader's identity row lock.
      */
-    public Map<String, Object> update(String tenant, String name, String expectedLeader, String actor,
-                                      Map<String, Object> body) {
+    public Map<String, Object> update(String tenant, String name, String expectedLeader, int tokenGeneration,
+                                      String actor, Map<String, Object> body) {
         IdentityMemberships.requireGroup(name);
         if (SET_FIELDS.stream().noneMatch(body::containsKey)) {
             throw new IdentityException(400, "nothing_to_set", "set takes one or more of " + new java.util.TreeSet<>(SET_FIELDS));
@@ -200,6 +204,7 @@ public final class GroupRepository {
                 OffsetDateTime now = OffsetDateTime.now(clock);
                 OffsetDateTime at = endedAt(body.get("ended_at"), now);
                 GroupRecordsRecord rec = lockLive(ctx, tenant, name, expectedLeader);
+                lockCurrentProcess(ctx, tenant, expectedLeader, tokenGeneration, null);
                 return endGroup(ctx, tenant, rec, at, "group_disband", actor, Map.of(), now);
             });
         }
@@ -229,6 +234,7 @@ public final class GroupRepository {
                 refuseSecondServer(ctx, tenant, name, newServes, now);
             }
             boolean handOver = newLeader != null && !newLeader.equals(rec.getLeader());
+            lockCurrentProcess(ctx, tenant, expectedLeader, tokenGeneration, handOver ? newLeader : null);
             if (handOver) {
                 requireLiveLeasedSeat(ctx, tenant, newLeader, now);
                 requireMember(ctx, tenant, newLeader, name);
@@ -256,11 +262,13 @@ public final class GroupRepository {
     }
 
     /** Disbands the group: {@code ended_at} is set once and every membership goes, in this transaction. */
-    public Map<String, Object> disband(String tenant, String name, String expectedLeader, String actor) {
+    public Map<String, Object> disband(String tenant, String name, String expectedLeader, int tokenGeneration,
+                                       String actor) {
         IdentityMemberships.requireGroup(name);
         return scope.withTenant(tenant, ctx -> {
             OffsetDateTime now = OffsetDateTime.now(clock);
             GroupRecordsRecord rec = lockLive(ctx, tenant, name, expectedLeader);
+            lockCurrentProcess(ctx, tenant, expectedLeader, tokenGeneration, null);
             return endGroup(ctx, tenant, rec, now, "group_disband", actor, Map.of(), now);
         });
     }
@@ -376,7 +384,8 @@ public final class GroupRepository {
     }
 
     /** A first or new leader is a live, leased seat. Locks its identity row. */
-    private static void requireLiveLeasedSeat(DSLContext ctx, String tenant, String id, OffsetDateTime now) {
+    private static IdentityRecordsRecord requireLiveLeasedSeat(DSLContext ctx, String tenant, String id,
+                                                               OffsetDateTime now) {
         IdentityRecordsRecord rec = IdentityRows.lock(ctx, tenant, id);
         if (!GroupRules.liveLeasedSeat(rec, now)) {
             throw new IdentityException(409, "bad_leader",
@@ -384,6 +393,44 @@ public final class GroupRepository {
                     + GroupRules.effectiveState(rec, now) + (rec.getLease() == null ? "" : " (" + rec.getLease() + ")"),
                 Map.of("identity", id, "kind", rec.getKind(), "state", GroupRules.effectiveState(rec, now)));
         }
+        return rec;
+    }
+
+    /**
+     * The level-1 check once more, inside the write transaction: the writer's token names the generation the identity
+     * holds now, and the identity is still held. The handler checks in its own statement before the write, as every
+     * handler-layer check of the engine does; a process that took the seat in between is refused here, under the row
+     * lock a bind needs.
+     */
+    private static void requireCurrentProcess(IdentityRecordsRecord holder, int tokenGeneration) {
+        if (holder.getGeneration() != tokenGeneration) {
+            throw new IdentityException(409, "generation_superseded",
+                holder.getId() + " is at generation " + holder.getGeneration() + "; this token is for " + tokenGeneration,
+                Map.of("identity", holder.getId(), "token_generation", tokenGeneration,
+                    "current_generation", holder.getGeneration()));
+        }
+        String state = holder.getState();
+        if ("unheld".equals(state) || "ended".equals(state) || ("lapsed".equals(state) && holder.getGoneAt() != null)) {
+            throw new IdentityException(409, "identity_not_held",
+                holder.getId() + " is " + state + ": no process holds it, so this token fences nothing",
+                Map.of("identity", holder.getId(), "state", state));
+        }
+    }
+
+    /**
+     * Locks the identity rows of the writer (the stored leader) and of a new leader in id order, so two hand-overs
+     * that cross each other cannot deadlock, then checks the writer's token against the locked row.
+     */
+    private static void lockCurrentProcess(DSLContext ctx, String tenant, String leader, int tokenGeneration,
+                                           String newLeader) {
+        IdentityRecordsRecord holder = null;
+        for (String id : new java.util.TreeSet<>(newLeader == null ? List.of(leader) : List.of(leader, newLeader))) {
+            IdentityRecordsRecord rec = IdentityRows.lock(ctx, tenant, id);
+            if (id.equals(leader)) {
+                holder = rec;
+            }
+        }
+        requireCurrentProcess(holder, tokenGeneration);
     }
 
     private void requireMember(DSLContext ctx, String tenant, String id, String group) {

@@ -10,11 +10,14 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
+import dev.nexus.service.db.IdentityException;
+
 import java.net.http.HttpResponse;
 import java.util.Map;
 
 import static dev.nexus.service.http.GroupTestEnv.body;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-252 Step 1, the level-1 writer check on {@code group/<name>}: for an existing record the writer's identity
@@ -160,5 +163,46 @@ class GroupWriterCheckTest {
         env.end(t, b);
         String c = env.seat(t, "gamma");
         assertThat(env.as(t, c, "POST", "", body("review-pair", b)).error()).isEqualTo("not_owner");
+    }
+
+    /**
+     * The handler checks the token in its own statement before the write transaction. A process that takes the seat
+     * between that check and the write must still be refused, so the repository checks the token's generation again
+     * under the leader's identity row lock. The repository is called the way the handler calls it after its check
+     * passed (the generation the token was minted for), with the seat superseded in between.
+     */
+    @Test
+    void aSupersedeBetweenTheHandlersCheckAndTheWriteRefusesTheOldProcess() {
+        String t = IdentityTestEnv.freshTenant();
+        String a = env.seat(t, "alpha");
+        assertThat(env.form(t, a, body("push-train", a)).status()).isEqualTo(200);
+        assertThat(env.form(t, a, body("review-pair", a)).status()).isEqualTo(200);
+        int oldGeneration = ((Number) env.ids.show(t, a).get("generation")).intValue();
+
+        env.supersede(t, a); // the handler's check passed for generation 1; the seat is at generation 2 when the write runs
+
+        assertThatThrownBy(() -> env.groups.update(t, "push-train", a, oldGeneration, "identity:" + a, Map.of("ack_deadline", 30)))
+            .isInstanceOfSatisfying(IdentityException.class, e -> assertThat(e.code()).isEqualTo("generation_superseded"));
+        assertThatThrownBy(() -> env.groups.update(t, "push-train", a, oldGeneration, "identity:" + a, Map.of("ended_at", true)))
+            .isInstanceOfSatisfying(IdentityException.class, e -> assertThat(e.code()).isEqualTo("generation_superseded"));
+        assertThatThrownBy(() -> env.groups.disband(t, "review-pair", a, oldGeneration, "identity:" + a))
+            .isInstanceOfSatisfying(IdentityException.class, e -> assertThat(e.code()).isEqualTo("generation_superseded"));
+        assertThatThrownBy(() -> env.groups.form(t, "identity:" + a, oldGeneration, body("third", a)))
+            .isInstanceOfSatisfying(IdentityException.class, e -> assertThat(e.code()).isEqualTo("generation_superseded"));
+        assertThat(env.read(t, "push-train").integer("ack_deadline")).as("nothing was written").isEqualTo(20);
+        assertThat(env.read(t, "push-train").body().get("ended_at")).isNull();
+        assertThat(env.read(t, "review-pair").body().get("ended_at")).isNull();
+        assertThat(env.read(t, "third").status()).isEqualTo(404);
+        assertThat(env.members(t, "push-train")).containsExactly(a);
+
+        // The current process, with the current generation, writes.
+        int now = ((Number) env.ids.show(t, a).get("generation")).intValue();
+        assertThat(env.groups.update(t, "push-train", a, now, "identity:" + a, Map.of("ack_deadline", 30)).get("ack_deadline"))
+            .isEqualTo(30);
+
+        // A seat that ended between the check and the write fences the write too.
+        env.end(t, a);
+        assertThatThrownBy(() -> env.groups.update(t, "push-train", a, now, "identity:" + a, Map.of("ack_deadline", 40)))
+            .isInstanceOfSatisfying(IdentityException.class, e -> assertThat(e.code()).isEqualTo("identity_not_held"));
     }
 }

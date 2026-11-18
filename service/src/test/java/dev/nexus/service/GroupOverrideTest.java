@@ -162,4 +162,38 @@ class GroupOverrideTest {
         assertThat(override(t, "push-train", Map.of("leader", d)).error()).isEqualTo("bad_leader");
         assertThat(env.ids.audit(t, "group_override")).isEmpty();
     }
+
+    @Test
+    void theOverrideSetsANewLeaderForAnUnheldLeader() throws Exception {
+        String t = IdentityTestEnv.freshTenant();
+        String[] ab = crew(t, "push-train");
+        env.release(t, ab[0]);
+        assertThat(env.ids.show(t, ab[0])).containsEntry("state", "unheld");
+
+        Resp r = override(t, "push-train", Map.of("leader", ab[1]));
+        assertThat(r.status()).as(r.toString()).isEqualTo(200);
+        assertThat(r.str("leader")).isEqualTo(ab[1]);
+        JsonNode d = JSON.readTree(env.ids.audit(t, "group_override").get(0).get(1));
+        assertThat(d.get("leader_state").asText()).isEqualTo("unheld");
+    }
+
+    @Test
+    void theOverrideIsAcceptedWhenTheLeadersIdentityRowIsGone() throws Exception {
+        String t = IdentityTestEnv.freshTenant();
+        String b = env.seat(t, "next-ghost");
+        assertThat(env.join(t, b, "ghost-crew", "member").status()).isEqualTo(200);
+        // A group record whose leader identity does not exist (purged, or never there): the override's reason to exist.
+        env.ids.scope.withTenant(t, ctx -> ctx.insertInto(dev.nexus.service.jooq.nexus.Tables.GROUP_RECORDS)
+            .set(dev.nexus.service.jooq.nexus.Tables.GROUP_RECORDS.TENANT_ID, t)
+            .set(dev.nexus.service.jooq.nexus.Tables.GROUP_RECORDS.NAME, "ghost-crew")
+            .set(dev.nexus.service.jooq.nexus.Tables.GROUP_RECORDS.LEADER, "i424242")
+            .set(dev.nexus.service.jooq.nexus.Tables.GROUP_RECORDS.FORMED_AT, java.time.OffsetDateTime.now()).execute());
+
+        Resp r = override(t, "ghost-crew", Map.of("leader", b));
+        assertThat(r.status()).as(r.toString()).isEqualTo(200);
+        assertThat(r.str("leader")).isEqualTo(b);
+        JsonNode d = JSON.readTree(env.ids.audit(t, "group_override").get(0).get(1));
+        assertThat(d.get("leader_state").asText()).isEqualTo("gone");
+        assertThat(d.get("old").get("leader").asText()).isEqualTo("i424242");
+    }
 }

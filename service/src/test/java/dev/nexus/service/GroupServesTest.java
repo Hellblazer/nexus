@@ -205,4 +205,28 @@ class GroupServesTest {
         assertThat(extend.error()).isEqualTo("topic_served");
         assertThat(env.groups.servingGroup(t, "nexus-develop")).hasValueSatisfying(g -> assertThat(g).containsEntry("name", "review-pair"));
     }
+
+    @Test
+    void aTopicThatOnlyStartsWithAnotherIsNotTheSameTopic() {
+        String t = IdentityTestEnv.freshTenant();
+        String a = env.seat(t, "alpha");
+        String b = env.seat(t, "beta");
+        assertThat(env.form(t, a, body("push-train", a, List.of("nexus-develop"))).status()).isEqualTo(200);
+
+        // The match is exact: a group serving nexus-develop is not the one that serves nexus-develop-2, nor nexus, and the reverse.
+        assertThat(env.groups.servingGroup(t, "nexus-develop-2")).isEmpty();
+        assertThat(env.groups.servingGroup(t, "nexus")).isEmpty();
+        assertThat(env.groups.servingGroup(t, "nexus-develo")).isEmpty();
+        assertThat(env.groups.servingGroup(t, "nexus-develop")).hasValueSatisfying(g -> assertThat(g).containsEntry("name", "push-train"));
+
+        // The one-live-server rule is exact too: serving a near name is not serving the same topic.
+        Resp near = env.form(t, b, body("review-pair", b, List.of("nexus-develop-2", "nexus")));
+        assertThat(near.status()).as(near.toString()).isEqualTo(200);
+        assertThat(env.groups.servingGroup(t, "nexus-develop-2")).hasValueSatisfying(g -> assertThat(g).containsEntry("name", "review-pair"));
+        assertThat(env.groups.servingGroup(t, "nexus-develop")).hasValueSatisfying(g -> assertThat(g).containsEntry("name", "push-train"));
+        assertThat(env.groups.servingGroup(t, "nexus")).hasValueSatisfying(g -> assertThat(g).containsEntry("name", "review-pair"));
+        // And the same name is refused, whichever group got it first.
+        assertThat(env.as(t, b, "POST", "/review-pair/set", Map.of("serves", List.of("nexus-develop-2", "nexus-develop"))).error())
+            .isEqualTo("topic_served");
+    }
 }

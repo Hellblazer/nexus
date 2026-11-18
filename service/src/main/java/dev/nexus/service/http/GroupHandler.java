@@ -116,12 +116,12 @@ public final class GroupHandler implements HttpHandler {
                 if (!tenantScope(scope) && !dataScope(scope)) throw forbidden(scope, "set a group");
                 Map<String, Object> body = readBody(ex);
                 String leader = writer(ex, tenant, name);
-                return repo.update(tenant, name, leader, actor(), body);
+                return repo.update(tenant, name, leader, generation(), actor(), body);
             }
             case "disband" -> {
                 if (!tenantScope(scope) && !dataScope(scope)) throw forbidden(scope, "disband a group");
                 String leader = writer(ex, tenant, name);
-                return repo.disband(tenant, name, leader, actor());
+                return repo.disband(tenant, name, leader, generation(), actor());
             }
             case "override" -> {
                 if (!tenantScope(scope)) throw forbidden(scope, "override a group");
@@ -139,7 +139,7 @@ public final class GroupHandler implements HttpHandler {
         }
         // A first write, and a re-form: the writer is the leader the call names.
         requireToken(ex, tenant, l);
-        return repo.form(tenant, actor(), body);
+        return repo.form(tenant, actor(), generation(), body);
     }
 
     /** The level-1 check against the stored leader of {@code name}; returns that leader. */
@@ -156,6 +156,12 @@ public final class GroupHandler implements HttpHandler {
                     + " (no unattested exception applies to a group record)", Map.of("identity", leader));
         }
         fence.requireOwner(ex, tenant, leader);
+    }
+
+    /** The generation of the request's identity token, which {@code requireToken} has just checked against the leader. */
+    private static int generation() {
+        Integer g = RequestContext.identityGeneration();
+        return g == null ? -1 : g;
     }
 
     private static String actor() {

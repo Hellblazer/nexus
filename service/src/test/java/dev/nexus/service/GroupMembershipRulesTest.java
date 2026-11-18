@@ -148,4 +148,28 @@ class GroupMembershipRulesTest {
         assertThat(again.error()).isEqualTo("group_disbanded");
         assertThat(env.as(t, a, "POST", "/push-train/set", Map.of("ack_deadline", 30)).error()).isEqualTo("group_disbanded");
     }
+
+    @Test
+    void aMemberThatJoinsAgainKeepsItsJoinTimeAndALeaveThenJoinStartsAFreshOne() {
+        String t = IdentityTestEnv.freshTenant();
+        String a = env.seat(t, "alpha");
+        String b = env.seat(t, "beta");
+        assertThat(env.form(t, a, body("push-train", a)).status()).isEqualTo(200);
+        String first = env.ids.clock.instant().toString();
+        assertThat(env.join(t, b, "push-train", "member").str("joined_at")).isEqualTo(first);
+
+        env.ids.clock.advance(Duration.ofHours(3));
+        // The same identity joins again (a role change, an idempotent retry): the join time stays, so the roster keeps its order.
+        Resp again = env.join(t, b, "push-train", "leader");
+        assertThat(again.status()).isEqualTo(200);
+        assertThat(again.str("joined_at")).as("the join time of a membership that exists").isEqualTo(first);
+        assertThat(again.str("role")).isEqualTo("leader");
+        assertThat(env.roster(t, "push-train")).extracting(m -> m.get("identity")).containsExactly(a, b);
+        assertThat(env.roster(t, "push-train").get(1)).containsEntry("joined_at", first);
+
+        // Leaving removes the row; a later join is a new membership with the time it was made.
+        assertThat(env.leave(t, b, "push-train").integer("removed")).isEqualTo(1);
+        String later = env.ids.clock.instant().toString();
+        assertThat(env.join(t, b, "push-train", "member").str("joined_at")).isEqualTo(later).isNotEqualTo(first);
+    }
 }
