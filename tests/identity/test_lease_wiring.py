@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import os
 import threading
 import time
@@ -58,7 +59,9 @@ def row_the_lease_starts_from_cores_start_path_adopts_a_marker_through_the_hando
             started = bind_at_session_start(s1, "startup", env={"NX_SEAT": world.q("alpha")}, claude_pid=me)
             assert started.outcome.identity == alpha and started.outcome.generation == 1
 
-            core._start_identity_lease()                                       # the server's own start path
+            assert "identity_lease.start_safely()" in inspect.getsource(core._start_t1_handoff_watch_task), \
+                "the server's start path starts the lease"
+            identity_lease.start_safely()                                      # what that start path calls
             lease = identity_lease.current()
             assert lease is not None and token_header._LEASE_OWNER, "the server owns the binding: its spawn-time session id is not checked"
             deadline = time.monotonic() + 15

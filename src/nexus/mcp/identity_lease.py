@@ -27,6 +27,7 @@ only while a ``directory/<name>`` lease is armed, and identity must be renewed f
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import threading
@@ -458,6 +459,68 @@ def shutdown() -> None:
         from nexus.identity import token_header  # noqa: PLC0415
 
         token_header.set_lease_owner(False)
+
+
+# ── The server's three call sites (mcp/core.py calls these and holds no identity logic of its own) ──────────────────
+
+
+def start_safely() -> None:
+    """The server's start path: :func:`start`, where a failure never costs the server (identity is additive)."""
+    try:
+        start()
+    except Exception as exc:  # noqa: BLE001 - identity is additive; the server must start without it
+        _log.warning("identity_lease_start_failed", error=str(exc))
+
+
+async def follow_marker(marker: Any, log: Any) -> None:
+    """The T1 handoff watcher found a marker: when the hook bound an identity (a /resume switch, a /clear), follow it,
+    independent of the session id, which may be unchanged. The marker's token-file read stays off the event loop; a
+    marker that cannot be followed is covered by the heartbeat's re-read."""
+    if marker.identity is None:
+        return
+    try:
+        await asyncio.to_thread(adopt_marker, identity=marker.identity, generation=marker.generation,
+                                token_file=marker.token_file)
+    except Exception as exc:  # noqa: BLE001 - the heartbeat's re-read covers a marker that could not be followed
+        log.warning("identity_marker_adopt_failed", error=str(exc))
+
+
+#: The exit path's identity shutdown (an ``end`` once the Claude process has exited, the token file's delete) has its
+#: own thread and its own budget: it waits up to 1.5 s for Claude to exit before it decides, which the name release's
+#: shared 3 s deadline cannot also hold.
+SHUTDOWN_BUDGET_S: float = 5.0
+_SHUTDOWN_THREAD: threading.Thread | None = None
+_SHUTDOWN_DEADLINE: float = 0.0
+
+
+def _shutdown_safely() -> None:
+    try:
+        shutdown()
+    except Exception as exc:  # noqa: BLE001 - best-effort on exit; the binding lapses by lease, as a crash's does
+        _log.warning("identity_shutdown_on_exit_failed", error=str(exc))
+
+
+def start_shutdown() -> None:
+    """Start the exit path's identity shutdown on its own thread. Idempotent while one runs; never blocks the exit."""
+    global _SHUTDOWN_THREAD, _SHUTDOWN_DEADLINE
+    running = _SHUTDOWN_THREAD
+    if running is not None and running.is_alive():
+        return
+    thread = threading.Thread(target=_shutdown_safely, name="nx-mcp-identity-shutdown", daemon=True)
+    try:
+        thread.start()
+    except Exception as exc:  # noqa: BLE001 - never block the exit
+        _log.warning("identity_shutdown_on_exit_not_started", error=str(exc))
+        return
+    _SHUTDOWN_DEADLINE = time.monotonic() + SHUTDOWN_BUDGET_S
+    _SHUTDOWN_THREAD = thread
+
+
+def await_shutdown() -> None:
+    """Wait for the exit path's identity shutdown until its own deadline, then give up."""
+    thread = _SHUTDOWN_THREAD
+    if thread is not None:
+        thread.join(max(0.0, _SHUTDOWN_DEADLINE - time.monotonic()))
 
 
 def current() -> IdentityLease | None:
