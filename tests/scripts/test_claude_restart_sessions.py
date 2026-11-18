@@ -54,6 +54,9 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "MADE_MARKERS", set())
     monkeypatch.setattr(crs, "UNWITHDRAWN", [])
     monkeypatch.setattr(crs, "ASK_MARKERS", tmp_path_factory.mktemp("ask-markers") / "restart-asks")
+    # RDR-253 Step 4: restart() makes or keeps a seat through `nx identity`, which reaches the engine. These tests drive
+    # restart() for other reasons; the seat behaviour is tested in test_claude_restart_sessions_seats.py.
+    monkeypatch.setattr(crs, "ensure_seat", lambda s: "")
     # Never this machine's managed settings, user settings or flags (the channel-swap gate reads them).
     settings = tmp_path_factory.mktemp("claude-settings")
     monkeypatch.setattr(crs, "MANAGED_SETTINGS", (settings / "managed" / "managed-settings.json",))
