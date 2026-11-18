@@ -280,12 +280,16 @@ class CatalogRdr241RouteStatementSpikeTest {
         return t.likeRegex("^-?[0-9]+$").and(t.cast(SQLDataType.NUMERIC).ge(BigDecimal.valueOf(n)));
     }
 
-    /** The same rule with the cast guarded by CASE, so a non-integer text can never reach the cast. */
+    /**
+     * The same rule as route 2.4 runs it: {@code CASE WHEN text ~ '^-?[0-9]+$' THEN text::numeric >= n ELSE false END}.
+     * The cast sits inside the THEN branch, which PostgreSQL evaluates only for rows the WHEN accepted, so a non-integer
+     * text never reaches it (an AND gives no such order).
+     */
     static Condition metaAtLeastCase(String key, int n) {
         Field<String> t = metaText(key);
-        Field<BigDecimal> guarded = DSL.when(t.likeRegex("^-?[0-9]+$"), t.cast(SQLDataType.NUMERIC))
-            .otherwise(DSL.castNull(SQLDataType.NUMERIC));
-        return guarded.ge(BigDecimal.valueOf(n));
+        Field<Boolean> guarded = DSL.when(t.likeRegex("^-?[0-9]+$"), DSL.field(t.cast(SQLDataType.NUMERIC).ge(BigDecimal.valueOf(n))))
+            .otherwise(DSL.inline(false));
+        return DSL.condition(guarded);
     }
 
     private static Condition metaWhere(String tenant, String contentType, Condition meta) {
@@ -449,8 +453,8 @@ class CatalogRdr241RouteStatementSpikeTest {
                 metaEqDefault("extraction_source", "mineru", "file"), i -> Fx.extDefault(i, "file", "mineru")),
             new Case("meta.extraction_source=file&meta_default.extraction_source=file",
                 metaEqDefault("extraction_source", "file", "file"), i -> Fx.extDefault(i, "file", "file")),
-            new Case("meta_min.miss_count>=2 (regex AND cast)", metaAtLeastCase("miss_count", 2), i -> Fx.missAtLeast(i, 2)),
-            new Case("meta_min.miss_count>=4 (CASE-guarded cast)", metaAtLeastCase("miss_count", 4), i -> Fx.missAtLeast(i, 4)));
+            new Case("meta_min.miss_count>=2 (CASE form)", metaAtLeastCase("miss_count", 2), i -> Fx.missAtLeast(i, 2)),
+            new Case("meta_min.miss_count>=4 (CASE WHEN regex THEN cast>=n ELSE false)", metaAtLeastCase("miss_count", 4), i -> Fx.missAtLeast(i, 4)));
         for (String ct : new String[] {null, "paper"}) {
             for (Case c : cases) {
                 long expect = Fx.count(i -> Fx.ctMatches(i, ct) && c.model.test(i));
