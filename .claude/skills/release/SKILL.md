@@ -1321,11 +1321,12 @@ git push -u origin release/vX.Y.N
 gh pr create --draft --base main --head release/vX.Y.N --title "release: conexus X.Y.N" --body-file <body>   # a draft: CI runs on it, and it cannot be merged before the battery passes. Body shape as in Step 9; keep <body> outside the worktree, the battery refuses an untracked path
 uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z   # on the exact PR head: git rev-parse HEAD equals git rev-parse origin/release/vX.Y.N
 tests/e2e/release-battery.sh --plugin-only vX.Y.Z
-gh pr ready release/vX.Y.N   # only after the battery prints its PLUGIN-ONLY PASSED line
+gh pr ready release/vX.Y.N   # only after the battery closes with "RELEASE BATTERY PASSED (PLUGIN-ONLY vs vX.Y.Z: ...)" and the line does not say "static pass only"; any other closing line is not a pass
 ```
 
-After any later push to the branch, re-run the eligibility script on the exact PR head
-before the merge.
+After any later push to the branch, first put the PR back to draft
+(`gh pr ready --undo release/vX.Y.N`), then re-run the eligibility script on the exact
+PR head and the battery, and mark it ready again only on the battery's verdict.
 
 There is no hand unit suite in this lane. The release PR's CI runs, on the head
 merged into main, the unit shards with the default markers (`not integration and
