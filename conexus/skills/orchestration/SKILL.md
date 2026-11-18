@@ -18,7 +18,7 @@ Reference skill for agent routing and pipeline coordination. See [reference.md](
 
 ## How to Use
 
-1. Consult [reference.md](./reference.md) for the routing graph and decision framework, and for § Skill Routing (which skill fits a situation), § nx_answer, § Working Rules (sequential thinking, storage tiers, T2 ttl), § Common Mistakes and § Red Flags
+1. Consult [reference.md](./reference.md) for the routing graph and decision framework, and for § Skill Routing (which skill fits a situation), § nx_answer, § Working Rules (the step-log tool, storage tiers, T2 ttl), § Common Mistakes and § Red Flags
 2. Match the request to the appropriate agent or pipeline
 3. Dispatch the agent directly using the relay format from [${CLAUDE_PLUGIN_ROOT}/resources/agent-shared/RELAY_TEMPLATE.md](../../resources/agent-shared/RELAY_TEMPLATE.md)
 

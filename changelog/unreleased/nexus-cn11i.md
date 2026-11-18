@@ -1,0 +1,3 @@
+### Changed
+
+- **No session or skill rule tells an agent to use the sequential-thinking tool any more.** A measured comparison on 2026-11-18 (nexus-cn11i, GH #1661) found the trigger for the API classifier's `[reasoning_extraction]` stops. It is guidance in the system prompt to log steps in the tool, combined with a message in the same request that names the tool. Either alone ran clean, and calls the model made on its own were clean: 27 calls with no stop. The SessionStart guidance drops its "Sequential thinking before dispatch, a fix, ..." sentence. The orchestration skill's Working Rules describe the tool as a step log any session may use, with no mandate, and ask briefs not to name it. The tool and its step-log description stay.
