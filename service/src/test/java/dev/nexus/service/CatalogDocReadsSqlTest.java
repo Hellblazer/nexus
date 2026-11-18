@@ -58,6 +58,13 @@ class CatalogDocReadsSqlTest {
     }
 
     @Test
+    void aFilterNeedsAClause_andSensitiveOnlyIsOne() {
+        assertThat(sql(CatalogDocReads.metaWhere("t", new CatalogDocReads.MetaFilter("paper", List.of(), List.of(), true)))).contains("sensitive");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new CatalogDocReads.MetaFilter("paper", List.of(), List.of(), false))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void sensitiveOnlyAddsTheFlagToThePredicate() {
         var eq = List.of(new CatalogDocReads.MetaEq("k", "v", null));
         assertThat(sql(CatalogDocReads.metaWhere("t", new CatalogDocReads.MetaFilter(null, eq, List.of(), true)))).contains("sensitive");

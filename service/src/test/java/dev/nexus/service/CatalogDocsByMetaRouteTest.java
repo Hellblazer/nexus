@@ -164,12 +164,46 @@ class CatalogDocsByMetaRouteTest extends Rdr241RouteTestBase {
     }
 
     @Test
-    void sensitiveTakesOnlyTrue_andDoesNotStandForAMetaClause() throws Exception {
+    void sensitiveTakesOnlyTrue() throws Exception {
         seed("{\"k\":\"v\"}");
         for (String q : List.of("meta.k=v&sensitive=false", "meta.k=v&sensitive=1", "meta.k=v&sensitive=", "meta.k=v&sensitive=TRUE",
-            "sensitive=true", "sensitive=true&content_type=prose", "meta.k=v&sensitive=true&sensitive=maybe")) {
+            "sensitive=false", "sensitive=", "sensitive=true&sensitive=maybe", "meta.k=v&sensitive=true&sensitive=maybe")) {
             assertThat(status(PATH + "?" + q)).as("query: " + q).isEqualTo(400);
         }
+    }
+
+    @Test
+    void sensitiveTrueIsAFilterClauseOnItsOwn_alone_withContentType_andPagingPastASmallCap() throws Exception {
+        // seven sensitive rows (three of them papers), two live non-sensitive rows, a tombstoned sensitive row, another tenant's
+        insert(Row.of("5.1.1").flagged(), Row.of("5.1.2").flagged().type("paper"), Row.of("5.1.3").flagged(),
+            Row.of("5.1.4").flagged().type("paper"), Row.of("5.1.5").flagged(), Row.of("5.1.6").flagged().type("paper"),
+            Row.of("5.1.7").flagged(), Row.of("5.2.1"), Row.of("5.2.2").type("paper"),
+            Row.of("5.3.1").flagged().tombstoned(), Row.of("5.4.1").tenant(TENANT_B).flagged());
+        var all = ok(PATH + "?sensitive=true");
+        assertThat(all).containsEntry("count", 7);
+        assertThat(tumblers(all)).containsExactly("5.1.1", "5.1.2", "5.1.3", "5.1.4", "5.1.5", "5.1.6", "5.1.7");
+        var papers = ok(PATH + "?sensitive=true&content_type=paper");
+        assertThat(tumblers(papers)).containsExactly("5.1.2", "5.1.4", "5.1.6");
+        assertThat(papers).containsEntry("count", 3);
+        // a page of 3 stands in for /sensitive's 10,000 cap: every sensitive row is reached by offset, the count stays exact
+        var p0 = ok(PATH + "?sensitive=true&limit=3");
+        var p1 = ok(PATH + "?sensitive=true&limit=3&offset=3");
+        var p2 = ok(PATH + "?sensitive=true&limit=3&offset=6");
+        var past = ok(PATH + "?sensitive=true&limit=3&offset=9");
+        for (var p : List.of(p0, p1, p2, past)) assertThat(p).containsEntry("count", 7);
+        assertThat(tumblers(p0)).containsExactly("5.1.1", "5.1.2", "5.1.3");
+        assertThat(tumblers(p2)).containsExactly("5.1.7");
+        assertThat(documents(past)).isEmpty();
+        assertThat(tumblers(ok(TOKEN_B, TENANT_B, PATH + "?sensitive=true"))).containsExactly("5.4.1");
+    }
+
+    @Test
+    void aRequestWithNeitherAMetaClauseNorSensitiveTrueIsStillA400() throws Exception {
+        seed("{\"k\":\"v\"}");
+        for (String q : List.of("content_type=prose", "meta_default.k=v", "limit=5", "content_type=prose&limit=5&offset=0")) {
+            assertThat(status(PATH + "?" + q)).as("query: " + q).isEqualTo(400);
+        }
+        assertThat(status(PATH)).isEqualTo(400);
     }
 
     // ── the 400s ────────────────────────────────────────────────────────────

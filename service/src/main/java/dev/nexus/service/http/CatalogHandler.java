@@ -65,7 +65,7 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
- *   GET   /v1/catalog/sensitive/locators?limit=N  the live sensitive documents and the live aliases of them, with the five locator fields (nexus-uwggq.2.5)
+ *   GET   /v1/catalog/sensitive/locators?limit=N  the live sensitive documents and the live aliases of them, with the six locator fields, sensitive included (nexus-uwggq.2.5)
  *   GET   /v1/catalog/docs/by-scheme?scheme=S&limit=&offset=  live documents whose urlparse(source_uri).scheme is S lowercased, a page of at most 1000 with the exact count (nexus-uwggq.1.5)
  *   GET   /v1/catalog/docs/by-author?author=T&limit=&offset=  live documents whose author contains the text, case-insensitively, a page of at most 1000 with the exact count (nexus-uwggq.2.3)
  *   GET   /v1/catalog/docs/by-meta?content_type=&meta.K=V&meta_min.K=N&meta_default.K=T&limit=&offset=  live documents whose own metadata satisfies every clause, a page of at most 1000 with the exact count (nexus-uwggq.2.4)
@@ -346,9 +346,9 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/fill"         -> handleManifestFill(exchange, tenant, method);
                 case "/sensitive"             -> handleSensitiveList(exchange, tenant, method);
                 case "/sensitive/locators"    -> handleSensitiveLocators(exchange, tenant, method);
-                case "/docs/by-scheme"            -> handleDocsByScheme(exchange, tenant, method);
-                case "/docs/by-author"            -> handleDocsByAuthor(exchange, tenant, method);
-                case "/docs/by-meta"              -> handleDocsByMeta(exchange, tenant, method);
+                case "/docs/by-scheme"        -> handleDocsByScheme(exchange, tenant, method);
+                case "/docs/by-author"        -> handleDocsByAuthor(exchange, tenant, method);
+                case "/docs/by-meta"          -> handleDocsByMeta(exchange, tenant, method);
                 case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
                 case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);

@@ -93,13 +93,14 @@ public final class CatalogDocReads {
     public record MetaMin(String key, BigInteger min) {}
 
     /**
-     * The by-meta filter: an exact content type (or null), equalities, integer lower bounds (at least one of those two),
-     * and {@code sensitiveOnly}, which keeps only the live documents whose {@code sensitive} flag is set.
+     * The by-meta filter: an exact content type (or null), equalities, integer lower bounds, and {@code sensitiveOnly},
+     * which keeps only the live documents whose {@code sensitive} flag is set. At least one of equalities, bounds or
+     * {@code sensitiveOnly} is required, so a filter is never an unfiltered listing.
      */
     public record MetaFilter(String contentType, List<MetaEq> equalities, List<MetaMin> bounds, boolean sensitiveOnly) {
         public MetaFilter {
-            if (equalities.isEmpty() && bounds.isEmpty()) {
-                throw new IllegalArgumentException("a metadata filter needs at least one meta. or meta_min. clause");
+            if (equalities.isEmpty() && bounds.isEmpty() && !sensitiveOnly) {
+                throw new IllegalArgumentException("a metadata filter needs at least one meta., meta_min. or sensitive=true clause");
             }
         }
     }

@@ -297,11 +297,12 @@ final class CatalogBoundedReadRoutes {
      * GET /v1/catalog/docs/by-meta?content_type=&meta.KEY=VALUE&meta_min.KEY=N&meta_default.KEY=TEXT&limit=&offset=
      * (nexus-uwggq.2.4): {@code {count, limit, offset, documents}} as {@code /docs/by-author}.
      *
-     * <p>At least one {@code meta.} or {@code meta_min.} parameter is required (a 400 otherwise), so the route can never
-     * serve as an unfiltered listing; {@code content_type} is optional and exact. {@link CatalogDocReads} has the
-     * reading rules. {@code sensitive=true} (the only value; any other is a 400) keeps only the live documents whose
-     * {@code sensitive} flag is set; it narrows a request that already has a {@code meta.} or {@code meta_min.} clause, and
-     * does not stand for one. A {@code meta_min} value that is not an integer (at most 131,072 characters, the digit
+     * <p>At least one {@code meta.}, {@code meta_min.} or {@code sensitive=true} parameter is required (a 400 otherwise), so
+     * the route can never serve as an unfiltered listing; {@code content_type} is optional and exact. {@link CatalogDocReads}
+     * has the reading rules. {@code sensitive=true} (the only value; any other is a 400) keeps only the live documents whose
+     * {@code sensitive} flag is set, and is itself a filter clause: {@code sensitive=true} alone, or with {@code content_type},
+     * pages every live sensitive document however many there are (past the 10,000 cap of {@code /sensitive}). A
+     * {@code meta_min} value that is not an integer (at most 131,072 characters, the digit
      * limit of PostgreSQL's numeric), an empty key, a {@code meta_default.KEY} with no
      * {@code meta.KEY} beside it, a repeated {@code meta_default.KEY}, and any parameter this route does not name are
      * each a 400: a misspelt clause must never widen the answer.
@@ -351,8 +352,8 @@ final class CatalogBoundedReadRoutes {
         for (String k : defaults.keySet()) {
             if (!eqKeys.contains(k)) { badRequest(exchange, "meta_default." + k + " needs a meta." + k + " beside it"); return; }
         }
-        if (eq.isEmpty() && bounds.isEmpty()) {
-            badRequest(exchange, "at least one meta. or meta_min. parameter is required");
+        if (eq.isEmpty() && bounds.isEmpty() && !sensitiveOnly) {
+            badRequest(exchange, "at least one meta., meta_min. or sensitive=true parameter is required");
             return;
         }
         Integer limit = limitParam(exchange, CatalogDocReads.DEFAULT_LIMIT, CatalogDocReads.MAX_LIMIT);
