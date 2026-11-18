@@ -1,3 +1,0 @@
-### Changed
-
-- **`nx_answer` no longer reuses a grown plan because of the label its request carried (nexus-a4g2a).** A grown plan that recorded lookup or listing used to serve later lookups or listings. That label was the growing request's guess, not a check of the plan's steps, so a lookup could take a plan built for synthesis. Until a reviewed decision trusts a grown plan's route, a grown plan serves no request: the request takes another eligible plan, such as a builtin one, or plans inline. The refusal is reported as `grown_route_untrusted_label`. Inline runs still save grown plans, and they stay in the library unused.

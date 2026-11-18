@@ -1,5 +1,12 @@
 # Changelog
 
+## [8.4.0] - 2026-11-18
+
+Plugin version aligned with conexus 8.4.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
+
+- `conexus/hooks/scripts/stop_wake_guard.py`: nexus-x4jok: a CI-wait block steers to `nx ci wait --branch` for a release or PR branch.
+- `conexus/skills/upgrade/SKILL.md`: nexus-6pfgb.43: the `retire-keys-sweep` rung: what it does at `nx upgrade`, that it defers on engine conditions, and that an accept goes to the user with the dry-run counts and what each accept destroys.
+
 ## [8.3.1] - 2026-11-18
 
 Plugin version aligned with conexus 8.3.1, a plugin-only patch off 8.3.0. These plugin changes become live at this pin.

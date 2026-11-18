@@ -1,3 +1,0 @@
-### Fixed
-
-- **`nx daemon service stop` no longer signals a process that only names the `NEXUS_SERVICE_JAR` jar on its command line.** The stop's process sweep matched any command containing `-jar <jar>`, and `--jar <jar>` or `--new-jar <jar>` contains that text. Under lab-run the RDR-246 MVV driver's root `lab-hand-exec` wrapper matched, both signals failed with EPERM, and the stop exited 1 ("survived SIGKILL") with PostgreSQL left running (3 of 3 runs on chas). A process the caller owned would have been killed. The sweep now matches a jar engine only when java is the first argument and `-jar <jar>` stands as whole arguments. Only installs that set `NEXUS_SERVICE_JAR` were affected.

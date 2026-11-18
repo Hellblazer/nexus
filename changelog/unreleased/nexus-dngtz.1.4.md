@@ -1,3 +1,0 @@
-### Added
-
-- **The engine has a correlation-id rule and marks the ids it generates with `nxe-`.** `CorrelationId` keeps an inbound `X-Correlation-ID` when the whole value matches `[A-Za-z0-9._-]{1,64}` (a trailing newline does not), and otherwise generates `nxe-` plus 32 lowercase hex characters. The nx client mints 32 hex characters with no prefix, so for a sender that never uses the prefix, such as the Phase 2 edge probe, an echo that starts with `nxe-` means the engine received no valid header; an inbound id that already starts with `nxe-` is kept like any valid id. Nothing calls it yet: the request filter will (RDR-167, Phase 1).
