@@ -197,7 +197,7 @@ def test_cli_prints_one_collection_per_line(cat) -> None:
 def test_cli_json(cat) -> None:
     result = _run(cat, "--corpus", "rdr", "--json")
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == sorted([RDR_A, RDR_B])
+    assert json.loads(result.stdout) == sorted([RDR_A, RDR_B])
 
 
 def test_cli_label_path(cat) -> None:
@@ -214,7 +214,7 @@ def test_cli_unknown_value_exits_1_with_text(cat) -> None:
 def test_cli_empty_content_type_exits_0_empty() -> None:
     result = _run(FakeCatalog(), "--corpus", "code")
     assert result.exit_code == 0 and result.output == ""
-    assert json.loads(_run(FakeCatalog(), "--corpus", "code", "--json").output) == []
+    assert json.loads(_run(FakeCatalog(), "--corpus", "code", "--json").stdout) == []
 
 
 def test_cli_needs_an_argument(cat) -> None:
