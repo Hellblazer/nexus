@@ -11,6 +11,12 @@ A failure is reported once, naming ``module::row`` with its traceback. A module 
 token rows, until the jar carries Step 2) is recorded as skipped in the report and the other modules run; under
 ``NX_IDENTITY_REQUIRE_STEP2=1`` it is a failure. ``NX_ROWS=<substring>`` keeps the rows whose ``module::row`` name
 contains it (``NX_ROWS=session_start_bind::lapsed``, ``NX_ROWS=hook_leg``).
+
+To add engine-backed rows (RDR-253 Steps 4 to 6): write ``row_*`` functions taking a ``World`` and a ``ROWS`` tuple in a
+module under tests/identity, give it no test function and no tenant mark, and add one ``_journey(module, "<tag>")``
+entry to ``JOURNEYS`` with a tag no other entry uses (``run_journeys`` refuses a repeated tag or module). Never add a
+second tenant test: the ceiling is one. ``test_rows_collector.py`` fails when a module with a ``ROWS`` table is
+missing from ``JOURNEYS``.
 """
 from __future__ import annotations
 
