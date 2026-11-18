@@ -15,6 +15,7 @@ from nexus.catalog.dchash import source as dchash_source_mod
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
+from nexus.mcp.catalog import catalog_link_audit
 
 BODY = "Intro line.\nthe passage we quote and more.\nEnd.\n"
 GOOD = f"dchash:{text_hash(BODY)}:0-5"
@@ -287,3 +288,14 @@ def test_link_audit_raises_on_an_engine_error(tmp_path: Path, exc: BaseException
     cat = FakeCatalog({"1.1.1": _entry("1.1.1", _doc(tmp_path, "a.md"))}, raises=exc)
     with pytest.raises(type(exc)):
         _run_audit([_link("1.1.1", "1.1.1", from_span=GOOD)], cat)
+
+
+def test_link_audit_docstring_names_the_stale_dchash_keys() -> None:
+    doc = catalog_link_audit.__doc__ or ""
+    for name in ("stale_dchash", "stale_dchash_count"):
+        assert name in doc
+    for status in ("malformed", "missing", "unreadable", "changed", "out_of_range"):
+        assert status in doc
+    for gone in ("stale_spans", "stale_chash"):
+        assert gone not in doc
+    assert "machine" in doc
