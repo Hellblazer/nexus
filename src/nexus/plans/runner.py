@@ -4165,6 +4165,9 @@ async def _plan_run_impl(
     )
     coverage_result: CoverageResult | None = None
     _coverage_calls = 0
+    #: The step indices of the pool filter's assessment calls (nexus-w8d30). They run on the pool filter's model, so
+    #: :func:`_assessment_cost_estimate` leaves them out of the mean the boundary's own (check-tier) calls are admitted on.
+    _pool_filter_steps: set[int] = set()
     #: Seconds the last boundary run took (assessment, repair, the reassessment). The terminal step's own
     #: ``elapsed_ms`` starts after it (nexus-jypmj.17): the assessment calls are their own StepRecords, and the run
     #: summary carries ``assessment_latency_ms``, so counting them in the terminal step's time too would charge the
@@ -4210,6 +4213,8 @@ async def _plan_run_impl(
 
         step_index = len(steps) + _coverage_calls
         _coverage_calls += 1
+        if args.get(POOL_FILTER_KEY):
+            _pool_filter_steps.add(step_index)
         started = time.monotonic()
         usage: list[Any] = []
         try:
@@ -4331,10 +4336,12 @@ async def _plan_run_impl(
     def _assessment_cost_estimate() -> float | None:
         """The mean known cost of the assessment calls so far, or ``None`` (no call reported a cost). Assessment calls
         are the ``operator_check`` records numbered past the plan's own steps; a plan's own ``check`` steps (lower
-        indices, a different prompt and size) are not assessment calls and stay out of the mean."""
+        indices, a different prompt and size) are not assessment calls and stay out of the mean. The pool filter's calls
+        run on another model (nexus-w8d30) and stay out too; :func:`_assessment_cost_spent` still counts them."""
         costs = [
             r.cost_usd for r in step_records
             if r.operator == "operator_check" and r.step_index >= len(steps) and r.cost_usd is not None
+            and r.step_index not in _pool_filter_steps
         ]
         return sum(costs) / len(costs) if costs else None
 

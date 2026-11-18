@@ -23,12 +23,13 @@ groups, its packing by ``_pack``, its reply parsing, its budget and deadline che
 key is kept when a ``supports`` record cites its chunk's item id (a covered facet's ``evidence_ids`` also holds its
 contradicting ids, so those are not read). The filter's calls carry ``POOL_FILTER_KEY``, so the runner sends them on
 ``model_tiers.POOL_FILTER_ALIAS``, not the check tier's model (nexus-w8d30). Keys the anchors name are not filtered. Without the filter a pool key is projected
-at precision 0.715, below the 0.95 gate (250-research-4), so the filter is part of the design. The MVV passed (250-research-8); the switch stays off by
+at precision 0.715, below the 0.95 gate (250-research-4), so the filter is part of the design. The MVV passed (250-research-8) with the
+filter on the check tier's haiku; the sonnet filter is unmeasured. The switch stays off by
 default until a separate decision turns it on. A pack the assessor answers with no evidence record is a reject verdict, not a failure.
 
 **Bounds.** Phase B starts only when one assessment call fits: the time left to the repair's retrieval stamp (less what the
 resolve and the record fetch need), and the answer's own remaining time, must cover the longest of the boundary's minimum
-call time and the first assessment's recorded latency per wave of calls; and the USD left, after the reassessment's reserve
+call time and the first assessment's recorded latency per wave of calls (a check-tier latency, shorter than the filter's own model takes); and the USD left, after the reassessment's reserve
 (planned calls times the mean call cost), must cover one call at its mean cost. Short of either it is skipped
 (``filter_skipped_deadline``, ``filter_skipped_budget``) and nothing starts. The filter's calls see the same bounds through a
 wrapped view, so each is cut at its slice, and a call that started is counted whether it finished, raised or was cut.
