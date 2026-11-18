@@ -27,7 +27,7 @@ SCRIPT = REPO_ROOT / "scripts" / "restart-sandbox-weekly.sh"
 # FAKE_HARNESS_SLEEP holds it running; a TERM is noted in $HOME/harness-term and ends it.
 HARNESS = """#!/usr/bin/env bash
 trap 'kill "$nap" 2>/dev/null; echo term >> "$HOME/harness-term"; exit 143' TERM
-echo "ran with TMPDIR=$TMPDIR PATH=$PATH" >> "$HOME/harness-calls"
+echo "ran in tempdir $TMPDIR with path $PATH" >> "$HOME/harness-calls"
 if [ -n "${FAKE_HARNESS_SLEEP:-}" ]; then sleep "$FAKE_HARNESS_SLEEP" & nap=$!; wait "$nap"; fi
 if [ "${FAKE_HARNESS_RECORD:-0}" = 1 ]; then
   mkdir -p "$HOME/.local/state/claude-restart-sessions"
@@ -113,7 +113,7 @@ def test_a_passing_run_records_a_new_pass_under_the_sanhell_tmpdir(box) -> None:
     r = _run(box)
     assert r.returncode == 0, r.stderr
     (call,) = _calls(box, "harness-calls")
-    assert f"TMPDIR={box['tmp']}" in call
+    assert f"tempdir {box['tmp']} " in call
     last = _last(box)
     assert last["status"] == "passed" and last["exit"] == 0 and last["recorded"] is True
     assert last["started"] <= last["ended"]
@@ -125,7 +125,7 @@ def test_the_run_puts_claude_and_homebrew_on_path_for_launchd(box) -> None:
     """launchd starts a job with a bare PATH; claude, nx, uv and tmux are in these."""
     assert _run(box).returncode == 0
     (call,) = _calls(box, "harness-calls")
-    path = call.split("PATH=", 1)[1].split(":")
+    path = call.split("with path ", 1)[1].split(":")
     assert f"{box['home']}/.local/bin" in path and "/opt/homebrew/bin" in path
 
 
@@ -164,7 +164,7 @@ def test_a_tmpdir_that_appears_while_waiting_is_used(box) -> None:
     time.sleep(1)
     late.mkdir()
     assert p.wait(timeout=60) == 0
-    assert f"TMPDIR={late}" in _calls(box, "harness-calls")[0]
+    assert f"tempdir {late} " in _calls(box, "harness-calls")[0]
 
 
 def test_a_harness_past_the_limit_is_stopped_and_reported(box) -> None:

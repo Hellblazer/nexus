@@ -333,3 +333,15 @@ def test_skip_sandbox_check_is_still_accepted_on_a_newer_claude_code(crs, monkey
 
 def test_the_weekly_run_named_in_the_warning_is_beside_the_script(crs) -> None:
     assert crs.WEEKLY_RUN == SCRIPT.parent / "restart-sandbox-weekly.sh" and crs.WEEKLY_RUN.is_file()
+
+
+def test_the_sandbox_gate_refuses_before_the_ready_round_is_read(crs, monkeypatch, passfile, capsys) -> None:
+    """No pass: exit 3 from the sandbox gate; the ready-round check never runs (nexus-8zdbu, nexus-1b5rs)."""
+    monkeypatch.setattr(crs, "go_gate", lambda *_a, **_k: pytest.fail("the ready round was read first"))
+    monkeypatch.setattr(crs, "sessions", lambda: [{"pid": 1, "pane": "%1", "name": "s", "sessionId": "sid", "status": "idle", "argv": "claude", "cwd": "/w"}])
+    monkeypatch.setattr(crs, "claude_version", lambda *_: "2.1.316")
+    monkeypatch.setattr(crs, "script_sha256", lambda *_: SHA)
+    monkeypatch.setattr(crs, "LAST_RUN", passfile.parent / "restart-last.json")
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--resume", "--no-update"])
+    assert crs.main() == 3
+    assert capsys.readouterr().out.splitlines()[-1].startswith("sandbox pass: refused, no sandbox pass recorded")

@@ -1974,19 +1974,6 @@ def test_a_written_handoff_withdraws_its_mailed_ask(crs, monkeypatch, tmp_path) 
     assert order == ["withdraw sid-1"]
 
 
-def test_the_sandbox_gate_refuses_before_the_ready_round_is_read(crs, monkeypatch, passfile, capsys) -> None:
-    """No pass: exit 3 from the sandbox gate; the ready-round check never runs (nexus-8zdbu, nexus-1b5rs)."""
-    monkeypatch.setattr(crs, "go_gate", lambda *_a, **_k: pytest.fail("the ready round was read first"))
-    monkeypatch.setattr(crs, "sessions", lambda: [{"pid": 1, "pane": "%1", "name": "s", "sessionId": "sid", "status": "idle", "argv": "claude", "cwd": "/w"}])
-    monkeypatch.setattr(crs, "claude_version", lambda *_: "2.1.316")
-    monkeypatch.setattr(crs, "script_sha256", lambda *_: SHA)
-    monkeypatch.setattr(crs, "LAST_RUN", passfile.parent / "restart-last.json")
-    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--resume", "--no-update"])
-    assert crs.main() == 3
-    assert capsys.readouterr().out.splitlines()[-1].startswith("sandbox pass: refused, no sandbox pass recorded")
-
-
-
 # ---- ready-round asks are withdrawn (nexus-xwijj Phase 3) ----
 
 def _manifest_with_asks(crs, rd, asks: dict[str, str], markers: bool = False) -> dict:
