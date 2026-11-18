@@ -49,5 +49,16 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/hooks/scripts/stop_wake_guard.py` -- a CI-wait block steers to nx ci wait --branch for a release or PR (nexus-x4jok)
 - `conexus/skills/upgrade/SKILL.md` -- the retire-keys-sweep rung: what it does at nx upgrade, that it defers on engine conditions, and that an accept goes to the user with the dry-run counts and what each accept destroys (nexus-6pfgb.43)
+- `conexus/agents/architect-planner.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/code-review-expert.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/codebase-deep-analyzer.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/debugger.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/deep-analyst.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/deep-research-synthesizer.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/developer.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/strategic-planner.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/substantive-critic.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/agents/test-validator.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
+- `conexus/skills/orchestration/reference.md` -- the Working Rules sequential-thinking bullet no longer calls the thought a visible record (GH #1661)
 
 ## Deferred to the next client release
