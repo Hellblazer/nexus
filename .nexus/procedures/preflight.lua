@@ -458,7 +458,7 @@ local JAR = step("build the gate jar first, pytest refuses a stale one"
 
 -- The census and lint meta-tests this diff can turn red (T2 nexus/observability-lookback-2026-11-17,
 -- item 1: 42% of develop's red CI runs from 10-19 failed only on these). The script selects them
--- from tests/meta_surfaces.json.gz, the traced record of what each one reads, and runs them here in
+-- from the surface map scripts/meta_tests.py build writes (the traced record of what each one reads), and runs them here in
 -- seconds, not as the lab-run lint bucket; it lists every meta-test it runs whatever the diff
 -- (new, edited since the trace, or reading through a subprocess) and why. It needs no engine.
 local META = step("the census and lint meta-tests this diff reaches (scripts/meta_tests.py: selected from the traced"
