@@ -1309,13 +1309,32 @@ For the eligibility script, exit 1 lists each offending path or straddling bead
 `--develop-ref` (default `origin/develop`, so fetch first) that does not resolve.
 Neither is a pass.
 
-**5. Gates.** From the release worktree with a clean tree (the mode refuses
-uncommitted or untracked paths, and refuses `--skip-preflight`):
+**5. Open the release PR, then run the battery beside its CI.** As soon as items 3
+and 4 pass, run Step 8's pre-push greps (unchanged), push the branch and open the
+PR, so the PR's CI and the battery run at the same time. The branch from item 2
+already exists and is built off the tag, so skip Step 7's branch-creation and
+pre-merge lines. From the release worktree with a clean tree (the battery
+refuses uncommitted or untracked paths, and refuses `--skip-preflight`):
 
 ```bash
-lab-remote -c lab-l -- python3 scripts/watched_pytest.py --stall 180 --status /tmp/fastlane-X.Y.N.json -- uv run pytest -n auto   # the unit suite: a hand step, SERIAL to the battery (Common Mistakes), not a leg; the status file stays outside the worktree
+git push -u origin release/vX.Y.N
+gh pr create --base main --head release/vX.Y.N --title "conexus X.Y.N: ..." --body-file <body>   # body shape as in Step 9: short opening, keywords, then <details>
+uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z   # on the exact PR head: git rev-parse HEAD equals git rev-parse origin/release/vX.Y.N
 tests/e2e/release-battery.sh --plugin-only vX.Y.Z
 ```
+
+After any later push to the branch, re-run the eligibility script on the exact PR head
+before the merge.
+
+There is no hand unit suite in this lane. The release PR's CI runs the full unit
+suite and every integration file on the exact head, and AGENTS.md rule 13 says no
+tree gets two green full runs (Sam 2026-11-18, T2
+`nexus/sam-ruling-fast-lane-trim-2026-11-18`). The hand `pytest -n auto` on lab-l
+that ran here before cost 8.3.1 about an hour (a 29-minute wait for the memory
+grant, a run that exited 75 because the copy had no gate jar, and a rerun) for a
+tree PR CI then ran in full. A hand run that does need the engine substrate builds
+the gate jar first with `scripts/build-gate-jar.sh --lab-run <class>`, never inside
+a lab-run grant (AGENTS.md rule 13).
 
 The battery runs the eligibility gate again, then the preflight (the pin tests; the
 lint bucket left it, nexus-jh1f2 cut 3, and runs in PR CI's `test-lint`), the
@@ -1330,16 +1349,10 @@ the base tag's but for the version, not because their inputs are identical:
 change with time, so a dependency or index break since the base tag goes
 undetected by a plugin-only run. The evidence for skipping is one measured
 identical-code bump (2026-10-26, all six legs passed). Step 11c below stays in the
-lane as the post-publish control for exactly this risk. Then Step 8's pre-push
-greps, unchanged.
+lane as the post-publish control for exactly this risk.
 
-**6. Publish.** The normal flow, with the same human gates, except at Step 7: the
-branch from item 2 already exists and is built off the tag, so skip Step 7's
-branch-creation and pre-merge lines and run only its push and
-`gh pr create --base main` from that branch (body shape as in Step 9: short opening, keywords, then `<details>`). Before Step 9, re-run the
-eligibility script on the exact PR head (`git rev-parse HEAD` equals
-`git rev-parse origin/release/vX.Y.N`; a later push re-opens items 4 and 5).
-Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release
+**6. Publish.** The merge waits for both: the PR's CI green on the exact head, and
+the battery's PLUGIN-ONLY verdict. A later push re-opens items 4 and 5. Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release
 deploy paragraph does not apply, because the engine pin is unchanged), Step 10
 (release.yml publishes the identical nx code under the new version), Step 11, and
 Step 11b's back-merge of `main` into `develop`.
@@ -1404,7 +1417,7 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 - **Freehanding a version surface or a tag from memory of AGENTS.md instead of invoking this skill.** It skips the pre-push and post-publish verification that catches a failed publish (v4.32.13: the tag's workflow failed, PyPI was skipped, and the release was declared done anyway). Invoke `release` (or `engine-release`) before touching either.
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Merging a release PR whose integration shards did not all run.** On a pull request into main, CI runs every integration file in three shards (nexus-jh1f2 cut 4); `pytest-gate` needs all three green. A release PR CI where `pytest (integration, affected, shard k/3)` is missing or skipped is not evidence: re-run it.
-- **Running the full unit suite CONCURRENTLY with the E2E gates** (the plugin-only lane still runs one by hand; the full release path no longer does, nexus-jh1f2 cut 5). (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
+- **Running the full unit suite CONCURRENTLY with the E2E gates** (neither the full release path nor the plugin-only lane runs one by hand any more: nexus-jh1f2 cut 5, and Sam's 2026-11-18 ruling for the lane). (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
 - **Using `gh release create` after `git push origin vX.Y.Z`.** Duplicate release. The Release workflow already creates one.
 - **Forgetting `uv sync`.** `uv.lock` not updated; CI fails or local install resolves differently.
 - **Forgetting the coordinated install after tag-push (Step 12).** Local `nx` stays on the old version; the post-merge "verify locally" step lies. The opposite slip is also a mistake: running `scripts/reinstall-tool.sh` or `nx upgrade` in one session while others are live.
