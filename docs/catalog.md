@@ -127,8 +127,19 @@ Span formats:
 - `3:100-250` — chunk 3, characters 100-250 (positional)
 - `chash:<sha256hex>` — content-addressed chunk identity (64-char SHA-256 hex, preferred)
 - `chash:<sha256hex>:<start>-<end>` — character range within a content-addressed chunk
+- `dchash:<hash>:<start>-<end>`: a passage by character offsets (Unicode code points, half-open) in the document's canonical text, which is the source file as strict UTF-8 with one leading BOM removed and CRLF and lone CR turned into LF; `<hash>` is the SHA-256 of that text (64 lowercase hex digits)
 
-Content-hash spans (`chash:`) survive re-indexing when chunk boundaries are unchanged. Position-based spans may become stale after re-indexing — `nx catalog link-audit` detects this. `nx catalog show` resolves span text inline when available.
+Make a `dchash:` span with `nx catalog span`, then hand it to `nx catalog link`:
+
+```bash
+nx catalog span "Paper A" --passage "the passage to pin"
+# dchash:<hash>:1042-1061
+nx catalog link "Paper A" "Paper B" --type quotes --from-span "dchash:<hash>:1042-1061"
+```
+
+The passage must occur exactly once in the document, and PDFs and `nx` notes have no text source and are refused. A `dchash:` span that does not parse is refused before the link is written.
+
+A `dchash:` span survives re-chunking of unchanged text, because it is anchored to the document and not to a chunk. Content-hash spans (`chash:`) survive re-indexing when chunk boundaries are unchanged. Position-based spans may become stale after re-indexing — `nx catalog link-audit` detects this. `nx catalog show` resolves span text inline when available.
 
 ## How it gets populated
 
@@ -320,6 +331,7 @@ Spans identify specific passages within documents. The three formats have differ
 | `3:100-250` (chunk:char) | No — chunk boundaries shift on re-indexing | Rare; prefer chash: instead |
 | `chash:<sha256hex>` | Yes, if chunk text is unchanged | Preferred for all durable references |
 | `chash:<sha256hex>:<start>-<end>` | Yes, if chunk text is unchanged | Character range within a content-addressed chunk |
+| `dchash:<hash>:<start>-<end>` | Yes, for re-chunking of unchanged text (the `chash` span does not survive it) | A passage in a text file, by offsets in the document |
 
 **What happens when spans go stale:** If you re-index a document, positional spans (`42-57`, `3:100-250`) may point to the wrong text. Content-hash spans (`chash:`) continue to resolve correctly as long as the chunk text hasn't changed.
 

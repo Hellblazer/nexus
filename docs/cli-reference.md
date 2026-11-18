@@ -838,7 +838,7 @@ Changes only `source_uri`, and only where it is empty, so a second run is a no-o
 
 | Flag | Description |
 |------|-------------|
-| `--collection NAME` | Repair one collection (default: every collection holding aspect rows) |
+| `--collection NAME` | Repair one collection (default: every collection the catalog's live documents live in, read with one distinct-collections call; a collection with no aspect rows plans nothing, so the output is the same) |
 | `--apply` | Perform the repair (default: dry-run report only) |
 | `--json` | Emit JSON instead of the human-readable report |
 
@@ -985,6 +985,8 @@ migration-capable 6.x release.
 ## nx catalog
 
 Document catalog — track indexed documents and the relationships between them.
+
+**Blank filters are refused.** The engine reads a blank or whitespace-only filter value as absent, so a catalog read given one would widen to the whole catalog. The client refuses it before any request and the CLI reports a usage error (exit 2) instead of an empty or full result. This holds across the catalog reads (owner, collection, content type, file path, source URI, link type, link creator and the like). A link-type entry made only of commas and spaces (`","`) names no type and is refused too, and a subtree or descendants prefix must be ASCII digits joined by dots (`1`, `1.2`). An omitted option, or an empty string for an optional filter, still means "no filter".
 
 ### nx catalog setup / init (retired)
 
@@ -1133,7 +1135,8 @@ nx catalog link-bulk-delete [--from TUMBLER] [--to TUMBLER] [--type TYPE]
 ```
 
 Hidden from `--help` but fully functional. Bulk-remove links matching the
-given filters (all optional; omitting every filter matches every link).
+given filters (all optional; omitting every filter matches every link, but a
+whitespace-only `--type`, `--created-by` or `--created-at-before` is a usage error, exit 2).
 Same double-gate as `nx catalog gc`: report-only by default, and
 `--no-dry-run` alone still only reports — pass `--confirm` alongside it to
 actually delete (nexus-9nim, 4.29.1 inverted the old delete-unless-dry-run
@@ -1422,7 +1425,7 @@ nx catalog list --sensitive [--owner O] [--type T] [-n N] [--offset K] [--json]
 
 RDR-243 (see [Sensitive documents](sensitivity.md)). Sets or clears the document sensitivity flag after the document was written. Setting needs no reason; clearing needs `--reason`, and every change writes a row (old, new, reason, actor, time) to the engine's `catalog_sensitivity_changes` table. There is no CLI view of that table yet, and no MCP tool clears the flag.
 
-`TUMBLER` is a dotted tumbler (never a title) and excludes the other options. `--collection C` takes every document in that physical collection. `--path GLOB` is an `fnmatch` pattern on the document's file path (`*` crosses `/`); the engine has no glob, so it reads the catalog, and `--collection` or `--owner` narrows that read first. `--owner` is accepted only with `--path`.
+`TUMBLER` is a dotted tumbler (never a title) and excludes the other options. `--collection C` takes every document in that physical collection. `--path GLOB` is an `fnmatch` pattern on the document's file path (`*` crosses `/`); the engine has no glob, so it reads the catalog, and `--collection` or `--owner` narrows that read first. `--owner` is accepted only with `--path`. A whitespace-only `--collection` is a usage error (exit 2, `--collection is blank; name a physical collection.`), because the engine would read it as no filter and list the tenant.
 
 The verb refuses, before it resolves a target or calls the engine, when the engine does not advertise `catalog_sensitivity_supported` (an engine without the column would drop the flag without an error). A target that matches nothing is an error. A large target is sent in batches of 500; a failure part-way names how many documents changed, and re-running the same command finishes the rest.
 
@@ -1599,6 +1602,8 @@ Repair catalog entries whose `file_path` is a bare basename or points at a file 
 - `--rdr-prefix-mode` adds a fallback for RDRs renamed end-to-end: when basename match fails, match by the durable `rdr-NNN-` prefix instead.
 - `--mark-missing` sets `meta.status='missing'` on entries with no candidate, so `nx catalog gc` can sweep them.
 
+A whitespace-only `--collection` is a usage error (exit 2, `--collection is blank; name a physical collection.`); an omitted one means no collection filter.
+
 Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are resolved. Empty-`file_path` entries (MCP-stored knowledge with no source file) are never touched.
 
 ### nx catalog prune-stale
@@ -1608,6 +1613,8 @@ nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [
 ```
 
 Drop catalog entries whose `file_path` is missing on disk. This is the supported stale-content sweep: `nx t3 prune-stale` was retired in 7.0.0 (nexus-bm8dd), and this verb followed by `nx t3 gc` replaces it. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
+
+A whitespace-only `--collection` is a usage error (exit 2, `--collection is blank; name a physical collection.`).
 
 Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default; `--no-rdr-prefix-skip` disables it), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
@@ -2255,7 +2262,7 @@ nx t3 retire-keys --add-check [--replace] --apply [--max-rps R] [--json]
 nx t3 retire-keys --validate --apply [--max-rps R] [--json]
 ```
 
-The sweep vehicle of RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): the operator's way into the engine's `POST /v1/admin/chunk-keys/sweep`, `/add-constraints` and `/validate-constraints`. Nothing calls those routes on its own; the upgrade-ladder rung that would run the sweep on every install is a later bead that ships after a cloud dry run has been read. The allowed keys, the bypass prefixes and the quarantine implication are rendered from the key table (`src/nexus/tables/chunk-metadata-keys.toml`) into every request, because the engine cannot name the ROW keys; the engine pins what it receives (the ROW keys by a digest generated from the table, the bypass set exactly the quarantine and taxonomy prefixes, the implication pair) and answers 400 to a plan that differs, since a dropped key would be stripped from every row and an extra prefix would exempt a collection from the CHECK for good.
+The sweep vehicle of RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): the operator's way into the engine's `POST /v1/admin/chunk-keys/sweep`, `/add-constraints` and `/validate-constraints`. `nx upgrade` runs the same sweep as the `retire-keys-sweep` rung (the last of the five; see [migration-runbook](migration-runbook.md#the-retire-keys-sweep-rung)): `nx upgrade --auto` runs it on a local engine, which is an unattended write; it defers and writes nothing while a precondition stands. The rung never accepts a residue, so `--accept`, `--add-check` and `--validate` stay operator-only. The allowed keys, the bypass prefixes and the quarantine implication are rendered from the key table (`src/nexus/tables/chunk-metadata-keys.toml`) into every request, because the engine cannot name the ROW keys; the engine pins what it receives (the ROW keys by a digest generated from the table, the bypass set exactly the quarantine and taxonomy prefixes, the implication pair) and answers 400 to a plan that differs, since a dropped key would be stripped from every row and an extra prefix would exempt a collection from the CHECK for good.
 
 Order, per install: dry run for each tenant, `--apply` for each tenant, then `--add-check --apply` once, then `--validate --apply` once.
 
@@ -3016,7 +3023,7 @@ The board wake is best effort: a run set the adapter could not fold posts no row
 | 2 | no row for the sha before `--timeout`, and GitHub does not show every run finished |
 | 3 | runs were cancelled or stale and none failed |
 | 4 | a conclusion could not be read, is one this table does not know, or disagrees with the board's outcome; or the board row was capped (its `n` counts more runs than it lists, none listed failed) and GitHub's runs for the sha are not exactly the missing ones |
-| 5 | the wait could not run: not a sha, no tuple store, a refused board read, or the engine unreachable until the deadline |
+| 5 | the wait could not run: not a sha, no tuple store, a refused board read, or the engine unreachable until the deadline, or a `--gh-repo` that is not `OWNER/NAME` (checked before either mode) |
 
 Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as for every `nx` command.
 
@@ -4141,6 +4148,8 @@ engine's view has `expired`, and when its reads have failed since it started and
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
 
+**Data moves (RDR-246, nexus-f3yqd.2.17).** The engine's move worker reports each open or failed data move (a row move registered in `nexus.data_moves`) as a `data-move:<label>` entry of the `boot_work` list in the same `GET /v1/status` body, and `nx doctor` turns the entries into rows. `Data move <label>` is red for a `blocked:` move (the engine retries it by itself) and for a `failed:` one (not retried; the failure text is in `nexus.data_moves.failure` and the engine log). It is a warning for a `stalled:` move, a CALL with no chunk done for `NX_DATA_MOVE_STALL_MINUTES` (default 15; a slow chunk looks the same), and a note, never red, for a `paused:` one (the fix line gives the `UPDATE` that resumes it). A move that is working, queued or complete has no row of its own. `Data move worker` is red when the engine reports that its move worker is not running (every registered move then waits), and `Data move reporting` is red when the worker runs but nothing reports its moves (a green summary would hide a blocked or failed one). `Data moves` is the summary row, always green: it counts the open or failed moves by state, or says "no data move is open or failed". The status carries only the move's label, a class and an SQLSTATE, so each row's hint says where the full text is. Not applicable (green) when the engine cannot be reached or predates `boot_work`. The state table, with what each state means and what to do, is in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
+
 **Recall canary (nexus-4lnn1.1.10, RDR-230 Technical Design 7).** `nx doctor`'s "Recall canary" row reads `per_collection_indexes.this_engine.maintenance.canary` from the same `GET /v1/status` body: the counts of this engine's per-collection (`pci_`) indexes whose recall canary reads green, red or unmeasured, and when the canary last ran. The route is unauthenticated, so it carries counts only. The row warns when any index reads red and points to the operator-only `GET /v1/admin/chunks-leaves`, whose `canary_indexes` entry names each red index with its `min_recall`, `trigger` and `red_after_reindex`; the engine log's `event=pci_canary` lines name them too. This row never calls that route. With no red it shows the counts. The counts are this engine's own history: a standby keeps the counts from when it held the builder lock, and the row says so. An engine without the `maintenance` or `canary` key reads not applicable, and a value the row cannot read says "could not read" rather than passing.
 
 **Reranker (nexus-yuh4a, RDR-210 P3.1).** `nx doctor`'s "Reranker" row reads `reranker_available` from the same `GET /v1/status`
@@ -4602,6 +4611,8 @@ indexing auto-starts, when `mineru.pid` names one (what `nx mineru stop` and
 `nx uninstall` key on), and prints `MinerU server stopped (PID n)`. A
 `mineru-api` you started without nexus has no pid file and is left alone, and a
 `--config-dir` other than the default never reaches the default dir's MinerU.
+
+A process the stop identified as this directory's service (an explicit `--config-dir` supervisor, the engine, or a start whose own environment names this directory) but could not signal, because another user owns it (EPERM on both signals), is reported separately from one that survived a kill: `stop` prints `FAILED`, names the pids, says to stop them as their owner and not to run `start` until then, and exits 1. That exit comes before PostgreSQL, so `--with-pg` leaves the cluster running. The sweep signals only what it can place in this directory: a process that merely names the engine jar (as another command's `--jar` option value) is not a JVM running it, and a wrapper such as `sudo`, `ssh` or `lab-run` that carries the supervisor's command line is not the supervisor, so neither is signalled.
 
 On Windows (RDR-224), `stop` sends the supervisor CTRL_BREAK and waits;
 a supervisor that does not exit in time is ended through its Job Object, which
@@ -5245,8 +5256,10 @@ The single trigger for the upgrade ladder ([RDR-185](rdr/rdr-185-single-ladder-c
 Upgrading nexus is: update the code ([`nx self install`](#nx-self-install)), then run `nx upgrade`. That single trigger
 converges everything else — it brings the package, engine, and process
 preconditions current, then walks one ordered ladder that auto-applies whichever
-data migrations your install actually needs (the pre-RDR-108 chunk-identity
-rekey is the standing rung; RDR-155 P4b retired the T2-schema and
+data migrations your install actually needs (the ladder holds five rungs:
+`rdr192-manifest-backfill`, `note-tags-array`, `manifest-section-labels`,
+`manifest-span-fill` and `retire-keys-sweep`, each described in the
+[migration runbook](migration-runbook.md#the-normal-path). RDR-155 P4b retired the T2-schema and
 Chroma→pgvector substrate rungs together with the migration machinery — a
 pre-PG install is redirected to the pinned last migration-capable release by
 the stranded-install detector), each rung detecting, converging, and verifying
@@ -5267,7 +5280,7 @@ nx upgrade --yes                  # Unattended: pre-approve a billed re-embed (=
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`. Nothing is written; a rung's `detect()` may READ the completion ledger (`rdr192-manifest-backfill` does, and takes no census), so an unreachable engine reports the rung pending with the reason. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
-| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)) |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)). On a local engine it can write unattended: the `retire-keys-sweep` rung runs at every session start until the install is swept, and defers, writing nothing, when a precondition stands in its way |
 | `--skip-t3` | Skips the precondition stage's engine install and process cycle (verdicts are still reported), the storage-service restart, the PDF stack carry-forward, the installer rebuild and the collection-name check. The old service keeps running until you run a plain `nx upgrade`. The data steps still run |
 | `--yes` | Pre-approve a billed re-embedding of your collections, for an unattended run (same as `NX_ASSUME_YES=1`). Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic. Nothing in `nx upgrade` asks for this today, so the flag currently changes nothing |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |

@@ -98,7 +98,7 @@ query(question="database design", follow_links="cites", depth=1)  # + citation g
 | `corpus` | string | Collection prefix or comma-separated list (default: every `knowledge__*` collection when no catalog parameter is set, otherwise the `content_type`'s own corpus; pass `all` for every corpus) |
 | `author` | string | Filter by document author (catalog lookup) |
 | `content_type` | string | `code`, `prose`, `rdr`, `paper`, `knowledge` |
-| `subtree` | string | Tumbler prefix — search only documents under this address |
+| `subtree` | string | Tumbler prefix — search only documents under this address. ASCII digits joined by dots (`1`, `1.2`); any other value is refused |
 | `follow_links` | string | Link type to follow (e.g., `cites`) — enriches with linked documents |
 | `depth` | integer | Hops to follow in the link graph (default 1) |
 | `limit` | integer | Maximum results (default 10) |
