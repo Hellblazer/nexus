@@ -73,7 +73,7 @@ public final class MemoryRepository {
      * {@code MemoryRepositoryQuarantineReadPathTest} derives the read-path set by
      * reflection and fails when any single path drops this.
      */
-    private static final Condition NOT_QUARANTINED = MEMORY.QUARANTINED_AT.isNull();
+    static final Condition NOT_QUARANTINED = MEMORY.QUARANTINED_AT.isNull();
 
     private final TenantScope tenantScope;
 
@@ -257,7 +257,7 @@ public final class MemoryRepository {
      * narrower tsquery than the one that matched puts translated-only hits at
      * rank 0 and sorts them last.
      */
-    private static String ftsQuery(String query) {
+    static String ftsQuery(String query) {
         boolean hasSeparator = query != null && query.chars()
             .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
         String q = "nexus.fold_diacritics({0})";
@@ -330,7 +330,7 @@ public final class MemoryRepository {
      *         silently swallow, recreating the exact ambiguity class this
      *         bead exists to eliminate (critic finding, nexus-senub review).
      */
-    private static void guardAgainstDegenerateQuery(DSLContext ctx, String query) {
+    static void guardAgainstDegenerateQuery(DSLContext ctx, String query) {
         Integer numnode = ctx.select(field(
                     "numnode(plainto_tsquery('english', nexus.fold_diacritics({0})))",
                     Integer.class, val(query)))
@@ -427,6 +427,12 @@ public final class MemoryRepository {
             }
             return rows;
         });
+    }
+
+    /** nexus-1gdv0.1.1: one page of {@link #search}, stamping only its rows; see {@link MemorySearchPage}. */
+    public MemorySearchPage.Page searchPage(String tenant, String query, String project, boolean trackAccess,
+                                            int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx -> MemorySearchPage.run(ctx, query, project, trackAccess, limit, offset));
     }
 
     /**
@@ -1266,7 +1272,7 @@ public final class MemoryRepository {
      * Batch-increment access_count and set last_accessed for multiple rows.
      * Best-effort: does NOT throw on failure.
      */
-    private void batchTrackAccess(DSLContext ctx, List<Long> ids) {
+    static void batchTrackAccess(DSLContext ctx, List<Long> ids) {
         if (ids.isEmpty()) return;
         try {
             ctx.update(MEMORY)

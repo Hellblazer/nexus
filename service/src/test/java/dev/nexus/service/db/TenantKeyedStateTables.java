@@ -163,6 +163,7 @@ final class TenantKeyedStateTables {
         }
         notKeyed.put("CatalogSensitiveReads.Page.documents", RESULT);   // nexus-f3yqd: one sensitive-list call's documents
         notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
+        notKeyed.put("MemorySearchPage.Page.rows", RESULT);   // nexus-1gdv0.1.1: one memory-search call's page of rows
         // nexus-f3yqd.2.13 (RDR-246): the data-move worker. The registry it works is global, with no tenant column.
         notKeyed.put("MoveStates.byLabel", DATA_MOVE_STATES);
         notKeyed.put("MoveStates.calls", DATA_MOVE_STATES);   // nexus-f3yqd.2.17: the CALL in flight, by move label

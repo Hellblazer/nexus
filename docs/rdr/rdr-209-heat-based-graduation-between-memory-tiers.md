@@ -378,9 +378,16 @@ more, default 0, used only with `limit`).
 - With `limit`: the engine keeps the same order as today (full-text rank, then
   id), takes the rows from `offset` for `limit` rows, stamps only those (when
   `access` is `track`), and answers an object, `{"rows": [...],
-  "matching_total": N}`. `N` comes from the same statement as the rows (a
-  window count), so the page and the total cannot disagree under a concurrent
-  write. A `limit` below 1 is a 400.
+  "matching_total": N}`. `N` and the rows come from ONE SQL statement: a CTE
+  of the matches, a one-row count over it, and the page left-joined to that
+  count, so a page past the end still returns the row that carries `N` (a
+  window count rides on returned rows and would lose it there). One statement
+  reads one snapshot even at READ COMMITTED, so a concurrent insert, delete or
+  quarantine cannot make the page and the total disagree; a second count
+  statement in the same transaction would not give that. A `limit` below 1 or
+  not an integer is a 400, and a `limit` above 10,000 is clamped to 10,000, as
+  `/v1/memory/list` clamps its `limit`; an `offset` below 0 or not an integer
+  is a 400.
 - An empty page past the end answers `{"rows": [], "matching_total": N}` and
   stamps nothing. The "no searchable terms" refusal fires only when `N` is
   0, as it does today when no row matches
@@ -753,12 +760,17 @@ Sized at about a day of work plus an engine release.
 
 #### Step 1: Engine, page-aware search
 
-`MemoryRepository.search` takes an optional page and stamps only the returned
-rows; the handler reads `limit` and `offset`, answers the object form, and
-returns 400 for a `limit` below 1. Tests in the repository and in
-`MemoryHandlerTest.java` (the search tests start at `:288`): the MVV counter
-proof, an empty page past the end (no error, no stamp, total reported), the
-no-`limit` request unchanged, `silent` stamps nothing, tenant isolation.
+`MemoryRepository.searchPage` (a delegate to `MemorySearchPage`; `search` keeps
+the bare list) takes a page and stamps only the returned rows; the handler
+reads `limit` and `offset`, answers the object form, and returns 400 for a
+`limit` below 1. Tests in `MemorySearchPageTest` (repository and wire): the MVV
+counter proof, an empty page past the end (no error, no stamp, total reported),
+the no-`limit` request unchanged, `silent` stamps nothing, tenant isolation, a
+`limit` above the ceiling clamped, rank order across pages, a quarantined match
+not counted, the degenerate-query guard keyed to the total. The one-statement
+shape is pinned by `MemorySearchPageStatementsTest`, which records the SQL a
+page runs, and the quarantine predicate on the total by
+`MemoryRepositoryQuarantineReadPathTest`.
 
 #### Step 2: Client, `search_page` and the MCP tool
 
@@ -989,11 +1001,11 @@ and skipped, goes in its bead before close.
 ### Performance Expectations
 
 Not estimated. A paged search returns fewer rows than today (the whole match
-set), and the window count runs in the same statement as the page, so it adds
-no second scan. The rollup's read is not narrowed: it is one `get_all` of the
-project per run, as the census makes (the nexus project held 3,158 rows on
-2026-09-14; its size today is not measured). The command's cost is that read
-and one write per record.
+set), and the total is counted in the same statement as the page (one pass
+over the matches), so it adds no second statement. The rollup's read is not
+narrowed: it is one `get_all` of the project per run, as the census makes (the
+nexus project held 3,158 rows on 2026-09-14; its size today is not measured).
+The command's cost is that read and one write per record.
 
 ## Finalization Gate
 
@@ -1100,3 +1112,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-16 | Fix round after gate round 1, Sam's ruling "Fix the three, then accept" (S1, S2, S4 only; S3 and S5 to S8 stay in the critique record as implementation work). Step 3 writes through the verbatim import route and keeps the row's own timestamp, and A9 is reopened and restated (research-10); `--all` and Step 1 leave the `<repo>_rdr` gate rows alone, with research-9 recording their readers; the engine tag filter and A7 are dropped for a client-side `get_all` plus `split_tags` partition, so the search page is the only wire change (research-11). |
 - 2026-11-16: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `43b12b69464f`; critique `nexus_rdr/209-gate-critique-2026-11-16-r1`.
 | 2026-11-16 | Accepted (Sam, by dialog in halcyon's session: "Keep timestamps, count first"), with the Count first step (fix check `nexus_rdr/209-fix-check-78cc9b0e4776` PASS). Epic nexus-1gdv0. Residual dispositions: gate S3 nexus-1gdv0.1.2, S5 nexus-1gdv0.2.7, S6 nexus-1gdv0.2.4, S7 nexus-1gdv0.2.5, S8 nexus-1gdv0.3; fix check d021: nexus-1gdv0.2.2, .2.3, .2.9, .2.10, .2.11; fix check 78cc: nexus-1gdv0.2.12, .2.13, .2.14, .2.15. |
+| 2026-11-18 | Gate finding S3 closed with the engine search page (nexus-1gdv0.1.1, nexus-1gdv0.1.2): the total is one statement (a CTE, a one-row count and the page left-joined), not a window count, so a page past the end still carries it and the page and the total share one snapshot; `limit` is clamped to 10,000 as `/v1/memory/list` clamps it and a bad `offset` is a 400. Wording amended under standing grant 3 to match the code reviewed at the nexus-1gdv0.1.3 gate (`MemorySearchPage`, tests in `MemorySearchPageTest`, `MemorySearchPageStatementsTest` and `MemoryRepositoryQuarantineReadPathTest`). |

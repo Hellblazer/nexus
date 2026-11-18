@@ -86,6 +86,54 @@ public final class MemoryHandler implements HttpHandler {
     }
 
     /**
+     * nexus-1gdv0.1.2: the {@code limit} of a {@code /search} body. Absent (or JSON null) is the unpaged
+     * contract; a non-integer or a value below 1 is a 400; a value above {@link #LIST_LIMIT_CEILING} is
+     * clamped to it, the rule {@link #parseListLimit} applies to {@code /list}.
+     */
+    public static Integer parseBodyLimit(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        long parsed = bodyInteger(raw, "limit");
+        if (parsed < 1) {
+            throw new IllegalArgumentException("field 'limit' must be a positive integer, got " + parsed);
+        }
+        return (int) Math.min(parsed, LIST_LIMIT_CEILING);
+    }
+
+    /**
+     * nexus-1gdv0.1.1: the {@code offset} of a paged {@code /search} body. Absent is 0; a non-integer or a
+     * negative value is a 400; a value past an int clamps (it is an empty page either way).
+     */
+    public static int parseBodyOffset(Object raw) {
+        if (raw == null) {
+            return 0;
+        }
+        long parsed = bodyInteger(raw, "offset");
+        if (parsed < 0) {
+            throw new IllegalArgumentException("field 'offset' must be a non-negative integer, got " + parsed);
+        }
+        return (int) Math.min(parsed, Integer.MAX_VALUE);
+    }
+
+    /** A JSON number with no fractional part, as a long saturated at the long range; anything else is a 400. */
+    private static long bodyInteger(Object raw, String name) {
+        if (raw instanceof java.math.BigInteger big) {
+            return big.bitLength() < 64 ? big.longValue() : big.signum() < 0 ? Long.MIN_VALUE : Long.MAX_VALUE;
+        }
+        if (raw instanceof Integer || raw instanceof Long || raw instanceof Short || raw instanceof Byte) {
+            return ((Number) raw).longValue();
+        }
+        if (raw instanceof Number n) {
+            double d = n.doubleValue();
+            if (!Double.isNaN(d) && !Double.isInfinite(d) && d == Math.rint(d)) {
+                return (long) d;
+            }
+        }
+        throw new IllegalArgumentException("field '" + name + "' must be an integer");
+    }
+
+    /**
      * nexus-pxp44: the {@code /all} title filter. Absent or blank is the empty
      * set (every row); an unknown or empty element is a 400.
      */
@@ -307,12 +355,19 @@ public final class MemoryHandler implements HttpHandler {
 
     /**
      * POST /v1/memory/search
-     * Request: {"query","project"(opt),"access"(opt,"track"|"silent")}
-     * Response 200: [entries]
+     * Request: {"query","project"(opt),"access"(opt,"track"|"silent"),"limit"(opt),"offset"(opt)}
+     * Response 200: [entries] without {@code limit}; {"rows":[entries],"matching_total":N} with it
      *
      * <p>The {@code access} field mirrors Python's {@code search(access="track"|"silent")}:
      * {@code "track"} (default) increments access_count on returned rows;
      * {@code "silent"} skips it (for internal consolidation scans).
+     *
+     * <p>RDR-209 Phase 0b: without {@code limit} every match is returned and stamped, as before (an older
+     * client). With it the engine returns rows {@code [offset, offset+limit)} in the same order, stamps only
+     * those, and reports how many rows matched in total, even for a page past the end (see
+     * {@code MemorySearchPage}). {@code limit} below 1 or not an integer is a 400, above
+     * {@link #LIST_LIMIT_CEILING} is clamped; {@code offset} (default 0, negative is a 400) is read only with
+     * {@code limit}.
      */
     private void handleSearch(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -321,10 +376,20 @@ public final class MemoryHandler implements HttpHandler {
         String project = optStringOrNull(body, "project");
         String access  = optStringOrNull(body, "access");
         boolean trackAccess = !"silent".equals(access);
+        Integer limit = parseBodyLimit(body.get("limit"));
+        int offset = limit == null ? 0 : parseBodyOffset(body.get("offset"));
 
         try {
-            var rows = repo.search(tenant, query, project, trackAccess);
-            HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+            if (limit == null) {
+                var rows = repo.search(tenant, query, project, trackAccess);
+                HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+                return;
+            }
+            var page = repo.searchPage(tenant, query, project, trackAccess, limit, offset);
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("rows", page.rows().stream().map(this::recordToMap).toList());
+            resp.put("matching_total", page.matchingTotal());
+            HttpUtil.send(ex, 200, json(resp));
         } catch (MemoryRepository.DegenerateQueryException e) {
             sendDegenerateQueryError(ex, tenant, e);
         }
