@@ -48,3 +48,5 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
+
+- `conexus/agents/deep-research-synthesizer.md` -- the catalog `resolve` example names the corpus content types and says an unknown `corpus` fails the call (GH #1668); the behaviour ships in the client's MCP server, so this line waits for the client release.
