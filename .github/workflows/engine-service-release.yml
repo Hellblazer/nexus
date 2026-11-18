@@ -101,6 +101,7 @@ jobs:
         uses: ./.github/actions/maven-cache
         with:
           job-class: package
+          save: false  # generate-sources resolves only part of the package class
 
       - name: Run jOOQ codegen
         working-directory: service
@@ -339,6 +340,8 @@ jobs:
         uses: ./.github/actions/maven-cache
         with:
           job-class: native
+          # -Pprebuilt-jooq turns the codegen plugins off, so this leg resolves part of the native class
+          save: false
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # RDR-160: in local mode the native binary constructs Bge768Embedder,

@@ -8,9 +8,17 @@ description: >-
   shared, the first job to save defined the content and a hit never saved
   again, so the native trip-wire fetched what only it resolves (the shade
   plugin's asm-commons, the native-image plugin) from Central on every run.
-  A pom change restores the same class's last entry. A tag run restores and
-  never saves: its scope is readable by no other run, and it reads only the
-  entries maven-cache-seed.yml keeps on main. A self-hosted runner keeps its
+  A pom change restores the same class's last entry, so an entry missing
+  something stays missing it across pom changes. A job that resolves only part
+  of its class (generate-sources alone, or a native build with the jOOQ codegen
+  plugins off) passes `save: false`: it restores and never saves. The lint test
+  tests/test_maven_cache_coverage_lint.py keeps every saving job one that runs
+  its class's whole build (develop run 44164358782: a cold jOOQ codegen job
+  saved the package entry without maven-resources-plugin, restore keys carried
+  it to the next pom hash, and run 44314623097's shaded-jar build fetched the
+  plugin from Central and met a 429). A tag run restores and never saves:
+  its scope is readable by no other run, and it reads only the entries
+  maven-cache-seed.yml keeps on main. A self-hosted runner keeps its
   own ~/.m2, so the cache is skipped there.
   Also sets MAVEN_ARGS for the rest of the job so the resolver retries a
   transient Central error (see the retry step).
@@ -18,10 +26,16 @@ description: >-
 inputs:
   job-class:
     description: >-
-      Which set of artifacts the job resolves: `package` (the shaded jar,
-      or generate-sources alone), `native` (-Pnative package) or `test`
-      (the Java test suites). Jobs with one class share an entry.
+      Which set of artifacts the job resolves: `package` (the shaded jar),
+      `native` (-Pnative package) or `test` (the Java test suites). Jobs with
+      one class share an entry.
     required: true
+  save:
+    description: >-
+      'false' for a job that resolves only part of its class, such as
+      generate-sources alone: it restores the class's entry and never saves it.
+    required: false
+    default: 'true'
 
 outputs:
   cache-hit:
@@ -35,37 +49,46 @@ runs:
       shell: bash
       env:
         JOB_CLASS: ${{ inputs.job-class }}
+        SAVE: ${{ inputs.save }}
       run: |
         case "$JOB_CLASS" in
           package|native|test) ;;
           *) echo "::error::maven-cache: unknown job-class '$JOB_CLASS' (package, native or test)"; exit 1 ;;
         esac
+        case "$SAVE" in
+          true|false) ;;
+          *) echo "::error::maven-cache: save must be 'true' or 'false', got '$SAVE'"; exit 1 ;;
+        esac
 
     # The key has no runner.arch: the Maven repository holds jars and poms, so the linux-arm64 release leg can
-    # restore an entry saved on x64. The second restore key reads the entry setup-graalvm saved before this action.
+    # restore an entry saved on x64. v2 because a generate-sources job had saved v1's package entry without
+    # maven-resources-plugin; the v1 restore key is the fallback, so the first full build fetches only what v1 lacks
+    # and saves a whole v2 entry. The last restore key reads the entry setup-graalvm saved before this action.
     - name: Restore the Maven local repository (saved at job end)
       id: cache
-      if: runner.environment == 'github-hosted' && github.ref_type != 'tag'
+      if: runner.environment == 'github-hosted' && github.ref_type != 'tag' && inputs.save == 'true'
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
       with:
         path: |
           ~/.m2/repository
           ~/.m2/wrapper
-        key: m2-v1-${{ runner.os }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
+        key: m2-v2-${{ runner.os }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
         restore-keys: |
+          m2-v2-${{ runner.os }}-${{ inputs.job-class }}-
           m2-v1-${{ runner.os }}-${{ inputs.job-class }}-
           setup-graalvm-${{ runner.os }}-maven-
 
-    - name: Restore the Maven local repository (tag run, no save)
+    - name: Restore the Maven local repository (tag run or save false, no save)
       id: restore
-      if: runner.environment == 'github-hosted' && github.ref_type == 'tag'
+      if: runner.environment == 'github-hosted' && (github.ref_type == 'tag' || inputs.save == 'false')
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
       with:
         path: |
           ~/.m2/repository
           ~/.m2/wrapper
-        key: m2-v1-${{ runner.os }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
+        key: m2-v2-${{ runner.os }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
         restore-keys: |
+          m2-v2-${{ runner.os }}-${{ inputs.job-class }}-
           m2-v1-${{ runner.os }}-${{ inputs.job-class }}-
           setup-graalvm-${{ runner.os }}-maven-
 

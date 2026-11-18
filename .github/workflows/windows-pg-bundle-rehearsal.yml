@@ -289,6 +289,7 @@ jobs:
         uses: ./.github/actions/maven-cache
         with:
           job-class: package
+          save: false  # generate-sources resolves only part of the package class
 
       - name: Run jOOQ codegen
         working-directory: service
