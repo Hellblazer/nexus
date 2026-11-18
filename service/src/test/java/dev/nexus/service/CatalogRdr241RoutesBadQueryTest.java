@@ -48,10 +48,26 @@ class CatalogRdr241RoutesBadQueryTest extends Rdr241RouteTestBase {
         }
     }
 
+    /** The request line is written by hand: java.net.http refuses to build a URI with a malformed escape. */
+    private int rawStatus(String requestTarget) throws Exception {
+        try (var socket = new java.net.Socket("127.0.0.1", service.getPort())) {
+            socket.setSoTimeout(10_000);
+            String req = "GET " + requestTarget + " HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " + TOKEN
+                + "\r\nX-Nexus-Tenant: " + TENANT + "\r\nConnection: close\r\n\r\n";
+            socket.getOutputStream().write(req.getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            socket.getOutputStream().flush();
+            var in = new java.io.BufferedReader(new java.io.InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.US_ASCII));
+            String statusLine = in.readLine();
+            assertThat(statusLine).startsWith("HTTP/1.1 ");
+            return Integer.parseInt(statusLine.split(" ")[1]);
+        }
+    }
+
     @Test
-    void aMalformedPercentEscapeIsA400() throws Exception {
+    void aMalformedPercentEscapeIsA400_notA500() throws Exception {
+        assertThat(rawStatus(AUTHOR + "?author=needle")).as("control").isEqualTo(200);
         for (String bad : List.of(AUTHOR + "?author=%zz", AUTHOR + "?author=100%", META + "?meta.k=%4", META + "?meta.%g1=v", LOCATORS + "?limit=%")) {
-            assertThat(status(bad)).as(bad).isEqualTo(400);
+            assertThat(rawStatus(bad)).as(bad).isEqualTo(400);
         }
     }
 }
