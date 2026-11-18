@@ -75,6 +75,13 @@ public final class Main {
             TrustAnchors.print(System.out);
             return;
         }
+        // nexus-dngtz.1.11 (RDR-167): the two log paths that bypass logback are made line-safe before anything else starts.
+        // An uncaught exception goes through the logback pattern, not the JVM's stderr handler; java.util.logging (Liquibase,
+        // and the JDK HttpServer through System.Logger) gets the formatter that escapes control characters. Neither is fatal.
+        dev.nexus.service.log.UncaughtExceptionLog.install();
+        if (dev.nexus.service.log.LineSafeFormatter.install() == 0) {
+            log.warn("event=jul_line_safe_inactive reason=\"no java.util.logging console handler: Liquibase's records are not escaped\"");
+        }
         goOfflineAtStartup();
         // nexus-rph82: one clock for the whole process, pinned before any
         // datasource negotiates a session zone. See SchemaMigrator.pinJvmTimeZoneToUtc.

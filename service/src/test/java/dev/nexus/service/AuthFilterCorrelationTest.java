@@ -504,7 +504,7 @@ class AuthFilterCorrelationTest {
         var encoder = (PatternLayoutEncoder) ((ch.qos.logback.core.OutputStreamAppender<ILoggingEvent>) appender)
             .getEncoder();
         assertThat(encoder.getPattern())
-            .contains("%logger{36} [cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}] - %msg%n");
+            .contains("%logger{36} [cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}] - %msgSafe%n%exSafe");
 
         // Engine reader of record: src/nexus/daemon/storage_service_daemon.py:986,
         // _ENGINE_LOGBACK_LINE = r"^\d{4}-\d\d-\d\d[ T]\S+\s+[A-Z]+\s". Re-confirm there if it moves.

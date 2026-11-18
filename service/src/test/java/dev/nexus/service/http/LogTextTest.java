@@ -123,4 +123,52 @@ class LogTextTest {
         String id = "sess-1.2_ab:CD/ef";
         assertThat(LogText.mdcValue(id)).isSameAs(id);
     }
+
+    // nexus-dngtz.1.11: the sink's escape. Call sites have already escaped their own values (a backslash is doubled
+    // there), so the sink never doubles one and never touches space, brackets or equals.
+
+    @Test
+    void lineSafeEscapesEveryControlCharacterLikeEscapeControl() {
+        java.util.List<Integer> chars = new java.util.ArrayList<>();
+        for (int c = 0x00; c <= 0x1F; c++) chars.add(c);
+        for (int c = 0x7F; c <= 0x9F; c++) chars.add(c);
+        chars.add(0x2028);
+        chars.add(0x2029);
+        assertThat(chars).as("non-vacuity: 32 + 33 + 2 characters").hasSize(67);
+        for (int c : chars) {
+            String expected = c < 0x100 ? String.format("\\x%02x", c) : String.format("\\u%04x", c);
+            assertThat(LogText.lineSafe("a" + (char) c + "b")).as("char 0x%04x", c).isEqualTo("a" + expected + "b");
+        }
+    }
+
+    @Test
+    void lineSafeEscapesTheNamedLineBreaks() {
+        assertThat(LogText.lineSafe("a\nb\rc\u0085d\u2028e\u2029f")).isEqualTo("a\\x0ab\\x0dc\\x85d\\u2028e\\u2029f");
+    }
+
+    @Test
+    void lineSafeLeavesABackslashAloneSoACallSiteEscapeIsNotDoubled() {
+        assertThat(LogText.lineSafe("a\\x0ab")).isEqualTo("a\\x0ab");
+        assertThat(LogText.lineSafe("\\\\")).isEqualTo("\\\\");
+        // a call-site escaped value that also holds a real newline: the real one is escaped, the typed one stays
+        assertThat(LogText.lineSafe("a\\\\x0a\n")).isEqualTo("a\\\\x0a\\x0a");
+    }
+
+    @Test
+    void lineSafeLeavesSpaceBracketsAndEqualsAlone() {
+        String s = "event=x [a] - b=c";
+        assertThat(LogText.lineSafe(s)).isSameAs(s);
+    }
+
+    @Test
+    void lineSafeReturnsTheSameInstanceWhenNothingNeedsEscaping() {
+        String plain = "event=data_move_call label=\"m\" caf\u00e9";
+        assertThat(LogText.lineSafe(plain)).isSameAs(plain);
+        assertThat(LogText.lineSafe("")).isEmpty();
+    }
+
+    @Test
+    void lineSafeOfNullIsNull() {
+        assertThat(LogText.lineSafe(null)).isNull();
+    }
 }

@@ -148,7 +148,7 @@ class MainBootEnvValidationIntegrationTest {
         assertThat(events.get(0)).as("the event line itself carries the variable's own message, unwrapped")
             .containsPattern(Pattern.compile("event=pg_session_env_invalid error=\"[^\"]*" + Pattern.quote(message)));
         assertThat(boot.output()).as("not an escaped static-init failure")
-            .doesNotContain("Exception in thread \"main\"");
+            .doesNotContain("event=uncaught_exception");
     }
 
     /** The control: with nothing malformed the same boot passes validation and starts the migration. */
@@ -218,7 +218,7 @@ class MainBootEnvValidationIntegrationTest {
             List<String> events = lines(boot, "event=export_env_invalid");
             assertThat(events).as("exactly one refusal event:\n" + boot.output()).hasSize(1);
             assertThat(events.get(0)).contains(c[2]);
-            assertThat(boot.output()).as("not an escaped exception").doesNotContain("Exception in thread \"main\"");
+            assertThat(boot.output()).as("not an escaped exception").doesNotContain("event=uncaught_exception");
         }
         // the same pool carries a smaller cap
         Boot ok = bootWith(java.util.Map.of("NX_EXPORT_MAX_SESSIONS", "5"), MIGRATION_START);
@@ -445,7 +445,9 @@ class MainBootEnvValidationIntegrationTest {
             long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - t0);
 
             assertThat(boot.output()).as("the failure is the embedder's").contains("Failed to initialise Bge768Embedder");
-            assertThat(boot.output()).as("it escaped main").contains("Exception in thread \"main\"");
+            // nexus-dngtz.1.11: the default UncaughtExceptionHandler logs an escaped main-thread escape through SLF4J
+            // in place of the JVM's stderr banner.
+            assertThat(boot.output()).as("it escaped main").contains("event=uncaught_exception thread=main");
             assertThat(boot.logged("event=service_ready")).as(boot.output()).isFalse();
             assertThat(boot.exitCode()).as(boot.output()).isNotZero();
             assertThat(seconds).as("the process ended on its own, well inside the smoke's 60 s health wait")

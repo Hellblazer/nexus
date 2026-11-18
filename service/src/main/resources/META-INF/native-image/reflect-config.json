@@ -32,6 +32,21 @@
     "allDeclaredFields": true
   },
   {
+    "name": "dev.nexus.service.log.SafeMessageConverter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "dev.nexus.service.log.SafeThrowableConverter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "dev.nexus.service.log.SafeThreadConverter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
     "name": "ch.qos.logback.classic.Logger",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,

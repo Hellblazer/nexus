@@ -301,6 +301,39 @@ else
   grep -m 3 'native-smoke-cid-2' "$SMOKE_TMP/svc.log" || tail -20 "$SMOKE_TMP/svc.log"; fail=1
 fi
 
+# nexus-dngtz.1.11: the log sink in the NATIVE image. The sink escapes control characters through three converters logback
+# makes by name from logback.xml (%msgSafe, %exSafe, %threadSafe); the native build lists them by hand in reflect-config.json
+# and initializes them at build time, so a missing entry shows up here as a %PARSER_ERROR in every line, or as a raw
+# newline from a client path. HttpExchange's decoded path carries a real newline, so a %0A in the path is the probe.
+echo "log sink escapes (nexus-dngtz.1.11):"
+code=$(curl -s -o "$SMOKE_TMP/sink1.out" -w '%{http_code}' -H 'Authorization: Bearer not-the-token' \
+  "$U/v1/_whoami%0Aforged-sink-probe=1")
+sink_re='event=request_failed .*path=/v1/_whoami\\x0aforged-sink-probe=1 '
+if sink_line=$(_log_line 'forged-sink-probe' 'event=request_failed'); then
+  # the line is read into a variable and matched in bash (no pipe into an early-exit consumer under pipefail)
+  forged_n=$(grep -c -E -- '^forged-sink-probe=1' "$SMOKE_TMP/svc.log" || true)
+  probe_n=$(grep -c -E -- 'event=request_failed.*forged-sink-probe' "$SMOKE_TMP/svc.log" || true)
+  if [ "$code" = "401" ] && [[ $sink_line =~ $sink_re ]] && [ "$forged_n" = "0" ] && [ "$probe_n" = "1" ]; then
+    echo "  ok   a %0A in the request path is one escaped svc.log line: $sink_line"
+  else
+    echo "  FAIL %0A in the request path: status $code (want 401), $probe_n request_failed line(s) (want 1) matching" \
+      "path=/v1/_whoami\\x0aforged-sink-probe=1, $forged_n line(s) starting with forged-sink-probe=1 (want 0):"
+    grep -m 4 'forged-sink-probe' "$SMOKE_TMP/svc.log" || true; fail=1
+  fi
+else
+  echo "  FAIL svc.log has no event=request_failed line for the %0A path probe (status $code):"
+  tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+# The installers that make the escape reach Liquibase and the JDK log (java.util.logging) say so when they cannot, and the
+# pattern says so ("%PARSER_ERROR") when a converter was not found: none of them may be in this run's log.
+sink_bad=$(grep -c -E -- 'event=jul_line_safe_inactive|event=jul_line_safe_failed|%PARSER_ERROR|PARSER_ERROR\[' "$SMOKE_TMP/svc.log" || true)
+if [ "$sink_bad" = "0" ]; then
+  echo "  ok   svc.log has no jul_line_safe_inactive, jul_line_safe_failed or %PARSER_ERROR line"
+else
+  echo "  FAIL svc.log has $sink_bad sink failure line(s):"
+  grep -m 4 -E -- 'event=jul_line_safe_inactive|event=jul_line_safe_failed|%PARSER_ERROR|PARSER_ERROR\[' "$SMOKE_TMP/svc.log" || true; fail=1
+fi
+
 # ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
 # T1 scratch lives in its OWN generated jOOQ schema (t1, e.g.
 # dev.nexus.service.jooq.t1.T1) — a completely separate schema model from every

@@ -34,13 +34,28 @@ public final class LogText {
         return escape(s, true);
     }
 
+    /**
+     * The escape the log sink applies to every message and every exception message (nexus-dngtz.1.11, RDR-167): a
+     * control character (C0, 0x7F, C1 0x80 to 0x9F, so U+0085 too), U+2028 or U+2029 becomes {@code \xNN} (lowercase hex)
+     * when below 0x100, else a backslash, {@code u} and four hex digits, so no logged text can start a new physical line.
+     *
+     * <p>Unlike {@link #escapeControl} it does not double a backslash, and it leaves space, {@code [}, {@code ]} and
+     * {@code =} alone: a call site has already escaped its own value with {@code escapeControl} or {@link #mdcValue}, and
+     * the sink must not escape that text a second time. Field-level escaping stays at the call sites. Returns the same
+     * instance when nothing needs escaping (the hot path); {@code null} stays {@code null}.
+     */
+    public static String lineSafe(String s) {
+        return s == null ? null : escape(s, false, false);
+    }
+
     private static String escape(String s, boolean prefixDelimiters) {
-        if (s == null) {
-            return "-";
-        }
+        return s == null ? "-" : escape(s, prefixDelimiters, true);
+    }
+
+    private static String escape(String s, boolean prefixDelimiters, boolean doubleBackslash) {
         int n = s.length();
         int first = 0;
-        while (first < n && !needsEscape(s.charAt(first), prefixDelimiters)) {
+        while (first < n && !needsEscape(s.charAt(first), prefixDelimiters, doubleBackslash)) {
             first++;
         }
         if (first == n) {
@@ -49,9 +64,9 @@ public final class LogText {
         StringBuilder out = new StringBuilder(n + 8).append(s, 0, first);
         for (int i = first; i < n; i++) {
             char c = s.charAt(i);
-            if (c == '\\') {
+            if (c == '\\' && doubleBackslash) {
                 out.append("\\\\");
-            } else if (needsEscape(c, prefixDelimiters)) {
+            } else if (needsEscape(c, prefixDelimiters, false)) {
                 out.append(c < 0x100 ? "\\x" : "\\u");
                 String hex = Integer.toHexString(c);
                 for (int pad = (c < 0x100 ? 2 : 4) - hex.length(); pad > 0; pad--) {
@@ -65,10 +80,10 @@ public final class LogText {
         return out.toString();
     }
 
-    private static boolean needsEscape(char c, boolean prefixDelimiters) {
+    private static boolean needsEscape(char c, boolean prefixDelimiters, boolean doubleBackslash) {
         if (prefixDelimiters && (c == ' ' || c == '[' || c == ']' || c == '=')) {
             return true;
         }
-        return c == '\\' || c == 0x2028 || c == 0x2029 || Character.getType(c) == Character.CONTROL;
+        return (c == '\\' && doubleBackslash) || c == 0x2028 || c == 0x2029 || Character.getType(c) == Character.CONTROL;
     }
 }

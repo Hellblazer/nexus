@@ -11,6 +11,7 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.ui.LoggerUIService;
+import liquibase.ui.UIService;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record4;
@@ -19,6 +20,7 @@ import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
+import dev.nexus.service.log.LineSafeUIService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -722,18 +724,16 @@ public final class SchemaMigrator {
     }
 
     /**
-     * Runs the walk, under a {@link LoggerUIService} scope when {@link #UI_PROPERTY} asks for one.
+     * Runs the walk, under a {@link LoggerUIService} scope when {@link #UI_PROPERTY} asks for one, and otherwise under a
+     * {@link LineSafeUIService} scope (nexus-dngtz.1.11): the console UI as always, with each message escaped so the
+     * PostgreSQL error text a failed changeset reports cannot start a new line.
      * Liquibase's root scope is per thread and always binds a ConsoleUIService, so a child scope
      * around the call is the only place the UI can be swapped for every caller of migrate().
      */
     static void update(Liquibase liquibase) throws LiquibaseException {
-        if (!UI_LOGGER.equals(System.getProperty(UI_PROPERTY))) {
-            liquibase.update(new Contexts(), new LabelExpression());
-            return;
-        }
+        UIService ui = UI_LOGGER.equals(System.getProperty(UI_PROPERTY)) ? new LoggerUIService() : new LineSafeUIService();
         try {
-            Scope.child(Scope.Attr.ui, new LoggerUIService(),
-                    () -> liquibase.update(new Contexts(), new LabelExpression()));
+            Scope.child(Scope.Attr.ui, ui, () -> liquibase.update(new Contexts(), new LabelExpression()));
         } catch (LiquibaseException | RuntimeException e) {
             throw e;
         } catch (Exception e) {

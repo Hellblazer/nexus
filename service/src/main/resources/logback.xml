@@ -1,12 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
+    <!-- nexus-dngtz.1.11: no value a client chose can start a new log line. %msgSafe writes every control character of the
+         message as an escape; %exSafe does the same for the message of each exception in a trace (frames stay on their
+         own lines). Listing %exSafe makes logback skip the plain %ex it would add on its own. -->
+    <conversionRule conversionWord="msgSafe" class="dev.nexus.service.log.SafeMessageConverter"/>
+    <conversionRule conversionWord="exSafe" class="dev.nexus.service.log.SafeThrowableConverter"/>
+    <!-- %threadSafe: the thread name through the prefix escape (control characters, space, [, ], =), so a name cannot end
+         the [..] block early. A normal name is unchanged. -->
+    <conversionRule conversionWord="threadSafe" class="dev.nexus.service.log.SafeThreadConverter"/>
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder class="ch.qos.logback.classic.encoder.PatternLayoutEncoder">
             <!-- Structured-ish: timestamp level logger [request ids] event. The bracketed block is
                  the MDC AuthFilter fills per request (RDR-167); "-" when a line has no request. -->
             <!-- nexus-rph82: one clock for the service — log lines are UTC explicitly,
                  the same zone databasechangelog.dateexecuted is stamped in. -->
-            <pattern>%d{ISO8601, UTC} %-5level [%thread] %logger{36} [cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}] - %msg%n</pattern>
+            <pattern>%d{ISO8601, UTC} %-5level [%threadSafe] %logger{36} [cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}] - %msgSafe%n%exSafe</pattern>
         </encoder>
     </appender>
 
