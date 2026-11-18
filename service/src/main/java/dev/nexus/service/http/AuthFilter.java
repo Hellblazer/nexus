@@ -417,7 +417,7 @@ public final class AuthFilter extends Filter {
                 // The route that mints the replacement does not use the token, so an expired one must not stand in
                 // its way: a client woken from a long sleep refreshes through bind with whatever header it holds.
                 log.debug("event=identity_token_ignored path={} reason=expired_on_bind_route",
-                          exchange.getRequestURI().getPath());
+                          LogText.escapeControl(exchange.getRequestURI().getPath()));
             } else {
                 reject(exchange, "identity_token_expired");
                 return;
