@@ -108,7 +108,9 @@ def test_a_dispatcher_under_a_claude_session_creates_a_delegated_identity_and_a_
     assert (view["kind"], view["parent"], view["generation"], view["state"]) == ("delegated", box.parent, 1, "live")
     assert box.events(handle.identity) == ["start"]
     path = delegated_token_path(box.identity_dir, handle.identity)
-    assert handle.path == path and path.stat().st_mode & 0o777 == 0o600
+    assert handle.path == path
+    if os.name == "posix":  # Windows has no POSIX mode bits
+        assert path.stat().st_mode & 0o777 == 0o600
     record = read_token_file(path)
     assert (record.identity, record.generation, record.pid, record.host) == (handle.identity, 1, box.dispatcher, HOST)
     assert record.token == f"tok-{handle.identity}-1" and record.expires_at
@@ -436,7 +438,9 @@ async def test_the_childs_token_file_is_in_its_environment_and_gone_with_an_end_
     path = delegated_token_path(box.identity_dir, delegated)
     if spawn is not _spawn_fails:
         assert seen["token_env"] == str(path) != str(up), "the child names ITS token file, not its parent's"
-        assert seen["file_at_spawn"] and seen["mode"] == 0o600 and seen["record"].identity == delegated
+        assert seen["file_at_spawn"] and seen["record"].identity == delegated
+        if os.name == "posix":  # Windows has no POSIX mode bits
+            assert seen["mode"] == 0o600
     assert ("raised" in seen) is raises
     assert not path.exists(), "the token file is gone"
     assert box.events(delegated) == ["start", "end"] and box.engine.bound(delegated)["state"] == "ended"
