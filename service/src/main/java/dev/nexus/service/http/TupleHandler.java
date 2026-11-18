@@ -269,6 +269,16 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, String> keys = stringMap((Map<String, Object>) body.get("keys"));
+        // RDR-252 Step 1: within board/ci/<topic>, the --owner and --push topics are not the adapter's. The topic
+        // judged is the one written, so the subspace's segment and keys.topic are both checked (BoardCiGuard).
+        String ciRefusal = TokenStore.SCOPE_BOARD_CI.equals(RequestContext.scope())
+                ? BoardCiGuard.refusal(subspace, keys) : null;
+        if (ciRefusal != null) {
+            log.debug("event=tuples_out_denied subspace={} reason=board_ci_scope_topic_forbidden", subspace);
+            HttpUtil.send(ex, 403, "{\"error\":" + HttpUtil.jsonString("forbidden: a 'board-ci'-scoped credential may "
+                    + "not write this board/ci topic: " + ciRefusal) + "}");
+            return;
+        }
         Map<String, String> dims = stringMap((Map<String, Object>) body.get("dims"));
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
