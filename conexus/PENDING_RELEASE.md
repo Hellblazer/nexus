@@ -43,13 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.3.1)
+## Awaiting the next release (pinned: v8.4.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- `conexus/skills/orchestration/reference.md` -- the Working Rules no longer mandate the sequential-thinking tool; it is a step log any session may use, and the rule says why no mandate comes back (nexus-cn11i A/B, GH #1661)
-- `conexus/skills/orchestration/SKILL.md` -- the Working Rules pointer names the step-log tool, not a sequential-thinking rule (nexus-cn11i)
-- `conexus/hooks/scripts/stop_wake_guard.py` -- a CI-wait block steers to nx ci wait --branch for a release or PR (nexus-x4jok)
-- `conexus/skills/upgrade/SKILL.md` -- the retire-keys-sweep rung: what it does at nx upgrade, that it defers on engine conditions, and that an accept goes to the user with the dry-run counts and what each accept destroys (nexus-6pfgb.43)
 
 ## Deferred to the next client release

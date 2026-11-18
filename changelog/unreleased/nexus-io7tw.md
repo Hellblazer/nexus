@@ -1,3 +1,0 @@
-### Added
-
-- **The exact-key resolution branch can scan the search step's unread hits for entity keys, behind `NX_ANSWER_POOL_KEY_SCAN`, off by default** (nexus-io7tw, RDR-250 Phase 1 Steps 2 and 3; client-only). With the switch on, the branch also fetches the search step's ids that the generator does not read, scans them for the keys of `entity.collections`, and keeps a key found only there when the coverage assessment cites its chunk as support; a failed fetch or filter keeps none. Off, nothing changes and the repair report has no `pool_*` field. What changes for you: nothing unless you set the variable.
