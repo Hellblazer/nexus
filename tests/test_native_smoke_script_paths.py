@@ -89,19 +89,31 @@ esac
 # (free_port), so another process can take it before the fake binds: a parallel test's server, or
 # another run's probe. On develop run 44400504933 the cloud boot died there with EADDRINUSE, the only
 # shape that binds and the only one that failed; a stress run on chas (640 runs, 32 at once) showed
-# the same death twice. The fake retries until the holder lets go; the sleep stub holds the script's
-# ticks meanwhile, because the fake has not settled.
+# the same death twice. The fake retries for up to ``retry_s`` until the holder lets go; the sleep stub
+# holds the script's ticks meanwhile, because the fake has not settled. With ``retry_s`` 0 the fake dies
+# at the taken port, as the engine does (an uncaught BindException), and the script's own retry on a
+# fresh port is what saves the run. ``held_for`` > 0 makes another process take the port first, for that
+# many seconds, at the run's first bind only (the ``held_once`` marker), so a retry boot binds clean.
 _BIND = r'''
 import errno, time
 
 
-def bind_service_port(handler):
-    deadline = time.monotonic() + 20
+def bind_service_port(handler, retry_s, held_for, held_once):
+    port = int(os.environ["NX_SERVICE_PORT"])
+    if held_for and not os.path.exists(held_once):
+        open(held_once, "w").close()
+        import subprocess
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import socket, sys, time; s = socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1]))); "
+             "s.listen(); print('held', flush=True); time.sleep(float(sys.argv[2]))", str(port), str(held_for)],
+            stdout=subprocess.PIPE, text=True)
+        assert holder.stdout.readline() == "held\n"
+    deadline = time.monotonic() + retry_s
     while True:
         try:
-            return http.server.HTTPServer(("127.0.0.1", int(os.environ["NX_SERVICE_PORT"])), handler)
+            return http.server.HTTPServer(("127.0.0.1", port), handler)
         except OSError as e:
-            if e.errno != errno.EADDRINUSE or time.monotonic() > deadline:
+            if e.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
                 raise
             time.sleep(0.05)
 '''
@@ -123,14 +135,17 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"{}")
     def log_message(self, *args):
         pass
-srv = bind_service_port(H)
+srv = bind_service_port(H, float(os.environ["FAKE_BIND_RETRY_S"]), float(os.environ["FAKE_PORT_HELD_FOR"]),
+                        os.environ["FAKE_BIN_PIDS"] + ".held")
 with open(os.environ["FAKE_SETTLED"], "a") as f:  # serving: the sleep stub's ticks count from here
     f.write(f"{os.getpid()}\\n")
 srv.serve_forever()
 """
 
 
-def _run(tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0) -> tuple[subprocess.CompletedProcess[str], list[str], list[int]]:
+def _run(
+    tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0, bind_retry_s: float = 20.0, port_held_for: float = 0.0,
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[int]]:
     stubs = tmp_path / "stubs"
     stubs.mkdir(parents=True)
     # 50 ms ticks: the script's waits stay short; the stub holds a tick while the fake is still starting.
@@ -148,6 +163,7 @@ def _run(tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0) -> tu
         PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake),
         DOCKER_LOG=str(log), DOCKER_RUN_RC=str(run_rc), PG_READY_RC=str(ready_rc),
         FAKE_BIN_MODE=mode, FAKE_BIN_PIDS=str(pids), NX_NO_TELEMETRY="1",
+        FAKE_BIND_RETRY_S=str(bind_retry_s), FAKE_PORT_HELD_FOR=str(port_held_for),
         **_stub_env(fake, tmp_path / "bin.settled"),
     )
     proc = subprocess.run(["bash", str(SMOKE)], cwd=SERVICE, env=env, capture_output=True, text=True, timeout=180)
@@ -194,7 +210,32 @@ def test_a_binary_that_dies_at_boot_fails_and_removes_its_container(tmp_path: Pa
     assert f"exec {name} pg_isready -U nexus" in calls
     assert calls[-1] == f"rm -f {name}", calls
     assert len(started) == 1, "the binary ran once"
+    assert "was taken before the engine bound it" not in out, "a failure that is not a taken port is not retried"
     assert "logs kept in" in out, "a failed run keeps its scratch dir and says where"
+
+
+_RETRY_LINE = re.compile(r"retry:? +port (\d+) was taken before the engine bound it \(Address already in use\); one more boot on a fresh port")
+
+
+def test_a_port_taken_before_the_engine_binds_gets_one_more_boot_on_a_fresh_port(tmp_path: Path) -> None:
+    """nexus-rc4pz: SVCPORT comes from a probe that closes its socket, so another process can take the port
+    first. Here one does, and the fake dies at its bind as the engine does (no retry of its own). The script
+    boots once more on a fresh port and gets past the health wait to the first real assertion, as the
+    health-mode run does; the first boot's log is kept. Without the script's retry: service exited."""
+    proc, calls, started = _run(tmp_path, mode="health", bind_retry_s=0, port_held_for=3.0)
+    out = proc.stdout + proc.stderr
+    try:
+        assert proc.returncode == 1, out
+        assert "FAIL: migration did not apply" in out, "past the health wait on the second boot"
+        assert "FAIL: service exited during startup" not in out, out
+        retries = _RETRY_LINE.findall(proc.stdout)
+        assert len(retries) == 1 and len(started) == 2, (retries, started, out)
+        kept = [Path(p) for p in re.findall(r"logs kept in (\S+)", out)]
+        assert len(kept) == 1 and "Address already in use" in (kept[0] / "svc.port-taken.log").read_text()
+        assert calls[-1] == f"rm -f {_container(calls)}", calls
+    finally:
+        for pid in started:
+            kill_if_identity(pid, str(tmp_path / "nexus-service"))
 
 
 def test_a_binary_that_answers_health_is_killed_and_its_container_removed(tmp_path: Path) -> None:
@@ -424,14 +465,7 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-if PORT_HELD_FOR:  # another process takes the port after the script's probe, and lets go PORT_HELD_FOR s later
-    import subprocess
-    holder = subprocess.Popen(
-        [sys.executable, "-c", "import socket, sys, time; s = socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1]))); "
-         "s.listen(); print('held', flush=True); time.sleep(float(sys.argv[2]))",
-         os.environ["NX_SERVICE_PORT"], str(PORT_HELD_FOR)], stdout=subprocess.PIPE, text=True)
-    assert holder.stdout.readline() == "held\n"
-srv = bind_service_port(H)
+srv = bind_service_port(H, BIND_RETRY_S, PORT_HELD_FOR, PIDS + ".held")
 if DEFECT != "cloud-never-ready":
     log("event=service_ready")
 settle()
@@ -468,7 +502,7 @@ class _ShapesRun:
 def _run_shapes(
     tmp_path: Path, *, defect: str = "", db_url: str | None = None, require_shapes: bool = False,
     borrowed_pg: tuple[str, str] | None = None, tick: float = 0.1, start_delay: float = 0.0,
-    port_held_for: float = 0.0, **docker_rc: int,
+    port_held_for: float = 0.0, bind_retry_s: float = 20.0, **docker_rc: int,
 ) -> _ShapesRun:
     stubs = tmp_path / "stubs"
     stubs.mkdir(parents=True)
@@ -482,7 +516,8 @@ def _run_shapes(
     fake = tmp_path / "nexus-service"
     fake.write_text(
         f"#!/usr/bin/env python3\nDEFECT = {defect!r}\nPIDS = {str(pids)!r}\nSETTLED = {str(settled)!r}\n"
-        f"START_DELAY = {start_delay!r}\nPORT_HELD_FOR = {port_held_for!r}\n{_BIND}{_SHAPES_BODY}"
+        f"START_DELAY = {start_delay!r}\nPORT_HELD_FOR = {port_held_for!r}\nBIND_RETRY_S = {bind_retry_s!r}\n"
+        f"{_BIND}{_SHAPES_BODY}"
     )
     fake.chmod(0o755)
     scratch = tmp_path / "tmp"
@@ -557,6 +592,23 @@ def test_a_port_taken_between_the_scripts_probe_and_the_engines_bind_still_passe
     assert run.proc.returncode == 0, run.out
     assert run.verdicts() == {shape: ("PASS", []) for shape in _SHAPES}, run.out
     assert run.leftover == [], "every engine ended before the script did"
+
+
+def test_a_port_the_engine_cannot_bind_gets_one_more_cloud_boot_on_a_fresh_port(tmp_path: Path) -> None:
+    """nexus-rc4pz, the script side: the fake dies at the taken port as the engine does (no retry of its
+    own), and the cloud shape boots once more on a fresh database and port. Every shape passes, the retry
+    is named once, and the first boot's files are kept beside the second's. Without the script's retry
+    the cloud shape fails on "reaches service_ready", as CI's did."""
+    run = _run_shapes(tmp_path, port_held_for=3.0, bind_retry_s=0)
+    assert run.proc.returncode == 0, run.out
+    assert run.verdicts() == {shape: ("PASS", []) for shape in _SHAPES}, run.out
+    retries = _RETRY_LINE.findall(run.proc.stdout)
+    assert len(retries) == 1 and len(run.boots) == len(_SHAPES) + 1, run.out
+    name, port = _own_container(run.calls)
+    dbs = _databases(run.calls, name)
+    assert len(dbs) == len(_SHAPES) + 1 and dbs[0] == dbs[1], "the second cloud boot gets its database re-created"
+    assert [url for _, url in run.boots] == [f"jdbc:postgresql://localhost:{port}/{db}" for db in dbs], run.boots
+    assert run.leftover == [] and run.kept() == [], "every engine ended, and a passing run removes its scratch dir"
 
 
 def test_an_engine_that_starts_slower_than_the_scripts_bounds_still_passes_every_shape(tmp_path: Path) -> None:
@@ -638,6 +690,9 @@ def test_each_check_fails_on_an_engine_that_breaks_it_and_nothing_else_does(
         assert status == ("FAIL" if want else "PASS"), f"{shape}\n{run.out}"
         assert len(got) == len(want) and all(any(g.startswith(w) for g in got) for w in want), f"{shape} {got} {want}\n{run.out}"
     assert "BOOT SHAPES FAIL" in run.out
+    # None of these defects is a taken port, so no boot is retried: one boot per shape, and the verdicts above
+    # are the first boot's (nexus-rc4pz).
+    assert len(run.boots) == len(_SHAPES) and not _RETRY_LINE.search(run.proc.stdout), run.out
     assert run.leftover == [], "the script ended every engine it started, the hung ones included"
     # A hung engine is killed by the script's 90-step bound (9 s here), not by the fake's 120 s alarm.
     assert run.elapsed < 90, f"{run.elapsed:.0f} s: something other than the script ended a hung engine"

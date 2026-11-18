@@ -129,17 +129,39 @@ mkdir -p "$SMOKE_TMP/jtmp"
 
 # nexus-9gaj7: -Duser.timezone=UTC defense-in-depth alongside Main.main's
 # in-process TimeZone.setDefault(UTC) pin (asserted at boot, fails loud).
-"$BIN" -Duser.timezone=UTC -Djava.io.tmpdir="$SMOKE_TMP/jtmp" > "$SMOKE_TMP/svc.log" 2>&1 &
-SVCPID=$!
-U="http://localhost:${SVCPORT}"
+start_service() {
+  "$BIN" -Duser.timezone=UTC -Djava.io.tmpdir="$SMOKE_TMP/jtmp" > "$SMOKE_TMP/svc.log" 2>&1 &
+  SVCPID=$!
+  U="http://localhost:${SVCPORT}"
+}
+# wait_healthy: 0 healthy, 1 the engine exited, 2 not healthy after 60 polls.
+wait_healthy() {
+  local _
+  for _ in $(seq 1 60); do
+    kill -0 "$SVCPID" 2>/dev/null || return 1
+    curl -fsS "$U/health" >/dev/null 2>&1 && return 0
+    sleep 1
+  done
+  return 2
+}
 
-UP=0
-for i in $(seq 1 60); do
-  kill -0 $SVCPID 2>/dev/null || { echo "FAIL: service exited during startup"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
-  curl -fsS "$U/health" >/dev/null 2>&1 && { UP=1; break; }
-  sleep 1
-done
-[ "$UP" = "1" ] || { echo "FAIL: service never became healthy"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
+start_service
+wait_healthy; HEALTH=$?
+# nexus-rc4pz: SVCPORT comes from a probe that closes its socket, so another process can bind the
+# port before the engine does; the engine then dies with the JDK's uncaught BindException, "Address
+# already in use". That boot gets one retry on a fresh port (the first log is kept as
+# svc.port-taken.log); any other failure is final, as before.
+if [ "$HEALTH" = "1" ] && grep -qF 'Address already in use' "$SMOKE_TMP/svc.log"; then
+  echo "  retry  port $SVCPORT was taken before the engine bound it (Address already in use); one more boot on a fresh port"
+  wait "$SVCPID" 2>/dev/null
+  mv "$SMOKE_TMP/svc.log" "$SMOKE_TMP/svc.port-taken.log"
+  SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
+  export NX_SERVICE_PORT=$SVCPORT
+  start_service
+  wait_healthy; HEALTH=$?
+fi
+[ "$HEALTH" = "1" ] && { echo "FAIL: service exited during startup"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
+[ "$HEALTH" = "0" ] || { echo "FAIL: service never became healthy"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
 
 # RDR-218 Gap 2 (nexus-ijue9.7): the SOCKET FAMILY of the listener.
 #

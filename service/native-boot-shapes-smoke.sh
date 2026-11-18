@@ -158,6 +158,11 @@ wait_ready() {
   return 1
 }
 
+# port_taken: the boot died because BOOT_PORT was taken before the engine bound it. free_port
+# closes its probe socket, so another process can bind the port first; the engine then dies with
+# the JDK's uncaught BindException, "Address already in use" (develop run 44400504933, nexus-rc4pz).
+port_taken() { ! kill -0 "$BOOT_PID" 2>/dev/null && grep -qF 'Address already in use' "$BOOT_LOG"; }
+
 # wait_exit <seconds>: bounded wait for our own pid to exit. Sets EXIT_RC; on timeout kills it
 # (only the pid we started) and sets EXIT_RC=137. Returns 1 on timeout.
 wait_exit() {
@@ -206,7 +211,19 @@ run_cloud_shape() {
   leg_ok=0
   boot_prepare cloud-shape || { leg_ok=1; verdict "cloud-shape"; return; }
   boot_start spike-dummy
-  if ! wait_ready; then
+  local ready=0
+  wait_ready && ready=1
+  # The only shape whose engine binds a port: a port taken after the probe gets one more boot, on a
+  # fresh database and port, with the first boot's files kept beside it. Any other failure is final.
+  if [ "$ready" = "0" ] && port_taken; then
+    echo "    retry: port $BOOT_PORT was taken before the engine bound it (Address already in use); one more boot on a fresh port"
+    kill_boot
+    mv "$BOOT_DIR" "$BOOT_DIR.port-taken"
+    boot_prepare cloud-shape || { leg_ok=1; verdict "cloud-shape"; return; }
+    boot_start spike-dummy
+    wait_ready && ready=1
+  fi
+  if [ "$ready" = "0" ]; then
     echo "    FAIL reaches service_ready: the engine exited or never became ready"; leg_ok=1
     kill_boot; verdict "cloud-shape"; return
   fi
