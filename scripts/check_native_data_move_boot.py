@@ -126,7 +126,9 @@ def check_libraries_applied(text: str) -> list[CheckResult]:
     results = []
     for lib in LIBRARIES:
         if lib not in applied:
-            ok, detail = False, f"no such line; applied: {sorted(applied) or 'none'}"
+            known = [name for name in LIBRARIES if name in applied]
+            others = len([name for name in applied if name not in LIBRARIES])
+            ok, detail = False, f"no such line; applied: {known or 'none'}" + (f", plus {others} other name(s)" if others else "")
         elif applied[lib] < 1:
             ok, detail = False, "the line says changesets=0: on a fresh cluster the walk applied nothing"
         else:
@@ -141,6 +143,15 @@ def check_libraries_applied(text: str) -> list[CheckResult]:
     return results
 
 
+def _other_skips(lines: list[str]) -> str:
+    """The skip lines with another reason, by count and first line number; the reason is free text the engine can
+    fill with exception text, so it is never printed (review of 372016a55)."""
+    hits = [ln for ln in lines if _SKIPPED.search(ln)]
+    if not hits:
+        return "no such line; no skip line at all"
+    return f"no such line; {len(hits)} skip line(s) with another reason (first at line {_first_line_no(lines, hits)})"
+
+
 def check_libraries_skipped_without_pg_background(text: str) -> list[CheckResult]:
     """The WARN skip, the completed nexus walk, a serving engine, and no library applied (a PostgreSQL without pg_background)."""
     lines = _lines(text)
@@ -148,7 +159,7 @@ def check_libraries_skipped_without_pg_background(text: str) -> list[CheckResult
     skip = [ln for ln in lines if (m := _SKIPPED.search(ln)) and m.group(1) == NO_PG_BACKGROUND_REASON]
     results.append(CheckResult(
         f'event=data_move_libraries_skipped reason="{NO_PG_BACKGROUND_REASON}"', bool(skip), len(lines),
-        "" if skip else f"no such line; skip lines seen: {[m.group(1) for ln in lines if (m := _SKIPPED.search(ln))] or 'none'}"))
+        "" if skip else _other_skips(lines)))
     results.append(CheckResult(
         "the skip is a WARN (a separate admin role, so not the expected single-role skip)",
         bool(skip) and all(_WARN.search(ln) for ln in skip), len(lines),
@@ -213,9 +224,9 @@ def _lines_holding(lines: list[str], value: str) -> list[int]:
     return [n for n, ln in enumerate(lines, start=1) if value in ln]
 
 
-def run_checks(text: str, mode: str, secrets: Mapping[str, str]) -> Report:
-    """Every check for ``mode`` on the log ``text``, with ``secrets`` as ``{label: value}`` (the tests' form)."""
-    return run_checks_for(text, mode, list(secrets), list(secrets.values()))
+def run_checks(text: str, mode: str, probes: Mapping[str, str]) -> Report:
+    """Every check for ``mode`` on the log ``text``, with ``probes`` as ``{label: value}`` (the tests' form)."""
+    return run_checks_for(text, mode, list(probes), list(probes.values()))
 
 
 def run_checks_for(text: str, mode: str, labels: Sequence[str], values: Sequence[str]) -> Report:

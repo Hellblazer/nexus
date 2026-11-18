@@ -142,3 +142,24 @@ def test_the_script_fails_loud_on_a_bundle_with_no_initdb(tmp_path):
     r = subprocess.run(["bash", str(SMOKE), "--locate-bundle", str(txz), str(out)], capture_output=True, text=True)
     assert r.returncode == 2
     assert "no bin/initdb" in r.stdout
+
+
+def test_the_failure_printout_numbers_every_citable_line_and_replaces_both_passwords(tmp_path):
+    """The checker cites a failing line by number and never quotes it (CodeQL alert 62), so the smoke's printout
+    must show that line under the same number, redacted, even when it is far above the last 40 lines."""
+    import os
+    import subprocess
+
+    lines = ["noise"] * 100
+    lines[2] = "INFO event=data_move_libraries_failed library=ddl_utils error=auth failed for adm1nPW"
+    lines[-1] = "tail line with svcPW"
+    log_file = tmp_path / "svc.log"
+    log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    src = SMOKE.read_text(encoding="utf-8")
+    fn = src[src.index("redacted_tail() {"):src.index("\n}\n", src.index("redacted_tail() {")) + 3]
+    env = {**os.environ, "SMOKE_ADMIN_PASS": "adm1nPW", "SMOKE_SVC_PASS": "svcPW"}
+    r = subprocess.run(["bash", "-c", fn + f'\nredacted_tail "{log_file}"'], capture_output=True, text=True, env=env, check=True)
+    assert "3: INFO event=data_move_libraries_failed" in r.stdout, r.stdout
+    assert "100: tail line with <smoke-redacted>" in r.stdout, r.stdout
+    assert "adm1nPW" not in r.stdout and "svcPW" not in r.stdout
+    assert "\n10: noise" not in r.stdout, "a line neither cited nor in the last 40 is left out"

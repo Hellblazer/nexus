@@ -335,7 +335,7 @@ _UNIQUE = "zq-not-in-any-fixture-7d1"
 def test_a_failure_cites_the_offending_line_by_number_and_never_quotes_it(mode: str, line: str) -> None:
     """Nothing the checker prints is taken from a log line's text, so nothing it prints can carry a secret a
     broken mask left in one (CodeQL alert 62: printed text must not flow from the secret values; the old
-    redact() pass is gone). The line number points into the smoke's redacted log tail."""
+    redact() pass is gone). The smoke's failure printout shows that line under the same number, redacted."""
     base = GOOD_WITH if mode == "with-pg-background" else GOOD_WITHOUT
     marked = line + f" note={_UNIQUE}"
     text = base.replace(L_NOISE + "\n", L_NOISE + "\n" + marked + "\n")
@@ -351,3 +351,23 @@ def test_the_checker_prints_its_report_without_a_secret_dependent_pass() -> None
     source = SCRIPT.read_text(encoding="utf-8")
     assert "def redact(" not in source and "redact(" not in source.split("def main(", 1)[1], (
         "the printed report must not be computed from the secrets (CodeQL alert 62)")
+
+
+def test_a_skip_reason_from_the_log_never_reaches_the_report() -> None:
+    """The skip line's reason is free text the engine can fill with exception text (DmlUtilsInstaller), so a
+    report quoting it could print a secret a broken mask left there (review of 372016a55)."""
+    odd = _P.format(lvl="WARN", cls=_INSTALLER) + f'event=data_move_libraries_skipped reason="checks failed: {ADMIN}"'
+    text = GOOD_WITHOUT.replace(L_SKIP + "\n", odd + "\n")
+    report = chk.run_checks(text, "without-pg-background", SECRETS)
+    assert not report.ok
+    assert ADMIN not in report.render(), report.render()
+    assert "checks failed" not in report.render(), report.render()
+
+
+def test_a_library_name_from_the_log_never_reaches_the_report() -> None:
+    """Only the libraries the checker knows are named; a name captured from the log is counted, not printed."""
+    odd = L_DDL.replace("library=ddl_utils", f"library={_UNIQUE.replace('-', '')}")
+    text = GOOD_WITH.replace(L_DDL + "\n", odd + "\n")
+    report = chk.run_checks(text, "with-pg-background", SECRETS)
+    assert not report.ok
+    assert _UNIQUE.replace("-", "") not in report.render(), report.render()

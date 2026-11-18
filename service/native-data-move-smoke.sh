@@ -107,16 +107,23 @@ cred() { awk -v k="$2" 'index($0, k "=") == 1 { print substr($0, length(k) + 2);
 # urlenc <text>: percent-encoded for one path segment.
 urlenc() { python3 -c "import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
 
-# redacted_tail <file>: the log's last lines with both passwords replaced, for a failure printout.
+# redacted_tail <file>: for a failure printout, the log's last 40 lines and every line a check can cite (the
+# data-move, masking, schema-walk and ready events), each with its line number in the whole log, so a line the
+# checker cites by number is shown here; both passwords are replaced first.
 redacted_tail() {
-  tail -40 "$1" | python3 -c '
-import os, sys
-t = sys.stdin.read()
+  python3 - "$1" <<'PY'
+import os, re, sys
+with open(sys.argv[1], encoding="utf-8", errors="replace") as f:
+    lines = f.read().splitlines()
+cited = re.compile(r"event=(data_move_|log_masking_|schema_migration_complete|service_ready)")
+keep = sorted({n for n, ln in enumerate(lines, 1) if cited.search(ln)} | set(range(max(1, len(lines) - 39), len(lines) + 1)))
+out = "\n".join(f"{n}: {lines[n - 1]}" for n in keep)
 for k in ("SMOKE_SVC_PASS", "SMOKE_ADMIN_PASS"):
     v = os.environ.get(k, "")
     if v:
-        t = t.replace(v, "<smoke-redacted>")
-sys.stdout.write(t)'
+        out = out.replace(v, "<smoke-redacted>")
+sys.stdout.write(out + "\n")
+PY
 }
 
 run_mode() {
@@ -201,7 +208,7 @@ run_mode() {
   python3 -I "$CHECKER" --mode "$mode" --log "$log" --secret svc=SMOKE_SVC_PASS --secret admin=SMOKE_ADMIN_PASS
   local rc=$?
   if [ "$rc" != "0" ]; then
-    echo "  --- engine log, last 40 lines (passwords replaced) ---"
+    echo "  --- engine log: cited events and the last 40 lines, numbered (passwords replaced) ---"
     redacted_tail "$log"
     return "$rc"
   fi
