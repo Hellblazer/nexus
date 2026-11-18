@@ -372,6 +372,17 @@ def _push_helpers():
     return sys.modules[name]
 
 
+def _fields(row: dict) -> dict:
+    """Every scalar key/value in a tuple row, wherever the row nests its dims and keys."""
+    out: dict = {}
+    for k, v in row.items():
+        if isinstance(v, dict):
+            out.update(_fields(v))
+        elif isinstance(v, (str, int)) and k not in out:
+            out[k] = v
+    return out
+
+
 def test_a_real_nx_writes_the_record_the_engine_serves_back(repos, tmp_path) -> None:
     """The first live run: the script's own `nx tuple out` against a real engine (a fresh tenant), read
     back with `nx tuple rd`. Proves the flags, the keys+nonce template and the body shape line up with the
@@ -394,8 +405,8 @@ def test_a_real_nx_writes_the_record_the_engine_serves_back(repos, tmp_path) -> 
     rows = json.loads(rd.stdout)
     assert len(rows) == 1, rows
     row = rows[0]
-    flat = json.dumps(row)
-    assert a in flat and "push" in flat and "unknown" in flat, row
+    fields = _fields(row)
+    assert fields.get("kind") == "push" and fields.get("from") == "unknown" and fields.get("sha") == a, row
     body = row.get("body")
     body = json.loads(body) if isinstance(body, str) else body
     assert body == {"base": base, "n": 1}, row
