@@ -315,6 +315,13 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheRdr241Route_CatalogDocsByMetaCapabilityField_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogDocsByMetaCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_docs_by_meta_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheRdr241Route_CatalogSensitiveLocators_AsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogSensitiveLocatorsCapabilityField(body);

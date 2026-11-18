@@ -4,6 +4,7 @@ package dev.nexus.service.http;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.sun.net.httpserver.HttpExchange;
+import dev.nexus.service.db.CatalogDocReads;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.CatalogSensitiveLocatorReads;
 import dev.nexus.service.db.CatalogSensitiveReads;
@@ -13,10 +14,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * nexus-f3yqd: the catalog's bounded read routes added in engine 0.1.188, split out of {@link CatalogHandler} (which
@@ -26,8 +31,10 @@ import java.util.Map;
  * engine before the route and one that gets a 503 is on an engine that could not answer in time; both must read
  * "cannot say", never "none".
  *
- * <p>RDR-241 Phase 2 adds {@code GET /v1/catalog/sensitive/locators} (nexus-uwggq.2.5, the {@code /sensitive} envelope), a new
- * path so an old engine answers 404; its {@code /version} flag is {@code catalog_sensitive_locators_supported}.
+ * <p>RDR-241 Phase 2 adds {@code GET /v1/catalog/sensitive/locators} (nexus-uwggq.2.5, the {@code /sensitive} envelope) and
+ * {@code GET /v1/catalog/docs/by-meta} (nexus-uwggq.2.4, paged: {@code {count, limit, offset, documents}} with the exact count
+ * and no {@code capped}), each a new path so an old engine answers 404; their {@code /version} flags are
+ * {@code catalog_sensitive_locators_supported} and {@code catalog_docs_by_meta_supported}.
  */
 final class CatalogBoundedReadRoutes {
 
@@ -37,12 +44,14 @@ final class CatalogBoundedReadRoutes {
     private final CatalogSensitiveLocatorReads locatorReads;
     private final ManifestFillableCount fillableCount;
     private final ManifestForeignCollectionReads foreignReads;
+    private final CatalogDocReads docReads;
 
     CatalogBoundedReadRoutes(CatalogRepository repo) {
         this.sensitiveReads = new CatalogSensitiveReads(repo);
         this.locatorReads = new CatalogSensitiveLocatorReads(repo);
         this.fillableCount = new ManifestFillableCount(repo);
         this.foreignReads = new ManifestForeignCollectionReads(repo);
+        this.docReads = new CatalogDocReads(repo);
     }
 
     /**
@@ -213,6 +222,115 @@ final class CatalogBoundedReadRoutes {
         body.put("capped", page.capped());
         body.put("documents", docs);
         send(exchange, 200, body);
+    }
+
+    private static final Pattern BOUND_TEXT = Pattern.compile("-?[0-9]{1," + CatalogDocReads.MAX_BOUND_DIGITS + "}");
+    private static final Set<String> BY_META_PLAIN = Set.of("content_type", "limit", "offset");
+
+    /**
+     * GET /v1/catalog/docs/by-meta?content_type=&meta.KEY=VALUE&meta_min.KEY=N&meta_default.KEY=TEXT&limit=&offset=
+     * (nexus-uwggq.2.4): {@code {count, limit, offset, documents}} as {@code /docs/by-author}.
+     *
+     * <p>At least one {@code meta.} or {@code meta_min.} parameter is required (a 400 otherwise), so the route can never
+     * serve as an unfiltered listing; {@code content_type} is optional and exact. {@link CatalogDocReads} has the
+     * reading rules. A {@code meta_min} value that is not an integer, an empty key, a {@code meta_default.KEY} with no
+     * {@code meta.KEY} beside it, a repeated {@code meta_default.KEY}, and any parameter this route does not name are
+     * each a 400: a misspelt clause must never widen the answer.
+     */
+    void byMeta(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String contentType = null;
+        List<String[]> eq = new ArrayList<>();
+        List<CatalogDocReads.MetaMin> bounds = new ArrayList<>();
+        Map<String, String> defaults = new LinkedHashMap<>();
+        String raw = exchange.getRequestURI().getRawQuery();
+        for (String part : raw == null || raw.isEmpty() ? new String[0] : raw.split("&")) {
+            String[] kv = part.split("=", 2);
+            String key = decode(kv[0]);
+            String value = kv.length == 2 ? decode(kv[1]) : "";
+            if (BY_META_PLAIN.contains(key)) {
+                if (key.equals("content_type")) contentType = value.isEmpty() ? null : value;
+                continue;   // limit and offset are read by their helpers
+            }
+            String family = key.startsWith("meta_min.") ? "meta_min." : key.startsWith("meta_default.") ? "meta_default."
+                : key.startsWith("meta.") ? "meta." : null;
+            if (family == null) { badRequest(exchange, "unknown parameter " + key); return; }
+            String name = key.substring(family.length());
+            if (name.isEmpty()) { badRequest(exchange, family + " needs a key"); return; }
+            switch (family) {
+                case "meta." -> eq.add(new String[]{name, value});
+                case "meta_min." -> {
+                    if (!BOUND_TEXT.matcher(value).matches()) {
+                        badRequest(exchange, "meta_min." + name + " must be an integer");
+                        return;
+                    }
+                    bounds.add(new CatalogDocReads.MetaMin(name, new BigInteger(value)));
+                }
+                default -> {
+                    if (defaults.put(name, value) != null) { badRequest(exchange, "meta_default." + name + " is repeated"); return; }
+                }
+            }
+        }
+        Set<String> eqKeys = new HashSet<>();
+        for (String[] e : eq) eqKeys.add(e[0]);
+        for (String k : defaults.keySet()) {
+            if (!eqKeys.contains(k)) { badRequest(exchange, "meta_default." + k + " needs a meta." + k + " beside it"); return; }
+        }
+        if (eq.isEmpty() && bounds.isEmpty()) {
+            badRequest(exchange, "at least one meta. or meta_min. parameter is required");
+            return;
+        }
+        Integer limit = limitParam(exchange, CatalogDocReads.DEFAULT_LIMIT, CatalogDocReads.MAX_LIMIT);
+        if (limit == null) return;
+        Integer offset = offsetParam(exchange);
+        if (offset == null) return;
+        List<CatalogDocReads.MetaEq> eqs = new ArrayList<>(eq.size());
+        for (String[] e : eq) eqs.add(new CatalogDocReads.MetaEq(e[0], e[1], defaults.get(e[0])));
+        CatalogDocReads.Page page;
+        try {
+            page = docReads.byMeta(tenant, new CatalogDocReads.MetaFilter(contentType, eqs, bounds), limit, offset);
+        } catch (RuntimeException e) {
+            if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            log.warn("event=catalog_docs_by_meta_timeout tenant={} limit={} offset={}", tenant, limit, offset);
+            timeout(exchange, "metadata read exceeded its time bound");
+            return;
+        }
+        sendPage(exchange, page);
+    }
+
+    private static void sendPage(HttpExchange exchange, CatalogDocReads.Page page) throws IOException {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("count", page.count());
+        body.put("limit", page.limit());
+        body.put("offset", page.offset());
+        body.put("documents", page.documents());
+        send(exchange, 200, body);
+    }
+
+    private static void badRequest(HttpExchange exchange, String message) throws IOException {
+        HttpUtil.send(exchange, 400, "{\"error\":" + HttpUtil.jsonString(message) + "}");
+    }
+
+    private static String decode(String s) {
+        return java.net.URLDecoder.decode(s, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    /** The {@code offset} query parameter (default 0); null after answering a 400 for a negative or non-integer one. */
+    static Integer offsetParam(HttpExchange exchange) throws IOException {
+        String raw = queryParam(exchange, "offset");
+        if (raw == null || raw.isBlank()) return 0;
+        int offset;
+        try {
+            offset = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"offset must be an integer, 0 or more\"}");
+            return null;
+        }
+        if (offset < 0) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"offset must be 0 or more\"}");
+            return null;
+        }
+        return offset;
     }
 
     // ── shared ───────────────────────────────────────────────────────────────

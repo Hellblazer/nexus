@@ -53,6 +53,7 @@ import java.util.function.Supplier;
  *  "catalog_manifest_foreign_collection_supported":true,
  *  "catalog_index_run_census_supported":true,
  *  "catalog_next_seq_drift_read_supported":true,
+ *  "catalog_docs_by_meta_supported":true,
  *  "catalog_sensitive_locators_supported":true,
  *  "chash_constraints_validate_job_supported":true,
  *  "tenant_export_supported":true,
@@ -664,6 +665,17 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-uwggq.2.4 capability advertisement: does {@code GET /v1/catalog/docs/by-meta} answer the live documents whose own metadata satisfies every {@code meta.}, {@code meta_default.} and {@code meta_min.} clause, a page at a time with the exact count, so a client need not walk the catalog to filter on metadata?
+     * A route, so an old engine answers 404 and a client can tell; the flag lets a client learn it from {@code /version}
+     * first. Always present, always {@code true} on an engine carrying the change. Cloud clients see it only once the
+     * public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release
+     * pre-tag check 3e).
+     */
+    static void appendCatalogDocsByMetaCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_docs_by_meta_supported\":true");
+    }
+
+    /**
      * nexus-uwggq.2.5 capability advertisement: does {@code GET /v1/catalog/sensitive/locators?limit=N} list the live sensitive documents and the live aliases of them, with the fields operator dispatch reads to write a deny rule, without a walk of the catalog?
      * A route, so an old engine answers 404 and a client can tell; the flag lets a client learn it from {@code /version}
      * first. Always present, always {@code true} on an engine carrying the change. Cloud clients see it only once the
@@ -962,6 +974,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-f3yqd: GET /v1/catalog/index-run/census and GET /v1/catalog/owners/next_seq_drift (the doctor's bounded reads).
         appendCatalogIndexRunCensusCapabilityField(body);
         appendCatalogNextSeqDriftReadCapabilityField(body);
+        // nexus-uwggq.2.4: GET /v1/catalog/docs/by-meta (documents by their own metadata: text equality, defaults, integer lower bound).
+        appendCatalogDocsByMetaCapabilityField(body);
         // nexus-uwggq.2.5: GET /v1/catalog/sensitive/locators (the sensitive and aliased-sensitive locators operator dispatch reads).
         appendCatalogSensitiveLocatorsCapabilityField(body);
         // nexus-f3yqd (0.1.190): POST /v1/admin/validate-constraints, the user-started VALIDATE CONSTRAINT job.

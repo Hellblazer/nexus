@@ -66,6 +66,7 @@ import java.util.*;
  *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/sensitive/locators?limit=N  the live sensitive documents and the live aliases of them, with the five locator fields (nexus-uwggq.2.5)
+ *   GET   /v1/catalog/docs/by-meta?content_type=&meta.K=V&meta_min.K=N&meta_default.K=T&limit=&offset=  live documents whose own metadata satisfies every clause, a page of at most 1000 with the exact count (nexus-uwggq.2.4)
  *   GET   /v1/catalog/stub-metadata?limit=N  per knowledge/docs collection, the PDF chunks still carrying the upload placeholder metadata, up to N (nexus-f3yqd)
  *   GET   /v1/catalog/index-run/census?limit=N  bounded census of stale index-run fences, unstamped documents and failed documents with ownerless chunks (nexus-f3yqd)
  *   GET   /v1/catalog/owners/next_seq_drift?limit=N  read-only list of the owners whose next_seq trails their highest child; the sweep below floors them (nexus-f3yqd)
@@ -343,6 +344,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/fill"         -> handleManifestFill(exchange, tenant, method);
                 case "/sensitive"             -> handleSensitiveList(exchange, tenant, method);
                 case "/sensitive/locators"    -> handleSensitiveLocators(exchange, tenant, method);
+                case "/docs/by-meta"              -> handleDocsByMeta(exchange, tenant, method);
                 case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
                 case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
@@ -3793,6 +3795,7 @@ public final class CatalogHandler implements HttpHandler {
 
     /** GET /v1/catalog/sensitive/locators?limit=N (nexus-uwggq.2.5): the body is {@link CatalogBoundedReadRoutes#sensitiveLocators}. */
     private void handleSensitiveLocators(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.sensitiveLocators(exchange, tenant, method); }
+    private void handleDocsByMeta(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.byMeta(exchange, tenant, method); }
 
     /** GET /v1/catalog/stub-metadata?limit=N (nexus-f3yqd): the body is {@link CatalogStubMetadataRoute#stubMetadata}. */
     private void handleStubMetadata(HttpExchange exchange, String tenant, String method) throws IOException {
