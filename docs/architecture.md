@@ -1422,11 +1422,13 @@ Every shipped template must be *offerable* — reachable by some question. A tem
 
 7. **A typed 4xx body names its cause in `reason`** (nexus-bgvnx) -- the engine's typed error bodies carry a stable, machine-readable top-level `reason` beside the human `error` prose, and a client decides on `reason`, never on the prose. Current values: `unregistered_collection` (422). The 409 bodies predate the rule and keep their own `status` key (`conflict_running`, `stale_run`); they are grandfathered, not renamed. The vocabulary lives in `HttpUtil.sendTypedDbError`'s javadoc (engine) and `nexus.db.engine_reasons` (client); a body with no `reason` is an older engine, and only then may a client fall back to matching wording.
 
-### T1's three scopes and the CLI/MCP split-brain (nexus-aj564)
+### T1's scopes and the CLI/MCP split-brain (nexus-aj564)
 
 Rule of record, full text, mechanism and measured history: JDR-001
 (`docs/rdr/joint/JDR-001-t1-three-scopes.md`). In brief: T1 is one
-PG-backed store reached through three scopes that exist at once. MCP-tool
+PG-backed store reached through four scopes that exist at once (the fourth,
+identity scratch `identity:<id>`, is RDR-253 Step 2's; below is about the
+other three). MCP-tool
 T1 is scoped to the session id leased at MCP-server spawn and moves only
 when the SessionStart hook's `/clear` or `/resume` handoff marker is
 consumed by the MCP lifespan's watcher (nexus-d76vc, one poll tick, old

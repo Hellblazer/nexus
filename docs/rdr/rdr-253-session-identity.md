@@ -110,12 +110,12 @@ all be unstamped (`nexus_rdr/252-fix-check-cee51c460fc1`).
 - **RDR-208** (session-id mail addressing, closed): its identity table is the
   starting point; this RDR replaces "the session id is the address" with "the
   seat is the address".
-- **JDR-001** (T1 three scopes): T1's session scope stays; this RDR adds
+- **JDR-001** (T1 scopes): T1's session scope stays; this RDR adds
   identity-scoped durable scratch beside it and extends the handoff marker;
-  JDR-001 gains a revision entry (Sam's edit).
+  JDR-001 is now four scopes, with a revision entry (Sam approved 2026-11-18).
 - **JDR-002** (tuple sender claims): the stamp stays a label everywhere except
   identity-owned subspaces, where a superseded generation is refused (Sam,
-  2026-11-16); JDR-002 gains a revision entry, Sam's edit.
+  2026-11-16); JDR-002 gains a revision entry (Sam approved 2026-11-18).
 - **RDR-252** (aura groups and one responder, draft): parked until this lands;
   its memberships, owners and push records name identities.
 - **RDR-245** (structured asks): asks are filed under the asking seat.
