@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
+from nexus.catalog import meta_filter
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.meta_filter import meta_at_least
 from nexus.cli import main
@@ -53,9 +54,19 @@ def test_the_rule_table(value, n, expected) -> None:
     assert meta_at_least(meta, "k", n) is expected
 
 
-def test_a_key_default_is_not_consulted() -> None:
-    # extraction_source reads "file" for equality; a bound has no such default.
-    assert meta_at_least({}, "extraction_source", 0) is False
+def test_a_key_default_is_not_consulted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An integer default, so an implementation that fell back to ABSENT_MEANS would
+    # read "5" and match; the bound must not (review of c6bd8441b: "file" could not tell).
+    monkeypatch.setattr(meta_filter, "ABSENT_MEANS", {"k": "5"})
+    assert meta_filter.meta_at_least({}, "k", 0) is False
+    assert meta_filter.meta_at_least({"k": None}, "k", 0) is False
+
+
+def test_an_integer_longer_than_pythons_int_limit_is_still_compared() -> None:
+    # 5,000 digits: int() refuses past 4,300 (Python 3.11+); the SQL numeric twin compares it.
+    big = "1" + "0" * 4999
+    assert meta_at_least({"miss_count": big}, "miss_count", 2) is True
+    assert meta_at_least({"miss_count": "-" + big}, "miss_count", 2) is False
 
 
 @pytest.mark.parametrize("meta", [None, "miss_count=3", ["miss_count"], 3])

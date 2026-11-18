@@ -19,6 +19,7 @@ Reading rules, so the filter says what the catalog says and no more:
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -76,17 +77,23 @@ def meta_at_least(meta: Any, key: str, n: int) -> bool:
       ``3.0`` and ``2.9``, the strings ``"2.9"``, ``"abc"``, ``""``, ``" 3"``, ``"+3"``, and ``True`` are not.
     - An integer matches when its value is at least *n*.
 
-    The same rule in SQL: ``metadata->>key ~ '^-?[0-9]+$' AND (metadata->>key)::numeric >= n``. One known
-    difference: Python writes a float of 1e16 or more as ``"1e+16"``, which is not an integer here, while
-    jsonb text holds it as a plain integer, so the engine may include a row this function excludes. That is
-    a widening, and the client's final filter removes the row.
+    The same rule in SQL, guarded so the cast never runs on a non-integer (PostgreSQL does not promise
+    left-to-right ``AND``, and ``::numeric`` raises on ``"abc"``):
+    ``CASE WHEN metadata->>key ~ '^-?[0-9]+$' THEN (metadata->>key)::numeric >= n ELSE false END``.
+    The two agree on every stored row: jsonb never prints an exponent, so a stored ``1e16`` reads back as
+    a plain integer on both sides. They differ only for an in-memory Python float of 1e16 or more that was
+    never written (``str()`` gives ``"1e+16"``, not an integer here). The engine's reconcile reads
+    ``miss_count`` its own way (catalog-048-reconcile.xml: non-negative only, ``::integer``); it agrees with
+    this rule for ``n >= 0`` on the small integers the engine writes.
     """
     meta = meta if isinstance(meta, Mapping) else {}
     value = meta.get(key)
     if value is None:
         return False
     text = _text(value)
-    return _INTEGER_TEXT.fullmatch(text) is not None and int(text) >= n
+    # Decimal, not int(): int() refuses a digit string past 4,300 digits (Python 3.11+),
+    # while the SQL twin's numeric compares any length; an integer text is exact either way.
+    return _INTEGER_TEXT.fullmatch(text) is not None and Decimal(text) >= n
 
 
 def documents_with_meta(entries: Iterable[Any], filters: Sequence[tuple[str, str]]) -> list[Any]:
