@@ -420,3 +420,143 @@ def test_every_meta_scans_root_declared_in_the_repo_exists() -> None:
     missing = {t: [p for p in roots if not (REPO_ROOT / p).exists()] for t, roots in declared.items()}
     assert {t: m for t, m in missing.items() if m} == {}
     assert sum(1 for roots in declared.values() if roots) >= 5
+
+
+# ── review fixes (code review of 41b5575aa) ──────────────────────────────────
+
+
+def _built_and_committed(repo: Path, conftest_extra: str = "") -> None:
+    _with_tracer(repo)
+    _write(repo, {
+        "tests/test_imports.py": LINT,
+        "tests/conftest.py": CONFTEST + conftest_extra,
+    })
+    mt.main(["build", "--repo", str(repo), "--jobs", "2"])
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "manifest")
+    _git(repo, "tag", "-f", "base")
+
+
+SKIP_IN_CONFTEST = (
+    "import pytest\n"
+    "def pytest_runtest_setup(item):\n"
+    "    if item.name == 'test_guard':\n"
+    "        pytest.skip('session.items shrank')\n"
+)
+
+
+@pytest.mark.parametrize(("conftest_extra", "rc"), [("", 0), (SKIP_IN_CONFTEST, 1)], ids=["passes", "skips-in-conftest"])
+def test_the_guard_counts_only_when_it_passes_a_skip_reported_at_the_conftest_fails_the_run(
+    repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str], conftest_extra: str, rc: int
+) -> None:
+    _built_and_committed(repo, conftest_extra)
+    (repo / "tests/test_plain.py").write_text("def test_p():\n    assert True\n")
+    assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == rc
+    out = capsys.readouterr().out
+    assert "session-items guard with the changed test files ran in" in out
+    assert ("the session-items guard did not pass" in out) is bool(rc)
+
+
+def test_a_failing_meta_test_is_named_in_the_short_summary(
+    repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _with_tracer(repo)
+    mt.main(["build", "--repo", str(repo), "--jobs", "2"])
+    capsys.readouterr()
+    (repo / "docs/a.md").write_text("changed\n")
+    assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == 1
+    assert "FAILED tests/test_imports.py::test_fails" in capsys.readouterr().out
+
+
+def test_picked_files_whose_meta_tests_are_all_deselected_do_not_redden_the_run(
+    repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _with_tracer(repo)
+    _write(repo, {"tests/test_imports.py": "import pytest\n\n@pytest.mark.lint\n@pytest.mark.integration\ndef test_i():\n    pass\n"})
+    mt.main(["build", "--repo", str(repo), "--jobs", "2"])
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "manifest")
+    _git(repo, "tag", "-f", "base")
+    # Every pick (the edited files and the integration-only one) holds only deselected meta-tests.
+    (repo / "tests/test_scan.py").write_text("import pytest\n\n@pytest.mark.lint\n@pytest.mark.slow\ndef test_s():\n    pass\n")
+    (repo / "tests/test_census.py").write_text("import pytest\n\n@pytest.mark.census\n@pytest.mark.slow\ndef test_c():\n    pass\n")
+    assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == 0
+    assert "no meta-test collected from the picked files" in capsys.readouterr().out
+
+
+def test_a_changed_path_with_spaces_stays_one_path_and_selects_its_reader(repo: Path) -> None:
+    _write(repo, {"dt/scripts/Index Selection in nx.applescript": "a\n"})
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "spaced")
+    (repo / "dt/scripts/Index Selection in nx.applescript").write_text("b\n")
+    changed = mt.changed_paths(repo, "base")
+    assert changed == ["dt/scripts/Index Selection in nx.applescript"]
+    manifest = _manifest(repo, test_scan={"opened": changed})
+    assert mt.select(repo, changed, "base", manifest).selected["tests/test_scan.py"] == f"reads {changed[0]}"
+
+
+def test_a_bare_import_resolves_through_scripts_and_tests_and_joins_the_staleness_hash(repo: Path) -> None:
+    _write(repo, {
+        "scripts/plugin_channel.py": "V = 1\n",
+        "tests/_helper.py": "H = 1\n",
+        "tests/test_bare.py": "import pytest\nimport _helper\nfrom plugin_channel import V\npytestmark = pytest.mark.lint\n",
+    })
+    assert mt.module_files(repo, "tests/test_bare.py") == {"scripts/plugin_channel.py", "tests/_helper.py"}
+    manifest = _manifest(repo, test_bare=READS)
+    sel = mt.select(repo, ["scripts/plugin_channel.py"], "base", manifest)
+    assert sel.selected["tests/test_bare.py"] == "imports scripts/plugin_channel.py"
+    assert "tests/_helper.py" in mt.tests_closure(repo, "tests/test_bare.py")
+    (repo / "tests/_helper.py").write_text("H = 2\n")
+    assert "changed since the manifest" in mt.select(repo, ["tests/_helper.py"], "base", manifest).always["tests/test_bare.py"]
+
+
+def test_deleting_the_last_file_of_a_directory_reaches_a_test_that_listed_its_parent(repo: Path) -> None:
+    _write(repo, {"docs/sub/only.md": "o\n"})
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "sub")
+    _git(repo, "tag", "-f", "base")
+    manifest = _manifest(repo, test_scan={"listed": ["docs"]})
+    (repo / "docs/sub/only.md").unlink()
+    (repo / "docs/sub").rmdir()
+    assert mt.select(repo, ["docs/sub/only.md"], "base", manifest).selected["tests/test_scan.py"] == (
+        "lists the directory losing docs/sub/only.md")
+    _write(repo, {"docs/sub/other.md": "x\n"})  # the directory survives: its parent's listing is unchanged
+    assert "tests/test_scan.py" not in mt.select(repo, ["docs/sub/only.md"], "base", manifest).selected
+
+
+def test_the_tracer_sees_a_repo_command_run_from_a_temporary_cwd_and_other_spawn_calls(
+    repo: Path, tmp_path: Path
+) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _write(repo, {
+        "tests/__init__.py": "",
+        "tests/_surface_trace.py": (REPO_ROOT / "tests/_surface_trace.py").read_text(),
+        "scripts/tool.sh": "true\n",
+        "tests/test_traced.py": (
+            "import os, subprocess, sys\nimport pytest\n"
+            "pytestmark = pytest.mark.lint\n"
+            f"ELSEWHERE = {str(elsewhere)!r}\n"
+            "REPO = os.getcwd()\n"
+            "def test_from_elsewhere():\n"
+            "    subprocess.run(['git', '-C', REPO, 'ls-files', '--', 'docs'], cwd=ELSEWHERE, check=True, capture_output=True)\n"
+            "    subprocess.run(['sh', os.path.join(REPO, 'scripts/tool.sh')], cwd=ELSEWHERE, check=True)\n"
+            "    subprocess.run(['true'], cwd=ELSEWHERE, check=True)\n"
+            "    os.system('true')\n"
+        ),
+    })
+    out = tmp_path / "trace"
+    env = {**os.environ, "NX_TEST_T2_SUBSTRATE": "none", "NX_SURFACE_TRACE_OUT": str(out),
+           "PYTHONPATH": str(repo / "src") + os.pathsep + str(repo)}
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:randomly", "-p", "no:cacheprovider", "-p", "tests._surface_trace",
+         "--rootdir", str(repo), "-c", os.devnull, "tests/test_traced.py"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    [frag] = list(out.glob("trace-*.json"))
+    got = json.loads(frag.read_text())["tests/test_traced.py"]
+    assert got["prefixes"] == ["docs"]
+    assert any("scripts/tool.sh" in o for o in got["opaque"]), got["opaque"]
+    assert "sh -c true" in got["opaque"]  # os.system runs from the repo cwd
+    assert not any(o == "true" for o in got["opaque"])  # nothing of the repo in it, run from elsewhere

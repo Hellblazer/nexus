@@ -96,8 +96,6 @@ def _subprocess(args: Any, cwd: Any) -> None:
     if not argv:
         return
     where = os.fsdecode(cwd) if cwd else os.getcwd()
-    if _rel(where) is None:
-        return
     tool = os.path.basename(argv[0])
     rest = argv[1:]
     if tool == "git":
@@ -110,7 +108,7 @@ def _subprocess(args: Any, cwd: Any) -> None:
                 i += 2
             else:
                 i += 1
-        if i >= len(rest):
+        if i >= len(rest) or _rel(where) is None:
             return
         sub, tail = rest[i], rest[i + 1:]
         if sub not in _GIT_ENUMERATORS:
@@ -137,7 +135,22 @@ def _subprocess(args: Any, cwd: Any) -> None:
         for a in rest[1:]:
             _record("opened", _rel(a, where))
         return
-    _record("opaque", " ".join(argv)[:200])
+    if _touches_repo(argv, where):
+        _record("opaque", " ".join(argv)[:200])
+
+
+def _touches_repo(argv: list[str], where: str) -> bool:
+    """Whether a command run from ``where`` can read the repo: it runs inside it, or the
+    executable or an argument names a path in it (a repo script run from a temporary cwd)."""
+    if _rel(where) is not None:
+        return True
+    for a in argv:
+        if _ROOT in a:
+            return True
+        full = os.path.join(where, a)
+        if os.path.exists(full) and _rel(full) is not None:
+            return True
+    return False
 
 
 def _pathspec_root(spec: str) -> str | None:
@@ -173,6 +186,12 @@ def _hook(event: str, args: tuple) -> None:
             _record("listed", _rel(args[0] if args and args[0] is not None else "."))
         elif event == "subprocess.Popen":
             _subprocess(args[1], args[2])
+        elif event == "os.system":
+            _subprocess(["sh", "-c", os.fsdecode(args[0])], None)
+        elif event in ("os.exec", "os.posix_spawn"):
+            _subprocess(args[1] or [args[0]], None)
+        elif event == "os.spawn":
+            _subprocess(args[2] or [args[1]], None)
     finally:
         _busy = False
 

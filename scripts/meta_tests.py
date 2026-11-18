@@ -68,10 +68,12 @@ JAVA_WALK = re.compile(r"Files\.(walk|list|find|newDirectoryStream)\(")
 JAVA_SURFACE = "service/src/"
 #: The two invocations, as the shell lines they are (files follow). The meta-tests in a selected
 #: file only: a file may hold behaviour tests beside its census.
-META_RUN = "uv run pytest -q -rf -p no:randomly --color=no -o addopts= -m '(lint or census) and not integration and not slow'"
+META_RUN = "uv run pytest -q -rfEs -p no:randomly --color=no -o addopts= -m '(lint or census) and not integration and not slow'"
+#: -rp lists each pass, so a guard counts only when its PASSED line appears (a skip inside
+#: tests/conftest.py is reported at the conftest, not at the guard file).
 #: The session-items guard judges what its own invocation collected, so the changed test files run
 #: with it unfiltered (a -m that deselects some reads as a partial view, and the guard skips).
-GUARD_RUN = "uv run pytest -q -rf -p no:randomly --color=no -o addopts= -m 'not integration and not slow'"
+GUARD_RUN = "uv run pytest -q -rfEsp -p no:randomly --color=no -o addopts= -m 'not integration and not slow'"
 #: Meta-tests read files; none needs the engine, so no gate jar is built or checked for them, and
 #: no suite lease is taken (tests/conftest.py takes one only for a substrate that boots the engine).
 ENV = {"NX_TEST_T2_SUBSTRATE": "none"}
@@ -84,6 +86,11 @@ NOT_COVERED = (
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout
+
+
+def git_names(repo: Path, *args: str) -> set[str]:
+    """Paths from a git listing run with -z: a name may hold spaces, and -z leaves it unquoted."""
+    return {n for n in git(repo, *args, "-z").split("\0") if n}
 
 
 #: Per-test lists of paths, inverted on disk: path -> id of the set of tests that read it.
@@ -224,7 +231,8 @@ def declared_scans(repo: Path, test: str) -> list[str]:
 
 
 def module_files(repo: Path, test: str) -> set[str]:
-    """Repo files the test file imports directly: src/nexus and tests modules, with package __init__s."""
+    """Repo files the test file imports directly: src/nexus, tests and bare scripts/ or tests/
+    modules, with package __init__s."""
     try:
         tree = ast.parse((repo / test).read_text())
     except (SyntaxError, UnicodeDecodeError, FileNotFoundError):
@@ -236,21 +244,29 @@ def module_files(repo: Path, test: str) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             names.add(node.module)
             names.update(f"{node.module}.{a.name}" for a in node.names)
+    # A bare name resolves as pytest makes it: scripts/ (pyproject pythonpath), the test's own
+    # directory (rootdir-relative import mode), then tests/.
+    bare_roots = [repo / "scripts", (repo / test).parent, repo / "tests"]
     out: set[str] = set()
     for name in names:
         top = name.split(".", 1)[0]
         if top == "nexus":
-            base = repo / "src"
+            bases = [repo / "src"]
         elif top == "tests":
-            base = repo
+            bases = [repo]
         else:
-            continue
+            bases = bare_roots
         parts = name.split(".")
-        for i in range(1, len(parts) + 1):
-            stem = base.joinpath(*parts[:i])
-            for cand in (stem.with_suffix(".py"), stem / "__init__.py"):
-                if cand.is_file():
-                    out.add(cand.relative_to(repo).as_posix())
+        for base in bases:
+            found = False
+            for i in range(1, len(parts) + 1):
+                stem = base.joinpath(*parts[:i])
+                for cand in (stem.with_suffix(".py"), stem / "__init__.py"):
+                    if cand.is_file():
+                        out.add(cand.relative_to(repo).as_posix())
+                        found = True
+            if found:
+                break
     return out
 
 
@@ -295,9 +311,9 @@ class Selection:
 
 
 def changed_paths(repo: Path, base: str) -> list[str]:
-    names = set(git(repo, "diff", "--no-renames", "--name-only", f"{base}...HEAD").split())
-    names |= set(git(repo, "diff", "--no-renames", "--name-only", "HEAD").split())
-    names |= set(git(repo, "ls-files", "--others", "--exclude-standard").split())
+    names = git_names(repo, "diff", "--no-renames", "--name-only", f"{base}...HEAD")
+    names |= git_names(repo, "diff", "--no-renames", "--name-only", "HEAD")
+    names |= git_names(repo, "ls-files", "--others", "--exclude-standard")
     return sorted(names)
 
 
@@ -316,9 +332,18 @@ class BaseTree:
             return "gaining" if exists else None
         return None if exists else "losing"
 
+    def dir_exists_now(self, repo: Path, d: str) -> bool:
+        if self.now is None:
+            return (repo / d).is_dir() if d else True
+        return d == "" or any(p.startswith(d + "/") for p in self.now)
+
 
 def base_tree(repo: Path, base: str) -> BaseTree:
-    files = {f for f in git(repo, "ls-tree", "-r", "--name-only", base).splitlines() if f}
+    try:
+        at = git(repo, "merge-base", base, "HEAD").strip()
+    except subprocess.CalledProcessError:
+        at = base
+    files = git_names(repo, "ls-tree", "-r", "--name-only", at)
     dirs = {""} | {d for f in files for d in _ancestors(f)}
     return BaseTree(dirs=dirs, files=files)
 
@@ -402,8 +427,15 @@ def _hit(test: str, entry: dict, changed: list[str], existing: BaseTree, imports
         # A listing changes only when an entry comes or goes; an edit to a file the test only
         # listed does not reach it (an edit to a file it read is caught above).
         change = existing.added_or_deleted(repo, p)
-        if change and _listed_hit(p, listed, existing.dirs):
-            return f"lists the directory {change} {p}"
+        if change == "gaining" and _listed_hit(p, listed, existing.dirs):
+            return f"lists the directory gaining {p}"
+        if change == "losing":
+            # The parent loses the entry; a directory the deletion empties vanishes from its own parent.
+            for anc in _ancestors(p):
+                if anc in listed:
+                    return f"lists the directory losing {p}"
+                if existing.dir_exists_now(repo, anc):
+                    break
     return None
 
 
@@ -444,7 +476,11 @@ def java_command(sel: Selection) -> str | None:
 
 def cmd_select(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
-    changed = sorted(sys.stdin.read().split()) if args.names_from_stdin else changed_paths(repo, args.base)
+    if args.names_from_stdin:
+        data = sys.stdin.read()
+        changed = sorted({n.strip("\n") for n in (data.split("\0") if "\0" in data else data.splitlines()) if n.strip()})
+    else:
+        changed = changed_paths(repo, args.base)
     t0 = time.monotonic()
     sel = select(repo, changed, args.base)
     if args.json:
@@ -488,13 +524,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     for label, argv in runs:
         print("$ " + shlex.join(argv), flush=True)
         t1 = time.monotonic()
-        code, skipped = _run_streaming(argv, repo, guards)
+        is_guard = label.startswith("session-items")
+        code, passed = _run_streaming(argv, repo)
         print(f"{label} ran in {time.monotonic() - t1:.1f}s (exit {code})")
-        if skipped:
-            # A skip exits 0, and here it means the guard judged nothing.
-            print("the session-items guard skipped (its invocation looked partial), so it judged nothing: run the"
-                  " full-corpus census job (push-train rule 1) for this push")
-            code = code or 1
+        if not is_guard and code == 5:
+            # Every meta-test in the picked files is integration- or slow-marked: nothing to judge here.
+            print("no meta-test collected from the picked files (all deselected by -m)")
+            code = 0
+        if is_guard and not code and not all(any(n.startswith(g + "::") for n in passed) for g in guards):
+            # A pass is the only evidence the guard judged anything; a skip also exits 0.
+            print("the session-items guard did not pass (it skipped, its invocation looked partial), so it judged"
+                  " nothing: run the full-corpus census job (push-train rule 1) for this push")
+            code = 1
         rc = rc or code
     cmd = java_command(sel)
     if cmd:
@@ -507,17 +548,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
-def _run_streaming(argv: list[str], repo: Path, guards: list[str]) -> tuple[int, bool]:
-    """Run pytest, echoing its output; also say whether a guard file's test was reported skipped."""
-    proc = subprocess.Popen([*argv, "-rs"], cwd=repo, env={**os.environ, **ENV},
+def _run_streaming(argv: list[str], repo: Path) -> tuple[int, set[str]]:
+    """Run pytest, echoing its output; also return the node ids its summary reports PASSED."""
+    proc = subprocess.Popen(argv, cwd=repo, env={**os.environ, **ENV},
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-    skipped = False
+    passed: set[str] = set()
     assert proc.stdout is not None
     for line in proc.stdout:
         sys.stdout.write(line)
-        if line.startswith("SKIPPED") and any(g in line for g in guards):
-            skipped = True
-    return proc.wait(), skipped
+        if line.startswith("PASSED "):
+            passed.add(line.split()[1])
+    return proc.wait(), passed
 
 
 def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict, str | None]:
@@ -527,7 +568,7 @@ def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict
     # -p loads the plugin before pytest puts the rootdir on sys.path.
     path = os.pathsep.join(p for p in (str(repo), os.environ.get("PYTHONPATH", "")) if p)
     env = dict(os.environ, **ENV, NX_SURFACE_TRACE_OUT=str(out), PYTHONPATH=path, TMPDIR=str(out.parent))
-    argv = [*shlex.split(META_RUN), "-rs", "-p", "tests._surface_trace", *extra, test]
+    argv = [*shlex.split(META_RUN), "-p", "tests._surface_trace", *extra, test]
     proc = subprocess.run(argv, cwd=repo, env=env, capture_output=True, text=True, errors="replace")
     merged: dict[str, set[str]] = {}
     for frag in out.glob("trace-*.json"):
