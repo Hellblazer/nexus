@@ -45,7 +45,8 @@ _ABSENT = object()
         ("3\n", 2, False),  # a bare re.match with $ would accept this
         ("+3", 2, False),
         ("1e3", 2, False),
-        (_ABSENT, 0, False),
+        # explicit id: a bare object()'s default id is its memory address, which differs per xdist worker
+        pytest.param(_ABSENT, 0, False, id="absent-0-False"),
     ],
     ids=repr,
 )
