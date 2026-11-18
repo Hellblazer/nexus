@@ -1,0 +1,3 @@
+### Fixed
+
+- **A run-summary readback no longer reports an unchanged engine as changed** (RDR-232; client-only). When a summary was dropped, the telemetry store re-read `GET /version` and compared the whole body with the cached one, so `process_uptime_seconds` (which ticks every second) or a restart's `process_start_time` read as a capability change: `capability_refreshed` came back true and `nx_answer_version_capabilities_changed` was logged with no flag moved. The refresh now compares only the `*_supported` flags. This also removes an intermittent failure of `test_rollback_after_a_cached_flag_is_dropped_and_refreshes_the_probe` (release PR #1663). What changes for you: no false capability-change warning.

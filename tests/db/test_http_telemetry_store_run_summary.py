@@ -238,6 +238,24 @@ class TestCapabilityRefresh:
         assert client._supports_nx_answer_run_summary() is False
         assert any(e["event"] == "nx_answer_version_capabilities_changed" for e in logs)
 
+    def test_refresh_ignores_the_fields_that_move_without_a_capability_change(self, client):
+        """The real ``/version`` carries ``process_uptime_seconds`` (and ``process_start_time``), which move on
+        their own. A refresh that straddles a second boundary is not a capability change: comparing the whole
+        body made the RDR-232 rollback integration test flake on release PR #1663 (job 134917696946)."""
+        ENGINE.new()
+        ENGINE.version |= {"process_uptime_seconds": 420, "process_start_time": "2026-11-18T09:00:00Z"}
+        assert client._supports_nx_answer_run_summary() is True
+        ENGINE.version |= {"process_uptime_seconds": 421}
+        with structlog.testing.capture_logs() as logs:
+            assert client._refresh_version_capabilities() is False, "uptime ticked; no flag changed"
+        assert not [e for e in logs if e["event"] == "nx_answer_version_capabilities_changed"]
+        ENGINE.version |= {"process_uptime_seconds": 3, "process_start_time": "2026-11-18T10:00:00Z"}
+        assert client._refresh_version_capabilities() is False, "a restart on the same build changes no flag"
+        ENGINE.version["nx_answer_steps_supported"] = False
+        assert client._refresh_version_capabilities() is True, "any *_supported flag counts, not only the summary's"
+        ENGINE.version.pop("nx_answer_run_summary_supported")
+        assert client._refresh_version_capabilities() is True, "a dropped flag is still a change"
+
     def test_refresh_never_raises(self):
         store = HttpTelemetryStore(base_url="http://127.0.0.1:1", tenant=DEFAULT_TENANT, _token=TOKEN)
         try:
