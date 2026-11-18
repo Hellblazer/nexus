@@ -56,6 +56,17 @@ def test_an_explicit_token_file_wins_and_a_session_for_another_identity_refuses(
     assert (alone.identity, alone.generation, alone.source) == ("i9", 1, "explicit_token")
 
 
+
+def test_an_explicit_token_file_that_cannot_be_read_is_no_identity_never_the_parents(tmp_path: Path) -> None:
+    """A delegated child whose file is gone, or one given the never-existing sentinel because no delegated identity was
+    made: the session id and the registry would name its parent, so the answer is None."""
+    client = FakeClient(sessions={"parent-sid": _row("i1", session_id="parent-sid")})
+    for given in (tmp_path / "delegated" / "none", tmp_path / "ended.token"):
+        assert resolve_identity(client=client, payload_session_id="parent-sid",
+                                env={"NX_IDENTITY_TOKEN": str(given), "CLAUDE_CODE_SESSION_ID": "parent-sid"}) is None
+    assert resolve_identity(client=client, env={"CLAUDE_CODE_SESSION_ID": "parent-sid"}).identity == "i1", \
+        "without NX_IDENTITY_TOKEN the same inputs name the parent: the refusal above is the explicit token's"
+
 def test_a_bash_child_from_before_a_cross_seat_resume_is_refused(tmp_path: Path) -> None:
     """The process switched from i1 to i2 (the token file now says i2); a Bash child started before the switch still
     carries the old session id, which the index maps to i1. The resolver compares the ancestor's token file with
