@@ -751,7 +751,13 @@ from __future__ import annotations
 #: replace that keeps unchanged rows, the anchor v2 relfilenode and red_unfixed
 #: hold, and the pgvector 0.8.7 bundle. Already deployed, so this release is
 #: not a paired one.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 194)
+#: 0.1.195 (conexus 8.4.0): pairs with engine-service-v0.1.195 (tagged on
+#: abeaea229). It carries RDR-246's background data moves (the data_moves
+#: registry, the DataMoveWorker, the ddl_utils/dml_utils install at boot, its
+#: native Liquibase reflection metadata), RDR-167 Phase 1's correlation id,
+#: request_failed line and log-sink escaping, and RDR-134's topic coverage.
+#: Paired: the cloud deploy follows the client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 195)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
