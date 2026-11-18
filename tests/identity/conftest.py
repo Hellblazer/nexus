@@ -16,6 +16,12 @@ its own process table, identity directory and clock, and a tag that qualifies ev
 session id the harness sends (the engine keeps those per tenant). A row reads as if it had the tenant to itself; the
 one place the tag shows is where it asserts text that names a seat, which goes through ``world.q``. A failing row
 does not stop the others: ``Rows.check`` fails once, naming every failed row with its traceback.
+
+Step 3's modules go one step further: the whole suite of engine-backed identity journeys mints ONE tenant, not one per
+module (tests/identity/test_identity_engine_journeys.py, Sam's ruling, T2 nexus/sam-ruling-rdr253-step3-tenants-2026-11-18).
+Each module keeps its row functions and its ``ROWS`` table and holds no test; the one test hands every table to
+:func:`run_journeys`, which runs each with its own ``Rows`` (a tag prefix per module, so no two rows of the run share a
+host, seat name or session id) and fails once, naming ``module::row`` for every failure.
 """
 from __future__ import annotations
 
@@ -24,7 +30,8 @@ import os
 import sys
 import time
 import traceback
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -169,8 +176,9 @@ class Rows:
     row of a long table (``NX_ROWS=lapsed uv run pytest tests/identity/test_session_start_bind.py``); a value that
     matches no row fails the test. Unset, every row runs."""
 
-    def __init__(self, world: World) -> None:
+    def __init__(self, world: World, *, prefix: str = "") -> None:
         self._base = world
+        self._prefix = f"{prefix}-" if prefix else ""     # rows of different modules must never share a tag
         self.ran: list[str] = []
         self.failed: dict[str, str] = {}
         self.seconds: dict[str, float] = {}
@@ -181,7 +189,7 @@ class Rows:
         self.ran.append(name)
         started = time.perf_counter()
         try:
-            yield self._base.scoped(f"r{len(self.ran):02d}")
+            yield self._base.scoped(f"{self._prefix}r{len(self.ran):02d}")
         except pytest.exit.Exception:  # pytest.exit() ends the session, never a row failure (Exit subclasses Exception)
             raise
         except (Exception, pytest.fail.Exception):  # noqa: BLE001 - kept and reported by check(), so one row's failure does not hide the next; Skipped and KeyboardInterrupt are not caught
@@ -189,20 +197,30 @@ class Rows:
         finally:
             self.seconds[name] = time.perf_counter() - started
 
-    def run(self, table: tuple[Callable[[World], None], ...], namespace: dict[str, Any]) -> None:
-        """Run every row function of *table* and fail once with the rows that failed. *namespace* is the module's
-        ``globals()``: a ``row_*`` function that is not in *table* never runs, so it fails here instead of passing."""
+    def select(self, table: tuple[Callable[[World], None], ...], namespace: dict[str, Any], *, label: str = "",
+               only: str | None = None) -> list[Callable[[World], None]]:
+        """The rows of *table* to run. *namespace* is the module's ``globals()``: a ``row_*`` function that is not in
+        *table* never runs, so it fails here instead of passing. *only* (``NX_ROWS`` when None) keeps the rows whose
+        ``label::name`` contains it; with no *label* the name alone. An empty result is the caller's to judge."""
         assert table, "the row table is empty: a test with no rows passes nothing"
         defined = sorted(n for n, o in namespace.items() if n.startswith("row_") and callable(o))
         listed = sorted(fn.__name__ for fn in table)
         assert defined == listed, f"row functions not in the table: {sorted(set(defined) - set(listed))}"
-        only = os.environ.get("NX_ROWS", "")
-        selected = [fn for fn in table if only in fn.__name__]
-        assert selected, f"NX_ROWS={only!r} matches no row of {listed}"
+        only = os.environ.get("NX_ROWS", "") if only is None else only
+        return [fn for fn in table if only in (f"{label}::{fn.__name__}" if label else fn.__name__)]
+
+    def execute(self, selected: Sequence[Callable[[World], None]]) -> None:
+        """Run each row on its own scoped world, keeping failures in ``failed``. A skip or interrupt ends the run."""
+        for fn in selected:
+            with self.row(fn.__name__) as world:
+                fn(world)
+
+    def run(self, table: tuple[Callable[[World], None], ...], namespace: dict[str, Any]) -> None:
+        """Run every row function of *table* and fail once with the rows that failed."""
+        selected = self.select(table, namespace)
+        assert selected, f"NX_ROWS={os.environ.get('NX_ROWS', '')!r} matches no row of {sorted(fn.__name__ for fn in table)}"
         try:
-            for fn in selected:
-                with self.row(fn.__name__) as world:
-                    fn(world)
+            self.execute(selected)
         except BaseException as stopped:  # a Skipped or KeyboardInterrupt ended the run; the failures so far still show
             if self.failed:
                 report = self._report(len(selected)) + f"\n\nthen the run was stopped by {stopped!r}"
@@ -222,6 +240,103 @@ class Rows:
             pytest.fail(f"{len(self.ran)} rows ran, the test expects {expect}: ran {self.ran}", pytrace=False)
         if self.failed:
             pytest.fail(self._report(expect), pytrace=False)
+
+
+@dataclass(frozen=True)
+class Journey:
+    """One module's rows in :func:`run_journeys`: its name in the report, a short unique tag prefix, its ``ROWS`` table
+    and ``globals()``. *precheck* returns the reason the module cannot run on this engine, or None when it can (it
+    gets the shared world; use ``world.scoped`` for anything it stages). With *require_env* set to ``1`` in the
+    environment such a reason is a failure, not a skip, so a gate cannot pass vacuously. *cleanup* runs after the module's
+    rows, pass or fail, for state the rows leave process-global (a cache)."""
+
+    module: str
+    tag: str
+    table: tuple[Callable[[World], None], ...]
+    namespace: dict[str, Any]
+    precheck: Callable[[World], str | None] | None = None
+    require_env: str = ""
+    cleanup: Callable[[], None] | None = None
+
+
+@dataclass
+class JourneyReport:
+    ran: list[str] = field(default_factory=list)                  # ``module::row`` of every row that ran
+    skipped: dict[str, str] = field(default_factory=dict)         # module -> why its rows did not run
+    seconds: dict[str, float] = field(default_factory=dict)       # ``module::row`` -> duration
+    failed: dict[str, str] = field(default_factory=dict)          # ``module::row`` (or ``module``) -> traceback
+
+    def times(self) -> str:
+        return ", ".join(f"{name} {secs:.2f}s" for name, secs in self.seconds.items())
+
+    def text(self) -> str:
+        skipped = "".join(f"\nSKIPPED module {m!r}: {why}" for m, why in self.skipped.items())
+        return f"{len(self.ran)} rows ran{skipped}\nrow times: {self.times()}"
+
+
+def run_journeys(world: World, journeys: Sequence[Journey]) -> JourneyReport:
+    """Run every module's rows on *world* (one tenant) and fail once, naming each failure as ``module::row``.
+
+    Each module runs its own ``Rows`` with its own tag prefix, and its own missing-row check against its own
+    ``globals()``. A module that cannot run on this engine (``precheck``) is recorded as skipped and the others still
+    run; a run in which no row ran fails (a pass over nothing is not a pass). ``NX_ROWS=<substring>`` keeps the rows
+    whose ``module::row`` name contains it. A ``pytest.skip`` inside a row ends that module's remaining rows and is
+    recorded the same way; ``KeyboardInterrupt`` and ``pytest.exit`` end the run, after the failures so far go to
+    stderr. Returns the report of a run that did not fail."""
+    report = JourneyReport()
+    only = os.environ.get("NX_ROWS", "")
+    try:
+        for journey in journeys:
+            rows = Rows(world, prefix=journey.tag)
+            try:
+                selected = rows.select(journey.table, journey.namespace, label=journey.module, only=only)
+            except AssertionError as bad:                       # a row function missing from the table, or an empty one
+                report.failed[journey.module] = f"{journey.module}: {bad}"
+                continue
+            if not selected:
+                continue                                        # NX_ROWS names no row of this module
+            reason: str | None = None
+            if journey.precheck is not None:
+                try:
+                    reason = journey.precheck(world)
+                except Exception:  # noqa: BLE001 - kept and reported: one module's broken precheck must not hide the others
+                    report.failed[journey.module] = f"{journey.module}: precheck failed:\n{traceback.format_exc()}"
+                    continue
+            if reason:
+                if journey.require_env and os.environ.get(journey.require_env) == "1":
+                    report.failed[journey.module] = f"{journey.module}: {reason} ({journey.require_env}=1, so this is a failure, not a skip)"
+                else:
+                    report.skipped[journey.module] = reason
+                continue
+            counted = None
+            try:
+                rows.execute(selected)
+            except pytest.skip.Exception as skip:               # the rest of this module's rows are not run; the other modules' are
+                counted = len(rows.ran) - 1                     # the row that skipped did not run to a verdict
+                report.skipped[journey.module] = f"skipped at row {rows.ran[-1]!r} after {counted} of {len(selected)} rows: {skip}"
+            finally:
+                if journey.cleanup is not None:
+                    journey.cleanup()
+            for name in rows.ran[:counted]:
+                report.ran.append(f"{journey.module}::{name}")
+                report.seconds[f"{journey.module}::{name}"] = rows.seconds[name]
+            for name, tb in rows.failed.items():
+                report.failed[f"{journey.module}::{name}"] = tb
+    except BaseException as stopped:  # an interrupt or pytest.exit ended the run; the failures so far still show
+        if report.failed:
+            sys.stderr.write(_journey_failure(report, len(report.ran)) + f"\n\nthen the run was stopped by {stopped!r}\n")
+        raise
+    if not report.ran and not report.failed:
+        pytest.fail("no row ran: every module was skipped or none matched NX_ROWS=" + repr(only)
+                    + "".join(f"\n  {m}: {why}" for m, why in report.skipped.items()), pytrace=False)
+    if report.failed:
+        pytest.fail(_journey_failure(report, len(report.ran)), pytrace=False)
+    return report
+
+
+def _journey_failure(report: JourneyReport, ran: int) -> str:
+    body = "\n\n".join(f"ROW {name!r} FAILED:\n{tb}" for name, tb in report.failed.items())
+    return f"{len(report.failed)} failed of {ran} rows run: {sorted(report.failed)}\n\n{body}\n\n{report.text()}"
 
 
 @pytest.fixture
