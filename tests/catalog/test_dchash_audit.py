@@ -176,7 +176,7 @@ def test_the_audit_and_dchash_status_agree(tmp_path: Path) -> None:
         assert by_span.get(s, "ok") == want
 
 
-def test_a_document_with_ten_spans_over_five_links_is_read_once(
+def test_a_document_with_many_spans_over_five_links_is_read_once(
     tmp_path: Path, reads: list[Path]
 ) -> None:
     cat = FakeCatalog(

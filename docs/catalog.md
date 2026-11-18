@@ -379,7 +379,7 @@ The catalog is as durable as the nexus service's Postgres — the same database 
 nx catalog link-audit
 ```
 
-Reports link graph health: total counts by type and creator, orphaned links (pointing to deleted documents), duplicate links, stale positional spans, and stale content-hash spans. When T3 is available, verifies each `chash:` span resolves to an actual chunk.
+Reports link graph health: total counts by type and creator, orphaned links (pointing to deleted documents), duplicate links, and stale `dchash:` spans (`stale_dchash` and `stale_dchash_count`, one row per span whose status is not `ok`). Positional and `chash:` spans are not checked; see [Span lifecycle and staleness](#span-lifecycle-and-staleness).
 
 Orphaned links are kept as historical record — they are not auto-deleted. Use `link-bulk-delete` to clean them up if needed.
 

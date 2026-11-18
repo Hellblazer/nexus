@@ -957,11 +957,11 @@ def catalog_link_audit() -> dict:
     span and status. The status is one of ``malformed``, ``missing`` (the document is
     gone), ``unreadable`` (no source file, or it cannot be read or is not UTF-8),
     ``changed`` (the source text differs from the one the span was minted on) or
-    ``out_of_range`` (the span reaches past the end of the text). Both keys are always
-    present. Positional and ``chash:`` spans are not checked.
+    ``out_of_range`` (the span reaches past the end of the text). Both keys are present
+    in every successful result. Positional and ``chash:`` spans are not checked.
 
     The stale_dchash report reads each document's source file, so it describes the
-    machine the tool runs on; an engine error fails the call instead of listing spans.
+    machine the tool runs on; an engine error fails the call: the result is an ``error`` object, with no stale_dchash keys.
     """
     cat, err = _require_catalog()
     if err:
