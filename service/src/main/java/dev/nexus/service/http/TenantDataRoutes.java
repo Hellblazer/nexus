@@ -6,6 +6,7 @@ import com.sun.net.httpserver.Filter;
 import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.ChashRepository;
+import dev.nexus.service.db.GroupRepository;
 import dev.nexus.service.db.IdentityRepository;
 import dev.nexus.service.db.IdentityTokenStore;
 import dev.nexus.service.db.LadderRepository;
@@ -17,6 +18,7 @@ import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TaxonomyCoverage;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TelemetryRepository;
+import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.TaxonomyCentroidRepository;
 
 import java.util.List;
@@ -33,7 +35,7 @@ public final class TenantDataRoutes {
     private TenantDataRoutes() {
     }
 
-    /** Registers the eleven contexts, each behind {@code authFilter}. */
+    /** Registers the twelve contexts, each behind {@code authFilter}. */
     public static void register(HttpServer server, List<Filter> authFilter,
                                 MemoryRepository memoryRepo, PlanRepository planRepo,
                                 TelemetryRepository telemetryRepo, ScratchRepository scratchRepo,
@@ -42,7 +44,7 @@ public final class TenantDataRoutes {
                                 ChashRepository chashRepo, RemapRepository remapRepo,
                                 LadderRepository ladderRepo, PipelineRepository pipelineRepo,
                                 IdentityRepository identityRepo, IdentityTokenStore identityTokens,
-                                IdentityFence fence) {
+                                IdentityFence fence, TenantScope tenantScope) {
         // /v1/memory/* — memory endpoints
         server.createContext("/v1/memory", new MemoryHandler(memoryRepo, fence)).getFilters().addAll(authFilter);
 
@@ -81,5 +83,10 @@ public final class TenantDataRoutes {
         // /v1/identity/* — session identity: seats, aliases, the binding log and the session index (RDR-253 Step 1,
         // bead nexus-hczdo.1.1). The handler admits each route for the credential that needs it.
         server.createContext("/v1/identity", new IdentityHandler(identityRepo, identityTokens, fence)).getFilters().addAll(authFilter);
+
+        // /v1/group/* — the group record: form, set, disband, read and the operator override (RDR-252 Step 1, bead
+        // nexus-igea9.5). The writer check is the leader's identity token, in the handler.
+        server.createContext("/v1/group", new GroupHandler(new GroupRepository(tenantScope, java.time.Clock.systemUTC()), fence))
+                .getFilters().addAll(authFilter);
     }
 }

@@ -797,7 +797,7 @@ public final class NexusService {
         // /v1/memory, plans, telemetry, t1, taxonomy, aspects, chash, remap, ladder, pipeline, identity: one place.
         dev.nexus.service.http.TenantDataRoutes.register(server, authFilter, memoryRepo, planRepo, telemetryRepo,
                 scratchRepo, taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage, aspectRepo, chashRepo, remapRepo,
-                ladderRepo, pipelineRepo, identityRepo, tokenStore.identityTokens(), identityFence);
+                ladderRepo, pipelineRepo, identityRepo, tokenStore.identityTokens(), identityFence, tenantScope);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18). The
         // combined-write orchestration seam (nexus-kl2z6 increment 1) rides
