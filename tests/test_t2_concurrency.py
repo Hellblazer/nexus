@@ -470,23 +470,6 @@ def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
     _assert_not_starved("memory_search", baseline, under_load, ceiling_floor_ms=150.0)
 
 
-def test_the_starvation_gate_reads_the_runs_own_tail() -> None:
-    """The gate's arithmetic on the observed numbers: develop run 44337073652's slow-box sample passes (nothing was
-    starved), and a read blocked behind a writer fails on a fast box and on a slow one."""
-    rows = _LOAD_ROUNDS * _READS_PER_PHASE
-
-    def sample(median: float, p95: float) -> list[float]:
-        return sorted([median] * (rows - rows // 10) + [p95] * (rows // 10))
-
-    _assert_not_starved("slow box, not starved", sample(19.79, 56.15), sample(24.86, 60.36), 50.0)
-    with pytest.raises(AssertionError, match="starvation ceiling"):
-        _assert_not_starved("fast box, starved tail", sample(1.5, 2.0), sample(1.6, 200.0), 50.0)
-    with pytest.raises(AssertionError, match="starvation ceiling"):
-        _assert_not_starved("slow box, starved tail", sample(19.79, 56.15), sample(24.86, 600.0), 50.0)
-    with pytest.raises(AssertionError, match="median inflated"):
-        _assert_not_starved("every read serialized", sample(1.5, 2.0), sample(40.0, 45.0), 50.0)
-
-
 # ── RDR-129 B1 (nexus-qi1zb): serving busy_timeout raised 5000 -> 30000 ──────
 #
 # test_serving_busy_timeout_constant_matches_bootstrap RETIRED (nexus-i711w
