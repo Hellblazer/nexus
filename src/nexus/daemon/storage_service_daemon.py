@@ -1033,9 +1033,12 @@ def _log_lines_since(log_path: Path, start_offset: int) -> list[str]:
 
 
 def _reason_text(line: str) -> str:
+    """The first physical line of a reason: an engine with the RDR-167 sink writes a multi-line message (PostgreSQL's
+    ``Where:``, Liquibase's ``Reason:``) as one line with a literal ``\\x0a``; the reason is its first non-blank part."""
     from nexus.redact import redact_credentials  # noqa: PLC0415 — deferred import — failure path only
 
-    return redact_credentials(line)[:_REASON_MAX_CHARS]
+    first = next((s for s in re.split(r"\\x0[ad]", line, flags=re.I) if s.strip()), "")
+    return redact_credentials(first.strip())[:_REASON_MAX_CHARS]
 
 
 def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:

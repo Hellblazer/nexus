@@ -1231,7 +1231,7 @@ _LIQUIBASE_CHANGESET_RE = re.compile(
 #: The SQL error one-liner Liquibase's PSQLException wrapper emits, usually
 #: a few lines after the changeset marker (e.g. "Caused by: ...PSQLException:
 #: \n  ERROR: constraint ... does not exist").
-_ERROR_LINE_RE = re.compile(r"^[ \t]*(ERROR:.*)$", re.MULTILINE)
+_ERROR_LINE_RE = re.compile(r"^[ \t]*(?:(?:Caused by|Reason): [\w.$]+: )?(ERROR:.*)$", re.MULTILINE)
 #: Cap on the surfaced error one-liner so a doctor line never becomes an
 #: unbounded stack-trace dump.
 _ERROR_LINE_MAX_CHARS: int = 200
@@ -1286,7 +1286,8 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
     # the changeset id alone. The real Liquibase trace puts the
     # PSQLException within a few lines of the marker; anything farther
     # away is presumed unrelated and we degrade to the id-only form.
-    remainder = tail[last.end() : last.end() + _ERROR_SEARCH_WINDOW_CHARS]
+    # an RDR-167 sink writes a message's own line breaks as a literal \x0a; they are line breaks here
+    remainder = re.sub(r"\\x0[aAdD]", "\n", tail[last.end() : last.end() + _ERROR_SEARCH_WINDOW_CHARS])
     error_match = _ERROR_LINE_RE.search(remainder)
     if error_match:
         error_line = error_match.group(1).strip()[:_ERROR_LINE_MAX_CHARS]

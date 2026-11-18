@@ -116,8 +116,9 @@ PROGRESS_LOG_INTERVAL: float = 30.0
 #: SLF4J. Against an engine without it, a value carrying a newline followed by
 #: a whole engine-shaped line still passes every anchor. "Running Changeset:" lines are bare
 #: Liquibase UI output carrying changeset ids from the engine's own changelog
-#: files, not client text, and are not escaped; they and the lock wait only
-#: widen a wait bound and name a changeset, never decide a phase or a failure.
+#: files, not client text, and are not escaped; they and the lock wait start
+#: the MIGRATING phase (a longer wait bound) and name a changeset, and never
+#: mark a migration complete or failed.
 RE_RUNNING_CHANGESET = re.compile(r"^Running Changeset:\s*(\S+)")
 RE_PENDING = re.compile(r"^event=schema_migration_pending\b.*?\bchangesets=(\d+)")
 RE_WAITING_FOR_LOCK = re.compile(r"^(?:[A-Z]+: )?Waiting for changelog lock")
@@ -126,8 +127,8 @@ RE_WAITING_FOR_LOCK = re.compile(r"^(?:[A-Z]+: )?Waiting for changelog lock")
 #: [cid=... tenant=... session=...] - <message>`` (service logback.xml). The
 #: bracketed MDC block is optional: engines before RDR-167 Phase 1 print none,
 #: and one may still be the engine running during an upgrade. No prefix value
-#: can hold ``] - `` (cid has a grammar, tenant and session go through
-#: LogText.mdcValue, thread names are the engine's own), so the message starts
+#: can hold ``] - `` (cid has a grammar; tenant, session and, from the RDR-167
+#: sink on, the thread name go through LogText.mdcValue), so the message starts
 #: at the first ``] - `` or `` - `` after the logger.
 RE_ENGINE_LINE = re.compile(
     r"^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d{3}\s+(?P<level>[A-Z]+)\s+\[[^\]]*\] (?P<logger>\S+) "

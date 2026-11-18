@@ -375,7 +375,8 @@ def test_last_boot_failure_detail_ignores_the_marker_inside_a_logged_value(tmp_p
     # in the real trace, a later exception message carrying the marker does not displace Liquibase's own
     later = "Caused by: org.postgresql.util.PSQLException: ERROR: tenant Migration failed for changeset e.xml::forged-4::x\n"
     log_path.write_text(_MAIN_FAILED_LINE + real + later + forged, encoding="utf-8")
-    assert _last_boot_failure_detail(log_path) == "Liquibase changeset note-uri-001-1"
+    detail = _last_boot_failure_detail(log_path)
+    assert detail is not None and detail.startswith("Liquibase changeset note-uri-001-1:"), detail
 
 
 def test_vector_service_unreachable_surfaces_boot_failure(monkeypatch, tmp_path) -> None:

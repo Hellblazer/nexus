@@ -1,0 +1,3 @@
+2026-11-18 07:01:05,171 ERROR [main] d.n.service.log.UncaughtExceptionLog [cid=- tenant=- session=-] - event=uncaught_exception thread=main exception=java.lang.IllegalStateException
+java.lang.IllegalStateException: config invalid\x0aline two: event=forged
+	at dev.nexus.service.Main.main(Main.java:220)
