@@ -7,9 +7,14 @@
 """The conexus ``sequential-thinking`` MCP server: standard library only.
 
 A port of ``@modelcontextprotocol/server-sequential-thinking``'s one tool,
-``sequentialthinking``, with the same name, input schema and result JSON, so
+``sequentialthinking``, with the same name, field names and result JSON, so
 the tool name every skill and agent cites
 (``mcp__plugin_conexus_sequential-thinking__sequentialthinking``) is unchanged.
+Synced with upstream 2.2.0 (2026-11-18): its annotations and its history bound.
+Two differences are deliberate. The tool and field descriptions are reworded
+(GH #1661, see TOOL_DESCRIPTION). The protocol list stops at 2025-06-18:
+upstream also serves 2025-11-25 and the 2026-07-28 ``server/discover`` era, and
+Claude Code still connects here through ``initialize``.
 
 Why it is not the npm package any more (nexus-f9bgu): conexus/.mcp.json used to
 start it with ``npx -y``. That needs Node.js, which conexus does not otherwise
@@ -25,13 +30,15 @@ nothing to stderr: Claude Code records every stderr line of a stdio server as an
 echo would read as faults there, and so would a traceback: input that is not
 UTF-8, too deeply nested, or too long to parse gets a JSON-RPC error, and a
 client that stops reading ends the server quietly. Like the upstream server, it
-keeps the thought history in process memory for the session's life.
+keeps the step history in process memory for the session's life, bounded as
+upstream bounds it (DEFAULT_MAX_THOUGHT_HISTORY).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -59,60 +66,27 @@ SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (
 
 TOOL_NAME: str = "sequentialthinking"
 
-TOOL_DESCRIPTION: str = """A detailed tool for dynamic and reflective problem-solving through thoughts.
-This tool helps analyze problems through a flexible thinking process that can adapt and evolve.
-Each thought can build on, question, or revise previous insights as understanding deepens.
+#: The description differs from upstream's on purpose (GH #1661): the API safety classifier stops requests
+#: with ``[reasoning_extraction]``, and upstream's text frames the tool as a way to write out the model's own
+#: thinking ("reflective problem-solving through thoughts", "your current thinking step"). The tool records
+#: steps of the work instead. Like upstream 2.2.0 it carries only when and how to call the tool and stays under
+#: 1024 characters, the cap OpenAI and Azure OpenAI put on a tool description; each field is explained in its
+#: own input-schema description. The tool and field names are upstream's, so every caller still works.
+TOOL_DESCRIPTION: str = """A step log for structured multi-step work. Record one step per call: a sub-question, a finding with its evidence, a hypothesis to test, a decision, or a correction to an earlier step. The server keeps the steps and their branches and returns only counts.
 
 When to use this tool:
-- Breaking down complex problems into steps
-- Planning and design with room for revision
-- Analysis that might need course correction
-- Problems where the full scope might not be clear initially
-- Problems that require a multi-step solution
-- Tasks that need to maintain context over multiple steps
-- Situations where irrelevant information needs to be filtered out
+- Breaking a complex task into ordered steps
+- Planning and design that may need correcting
+- Tracking hypotheses and the evidence for or against each
+- Tasks whose full scope is not clear at the start
+- Keeping a sequence of decisions in order over many tool calls
 
-Key features:
-- You can adjust total_thoughts up or down as you progress
-- You can question or revise previous thoughts
-- You can add more thoughts even after reaching what seemed like the end
-- You can express uncertainty and explore alternative approaches
-- Not every thought needs to build linearly - you can branch or backtrack
-- Generates a solution hypothesis
-- Verifies the hypothesis based on the Chain of Thought steps
-- Repeats the process until satisfied
-- Provides a correct answer
-
-Parameters explained:
-- thought: Your current thinking step, which can include:
-  * Regular analytical steps
-  * Revisions of previous thoughts
-  * Questions about previous decisions
-  * Realizations about needing more analysis
-  * Changes in approach
-  * Hypothesis generation
-  * Hypothesis verification
-- nextThoughtNeeded: True if you need more thinking, even if at what seemed like the end
-- thoughtNumber: Current number in sequence (can go beyond initial total if needed)
-- totalThoughts: Current estimate of thoughts needed (can be adjusted up/down)
-- isRevision: A boolean indicating if this thought revises previous thinking
-- revisesThought: If is_revision is true, which thought number is being reconsidered
-- branchFromThought: If branching, which thought number is the branching point
-- branchId: Identifier for the current branch (if any)
-- needsMoreThoughts: If reaching end but realizing more thoughts needed
-
-You should:
-1. Start with an initial estimate of needed thoughts, but be ready to adjust
-2. Feel free to question or revise previous thoughts
-3. Don't hesitate to add more thoughts if needed, even at the "end"
-4. Express uncertainty when present
-5. Mark thoughts that revise previous thinking or branch into new paths
-6. Ignore information that is irrelevant to the current step
-7. Generate a solution hypothesis when appropriate
-8. Verify the hypothesis based on the Chain of Thought steps
-9. Repeat the process until satisfied with the solution
-10. Provide a single, ideally correct answer as the final output
-11. Only set nextThoughtNeeded to false when truly done and a satisfactory answer is reached"""
+How to use it:
+1. Estimate totalThoughts up front and adjust it as you go; thoughtNumber may exceed it
+2. Correct an earlier step (isRevision with revisesThought), or start an alternative path (branchFromThought with branchId)
+3. Record uncertainty, and leave out information irrelevant to the current step
+4. Test each hypothesis against the evidence recorded so far
+5. Set nextThoughtNeeded to false only when the task's answer is reached"""
 
 _BOOL_OR_STRING: dict[str, Any] = {"type": ["boolean", "string"]}
 _POSITIVE_INT: dict[str, Any] = {"type": "integer", "minimum": 1}
@@ -120,21 +94,24 @@ _POSITIVE_INT: dict[str, Any] = {"type": "integer", "minimum": 1}
 INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "thought": {"type": "string", "description": "Your current thinking step"},
-        "nextThoughtNeeded": {**_BOOL_OR_STRING, "description": "Whether another thought step is needed"},
+        "thought": {
+            "type": "string",
+            "description": "This step's content: a sub-question, a finding with its evidence, a hypothesis, a decision, or a correction",
+        },
+        "nextThoughtNeeded": {**_BOOL_OR_STRING, "description": "Whether another step follows"},
         "thoughtNumber": {
             **_POSITIVE_INT,
-            "description": "Current thought number (numeric value, e.g., 1, 2, 3)",
+            "description": "This step's number (numeric value, e.g., 1, 2, 3)",
         },
         "totalThoughts": {
             **_POSITIVE_INT,
-            "description": "Estimated total thoughts needed (numeric value, e.g., 5, 10)",
+            "description": "Estimated number of steps (numeric value, e.g., 5, 10)",
         },
-        "isRevision": {**_BOOL_OR_STRING, "description": "Whether this revises previous thinking"},
-        "revisesThought": {**_POSITIVE_INT, "description": "Which thought is being reconsidered"},
-        "branchFromThought": {**_POSITIVE_INT, "description": "Branching point thought number"},
+        "isRevision": {**_BOOL_OR_STRING, "description": "Whether this step corrects an earlier step"},
+        "revisesThought": {**_POSITIVE_INT, "description": "Which step this one corrects"},
+        "branchFromThought": {**_POSITIVE_INT, "description": "The step this branch starts from"},
         "branchId": {"type": "string", "description": "Branch identifier"},
-        "needsMoreThoughts": {**_BOOL_OR_STRING, "description": "If more thoughts are needed"},
+        "needsMoreThoughts": {**_BOOL_OR_STRING, "description": "Whether more steps are needed than estimated"},
     },
     "required": ["thought", "nextThoughtNeeded", "thoughtNumber", "totalThoughts"],
 }
@@ -153,14 +130,16 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 
 TOOL: dict[str, Any] = {
     "name": TOOL_NAME,
-    "title": "Sequential Thinking",
+    "title": "Sequential Step Log",
     "description": TOOL_DESCRIPTION,
     "inputSchema": INPUT_SCHEMA,
     "outputSchema": OUTPUT_SCHEMA,
+    # As upstream (#4721): every call appends to the in-memory history, and a call with both branchFromThought
+    # and branchId also appends to that branch, so the tool is neither read-only nor idempotent.
     "annotations": {
-        "readOnlyHint": True,
+        "readOnlyHint": False,
         "destructiveHint": False,
-        "idempotentHint": True,
+        "idempotentHint": False,
         "openWorldHint": False,
     },
 }
@@ -191,12 +170,26 @@ def _as_positive_int(name: str, value: Any) -> int:
     return int(number)
 
 
-class SequentialThinking:
-    """Thought history and branches for one server process (one session)."""
+#: Upstream 2.2.0's bound on the history (``MAX_THOUGHT_HISTORY``, default 1000): past it the oldest step is
+#: dropped, from its branch too, so a long session's memory stays bounded. A value that is not a positive integer
+#: falls back to the default; upstream says so on stderr, this server writes nothing there (module docstring).
+DEFAULT_MAX_THOUGHT_HISTORY: int = 1000
 
-    def __init__(self) -> None:
+
+def max_thought_history(environ: dict[str, str] | None = None) -> int:
+    # ASCII digits only and at most 15 of them, as upstream's /^\d+$/ plus its safe-integer check: str.isdigit
+    # accepts "²", which int() refuses, and a crash here would end the server at start.
+    raw = (os.environ if environ is None else environ).get("MAX_THOUGHT_HISTORY", "").strip()
+    return int(raw) if re.fullmatch(r"[0-9]{1,15}", raw) and int(raw) >= 1 else DEFAULT_MAX_THOUGHT_HISTORY
+
+
+class SequentialThinking:
+    """Step history and branches for one server process (one session)."""
+
+    def __init__(self, max_history: int | None = None) -> None:
         self.thought_history: list[dict[str, Any]] = []
         self.branches: dict[str, list[dict[str, Any]]] = {}
+        self.max_history = max_thought_history() if max_history is None else max_history
 
     def process(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Record one thought; return the upstream result object."""
@@ -230,6 +223,13 @@ class SequentialThinking:
         self.thought_history.append(data)
         if data.get("branchFromThought") and data.get("branchId"):
             self.branches.setdefault(data["branchId"], []).append(data)
+        while len(self.thought_history) > self.max_history:
+            oldest = self.thought_history.pop(0)
+            branch = self.branches.get(oldest.get("branchId", ""))
+            if branch is not None and oldest in branch:
+                branch.remove(oldest)
+                if not branch:
+                    del self.branches[oldest["branchId"]]
         return {
             "thoughtNumber": data["thoughtNumber"],
             "totalThoughts": data["totalThoughts"],

@@ -162,26 +162,6 @@ You are a substantive critic with deep expertise in deconstructing and evaluatin
    - Why it matters (concrete impact)
    - How to address it (specific recommendation)
 
-## Structured Analysis with Sequential Thinking
-
-Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` BEFORE every verdict — not only for "complex" artifacts; the qualifier is how it goes unused. The thought chain is the visible record of the critique's reasoning.
-
-**When to Use**: Multi-component designs, cross-referencing documentation, validating implementation against specification.
-
-**Pattern for Critique**:
-```
-Thought 1: State what artifact is being critiqued and its stated purpose
-Thought 2: Identify the criteria/specification it should conform to
-Thought 3: Gather evidence - cross-reference with the T3 store via the search tool (corpus="knowledge"), related artifacts
-Thought 4: Analyze first dimension (e.g., structural integrity)
-Thought 5: Analyze second dimension (e.g., logical consistency)
-Thought 6: Analyze third dimension (e.g., completeness)
-Thought 7: Synthesize findings - prioritize by impact (Critical/Significant/Minor)
-Thought 8: Formulate actionable recommendations
-```
-
-Set `needsMoreThoughts: true` to continue analysis, use `isRevision: true, revisesThought: N` to correct earlier assessment.
-
 ## Beads Integration
 
 - Check if critique is associated with a bead: `bd show <id>`

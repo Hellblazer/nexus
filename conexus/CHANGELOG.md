@@ -1,5 +1,13 @@
 # Changelog
 
+## [8.3.1] - 2026-11-18
+
+Plugin version aligned with conexus 8.3.1, a plugin-only patch off 8.3.0. These plugin changes become live at this pin.
+
+- `conexus/agents/architect-planner.md`, `code-review-expert.md`, `codebase-deep-analyzer.md`, `debugger.md`, `deep-analyst.md`, `deep-research-synthesizer.md`, `developer.md`, `strategic-planner.md`, `substantive-critic.md`, `test-validator.md`: GH #1661: the sequential-thinking sections, their numbered Thought templates, the "visible record" wording and the before-every-verdict tool mandates are removed. They asked the model to make its reasoning visible, the lead for the API classifier's `[reasoning_extraction]` stops. Each agent's method is unchanged.
+- `conexus/skills/orchestration/reference.md`, `conexus/skills/architecture/SKILL.md`, `codebase-analysis/SKILL.md`, `deep-analysis/SKILL.md`, `research-synthesis/SKILL.md`, `strategic-planning/SKILL.md`, `substantive-critique/SKILL.md`: GH #1661: the Working Rules no longer call a thought the visible record, and the skills no longer say an agent uses the sequential-thinking tool.
+- `conexus/mcp/sequential_thinking.py`: GH #1661: the tool and field descriptions describe a step log for the work instead of the model's own thinking (the server loads into every session); synced with upstream 2.2.0's annotations and its `MAX_THOUGHT_HISTORY` bound. Tool and field names are unchanged.
+
 ## [8.3.0] - 2026-11-16
 
 Plugin version aligned with conexus 8.3.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

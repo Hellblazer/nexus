@@ -38,7 +38,7 @@ explicitly for the cheap end of the table below:
 2. get_symbols_overview to map key classes in discovered files
 3. jet_brains_type_hierarchy (JetBrains only) to trace abstraction patterns
 4. find_referencing_symbols to understand cross-module usage
-5. Synthesize findings with `mcp__plugin_conexus_sequential-thinking__sequentialthinking`
+5. Synthesize findings
 6. Design architecture with clear boundaries
 ```
 
@@ -94,7 +94,7 @@ For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resourc
 
 ## Architecture Methodology
 
-The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
+The architect-planner uses `nx search --corpus code --hybrid` for discovery (30-50 results), then:
 1. Understand system architecture and integration patterns
 2. Synthesize findings into architectural approach
 3. Define component boundaries and interfaces

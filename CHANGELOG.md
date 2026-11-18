@@ -6,6 +6,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [8.3.1] - 2026-11-18
+
+Pairs with engine-service-v0.1.194 (REQUIRED_ENGINE_VERSION unchanged from 8.3.0). A plugin-only patch for GH #1661: conexus agents no longer ask the model to make its reasoning visible, and the sequential-thinking tool no longer describes itself as a way to write out the model's thinking.
+
+### Fixed
+
+- **conexus agents no longer ask the model to make its reasoning visible.** On conexus 8.3.0 the API safety classifier stopped substantive-critic runs in RDR gates, and some code-review-expert dispatches, with `[reasoning_extraction]` (GH #1661). The SubagentStart hook lost its sequential-thinking section in 8.2.2 (GH #1656), but ten agent definitions still told the model to use the sequential-thinking tool before every verdict or decision, called the thought chain "the visible record" of its reasoning, and gave a numbered Thought 1-8 template. Those sections, templates and tool mandates are removed from architect-planner, code-review-expert, codebase-deep-analyzer, debugger, deep-analyst, deep-research-synthesizer, developer, strategic-planner, substantive-critic and test-validator, the visible-record sentence from the orchestration skill's Working Rules, and the tool's name from six skills that said an agent uses it (architecture, codebase-analysis, deep-analysis, research-synthesis, strategic-planning, substantive-critique). Each agent's method (hypotheses, evidence, file:line findings, verdicts) is unchanged. The sequential-thinking MCP server itself stays.
+- **The sequential-thinking tool no longer describes itself as a way to write out the model's thinking.** The server loads into every session, so its descriptions ride on every request. They called it "dynamic and reflective problem-solving through thoughts", asked for "your current thinking step" and said it "verifies the hypothesis based on the Chain of Thought steps": the framing the API safety classifier stops with `[reasoning_extraction]` (GH #1661; upstream report anthropics/claude-code#110424). The tool and field descriptions now describe a step log: sub-questions, findings with their evidence, hypotheses, decisions and corrections. The tool name and every field name are unchanged, so existing callers work. The server is also synced with upstream 2.2.0: its annotations no longer claim the tool is read-only and idempotent (each call appends to the history), and the history is bounded by `MAX_THOUGHT_HISTORY` (default 1000), with an evicted step leaving its branch.
+
 ## [8.3.0] - 2026-11-16
 
 Pairs with engine-service-v0.1.194 (REQUIRED_ENGINE_VERSION moves from 0.1.191 to 0.1.194; the cloud already runs it). Sessions can opt in to declarative auras, starting with `ci_develop_red`, which is off by default. `nx backup restore` loads a tenant backup into an empty tenant. The engine reindexes a degraded per-collection index instead of rebuilding it on a timer, the local PostgreSQL bundle moves to pgvector 0.8.7, and lookup answers read 20 chunks instead of 6.

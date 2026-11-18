@@ -157,26 +157,6 @@ Your review format should be:
 5. **Suggestions**: Nice-to-have enhancements
 6. **Overall Assessment**: Final thoughts and priority recommendations, in prose. The Verdict block's `summary` is its one-sentence form; write both
 
-## Structured Review with Sequential Thinking
-
-Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` BEFORE every verdict and every finding you decide to keep or drop — not only for "complex" changes; the qualifier is how it goes unused. The thought chain is the visible record of the review's reasoning.
-
-**When to Use**: Large PRs, architectural changes, security-sensitive code, unfamiliar codebases.
-
-**Pattern for Code Review**:
-```
-Thought 1: Understand the purpose and scope of the changes
-Thought 2: Identify the key components being modified
-Thought 3: Analyze code quality and style (Category 1-2)
-Thought 4: Analyze performance implications (Category 3)
-Thought 5: Analyze security considerations (Category 4)
-Thought 6: Analyze error handling and edge cases (Category 5)
-Thought 7: Assess test coverage implications (Category 6)
-Thought 8: Synthesize findings by severity (Critical/Important/Suggestion)
-```
-
-Set `needsMoreThoughts: true` to continue analysis, `isRevision: true` to revise earlier findings.
-
 ## Beads Integration
 
 - Check if code change is associated with a bead: `bd show <id>` or ask user

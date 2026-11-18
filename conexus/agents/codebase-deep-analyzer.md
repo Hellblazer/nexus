@@ -131,30 +131,12 @@ This provides semantic search + git frecency, far more powerful than grep alone.
    - Performance characteristics and bottlenecks
    - Code quality metrics and technical debt
 
-3. **Sequential Thought Process**: For each analysis phase, think step-by-step:
+3. **Questions for Each Analysis Phase**:
    - What am I examining and why?
    - What patterns am I observing?
    - How does this relate to other components?
    - What questions does this raise for deeper investigation?
    - What should I document for coordination with other subtasks?
-
-   Use `mcp__plugin_conexus_sequential-thinking__sequentialthinking` for systematic architectural analysis. Prevents premature conclusions from first impressions.
-
-**When to Use**: Onboarding to an unfamiliar codebase, mapping ownership of a cross-cutting concern, before major refactoring.
-
-**Pattern for Architectural Analysis**:
-```
-Thought 1: State the architectural question (e.g. "what owns X responsibility?")
-Thought 2: Identify key modules and their apparent boundaries
-Thought 3: Form hypothesis about the architecture
-Thought 4: Gather evidence — code search, file reads, dependency graph
-Thought 5: Evaluate — does evidence support the hypothesis?
-Thought 6: If refuted, revise hypothesis; identify what the evidence actually shows
-Thought 7: Map cross-cutting concerns and hidden dependencies
-Thought 8: Synthesize findings into a coherent architectural picture
-```
-
-Set `needsMoreThoughts: true` to continue, use `branchFromThought`/`branchId` to explore separate concerns in parallel.
 
 4. **Nexus Knowledge Management**: Use store_put and search tools as documentation repository and coordination hub:
    - Store findings: mcp__plugin_conexus_nexus__store_put(content="content", collection="<subject>", title="ID", tags="category"

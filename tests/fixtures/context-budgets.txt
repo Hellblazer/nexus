@@ -6,13 +6,13 @@
 conexus/agents/architect-planner.md 21240
 conexus/agents/code-review-expert.md 26210
 conexus/agents/codebase-deep-analyzer.md 20607
-conexus/agents/debugger.md 19685
-conexus/agents/deep-analyst.md 22678
+conexus/agents/debugger.md 18432
+conexus/agents/deep-analyst.md 21279
 conexus/agents/deep-research-synthesizer.md 25284
 conexus/agents/developer.md 27350
 conexus/agents/strategic-planner.md 24998
 conexus/agents/substantive-critic.md 28563
-conexus/agents/test-validator.md 20296
+conexus/agents/test-validator.md 18988
 conexus/commands/analyze-code.md 1687
 conexus/commands/continuation.md 6126
 conexus/commands/create-plan.md 1808
