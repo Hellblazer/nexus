@@ -50,8 +50,8 @@ decision of 2026-11-16 by dialog, relayed by the coordinator):
 2. The unattended walks (Gap 3): MCP catalog search by author, and one more this
    revision found, the read that operator dispatch makes.
 3. The engine routes the remaining walks need (an author filter, a metadata
-   filter, a sensitive-document locator route), and switching walks to engine
-   routes that already exist (Gap 1).
+   filter, a sensitive-document locator route and, added by Sam on 2026-11-16, a
+   scheme read), and switching walks to engine routes that already exist (Gap 1).
 
 Moving tenant-wide data migrations into the engine (Gap 2) waits for the
 background-job mechanism of nexus-f3yqd.2 (designed in RDR-246) and is deferred
@@ -86,7 +86,9 @@ need a route that does not exist: an author filter (MCP search), a `meta` filter
 (`nx catalog list --meta` and `nx catalog gc`), and a way to list the sensitive
 documents with their file locations (operator dispatch). The tenth, the citation
 join in `link_generator._all_entries`, has no route designed here (Critical
-Assumptions).
+Assumptions). Sam's 2026-11-16 option C moved `--check-references` from the first
+group to the second: the existing prefix read is case-sensitive, so the check
+needs the by-scheme route (Engine routes, Phase 2).
 
 #### Gap 3: Unattended reads still walk the catalog
 
@@ -302,7 +304,9 @@ draft's claims point at.
   (`:3407-3412`), `documentsByOwnerContentTypes`
   (`CatalogLinksRepository.java:184-211`, which matches the URI prefix
   literally and case-sensitively, as `str.startswith` does) and
-  `distinctDocCollections` (`CatalogRepository.java:12483-12490`).
+  `distinctDocCollections` (`CatalogRepository.java:12483-12490`). The by-scheme
+  route (Engine routes) does not reuse that literal prefix read: it keeps a row
+  iff `urlparse(source_uri).scheme` equals the requested scheme lowercased.
 - **Verified (source):** `nx doctor`'s sensitive rows read `/sensitive` with a
   limit of 10,000 and fall back to a walk when the engine lacks the route,
   answers 503 or the list is capped (`sensitivity_doctor.py:69`, `:110`, `:117-142`).
@@ -334,8 +338,12 @@ draft's claims point at.
   outside this assumption. Sam decided on 2026-11-16 (ask uwggq15-scheme-case,
   option C, "Use the engine route instead") that registered schemes in any case
   stay checked, so the `--check-references` switch (nexus-uwggq.1.5) moves to
-  Phase 2 behind an engine route that matches the scheme prefix without regard
-  to case. Checked before the switch ships by
+  Phase 2 behind `GET /v1/catalog/docs/by-scheme`, which answers exactly what
+  the client keeps today: a live row whose `urlparse(source_uri).scheme` equals
+  the requested scheme lowercased. A registered scheme in any case and a row
+  with leading spaces or control characters stay checked (the route designer's
+  decision of 2026-11-18 on the leading-whitespace question, which preserves
+  today's client behaviour). Checked before the switch ships by
   running the check on one fixture before and after and diffing the reports
   — **Method**: Test
 - [x] An engine filter on `author` or on a `meta` key answers in one statement
@@ -344,10 +352,16 @@ draft's claims point at.
   one exception. Every metadata statement ran in at most 80.8 ms and the
   sensitive-locator route with its `alias_of` leg in at most 20.4 ms, so neither
   gets an index. The author statements ran in 29 to 94 ms, except a broad
-  term (about 44,000 matches) paged at offset 40,000, at 153.7 ms; by the rule
-  fixed before the run (over 100 ms ships the named index), the author route
-  ships a GIN `pg_trgm` index on `lower(author)` and measures that statement
-  again with the index in place, since its cost is a deep page in tumbler order.
+  term (about 44,000 matches) paged at offset 40,000, at 153.7 ms. The rule
+  fixed before the run was that over 100 ms ships a named index, a GIN
+  `pg_trgm` index on `lower(author)`. Measured again on 2026-11-18 on the
+  statement the route now runs (the `pg_c_utf8` fold, below), same fixture and
+  offset: 131 ms without the index and 143 ms with it (the route itself: 143 ms
+  without, 149 ms with). The index shortened only statements that were already
+  fast (a selective term, 25 ms to 4 ms), and a trigram index cannot serve a
+  needle shorter than three characters. Whether the index ships is a pending
+  decision (Sam, ask author-index-deep-offset); the engine branch
+  `feature/nexus-uwggq.2.3-author-trgm-index` holds it as one separate commit.
   I found no index on `catalog_documents.metadata` or on `author` in the
   Liquibase changelogs (only the full-text vector and the collection and
   `source_uri` columns; a comment at
@@ -384,10 +398,10 @@ Applied to this RDR's scope, in the order the work can ship:
   through an engine route instead of a walk, or instead of the walk's
   unscoped branch. A switch that removes a call lowers the table in the same
   commit.
-- **Add the routes that are missing (engine, then client).** Three new read
-  routes: an author filter, a metadata filter and a sensitive-document locator
-  route. They serve MCP search (Gap 3), operator dispatch (Gap 3) and two catalog
-  verbs (Gap 1).
+- **Add the routes that are missing (engine, then client).** Four new read
+  routes: an author filter, a metadata filter, a sensitive-document locator
+  route and a scheme read. They serve MCP search (Gap 3), operator dispatch
+  (Gap 3), two catalog verbs and the references check (Gap 1).
 - **A client never falls back to a walk.** When the engine lacks a route, the
   client reports "not checked" or an error that names the engine version that
   has it, or, for operator dispatch, takes the file tools away (the rule that
@@ -448,7 +462,7 @@ only), "P2" is Phase 2 (engine, then client):
 | `catalog/meta_backfill.py::backfill_meta` | BULK JOB | 1 | Writes meta on every document. Stays. |
 | `catalog/recovery_bundle.py::enumerate_all_documents` | BULK JOB | 1 | `nx catalog recovery export`. Stays. |
 | `catalog/sensitivity_doctor.py::_walk_sensitive` | AGGREGATE | 1 | Fallback when `/sensitive` is unavailable or capped. P1: report "not checked", no walk (the call leaves the table). |
-| `commands/catalog.py::list_cmd` | AGGREGATE | 1 | `--meta` and `--sensitive` read every document of a type. P1: `--sensitive` through `/sensitive` and `resolve_many`. P2: `--meta` through the metadata route. The call then remains only in its bounded mode, so the row becomes BOUNDED. |
+| `commands/catalog.py::list_cmd` | AGGREGATE | 1 | `--meta` and `--sensitive` read every document of a type. P1: `--sensitive` through `/sensitive` and `resolve_many`. P2: `--meta` through the metadata route, and `--sensitive` past 10,000 sensitive documents through the same route's `sensitive=true` filter. The call then remains only in its bounded mode, so the row becomes BOUNDED. |
 | `commands/catalog.py::reconcile_cmd` | BULK JOB | 1 | Heals manifest gaps for every document. Stays. |
 | `commands/catalog_cmds/backfill.py::backfill_source_uri_cmd` | AGGREGATE | 1 | Wants the `chroma://` rows. P1: `list_scoped(source_uri_prefix="chroma://")`. |
 | `commands/catalog_cmds/backfill.py::backfill_etags_cmd` | AGGREGATE | 1 | Wants the `https://` rows when no owner is given. P1: `list_scoped(source_uri_prefix="https://")`. |
@@ -462,7 +476,7 @@ only), "P2" is Phase 2 (engine, then client):
 | `commands/catalog_cmds/remediation.py::remediate_paths_cmd` | BULK JOB | 2 | Per-row path resolution. P1: the `--collection` branch uses `list_by_collection` (calls 2 to 1). |
 | `commands/catalog_cmds/sensitivity.py::_targets` | BULK JOB | 1 | `nx catalog sensitive` with no tumbler, `--collection` or `--owner`. Stays. |
 | `commands/enrich.py::_aspect_bearing_collections` | AGGREGATE | 1 | Builds a set of collection names. P1: `distinct_doc_collections()` (renamed `_catalog_collections`). |
-| `doctor_references.py::reference_only_candidates` | AGGREGATE | 1 | Wants non-`file://` rows. P2: the case-insensitive scheme-prefix route (moved from P1, option C). |
+| `doctor_references.py::reference_only_candidates` | AGGREGATE | 1 | Wants non-`file://` rows. P2: the by-scheme route, which keeps a row iff `urlparse(source_uri).scheme` equals the scheme lowercased (moved from P1, option C). |
 | `mcp/catalog.py::catalog_list` | BOUNDED | 2 | One page of `limit + 1`. Stays. |
 | `mcp/catalog.py::catalog_search` | AGGREGATE | 1 | Author alone, unattended (Gap 3). P2: the author route. |
 | `operators/sensitive_paths.py::file_tool_restriction` | AGGREGATE | 1 | Per dispatch, unattended (Gap 3). P2: the locator route. |
@@ -478,38 +492,92 @@ the real count.
 
 #### Engine routes (Phase 2)
 
-Interfaces, not implementations. Each is a new path, `GET`, tenant-scoped like
-every catalog route, and follows the shape of `CatalogBoundedReadRoutes`: a
-bounded `limit` with a `capped` flag where the answer can be long, the
-statement timeout answering 503 (the client reads 503 and 404 as "cannot say",
-never as "none"), and a flag in `GET /version` for the client to probe. Names
-are settled in the engine review; the rule that each is a new path is not.
+Each is a new path, `GET`, tenant-scoped like every catalog route, and follows
+the shape of `CatalogBoundedReadRoutes`. The sensitive-locator route answers the
+envelope of `/sensitive`, `{count, limit, capped, documents}` (limit up to
+10,000). The three paged routes (author, metadata, scheme) answer
+`{count, limit, offset, documents}`: `count` is the exact number of live matches
+whatever the page, there is no `capped` flag, and a caller pages with `offset`
+(`limit` 1 to 1,000, default 1,000, `offset` 0 or more, else 400). One statement
+carries the window count; a page past the last match has no row to carry it, so
+then a second statement counts. Rows come in the engine's text order of
+`tumbler`, the database's collation of a text column, so `5.1.12` sorts before
+`5.1.2`; it is not the integer order of a tumbler's segments, and an
+equivalence test compares in that order. Every route answers 503 with reason
+`statement_timeout` when its statement outlasts the bound (the client reads 503
+and 404 as "cannot say", never as "none"), answers 400 for a NUL byte or a
+malformed percent escape in any parameter, and has a flag in `GET /version` for
+the client to probe: `catalog_docs_by_author_supported`,
+`catalog_docs_by_meta_supported`, `catalog_sensitive_locators_supported` and
+`catalog_docs_by_scheme_supported`. Names were settled in the engine review; the
+rule that each is a new path was not.
 
 - **By author.** `GET /v1/catalog/docs/by-author?author=<text>&limit=&offset=`:
   live documents whose `author` contains the text, case-insensitively and
-  literally (`%` and `_` escaped, as `CatalogLinksRepository.likePrefix` does),
-  in tumbler order, as `{documents, count}`. Replaces the walk at
-  `mcp/catalog.py:279-281`; the tool's other filters still apply on the client
-  to a page that is complete for the author.
-- **By metadata.** `GET /v1/catalog/docs/by-meta?content_type=&meta.<key>=<value>&meta_min.<key>=<n>&meta_default.<key>=<text>&limit=&offset=`:
+  literally (`\`, `%` and `_` escaped, as `CatalogLinksRepository.likePrefix`
+  does). `author` is required and non-empty. The match is
+  `lower(author COLLATE "pg_c_utf8") LIKE '%' || lower(:text COLLATE
+  "pg_c_utf8") || '%'`: PostgreSQL 17's builtin collation with Unicode simple
+  case mapping, so it folds non-ASCII letters on the local bundle, which is
+  `initdb --no-locale` (C ctype, where a bare `lower()` folds ASCII only), and
+  does not depend on ICU. Production runs PostgreSQL 17 (`docs/agents/engine-service-release.md`). Python's `needle.lower() in author.lower()` uses
+  the full case mapping, and the two differ in two classes, found by a matrix of
+  26 needles against 19 authors run on a C-ctype cluster and on the test
+  cluster's locale: U+0130 (Python lowers it to `i` plus U+0307, the engine to
+  `i`) and a capital sigma at the end of a word (Python's final sigma, the
+  engine's medial one). That is five (needle, author) pairs, listed in
+  nexus-uwggq.2.6; the client's final filter (`_keep`) removes rows the engine
+  adds and cannot restore a row the engine leaves out. No Unicode normalization
+  on either side. Replaces the walk at `mcp/catalog.py:279-281`; the tool's other
+  filters still apply on the client to a page that is complete for the author.
+- **By metadata.** `GET /v1/catalog/docs/by-meta?content_type=&meta.<key>=<value>&meta_min.<key>=<n>&meta_default.<key>=<text>&sensitive=true&limit=&offset=`:
   live documents, optionally of one content type, whose `metadata` satisfies
   every `meta.` pair under the reading rules of `catalog/meta_filter.py`
   (text comparison, booleans as `true` and `false`, an absent key matches
-  nothing) and every `meta_min.` bound (an integer at least `n`; a value that
-  is not an integer matches nothing). A key with a stated default sends it as
-  `meta_default.<key>`, so the default table stays in `meta_filter.py` and is
-  not copied into the engine. Replaces the scans in `nx catalog list --meta`
-  and `nx catalog gc`. An equivalence test runs `documents_with_meta` and the
-  route over one fixture and requires the same documents.
+  nothing) and every `meta_min.` bound (an integer at least `n`, written as
+  `CASE WHEN text ~ '^-?[0-9]+$' THEN text::numeric >= n ELSE false END` so a
+  value that is not an integer matches nothing and never fails the read; the
+  bound and a stored text may be up to 131,072 characters, PostgreSQL numeric's
+  limit). A key with a stated default sends it as `meta_default.<key>`, so the
+  default table stays in `meta_filter.py` and is not copied into the engine.
+  `sensitive=true` (the only value; anything else is 400) keeps only live
+  sensitive documents and is itself a filter clause: at least one `meta.`,
+  `meta_min.` or `sensitive=true` parameter is required (400 otherwise), so the
+  route is never an unfiltered listing, and `sensitive=true` alone or with
+  `content_type` pages every sensitive document past the 10,000 cap of
+  `/sensitive`. Also 400: a `meta_min` that is not an integer, an empty key, a
+  `meta_default.<key>` with no `meta.<key>` beside it or repeated, and an
+  unknown parameter. Replaces the scans in `nx catalog list --meta` and
+  `nx catalog gc`. An equivalence test runs `documents_with_meta` and the route
+  over one fixture and requires the same documents.
 - **Sensitive locators.** `GET /v1/catalog/sensitive/locators?limit=N`: the
-  live sensitive documents and the live documents whose `alias_of` names one (a merged duplicate points at
-  its canonical document through `alias_of`, and its file holds the same content),
-  each as `{tumbler, source_uri, file_path, alias_of, physical_collection}`,
-  in the envelope of `/sensitive` (`{count, limit, capped, documents}`, limit
-  up to 10,000). These are the fields `_restrict` and `_locator` read
-  (`sensitive_paths.py:107-121`, `:195-200`). A capped answer is "cannot say"
-  and takes the file tools away, the existing rule for a catalog that cannot be
-  listed.
+  live sensitive documents and the live documents whose `alias_of` names one (a
+  merged duplicate points at its canonical document through `alias_of`, and its
+  file holds the same content), each as `{tumbler, source_uri, file_path,
+  alias_of, physical_collection, sensitive}`, in the envelope of `/sensitive`.
+  Empty strings come back as `""`. `sensitive` is the row's own flag (true for a
+  sensitive row; an alias row reads false unless it is itself flagged), so
+  `_restrict` consumes the rows raw: it keeps a row that is flagged or whose
+  `alias_of` names a flagged row of the same list. These are the fields
+  `_restrict` and `_locator` read (`sensitive_paths.py:107-121`, `:195-200`). A
+  capped answer is "cannot say" and takes the file tools away, the existing rule
+  for a catalog that cannot be listed.
+- **By scheme.** `GET /v1/catalog/docs/by-scheme?scheme=<s>&limit=&offset=`:
+  live documents for which CPython 3.13's `urlparse(source_uri).scheme` equals
+  `s` lowercased, which is what the client keeps today
+  (`doctor_references.is_reference_only`); so `HTTPS://x`, a row with leading
+  spaces or control characters, and a tab or CR/LF inside the scheme are all
+  kept. The statement mirrors `urllib.parse.urlsplit` (CPython 3.13.5,
+  `Lib/urllib/parse.py` lines 494, 497-498, 503-509): strip U+0001 to U+0020 from
+  the left, delete tab, CR and LF, take the text before the first colon when its
+  first character is an ASCII letter and every character is a letter, digit or
+  `+ - .`. `scheme` is required and must be such a scheme, else 400 (a literal `+`
+  in a query is a space: send `%2B`). Not mirrored: a source URI on which
+  `urlsplit` raises `ValueError` (an invalid bracketed host), where the client's
+  call raises and the route answers the scheme; a NUL cannot be stored in
+  PostgreSQL text, so none occurs. Measured on 50,000 live rows with no index
+  the statement runs in 133 to 246 ms (about 2.7 microseconds a row over the
+  tenant's live rows), over the 100 ms rule; reported, no index added (nexus-uwggq.1.5).
 
 No new table. The routes read `catalog_documents` through jOOQ (the Java SQL library the
 engine uses). An index is added only if the spike (Critical Assumptions) shows
@@ -534,7 +602,7 @@ filter as absent and the request would widen to the whole tenant; `""` means
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
-| Read routes (author, metadata, sensitive locators) | `CatalogHandler`, `CatalogBoundedReadRoutes`, `CatalogRepository`; `/sensitive` as the pattern (`CatalogBoundedReadRoutes.java:44-79`) | Extend, as new paths |
+| Read routes (author, metadata, sensitive locators, scheme) | `CatalogHandler`, `CatalogBoundedReadRoutes`, `CatalogRepository`; `/sensitive` as the pattern (`CatalogBoundedReadRoutes.java:44-79`) | Extend, as new paths |
 | Switches to existing routes | `distinct_doc_collections`, `list_scoped`, `list_by_collection`, `resolve_many`, `sensitive_documents` on `HttpCatalogClient` | Reuse unchanged |
 | Unattended guard for upgrade rungs | `upgrade_ladder/auto_guard.py`, `unattended.py` (covers `detect`, `converge`, `verify`) | Reuse unchanged; shipped |
 | Doctor census reads | `CatalogCensusRoutes`, `http_catalog_client.py:1269-1286` | Reuse unchanged; shipped |
@@ -616,7 +684,7 @@ version is the honest answer.
 
 - Positive: MCP search, operator dispatch and the catalog verbs stop growing
   with the catalog, and a new walk cannot land unnoticed.
-- Negative: three new engine routes, each with a wire-contract entry, a
+- Negative: four new engine routes, each with a wire-contract entry, a
   `/version` flag, an edge allowlist entry and an engine release; the client
   changes that use them need the engine first (the paired release
   choreography).
@@ -700,8 +768,11 @@ the table in the same commit:
   sensitive documents a `--type` or `--meta` listing, or a page past row
   10,000, refuses and names `--owner`, where the walk listed them. Sam shipped
   that regression on 2026-11-17 (ask uwggq17-sensitive-cap, option C) and Phase
-  2 closes it: the metadata route (nexus-uwggq.2.4, .2.14) and a type filter on
-  the sensitive route.
+  2 closes it in the engine: the metadata route's `sensitive=true` filter, alone,
+  with `content_type` or with a `meta.` clause, lists the sensitive documents
+  past row 10,000 with an exact count (nexus-uwggq.2.4; the client half is
+  nexus-uwggq.2.14). The route admits `sensitive=true` as a clause of its own, so
+  no type filter on `/sensitive` is needed.
 - `sensitivity_doctor._walk_sensitive` stops falling back to a walk: an
   unavailable or capped read is "not checked", with the cause. The dedicated
   `nx catalog doctor --sensitive-with-aspects` check exits "could not check"
@@ -715,30 +786,33 @@ the one call `--check-references` keeps until its switch in Phase 2).
 
 Four routes, each a repository method, a handler case, a `/version` flag and
 engine tests against real Postgres. The fourth, added by Sam's 2026-11-16
-decision (option C), lists documents whose `source_uri` starts with a scheme
-prefix matched without regard to case; `nx doctor --check-references`
-(nexus-uwggq.1.5) switches to it, and the spike covers its statement (`CatalogBoundedReadRoutes` and its tests are
-the pattern). Sized in days because of the engine release and the paired client
+decision (option C), is `GET /v1/catalog/docs/by-scheme`: it keeps a row iff
+`urlparse(source_uri).scheme` equals the requested scheme lowercased, so a
+scheme in any case and a leading-whitespace row stay checked, as they are today;
+`nx doctor --check-references` (nexus-uwggq.1.5) switches to it (`CatalogBoundedReadRoutes`
+and its tests are the pattern). Sized in days because of the engine release and the paired client
 release, not because the routes are large; the estimate is mine and unmeasured.
 
 #### Step 3: Spike and engine routes
 
 Run the 50,000-row `EXPLAIN ANALYZE` first (Critical Assumptions). Then build
-the author route, the metadata route and the locator route, with the
-equivalence test for the metadata route. Each route that a client depends on
+the author route, the metadata route, the locator route and the scheme route,
+with an equivalence test for the metadata route, the author route (non-ASCII
+names, against the `_keep` predicate) and the scheme route (against `urlparse`). Each route that a client depends on
 gets an `## Unshipped` entry in `docs/wire-contract-pending.md`, led by
 `[additive]` with its direction-safety prose (old client with new engine is
 safe: nothing calls a new path; new client with old engine is safe: the client
 probes the flag and does not call it), moved to `## Shipped` when the client
 release ships. The engine tag is Sam's to cut, and the cloud edge allowlist for
-the three flags is the conexus side's to change (engine-release pre-tag check
+the four flags is the conexus side's to change (engine-release pre-tag check
 3e), so the plan names both as handoffs, not steps.
 
 #### Step 4: Client switches
 
 After the engine release: `catalog_search` uses the author route,
 `nx catalog list --meta` and `nx catalog gc` use the metadata route,
-`file_tool_restriction` uses the locator route. Each behind its flag, each with
+`file_tool_restriction` uses the locator route, and `reference_only_candidates`
+uses the scheme route (nexus-uwggq.1.5). Each behind its flag, each with
 the absent-route outcome from Client rules, each lowering the table. A client
 test per site drives a fake engine that has the route and one that does not.
 Raise `REQUIRED_ENGINE_VERSION` in the client release that depends on them
@@ -785,6 +859,12 @@ None.
 - **Scenario**: the metadata route against `documents_with_meta` over one
   fixture (text, booleans, an absent key, `extraction_source`, an integer
   bound, a non-integer value) — **Verify**: the same documents.
+- **Scenario**: the scheme route against `urlparse(source_uri).scheme` over a
+  table of stored URIs (plain, `HTTPS://`, leading space, tab, a control
+  character, CR/LF inside the scheme, a drive path, a digit-led and a space-split
+  scheme, an empty scheme), on a C-ctype cluster and on the test cluster's
+  locale — **Verify**: the same rows as `urlparse`, a deleted row and another
+  tenant's row never listed.
 - **Scenario**: `catalog_search(author="lamport")` on a fake engine with the
   author route and on one without — **Verify**: the first returns
   `tests/test_3bafq_catalog_search_at_scale.py:83-90`'s answers with no
@@ -841,7 +921,7 @@ The scope is the narrowed one Sam took on 2026-11-16: the ratchet (Gap 4),
 the unattended walks (Gap 3), and the routes and switches for Gap 1. Every
 in-scope gap has a phase: Gap 4 is Phase 1's first step, the Gap 1
 switches to existing routes are Phase 1, and Gap 3's two walks and the new
-author, metadata, sensitive-locator and scheme-prefix routes are Phase 2. Gap 2 (tenant-wide jobs) is
+author, metadata, sensitive-locator and scheme routes are Phase 2. Gap 2 (tenant-wide jobs) is
 deferred with the trigger "nexus-f3yqd.2's job mechanism is built" and is not
 a gate item. The operator-dispatch walk was found during the revision and is
 inside Gap 3's definition (an unattended path that reaches a walk), so it is
@@ -865,7 +945,7 @@ in scope.
 
 Phase 1 is client-only, about hours: a ratchet test over a checked table and
 switches of existing walks to routes the engine already serves. Phase 2 is
-three additive engine routes, a spike, and one engine release, about days,
+four additive engine routes, a spike, and one engine release, about days,
 and each client switch is gated on the route's `/version` flag. The design
 adds no new storage and no new service. The size matches the problem: the
 walks grew by four files in three days after the census, and nothing stops
@@ -913,4 +993,5 @@ the next one without the ratchet.
 - 2026-11-17: The sensitive-document doctor rows (nexus-uwggq.1.8) read "not checked" with a reason that names the cause the engine's list reported and a next step; `nx catalog doctor --sensitive-with-aspects` exits 3 ("could not check") when its row reads "not checked", and `nx doctor` keeps the rows non-gating (standing grant 3).
 - 2026-11-17: Client rules and Phase 1 Step 2 record that scoped client reads and writes refuse a blank or whitespace value (nexus-uwggq.1.9, after nexus-uwggq.1.6). The engine-side 400 and the `descendants` LIKE escape are not yet planned in this RDR; they are recorded in the nexus-uwggq.1.9 notes.
 - 2026-11-17: Phase 1's expected count reads 22 calls in 21 sites, the live walk-site scan on e0d833c58, because the `--check-references` switch (nexus-uwggq.1.5) moved to Phase 2; Phase 2's 18 is unchanged. The site table row, the count forecast, Phase 1 Step 2, the Test Plan scenario and the Finalization Gate text say the same (standing grant 3).
-- 2026-11-18: The author-and-meta critical assumption is verified by the Phase 2 spike (nexus-uwggq.2.1): no index for the metadata or sensitive-locator routes; the author route ships the named GIN `pg_trgm` index on `lower(author)` (one deep-offset statement at 153.7 ms) and measures it again with the index in place (grant 3, linda).
+- 2026-11-18: The author-and-meta critical assumption is verified by the Phase 2 spike (nexus-uwggq.2.1): no index for the metadata or sensitive-locator routes; one author statement (a broad term at offset 40,000) ran at 153.7 ms, over the 100 ms rule, and the decision on a GIN `pg_trgm` index on `lower(author)` is pending (see the next entry) (grant 3, linda).
+- 2026-11-18: Amendment matching the reviewed engine routes `2d33588d9` and their gate (grant 3, linda; code review and critique rounds r1 and r2, T2 `nexus/review-7dfe8e09d-nexus-uwggq.2-2026-11-18-r1`, `nexus/critique-7dfe8e09d-nexus-uwggq.2.3-2026-11-18-r1` and their r2 confirmations): four routes, the fourth being by-scheme, which keeps a row iff `urlparse(source_uri).scheme` equals the requested scheme lowercased (leading-whitespace rows kept); the three paged routes answer `{count, limit, offset, documents}` with the exact count and no `capped` flag; rows come in the engine's text order of `tumbler`; the author match folds with PostgreSQL 17's `pg_c_utf8` simple case mapping and differs from `str.lower()` in two classes (U+0130 and a word-final capital sigma); by-meta takes `sensitive=true` as a clause of its own, which closes the sensitive-cap regression of 2026-11-17 in the engine (no type filter on `/sensitive` is needed), and a `meta_min` bound up to 131,072 characters; locator rows carry `sensitive`; a NUL byte or malformed percent escape is a 400; the author-index assumption records only the measured facts (153.7 ms; 131 ms without and 143 ms with the index on the collated statement) with the decision pending (Sam, ask author-index-deep-offset); the Phase 2 intro, Step 3, Step 4, scope and proportionality lines name four routes and four flags.
