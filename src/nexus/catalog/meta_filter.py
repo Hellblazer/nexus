@@ -18,6 +18,7 @@ Reading rules, so the filter says what the catalog says and no more:
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -57,6 +58,35 @@ def meta_matches(meta: Any, filters: Sequence[tuple[str, str]]) -> bool:
         if have != wanted:
             return False
     return True
+
+
+_INTEGER_TEXT = re.compile(r"-?[0-9]+")
+
+
+def meta_at_least(meta: Any, key: str, n: int) -> bool:
+    """Whether ``meta[key]`` is an integer that is at least *n*: the one integer lower-bound rule
+    (nexus-uwggq.2.2; ``nx catalog gc`` uses it for ``miss_count >= 2``).
+
+    - The value is read as text, as :func:`meta_matches` reads it (a boolean is ``true`` / ``false``, anything
+      else ``str()``).
+    - An absent key, or one whose value is ``None``, matches nothing. The :data:`ABSENT_MEANS` defaults do
+      NOT apply to a bound, unlike :func:`meta_matches`. A *meta* that is not a mapping matches nothing.
+    - The text must fully match ``^-?[0-9]+$``: no spaces, no plus sign, no decimal point, no exponent.
+      Anything else matches nothing. So the int ``3`` and the string ``"3"`` are integers; the floats
+      ``3.0`` and ``2.9``, the strings ``"2.9"``, ``"abc"``, ``""``, ``" 3"``, ``"+3"``, and ``True`` are not.
+    - An integer matches when its value is at least *n*.
+
+    The same rule in SQL: ``metadata->>key ~ '^-?[0-9]+$' AND (metadata->>key)::numeric >= n``. One known
+    difference: Python writes a float of 1e16 or more as ``"1e+16"``, which is not an integer here, while
+    jsonb text holds it as a plain integer, so the engine may include a row this function excludes. That is
+    a widening, and the client's final filter removes the row.
+    """
+    meta = meta if isinstance(meta, Mapping) else {}
+    value = meta.get(key)
+    if value is None:
+        return False
+    text = _text(value)
+    return _INTEGER_TEXT.fullmatch(text) is not None and int(text) >= n
 
 
 def documents_with_meta(entries: Iterable[Any], filters: Sequence[tuple[str, str]]) -> list[Any]:
