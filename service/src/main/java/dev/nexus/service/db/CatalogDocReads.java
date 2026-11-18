@@ -21,7 +21,8 @@ import java.util.Map;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 
 /**
- * nexus-uwggq.2.4 (RDR-241 Phase 2): the paged document read behind {@code GET /v1/catalog/docs/by-meta}, split out of {@link CatalogRepository} (at its file-size cap). Each answers
+ * nexus-uwggq.2.3 and .4 (RDR-241 Phase 2): the paged document reads behind {@code GET /v1/catalog/docs/by-author}
+ * and {@code GET /v1/catalog/docs/by-meta}, split out of {@link CatalogRepository} (at its file-size cap). Each answers
  * the tenant's live documents that satisfy a filter, in tumbler order, one page at a time, with the EXACT number of
  * live matches whatever the page.
  *
@@ -32,6 +33,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
  * under the section-label count's {@code statement_timeout} ({@link CatalogRepository#FILLABLE_COUNT_TIMEOUT_MS}, same
  * test hook): a timeout is a {@code DataAccessException} holding SQLSTATE {@link CatalogRepository#QUERY_CANCELED}.
  * Rows are the {@code /list} document maps ({@link CatalogRepository#documentFields()}), metadata included.
+ *
+ * <p><b>Author</b> ({@link #authorWhere}): {@code lower(author) LIKE '%' || lower(:text) || '%' ESCAPE '\'}, which is
+ * Python's {@code needle.lower() in author.lower()} under the database's lowercase: no normalization on either side,
+ * and {@code \}, {@code %} and {@code _} in the text are literal.
  *
  * <p><b>Metadata</b> ({@link #metaWhere}): the reading rules of {@code catalog/meta_filter.py}, the client's oracle.
  */
@@ -79,6 +84,17 @@ public final class CatalogDocReads {
         return CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
     }
 
+    /** The contains-pattern for {@code text}: backslash, {@code %} and {@code _} escaped, wrapped in {@code %}. */
+    static String containsPattern(String text) {
+        return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
+    }
+
+    /** Live documents of the tenant whose author contains {@code text}, case-insensitively and literally. Public for plan tests. */
+    public static Condition authorWhere(String tenant, String text) {
+        return liveOfTenant(tenant).and(DSL.lower(CATALOG_DOCUMENTS.AUTHOR)
+            .like(DSL.lower(DSL.val(containsPattern(text))), '\\'));
+    }
+
     /** {@code metadata->>key}, the key bound (user input). NULL for an absent key and for a JSON null; a boolean reads true or false. */
     private static Field<String> metaText(String key) {
         return DSL.jsonbGetAttributeAsText(CATALOG_DOCUMENTS.METADATA, key);
@@ -124,6 +140,12 @@ public final class CatalogDocReads {
             .orderBy(CATALOG_DOCUMENTS.TUMBLER).limit(limit).offset(offset);
     }
 
+    /** The page without the window total: the document fields in tumbler order. Public so a measurement can compare the two forms. */
+    public static ResultQuery<Record> pageRowsQuery(DSLContext ctx, Condition where, int limit, int offset) {
+        return ctx.select(CatalogRepository.documentFields()).from(CATALOG_DOCUMENTS).where(where)
+            .orderBy(CATALOG_DOCUMENTS.TUMBLER).limit(limit).offset(offset);
+    }
+
     /** The count statement for the same predicate. */
     public static ResultQuery<Record1<Integer>> countQuery(DSLContext ctx, Condition where) {
         return ctx.select(DSL.count()).from(CATALOG_DOCUMENTS).where(where);
@@ -150,7 +172,17 @@ public final class CatalogDocReads {
         });
     }
 
-    /** The by-meta page; {@code limit} is 1 to {@link #MAX_LIMIT}, {@code offset} 0 or more. */
+    /**
+     * @param author non-empty text
+     * @param limit  1 to {@link #MAX_LIMIT}
+     * @param offset 0 or more
+     */
+    public Page byAuthor(String tenant, String author, int limit, int offset) {
+        if (author == null || author.isEmpty()) throw new IllegalArgumentException("author must be non-empty");
+        return page(tenant, authorWhere(tenant, author), limit, offset);
+    }
+
+    /** The by-meta page; see {@link #byAuthor} for the bounds. */
     public Page byMeta(String tenant, MetaFilter filter, int limit, int offset) {
         return page(tenant, metaWhere(tenant, filter), limit, offset);
     }

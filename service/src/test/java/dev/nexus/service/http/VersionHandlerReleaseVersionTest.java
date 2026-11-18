@@ -315,6 +315,13 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheRdr241Route_CatalogDocsByAuthorCapabilityField_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogDocsByAuthorCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_docs_by_author_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheRdr241Route_CatalogDocsByMetaCapabilityField_AsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogDocsByMetaCapabilityField(body);

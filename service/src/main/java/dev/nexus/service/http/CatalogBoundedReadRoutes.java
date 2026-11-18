@@ -31,10 +31,11 @@ import java.util.regex.Pattern;
  * engine before the route and one that gets a 503 is on an engine that could not answer in time; both must read
  * "cannot say", never "none".
  *
- * <p>RDR-241 Phase 2 adds {@code GET /v1/catalog/sensitive/locators} (nexus-uwggq.2.5, the {@code /sensitive} envelope) and
- * {@code GET /v1/catalog/docs/by-meta} (nexus-uwggq.2.4, paged: {@code {count, limit, offset, documents}} with the exact count
- * and no {@code capped}), each a new path so an old engine answers 404; their {@code /version} flags are
- * {@code catalog_sensitive_locators_supported} and {@code catalog_docs_by_meta_supported}.
+ * <p>RDR-241 Phase 2 adds three more (nexus-uwggq.2.3 to .5), each a new path so an old engine answers 404:
+ * {@code GET /v1/catalog/docs/by-author}, {@code GET /v1/catalog/docs/by-meta} (both paged, {@code {count, limit, offset,
+ * documents}} with the exact count and no {@code capped}) and {@code GET /v1/catalog/sensitive/locators} (the
+ * {@code /sensitive} envelope). Their {@code /version} flags are {@code catalog_docs_by_author_supported},
+ * {@code catalog_docs_by_meta_supported} and {@code catalog_sensitive_locators_supported}.
  */
 final class CatalogBoundedReadRoutes {
 
@@ -222,6 +223,36 @@ final class CatalogBoundedReadRoutes {
         body.put("capped", page.capped());
         body.put("documents", docs);
         send(exchange, 200, body);
+    }
+
+    /**
+     * GET /v1/catalog/docs/by-author?author=TEXT&limit=N&offset=M (nexus-uwggq.2.3): {@code {count, limit, offset,
+     * documents}}. {@code author} is required and non-empty, {@code limit} 1 to 1,000 (default 1,000), {@code offset}
+     * 0 or more; anything else is a 400. The rows are the live documents whose author contains the text,
+     * case-insensitively ({@link CatalogDocReads} has the rule), in tumbler order; {@code count} is the exact number of
+     * live matches, independent of the page, and there is no {@code capped}: a caller pages with {@code offset}.
+     */
+    void byAuthor(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String author = queryParam(exchange, "author");
+        if (author == null || author.isEmpty()) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"author is required and must not be empty\"}");
+            return;
+        }
+        Integer limit = limitParam(exchange, CatalogDocReads.DEFAULT_LIMIT, CatalogDocReads.MAX_LIMIT);
+        if (limit == null) return;
+        Integer offset = offsetParam(exchange);
+        if (offset == null) return;
+        CatalogDocReads.Page page;
+        try {
+            page = docReads.byAuthor(tenant, author, limit, offset);
+        } catch (RuntimeException e) {
+            if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            log.warn("event=catalog_docs_by_author_timeout tenant={} limit={} offset={}", tenant, limit, offset);
+            timeout(exchange, "author read exceeded its time bound");
+            return;
+        }
+        sendPage(exchange, page);
     }
 
     private static final Pattern BOUND_TEXT = Pattern.compile("-?[0-9]{1," + CatalogDocReads.MAX_BOUND_DIGITS + "}");

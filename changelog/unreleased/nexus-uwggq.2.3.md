@@ -1,0 +1,3 @@
+### Added
+
+- **Engine: `GET /v1/catalog/docs/by-author` reads documents by author (RDR-241 Phase 2).** `?author=<text>&limit=&offset=` answers `{count, limit, offset, documents}`: the live documents whose author contains the text, case-insensitively, in tumbler order, a page of at most `limit` (1 to 1,000, default 1,000) at `offset`, with `count` the exact number of matches whatever the page. `author` is required and non-empty; `%`, `_` and `\` in it are literal; the match is `lower(author) LIKE '%' || lower(text) || '%'` under the database's lowercase, with no Unicode normalization on either side. A read that outlasts its statement bound answers 503 with `reason: statement_timeout`. `GET /version` gains `catalog_docs_by_author_supported: true`. No client calls it yet.
