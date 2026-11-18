@@ -5,6 +5,7 @@
 Plugin version aligned with conexus 8.4.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).
 
 - `conexus/hooks/scripts/stop_wake_guard.py`: nexus-x4jok: a CI-wait block steers to `nx ci wait --branch` for a release or PR branch.
+- `conexus/skills/orchestration/SKILL.md`, `conexus/skills/orchestration/reference.md`: nexus-cn11i (GH #1661, the session half): the Working Rules no longer mandate the sequential-thinking tool; it is a step log any session may use, briefs never demand a count of reasoning steps, and the rule says why no mandate comes back.
 - `conexus/skills/upgrade/SKILL.md`: nexus-6pfgb.43: the `retire-keys-sweep` rung: what it does at `nx upgrade`, that it defers on engine conditions, and that an accept goes to the user with the dry-run counts and what each accept destroys.
 
 ## [8.3.1] - 2026-11-18
