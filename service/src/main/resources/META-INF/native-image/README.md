@@ -66,3 +66,22 @@ descriptor's `name`.
   (2026-07-10): JVM tests structurally cannot see this failure class, and
   `ci.yml`'s `-Ob` build trip-wire only proves the BUILD succeeds, not
   runtime reflection during boot.
+
+- **`liquibase.change.AbstractSQLChange`, `RawSQLChange`, `SQLFileChange`, `CreateProcedureChange`
+  and `liquibase.precondition.core.DBMSPrecondition`** (hand-added, nexus-f3yqd.2.22)
+  The vendored `ddl_utils` and `dml_utils` libraries (246 `<sqlFile>`, 180 `<createProcedure>`,
+  one `<dbms>` precondition) reach Liquibase by reflection in ways no trace saw, and the native
+  engine failed their apply with `MissingReflectionRegistrationError ... SQLFileChange.setPath`
+  (engine-service-release run 44269122187). The traced metadata held these classes with
+  `<init>` only. Liquibase reaches BOTH sides of every change parameter: the setter at parse
+  time (`AbstractChange.load`), and the getter at apply time (`MarkChangeSetRanGenerator` calls
+  `getDescription()`, which reads each `*name` and `path` parameter, and
+  `CreateProcedureChange.generateCheckSum` falls back to a serialiser that reads every
+  parameter). The entries use `allDeclaredMethods` plus `allPublicMethods` rather than a
+  hand-kept list, so a Liquibase upgrade that adds a parameter stays covered. They live here and
+  not in the traced file because a re-trace drops hand edits to that file.
+  `service/src/test/java/dev/nexus/service/nativeimage/LiquibaseReflectionRegistrationTest.java`
+  loads every changelog the engine applies, asks Liquibase's own `ChangeMetaData` for each
+  parameter's read and write method, and fails on any not registered here or in the traced
+  file; `tests/test_native_liquibase_changelog_reflection.py` is the cheap XML-text cross-check
+  of the setters, and fails on a changelog element it cannot map.
