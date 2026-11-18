@@ -61,7 +61,7 @@ jobs:
     env:
       NX_JOOQ_CACHE: "off"
     outputs:
-      sha: ${{ steps.sha.outputs.sha }}
+      revision: ${{ steps.revision.outputs.revision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -70,9 +70,12 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}
           persist-credentials: false
 
-      - name: Resolve the one sha both jobs test
-        id: sha
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Resolve the one revision both jobs test
+        # Named revision, not sha: CodeQL's cache-poisoning query reads a checkout ref whose output or step is
+        # named like head, sha or commit as an untrusted pull-request head (code scanning alert 61). This is the
+        # commit of the ref checked out above, develop or the dispatching branch, which the query trusts.
+        id: revision
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up GraalVM 25.0.3
         uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
@@ -124,7 +127,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
-          ref: ${{ needs.service-jar.outputs.sha }}
+          ref: ${{ needs.service-jar.outputs.revision }}
           persist-credentials: false
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
