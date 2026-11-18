@@ -1094,18 +1094,9 @@ def _start_t1_handoff_watch_task() -> None:
 
     global _T1_HANDOFF_WATCH_TASK
     _T1_HANDOFF_WATCH_TASK = asyncio.create_task(_t1_handoff_watch_loop())
-    _start_identity_lease()
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: server start cost (RDR-253 Step 3)
 
-
-def _start_identity_lease() -> None:
-    """RDR-253 Step 3: start this server's identity lease (token read, renewal, refresh, fork row, pending bind) on
-    its own thread. All of it lives in :mod:`nexus.mcp.identity_lease`; a failure there never costs the server."""
-    try:
-        from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: server start cost
-
-        identity_lease.start()
-    except Exception as exc:  # noqa: BLE001 — identity is additive; the server must start without it
-        _log.warning("identity_lease_start_failed", error=str(exc))
+    identity_lease.start_safely()
 
 
 async def _cancel_t1_handoff_watch_task() -> None:
@@ -1468,17 +1459,9 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # later to compare-then-delete its lease rather than blindly unlink
     # it -- see `clear_t1_session_lease_if_matches`'s docstring.
     old_session_token = _os.environ.get("NX_T1_SESSION", "").strip() or None
-    if marker.identity is not None:
-        # RDR-253 Step 3: the hook bound an identity (a /resume switch, a /clear): follow it. Independent of the
-        # session id below, which may be unchanged.
-        try:
-            import asyncio  # noqa: PLC0415 — stdlib; the file read of the marker's token file stays off the event loop
-            from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: rare/branch-local path
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: rare/branch-local path (RDR-253 Step 3)
 
-            await asyncio.to_thread(identity_lease.adopt_marker, identity=marker.identity,
-                                    generation=marker.generation, token_file=marker.token_file)
-        except Exception as exc:  # noqa: BLE001 — the heartbeat's re-read covers a marker that could not be followed
-            log.warning("identity_marker_adopt_failed", error=str(exc))
+    await identity_lease.follow_marker(marker, log)
     if old_session_id == new_session_id:
         # Nothing to do (e.g. a re-tick that raced the previous one's own
         # consume, or a resume that lands back on the id already active).
@@ -2813,7 +2796,9 @@ def _start_session_name_release() -> threading.Thread | None:
     (resource exhaustion): the caller's exit goes on and the rows lapse
     by TTL."""
     global _NAME_RELEASE_THREAD, _NAME_RELEASE_DEADLINE
-    _start_identity_shutdown()
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
+
+    identity_lease.start_shutdown()
     running = _NAME_RELEASE_THREAD
     if running is not None and running.is_alive():
         return running
@@ -2830,43 +2815,11 @@ def _start_session_name_release() -> threading.Thread | None:
     return thread
 
 
-#: RDR-253 Step 3: the identity shutdown (an ``end`` after the Claude process has exited, the token file's delete) has
-#: its own thread and its own budget: it waits up to 1.5 s for Claude to exit before it decides, which the name release's
-#: shared 3 s deadline cannot also hold.
-_IDENTITY_SHUTDOWN_BUDGET_S: float = 5.0
-_IDENTITY_SHUTDOWN_THREAD: threading.Thread | None = None
-_IDENTITY_SHUTDOWN_DEADLINE: float = 0.0
-
-
-def _shutdown_identity_now() -> None:
-    try:
-        from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path
-
-        identity_lease.shutdown()
-    except Exception as e:  # noqa: BLE001 — best-effort on exit; the binding lapses by lease, as a crash's does
-        _log.warning("identity_shutdown_on_exit_failed", error=str(e))
-
-
-def _start_identity_shutdown() -> None:
-    global _IDENTITY_SHUTDOWN_THREAD, _IDENTITY_SHUTDOWN_DEADLINE
-    running = _IDENTITY_SHUTDOWN_THREAD
-    if running is not None and running.is_alive():
-        return
-    thread = threading.Thread(target=_shutdown_identity_now, name="nx-mcp-identity-shutdown", daemon=True)
-    try:
-        thread.start()
-    except Exception as e:  # noqa: BLE001 — never block the exit
-        _log.warning("identity_shutdown_on_exit_not_started", error=str(e))
-        return
-    _IDENTITY_SHUTDOWN_DEADLINE = time.monotonic() + _IDENTITY_SHUTDOWN_BUDGET_S
-    _IDENTITY_SHUTDOWN_THREAD = thread
-
-
 def _await_session_name_release(thread: threading.Thread | None) -> None:
     """Wait for *thread* until the release's shared deadline, then give up; and for the identity shutdown until its own."""
-    identity = _IDENTITY_SHUTDOWN_THREAD
-    if identity is not None:
-        identity.join(max(0.0, _IDENTITY_SHUTDOWN_DEADLINE - time.monotonic()))
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
+
+    identity_lease.await_shutdown()
     if thread is None:
         return
     thread.join(max(0.0, _NAME_RELEASE_DEADLINE - time.monotonic()))
