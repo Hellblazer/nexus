@@ -629,6 +629,18 @@ def test_link_audit(cat, monkeypatch) -> None:
     )
     assert result["by_type"]["cites"] == 1
     assert result["orphaned_count"] == len(result["orphaned"])
+    assert result["stale_dchash"] == [] and result["stale_dchash_count"] == 0
+
+
+def test_link_audit_docstring_names_the_stale_dchash_keys() -> None:
+    doc = catalog_link_audit.__doc__ or ""
+    for name in ("stale_dchash", "stale_dchash_count"):
+        assert name in doc
+    for status in ("malformed", "missing", "unreadable", "changed", "out_of_range"):
+        assert status in doc
+    for gone in ("stale_spans", "stale_chash"):
+        assert gone not in doc
+    assert "machine" in doc
 
 
 @pytest.mark.parametrize("resolve_kw", [dict(tumbler="1.1.1"), dict(owner="1.1")])

@@ -2930,8 +2930,10 @@ class TestLinkAuditIsNoLongerAStub:
         for key in (
             "total", "by_type", "by_creator",
             "duplicate_count", "duplicates", "orphaned_count", "orphaned",
+            "stale_dchash", "stale_dchash_count",
         ):
             assert key in audit, f"CLI/MCP consumers read {key!r}; it must be present"
+        assert audit["stale_dchash_count"] == len(audit["stale_dchash"])
         assert audit["total"] >= 1
         assert audit["by_type"].get("cites", 0) >= 1
 

@@ -113,7 +113,11 @@ Duplicate links are merged — the second creator is recorded in `co_discovered_
 Links can point to specific passages:
 
 ```bash
-# Content-addressed span (preferred — survives re-indexing):
+# Document-offset span (preferred — survives re-chunking of unchanged text):
+nx catalog link "Paper A" "Paper B" --type quotes \
+  --from-span "$(nx catalog span "Paper A" --passage 'the quoted words')"
+
+# Content-addressed chunk span (does not survive re-chunking):
 nx catalog link "Paper A" "Paper B" --type quotes \
   --from-span "chash:a1b2c3d4e5f6...64hexchars"
 
@@ -125,10 +129,11 @@ Span formats:
 
 - `42-57` — line range (positional)
 - `3:100-250` — chunk 3, characters 100-250 (positional)
-- `chash:<sha256hex>` — content-addressed chunk identity (64-char SHA-256 hex, preferred)
+- `chash:<sha256hex>` — content-addressed chunk identity (64-char SHA-256 hex)
 - `chash:<sha256hex>:<start>-<end>` — character range within a content-addressed chunk
+- `dchash:<sha256hex>:<start>-<end>` — character offsets in the document's canonical text, hashed as a whole (preferred; make one with `nx catalog span`)
 
-Content-hash spans (`chash:`) survive re-indexing when chunk boundaries are unchanged. Position-based spans may become stale after re-indexing — `nx catalog link-audit` detects this. `nx catalog show` resolves span text inline when available.
+A `dchash:` span survives re-chunking of unchanged text, because it names offsets in the document and not a chunk. A `chash:` span does not: re-chunking changes the chunk's text and so its hash. Position-based spans may become stale after re-indexing. `nx catalog link-audit` reports `dchash:` spans that no longer resolve. `nx catalog show` resolves span text inline when available.
 
 ## How it gets populated
 
@@ -312,24 +317,27 @@ From then on, every `store_put` auto-assigns the new document to its nearest top
 
 ## Span lifecycle and staleness
 
-Spans identify specific passages within documents. The three formats have different durability characteristics:
+Spans identify specific passages within documents. The formats have different durability characteristics:
 
-| Format | Survives re-indexing? | When to use |
+| Format | Survives re-chunking? | When to use |
 |--------|----------------------|-------------|
-| `42-57` (line range) | No — line numbers shift if file content changes | Quick references to source files you control |
-| `3:100-250` (chunk:char) | No — chunk boundaries shift on re-indexing | Rare; prefer chash: instead |
-| `chash:<sha256hex>` | Yes, if chunk text is unchanged | Preferred for all durable references |
-| `chash:<sha256hex>:<start>-<end>` | Yes, if chunk text is unchanged | Character range within a content-addressed chunk |
+| `42-57` (line range) | Yes, but line-grained and unstamped: it points at the wrong text if the file changes | Quick references to source files you control |
+| `3:100-250` (chunk:char) | No — chunk boundaries shift on re-indexing | Rare; prefer `dchash:` instead |
+| `chash:<sha256hex>` | No — re-chunking changes the chunk's text, and so its hash | A whole chunk, while its text is unchanged |
+| `chash:<sha256hex>:<start>-<end>` | No — same reason | Character range within a content-addressed chunk |
+| `dchash:<sha256hex>:<start>-<end>` | Yes, for unchanged text | Preferred for durable passage references |
 
-**What happens when spans go stale:** If you re-index a document, positional spans (`42-57`, `3:100-250`) may point to the wrong text. Content-hash spans (`chash:`) continue to resolve correctly as long as the chunk text hasn't changed.
+**What happens when spans go stale:** If you re-index a document, positional spans (`42-57`, `3:100-250`) may point to the wrong text, and a `chash:` span stops resolving once re-chunking changes its chunk. A `dchash:` span keeps resolving while the document's text is unchanged, and stops (status `changed`) when the text is edited.
 
 **Detecting stale spans:** Run `nx catalog link-audit` (the `catalog_link_audit` operation is CLI-only since RDR-062 — demoted from the MCP surface). The audit reports:
-- `stale_spans` — positional spans on documents that were re-indexed after the link was created
-- `stale_chash` — content-hash spans that no longer resolve to any chunk in T3 (chunk was deleted or text changed)
+- `stale_dchash` — one row per `dchash:` span that no longer resolves, with `from_tumbler`, `to_tumbler`, `link_type`, `side` (`from` or `to`), `span` and `status`
+- `stale_dchash_count` — the number of rows
 
-Each `stale_chash` entry includes a `reason` field: `missing` (chunk deleted), `document_deleted`, or `error` (infrastructure issue).
+The `status` is one of `malformed` (the span does not parse), `missing` (the document is gone), `unreadable` (no source file, or it cannot be read or is not UTF-8), `changed` (the source text differs from the one the span was minted on) or `out_of_range` (the span reaches past the end of the text). Both keys are always present, `[]` and `0` when no link carries a `dchash:` span. Positional and `chash:` staleness is no longer reported.
 
-**Recommendation:** Use `chash:` spans for any link you expect to survive re-indexing. For existing positional spans, they continue to work — `link-audit` will flag them if the underlying document changes.
+The report reads each document's source file by path, so it describes the machine it runs on: run it where the source files are. An engine error fails the audit instead of listing spans as stale.
+
+**Recommendation:** Use `dchash:` spans for any link you expect to survive re-chunking (`nx catalog span` makes one). Existing positional and `chash:` spans keep working; `link-audit` does not check them.
 
 ## How it's stored
 
@@ -586,4 +594,4 @@ After upgrading to RDR-060, run `--fix-paths` once to migrate existing absolute 
 
 **Links point to deleted documents:** Run `nx catalog link-audit` to find orphans. Decide whether to keep them (historical record) or delete with `link-bulk-delete`.
 
-**Spans show wrong text after re-indexing:** Positional spans (`42-57`) become stale when file content changes. Run `link-audit` to identify stale spans. Prefer `chash:` spans for durable references.
+**Spans show wrong text after re-indexing:** Positional spans (`42-57`) become stale when file content changes. Run `link-audit` to identify stale `dchash:` spans. Prefer `dchash:` spans for durable references (`nx catalog span` makes one).

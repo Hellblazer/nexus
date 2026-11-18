@@ -1122,7 +1122,15 @@ nx catalog link-audit [--json]
 Hidden from `--help` but fully functional. Reports link graph stats: total
 count, orphaned links (endpoint no longer resolves), duplicates, a
 by-type and by-creator breakdown, and the list of orphaned links
-themselves. `--json` emits the same fields as a machine-readable object.
+themselves. It also prints a `Stale dchash:` count and, when it is above zero,
+a `Stale dchash spans:` list with one line per span that no longer resolves:
+`<from> → <to> (<type>) <side>: <status>`, the status being `malformed`,
+`missing`, `unreadable`, `changed` or `out_of_range`. The stale dchash check
+reads each document's source file, so it describes the machine it runs on, and
+an engine error fails the command. `--json` emits the same fields as a
+machine-readable object, with `stale_dchash` (rows of `from_tumbler`,
+`to_tumbler`, `link_type`, `side`, `span`, `status`) and `stale_dchash_count`
+always present.
 
 ### nx catalog link-bulk-delete (hidden)
 

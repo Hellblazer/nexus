@@ -324,7 +324,7 @@ def link_bulk_delete_cmd(
 @click.command("link-audit", hidden=True)
 @click.option("--json", "as_json", is_flag=True)
 def link_audit_cmd(as_json: bool) -> None:
-    """Audit the link graph: stats, orphans, duplicates."""
+    """Audit the link graph: stats, orphans, duplicates, stale dchash spans."""
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
@@ -335,6 +335,7 @@ def link_audit_cmd(as_json: bool) -> None:
         click.echo(f"Total links:     {result['total']}")
         click.echo(f"Orphaned:        {result['orphaned_count']}")
         click.echo(f"Duplicates:      {result['duplicate_count']}")
+        click.echo(f"Stale dchash:    {result['stale_dchash_count']}")
         if result["by_type"]:
             click.echo("By type:")
             for t, c in sorted(result["by_type"].items()):
@@ -347,6 +348,13 @@ def link_audit_cmd(as_json: bool) -> None:
             click.echo("Orphaned links:")
             for o in result["orphaned"]:
                 click.echo(f"  {o['from']} → {o['to']} ({o['type']})")
+        if result["stale_dchash_count"]:
+            click.echo("Stale dchash spans:")
+            for r in result["stale_dchash"]:
+                click.echo(
+                    f"  {r['from_tumbler']} → {r['to_tumbler']} ({r['link_type']}) "
+                    f"{r['side']}: {r['status']}"
+                )
 
 
 @click.command("links-for-file")

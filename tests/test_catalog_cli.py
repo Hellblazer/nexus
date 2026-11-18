@@ -1150,6 +1150,7 @@ class TestLinkAuditCommand:
         result = runner.invoke(main, ["catalog", "link-audit"])
         assert result.exit_code == 0
         assert "Total links" in result.output
+        assert "Stale dchash:    0" in result.output
         assert "cites" in result.output
 
     @_needs_diagnosis_nexus_02avu
@@ -1162,6 +1163,7 @@ class TestLinkAuditCommand:
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["total"] == 1
+        assert data["stale_dchash"] == [] and data["stale_dchash_count"] == 0
 
 
 @pytest.mark.t2_tenant
@@ -3120,12 +3122,53 @@ class TestKgyozLinksCarve:
         fake.link_audit.return_value = {
             "total": 7, "orphaned_count": 0, "duplicate_count": 0,
             "by_type": {}, "by_creator": {}, "orphaned": [],
+            "stale_dchash": [], "stale_dchash_count": 0,
         }
         with patch("nexus.commands.catalog._get_catalog", return_value=fake):
             result = CliRunner().invoke(main, ["catalog", "link-audit", "--json"])
         assert result.exit_code == 0, result.output
         assert '"total": 7' in result.output
+        assert '"stale_dchash": []' in result.output
+        assert '"stale_dchash_count": 0' in result.output
         fake.link_audit.assert_called_once()
+
+    @staticmethod
+    def _audit_text(stale: list[dict]) -> str:
+        from unittest.mock import MagicMock, patch
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.cli import main
+
+        fake = MagicMock(spec=HttpCatalogClient)
+        fake.link_audit.return_value = {
+            "total": 2, "orphaned_count": 0, "duplicate_count": 0,
+            "by_type": {}, "by_creator": {}, "orphaned": [],
+            "stale_dchash": stale, "stale_dchash_count": len(stale),
+        }
+        with patch("nexus.commands.catalog._get_catalog", return_value=fake):
+            result = CliRunner().invoke(main, ["catalog", "link-audit"])
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    def test_link_audit_prints_a_zero_stale_dchash_line_and_no_section(self):
+        out = self._audit_text([])
+        assert "Stale dchash:    0" in out
+        assert "Stale dchash spans:" not in out
+        lines = out.splitlines()
+        assert lines.index("Duplicates:      0") + 1 == lines.index("Stale dchash:    0")
+
+    def test_link_audit_lists_each_stale_dchash_row(self):
+        span = "dchash:" + "a" * 64 + ":0-5"
+        out = self._audit_text([
+            {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites",
+             "side": "to", "span": span, "status": "changed"},
+            {"from_tumbler": "1.1.3", "to_tumbler": "1.1.4", "link_type": "relates",
+             "side": "from", "span": span, "status": "missing"},
+        ])
+        assert "Stale dchash:    2" in out
+        assert "Stale dchash spans:" in out
+        assert "  1.1.1 → 1.1.2 (cites) to: changed" in out
+        assert "  1.1.3 → 1.1.4 (relates) from: missing" in out
 
     def test_links_flat_query_runs_through_carved_body(self):
         """End-to-end through the group for the most complex carved command:

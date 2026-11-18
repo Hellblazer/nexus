@@ -952,11 +952,16 @@ def catalog_link_audit() -> dict:
     """Audit the link graph for health issues.
 
     Returns: total, by_type, by_creator, orphaned (+ count), duplicates (+ count),
-    stale_spans (+ count, positional spans on re-indexed docs),
-    stale_chash (+ count, content-hash spans that no longer resolve in T3).
+    stale_dchash (+ stale_dchash_count): one row per ``dchash:`` span that no longer
+    resolves, each with from_tumbler, to_tumbler, link_type, side ("from" or "to"),
+    span and status. The status is one of ``malformed``, ``missing`` (the document is
+    gone), ``unreadable`` (no source file, or it cannot be read or is not UTF-8),
+    ``changed`` (the source text differs from the one the span was minted on) or
+    ``out_of_range`` (the span reaches past the end of the text). Both keys are always
+    present. Positional and ``chash:`` spans are not checked.
 
-    Each stale_chash entry includes a ``reason`` field: ``"missing"`` (chunk deleted),
-    ``"document_deleted"``, or ``"error"`` (with ``error`` type name).
+    The stale_dchash report reads each document's source file, so it describes the
+    machine the tool runs on; an engine error fails the call instead of listing spans.
     """
     cat, err = _require_catalog()
     if err:
