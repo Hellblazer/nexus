@@ -324,6 +324,8 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // handler method here only delegates, so the "count" key is not in the body this gate scans; it is pinned, with
         // count/limit/capped and the 10,000 cap, by CatalogSensitiveListRouteTest.
         collectionExempt("/sensitive", "handleSensitiveList", BOUNDED_READ_DELEGATE),
+        // nexus-uwggq.1.5: same delegate shape as /sensitive; CatalogDocsBySchemeRouteTest pins count/limit/offset, the 400s, the 405 and the 503.
+        collectionExempt("/docs/by-scheme", "handleDocsByScheme", BOUNDED_READ_DELEGATE),
         // nexus-uwggq.2.3: same delegate shape as /sensitive; CatalogDocsByAuthorRouteTest pins count/limit/offset, the 400s, the 405 and the 503.
         collectionExempt("/docs/by-author", "handleDocsByAuthor", BOUNDED_READ_DELEGATE),
         // nexus-uwggq.2.4: same delegate shape as /sensitive; CatalogDocsByMetaRouteTest pins count/limit/offset, the 400s, the 405 and the 503.

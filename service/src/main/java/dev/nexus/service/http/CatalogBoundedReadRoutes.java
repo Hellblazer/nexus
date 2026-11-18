@@ -259,6 +259,37 @@ final class CatalogBoundedReadRoutes {
         sendPage(exchange, page);
     }
 
+    /**
+     * GET /v1/catalog/docs/by-scheme?scheme=S&limit=N&offset=M (nexus-uwggq.1.5): {@code {count, limit, offset, documents}}
+     * as {@code /docs/by-author}. The live documents whose {@code urlparse(source_uri).scheme} is {@code S} lowercased, which
+     * is what the client's reference-only check keeps today; {@link CatalogDocReads} cites the lines of CPython's urlsplit
+     * the statement mirrors. {@code scheme} is required and must be an RFC 3986 scheme (a letter, then letters, digits and
+     * {@code + - .}; a literal {@code +} in a query decodes to a space, so a client sends {@code %2B}), else 400.
+     */
+    void byScheme(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        if (rejectBadQuery(exchange)) return;
+        String scheme = queryParam(exchange, "scheme");
+        if (scheme == null || !CatalogDocReads.SCHEME_GRAMMAR.matcher(scheme).matches()) {
+            badRequest(exchange, "scheme is required and must be an RFC 3986 scheme (a letter, then letters, digits, + - .)");
+            return;
+        }
+        Integer limit = limitParam(exchange, CatalogDocReads.DEFAULT_LIMIT, CatalogDocReads.MAX_LIMIT);
+        if (limit == null) return;
+        Integer offset = offsetParam(exchange);
+        if (offset == null) return;
+        CatalogDocReads.Page page;
+        try {
+            page = docReads.byScheme(tenant, scheme, limit, offset);
+        } catch (RuntimeException e) {
+            if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            log.warn("event=catalog_docs_by_scheme_timeout tenant={} limit={} offset={}", tenant, limit, offset);
+            timeout(exchange, "scheme read exceeded its time bound");
+            return;
+        }
+        sendPage(exchange, page);
+    }
+
     private static final Pattern BOUND_TEXT = Pattern.compile("-?[0-9]+");
     private static final Set<String> BY_META_PLAIN = Set.of("content_type", "limit", "offset", "sensitive");
 

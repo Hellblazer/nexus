@@ -46,6 +46,18 @@ class CatalogDocReadsSqlTest {
     }
 
     @Test
+    void theSchemeStatementStripsThenRemovesThenReadsThePrefixInThatOrder() {
+        String sql = sql(CatalogDocReads.schemeWhere("t", "https"));
+        int ltrim = sql.indexOf("ltrim(");
+        int translate = sql.indexOf("translate(");
+        int substring = sql.indexOf("substring(");
+        assertThat(substring).as(sql).isGreaterThanOrEqualTo(0);
+        assertThat(translate).as("translate (tab, CR, LF out) wraps the ltrim (C0 and space off the left), as urlsplit orders them").isGreaterThan(substring);
+        assertThat(ltrim).isGreaterThan(translate);
+        assertThat(sql).contains("'https'");
+    }
+
+    @Test
     void sensitiveOnlyAddsTheFlagToThePredicate() {
         var eq = List.of(new CatalogDocReads.MetaEq("k", "v", null));
         assertThat(sql(CatalogDocReads.metaWhere("t", new CatalogDocReads.MetaFilter(null, eq, List.of(), true)))).contains("sensitive");

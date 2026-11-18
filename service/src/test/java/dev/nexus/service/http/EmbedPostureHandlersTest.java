@@ -395,6 +395,8 @@ class EmbedPostureHandlersTest {
         // nexus-f3yqd: the two census routes, each flag its own
         assertThat(body.get("catalog_index_run_census_supported").asBoolean()).isTrue();
         assertThat(body.get("catalog_next_seq_drift_read_supported").asBoolean()).isTrue();
+        // nexus-uwggq.1.5: the RDR-241 Phase 2 engine read route, its flag its own
+        assertThat(body.get("catalog_docs_by_scheme_supported").asBoolean()).isTrue();
         // nexus-uwggq.2.3: the RDR-241 Phase 2 engine read route, its flag its own
         assertThat(body.get("catalog_docs_by_author_supported").asBoolean()).isTrue();
         // nexus-uwggq.2.4: the RDR-241 Phase 2 engine read route, its flag its own

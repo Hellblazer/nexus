@@ -16,7 +16,9 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 
@@ -47,6 +49,22 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
  * normalization on either side, and {@code \}, {@code %} and {@code _} in the text are literal.
  *
  * <p><b>Metadata</b> ({@link #metaWhere}): the reading rules of {@code catalog/meta_filter.py}, the client's oracle.
+ *
+ * <p><b>Scheme</b> ({@link #schemeWhere}, nexus-uwggq.1.5): a live row matches iff CPython 3.13's
+ * {@code urlparse(source_uri).scheme} equals the requested scheme lowercased, which is what the client keeps today
+ * ({@code doctor_references.is_reference_only}). The statement mirrors {@code urllib.parse.urlsplit} as shipped in the
+ * repo's uv CPython 3.13.5, {@code Lib/urllib/parse.py}: line 494 {@code url = url.lstrip(_WHATWG_C0_CONTROL_OR_SPACE)}
+ * (the set is U+0000 to U+0020, line 89; only the LEFT end is stripped, line 492-493), lines 497-498 remove
+ * {@code _UNSAFE_URL_BYTES_TO_REMOVE} (tab, CR, LF, line 92) from anywhere in what is left, line 503
+ * {@code i = url.find(':')} and line 504 {@code if i > 0 and url[0].isascii() and url[0].isalpha()} with lines 505-509: the
+ * text before the first colon is the scheme when every character is in {@code scheme_chars} (ASCII letters, digits and
+ * {@code + - .}, line 82), lowercased. In SQL: {@code ltrim} of U+0001 to U+0020 (a NUL cannot be stored in PostgreSQL text,
+ * so the NUL of the set cannot occur), {@code translate} to delete tab, CR and LF, then the regex
+ * {@code ^([A-Za-z][A-Za-z0-9+.-]*):}, which is the same test (the class excludes the colon, so the colon it meets is the
+ * first). NOT mirrored: {@code urlsplit} also raises {@code ValueError} for an invalid IPv6 netloc (lines 447-451, 514) or a
+ * netloc that is not valid under NFKC ({@code _checknetloc}, line 521), and the client's {@code urlparse} call has no
+ * handler, so on such a row the client fails where this route answers the scheme; that is a defect of the client's call, and
+ * the route does not reproduce an exception.
  */
 public final class CatalogDocReads {
 
@@ -90,6 +108,22 @@ public final class CatalogDocReads {
     public static final String FOLD_COLLATION = "pg_c_utf8";
 
     private static final String INTEGER_TEXT = "^-?[0-9]+$";
+
+    /** RFC 3986 scheme, which is also urlsplit's scheme_chars with a letter first (parse.py lines 82 and 504). */
+    public static final Pattern SCHEME_GRAMMAR = Pattern.compile("[A-Za-z][A-Za-z0-9+.-]*");
+
+    /** The urlsplit lstrip set without its NUL (parse.py line 89): U+0001 to U+0020. */
+    private static final String C0_OR_SPACE = c0OrSpace();
+
+    private static final String UNSAFE_URL_BYTES = "\t\r\n";
+
+    private static final String SCHEME_PREFIX = "^([A-Za-z][A-Za-z0-9+.-]*):";
+
+    private static String c0OrSpace() {
+        StringBuilder sb = new StringBuilder();
+        for (char c = 1; c <= 0x20; c++) sb.append(c);
+        return sb.toString();
+    }
     private static final Field<Integer> TOTAL = DSL.count().over().as("nx_total");
 
     private final CatalogRepository repo;
@@ -141,6 +175,17 @@ public final class CatalogDocReads {
                 DSL.field(t.cast(SQLDataType.NUMERIC).ge(new BigDecimal(m.min()))))
             .otherwise(DSL.inline(false));
         return DSL.condition(guarded);
+    }
+
+    /**
+     * Live documents of the tenant whose {@code urlparse(source_uri).scheme} is {@code scheme} lowercased; see the class
+     * javadoc for the lines of urlsplit it mirrors. {@code scheme} must match {@link #SCHEME_GRAMMAR}. Public for plan tests.
+     */
+    public static Condition schemeWhere(String tenant, String scheme) {
+        Field<String> stripped = DSL.translate(DSL.ltrim(CATALOG_DOCUMENTS.SOURCE_URI, C0_OR_SPACE), UNSAFE_URL_BYTES, "");
+        Field<String> found = DSL.function("substring", String.class, stripped, DSL.val(SCHEME_PREFIX));
+        // ASCII only (the regex admits nothing else), so the collation C lowercase is exact on every cluster
+        return liveOfTenant(tenant).and(DSL.lower(found.collate("C")).eq(scheme.toLowerCase(Locale.ROOT)));
     }
 
     /** Live documents of the tenant that satisfy every clause of {@code filter}. Public for plan tests. */
@@ -203,6 +248,12 @@ public final class CatalogDocReads {
     public Page byAuthor(String tenant, String author, int limit, int offset) {
         if (author == null || author.isEmpty()) throw new IllegalArgumentException("author must be non-empty");
         return page(tenant, authorWhere(tenant, author), limit, offset);
+    }
+
+    /** The by-scheme page (nexus-uwggq.1.5); the bounds are {@link #byAuthor}'s. @throws IllegalArgumentException for a scheme outside {@link #SCHEME_GRAMMAR} */
+    public Page byScheme(String tenant, String scheme, int limit, int offset) {
+        if (scheme == null || !SCHEME_GRAMMAR.matcher(scheme).matches()) throw new IllegalArgumentException("scheme must be an RFC 3986 scheme");
+        return page(tenant, schemeWhere(tenant, scheme), limit, offset);
     }
 
     /** The by-meta page; see {@link #byAuthor} for the bounds. */
