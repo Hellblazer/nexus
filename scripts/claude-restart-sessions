@@ -134,9 +134,19 @@ engine (the sandbox runs the installed nx, and keying on it would force a sandbo
 before every restart that follows a release, which is the restart that rolls sessions
 onto it), macOS (rare, and Claude Code's version stands in for the client side), and
 reinstall-tool.sh (the sandbox replaces it with a stand-in, so a pass says nothing about
-it). --dry-run reports whether the pass holds. --skip-sandbox-check REASON restarts
-anyway and logs the reason. The detached roll checks the pass too, so calling it
-directly does not get around the gate.
+it). A pass on another Claude Code version only warns (Sam, 2026-11-18): the restart goes on,
+and the log's WARN line names the last pass, the version now running and the weekly run's last
+result, since Claude Code updates every couple of days and the script has not changed. Another
+script, harness or tmux, no pass at all, or a Claude Code version that cannot be read, still
+refuses. --dry-run reports whether the pass holds. --skip-sandbox-check REASON restarts past a
+refusal and logs the reason; a version warning needs no flag. The
+detached roll checks the pass too, so calling it directly does not get around the gate.
+
+scripts/restart-sandbox-weekly.sh runs the sandbox once a week from a launchd job
+(`scripts/restart-sandbox-weekly.sh --install` sets it up), so a pass is kept current
+through Claude Code updates. A restart that misbehaves (a session not resumed, a pane
+closed, a missing wake, a busy session exited) should be followed by a sandbox run
+(tests/e2e/restart-sessions/run.sh) before the next restart, whatever the gate says.
 
 Install as a symlink to the primary checkout, which tracks develop, so the copy you
 run cannot drift from the one the sandbox tested:
@@ -251,6 +261,9 @@ def tmux_version() -> str:
 
 #: The sandbox harness, beside this script in its checkout (resolved through the install symlink).
 HARNESS = Path(__file__).resolve().parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py"
+#: The weekly scheduled sandbox run (a launchd job it installs with --install), beside this script.
+#: It records its last invocation in sandbox-weekly-last.json beside SANDBOX_PASS.
+WEEKLY_RUN = Path(__file__).resolve().parent / "restart-sandbox-weekly.sh"
 
 
 def harness_sha256(path: Path | None = None) -> str:
@@ -261,38 +274,75 @@ def harness_sha256(path: Path | None = None) -> str:
         return ""
 
 
-def sandbox_pass_problem(script: str, claude: str) -> str:
-    """Why the recorded sandbox pass does not cover this script, Claude Code, tmux and harness, or ""
-    when it does."""
+def sandbox_pass_check(script: str, claude: str) -> tuple[str, str]:
+    """(refusal, warning) for the recorded sandbox pass against this script, Claude Code, tmux and
+    harness. A refusal stops a restart (exit 3); a warning is logged and the restart goes on; both
+    empty means the pass covers all four.
+
+    Only a Claude Code version other than the pass's is a warning (Sam, 2026-11-18: it changes every
+    couple of days, and refusing on it made every restart need --skip-sandbox-check). A changed
+    script, harness or tmux, or no readable pass, still refuses. The Claude Code check runs last, so
+    a refusal is never hidden behind it."""
     if not claude:
-        return "could not read Claude Code's version"
+        return "could not read Claude Code's version", ""
     try:
         rec = json.loads(SANDBOX_PASS.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return f"no sandbox pass recorded ({SANDBOX_PASS})"
+        return f"no sandbox pass recorded ({SANDBOX_PASS})", ""
     except (OSError, ValueError) as e:
-        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})"
+        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})", ""
     if not isinstance(rec, dict):
-        return f"the sandbox pass record {SANDBOX_PASS} is not an object"
+        return f"the sandbox pass record {SANDBOX_PASS} is not an object", ""
+    passed = rec.get("passed_at", "?")
+    recorded_claude = rec.get("claude_version")
+    if not isinstance(recorded_claude, str) or not recorded_claude:
+        # A record that names no Claude Code version says nothing about it: refuse, as before,
+        # rather than warn as if it named an older one.
+        return f"the sandbox pass record {SANDBOX_PASS} names no Claude Code version", ""
     if rec.get("script_sha256") != script:
-        return f"the last sandbox pass ({rec.get('passed_at', '?')}) was on another copy of this script"
-    if rec.get("claude_version") != claude:
-        return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on Claude Code "
-                f"{rec.get('claude_version', '?')}, not {claude}")
+        return f"the last sandbox pass ({passed}) was on another copy of this script", ""
     if rec.get("tmux_version") != (tmux := tmux_version()):
-        return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
-                f"not {tmux or 'an unreadable tmux'}")
+        return (f"the last sandbox pass ({passed}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
+                f"not {tmux or 'an unreadable tmux'}"), ""
     if rec.get("harness_sha256") != (harness := harness_sha256()):
         if not harness:
             return (f"this copy has no sandbox harness beside it ({HARNESS}); install the script as a symlink "
-                    "into a checkout, as the header says")
-        return f"the last sandbox pass ({rec.get('passed_at', '?')}) was on another copy of the sandbox harness"
-    return ""
+                    "into a checkout, as the header says"), ""
+        return f"the last sandbox pass ({passed}) was on another copy of the sandbox harness", ""
+    if recorded_claude != claude:
+        return "", (f"the last sandbox pass ({passed}) was on Claude Code {recorded_claude}, not {claude}; "
+                    f"{weekly_run_status()}; run tests/e2e/restart-sessions/run.sh to refresh it")
+    return "", ""
+
+
+def weekly_run_status() -> str:
+    """One clause on the weekly sandbox job, for the version warning: its last result, or how to
+    set it up when it has never run here."""
+    path = SANDBOX_PASS.parent / "sandbox-weekly-last.json"
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"no weekly sandbox run has happened here ({WEEKLY_RUN.name} --install sets one up)"
+    except (OSError, ValueError):
+        return f"the weekly sandbox run's record {path} is unreadable"
+    if not isinstance(rec, dict):
+        return f"the weekly sandbox run's record {path} is not an object"
+    status, ended = rec.get("status", "?"), rec.get("ended", "?")
+    on = f" on Claude Code {v}" if isinstance(v := rec.get("claude_version"), str) and v else ""
+    if status == "passed":
+        return f"the last weekly sandbox run ({ended}{on}) passed"
+    return f"the last weekly sandbox run ({ended}{on}) did not record a pass: {status}, {rec.get('reason', '?')}"
+
+
+def sandbox_pass_problem(script: str, claude: str) -> str:
+    """The refusal or warning from sandbox_pass_check, refusal first, or "" when the pass covers everything."""
+    refusal, warning = sandbox_pass_check(script, claude)
+    return refusal or warning
 
 
 def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float,
                         tmux: str | None = None, harness: str | None = None) -> None:
-    """Write the record sandbox_pass_problem reads (the sandbox harness calls this on a full pass).
+    """Write the record sandbox_pass_check reads (the sandbox harness calls this on a full pass).
     *tmux* and *harness* default to what is installed now; the harness passes the values it read
     before its first scenario, so a mid-run change is not recorded as tested."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2566,9 +2616,10 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
                 if t["sessionId"] not in {s["sessionId"] for s in found}]
         if gone:
             print("in the round but not live now: " + ", ".join(gone))
-        # The restart checks the sandbox pass too (exit 3), so "allowed" must include it.
-        sandbox = sandbox_pass_problem(script_sha256(), claude_version())
-        print(f"sandbox pass: {sandbox or 'holds for this script, Claude Code, tmux and the harness'}")
+        # The restart checks the sandbox pass too (exit 3 on a refusal), so "allowed" must include
+        # it; a warning (a newer Claude Code) does not block.
+        sandbox, sandbox_warn = sandbox_pass_check(script_sha256(), claude_version())
+        print(f"sandbox pass: {sandbox or (f'warning, {sandbox_warn}' if sandbox_warn else 'holds for this script, Claude Code, tmux and the harness')}")
         return 0 if rows and not problem and not sandbox and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
@@ -2685,7 +2736,8 @@ def main() -> int:
                     help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
                          "restart sessions in status 'shell'")
     ap.add_argument("--skip-sandbox-check", metavar="REASON", default=None,
-                    help="restart although no sandbox pass covers this script (see above); REASON is logged")
+                    help="restart past a sandbox refusal: another script, harness or tmux, or no pass (see "
+                         "above); REASON is logged. A newer Claude Code only warns and needs no flag")
     ap.add_argument("--no-slash-restart", action="store_true",
                     help="resume each session by exiting it and relaunching `claude ... --resume <id>`, "
                          "never through Claude Code's own /restart")
@@ -2730,20 +2782,24 @@ def main() -> int:
         # withdrawal and the footprint report. By default they end the process with neither.
         exit_on_stop_signals()
         # The gate holds here too: a direct --detached call must not get around it.
-        problem = sandbox_pass_problem(script_sha256(), claude_version())
+        problem, warning = sandbox_pass_check(script_sha256(), claude_version())
         if problem and not skip_reason:
             log(f"ABORT: sandbox pass: {problem} (detached). Nothing installed, nothing restarted.")
             return 3
         if problem:
             log(f"WARN: {problem}; restarting anyway (detached, --skip-sandbox-check: {skip_reason})")
+        elif warning:
+            log(f"WARN: sandbox pass: {warning} (detached)")
     if not a.detached:
         # The sandbox pass first: it needs no session's answer, and nothing else is worth asking
         # of a script the sandbox has not passed (nexus-8zdbu).
-        problem = sandbox_pass_problem(script_sha256(), claude_version())
+        problem, warning = sandbox_pass_check(script_sha256(), claude_version())
         if a.dry_run:
-            print(f"sandbox pass: {problem or 'holds for this script, Claude Code, tmux and the harness'}")
+            print(f"sandbox pass: {problem or (f'warning, {warning}' if warning else 'holds for this script, Claude Code, tmux and the harness')}")
         elif problem and skip_reason:
             log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check: {skip_reason})")
+        elif warning:
+            log(f"WARN: sandbox pass: {warning}")  # log() prints the line as well
         elif problem:
             log(f"ABORT: sandbox pass: {problem}. Run tests/e2e/restart-sessions/run.sh (all scenarios) first, "
                 f"or pass --skip-sandbox-check REASON. Nothing installed, nothing restarted.")

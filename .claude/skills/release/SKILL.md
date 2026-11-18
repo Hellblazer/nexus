@@ -1124,6 +1124,12 @@ command:
   `nx --version` must print X.Y.Z. After a reboot the restart mode finds nothing
   (it needs live pids); `claude-restart-sessions --revive [--dry-run]` resumes
   the sessions whose transcripts were written in the 30 minutes before boot.
+- A restart that misbehaved (a session not resumed, a pane closed, a missing
+  wake, a busy session exited) gets a sandbox run, `tests/e2e/restart-sessions/run.sh`,
+  before the next restart, whatever the gate says. The gate only warns when the
+  last pass was on another Claude Code version (Sam, 2026-11-18), and
+  `scripts/restart-sandbox-weekly.sh` keeps the pass current from a weekly launchd
+  job (`--install` sets it up).
 
 Source: memory `feedback_release_and_develop_ci` § coordinated_upgrade_restart.
 The rest of this step is what that run does to this box, and the manual form

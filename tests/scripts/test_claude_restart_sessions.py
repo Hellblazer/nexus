@@ -975,7 +975,7 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "LAST_RUN", tmp_path / "restart-last.json")
     monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
     # The sandbox gate has its own tests; its inputs are stubbed too, so no test runs the real claude.
-    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", ""))
     monkeypatch.setattr(crs, "script_sha256", lambda *_a: SHA)
     monkeypatch.setattr(crs, "claude_version", lambda *_a: "2.1.316")
     # Live sessions here carry the test process's pid; its children are not background tasks of theirs.
@@ -1180,9 +1180,13 @@ def test_status_is_not_go_while_the_sandbox_pass_does_not_hold(crs, rd, monkeypa
     setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     assert crs.main() == 0
     assert "sandbox pass: holds" in capsys.readouterr().out
-    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "no sandbox pass recorded (x)")
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("no sandbox pass recorded (x)", ""))
     assert crs.main() == 1
     assert "sandbox pass: no sandbox pass recorded" in capsys.readouterr().out
+    # a newer Claude Code only warns, so --status still says go
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", "the last sandbox pass (x) was on Claude Code 1, not 2"))
+    assert crs.main() == 0
+    assert "sandbox pass: warning, the last sandbox pass (x)" in capsys.readouterr().out
 
 
 def test_status_without_a_round_says_so(crs, rd, monkeypatch, capsys) -> None:
@@ -1750,184 +1754,7 @@ def test_fresh_and_resume_are_opposites(crs, rd, monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--fresh", "--resume"])
     with pytest.raises(SystemExit):
         crs.main()
-# ── the sandbox-pass gate (nexus-8zdbu) ──────────────────────────────────────────────────
-
-SHA = "a" * 64
-
-
-@pytest.fixture
-def passfile(crs, monkeypatch, tmp_path) -> Path:
-    path = tmp_path / "state" / "sandbox-pass.json"
-    monkeypatch.setattr(crs, "SANDBOX_PASS", path)
-    monkeypatch.setattr(crs, "LOG", tmp_path / "restart.log")
-    monkeypatch.setattr(crs, "tmux_version", lambda: "tmux 3.6a")
-    monkeypatch.setattr(crs, "harness_sha256", lambda *_a: "h" * 64)
-    return path
-
-
-def test_a_recorded_pass_covers_its_script_and_claude_version(crs, passfile) -> None:
-    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll", "variant", "abort", "gate"], 756.4)
-    assert crs.sandbox_pass_problem(SHA, "2.1.316") == ""
-    rec = json.loads(passfile.read_text(encoding="utf-8"))
-    assert rec["seconds"] == 756 and rec["scenarios"] == ["roll", "variant", "abort", "gate"]
-
-
-@pytest.mark.parametrize(("script", "claude", "says"), [
-    ("b" * 64, "2.1.316", "another copy of this script"),
-    (SHA, "2.1.317", "Claude Code 2.1.316, not 2.1.317"),
-    (SHA, "", "could not read Claude Code's version"),
-], ids=["script-changed", "claude-changed", "claude-unreadable"])
-def test_a_pass_on_anything_else_does_not_count(crs, passfile, script: str, claude: str, says: str) -> None:
-    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
-    assert says in crs.sandbox_pass_problem(script, claude)
-
-
-@pytest.mark.parametrize(("content", "says"), [
-    (None, "no sandbox pass recorded"),
-    ("{not json", "unreadable"),
-    ("[1]", "not an object"),
-], ids=["absent", "garbled", "list"])
-def test_a_missing_or_bad_record_does_not_count(crs, passfile, content: str | None, says: str) -> None:
-    if content is not None:
-        passfile.parent.mkdir(parents=True)
-        passfile.write_text(content, encoding="utf-8")
-    assert says in crs.sandbox_pass_problem(SHA, "2.1.316")
-
-
-def test_script_sha256_is_the_hash_of_the_scripts_bytes_through_a_symlink(crs, tmp_path) -> None:
-    expected = hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
-    link = tmp_path / "claude-restart-sessions"
-    link.symlink_to(SCRIPT)
-    assert crs.script_sha256(link) == expected
-    assert crs.script_sha256() == expected  # with no path: the module's own file
-    changed = tmp_path / "changed"
-    changed.write_bytes(SCRIPT.read_bytes() + b"\n")
-    assert crs.script_sha256(changed) != expected
-
-
-def _main(crs, monkeypatch, *argv: str) -> tuple[int, list[list[str]]]:
-    """Run main with one idle session; return its exit code and the commands it ran."""
-    ran: list[list[str]] = []
-    monkeypatch.setattr(crs, "sessions", lambda: [{"pid": 1, "pane": "%1", "name": "s", "sessionId": "sid", "status": "idle", "argv": "claude", "cwd": "/w"}])
-    monkeypatch.setattr(crs, "claude_version", lambda *_: "2.1.316")
-    monkeypatch.setattr(crs, "script_sha256", lambda *_: SHA)
-    monkeypatch.setattr(crs, "converge", lambda *_a, **_k: pytest.fail("converge ran past a refused gate"))
-    monkeypatch.setattr(crs, "LAST_RUN", crs.SANDBOX_PASS.parent / "restart-last.json")  # never the operator's
-    setattr_in(monkeypatch, crs, "subprocess.run", lambda cmd, *_a, **_k: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0))
-    # The ready round has its own tests; here it is skipped so only the sandbox gate decides.
-    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--no-ready-check", *argv])
-    return crs.main(), ran
-
-
-def test_a_restart_with_no_pass_is_refused_before_anything_runs(crs, monkeypatch, passfile, capsys) -> None:
-    code, ran = _main(crs, monkeypatch, "--nx", "7.93.1")
-    assert code == 3 and ran == []
-    assert "ABORT: sandbox pass: no sandbox pass recorded" in crs.LOG.read_text(encoding="utf-8")
-    out = capsys.readouterr().out.splitlines()
-    assert "ABORT: sandbox pass: no sandbox pass recorded" in out[0]
-    assert out[-1].startswith("sandbox pass: refused, no sandbox pass recorded")
-
-
-def test_a_restart_with_a_pass_goes_on(crs, monkeypatch, passfile) -> None:
-    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
-    code, ran = _main(crs, monkeypatch)
-    assert code == 0 and ran and ran[0][:3] == ["tmux", "run-shell", "-b"]
-
-
-def test_skip_sandbox_check_restarts_and_logs_its_reason(crs, monkeypatch, passfile) -> None:
-    code, ran = _main(crs, monkeypatch, "--skip-sandbox-check", "comment-only edit, rerun tonight")
-    assert code == 0 and ran
-    assert ("WARN: no sandbox pass recorded" in (log := crs.LOG.read_text(encoding="utf-8"))
-            and "(--skip-sandbox-check: comment-only edit, rerun tonight)" in log)
-    # the reason rides into the detached roll's argv, which checks the gate itself
-    assert "comment-only edit, rerun tonight" in ran[0][-1]
-
-
-@pytest.mark.parametrize("argv", [["--skip-sandbox-check", " "], ["--skip-sandbox-check"], ["--skip-sandbox-check=  "],
-                                  ["--skip-sandbox", " "], ["--skip-sandbox-ch=\t"], ["--skip-sandbox-check", "\u200b\x1b"],
-                                  ["--revive", "--skip-sandbox-check", " "]],
-                         ids=["blank", "bare", "equals-blank", "abbrev-blank", "abbrev-equals-tab", "non-printing",
-                              "revive-blank"])
-def test_skip_sandbox_check_needs_a_reason(crs, monkeypatch, passfile, argv) -> None:
-    with pytest.raises(SystemExit) as exc:
-        _main(crs, monkeypatch, *argv)
-    assert exc.value.code == 2
-
-
-def test_a_reason_cannot_forge_a_log_line(crs, monkeypatch, passfile) -> None:
-    code, _ = _main(crs, monkeypatch, "--skip-sandbox-check", "tired\n12:00:00 RESTART SANDBOX PASSED")
-    assert code == 0
-    log = crs.LOG.read_text(encoding="utf-8")
-    assert "(--skip-sandbox-check: tired 12:00:00 RESTART SANDBOX PASSED)" in log
-    assert not any(ln.startswith("12:00:00 RESTART") for ln in log.splitlines())
-
-
-def test_a_detached_roll_given_a_reason_logs_it_and_rolls(crs, monkeypatch, passfile) -> None:
-    rolled: list = []
-    monkeypatch.setattr(crs, "_roll", lambda *a, **k: rolled.append(1) or 0)
-    monkeypatch.setattr(crs, "footprint_report", lambda *a, **k: [])
-    code, _ = _main(crs, monkeypatch, "--detached", "--resume", "--no-update", "--skip-sandbox-check", "direct call")
-    assert code == 0 and rolled == [1]
-    assert "restarting anyway (detached, --skip-sandbox-check: direct call)" in crs.LOG.read_text(encoding="utf-8")
-
-
-def test_a_copy_with_no_harness_says_so(crs, monkeypatch, passfile, tmp_path) -> None:
-    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
-    monkeypatch.setattr(crs, "harness_sha256", lambda *_a: "")
-    assert "has no sandbox harness beside it" in crs.sandbox_pass_problem(SHA, "2.1.316")
-
-
-def test_harness_sha256_with_no_argument_reads_harness(crs, monkeypatch, tmp_path) -> None:
-    import hashlib  # noqa: PLC0415 -- test-local
-    fake = tmp_path / "run.py"
-    fake.write_bytes(b"harness bytes")
-    monkeypatch.setattr(crs, "HARNESS", fake)
-    assert crs.harness_sha256() == hashlib.sha256(b"harness bytes").hexdigest()
-    monkeypatch.setattr(crs, "HARNESS", tmp_path / "absent.py")
-    assert crs.harness_sha256() == ""
-
-
-def test_the_record_keeps_the_tmux_and_harness_it_is_given(crs, passfile) -> None:
-    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1, tmux="tmux 9.9", harness="z" * 64)
-    rec = json.loads(passfile.read_text(encoding="utf-8"))
-    assert rec["tmux_version"] == "tmux 9.9" and rec["harness_sha256"] == "z" * 64
-
-
-def test_the_detached_roll_checks_the_gate_itself(crs, monkeypatch, passfile) -> None:
-    """A direct --detached call does not get around the gate."""
-    monkeypatch.setattr(crs, "_roll", lambda *a, **k: pytest.fail("rolled past a refused gate"))
-    code, ran = _main(crs, monkeypatch, "--detached", "--resume")
-    assert code == 3 and ran == []
-    assert "ABORT: sandbox pass: no sandbox pass recorded" in crs.LOG.read_text(encoding="utf-8")
-
-
-@pytest.mark.parametrize(("patch", "says"), [
-    ("tmux_version", "was on tmux 3.6a, not tmux 3.7"),
-    ("harness_sha256", "another copy of the sandbox harness"),
-])
-def test_a_pass_on_another_tmux_or_harness_does_not_count(crs, monkeypatch, passfile, patch, says) -> None:
-    crs.record_sandbox_pass(passfile, SHA, "2.1.316", ["roll"], 1)
-    assert crs.sandbox_pass_problem(SHA, "2.1.316") == ""
-    monkeypatch.setattr(crs, patch, (lambda: "tmux 3.7") if patch == "tmux_version" else (lambda *_a: "x" * 64))
-    assert says in crs.sandbox_pass_problem(SHA, "2.1.316")
-
-
-def test_harness_sha256_is_the_run_py_beside_the_script(crs) -> None:
-    import hashlib  # noqa: PLC0415 -- test-local
-    assert crs.HARNESS == SCRIPT.parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py"
-    assert crs.harness_sha256(crs.HARNESS) == hashlib.sha256(crs.HARNESS.read_bytes()).hexdigest()
-
-
-def test_a_dry_run_reports_the_gate_and_refuses_nothing(crs, monkeypatch, passfile, capsys) -> None:
-    code, ran = _main(crs, monkeypatch, "--dry-run")
-    assert code == 0 and ran == []
-    assert "sandbox pass: no sandbox pass recorded" in capsys.readouterr().out
-
-
-def test_revive_is_not_gated(crs, monkeypatch, passfile) -> None:
-    monkeypatch.setattr(crs, "revive", lambda _a: 0)
-    code, _ = _main(crs, monkeypatch, "--revive")
-    assert code == 0
+SHA = "a" * 64  # the sandbox-gate tests live in test_claude_restart_sessions_sandbox.py
 
 
 # ── withdrawing a mailed ask (nexus-o581r) ───────────────────────────────────────────────
@@ -2232,7 +2059,7 @@ def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
     (rd / "ready-gamma.json").write_text("{not json", encoding="utf-8")
     calls: list[tuple] = []
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", ""))
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert sorted(calls) == [("sid-alpha", "t-a"), ("sid-gamma", "t-g")]
@@ -2382,7 +2209,7 @@ def test_status_removes_only_the_answered_targets_markers(crs, rd, monkeypatch) 
     _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"}, markers=True)
     (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_problem", lambda *_a: "")
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", ""))
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert not _marker_of(crs, rd, "alpha").exists() and _marker_of(crs, rd, "beta").exists()
