@@ -30,7 +30,7 @@ The catalog is the connective tissue between Nexus's [storage tiers](../storage-
 
 **The [query planner](../querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents relevant to the question.
 
-**Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale (the command is hidden from `--help`). Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
+**Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) detects orphaned links to deleted documents and duplicate links, and flags `dchash:` passage spans whose source text has changed or gone (the command is hidden from `--help`; positional and `chash:` spans are not checked). Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
 
 ## What we borrowed
 
