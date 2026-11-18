@@ -85,30 +85,35 @@
     "name": "liquibase.change.AbstractSQLChange",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
-    "allPublicMethods": true
+    "allPublicMethods": true,
+    "allDeclaredFields": true
   },
   {
     "name": "liquibase.change.core.RawSQLChange",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
-    "allPublicMethods": true
+    "allPublicMethods": true,
+    "allDeclaredFields": true
   },
   {
     "name": "liquibase.change.core.SQLFileChange",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
-    "allPublicMethods": true
+    "allPublicMethods": true,
+    "allDeclaredFields": true
   },
   {
     "name": "liquibase.change.core.CreateProcedureChange",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
-    "allPublicMethods": true
+    "allPublicMethods": true,
+    "allDeclaredFields": true
   },
   {
     "name": "liquibase.precondition.core.DBMSPrecondition",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
-    "allPublicMethods": true
+    "allPublicMethods": true,
+    "allDeclaredFields": true
   }
 ]
