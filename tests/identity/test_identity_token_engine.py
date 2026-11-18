@@ -8,6 +8,9 @@ carries Step 2 a green run cannot be a vacuous one (the nexus-moht0 doctrine); t
 Covers the bead's tests that need tokens: the first write after ``/clear`` succeeds; a Bash child from before the
 ``/clear`` still writes; a refresh rewrites the process's one token file; a superseded process's write is a typed
 stop; a tokenless write to a threads entry is refused.
+
+The three rows are independent journeys: each runs on its own scoped world inside ONE tenant (``rows``, see
+tests/identity/conftest.py), after ``step2`` has checked the engine once. The module mints one tenant, not three.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.identity import token_header
 from nexus.identity.token_file import read_token_file, token_path
 from nexus.mcp.identity_lease import IdentityLease
-from tests.identity.conftest import VERSION, World
+from tests.identity.conftest import VERSION, Rows, World
 
 T1 = "2026-11-17T09:00:00Z"
 
@@ -56,41 +59,37 @@ def _entry(identity: str, session: str) -> str:
     return f"session: {session}\nidentity: {identity}\n\n## work\nref: none\n"
 
 
-@pytest.mark.t2_tenant
-def test_a_threads_write_after_clear_works_with_the_new_token_and_the_old_one_and_a_superseded_process_is_stopped(
-        step2: World, monkeypatch: pytest.MonkeyPatch) -> None:
-    world = step2
-    alpha = world.seat("alpha")
-    world.process(100, name="alpha")
-    started = world.hook(100, "startup", "s1")
-    assert started.identity == alpha
-    old_token = read_token_file(token_path(world.identity_dir, 100, 100_000)).token
-    store = _threads(world, monkeypatch, 100)
-    store.put("threads", "alpha", _entry(alpha, "s1"))                         # a write with the identity token
+def row_a_threads_write_after_clear_works_with_the_new_token_and_the_old_one_and_a_superseded_process_is_stopped(
+        world: World) -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:        # a row's patches end with the row
+        alpha = world.seat("alpha")
+        world.process(100, name="alpha")
+        started = world.hook(100, "startup", "s1")
+        assert started.identity == alpha
+        old_token = read_token_file(token_path(world.identity_dir, 100, 100_000)).token
+        store = _threads(world, monkeypatch, 100)
+        store.put("threads", world.q("alpha"), _entry(alpha, "s1"))                         # a write with the identity token
 
-    cleared = world.hook(100, "clear", "s2")
-    new_token = read_token_file(token_path(world.identity_dir, 100, 100_000)).token
-    assert cleared.generation == 1 and new_token and new_token != old_token
-    store.put("threads", "alpha", _entry(alpha, "s2"))                         # a threads write after /clear: no refusal (a threads write never checks the session id, so this proves the generation held, not the stamp)
-    # a Bash child from before the /clear holds the old token in its (cached) view: still the same generation
-    from nexus.db.t2 import _refreshable_client
-    monkeypatch.setattr(_refreshable_client, "fenced_identity_headers",
-                        lambda method, path: {"X-Nexus-Identity-Token": old_token})
-    store.put("threads", "alpha", _entry(alpha, "s2"))
+        cleared = world.hook(100, "clear", "s2")
+        new_token = read_token_file(token_path(world.identity_dir, 100, 100_000)).token
+        assert cleared.generation == 1 and new_token and new_token != old_token
+        store.put("threads", world.q("alpha"), _entry(alpha, "s2"))                         # a threads write after /clear: no refusal (a threads write never checks the session id, so this proves the generation held, not the stamp)
+        # a Bash child from before the /clear holds the old token in its (cached) view: still the same generation
+        monkeypatch.setattr(token_header, "fenced_identity_headers",
+                            lambda method, path: {"X-Nexus-Identity-Token": old_token})
+        store.put("threads", world.q("alpha"), _entry(alpha, "s2"))
 
-    # process 100 crashes, 101 takes the seat at generation 2: 100's token is for generation 1
-    world.procs.stop(100, keep_registry=True)
-    world.process(101, os_start=T1, name="alpha")
-    assert world.hook(101, "startup", "s3").generation == 2
-    with pytest.raises(token_header.GenerationSupersededError) as err:
-        store.put("threads", "alpha", _entry(alpha, "s2"))
-    assert err.value.identity == alpha and err.value.current_generation == 2 and err.value.holder["pid"] == 101
+        # process 100 crashes, 101 takes the seat at generation 2: 100's token is for generation 1
+        world.procs.stop(100, keep_registry=True)
+        world.process(101, os_start=T1, name="alpha")
+        assert world.hook(101, "startup", "s3").generation == 2
+        with pytest.raises(token_header.GenerationSupersededError) as err:
+            store.put("threads", world.q("alpha"), _entry(alpha, "s2"))
+        assert err.value.identity == alpha and err.value.current_generation == 2 and err.value.holder["pid"] == 101
 
 
-@pytest.mark.t2_tenant
-def test_a_refresh_at_half_life_rewrites_the_one_token_file_and_the_hook_files_stay_readable(step2: World) -> None:
+def row_a_refresh_at_half_life_rewrites_the_one_token_file_and_the_hook_files_stay_readable(world: World) -> None:
     """One clock drives the hook that writes the file's expiry, the lease and the test (``world.now``, real time here)."""
-    world = step2
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "s1")
@@ -111,16 +110,30 @@ def test_a_refresh_at_half_life_rewrites_the_one_token_file_and_the_hook_files_s
     assert world.events(alpha) == ["start"], "a refresh is not a new binding"
 
 
+def row_a_tokenless_write_to_a_fenced_threads_entry_is_refused(world: World) -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:        # a row's patches end with the row
+        alpha = world.seat("alpha")
+        world.process(100, name="alpha")
+        world.hook(100, "startup", "s1")
+        _threads(world, monkeypatch, 100).put("threads", world.q("alpha"), _entry(alpha, "s1"))
+        monkeypatch.setattr(token_header, "_discover", lambda: None)               # a shell with no Claude ancestor
+        token_header.reset_for_tests()
+        bare = HttpMemoryStore(base_url=world.base_url, tenant="default", _token=os.environ["NX_SERVICE_TOKEN"])
+        with pytest.raises(Exception) as err:
+            bare.put("threads", world.q("alpha"), _entry(alpha, "s9"))
+        assert "403" in str(err.value) or "identity_token_required" in str(err.value)
+
+
+ROWS = (
+    row_a_threads_write_after_clear_works_with_the_new_token_and_the_old_one_and_a_superseded_process_is_stopped,
+    row_a_refresh_at_half_life_rewrites_the_one_token_file_and_the_hook_files_stay_readable,
+    row_a_tokenless_write_to_a_fenced_threads_entry_is_refused,
+)
+
+
 @pytest.mark.t2_tenant
-def test_a_tokenless_write_to_a_fenced_threads_entry_is_refused(step2: World, monkeypatch: pytest.MonkeyPatch) -> None:
-    world = step2
-    alpha = world.seat("alpha")
-    world.process(100, name="alpha")
-    world.hook(100, "startup", "s1")
-    _threads(world, monkeypatch, 100).put("threads", "alpha", _entry(alpha, "s1"))
-    monkeypatch.setattr(token_header, "_discover", lambda: None)               # a shell with no Claude ancestor
-    token_header.reset_for_tests()
-    bare = HttpMemoryStore(base_url=world.base_url, tenant="default", _token=os.environ["NX_SERVICE_TOKEN"])
-    with pytest.raises(Exception) as err:
-        bare.put("threads", "alpha", _entry(alpha, "s9"))
-    assert "403" in str(err.value) or "identity_token_required" in str(err.value)
+def test_the_identity_token_journeys_against_the_step2_engine(step2: World, rows: Rows) -> None:
+    """``step2`` and ``rows`` are the same world: the engine is checked once, then each journey runs on a scoped slice
+    of it (its clock starts from the real time ``step2`` set). A failure names its row and the rows after it run."""
+    assert rows._base is step2
+    rows.run(ROWS, globals())

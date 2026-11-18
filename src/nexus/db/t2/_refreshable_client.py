@@ -69,7 +69,7 @@ import structlog
 from nexus._log_safe_url import log_endpoint
 from nexus.collection_errors import superseded_write_error_from_body
 from nexus.db.client_identity import client_identity_headers
-from nexus.identity.token_header import fenced_identity_headers, retry_headers_after_401, superseded_from_response
+from nexus.identity.token_header import request_with_identity, superseded_from_response
 from nexus.db import gateway_hold
 from nexus.db.request_gate import before_request
 from nexus.db.gateway_backoff import (
@@ -1437,11 +1437,8 @@ class RefreshableHttpStoreMixin:
         nexus-bikit.4, when ``merge_memories`` was routed through ``_post``).
         """
         url = self._base_url + path
-        before_request()  # nexus-ldf2s: every attempt, retries included, passes the request gate
-        resp = self._client.request(method, url, headers=(sent := {**self._auth_headers(), **fenced_identity_headers(method, path)}), **kwargs)
-        if resp.status_code == 401 and (fresh := retry_headers_after_401(sent, path)):  # RDR-253 Step 3: re-read the token file once
-            before_request()
-            resp = self._client.request(method, url, headers=fresh, **kwargs)
+        # nexus-ldf2s: every attempt passes the request gate; RDR-253 Step 3: the identity token, one resend on a 401
+        resp = request_with_identity(lambda h: self._client.request(method, url, headers=h, **kwargs), before_request, self._auth_headers(), method, path)
         self._note_data_token_response(resp)
         self._raise_for_status(resp, path)
         if not resp.content:
