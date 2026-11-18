@@ -48,7 +48,7 @@ class CatalogDocReadsSqlTest {
     @Test
     void theSchemeStatementStripsThenRemovesThenReadsThePrefixInThatOrder() {
         String sql = sql(CatalogDocReads.schemeWhere("t", "https"));
-        int ltrim = sql.indexOf("ltrim(");
+        int ltrim = Math.max(sql.indexOf("ltrim("), sql.indexOf("leading"));   // rendered as ltrim(x, set) or trim(leading set from x)
         int translate = sql.indexOf("translate(");
         int substring = sql.indexOf("substring(");
         assertThat(substring).as(sql).isGreaterThanOrEqualTo(0);
