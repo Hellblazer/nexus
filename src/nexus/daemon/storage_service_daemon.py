@@ -1136,11 +1136,7 @@ def last_engine_root_cause(log_path: Path, start_offset: int) -> str | None:
     """
     lines = _log_lines_since(log_path, start_offset)
     last_error = next(
-        (
-            i
-            for i in range(len(lines) - 1, -1, -1)
-            if _ENGINE_ERROR_LINE.match(lines[i]) and "event=schema_migration_failed" in lines[i]
-        ),
+        (i for i in range(len(lines) - 1, -1, -1) if readiness.is_migration_failed_line(lines[i])),
         None,
     )
     if last_error is None:

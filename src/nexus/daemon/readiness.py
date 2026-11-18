@@ -102,14 +102,68 @@ PROGRESS_LOG_INTERVAL: float = 30.0
 #: phase transition on their own. The 600s/3600s PG-probe-backed stall
 #: timeout is the real safety net regardless of whether either assumption
 #: about JUL's default bootstrap under GraalVM native-image ever breaks.
-RE_RUNNING_CHANGESET = re.compile(r"Running Changeset:\s*(\S+)")
-RE_PENDING = re.compile(r"event=schema_migration_pending\b.*?changesets=(\d+)")
+#:
+#: Anchoring (RDR-167, nexus-dngtz.1.11). Engine lines carry client-chosen
+#: values (tenant and collection names, request paths, exception text), so a
+#: marker counts only where a client value cannot stand: as the FIRST token of
+#: the message of a logback line from the logger that emits it, or at the
+#: start of a bare Liquibase line. A marker anywhere else in a line, inside a
+#: quoted value or after other text, is ignored. The engine's sink converter
+#: escapes every control character in a message and in exception text, so no
+#: value can start a line of its own. Liquibase's JUL records get the same
+#: escape from the engine's JUL formatter. "Running Changeset:" lines are bare
+#: Liquibase UI output carrying changeset ids from the engine's own changelog
+#: files, not client text, and are not escaped; they and the lock wait only
+#: widen a wait bound and name a changeset, never decide a phase or a failure.
+RE_RUNNING_CHANGESET = re.compile(r"^Running Changeset:\s*(\S+)")
+RE_PENDING = re.compile(r"^event=schema_migration_pending\b.*?\bchangesets=(\d+)")
+RE_WAITING_FOR_LOCK = re.compile(r"^(?:[A-Z]+: )?Waiting for changelog lock")
+
+#: One engine logback line: ``<date> <time> <LEVEL> [<thread>] <logger>
+#: [cid=... tenant=... session=...] - <message>`` (service logback.xml). The
+#: bracketed MDC block is optional: engines before RDR-167 Phase 1 print none,
+#: and one may still be the engine running during an upgrade. No prefix value
+#: can hold ``] - `` (cid has a grammar, tenant and session go through
+#: LogText.mdcValue, thread names are the engine's own), so the message starts
+#: at the first ``] - `` or `` - `` after the logger.
+RE_ENGINE_LINE = re.compile(
+    r"^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d[,.]\d{3}\s+(?P<level>[A-Z]+)\s+\[[^\]]*\] (?P<logger>\S+) "
+    r"(?:\[cid=\S* tenant=\S* session=\S*\] )?- (?P<message>.*)$"
+)
+
+#: The loggers that emit the schema-migration markers, as %logger{36} renders
+#: them (both names are 36 characters or fewer, so they print unabbreviated).
+SCHEMA_MIGRATOR_LOGGER = "dev.nexus.service.db.SchemaMigrator"
+ENGINE_MAIN_LOGGER = "dev.nexus.service.Main"
 
 MARKER_START = "event=schema_migration_start"
 MARKER_PENDING = "event=schema_migration_pending"
 MARKER_COMPLETE = "event=schema_migration_complete"
 MARKER_FAILED = "event=schema_migration_failed"
 MARKER_WAITING_FOR_LOCK = "Waiting for changelog lock"
+
+
+def engine_message(line: str, logger: str, level: str | None = None) -> str | None:
+    """The message of *line* when it is an engine logback line from *logger*
+    (at *level*, when given); otherwise None."""
+    m = RE_ENGINE_LINE.match(line)
+    if m is None or m.group("logger") != logger or (level is not None and m.group("level") != level):
+        return None
+    return m.group("message")
+
+
+def starts_with_marker(message: str | None, marker: str) -> bool:
+    """True when *message* begins with *marker* as a whole token."""
+    return (
+        message is not None
+        and message.startswith(marker)
+        and (len(message) == len(marker) or message[len(marker)] == " ")
+    )
+
+
+def is_migration_failed_line(line: str) -> bool:
+    """The engine's ``event=schema_migration_failed`` ERROR line, from Main."""
+    return starts_with_marker(engine_message(line, ENGINE_MAIN_LOGGER, "ERROR"), MARKER_FAILED)
 
 
 # ── Phase / probe enums ──────────────────────────────────────────────────────
@@ -185,25 +239,26 @@ class MigrationLogScanner:
         the changelog-lock-wait marker."""
         waiting_for_lock = False
         for line in lines:
-            if MARKER_FAILED in line:
+            if is_migration_failed_line(line):
                 self.failed = True
                 self.failure_line = line
                 continue
-            if MARKER_WAITING_FOR_LOCK in line:
-                waiting_for_lock = True
-            changeset_match = RE_RUNNING_CHANGESET.search(line)
+            lock_wait = RE_WAITING_FOR_LOCK.match(line) is not None
+            waiting_for_lock = waiting_for_lock or lock_wait
+            changeset_match = RE_RUNNING_CHANGESET.match(line)
+            message = engine_message(line, SCHEMA_MIGRATOR_LOGGER)
             if (
-                MARKER_START in line
-                or MARKER_PENDING in line
-                or MARKER_WAITING_FOR_LOCK in line
+                starts_with_marker(message, MARKER_START)
+                or starts_with_marker(message, MARKER_PENDING)
+                or lock_wait
                 or changeset_match
             ):
                 self.started = True
             if changeset_match:
                 self.changeset = changeset_match.group(1)
-            if m := RE_PENDING.search(line):
+            if message is not None and (m := RE_PENDING.match(message)):
                 self.pending = int(m.group(1))
-            if MARKER_COMPLETE in line:
+            if starts_with_marker(message, MARKER_COMPLETE):
                 self.complete = True
         return waiting_for_lock
 

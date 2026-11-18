@@ -83,11 +83,11 @@ class _EngineLog:
         self.line(f"Running Changeset: db/changelog/{name}.xml::{name}::nexus-test")
 
     def migration_start(self, pending: int = 400) -> None:
-        self.line("2026-11-08 07:00:00,000 INFO  [main] d.n.s.d.SchemaMigrator - event=schema_migration_start changelog=x")
-        self.line(f"2026-11-08 07:00:00,100 INFO  [main] d.n.s.d.SchemaMigrator - event=schema_migration_pending changesets={pending}")
+        self.line("2026-11-08 07:00:00,000 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_start changelog=x")
+        self.line(f"2026-11-08 07:00:00,100 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_pending changesets={pending}")
 
     def migration_complete(self) -> None:
-        self.line("2026-11-08 07:01:00,000 INFO  [main] d.n.s.d.SchemaMigrator - event=schema_migration_complete new_changesets=400")
+        self.line("2026-11-08 07:01:00,000 INFO  [main] dev.nexus.service.db.SchemaMigrator - event=schema_migration_complete new_changesets=400")
 
     def ready(self, port: int) -> None:
         self.line(f"2026-11-08 07:01:30,000 INFO  [main] d.n.s.NexusService - {sub._ENGINE_READY_PREFIX}{port}")

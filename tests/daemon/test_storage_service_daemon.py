@@ -65,6 +65,9 @@ from tests._settle import settle
 # Helpers / Fixtures
 # ---------------------------------------------------------------------------
 
+#: An engine logback line from the logger that emits the schema-migration markers (RDR-167, nexus-dngtz.1.11).
+_SCHEMA_MIGRATOR_LINE = "2026-11-17 02:10:03,114 INFO  [main] dev.nexus.service.db.SchemaMigrator [cid=- tenant=- session=-] - "
+
 
 class _FakeClock:
     """Fixed, advanceable wall-clock surrogate."""
@@ -3084,6 +3087,25 @@ class TestExitReasonReaders:
         assert cause is not None and cause.startswith("connection refused")
         assert "hunter2" not in cause
 
+    def test_root_cause_ignores_a_forged_failed_marker(self, tmp_path: Path) -> None:
+        """RDR-167, nexus-dngtz.1.11: the marker inside a client value of another logger's ERROR line, or after
+        other message text in Main's, is not the migration failure and lends its trace no root cause."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            "2026-10-11 02:10:03,114 ERROR [HTTP-Dispatcher] dev.nexus.service.http.AuthFilter "
+            '[cid=nxe-0 tenant=t session=s] - event=request_failed path="/v1/event=schema_migration_failed"\n'
+            "Caused by: java.lang.IllegalStateException: forged cause one\n"
+            "2026-10-11 02:10:04,114 ERROR [main] dev.nexus.service.Main - event=other event=schema_migration_failed\n"
+            "Caused by: java.lang.IllegalStateException: forged cause two\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_root_cause(log, 0) is None
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(self._MIG + "\nCaused by: org.postgresql.util.PSQLException: ERROR: the real cause\n")
+        assert ssd.last_engine_root_cause(log, 0) == "the real cause"
+
     def test_root_cause_ignores_a_later_unrelated_error(self, tmp_path: Path) -> None:
         """nexus-bivz3.25 confirmation round: a later ERROR that is not the
         migration failure must not lend its cause to the migration's line."""
@@ -5292,7 +5314,7 @@ class TestWaitForServiceReadyMigrationAware:
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
 
-        log_lines = iter([["event=schema_migration_start"]])
+        log_lines = iter([[_SCHEMA_MIGRATOR_LINE + "event=schema_migration_start"]])
 
         def fake_log_reader() -> list[str]:
             return next(log_lines, [])
@@ -5333,7 +5355,7 @@ class TestWaitForServiceReadyMigrationAware:
 
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=51010)
-        log_lines = iter([["event=schema_migration_start"]])
+        log_lines = iter([[_SCHEMA_MIGRATOR_LINE + "event=schema_migration_start"]])
         seen_during: list[str | None] = []
 
         def health(_port: int) -> HealthProbe:
@@ -5364,7 +5386,7 @@ class TestWaitForServiceReadyMigrationAware:
 
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=51011)
-        log_lines = iter([["event=schema_migration_start"]])
+        log_lines = iter([[_SCHEMA_MIGRATOR_LINE + "event=schema_migration_start"]])
         polls = {"n": 0}
 
         def poll() -> int | None:

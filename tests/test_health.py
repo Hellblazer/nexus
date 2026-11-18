@@ -339,6 +339,31 @@ def test_last_boot_failure_detail_bounded_tail_read(tmp_path) -> None:
     assert "catalog-999-9" in detail
 
 
+def test_last_boot_failure_detail_ignores_the_marker_inside_a_logged_value(tmp_path) -> None:
+    """RDR-167, nexus-dngtz.1.11: a client value printed in an engine logback line (a tenant, a request path) must
+    not forge the boot-failure advisory. The real trace line after it still counts (fixture
+    tests/fixtures/rdr231_halt/engine_native_log_failed_boot.txt:128)."""
+    from nexus.health import _last_boot_failure_detail
+
+    log_path = tmp_path / "storage_service_native.log"
+    real = (
+        "Caused by: liquibase.exception.MigrationFailedException: Migration failed for changeset "
+        "db/changelog/note-uri-001-backfill.xml::note-uri-001-1::nexus-bivz3.5:\n"
+    )
+    forged = (
+        "2026-11-17 02:10:03,114 WARN  [HTTP-Dispatcher] dev.nexus.service.http.AuthFilter "
+        "[cid=nxe-0 tenant=t session=s] - event=request_failed path=\"/v1/x Migration failed for changeset "
+        "db/changelog/evil.xml::forged-1::x\" status=500\n"
+        "2026-11-17 02:10:04,114 WARN  [HTTP-Dispatcher] dev.nexus.service.http.AuthFilter - "
+        "event=request_failed op=\"liquibase.exception.MigrationFailedException: Migration failed for changeset "
+        "db/changelog/evil.xml::forged-2::x\"\n"
+    )
+    log_path.write_text(forged, encoding="utf-8")
+    assert _last_boot_failure_detail(log_path) is None
+    log_path.write_text(real + forged, encoding="utf-8")
+    assert _last_boot_failure_detail(log_path) == "Liquibase changeset note-uri-001-1"
+
+
 def test_vector_service_unreachable_surfaces_boot_failure(monkeypatch, tmp_path) -> None:
     """Core acceptance test (nexus-4m6i0.7): when the vector service is
     unreachable AND the local service log carries a recent Liquibase

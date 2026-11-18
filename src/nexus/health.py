@@ -1222,12 +1222,12 @@ def _check_service_crossencoder_model() -> list[HealthResult]:
 #: meaningful drag on `nx doctor`.
 _BOOT_FAILURE_TAIL_BYTES: int = 64 * 1024
 
-#: Liquibase's failure marker, verbatim across both the wrapped GH #1390
-#: report and the raw stack trace: "Migration failed for changeset
-#: <changelog-path>::<changeset-id>::<author>".
+#: Liquibase's failure marker ("Migration failed for changeset <path>::<id>::<author>"), only where Liquibase puts
+#: it: a line start or right after "MigrationFailedException: ", never in an engine logback line, whose message can
+#: carry client text (RDR-167, nexus-dngtz.1.11). An exception message on a trace line still could; display only.
 _LIQUIBASE_CHANGESET_RE = re.compile(
-    r"Migration failed for changeset\s+(?P<path>\S+?)::(?P<id>[^:\s]+)::(?P<author>\S+)"
-)
+    r"(?m)^(?!\d{4}-\d\d-\d\d[ T])(?:[ \t]*|.*?\bMigrationFailedException: )Migration failed for changeset\s+"
+    r"(?P<path>\S+?)::(?P<id>[^:\s]+)::(?P<author>\S+)")
 #: The SQL error one-liner Liquibase's PSQLException wrapper emits, usually
 #: a few lines after the changeset marker (e.g. "Caused by: ...PSQLException:
 #: \n  ERROR: constraint ... does not exist").

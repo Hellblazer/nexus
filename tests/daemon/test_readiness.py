@@ -28,6 +28,12 @@ from nexus.daemon.readiness import (
     ReadinessStopRequestedError,
 )
 
+#: Engine lines as the engine renders them (service logback.xml). A marker counts only as the first token of the
+#: message of a line from its own logger (RDR-167, nexus-dngtz.1.11): start/pending/complete from SchemaMigrator,
+#: failed from Main at ERROR.
+_MIGRATOR = "2026-11-17 02:10:03,114 INFO  [main] dev.nexus.service.db.SchemaMigrator [cid=- tenant=- session=-] - "
+_MAIN_ERROR = "2026-11-17 02:10:03,114 ERROR [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
+
 
 class _FakeClock:
     """Monotonic-style fake clock: advance() moves time forward explicitly."""
@@ -167,7 +173,7 @@ class TestMigrationKeptAliveByPgProbe:
         not trip the 600s stall bound."""
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         pg = _ScriptedPgProbe(default=PgActivity.EXECUTING)
         hp = _ScriptedHealthProbe(default=HealthAnswer.UNKNOWN)
         monitor, *_ = _make_monitor(clock, log_reader=lr, pg_probe=pg, health_probe=hp)
@@ -185,7 +191,7 @@ class TestMigrationKeptAliveByPgProbe:
             assert r.phase is ReadinessPhase.MIGRATING
 
         # Now the changeset finishes: log line + health goes OK.
-        lr.queue("event=schema_migration_complete")
+        lr.queue(_MIGRATOR + "event=schema_migration_complete")
         clock.advance(1.0)
         r = monitor.tick()
         assert r.phase is ReadinessPhase.POST_MIGRATION
@@ -200,7 +206,7 @@ class TestMigrationKeptAliveByPgProbe:
         throttle interval has elapsed."""
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         pg = _ScriptedPgProbe(default=PgActivity.EXECUTING)
         monitor, _, pg_probe, _, _ = _make_monitor(
             clock, log_reader=lr, pg_probe=pg, pg_probe_min_interval=5.0
@@ -226,7 +232,7 @@ class TestStallDetection:
         silence elapses, never sooner."""
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         pg = _ScriptedPgProbe(default=PgActivity.IDLE)
         monitor, *_ = _make_monitor(clock, log_reader=lr, pg_probe=pg)
 
@@ -260,7 +266,7 @@ class TestUnobservableProbe:
         lines count as progress, and the bound widens to 3600s."""
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         pg = _ScriptedPgProbe(default=PgActivity.UNAVAILABLE)
         monitor, *_ = _make_monitor(clock, log_reader=lr, pg_probe=pg)
 
@@ -278,7 +284,7 @@ class TestUnobservableProbe:
     def test_unobservable_probe_still_stalls_at_3600s(self):
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         pg = _ScriptedPgProbe(default=PgActivity.UNAVAILABLE)
         monitor, *_ = _make_monitor(clock, log_reader=lr, pg_probe=pg)
 
@@ -299,7 +305,7 @@ class TestUnobservableProbe:
         an expensive shell-out)."""
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         pg = _ScriptedPgProbe(default=PgActivity.UNAVAILABLE)
         monitor, _, pg_probe, _, _ = _make_monitor(clock, log_reader=lr, pg_probe=pg)
 
@@ -320,9 +326,9 @@ class TestProcessExitFailsFast:
         clock = _FakeClock()
         lr = _ScriptedLogReader()
         if phase_setup in ("migrating", "post_migration"):
-            lr.queue("event=schema_migration_start")
+            lr.queue(_MIGRATOR + "event=schema_migration_start")
         if phase_setup == "post_migration":
-            lr.queue("event=schema_migration_complete")
+            lr.queue(_MIGRATOR + "event=schema_migration_complete")
         poll = _ScriptedProcessPoll()
         monitor, *_ = _make_monitor(clock, log_reader=lr, process_poll=poll)
 
@@ -357,12 +363,12 @@ class TestMigrationFailedMarker:
         over a bare process-exit report, which names only a returncode."""
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         poll = _ScriptedProcessPoll()
         monitor, *_ = _make_monitor(clock, log_reader=lr, process_poll=poll)
         monitor.tick()  # -> MIGRATING
 
-        lr.queue("event=schema_migration_failed changeset=rdr180-001 error=boom")
+        lr.queue(_MAIN_ERROR + "event=schema_migration_failed changeset=rdr180-001 error=boom")
         poll.kill(returncode=1)
         with pytest.raises(ReadinessMigrationFailedError) as exc_info:
             monitor.tick()
@@ -371,11 +377,11 @@ class TestMigrationFailedMarker:
     def test_failed_marker_raises_immediately_not_a_stall(self):
         clock = _FakeClock()
         lr = _ScriptedLogReader()
-        lr.queue("event=schema_migration_start")
+        lr.queue(_MIGRATOR + "event=schema_migration_start")
         monitor, *_ = _make_monitor(clock, log_reader=lr)
         monitor.tick()  # -> MIGRATING
 
-        lr.queue("event=schema_migration_failed changeset=foo::bar::baz")
+        lr.queue(_MAIN_ERROR + "event=schema_migration_failed changeset=foo::bar::baz")
         clock.advance(1.0)  # nowhere near any deadline
         with pytest.raises(ReadinessMigrationFailedError) as exc_info:
             monitor.tick()
@@ -408,7 +414,7 @@ class TestChangesetAndPendingTracking:
         clock = _FakeClock()
         lr = _ScriptedLogReader()
         lr.queue(
-            "event=schema_migration_pending changesets=3",
+            _MIGRATOR + "event=schema_migration_pending changesets=3",
             "Running Changeset: db/changelog/rdr180-001.xml::rdr180-001::hal",
         )
         monitor, *_ = _make_monitor(clock, log_reader=lr)
@@ -523,16 +529,16 @@ class TestMigrationLogScanner:
     def test_started_is_sticky_across_feed_calls(self):
         scanner = MigrationLogScanner()
         assert scanner.started is False
-        scanner.feed(["event=schema_migration_start"])
+        scanner.feed([_MIGRATOR + "event=schema_migration_start"])
         assert scanner.started is True
         scanner.feed([])  # empty batch must not reset it
         assert scanner.started is True
 
     def test_complete_is_sticky_and_flips_migrating_false(self):
         scanner = MigrationLogScanner()
-        scanner.feed(["event=schema_migration_start"])
+        scanner.feed([_MIGRATOR + "event=schema_migration_start"])
         assert scanner.migrating is True
-        scanner.feed(["event=schema_migration_complete"])
+        scanner.feed([_MIGRATOR + "event=schema_migration_complete"])
         assert scanner.complete is True
         assert scanner.migrating is False
         scanner.feed([])
@@ -552,40 +558,86 @@ class TestMigrationLogScanner:
 
     def test_pending_count_captured(self):
         scanner = MigrationLogScanner()
-        scanner.feed(["event=schema_migration_pending changesets=7"])
+        scanner.feed([_MIGRATOR + "event=schema_migration_pending changesets=7"])
         assert scanner.pending == 7
         assert scanner.started is True
 
     # nexus-dngtz.1.5: the engine's logback line gained ``[cid=.. tenant=.. session=..]`` before `` - ``
-    # (RDR-167 Step 3). The markers and RE_PENDING match message text, so they must read these as before.
-    _NEW_FORMAT_BARE = "2026-11-17 02:10:03,114 INFO  [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
-    _NEW_FORMAT_REQUEST = (
-        "2026-11-17 02:10:03,114 INFO  [HTTP-Dispatcher] dev.nexus.service.http.AuthFilter "
+    # (RDR-167 Step 3). An engine before that prints no MDC block, and may still be the one running during an
+    # upgrade, so both forms are read. Lines taken from tests/fixtures/windows_engine/engine-first-boot.log.
+    _OLD_FORMAT = "2026-10-05 13:56:13,157 INFO  [main] dev.nexus.service.db.SchemaMigrator - "
+    _NEW_FORMAT = _MIGRATOR
+    _REQUEST_LINE = (
+        "2026-11-17 02:10:03,114 WARN  [HTTP-Dispatcher] dev.nexus.service.http.AuthFilter "
         "[cid=nxe-0123456789abcdef0123456789abcdef tenant=tenant-a session=session-a1] - "
     )
 
-    def test_new_format_pending_line_gives_the_same_count(self):
-        from nexus.daemon.readiness import RE_PENDING
-
-        for prefix in (self._NEW_FORMAT_BARE, self._NEW_FORMAT_REQUEST):
-            line = prefix + "event=schema_migration_pending changesets=7"
-            m = RE_PENDING.search(line)
-            assert m is not None and m.group(1) == "7", line
+    def test_pending_line_gives_the_count_in_both_formats(self):
+        for prefix in (self._OLD_FORMAT, self._NEW_FORMAT):
             scanner = MigrationLogScanner()
-            scanner.feed([line])
-            assert scanner.pending == 7
+            scanner.feed([prefix + "event=schema_migration_pending changesets=7"])
+            assert scanner.pending == 7, prefix
             assert scanner.started is True
 
-    def test_new_format_start_and_complete_lines_set_the_same_flags(self):
-        from nexus.daemon.readiness import MARKER_START
+    def test_start_and_complete_lines_set_the_flags_in_both_formats(self):
+        for prefix in (self._OLD_FORMAT, self._NEW_FORMAT):
+            scanner = MigrationLogScanner()
+            scanner.feed([prefix + "event=schema_migration_start changelog=db/changelog/db.changelog-master.xml"])
+            assert scanner.started is True, prefix
+            scanner.feed([prefix + "event=schema_migration_complete new_changesets=508 reexecuted_changesets=0"])
+            assert scanner.complete is True, prefix
 
-        start = self._NEW_FORMAT_BARE + "event=schema_migration_start"
-        assert MARKER_START in start
+    # RDR-167, nexus-dngtz.1.11: a client-chosen value printed in an ordinary line must not forge a marker.
+    def test_a_marker_inside_a_client_value_is_ignored(self):
+        forged = [
+            self._REQUEST_LINE + 'event=request_failed path="/v1/x event=schema_migration_failed" status=500',
+            self._REQUEST_LINE + 'event=request_failed op="event=schema_migration_complete" status=500',
+            _MIGRATOR + 'event=schema_migration_session search_path="event=schema_migration_complete"',
+        ]
         scanner = MigrationLogScanner()
-        scanner.feed([start])
+        assert scanner.feed(forged) is False
+        assert (scanner.started, scanner.complete, scanner.failed, scanner.pending) == (False, False, False, None)
+
+    def test_a_marker_mid_line_or_from_another_logger_is_ignored(self):
+        forged = [
+            # the marker after other message text
+            _MIGRATOR + "event=other x=1 event=schema_migration_start",
+            _MAIN_ERROR + "event=request_failed event=schema_migration_failed",
+            # the right first token from the wrong logger, or failed at the wrong level
+            self._REQUEST_LINE + "event=schema_migration_start",
+            self._REQUEST_LINE + "event=schema_migration_pending changesets=9",
+            "2026-11-17 02:10:03,114 INFO  [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
+            "event=schema_migration_failed error=x",
+            _MIGRATOR.replace("INFO ", "ERROR") + "event=schema_migration_failed error=x",
+            # a marker glued to a longer token
+            _MIGRATOR + "event=schema_migration_started",
+            # not an engine line at all: a bare marker, a quoted one, a forged prefix inside a value
+            "event=schema_migration_failed",
+            'Caused by: java.lang.IllegalStateException: tenant "event=schema_migration_failed"',
+            self._REQUEST_LINE + "x 2026-11-17 02:10:03,114 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed",
+            # the Liquibase markers anywhere but the start of a line
+            self._REQUEST_LINE + 'path="Running Changeset: a::b::c"',
+            self._REQUEST_LINE + 'path="Waiting for changelog lock"',
+        ]
+        for line in forged:
+            scanner = MigrationLogScanner()
+            assert scanner.feed([line]) is False, line
+            assert (scanner.started, scanner.complete, scanner.failed, scanner.changeset, scanner.pending) == (
+                False, False, False, None, None), line
+
+    def test_real_liquibase_lines_still_match(self):
+        scanner = MigrationLogScanner()
+        assert scanner.feed(["INFO: Waiting for changelog lock...."]) is True
+        scanner.feed(["Running Changeset: db/changelog/role-001-nexus-svc.xml::role-001-1::nexus-9qvam"])
         assert scanner.started is True
-        scanner.feed([self._NEW_FORMAT_BARE + "event=schema_migration_complete"])
-        assert scanner.complete is True
+        assert scanner.changeset == "db/changelog/role-001-nexus-svc.xml::role-001-1::nexus-9qvam"
+
+    def test_the_real_failed_boot_line_matches(self):
+        # tests/fixtures/rdr231_halt/engine_native_log_failed_boot.txt, line 14
+        line = '2026-10-29 13:56:09,901 ERROR [main] dev.nexus.service.Main - event=schema_migration_failed error="Liquibase migration failed"'
+        scanner = MigrationLogScanner()
+        scanner.feed([line])
+        assert scanner.failed is True and scanner.failure_line == line
 
     def test_waiting_for_lock_is_not_sticky(self):
         scanner = MigrationLogScanner()
@@ -597,9 +649,9 @@ class TestMigrationLogScanner:
 
     def test_failed_marker_is_sticky_and_captures_the_line(self):
         scanner = MigrationLogScanner()
-        scanner.feed(["event=schema_migration_failed changeset=x::y::z"])
+        scanner.feed([_MAIN_ERROR + "event=schema_migration_failed changeset=x::y::z"])
         assert scanner.failed is True
-        assert scanner.failure_line == "event=schema_migration_failed changeset=x::y::z"
+        assert scanner.failure_line == _MAIN_ERROR + "event=schema_migration_failed changeset=x::y::z"
         scanner.feed([])
         assert scanner.failed is True  # still sticky
 
