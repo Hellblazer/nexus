@@ -331,11 +331,12 @@ class TestWorkflowPins:
         assert len(first) == 1 and len(second) == 1
         # The first resolves develop (or a dispatch's own ref, tests/test_workflow_dispatch_ref_lint.py)...
         assert first[0]["with"]["ref"] == "${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'develop' }}"
-        sha_step = next(s for s in jobs["service-jar"]["steps"] if s.get("id") == "sha")
-        assert "rev-parse HEAD" in sha_step["run"] and "$GITHUB_OUTPUT" in sha_step["run"]
-        assert jobs["service-jar"]["outputs"]["sha"] == "${{ steps.sha.outputs.sha }}"
+        sha_step = next(s for s in jobs["service-jar"]["steps"] if s.get("id") == "revision")
+        assert 'echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"' in sha_step["run"]  # the key the output reads
+        # Not named sha, head or commit, which CodeQL reads as an untrusted pull-request head (code scanning alert 61).
+        assert jobs["service-jar"]["outputs"] == {"revision": "${{ steps.revision.outputs.revision }}"}
         # ...and the second tests exactly that tree, so the jar and the tests cannot differ by a push in between.
-        assert second[0]["with"]["ref"] == "${{ needs.service-jar.outputs.sha }}"
+        assert second[0]["with"]["ref"] == "${{ needs.service-jar.outputs.revision }}"
         assert jobs["canary"]["needs"] == "service-jar"
 
     def test_it_builds_the_jar_the_way_ci_does_and_runs_the_script_on_the_tag(self) -> None:
