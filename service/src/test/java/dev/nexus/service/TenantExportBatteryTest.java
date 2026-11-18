@@ -180,7 +180,8 @@ class TenantExportBatteryTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             List<String> problems = new ArrayList<>();
             List<ExportTable> exported = TenantExport.TABLES.stream().filter(ExportTable::exported).toList();
-            assertThat(exported).as("the registry's data and derived tables").hasSize(32);
+            // 32 -> 33: nexus-igea9.5 (RDR-252 Step 1) registered group_records as DATA.
+            assertThat(exported).as("the registry's data and derived tables").hasSize(33);
 
             // the seed is not vacuous: every exported column is non-NULL in some A row and NULL-or-default in the
             // others, and B has rows in every table
@@ -223,7 +224,7 @@ class TenantExportBatteryTest {
             }
             assertThat(types).as("the column types of the exported tables").containsExactlyInAnyOrder(
                 "bigint", "bigint[]", "boolean", "bytea", "double precision", "integer", "integer[]", "jsonb",
-                "numeric", "text", "timestamp with time zone", "vector(n)");
+                "numeric", "text", "text[]", "timestamp with time zone", "vector(n)");
             assertThat(identityColumns).as("serial or identity columns of the exported tables").isGreaterThan(0);
             // the id the restore reassigns is a serial or identity column of the table, and it is in every page's rows
             for (ExportTable t : exported) {
@@ -905,6 +906,7 @@ class TenantExportBatteryTest {
                 case "jsonb" -> JSONB.valueOf("{\"k\": [1, 2, {\"n\": null}], \"s\": \"v\"}");
                 case "bigint[]" -> new Long[] {5L, Long.MAX_VALUE};
                 case "integer[]" -> new Integer[] {1, 2, 3};
+                case "text[]" -> new String[] {"first é", "second"};
                 case "uuid" -> UUID.nameUUIDFromBytes(where.getBytes(StandardCharsets.UTF_8));
                 default -> throw new IllegalStateException("the battery has no value for the column type " + type + " of " + where);
             };
