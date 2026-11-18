@@ -124,6 +124,24 @@ class TestCapabilityReader:
         engine.version = version
         assert engine.client.supports_topic_route() is expected
 
+    # The cloud edge relays an allowlisted /version body (conexus PR #721, nexus-7fku2.1.6): public fields only,
+    # the flag as a JSON boolean when the engine sent one, the key dropped when the engine omitted it or sent a
+    # non-boolean, and no schema_* fields.
+    _EDGE_BODY = {
+        "app_version": "8.4.0", "release_version": "0.1.196", "tenant_import_supported": True,
+        "vector_topic_route_supported": True, "process_uptime_seconds": 900,
+    }
+
+    def test_an_edge_trimmed_body_with_the_flag_reads_as_supported(self, monkeypatch) -> None:
+        engine = _engine(monkeypatch, _cols("docs", _BGE, 1), capable=False)
+        engine.version = dict(self._EDGE_BODY)
+        assert engine.client.supports_topic_route() is True
+
+    def test_an_edge_trimmed_body_without_the_flag_reads_as_unsupported(self, monkeypatch) -> None:
+        engine = _engine(monkeypatch, _cols("docs", _BGE, 1), capable=False)
+        engine.version = {k: v for k, v in self._EDGE_BODY.items() if k != "vector_topic_route_supported"}
+        assert engine.client.supports_topic_route() is False
+
     def test_an_outage_reads_as_unsupported_and_never_raises(self, monkeypatch) -> None:
         engine = _engine(monkeypatch, _cols("docs", _BGE, 1))
         engine.version_error = VectorServiceError("down", code=503)
