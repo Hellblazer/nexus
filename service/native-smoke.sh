@@ -947,7 +947,10 @@ SVCPID=$!
 VUP=0
 for i in $(seq 1 60); do
   kill -0 $SVCPID 2>/dev/null || { echo "FAIL: voyage-mode service exited during startup (segfault?)"; tail -40 "$SMOKE_TMP/voyage.log"; exit 1; }
-  curl -fsS "$U/health" >/dev/null 2>&1 && { VUP=1; break; }
+  # This boot reuses SVCPORT, free again only since the first engine stopped: as wait_healthy, a 200
+  # counts only once THIS engine has logged that it serves the port (nexus-rc4pz).
+  curl -fsS "$U/health" >/dev/null 2>&1 \
+    && grep -qF "event=service_started port=$SVCPORT" "$SMOKE_TMP/voyage.log" && { VUP=1; break; }
   sleep 1
 done
 [ "$VUP" = "1" ] || { echo "FAIL: voyage-mode service never became healthy"; tail -40 "$SMOKE_TMP/voyage.log"; exit 1; }

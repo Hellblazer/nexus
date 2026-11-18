@@ -389,6 +389,19 @@ def test_two_runs_name_their_containers_apart(tmp_path: Path) -> None:
     assert len(names) == 2, names
 
 
+def test_every_health_wait_in_native_smoke_counts_only_its_own_engine() -> None:
+    """nexus-rc4pz: a process that took the port can answer /health while the engine dies at its bind, so every
+    /health poll in native-smoke.sh must also find ``event=service_started port=$SVCPORT`` in that boot's own
+    log. The first boot's wait is run by the thief test below; the voyage-mode reboot sits past checks the fake
+    engine cannot pass (it stops at "migration did not apply"), so its guard is pinned here as text."""
+    lines = SMOKE.read_text().splitlines()
+    polls = [n for n, line in enumerate(lines) if 'curl -fsS "$U/health"' in line and not line.lstrip().startswith("#")]
+    assert len(polls) == 2, polls  # wait_healthy and the voyage-mode reboot; a new poll needs the guard too
+    for n, log in zip(polls, ("svc.log", "voyage.log")):
+        guard = lines[n] + lines[n + 1]
+        assert f'grep -qF "event=service_started port=$SVCPORT" "$SMOKE_TMP/{log}"' in guard, (n + 1, guard)
+
+
 _SCRIPTS = ["native-smoke.sh", "native-boot-shapes-smoke.sh", "linux-native-verify.sh", "trace-native.sh"]
 
 
