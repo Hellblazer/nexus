@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The client against an engine that issues identity tokens and fences the four families (RDR-253 Step 2,
-nexus-hczdo.1.2). Written to the Step 2 contract in ``nexus.identity.token_contract``; every row here is SKIPPED, as a
-module of tests/identity/test_identity_engine_journeys.py, on an engine that does not issue ``identity_token`` (the Step
-1 engine this branch is built on) and runs once Step 2's engine is the session jar; the other modules' rows run either
-way. ``NX_IDENTITY_REQUIRE_STEP2=1`` turns the skip into a failure, so the day the jar carries Step 2 a green run cannot
-be a vacuous one (the nexus-moht0 doctrine); the hand-back lists the three rows.
+nexus-hczdo.1.2). Written to the Step 2 contract in ``nexus.identity.token_contract``. Step 2 is on develop, so the
+session jar issues ``identity_token``; on an engine that does not, this module of
+tests/identity/test_identity_engine_journeys.py FAILS (the nexus-moht0 doctrine: a gate never passes vacuously), and only
+``NX_IDENTITY_REQUIRE_STEP2=0`` lets it skip, for a hand run against an older jar. The other modules' rows run either
+way.
 
 Covers the bead's tests that need tokens: the first write after ``/clear`` succeeds; a Bash child from before the
 ``/clear`` still writes; a refresh rewrites the process's one token file; a superseded process's write is a typed
