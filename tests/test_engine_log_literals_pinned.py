@@ -187,7 +187,8 @@ def test_readiness_logger_names_are_the_java_loggers_as_logback_prints_them() ->
         assert path.stem == cls, (name, path)
         assert len(name) <= 36, f"{name} is longer than %logger{{36}} and would print abbreviated"
     pattern = (REPO / "service" / "src" / "main" / "resources" / "logback.xml").read_text(encoding="utf-8")
-    assert "%logger{36}" in pattern and "] - %msg%n" in pattern
+    # the message converter may be renamed (the engine's escaping converter); its place after "] - " may not
+    assert "%logger{36}" in pattern and re.search(r"\] - %[A-Za-z]+(?:\{[^}]*\})?%n", pattern)
 
 
 def test_the_failed_marker_is_logged_by_main_at_error_and_the_others_by_schema_migrator() -> None:

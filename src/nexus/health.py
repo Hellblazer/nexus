@@ -1219,8 +1219,8 @@ def _check_service_crossencoder_model() -> list[HealthResult]:
 #: The service can crash-loop BEFORE it answers any HTTP request, so the
 #: only evidence of *why* is in its own log file — never the whole file,
 #: just the most recent bytes, to keep this diagnostic O(1)-ish and never a
-#: meaningful drag on `nx doctor`.
-_BOOT_FAILURE_TAIL_BYTES: int = 64 * 1024
+#: meaningful drag on `nx doctor`. 1 MiB holds Main's failed line and a long Failed-SQL trace after it.
+_BOOT_FAILURE_TAIL_BYTES: int = 1024 * 1024
 
 #: Liquibase's failure marker ("Migration failed for changeset <path>::<id>::<author>"), read only in the trace of
 #: Main's event=schema_migration_failed ERROR line, and its first match there, Liquibase's own outer wrapper: an
