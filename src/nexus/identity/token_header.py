@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -281,3 +281,17 @@ def retry_headers_after_401(sent: Mapping[str, str], path: str = "") -> dict[str
     if is_send("POST", path):
         return {k: v for k, v in sent.items() if k != token_contract.IDENTITY_TOKEN_HEADER}
     return None
+
+
+def request_with_identity(
+    send: Callable[[Mapping[str, str]], Any], gate: Callable[[], None], auth: Mapping[str, str], method: str, path: str
+) -> Any:
+    """Send one request with the identity token when it is fenced, and on a 401 resend once with the headers
+    :func:`retry_headers_after_401` gives. *gate* runs before each attempt (the request gate); *send* takes the
+    complete headers and returns the response."""
+    gate()
+    resp = send(sent := {**auth, **fenced_identity_headers(method, path)})
+    if resp.status_code == 401 and (fresh := retry_headers_after_401(sent, path)):
+        gate()
+        resp = send(fresh)
+    return resp
