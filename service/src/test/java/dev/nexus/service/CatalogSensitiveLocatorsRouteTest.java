@@ -38,14 +38,23 @@ class CatalogSensitiveLocatorsRouteTest extends Rdr241RouteTestBase {
     }
 
     @Test
-    void aSensitiveRowCarriesAllFiveFields() throws Exception {
+    void aSensitiveRowCarriesTheFiveLocatorFieldsAndItsOwnSensitiveFlag() throws Exception {
         insert(Row.of("9.1.1").flagged().uri("file:///s/one.md").path("/s/one.md"));
         var body = ok(PATH);
         assertThat(body).containsEntry("count", 1);
         var d = documents(body).get(0);
         assertThat(d).containsEntry("tumbler", "9.1.1").containsEntry("source_uri", "file:///s/one.md")
-            .containsEntry("file_path", "/s/one.md").containsEntry("alias_of", "").containsEntry("physical_collection", COLL);
-        assertThat(d.keySet()).containsExactlyInAnyOrder("tumbler", "source_uri", "file_path", "alias_of", "physical_collection");
+            .containsEntry("file_path", "/s/one.md").containsEntry("alias_of", "").containsEntry("physical_collection", COLL)
+            .containsEntry("sensitive", true);
+        assertThat(d.keySet()).containsExactlyInAnyOrder("tumbler", "source_uri", "file_path", "alias_of", "physical_collection", "sensitive");
+    }
+
+    @Test
+    void sensitiveIsTheRowsOwnFlag_anAliasReadsFalseUnlessItIsItselfFlagged() throws Exception {
+        insert(Row.of("9.1.1").flagged(), Row.of("9.1.2").alias("9.1.1"), Row.of("9.1.3").alias("9.1.1").flagged());
+        var docs = documents(ok(PATH));
+        assertThat(docs).extracting(d -> d.get("sensitive")).containsExactly(true, false, true);
+        assertThat(docs).extracting(d -> d.get("alias_of")).containsExactly("", "9.1.1", "9.1.1");
     }
 
     @Test

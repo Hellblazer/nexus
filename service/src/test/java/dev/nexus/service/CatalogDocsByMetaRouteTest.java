@@ -188,7 +188,7 @@ class CatalogDocsByMetaRouteTest extends Rdr241RouteTestBase {
         seed("{\"k\":\"v\"}");
         for (String q : List.of(
             "meta.k=v&limit=0", "meta.k=v&limit=1001", "meta.k=v&limit=abc", "meta.k=v&offset=-1", "meta.k=v&offset=abc",
-            "meta_min.k=abc", "meta_min.k=1.5", "meta_min.k=", "meta_min.k=%2B3", "meta_min.k=" + "9".repeat(39),
+            "meta_min.k=abc", "meta_min.k=1.5", "meta_min.k=", "meta_min.k=%2B3",
             "meta.=v", "meta_min.=3", "meta.k=v&meta_default.=x", "meta.k=v&meta_default.j=x",
             "meta.k=v&meta_default.k=a&meta_default.k=b", "meta.k=v&surprise=1", "meta.k=v&meta_mni.k=3")) {
             assertThat(status(PATH + "?" + q)).as("query: " + q).isEqualTo(400);

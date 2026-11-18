@@ -188,7 +188,8 @@ final class CatalogBoundedReadRoutes {
 
     /**
      * GET /v1/catalog/sensitive/locators?limit=N (nexus-uwggq.2.5): {@code {count, limit, capped, documents:[{tumbler,
-     * source_uri, file_path, alias_of, physical_collection}]}}, the envelope of {@code /sensitive}.
+     * source_uri, file_path, alias_of, physical_collection, sensitive}]}}, the envelope of {@code /sensitive}. {@code sensitive}
+     * is the row's own flag (an alias row reads false unless it is itself flagged), so {@code _restrict} takes the rows raw.
      *
      * <p>The tenant's live sensitive documents and the live documents whose {@code alias_of} names a live sensitive one
      * ({@link CatalogSensitiveLocatorReads} has the statement), in tumbler order; {@code limit} is 1 to 10,000 (default
@@ -196,6 +197,7 @@ final class CatalogBoundedReadRoutes {
      */
     void sensitiveLocators(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        if (rejectBadQuery(exchange)) return;
         Integer limit = limitParam(exchange, CatalogSensitiveLocatorReads.DEFAULT_LIMIT, CatalogSensitiveLocatorReads.MAX_LIMIT);
         if (limit == null) return;
         CatalogSensitiveLocatorReads.Page page;
@@ -215,6 +217,7 @@ final class CatalogBoundedReadRoutes {
             m.put("file_path", d.filePath());
             m.put("alias_of", d.aliasOf());
             m.put("physical_collection", d.physicalCollection());
+            m.put("sensitive", d.sensitive());
             docs.add(m);
         }
         Map<String, Object> body = new LinkedHashMap<>();
@@ -234,6 +237,7 @@ final class CatalogBoundedReadRoutes {
      */
     void byAuthor(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        if (rejectBadQuery(exchange)) return;
         String author = queryParam(exchange, "author");
         if (author == null || author.isEmpty()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"author is required and must not be empty\"}");
@@ -273,6 +277,7 @@ final class CatalogBoundedReadRoutes {
      */
     void byMeta(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        if (rejectBadQuery(exchange)) return;
         String contentType = null;
         boolean sensitiveOnly = false;
         List<String[]> eq = new ArrayList<>();
@@ -348,6 +353,23 @@ final class CatalogBoundedReadRoutes {
 
     private static void badRequest(HttpExchange exchange, String message) throws IOException {
         HttpUtil.send(exchange, 400, "{\"error\":" + HttpUtil.jsonString(message) + "}");
+    }
+
+    /**
+     * Answers 400 (and returns true) for a query string the three Phase 2 routes cannot read: a parameter holding a NUL
+     * byte ({@code %00}), which PostgreSQL text cannot hold and would otherwise surface as a 500, or a malformed percent
+     * escape, which the decoder rejects.
+     */
+    private static boolean rejectBadQuery(HttpExchange exchange) throws IOException {
+        String raw = exchange.getRequestURI().getRawQuery();
+        if (raw == null) return false;
+        try {
+            if (decode(raw).indexOf('\0') >= 0) { badRequest(exchange, "a parameter holds a NUL byte"); return true; }
+        } catch (IllegalArgumentException e) {
+            badRequest(exchange, "a parameter is not valid percent-encoding");
+            return true;
+        }
+        return false;
     }
 
     private static String decode(String s) {

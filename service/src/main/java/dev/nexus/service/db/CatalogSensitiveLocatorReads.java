@@ -3,7 +3,7 @@
 package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
-import org.jooq.Record6;
+import org.jooq.Record7;
 import org.jooq.Select;
 import org.jooq.impl.DSL;
 
@@ -28,6 +28,11 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
  * tumblers)}: a row that is both appears once. No index on {@code alias_of}: the spike (nexus-uwggq.2.1) measured the
  * statement at 17.9 ms at 50,000 live rows, under the 100 ms rule. Empty {@code source_uri}, {@code file_path} and
  * {@code alias_of} come back as {@code ""}, the columns' defaults, never null.
+ *
+ * <p>Each row carries {@code sensitive}, the row's OWN flag: true for a sensitive row, and for an alias row whatever that
+ * row's own column says (false unless it is itself flagged), never the target's. So {@code sensitive_paths._restrict}, which
+ * keeps a row that is flagged or whose {@code alias_of} names a flagged row of the same list, consumes the rows unchanged:
+ * the alias's target is a live sensitive row and is in the same list, except past the {@code limit} (a capped answer).
  */
 public final class CatalogSensitiveLocatorReads {
 
@@ -37,8 +42,8 @@ public final class CatalogSensitiveLocatorReads {
     /** The limit a call without one uses. */
     public static final int DEFAULT_LIMIT = CatalogSensitiveReads.DEFAULT_LIMIT;
 
-    /** One listed document: the five fields the operator reads. */
-    public record Doc(String tumbler, String sourceUri, String filePath, String aliasOf, String physicalCollection) {}
+    /** One listed document: the fields the operator reads, and its own {@code sensitive} flag. */
+    public record Doc(String tumbler, String sourceUri, String filePath, String aliasOf, String physicalCollection, boolean sensitive) {}
 
     /** The answer: {@code count} is every row of the set; {@code documents} at most {@code limit} of them. */
     public record Page(int count, int limit, boolean capped, List<Doc> documents) {}
@@ -50,16 +55,16 @@ public final class CatalogSensitiveLocatorReads {
     }
 
     /**
-     * The one statement: {@code fetchLimit} rows of (tumbler, source_uri, file_path, alias_of, physical_collection,
+     * The one statement: {@code fetchLimit} rows of (tumbler, source_uri, file_path, alias_of, physical_collection, sensitive,
      * total), the caller passing {@code limit + 1}. Public so a plan-shape test can explain the exact statement.
      */
-    public static Select<Record6<String, String, String, String, String, Integer>> listQuery(
+    public static Select<Record7<String, String, String, String, String, Boolean, Integer>> listQuery(
             DSLContext ctx, String tenant, int fetchLimit) {
         var d = CATALOG_DOCUMENTS.as("d");
         var s = CATALOG_DOCUMENTS.as("s");
         var sensitiveTumblers = ctx.select(s.TUMBLER).from(s)
             .where(s.TENANT_ID.eq(tenant).and(DSL.condition(s.SENSITIVE)).and(s.DELETED_AT.isNull()));
-        return ctx.select(d.TUMBLER, d.SOURCE_URI, d.FILE_PATH, d.ALIAS_OF, d.PHYSICAL_COLLECTION, DSL.count().over())
+        return ctx.select(d.TUMBLER, d.SOURCE_URI, d.FILE_PATH, d.ALIAS_OF, d.PHYSICAL_COLLECTION, d.SENSITIVE, DSL.count().over())
             .from(d)
             .where(d.TENANT_ID.eq(tenant).and(d.DELETED_AT.isNull())
                 .and(DSL.condition(d.SENSITIVE).or(d.ALIAS_OF.in(sensitiveTumblers))))
@@ -79,12 +84,12 @@ public final class CatalogSensitiveLocatorReads {
             PgSession.setLocal(ctx, "statement_timeout", Integer.toString(Integer.getInteger(
                 CatalogRepository.FILLABLE_COUNT_TIMEOUT_PROPERTY, CatalogRepository.FILLABLE_COUNT_TIMEOUT_MS)));
             var rows = listQuery(ctx, tenant, limit + 1).fetch();
-            int count = rows.isEmpty() ? 0 : rows.get(0).value6();
+            int count = rows.isEmpty() ? 0 : rows.get(0).value7();
             boolean capped = count > limit;
             List<Doc> docs = new ArrayList<>(Math.min(rows.size(), limit));
             for (int i = 0; i < Math.min(rows.size(), limit); i++) {
                 var r = rows.get(i);
-                docs.add(new Doc(r.value1(), nz(r.value2()), nz(r.value3()), nz(r.value4()), nz(r.value5())));
+                docs.add(new Doc(r.value1(), nz(r.value2()), nz(r.value3()), nz(r.value4()), nz(r.value5()), Boolean.TRUE.equals(r.value6())));
             }
             return new Page(count, limit, capped, docs);
         });
