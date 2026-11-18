@@ -241,9 +241,12 @@ code (research 3); lane D, outside systems (research 4).
 
 1. **Seats.** An identity is an engine record with an opaque id that is never
    reused and one or more names. A seat is an identity Sam creates once by
-   name, by Sam (`nx identity create`) or by the restart script, which creates
-   a seat for each session it relaunches under a name the user set when no seat
-   has that name yet (`created_by: restart`); a launch that names no seat, or gives `-n`
+   name, by Sam (`nx identity create`) or by the restart script. Before it
+   restarts a session under a name the user set (registry `nameSource` is
+   `user`), in place or by relaunch, the script keeps a seat the session
+   already holds (the relaunch carries `NX_SEAT`), else promotes the session's
+   ephemeral identity to a seat of that name, else creates one
+   (`created_by: restart`); a launch that names no seat, or gives `-n`
    a name that is not a seat's, gets an ephemeral identity that can be
    promoted to a seat (Sam, 2026-11-16).
 2. **A binding log.** Each time a session takes, keeps or loses a seat
@@ -260,8 +263,9 @@ code (research 3); lane D, outside systems (research 4).
    generation (Sam, 2026-11-16, decision 2 as amended the same day); anyone
    may still send a seat mail. Elsewhere the stamp stays a label.
 5. **Delegated children.** A Bash child acts as its session's identity; a
-   `claude -p` child gets a delegated sub-identity that may read the parent's
-   state and write only its own. Agent-tool subagents keep the parent's seat
+   `claude -p` child that the dispatcher grants tools gets a delegated
+   sub-identity that may read the parent's state and write only its own (a
+   child with no tools cannot reach nexus and gets none). Agent-tool subagents keep the parent's seat
    with an `agent` label until Claude Code identifies their calls (Sam,
    2026-11-16, narrowed the same day).
 6. **State moves onto the identity.** Phase 1 moves the threads entry, the
@@ -332,11 +336,15 @@ the seat. A second `gone` for the same holder appends no row and answers
 `recorded: false`. A route lists the bindings
 whose host is a given host. At every SessionStart, after its own bind or
 rebind, the hook lists the live, lapsed and `unleased` bindings on its host,
-skips its own process's binding and every delegated identity (a delegated
-identity is renewed by the `nx` dispatcher, has no registry file, and lapses
-on its lease), runs the holder check on the rest and reports the gone ones, so
-a crashed session's identity is recorded as gone even if its seat is never
-claimed again; `nx identity alive` reports what it finds the same way.
+skips its own process's binding and every delegated identity in this pass (a
+delegated identity is renewed by the `nx` dispatcher, and the process that
+holds its binding is the dispatcher, which has no registry file), runs the holder
+check on the rest and reports the gone ones, so a crashed session's identity
+is recorded as gone even if its seat is never claimed again. A second pass
+checks each delegated identity's dispatcher by its pid and OS start time alone
+(a dead or reused pid is gone, one that runs or cannot be read is not) and
+reports the gone ones the same way; a 403 from `gone` ends the sweep. `nx
+identity alive` reports what it finds the same way.
 Retention and `purge` read these recorded verdicts. The callers of `bind` are
 the SessionStart hook, the `nx identity` commands, the MCP server (renewal,
 refresh, `end`, the `/branch` fork row and the pending bind below) and the `nx` operator dispatcher (a delegated identity's
@@ -515,7 +523,8 @@ ancestor's registry `entrypoint` is `cli` or `claude-desktop`, and a `claude
 -p` child, whose `entrypoint` is `sdk-cli` though its `kind` is `interactive`
 (`nexus_rdr/253-research-10` (4)), is refused. It is also refused when the
 holder's process is an ancestor of the caller's, so no child can take its
-parent's seat, and when the caller has no Claude ancestor with a registry
+parent's seat (the caller's own Claude process is not its own ancestor: a
+take-over of a seat that process already holds binds nothing new), and when the caller has no Claude ancestor with a registry
 file at all (a plain shell), since `find_immediate_claude_pid` would
 otherwise fall back to the shell itself. The hook prints the take-over remedy only into interactive sessions.
 The claim binds the caller's own Claude process (its nearest Claude ancestor,
@@ -709,17 +718,26 @@ it, clears the label, since the content is no longer the token holder's;
 `import_batch` stamps nothing. The tenant import and restore routes are
 deliberate unfenced operator paths.
 
-**Delegation.** `nx` operator dispatch (`claude -p`) creates a delegated
-identity, `kind=delegated parent=<id>`, with generation 1 and one `start`
-binding row written by the dispatcher, and passes the child, in place of the parent's token,
+**Delegation.** `nx` operator dispatch (`claude -p`) that grants the child tools
+(`allowed_tools` or `mcp_servers`) and runs under a bound identity creates a
+delegated identity, `kind=delegated parent=<id>`, with generation 1 and one
+`start` binding row written by the dispatcher; the row names the dispatcher's
+own process (host, pid, `started_at` and `proc_start`), since the dispatcher has no
+registry file. A dispatch that grants no tools (its child loads no MCP server
+and cannot reach nexus), a dispatcher with no identity of its own, or an engine
+that refuses the create runs as before, with no delegated identity. The
+dispatcher passes the child, in place of any token the parent carried,
 `NX_IDENTITY_TOKEN` naming a token file it keeps current; the child's own SessionStart
 hook sees the variable and does not bind, and the resolver takes the
 explicit token first. The dispatcher renews the delegated binding while the child runs, refreshes
 its token by rewriting the file `NX_IDENTITY_TOKEN` names
 (`~/.config/nexus/identity/delegated/<id>.token`, mode 0600; the child reads
 the token from the file, not from the variable), deletes that file and
-appends `end` when the child exits; if the dispatcher dies, renewal stops and the
-delegated identity lapses. A delegated
+appends `end` when the child exits, on every way it ends (success, failure,
+timeout, a spawn failure, a cancellation); if the dispatcher dies, renewal stops, the
+delegated identity lapses, and the SessionStart sweep (or `nx identity alive`)
+finds the dispatcher process gone and records `gone`. The hook also deletes the
+token files in that directory whose dispatcher is gone. A delegated
 identity reads its parent's identity-owned state and writes only its own.
 Agent-tool subagents keep the parent's seat with an `agent` label: their MCP
 calls carry nothing that tells them from the parent's (Critical Assumption 3;
@@ -733,7 +751,9 @@ session's identity; a seat that lapses in a sleep and revives is not
 counted), and an `unleased` ephemeral 30 days after the holder check finds
 its process gone. That clock starts at the engine time the `gone` row was
 recorded. A delegated identity has no registry file for a holder check to
-find, so 30 days lapsed is enough for it. Their identity, binding, session-index, membership,
+find, so 30 days lapsed is enough for it; the `gone` row the sweep records for a
+dead dispatcher is not needed for that, and lets `purge` act on it sooner
+(purge needs a recorded `gone` for any lapsed identity). Their identity, binding, session-index, membership,
 background-work and scratch rows and their threads entry are pruned, their
 mailbox is emptied, and the counter keeps their numbers. Token files are
 local: the MCP server deletes its own at shutdown once its Claude process has
@@ -743,7 +763,8 @@ has dealt with that holder: the engine recorded the `gone`, or no longer lists
 the process as the identity's holder (it ended, was released or was taken
 over). A run with no sweep, or a sweep that ended on a 403, deletes no token
 file, because the file may be the only record of the registry directory a live
-binding uses. A seat's binding rows are kept
+binding uses; the same holds for the delegated directory, whose files go only
+when the dispatcher process is gone and not in such a run. A seat's binding rows are kept
 for 180 days, never the last one, and its session-index rows as long as the
 binding rows they point to. Identity scratch goes with its identity: a
 purge removes the scope right after the purge commits (the scope is in another
@@ -825,7 +846,7 @@ seat's alias differ.
 | Session token, `sender_session` stamp | Yes (JDR-002) | Becomes an identity token carrying identity and generation |
 | MCP 60-second heartbeat thread | Yes (`subscriptions.py`) | Not used for identity: the identity lease runs on its own thread (`mcp/identity_lease.py`), because that loop runs only while a directory lease is armed |
 | SessionStart hook with `source` | Yes | Binds per the policy table (start, resume, clear, fork) |
-| Restart script with `-n` | Yes | Restart unchanged (the new start finds the old holder gone); its readiness check reads the identity's work rows (Step 6) |
+| Restart script with `-n` | Yes | The script makes or keeps the seat first (Approach item 1); a relaunch passes `-n` only for a user-set name and carries `NX_SEAT` for a held seat, and the new start finds the old holder gone; its readiness check reads the identity's work rows (Step 6) |
 | Catalog tumbler allocator | Yes (`catalog/tumbler.py`) | Pattern for the never-reused id counter |
 | T1 handoff marker | Yes (`hooks/__init__.py`, `mcp/core.py`) | Carries the binding to the MCP server; kept |
 | Directory lease, session markers, `current_session` | Yes | Fallbacks in Phase 1, retired in Phase 2 |
@@ -1059,10 +1080,13 @@ with take-over refused for non-interactive callers (registry `entrypoint`
 other than `cli` or `claude-desktop`), descendants of the holder and callers
 with no Claude ancestor; release carries none of those guards, only the holder
 check on the holder's host and the lease check for a holder on another host,
-and runs from a plain shell; the restart script's seat creation for sessions
-it relaunches under a name the user set;
-delegated identities, their renewal and their token file for `claude -p`
-dispatch.
+and runs from a plain shell; the restart script's seats: a session that holds a
+seat keeps it (the relaunch carries `NX_SEAT`), and for a name the user set (the
+registry `nameSource` is `user`) with no seat, the session's ephemeral identity
+is promoted, else a seat is created with `created_by=restart`, before an in-place
+`/restart` or a relaunch alike, while a derived name is not passed back as `-n`;
+delegated identities, their renewal and their token file for a `claude -p`
+dispatch that grants tools, and a `gone` row for a dead dispatcher.
 
 #### Step 5: Threads entry, mailbox and names
 
@@ -1087,8 +1111,10 @@ pre-Phase-1 client: every live Claude process on the laptop (registry files)
 has a binding whose `client_version` is the Step 5 release or later (the MCP
 server reports its own version on every renewal, so a stale server under a
 newer plugin is seen), checked by `nx
-identity show --all`, which lists live processes without a binding as
-well.
+identity show --all`, which lists the bindings held on this host and the live
+processes without one (not `claude -p` children, whose binding is their
+dispatcher's). The engine has no route that lists every identity, so an identity
+that no process on this host holds does not appear.
 
 ### Day 2 Operations
 
@@ -1124,7 +1150,10 @@ None.
   pid was reused after a crash is found gone; a holder's start time compared
   in UTC is not found gone.
 - The sweep marks a crashed holder's binding `gone` and leaves its own
-  process, delegated identities and a binding rebound since its read alone.
+  process and a binding rebound since its read alone; it marks a delegated
+  identity `gone` when its dispatcher process is gone (or its pid was reused)
+  and leaves one whose dispatcher runs alone, one failing row does not stop the
+  rest, and a sweep that ended on a 403 removes no token file.
 - A person at a plain shell releases a seat whose holder is gone, and is
   refused while it runs.
 - Two processes resuming one session id use separate token files.
@@ -1152,8 +1181,18 @@ None.
 - Retention: an ephemeral or delegated identity tombstoned 30 days after it
   ends or after 30 days lapsed with its holder recorded gone (a `gone` row
   included), its rows and board entry gone, its number never reused; token files
-  of dead processes removed by the hook; a seat's last binding row never
-  pruned.
+  of dead processes, and of dead dispatchers in the delegated directory, removed
+  by the hook; a seat's last binding row never pruned.
+- Seats from the restart script: a session relaunched (or restarted in place)
+  under a name the user set gets its ephemeral promoted, or a seat created, when
+  no seat has the name, and a name that already is a seat gets no second one; a
+  derived name makes none and is not passed back as `-n`; a session holding a seat
+  under another display name keeps it through `NX_SEAT`.
+- `nx identity show --all` lists a live process with no binding and leaves out a
+  `claude -p` child and a process whose pid was reused.
+- A delegated child writes its own records, reads its parent's and is refused on
+  them; its token file is gone and an `end` row present after every way its
+  dispatch ends, a cancellation while its identity is being created included.
 - Reboot: identity, aliases and bindings survive; `--revive` rebinds.
 
 ## Validation
@@ -1256,3 +1295,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-17: wording amended to match the reviewed Step 1 code (grant 3), bead nexus-hczdo.1.1.
 - 2026-11-17: wording amended to match the reviewed Step 2 code (grant 3), bead nexus-hczdo.1.2: identity tokens and their expiry rule, stale-generation and holder-mismatch codes, the four fences' refusal codes and check-then-write limit, threads, scratch and mailbox behaviour, and what the stamps say.
 - 2026-11-17: wording amended to match the reviewed Step 3 code (grant 3), bead nexus-hczdo.1.4: the identity lease on its own thread and `end` only after Claude exits; a notice, not a seat list, for an `NX_SEAT` naming no seat; the cases where the hook binds nothing; the resolver's fourth input and the token file's fields; which requests carry the token and the client-side session check; the holder check's registry-directory rule, unknown holders and Windows start time; data-credential degradation; `NX_IDENTITY_LEASE=0`; the pending bind logging its notices; the unindexed-resume reuse row; the Step 3 plan entry; the Desktop pending bind and the in-process `/resume` registry timing stated as unverified.
+- 2026-11-18: wording amended to match the reviewed Step 4 code (grant 3), bead nexus-hczdo.1.5: delegated identities for tool-granting dispatches only, their binding naming the dispatcher process and the sweep that records `gone` for a dead one and removes its token files (not after a 403); `nx identity show --all` scoped to bindings on this host and live processes without one, `claude -p` children left out; the restart script keeps a held seat through `NX_SEAT`, promotes an ephemeral or creates a seat for a `nameSource` `user` name, before an in-place `/restart` too, and passes no derived name back as `-n`; the take-over ancestor guard exempts the caller's own Claude process; Test Plan lines for these.

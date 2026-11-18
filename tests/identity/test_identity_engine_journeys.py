@@ -28,6 +28,7 @@ import pytest
 
 from nexus.identity import token_header
 from tests.identity import (
+    test_identity_step4,
     test_hook_leg,
     test_identity_token_engine,
     test_lease_wiring,
@@ -54,6 +55,10 @@ JOURNEYS = (
     # ancestor caches process-global, so they are reset after the module, a failing row included.
     _journey(test_identity_token_engine, "ite", precheck=test_identity_token_engine.step2_skip_reason,
              require_env=test_identity_token_engine.REQUIRE_ENV, cleanup=token_header.reset_for_tests),
+    # Step 4 (nexus-hczdo.1.5): take-over, release, promote, rename, purge and delegated identities. The delegated-child
+    # fence row sends identity tokens, so the module needs Step 2 and resets the same caches.
+    _journey(test_identity_step4, "st4", precheck=test_identity_step4.step2_skip_reason, require_env=test_identity_step4.REQUIRE_ENV,
+             cleanup=token_header.reset_for_tests),
 )
 
 

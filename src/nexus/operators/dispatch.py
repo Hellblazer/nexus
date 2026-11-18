@@ -1448,7 +1448,11 @@ class CliBackend:
         # nexus-xzorj: the group id recorded at spawn. asyncio's child watcher reaps the child on its
         # own schedule, so a kill after a timeout or cancel must not resolve the group from the pid.
         _dispatch_pgid: int | None = None
+        _delegated = None  # RDR-253 Step 4: this child's delegated identity, ended in the finally below
         try:
+            from nexus.operators.delegated_identity import start_delegation  # noqa: PLC0415 - deferred: only a Claude session with a bound identity pays for it
+
+            _delegated = await start_delegation(env, enabled=bool(mcp_servers or allowed_tools), label=operator)
             from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
             prompt_path = _write_prompt_file(prompt)
@@ -1932,6 +1936,8 @@ class CliBackend:
             # now that the subprocess that owned it is gone. No-op when this
             # dispatch never minted (tool-free, or a failed mint).
             _close_dispatch_session(_minted_session_id, _minted_session_token)
+            if _delegated is not None:  # RDR-253 Step 4: stop renewing, delete its token file, append `end`
+                _delegated.finish()
             # nexus-vzy2v: delete the temp prompt file on every path -- success,
             # harness failure, timeout-kill, or a spawn failure that raised
             # before any of the above ran. Best-effort: an already-completed

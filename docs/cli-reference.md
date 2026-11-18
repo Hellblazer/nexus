@@ -5906,6 +5906,95 @@ reach you by name. It is not a second delivered mailbox (RDR-208 Phase 3, bead
 nexus-galkv.20). See
 [Tuple space § Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
+## nx identity
+
+Session identity (RDR-253, Step 4). A **seat** is a long-lived identity such as `marginalia`: created once, held by one Claude process at a time, and bound by a launch that names it (`NX_SEAT`, or a `-n` that exactly matches the seat). A launch that names no seat gets an **ephemeral** identity that can be promoted to a seat. A `claude -p` child started by the `nx` operator dispatcher gets a **delegated** identity of its own. Every subcommand calls the engine's `/v1/identity` routes with the tenant credential `nx` already resolves; a refusal prints the engine's code and reason and exits 1.
+
+### nx identity create
+
+```
+nx identity create NAME [--created-by sam|restart]
+```
+
+Create the seat `NAME`: unheld, generation 0, with a live alias. Names that look like identity ids (`i<digits>`) are reserved.
+
+| Flag | Description |
+|------|-------------|
+| `--created-by sam\|restart` | Who made the seat (default `sam`). `scripts/claude-restart-sessions` passes `restart` |
+
+### nx identity show
+
+```
+nx identity show [SEAT] [--session ID] [--json]
+nx identity show --all
+```
+
+Show an identity: its alias, kind, state, liveness, current generation, holder (pid and host), the holder's client version and the five most recent binding rows. `SEAT` is a seat name or an id (`i7`); with neither argument it is the identity of the Claude session the command runs under.
+
+`--all` lists every binding held on this host, each with its client version, and then the live Claude processes here that have no binding (read from the registry files and checked against the process table; a `claude -p` child, entrypoint `sdk-cli`, is left out because its binding is its dispatcher's, and so is a registry file whose pid now belongs to another process). RDR-253's Phase 2 gate reads this list. The engine has no route that lists unheld seats, so an identity with no holder on this host does not appear.
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Bindings on this host plus live Claude processes with none. Takes no other argument |
+| `--session ID` | Show the identity a Claude session id belongs to (the session index) |
+| `--json` | Print the engine's identity record as JSON instead of text |
+
+### nx identity alive
+
+```
+nx identity alive [TARGET]
+```
+
+Run the holder check and report gone holders to the engine's `gone` route, as the SessionStart sweep does. `TARGET` is a seat name, an id or a pid on this host. With no argument every binding on this host is checked, skipping the caller's own process; a delegated identity is judged by its dispatcher's pid and start time, since it has no registry file. A holder on another host is judged by its lease alone, never by this command.
+
+### nx identity claim
+
+```
+nx identity claim SEAT --take-over
+```
+
+Supersede `SEAT`'s current holder with the Claude session this command runs under: that process is bound as a new generation and its token file is written, and the identity it held before is closed (`end` for an ephemeral, `release` for a seat). Refused when the nearest Claude ancestor is not an interactive session (its registry `entrypoint` must be `cli` or `claude-desktop`; a `claude -p` child is `sdk-cli`), when the seat's holder is an ancestor of this process, and when there is no Claude ancestor with a registry file (a plain shell).
+
+| Flag | Description |
+|------|-------------|
+| `--take-over` | Required. Confirms superseding the holder |
+
+### nx identity release
+
+```
+nx identity release SEAT
+```
+
+Free `SEAT` whose holder is gone. It carries none of the take-over guards, binds nothing and runs from a plain shell. For a holder on this host it runs the holder check and is refused while the holder runs or cannot be judged; for a holder on another host it is refused while the lease is live, and allowed once a lapsed lease's 10-minute reservation has passed. A seat nobody holds is reported as such and left alone.
+
+### nx identity rename
+
+```
+nx identity rename OLD NEW
+```
+
+Rename the seat `OLD` (a name or an id) to `NEW`. The old name keeps resolving for 7 days with a notice naming the new one, then is refused; a retired name is never reissued. The seat's threads entry is retitled in the same call. Claude Code's `/rename` changes only the display name.
+
+### nx identity promote
+
+```
+nx identity promote IDENTITY NAME
+```
+
+Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch and board entry stay. `NAME` may not look like an id (`i<digits>`).
+
+### nx identity purge
+
+```
+nx identity purge IDENTITY --operator
+```
+
+Remove the fenced state of `IDENTITY` (board entry, mailbox, scratch, memberships). Refused for a live or unheld identity and for a lapsed one with no recorded `gone`; allowed when it has ended, or lapsed with its holder recorded gone. The engine audit-logs it with the caller.
+
+| Flag | Description |
+|------|-------------|
+| `--operator` | Required. Confirms the operator override |
+
 ## nx service
 
 Storage-service administration.

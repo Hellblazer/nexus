@@ -137,6 +137,10 @@ class IdentityClient:
         params = {"host": host, "pid": pid, "proc_start": proc_start, "history": "1"}
         return list(self._request("GET", "/bindings", params=params).get("bindings") or [])
 
+    def log(self, identity: str) -> list[dict[str, Any]]:
+        """The identity's binding log, oldest first (``nx identity show`` prints its tail)."""
+        return list(self._request("GET", f"/{identity}/bindings").get("bindings") or [])
+
     # ── writes ──────────────────────────────────────────────────────────────
 
     def create_seat(self, name: str, *, created_by: str = "sam", display_name: str | None = None) -> dict[str, Any]:
@@ -153,6 +157,28 @@ class IdentityClient:
         if display_name:
             body["display_name"] = display_name
         return self._request("POST", "", json=body)
+
+    def create_delegated(self, parent: str, *, display_name: str | None, evidence: Mapping[str, Any]) -> dict[str, Any]:
+        """A delegated identity under *parent* for a ``claude -p`` child (tenant credential only): generation 1, live,
+        one ``start`` row naming the dispatcher's process (*evidence*: host, pid, started_at, proc_start). The answer
+        carries ``identity_token``. Step 4: the ``nx`` operator dispatcher is its caller."""
+        body: dict[str, Any] = {"parent": parent, "bind": dict(evidence)}
+        if display_name:
+            body["display_name"] = display_name
+        return self._request("POST", "/delegated", json=body)
+
+    def promote(self, identity: str, name: str) -> dict[str, Any]:
+        """Make an ephemeral identity a seat named *name* (tenant credential only)."""
+        return self._request("POST", f"/{identity}/promote", json={"name": name})
+
+    def rename(self, old: str, new: str) -> dict[str, Any]:
+        """Retire seat *old*'s alias (a name or an id) and give it *new*, retitling its board entry (tenant credential only)."""
+        return self._request("POST", "/rename", json={"old": old, "new": new})
+
+    def purge(self, identity: str) -> dict[str, Any]:
+        """The operator purge of an identity's fenced state (tenant credential only); the engine refuses a live,
+        unheld or plainly lapsed identity and audit-logs the rest."""
+        return self._request("POST", f"/{identity}/purge", json={"operator": True})
 
     def bind(self, identity: str, event: str, expected_generation: int, evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """The compare-and-set. The answer is the identity view plus ``event``, ``generation_changed``, ``noop``,

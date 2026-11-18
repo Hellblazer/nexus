@@ -53,6 +53,7 @@ from nexus.commands.dt import dt
 from nexus.commands.enrich import enrich
 from nexus.commands.hook import hook_group
 from nexus.commands.hooks import hooks
+from nexus.commands.identity_cmd import identity_group
 from nexus.commands.index import index
 from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
@@ -345,6 +346,7 @@ main.add_command(doctor_cmd, name="doctor")
 hook_group.hidden = True
 main.add_command(hook_group, name="hook")
 main.add_command(hooks)
+main.add_command(identity_group, name="identity")
 main.add_command(index)
 main.add_command(init_cmd, name="init")
 main.add_command(memory)

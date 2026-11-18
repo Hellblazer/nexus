@@ -16,6 +16,8 @@ import nexus.claude_child_env as claude_child_env
 from nexus.claude_child_env import (
     CLAUDE_OAUTH_TOKEN_ENV_VAR,
     HARNESS_OAUTH_TOKEN_ENV_VAR,
+    IDENTITY_TOKEN_ENV_VAR,
+    apply_delegated_identity,
     apply_harness_oauth_grant,
 )
 
@@ -174,3 +176,21 @@ def test_the_aspect_extractors_claude_child_gets_no_openai_compat_key(monkeypatc
     ax._run_claude_isolated("x", timeout=1, _argv=["python", "-c", "pass"])
     assert captured, "the spawn was not reached"
     assert "NX_LLM_OPENAI_API_KEY" not in captured
+
+
+# RDR-253 Step 4 (nexus-hczdo.1.5): a child never carries its parent's identity token; a delegated one names its own.
+
+
+def test_a_claude_child_never_inherits_the_parents_identity_token() -> None:
+    base = {"PATH": "/usr/bin", IDENTITY_TOKEN_ENV_VAR: "/home/x/.config/nexus/identity/delegated/i4.token"}
+    result = apply_harness_oauth_grant(base)
+    assert IDENTITY_TOKEN_ENV_VAR not in result and result["PATH"] == "/usr/bin"
+    assert base[IDENTITY_TOKEN_ENV_VAR].endswith("i4.token"), "the input is not mutated"
+
+
+def test_a_delegated_childs_environment_names_its_own_token_file_in_place_of_the_parents() -> None:
+    base = {"PATH": "/usr/bin", IDENTITY_TOKEN_ENV_VAR: "/parent.token"}
+    result = apply_delegated_identity(base, "/child/i9.token")
+    assert result[IDENTITY_TOKEN_ENV_VAR] == "/child/i9.token" and result["PATH"] == "/usr/bin"
+    assert base[IDENTITY_TOKEN_ENV_VAR] == "/parent.token"
+    assert apply_delegated_identity({}, "/c.token") == {IDENTITY_TOKEN_ENV_VAR: "/c.token"}

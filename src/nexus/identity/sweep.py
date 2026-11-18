@@ -3,9 +3,9 @@
 """The SessionStart sweep and the local file cleanup that rides it (RDR-253 "Binding", "Retention").
 
 At every SessionStart, after its own bind or rebind, the hook lists the live, lapsed and ``unleased`` bindings on
-its host, skips its own process's binding and every delegated identity (a delegated identity is renewed by the
-``nx`` dispatcher, has no registry file and lapses on its lease), runs the holder check on the rest and reports the
-gone ones to the engine's ``gone`` route, so a crashed session's identity is recorded as gone even if its seat is
+its host, skips its own process's binding and every delegated identity here (a delegated identity is renewed by the
+``nx`` dispatcher and has no registry file; its dispatcher process is checked by :mod:`nexus.identity.delegated`),
+runs the holder check on the rest and reports the gone ones to the engine's ``gone`` route, so a crashed session's identity is recorded as gone even if its seat is
 never claimed again. The engine accepts a verdict only when it names the identity's current holder under the
 generation the sweep read, so a binding that was rebound since is left alone: its answer is a 409 and the sweep
 counts it as skipped, never as an error.
@@ -43,6 +43,8 @@ class SweepReport:
     recorded_gone: list[str] = field(default_factory=list)
     skipped_own: int = 0
     skipped_delegated: int = 0
+    #: the delegated bindings the sweep listed and skipped, for :func:`nexus.identity.delegated.sweep_delegated`
+    delegated_views: list[Any] = field(default_factory=list)
     skipped_rebound: int = 0
     running: int = 0
     unknown: int = 0
@@ -79,6 +81,7 @@ def sweep_host(client: Any, procs: Processes | Any, *, host: str, own: tuple[int
         holder = view.get("holder")
         if view.get("kind") == "delegated":
             report.skipped_delegated += 1
+            report.delegated_views.append(view)
             continue
         if not isinstance(holder, Mapping):
             continue

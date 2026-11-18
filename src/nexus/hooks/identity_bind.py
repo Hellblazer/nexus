@@ -147,6 +147,7 @@ def _run(result: IdentityResult, session_id: str, source: str, env: Mapping[str,
 def _bind_and_sweep(result: IdentityResult, engine: Any, facts: LaunchFacts, source: str, env: Mapping[str, str],
                     procs: Processes | Any, directory: Path, host: str, claude_pid: int, proc_start: str | None,
                     session_id: str, clock: Callable[[], float], sleep: Callable[[float], None]) -> None:
+    from nexus.identity.delegated import clean_delegated_files, sweep_delegated  # noqa: PLC0415
     from nexus.identity.pending import Pending, write_pending  # noqa: PLC0415
     from nexus.identity.sweep import clean_local_files, sweep_host  # noqa: PLC0415
 
@@ -179,6 +180,13 @@ def _bind_and_sweep(result: IdentityResult, engine: Any, facts: LaunchFacts, sou
         report = sweep_host(engine, procs, host=host, own=(claude_pid, facts.started_at), identity_dir=directory)
         clean_local_files(directory, procs, host=host, own_token=outcome.token_file, report=report)
         result.sweep = report
+        # Step 4 (nexus-hczdo.1.5): a delegated identity's holder is its dispatcher process; a dead one is recorded
+        # gone here, and the token files it left in identity/delegated/ are removed.
+        # A sweep that ended on a 403 (a credential that may not report gone) deletes no token file (RDR "Retention").
+        if not report.forbidden:
+            sweep_delegated(engine, procs, report.delegated_views, host=host, report=report)
+        if not report.forbidden:
+            clean_delegated_files(directory, procs, host=host)
     except Exception as exc:  # noqa: BLE001 — the sweep is housekeeping; the bind above already stands
         _log().warning("identity_sweep_failed", error=f"{type(exc).__name__}: {exc}")
 

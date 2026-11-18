@@ -46,6 +46,10 @@ HARNESS_OAUTH_TOKEN_ENV_VAR = "NX_HARNESS_CLAUDE_OAUTH_TOKEN"
 #: unless something maps the harness name into it first.
 CLAUDE_OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
 
+#: The explicit identity token (RDR-253 Step 4): a delegated child's ``NX_IDENTITY_TOKEN`` is the PATH of the token
+#: file its dispatcher keeps current, never the token. The resolver takes it before every other input.
+IDENTITY_TOKEN_ENV_VAR = "NX_IDENTITY_TOKEN"
+
 #: The grant is applied on every claude dispatch and aspect-extraction
 #: retry, so it is logged once per process, not per call; nx-mcp's
 #: startup warning already names the grant.
@@ -73,6 +77,9 @@ def apply_harness_oauth_grant(base: Mapping[str, str]) -> dict[str, str]:
     # (dispatch's _build_dispatch_env and the aspect extractor's isolated
     # runner), so a new launch site cannot forget it (nexus-2k66t.3).
     result.pop("NX_LLM_OPENAI_API_KEY", None)
+    # RDR-253 Step 4: a child never inherits its parent's identity token (the path of a delegated parent's token
+    # file); a delegated child gets its own, set by apply_delegated_identity.
+    result.pop(IDENTITY_TOKEN_ENV_VAR, None)
     harness_value = result.get(HARNESS_OAUTH_TOKEN_ENV_VAR)
     if harness_value and CLAUDE_OAUTH_TOKEN_ENV_VAR not in result:
         result[CLAUDE_OAUTH_TOKEN_ENV_VAR] = harness_value
@@ -85,4 +92,13 @@ def apply_harness_oauth_grant(base: Mapping[str, str]) -> dict[str, str]:
         if not _grant_logged:
             _grant_logged = True
             _log.warning("claude_child_env_harness_oauth_grant_applied")
+    return result
+
+
+def apply_delegated_identity(base: Mapping[str, str], token_file: str) -> dict[str, str]:
+    """Return a NEW child-environment dict that names *token_file* (the delegated identity's token file, kept current
+    by the dispatcher) in ``NX_IDENTITY_TOKEN`` in place of whatever the parent carried. Never mutates ``base``."""
+    result = dict(base)
+    result.pop(IDENTITY_TOKEN_ENV_VAR, None)
+    result[IDENTITY_TOKEN_ENV_VAR] = token_file
     return result

@@ -724,7 +724,9 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
         if a.startswith("--name="):
             continue
         out.append(a)
-    if s.get("name"):
+    # A name Claude Code derived is not passed back: `-n` would make it a user-set name, and the next restart
+    # would then mint a seat from it. An absent nameSource (an older Claude) keeps the old behaviour.
+    if s.get("name") and s.get("nameSource", "user") in USER_NAME_SOURCES:
         out += ["-n", s["name"]]
     if not fresh:
         out += ["--resume", s["sessionId"]]
@@ -736,7 +738,10 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
             out += ["--permission-mode", mode]
     if first_prompt:
         out += ["--", first_prompt]
-    return f"cd {shlex.quote(s['cwd'])} && {shlex.quote(CLAUDE)} " + " ".join(shlex.quote(a) for a in out)
+    # A session that holds a seat under another display name relaunches onto the SAME seat: Step 3's hook binds a
+    # seat named by NX_SEAT (ensure_seat records it), where the `-n` display name would give it an ephemeral identity.
+    seat = f"NX_SEAT={shlex.quote(s['nx_seat'])} " if s.get("nx_seat") else ""
+    return f"cd {shlex.quote(s['cwd'])} && {seat}{shlex.quote(CLAUDE)} " + " ".join(shlex.quote(a) for a in out)
 
 
 def _vt(v: str) -> tuple[int, ...]:
@@ -1173,6 +1178,10 @@ def restart(s: dict, handoff: str = "") -> bool:
     if refused:
         log(f"SKIP {name}: {refused}; left running, not restarted")
         return False
+    # Before either path: an in-place /restart keeps the process and rebinds the same identity, so promoting its
+    # ephemeral first is what lets the seat survive it; the relaunch path binds the seat by name or NX_SEAT.
+    if seat := ensure_seat(s):
+        log(f"{name}: {seat}")
     if not handoff:
         done, why = slash_restart(s)
         if done:
@@ -1717,6 +1726,72 @@ def _nx_binary() -> str:
     if local.exists():
         return str(local)
     return shutil.which("nx") or "nx"
+
+
+#: The registry `nameSource` of a name the user set: `-n` at launch or `/rename`. A name Claude Code generated has
+#: another source, and a Desktop session has none (RDR-253 Step 4, nexus-hczdo.1.5).
+USER_NAME_SOURCES = frozenset({"user"})
+
+
+def user_named(s: dict) -> bool:
+    return bool(s.get("name")) and s.get("nameSource") in USER_NAME_SOURCES
+
+
+def _nx_identity(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([_nx_binary(), "identity", *args], capture_output=True, text=True, timeout=60)
+
+
+def _identity_error(done: subprocess.CompletedProcess) -> str:
+    return (done.stderr or done.stdout).strip()[:200]
+
+
+def ensure_seat(s: dict) -> str:
+    """Before a session is restarted: its seat, and a seat for a name the user set (RDR-253 Step 4).
+
+    A session that already holds a seat keeps it across the relaunch: its name goes in `s["nx_seat"]`, which
+    `relaunch_command` carries as NX_SEAT (Step 3 binds a seat named by NX_SEAT; a `-n` that names no seat gives an
+    ephemeral identity). Otherwise, only a name the user set counts (`user_named`): a seat with that name already:
+    nothing. The session holds an ephemeral identity: PROMOTE it to the seat, which keeps its identity scratch and
+    board entry (a new seat would orphan them). It holds no identity, or its ephemeral has ended: create the seat,
+    created_by=restart. The relaunch then finds the old holder gone and binds the seat, so no release step is needed.
+
+    Never raises and never blocks the restart, whatever goes wrong: returns what it did, or why it did not ("" when
+    there was nothing to do)."""
+    try:
+        return _ensure_seat(s)
+    except Exception as exc:  # noqa: BLE001 — a restart must never fail over a seat
+        return f"no seat made for {s.get('name') or s.get('sessionId')}: {type(exc).__name__}: {exc}"
+
+
+def _ensure_seat(s: dict) -> str:
+    named = user_named(s)
+    held = _nx_identity("show", "--session", s["sessionId"], "--json")
+    identity: dict = {}
+    if held.returncode == 0:
+        try:
+            identity = json.loads(held.stdout)
+        except ValueError:
+            identity = {}
+    elif "unknown_session" not in held.stdout + held.stderr:
+        return f"no seat made: {_identity_error(held)}" if named else ""
+    if identity.get("kind") == "seat" and identity.get("state") in ("live", "lapsed") and identity.get("name"):
+        s["nx_seat"] = identity["name"]
+        return (f"holds seat {identity['name']}; the relaunch carries NX_SEAT={identity['name']}"
+                + (f", and no seat is made for {s['name']}" if named and s["name"] != identity["name"] else ""))
+    if not named:
+        return ""
+    name = s["name"]
+    exists = _nx_identity("show", name)
+    if exists.returncode == 0:
+        return f"seat {name} exists"
+    if "unknown_name" not in exists.stdout + exists.stderr:
+        return f"no seat made for {name}: {_identity_error(exists)}"
+    if identity.get("kind") == "ephemeral" and identity.get("state") in ("live", "lapsed"):
+        done = _nx_identity("promote", identity["id"], name)
+        return (f"promoted {identity['id']} to seat {name}" if done.returncode == 0
+                else f"could not promote {identity['id']} to {name}: {_identity_error(done)}")
+    made = _nx_identity("create", name, "--created-by", "restart")
+    return f"created seat {name}" if made.returncode == 0 else f"could not create seat {name}: {_identity_error(made)}"
 
 
 def went_busy(s: dict, n0: int, seconds: int = 60) -> bool:
