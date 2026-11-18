@@ -143,7 +143,7 @@ class CatalogRdr241RouteStatementSpikeTest {
             String q = qgo(i);
             if (q != null) sb.append(",\"quality_gate_overridden\":").append(q);
             String e = ext(i);
-            if (e == NULL_EXT) sb.append(",\"extraction_source\":null");
+            if (NULL_EXT.equals(e)) sb.append(",\"extraction_source\":null");
             else if (e != null) sb.append(",\"extraction_source\":\"").append(e).append('"');
             String m = miss(i);
             if (m != null) {
@@ -168,7 +168,7 @@ class CatalogRdr241RouteStatementSpikeTest {
         /** meta_default semantics: absent, JSON null and "" read as the default. */
         static boolean extDefault(int i, String dflt, String wanted) {
             String e = ext(i);
-            String have = (e == null || e == NULL_EXT || e.isEmpty()) ? dflt : e;
+            String have = (e == null || NULL_EXT.equals(e) || e.isEmpty()) ? dflt : e;
             return have.equals(wanted);
         }
 
@@ -186,7 +186,6 @@ class CatalogRdr241RouteStatementSpikeTest {
     private HikariDataSource svcDs;
     private TenantScope scope;
     private final List<String> report = new ArrayList<>();
-    private final List<double[]> medians = new ArrayList<>();
     private final List<String> decisionLines = new ArrayList<>();
 
     /** One explained statement: warm-up, five runs, the median Execution Time; the last run's plan is reported. */
@@ -211,7 +210,6 @@ class CatalogRdr241RouteStatementSpikeTest {
             emit(line);
             emit("RDR241SPIKE plan of " + name + " (last run, EXPLAIN (ANALYZE, BUFFERS)):\n" + plan);
             decisionLines.add(group + " | " + name + " | " + String.format(Locale.ROOT, "%.3f", median) + " ms | " + verdict);
-            medians.add(new double[] {median});
             return median;
         });
     }
@@ -415,9 +413,20 @@ class CatalogRdr241RouteStatementSpikeTest {
         }
         // a term with wildcard characters in it: matched literally, so only the "100% Author_Fan" rows
         cases.add(new Case("0% author_f", 0, Fx.count(i -> Fx.authorContains(i, "0% author_f"))));
+        // a bare wildcard: escaped, only the rows that hold that character; unescaped, every author (review of
+        // 00b3c4902: "0% author_f" alone matched the same 44 rows escaped or not, so it could not catch a lost escape)
+        cases.add(new Case("%", 0, Fx.count(i -> Fx.authorContains(i, "%"))));
+        cases.add(new Case("_", 0, Fx.count(i -> Fx.authorContains(i, "_"))));
         assertThat(cases.get(0).expectCount).as("lamport matches (non-vacuity)").isBetween(200L, 600L);
         assertThat(cases.get(2).expectCount).as("author matches beyond offset 40,000 (non-vacuity)").isGreaterThan(41_000L);
         assertThat(cases.get(4).expectCount).as("literal-wildcard term matches (non-vacuity)").isGreaterThan(0L);
+        long withAuthor = Fx.count(i -> Fx.author(i) != null);
+        for (int k = 5; k <= 6; k++) {
+            assertThat(cases.get(k).expectCount)
+                .as("escaped '%s' matches only rows holding it, far fewer than every author (%d), so a lost escape fails",
+                    cases.get(k).term, withAuthor)
+                .isGreaterThan(0L).isLessThan(withAuthor / 10);
+        }
 
         for (Case c : cases) {
             Condition where = authorContains(TENANT, c.term);
