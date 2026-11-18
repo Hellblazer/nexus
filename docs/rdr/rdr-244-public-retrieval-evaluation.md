@@ -2,7 +2,8 @@
 title: "Public retrieval evaluation others can run"
 id: RDR-244
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-16
 priority: medium
 author: Sam
 reviewed-by: self
@@ -240,7 +241,7 @@ and the telemetry of one nx_answer run; those findings are in the Deferred secti
 - [x] Each CoIR dataset in the subset carries a licence that allows publishing a derived manifest and results. **Status**: Verified for the subset rule (Sam, 2026-11-06: "upstream licence is fine"). The basis is the paper's licence table and the upstream sources, which state Apache-2.0; the Hugging Face cards state no licence at all (research-15). The check ran in Step 0, before the pre-registration commit. **Method**: Docs Only.
 - [x] A search result row's chunk hash maps, through `docs_for_chashes`, to the loaded documents and their `<dataset>:<id>` titles, so that a hit maps to a CoIR document id. **Status**: Verified (Step 0, research-16: every row mapped, none out of collection; the harness's engine test maps every row). **Method**: Spike.
 - [x] The local-mode collection name renders from the subject, and `--corpus <full collection name>` scopes a search to that collection alone. **Status**: Verified (Step 0, research-16: the name renders as `knowledge__<subject>__bge-base-en-v15-768__v1`; the harness refuses one that does not carry the token). **Method**: Spike.
-- [x] The subset's chunks index within the run-time cap at $0 with local bge-768. **Status**: Verified (Step 0, research-16: mean write time 0.03 to 0.18 s per document by dataset, maximum 1.10 s; at the highest mean, about 15 minutes for 5,000 against the 30-minute cap, which the run enforces). **Method**: Spike.
+- [x] The subset's chunks index within the run-time cap at $0 with local bge-768. **Status**: Falsified for two of five datasets by the Step 2 run. Step 0 (research-16) measured a mean write time of 0.03 to 0.18 s per document by dataset (maximum 1.10 s), about 15 minutes for 5,000 at the highest mean. The run's own rates were 0.22, 0.58 and 0.07 s per document for codetrans-dl, codetrans-contest and synthetic-text2sql, and neither codefeedback dataset finished its 5,000-document sample within the 1,800 s cap; both were dropped by the cap as pre-registered (`docs/rdr/evidence/rdr-244/results.md`). The $0 part held. **Method**: Spike, then the run.
 - [x] Track A runs at no API cost: the bench loader's writes enqueue no aspect row and start no Claude-CLI process. **Status**: Verified (research-16 and -17: on a fresh tenant the loader leaves every `aspects` tuple count at zero and starts no `claude` process, while the same put with the default hooks queues one task). **Method**: Spike, and the harness's engine test.
 - [x] With no taxonomy assignments for the bench documents and no reranker, no ranking boost reorders the bench results. **Status**: Verified (research-17: `frecency_score` is present on every row but inert, because the non-hybrid score is the normalised vector distance alone; the quality boost needs `bib_citation_count`, which bench notes lack). The harness refuses a row that carries a rerank, bibliographic or boost signal, and any taxonomy assignment on a bench chunk. **Method**: Spike.
 
@@ -525,8 +526,8 @@ Only the modes that change a decision:
 - [x] Each pool dataset's licence checked before the pre-registration commit (Critical Assumption 1; Sam, 2026-11-06).
 - [x] Corpus cap decided: 5,000 documents per dataset by the seeded sample (Sam, 2026-11-06).
 - [x] Run-time cap decided: 30 minutes of wall-clock ingest per dataset, an over-cap dataset dropped and named (Sam, 2026-11-03, nexus-2k66t.2.7).
-- [ ] Step 2 write opt-in: the run writes outside pytest, so the production-write guard needs an owner decision (a scoped `NX_ALLOW_PROD_WRITE` or a harness exemption); Sam's Step 0 grant covered the spike only.
-- [ ] Pre-registration file (`docs/rdr/evidence/rdr-244/preregistration.md`) committed before the first run: subset, seed, query count, caps, scoring rule, interval method, and the decision the owner will take from the result (see Validation).
+- [x] Step 2 write opt-in: the run writes outside pytest, so the production-write guard needs an owner decision (a scoped `NX_ALLOW_PROD_WRITE` or a harness exemption); Sam's Step 0 grant covered the spike only. Decided 2026-11-07: a scoped `NX_ALLOW_PROD_WRITE` for the run (ask rdr244-step2-write); the run recipe in `results.md` states it.
+- [x] Pre-registration file (`docs/rdr/evidence/rdr-244/preregistration.md`) committed before the first run (cc378a4a6): subset, seed, query count, caps, scoring rule, interval method, and the decision the owner will take from the result (see Validation).
 
 ### Minimum Viable Validation
 
@@ -573,8 +574,8 @@ scoped to that engine (Sam, 2026-11-06), and its results are in research-15 and 
    subjects; if Rule 1 cannot supply five, that is an owner decision. Result: Track A
    ingestion.
 
-Results go to T2 research entries (research-15 and -16). The write time confirmed
-the 30-minute run-time cap, and the qrels values fixed the gain form.
+Results go to T2 research entries (research-15 and -16). The write time set the
+30-minute run-time cap (which the Step 2 run then hit on two datasets; Critical Assumption 4), and the qrels values fixed the gain form.
 
 #### Step 1: Track A harness
 
@@ -589,6 +590,8 @@ empty-key error, the timing definition above, and the `results.json` writer. Don
 
 Run the subset with pinned versions, and record the numbers and their intervals.
 
+Done 2026-11-07 on chas: attempt 2 is the published run (attempt 1 stopped when its client session dropped and was rerun unchanged on Sam's word). Three datasets scored, the two codefeedback datasets dropped by the cap; the decision taken is "baseline only" (Sam, 2026-11-07). Record: `docs/rdr/evidence/rdr-244/results.md` and `step2/results.json`.
+
 ### Phase 2: Operational Activation
 
 #### Activation Step 1: Publish
@@ -596,7 +599,7 @@ Run the subset with pinned versions, and record the numbers and their intervals.
 Publish the harness, the query-set manifest, the dataset manifest with the licence
 line for each dataset, and each `results.json`, with the RDR-090 result beside them.
 The licence check is done (Decisions, 2026-11-06), so publishing waits only for the
-first run's results.
+first run's results. Done: published with the RDR-090 result beside it in `docs/rdr/evidence/rdr-244/results.md` (587af4687, 3c946044a), with a run recipe for third parties.
 
 ### Day 2 Operations
 
@@ -798,3 +801,4 @@ Spike).
 - 2026-11-03: Gate r4 residual, docs_for_chashes scope sharpened by one collection per dataset: nexus-2k66t.2.5.
 - 2026-11-03: Gate r4 residual, round 3 items still open in text (hybrid_default, aspect check, stamp_note, shared-chunk order, oversized documents): nexus-2k66t.2.1 to .2.4 and .2.6.
 - 2026-11-03: Accepted. Sam, in elsinore's pane, typed "accept RDR-244" on 2026-11-03. Gate round 4 PASSED; fix check `nexus_rdr/244-fix-check-8f0c4c42b`.
+- 2026-11-16: Closing reconciliation (close critique T2 `nexus/critique-d76add41d-nexus-2k66t.2-2026-11-16-r1`), standing grant 3: Critical Assumption 4 restated as falsified for the codefeedback datasets by the Step 2 run; the write opt-in and pre-registration prerequisites ticked; Step 2 and Activation Step 1 marked done; run recipe added to `results.md` (Gap 3).

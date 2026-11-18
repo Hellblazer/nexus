@@ -1,6 +1,6 @@
 # Nexus
 
-**Nexus lets AI agents work on a project the way a team does.** They read your code and papers by meaning, and they remember what was decided and why. They answer a question from many documents at once, and they write decisions down as records you can review. Several agent sessions share the same memory and knowledge, and they coordinate through a shared tuple space. Nexus runs on your computer. Search and storage need no API key, no account, and no separate database install. The steps that call a language model (the `nx_answer` operators, aspect extraction, topic labels) use the Claude Code CLI when it is installed, and otherwise an Anthropic API key you set with `nx config set anthropic_api_key`.
+**Nexus gives AI coding agents a shared, lasting memory of your project.** It indexes your code and documents so agents find things by meaning, not keywords, and it keeps the decisions they reach as records you can read and review. Everything runs on your machine: no account, no API key, no database to install.
 
 [![CI](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml/badge.svg)](https://github.com/Hellblazer/nexus/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/conexus)](https://pypi.org/project/conexus/)
@@ -10,6 +10,8 @@
 **Install:** follow the [install guide at hellblazer.github.io/nexus](https://hellblazer.github.io/nexus/). It has a version for Claude Code, for the `nx` CLI alone, and for Claude Desktop, on macOS, Linux and Windows. On macOS, Nexus needs macOS 14 or later on Apple Silicon (the embedder runtime, onnxruntime, ships only macOS 14 wheels from 1.24 on). Windows 11 x64 is supported, with the limits listed in the [Windows install guide](https://github.com/Hellblazer/nexus/blob/develop/docs/windows-install.md#what-is-not-supported-or-not-measured).
 
 The package on PyPI is `conexus`. The command it installs is `nx`.
+
+Search and storage need no key. The steps that call a language model (the `nx_answer` operators, aspect extraction, topic labels) use the Claude Code CLI when it is installed, and otherwise an Anthropic API key you set with `nx config set anthropic_api_key`.
 
 ## Install
 

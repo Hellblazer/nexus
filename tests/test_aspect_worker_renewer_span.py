@@ -286,3 +286,73 @@ def test_a_lapse_on_a_held_claim_is_logged_as_lost() -> None:
 
 def test_a_lapse_on_a_claim_that_finished_meanwhile_is_not_logged() -> None:
     assert _lost_claim_logs([True, False]) == []
+
+
+def test_a_retryable_extraction_failure_logs_its_traceback_once(monkeypatch: Any) -> None:
+    """The worker's real ``_extract_tuple_rows`` raising a retryable error: one ``aspect_worker_extract_raised``
+    event carries the traceback, then the claim is nacked live. The extract step and the verdict map each
+    logged it, so every retryable failure drew its traceback twice inside the claim's lease (nexus-bpikw)."""
+    import httpx
+
+    import nexus.commands.enrich as enrich
+    from nexus.aspect_worker import AspectExtractionWorker
+
+    def refused(**kw: Any) -> None:
+        raise httpx.ConnectError("T3 unreachable")
+
+    monkeypatch.setattr("nexus.aspect_worker._extract_aspects", refused)
+    monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
+    clock = FakeClock()
+    engine = _LeaseEngine(clock, 1)
+    side = TupleQueueSide(
+        worker_id="w", batch_size=1, tuples_call=lambda fn: fn(engine),
+        complete=lambda fields, claim_id, claimant: None,
+        extract=AspectExtractionWorker(poll_interval=10.0)._extract_tuple_rows,
+        on_self_fault=lambda reason, claim, exc: None,
+        lease_s=_LEASE_S, renew_every_s=_RENEW_S, deadline_s=lambda n: 3600.0, clock=clock,
+    )
+    claims, failed = side.claim_batch(park=False)
+    assert len(claims) == 1 and not failed
+    with capture_logs() as logs:
+        side.process(claims)
+
+    raised = [e for e in logs if e["event"] == "aspect_worker_extract_raised"]
+    assert len(raised) == 1 and raised[0].get("exc_info"), f"one traceback per failure, got {raised}"
+    assert raised[0]["source_path"] == "/doc-0.md"
+    assert engine.has("nack", claims[0].claim_id) and engine.lapsed() == [], engine.ops
+
+
+def test_a_retryable_batch_failure_logs_one_traceback_per_row(monkeypatch: Any) -> None:
+    """The batch extractor raising a retryable error for a batch of two: the batch event names the error
+    without a traceback, and each row's verdict logs the traceback once (it was N+1 before, nexus-bpikw)."""
+    import httpx
+
+    import nexus.commands.enrich as enrich
+    from nexus.aspect_worker import AspectExtractionWorker
+
+    def refused(items: Any, **kw: Any) -> None:
+        raise httpx.ConnectError("T3 unreachable")
+
+    monkeypatch.setattr("nexus.aspect_worker._extract_aspects_batch", refused)
+    monkeypatch.setattr(enrich, "_build_catalog_manifest_lookup", lambda: None)
+    clock = FakeClock()
+    engine = _LeaseEngine(clock, 2)
+    side = TupleQueueSide(
+        worker_id="w", batch_size=2, tuples_call=lambda fn: fn(engine),
+        complete=lambda fields, claim_id, claimant: None,
+        extract=AspectExtractionWorker(poll_interval=10.0)._extract_tuple_rows,
+        on_self_fault=lambda reason, claim, exc: None,
+        lease_s=_LEASE_S, renew_every_s=_RENEW_S, deadline_s=lambda n: 3600.0, clock=clock,
+    )
+    claims, failed = side.claim_batch(park=False)
+    assert len(claims) == 2 and not failed
+    with capture_logs() as logs:
+        side.process(claims)
+
+    batch = [e for e in logs if e["event"] == "aspect_worker_batch_extract_raised"]
+    assert len(batch) == 1 and not batch[0].get("exc_info"), f"the batch event names the error only: {batch}"
+    assert batch[0]["error"] == "ConnectError", batch
+    raised = [e for e in logs if e["event"] == "aspect_worker_extract_raised"]
+    assert sorted(e["source_path"] for e in raised) == ["/doc-0.md", "/doc-1.md"], raised
+    assert all(e.get("exc_info") for e in raised), f"each row's verdict carries the traceback: {raised}"
+    assert all(engine.has("nack", c.claim_id) for c in claims) and engine.lapsed() == [], engine.ops

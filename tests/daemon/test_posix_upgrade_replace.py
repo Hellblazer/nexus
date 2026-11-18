@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nexus.daemon.storage_service_daemon import StorageServiceStartError
+from nexus.daemon.storage_service_daemon import StopOutcome, StorageServiceStartError
 from tests._module_seam import setattr_in
 from click.testing import CliRunner
 
@@ -132,6 +132,34 @@ def test_nothing_running_means_nothing_is_started(tmp_path, replacing):
     assert ran == ["body"]
     assert not st.stopped_service and not st.stopped_pg
     assert "start_service" not in fake.events and "start_pg" not in fake.events
+
+
+def _unsignalled_outcome(pid: int, *, lease: bool):
+    """A member another user owns, which neither signal could reach (EPERM). On the sweep path nothing was
+    signalled; on the lease path the supervisor is in ``pids`` and, after the failed kill, in ``stubborn``."""
+    if lease:
+        return StopOutcome(pids=(pid,), stubborn=(pid,), source="lease", lease_seen=True, unsignalled=(pid,))
+    return StopOutcome(pids=(), stubborn=(), source="none", unsignalled=(pid,))
+
+
+@pytest.mark.parametrize("lease", [False, True], ids=["sweep", "lease"])
+@pytest.mark.parametrize("replacing", ["engine", "pg_bundle"])
+def test_a_member_the_stop_could_not_signal_blocks_the_replacement_before_postgresql(tmp_path, replacing, lease):
+    """nexus-f3yqd.2.22: an EPERM member is still running on the old files. The swap is refused, PostgreSQL is
+    not stopped under it, and the message names it as unsignalled, never as a survivor of the kill."""
+    fake = _Ops(outcome=_unsignalled_outcome(4242, lease=lease), pg_up=True)
+    ran: list[str] = []
+    with pytest.raises(rq.ReplaceBlockedError) as raised:
+        with rq.quiesced(tmp_path, replacing=replacing, platform="linux", ops=fake.ops()):
+            ran.append("body")
+    assert ran == []
+    assert "stop_pg" not in fake.events and "start_pg" not in fake.events
+    message = str(raised.value)
+    assert "4242" in message and "EPERM" in message
+    assert "identified as this directory's service" in message and "stop them as their owner" in message.lower()
+    assert "survived" not in message
+    assert message.count("4242") == 1, message
+    assert "No file was replaced" in message
 
 
 def test_an_engine_replacement_never_touches_postgresql(tmp_path):

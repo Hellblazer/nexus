@@ -288,12 +288,13 @@ _SUBPROCESS_CALLS = frozenset({
 #: ``provision()`` files until nexus-0ajjm taught the owner-record sweep a nested ``postmaster.pid`` and moved them
 #: to the helper; it is empty. ``not_a_cluster`` is the files that name initdb / ``provision`` but never run a
 #: postmaster. Raising either number is a decision to make on purpose, in a diff a reviewer reads.
-#: The five files whose clusters come from ``pg_provision.provision(config_dir)`` (nexus-0ajjm): ``config_dir`` is a
+#: The six files whose clusters come from ``pg_provision.provision(config_dir)`` (nexus-0ajjm): ``config_dir`` is a
 #: ``pg_data_tempdir`` dir, the cluster sits at ``<config_dir>/postgres`` and the owner-record sweep reads that. ONE
 #: definition: the lint test and ``tests/test_integration_pg_cluster.py`` (the conf census) both read it. Repo-relative.
 PROVISION_DRIVEN: tuple[str, ...] = (
     "tests/db/test_pg_provision.py",
     "tests/db/test_pg_provision_ca3_bundle.py",
+    "tests/db/test_pg_provision_dml_utils_bootstrap.py",
     "tests/db/test_pg_bundle_relocation.py",
     "tests/db/test_pg_scram_auth.py",
     "tests/daemon/test_storage_service_daemon_pg_monitor_backfill.py",

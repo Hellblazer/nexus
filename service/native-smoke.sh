@@ -255,6 +255,109 @@ if grep -q 'gzip_response_unavailable' "$SMOKE_TMP/svc.log"; then
   echo "  FAIL gzip fell back to identity in the native image:"; grep -m 3 gzip_response_unavailable "$SMOKE_TMP/svc.log"; fail=1
 fi
 
+# RDR-167 (nexus-dngtz.1.9): the correlation id and the request_failed line in the NATIVE
+# image. The engine is built with --initialize-at-build-time=org.slf4j,ch.qos.logback and
+# Logback's reflection entries are listed by hand, so "%X needs no reflection entry" is a
+# source read and a JVM run until this runs on the binary. /version is NOT used: it is
+# registered without AuthFilter, so a bad bearer gets 200 and no echo. /v1/_whoami is behind
+# AuthFilter. The log lines are read after a short bounded poll (the appender writes per line,
+# but the reader is another process).
+echo "correlation id / MDC (RDR-167):"
+_log_line() { # pattern... : first svc.log line matching every pattern, polled for up to 2 s
+  local i l pat
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    l=$(cat "$SMOKE_TMP/svc.log")
+    for pat in "$@"; do l=$(printf '%s\n' "$l" | grep -E -- "$pat"); done
+    [ -n "$l" ] && { printf '%s\n' "${l%%$'\n'*}"; return 0; }
+    sleep 0.2
+  done
+  return 1
+}
+code=$(curl -s -D "$SMOKE_TMP/cid1.hdr" -o "$SMOKE_TMP/cid1.out" -w '%{http_code}' \
+  -H 'Authorization: Bearer not-the-token' -H 'X-Correlation-ID: native-smoke-cid-1' "$U/v1/_whoami")
+# The headers are read into a variable first (no pipe into an early-exit consumer under pipefail),
+# lower-cased because header names are case-insensitive, then matched as one whole line.
+cid1_hdr=$(tr -d '\r' < "$SMOKE_TMP/cid1.hdr" | tr '[:upper:]' '[:lower:]')
+cid1_re=$'(^|\n)x-correlation-id: *native-smoke-cid-1(\n|$)'
+if [ "$code" = "401" ] && [[ $cid1_hdr =~ $cid1_re ]]; then
+  echo "  ok   bad bearer on /v1/_whoami -> 401 and X-Correlation-ID echoed"
+else
+  echo "  FAIL bad bearer on /v1/_whoami -> $code (want 401) with X-Correlation-ID native-smoke-cid-1 echoed:"; cat "$SMOKE_TMP/cid1.hdr"; fail=1
+fi
+if line=$(_log_line 'cid=native-smoke-cid-1' 'event=request_failed' 'status=401'); then
+  echo "  ok   svc.log: $line"
+else
+  echo "  FAIL svc.log has no line with cid=native-smoke-cid-1, event=request_failed and status=401:"
+  grep -m 3 'native-smoke-cid-1' "$SMOKE_TMP/svc.log" || tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+# A malformed document tumbler on the catalog register route is answered 400 by CatalogHandler
+# after the token resolved, so the request_failed line carries a real tenant, not "-".
+assert "catalog/register bad tumbler (cid-2)" 400 "${A[@]}" "${J[@]}" -H 'X-Correlation-ID: native-smoke-cid-2' \
+  -X POST -d '{"tumbler":"not-a-tumbler"}' "$U/v1/catalog/register"
+if line=$(_log_line 'cid=native-smoke-cid-2' 'event=request_failed' 'status=400' 'tenant=[A-Za-z0-9]'); then
+  echo "  ok   svc.log: $line"
+else
+  echo "  FAIL svc.log has no event=request_failed line with cid=native-smoke-cid-2, status=400 and a resolved tenant=:"
+  grep -m 3 'native-smoke-cid-2' "$SMOKE_TMP/svc.log" || tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+
+# nexus-dngtz.1.11: the log sink in the NATIVE image. The sink escapes control characters through three converters logback
+# makes by name from logback.xml (%msgSafe, %exSafe, %threadSafe); the native build lists them by hand in reflect-config.json
+# and initializes them at build time, so a missing entry shows up here as a %PARSER_ERROR in every line. Two probes:
+#  1. a %0A in the request path: AuthFilter's request_failed line escapes the path at the call site (LogText.escapeControl),
+#     so this proves that call-site escape survives natively. It does NOT prove the sink: with the sink removed it still passes.
+#  2. a "\n" in a collection name sent to /v1/vectors/search: the engine's unregistered-collection warning prints that name
+#     RAW (no call-site escape, PgVectorRepository search_skipped and HttpUtil's unregistered-collection line), so only the
+#     sink turns the newline into \x0a. This is the probe that fails when %msgSafe is %msg. It is a 422 on a collection that
+#     does not exist: no row is read or written.
+echo "log sink escapes (nexus-dngtz.1.11):"
+code=$(curl -s -o "$SMOKE_TMP/sink1.out" -w '%{http_code}' -H 'Authorization: Bearer not-the-token' \
+  "$U/v1/_whoami%0Aforged-sink-probe=1")
+sink_re='event=request_failed .*path=/v1/_whoami\\x0aforged-sink-probe=1 '
+if sink_line=$(_log_line 'forged-sink-probe' 'event=request_failed'); then
+  # the line is read into a variable and matched in bash (no pipe into an early-exit consumer under pipefail)
+  forged_n=$(grep -c -E -- '^forged-sink-probe=1' "$SMOKE_TMP/svc.log" || true)
+  probe_n=$(grep -c -E -- 'event=request_failed.*forged-sink-probe' "$SMOKE_TMP/svc.log" || true)
+  if [ "$code" = "401" ] && [[ $sink_line =~ $sink_re ]] && [ "$forged_n" = "0" ] && [ "$probe_n" = "1" ]; then
+    echo "  ok   a %0A in the request path is one escaped svc.log line (the call-site escape): $sink_line"
+  else
+    echo "  FAIL %0A in the request path: status $code (want 401), $probe_n request_failed line(s) (want 1) matching" \
+      "path=/v1/_whoami\\x0aforged-sink-probe=1, $forged_n line(s) starting with forged-sink-probe=1 (want 0):"
+    grep -m 4 'forged-sink-probe' "$SMOKE_TMP/svc.log" || true; fail=1
+  fi
+else
+  echo "  FAIL svc.log has no event=request_failed line for the %0A path probe (status $code):"
+  tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+# Probe 2: a value no call site escapes. The newline is a JSON "\n" in the collection name, so the handler holds a real
+# newline and the logger prints it raw; the escaped \x0a form on the log line is the sink's work. The "forged-sink-raw-probe"
+# token is hyphenated on purpose (not an event name: a log-event rot lint would flag a snake_case one).
+raw_code=$(curl -s -o "$SMOKE_TMP/sink2.out" -w '%{http_code}' "${A[@]}" "${J[@]}" -X POST \
+  -d '{"collections":["x\nforged-sink-raw-probe=1"],"query":"q","limit":1}' "$U/v1/vectors/search")
+if raw_line=$(_log_line 'WARN' 'collection=x\\x0aforged-sink-raw-probe=1$'); then
+  raw_forged=$(grep -c -E -- '^forged-sink-raw-probe=1' "$SMOKE_TMP/svc.log" || true)
+  raw_n=$(grep -c -F -- 'collection=x\x0aforged-sink-raw-probe=1' "$SMOKE_TMP/svc.log" || true)
+  if [ "$raw_code" = "422" ] && [ "$raw_forged" = "0" ] && [ "$raw_n" = "1" ]; then
+    echo "  ok   a newline in a collection name no call site escapes is one escaped svc.log line (the sink): $raw_line"
+  else
+    echo "  FAIL newline in an unregistered collection name: status $raw_code (want 422), $raw_n line(s) with" \
+      "collection=x\\x0aforged-sink-raw-probe=1 (want 1), $raw_forged line(s) starting with forged-sink-raw-probe=1 (want 0):"
+    grep -m 4 'forged-sink-raw-probe' "$SMOKE_TMP/svc.log" || true; fail=1
+  fi
+else
+  echo "  FAIL svc.log has no WARN line ending collection=x\\x0aforged-sink-raw-probe=1 (status $raw_code); the sink did not escape the newline:"
+  grep -m 4 'forged-sink-raw-probe' "$SMOKE_TMP/svc.log" || tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+# The installers that make the escape reach Liquibase and the JDK log (java.util.logging) say so when they cannot, and the
+# pattern says so ("%PARSER_ERROR") when a converter was not found: none of them may be in this run's log.
+sink_bad=$(grep -c -E -- 'event=jul_line_safe_inactive|event=jul_line_safe_failed|%PARSER_ERROR|PARSER_ERROR\[' "$SMOKE_TMP/svc.log" || true)
+if [ "$sink_bad" = "0" ]; then
+  echo "  ok   svc.log has no jul_line_safe_inactive, jul_line_safe_failed or %PARSER_ERROR line"
+else
+  echo "  FAIL svc.log has $sink_bad sink failure line(s):"
+  grep -m 4 -E -- 'event=jul_line_safe_inactive|event=jul_line_safe_failed|%PARSER_ERROR|PARSER_ERROR\[' "$SMOKE_TMP/svc.log" || true; fail=1
+fi
+
 # ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
 # T1 scratch lives in its OWN generated jOOQ schema (t1, e.g.
 # dev.nexus.service.jooq.t1.T1) — a completely separate schema model from every

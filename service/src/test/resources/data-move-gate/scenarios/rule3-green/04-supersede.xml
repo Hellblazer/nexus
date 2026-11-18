@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-green. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-register-the-replacement" author="fixture">
+        <comment>g-register-the-replacement</comment>
+        <sql splitStatements="false" stripComments="false">
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id, supersedes) VALUES
+    ('m-widgets-2', 'UPDATE nexus.widgets_v2 SET new_col = old_col WHERE new_col IS NULL; DELETE FROM nexus.widgets_v2 WHERE dead', 'nexus', 'widgets_v2', 1000, 50, 60000, 'SELECT count(*) FROM nexus.widgets_v2 WHERE new_col IS NULL AND tenant_id = $1', 'ALTER TABLE nexus.widgets_v2 VALIDATE CONSTRAINT moved_check', 'm-widgets-2', 'm-widgets-1');
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

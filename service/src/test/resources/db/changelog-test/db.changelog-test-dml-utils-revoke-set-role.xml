@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.11 (RDR-246 Step 4): take SET away from the engine's migration role's membership in dml_utils_owner
+    (GRANT ... WITH INHERIT FALSE, SET FALSE), so SET ROLE dml_utils_owner is refused as on a cluster whose DBA granted
+    the role without it. The role is the fixed name DmlUtilsInstallIntegrationTest#ADMIN; no placeholder, so RawSqlGateTest's
+    parameterised-changelog lists need no entry. db.changelog-test-dml-utils-roles.xml grants it back. Superuser, runAlways.
+    Run through DmlUtilsTestFixtures#revokeSetRole.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-dml-utils-revoke-set-role-1" author="nexus-f3yqd.2.11" runAlways="true">
+        <sql>GRANT dml_utils_owner TO nexus_admin_dmlutils WITH INHERIT FALSE, SET FALSE</sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

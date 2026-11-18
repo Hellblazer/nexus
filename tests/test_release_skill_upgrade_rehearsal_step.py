@@ -214,3 +214,25 @@ def test_the_step_states_the_hang_guard_and_holds_a_pending_not_run_for_sams_cal
     assert "1800 s hang guard" in step and "never makes a pass" in step
     assert step.count("Sam decides") == 1, "said once, where the pending ceiling is"
     assert "while the 7.76.0 ceiling is pending" not in step
+
+
+def test_the_step_documents_the_seed_cache_as_preparation_only() -> None:
+    step = _step()
+    assert "Seed cache (preparation only; no criterion, ceiling, limit, judgment or exit code" in step
+    assert "`store restored from cache <key> (saved <date>)`" in step
+    assert "describes a cache miss" in step, "the wall-time sentence is for a miss"
+    assert "What a hit shows the judged steps, against a seed" in step
+    assert "judged steps cannot tell a restore from a seed" not in step
+    assert "30 days" in step and "three starts a release" in step
+    assert "sees no dead catalog owner" in step
+    assert "`seeded (cache miss, saved <key>)`" in step
+    assert "`--no-seed-cache`" in step and "makes a pass NOT THE RELEASE GATE" in step
+    assert "`$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE`" in step
+    assert "the 50,000-row floor and equals the manifest's" in step
+    # the opt-out is a non-default option in the driver; the cache itself is not
+    ur = _driver()
+    ap = ur._build_parser()
+    base = ["--work", "w", "--target-release", "9.9.9"]
+    assert ur.non_default_flags(ap, ap.parse_args(base)) == []
+    assert ur.non_default_flags(ap, ap.parse_args([*base, "--no-seed-cache"])) == ["--no-seed-cache"]
+    assert ur.seed_cache.CACHE_ENV == "NEXUS_UPGRADE_REHEARSAL_SEED_CACHE"

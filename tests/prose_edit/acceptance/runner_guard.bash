@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Sourced by run-review.sh, run-teach.sh and run-memory-gate.sh (not run on its own). WT must be set first.
+# Sourced by run-review.sh, run-teach.sh, run-memory-gate.sh, run-scenario.sh, run-cut.sh and run-canaries.sh
+# (not run on its own). WT must be set first.
 #
 # Why it exists (nexus-ger02.7, the exit batch of 2026-10-03): the three runners each copy the scenario document
 # into docs/ in the shared worktree and the editor Greps the genre's paths. Run at the same time, each runner's
@@ -15,6 +16,9 @@
 #                         stops the runner's background jobs and their children before it removes copies and the lock.
 #   runner_sweep_stale    remove untracked docs/zz-* left by an older runner (it holds the lock, so none is live)
 #   runner_track REL...   paths relative to WT that the exit trap removes
+#   runner_at_exit CMD... shell functions or commands the exit trap runs, in the order given, after it has stopped the
+#                         background jobs and before it removes the copies and the lock. local_engine.bash registers
+#                         its teardown here, so the guard keeps the only EXIT trap. A hook's failure is not the run's.
 #   runner_not_run OUT NAME REASON
 #                         say, on stderr and in OUT/not-run.txt ("NAME: REASON"), that scenario NAME was not run. The
 #                         verdict scripts read that file and score the scenario NOT-RUN with the reason. A runner
@@ -30,10 +34,25 @@
 #                         T2 is down at the build; unmapped: the skill asks for a genre first), so they stay valid
 #                         headless. run-scenario.sh does not guard them.
 #
+#   runner_answer TEXT    the author's answer turn for a PATH run. Under PROSE_EDIT_APP_RUNNER=1 it is "reviewed" and nothing
+#                         else: the author's decisions live only in the stand-in's list_suggestions statuses
+#                         (markup_standin_decisions.json), so a pass cannot be the skill reading the chat. Without the
+#                         switch it is TEXT, unchanged. A chat-decision scenario (a stdin run, a promote) keeps its own text
+#                         and does not go through here.
+#   runner_turn_applied OUT NAME
+#                         exit 0 when OUT/NAME.jsonl holds a real `review.py apply` (not --dry-run): the answer turn
+#                         already applied (an App-decided run does it in the same turn, SKILL.md step 12), so no
+#                         "Yes, apply." turn follows. A turn that only dry-ran and asked "Apply" gets its confirmation.
+#   runner_standin_reset OUT
+#                         remove OUT/markup-standin-state.json (and a temp file a killed server left): one state file is
+#                         shared by the sessions of ONE run, and a leftover from an earlier run in the same OUT_DIR
+#                         would put its suggestions and ids into this one.
+#
 # PROSE_EDIT_RUNNER_LOCK overrides the lock path (the tests use it); by default the lock sits in the git common
 # directory, so every worktree of the box sees it.
-RUNNER_NO_APP_REASON="a path run reviews its edits in the MarkupEditor app, which a headless claude -p session cannot drive; the scenario needs a harness that answers the MarkupEditor tools (PROSE_EDIT_APP_RUNNER=1 says one is in place; none exists yet)"
+RUNNER_NO_APP_REASON="a path run reviews its edits in the MarkupEditor app, which a headless claude -p session cannot drive; the scenario needs a harness that answers the MarkupEditor tools (PROSE_EDIT_APP_RUNNER=1 runs it against markup_standin.py, a stand-in server that serves them from the recorded replies and a script of the author's decisions; it is not the app)"
 RUNNER_COPIES=()
+RUNNER_EXIT_HOOKS=()
 
 runner_not_run() {
   mkdir -p "$1" && printf '%s: %s\n' "$2" "$3" >> "$1/not-run.txt"
@@ -129,6 +148,9 @@ runner_cleanup() {
   local rc=$? p
   trap - EXIT INT TERM HUP
   _runner_stop_jobs
+  for p in ${RUNNER_EXIT_HOOKS[@]+"${RUNNER_EXIT_HOOKS[@]}"}; do
+    "$p" || true
+  done
   for p in ${RUNNER_COPIES[@]+"${RUNNER_COPIES[@]}"}; do
     rm -rf "${WT:?}/$p"
   done
@@ -237,4 +259,35 @@ runner_sweep_stale() {
 
 runner_track() {
   RUNNER_COPIES+=("$@")
+}
+
+runner_at_exit() {
+  RUNNER_EXIT_HOOKS+=("$@")
+}
+
+runner_answer() {
+  if [ "${PROSE_EDIT_APP_RUNNER:-0}" = 1 ]; then printf '%s\n' reviewed; else printf '%s\n' "$1"; fi
+}
+
+runner_turn_applied() {
+  [ -f "$1/$2.jsonl" ] || return 1
+  python3 - "$1/$2.jsonl" <<'PY'
+import json, sys
+for line in open(sys.argv[1], encoding="utf-8"):
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        continue
+    content = (ev.get("message") or {}).get("content") if isinstance(ev, dict) else None
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash":
+            command = str((block.get("input") or {}).get("command", ""))
+            if "review.py" in command and " apply" in command and "--dry-run" not in command:
+                sys.exit(0)
+sys.exit(1)
+PY
+}
+
+runner_standin_reset() {
+  rm -f "$1/markup-standin-state.json" "$1"/markup-standin-state.json.*.tmp
 }

@@ -21,6 +21,8 @@ deletion). What remains:
    — section labels fills the legacy rows the backfill adds (nexus-dfemn).
 4. :data:`RUNG_RDR192_MANIFEST_BACKFILL` → :data:`RUNG_MANIFEST_SPAN_FILL`
    — the span fill reads the same rows, for the same reason (nexus-l8o33).
+5. :data:`RUNG_RETIRE_KEYS_SWEEP` comes after the backfill, section labels, span fill and note-tags rungs
+   (nexus-6pfgb.43): those clear the preconditions the sweep counts, and the sweep deletes the chunk-row copy they read.
 
 Package/engine/process are STATELESS preconditions (RDR-185 Constraints):
 re-derived from ON-DISK state at every invocation, converged before the
@@ -28,9 +30,10 @@ ladder walks (wired in P3, nexus-n7u38.23) — they are NOT rungs and never
 appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
-:data:`RUNG_ORDER` holds four rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
-:data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`, :data:`RUNG_MANIFEST_SPAN_FILL`). Two
-depend on another: section labels and the span fill wait on the RDR-192 backfill, whose rows they fill. The walk follows the edges
+:data:`RUNG_ORDER` holds five rungs today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`,
+:data:`RUNG_NOTE_TAGS_ARRAY`, :data:`RUNG_MANIFEST_SECTION_LABELS`, :data:`RUNG_MANIFEST_SPAN_FILL`,
+:data:`RUNG_RETIRE_KEYS_SWEEP`). Three depend on another: section labels and the span fill wait on the RDR-192 backfill,
+whose rows they fill, and the sweep waits on all four. The walk follows the edges
 (nexus-dfemn): a deferred rung holds back only the rungs with an edge from it.
 Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
 in :data:`HARD_EDGES`; the order is validated against the edges at
@@ -87,6 +90,11 @@ RUNG_MANIFEST_SECTION_LABELS = "manifest-section-labels"
 #: span keys. Fill-only per column; the same hard edge as the label rung, for the same reason.
 RUNG_MANIFEST_SPAN_FILL = "manifest-span-fill"
 
+#: RDR-236 Phase 4 Step 3 (nexus-6pfgb.43): strip the retired chunk-row metadata keys from this install's tenant, through
+#: the engine's sweep job. Never accepts a residue for the user (a standing precondition defers it). It has hard edges
+#: from the four rungs above, which clear the preconditions the sweep counts (see :data:`HARD_EDGES`).
+RUNG_RETIRE_KEYS_SWEEP = "retire-keys-sweep"
+
 #: Stateless preconditions — NOT rungs (see module docstring).
 PRECONDITION_PACKAGE = "precondition:package"
 PRECONDITION_ENGINE = "precondition:engine"
@@ -102,6 +110,7 @@ ALL_RUNGS = "*"
 #: nexus-lgdel.l1 (which retired chash-rekey) until nexus-wbfpw.41.
 RUNG_ORDER: tuple[str, ...] = (
     RUNG_RDR192_MANIFEST_BACKFILL, RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL,
+    RUNG_RETIRE_KEYS_SWEEP,
 )
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
@@ -114,6 +123,14 @@ HARD_EDGES: tuple[tuple[str, str], ...] = (
     # The span fill reads the manifest rows the backfill adds (NULL spans by design, RDR-236 A4) and, once recorded,
     # reads converged for good, so it must not run while the backfill is deferred (nexus-l8o33).
     (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_MANIFEST_SPAN_FILL),
+    # The sweep deletes the chunk-row keys the three fills above copy from, and counts what they clear as its
+    # preconditions (legacy labels, NULL spans, tags as a string): it must not run while any of them is deferred.
+    # Once recorded it reads converged from the record, like the span fill (nexus-6pfgb.43); `nx doctor`'s
+    # `Retired chunk keys` row says a record is not a live count.
+    (RUNG_RDR192_MANIFEST_BACKFILL, RUNG_RETIRE_KEYS_SWEEP),
+    (RUNG_NOTE_TAGS_ARRAY, RUNG_RETIRE_KEYS_SWEEP),
+    (RUNG_MANIFEST_SECTION_LABELS, RUNG_RETIRE_KEYS_SWEEP),
+    (RUNG_MANIFEST_SPAN_FILL, RUNG_RETIRE_KEYS_SWEEP),
 )
 
 #: RQ2 edges 4–5 (chunk-identity / embedder-era co-residency inside the
@@ -268,6 +285,11 @@ def default_registry() -> LadderRegistry:
         ManifestSpanFillRung,
     )
 
+    from nexus.upgrade_ladder.rungs.retire_keys_sweep import (  # noqa: PLC0415 — deferred; keeps registry import cheap and avoids a cycle
+        RetireKeysSweepRung,
+    )
+
     return LadderRegistry((
         Rdr192ManifestBackfillRung(), NoteTagsArrayRung(), ManifestSectionLabelsRung(), ManifestSpanFillRung(),
+        RetireKeysSweepRung(),
     ))

@@ -868,7 +868,8 @@ public final class TokenStore {
             .set(SESSION_TOKENS.SESSION_TOKEN_HASH, hash)
             .set(SESSION_TOKENS.EXPIRES_AT, expiresAt)
             .execute();
-        log.info("event=session_token_minted tenant={} session={}", tenant, sessionId);
+        log.info("event=session_token_minted tenant={} session={}",
+            dev.nexus.service.http.LogText.mdcValue(tenant), dev.nexus.service.http.LogText.mdcValue(sessionId));
         return new IssuedToken(raw, hash);
     }
 
@@ -887,7 +888,8 @@ public final class TokenStore {
             .and(SESSION_TOKENS.SESSION_ID.eq(sessionId))
             .execute();
         log.info("event=session_token_closed tenant={} session={} deleted={}",
-                 tenant, sessionId, deleted);
+                 dev.nexus.service.http.LogText.mdcValue(tenant),
+                 dev.nexus.service.http.LogText.mdcValue(sessionId), deleted);
         return deleted;
     }
 

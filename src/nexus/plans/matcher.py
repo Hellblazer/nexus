@@ -746,8 +746,8 @@ def plan_match(
     ``dimensions["verb"]`` entry. ``dimensions`` is a hard filter over
     ALL candidates including grown plans, whose verbs only ever come out
     as ``research`` or ``analyze``; routing a derived ``debug`` through
-    it would drop every grown plan, and grown plans are currently the
-    entire live hit rate.
+    it would drop every grown plan (which, since nexus-a4g2a, serve no
+    request until a reviewed route trusts their recorded kind).
 
     *eligibility* (RDR-232 Phase 2, nexus-jypmj.2.3) is the answer-kind filter for this request. Every
     branch (cosine, the below-floor category route, the FTS5 fallback) asks it last, after every other

@@ -9,6 +9,8 @@ import com.sun.net.httpserver.Filter;
 import com.sun.net.httpserver.HttpExchange;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+import org.slf4j.event.Level;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -69,6 +71,11 @@ public final class AuthFilter extends Filter {
     private static final String BEARER_PREFIX = "Bearer ";
     private static final String TENANT_HEADER = "X-Nexus-Tenant";
     private static final String SESSION_HEADER = "X-Nexus-T1-Session";
+
+    // MDC keys; logback.xml prints them as [cid=... tenant=... session=...].
+    private static final String MDC_CORRELATION_ID = "correlation_id";
+    private static final String MDC_TENANT = "tenant";
+    private static final String MDC_SESSION = "session";
 
     /**
      * Public alias of {@link RequestDeadline#REQUEST_DEADLINE_HEADER} (nexus-8hdg9
@@ -185,6 +192,64 @@ public final class AuthFilter extends Filter {
 
     @Override
     public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+        // RDR-167 Step 3 (nexus-dngtz.1.5): the correlation id is accepted or generated and
+        // set on the response BEFORE anything can send a response, so every path below (the
+        // 401 early returns included) echoes it and logs under it. Everything after the
+        // accept sits inside the try, so the MDC is cleared on every exit. Production runs one
+        // virtual thread per request (NexusService: newVirtualThreadPerTaskExecutor), so a
+        // ThreadLocal cannot outlive a request there; the clear is defense for any other
+        // executor, not a fix for a pool leak.
+        String correlationId = CorrelationId.acceptOrGenerate(
+            exchange.getRequestHeaders().getFirst(CorrelationId.HEADER));
+        long startNanos = System.nanoTime();
+        Throwable thrown = null;
+        try {
+            // Needs no escape: CorrelationId admits only [A-Za-z0-9._-]{1,64}.
+            MDC.put(MDC_CORRELATION_ID, correlationId);
+            exchange.getResponseHeaders().set(CorrelationId.HEADER, correlationId);
+            authenticateAndDispatch(exchange, chain);
+        } catch (Throwable t) {
+            // Precise rethrow: t is not reassigned, so this compiles under `throws IOException` and the
+            // exception reaches the server unchanged. It is kept only to name its class in the line.
+            thrown = t;
+            throw t;
+        } finally {
+            logRequestFailed(exchange, thrown, startNanos);   // never throws; before the clears so the line carries the ids
+            RequestContext.clear();
+            RequestContext.clearDeadline();
+            MDC.clear();
+        }
+    }
+
+    /**
+     * RDR-167 Step 3 (nexus-dngtz.1.6): one line, at WARN (a sent 404 with nothing thrown at INFO), for a request that failed or was never answered:
+     * the response status is 400 or above, nothing was sent ({@code getResponseCode() == -1}, printed as
+     * {@code none}), or the chain threw (a handler that sent 200 and then threw while writing the body
+     * counts). The exception's class name is printed, never its message or stack trace: both can carry
+     * client text. The path has no query string, as in {@code event=auth_rejected}. A failure to log
+     * is swallowed: it must not replace the request's own exception, and the caller clears the request
+     * context behind this call either way.
+     */
+    private void logRequestFailed(HttpExchange exchange, Throwable thrown, long startNanos) {
+        try {
+            int status = exchange.getResponseCode();
+            if (status >= 400 || status == -1 || thrown != null) {
+                // Sam's ruling 2026-11-17 (RDR-167 Step 3): a 404 is a normal "not found" answer on
+                // lookup routes, so a sent 404 with nothing thrown logs at INFO; every other failure WARN.
+                Level level = status == 404 && thrown == null ? Level.INFO : Level.WARN;
+                log.atLevel(level).log("event=request_failed method={} path={} status={} exception={} duration_ms={}",
+                    LogText.escapeControl(exchange.getRequestMethod()),
+                    LogText.escapeControl(exchange.getRequestURI().getPath()),
+                    status == -1 ? "none" : Integer.toString(status),
+                    thrown == null ? "none" : thrown.getClass().getName(),
+                    (System.nanoTime() - startNanos) / 1_000_000L);
+            }
+        } catch (Throwable loggingFailure) {
+            // Deliberately empty: see the method comment.
+        }
+    }
+
+    private void authenticateAndDispatch(HttpExchange exchange, Chain chain) throws IOException {
         // 1. Extract the bearer.
         String authHeader = exchange.getRequestHeaders().getFirst("Authorization");
         if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
@@ -208,6 +273,11 @@ public final class AuthFilter extends Filter {
             return;
         }
         String tokenTenant = resolved.get().tenantId();
+        // The tenant goes in MDC as soon as the token names it, so the request_failed line for a 403
+        // scope refusal or a cross-tenant / unminted-session 401 carries it. An unknown token has no
+        // tenant and prints none. The session is put only once it is verified (step 3).
+        // mdcValue: only the printed text is escaped; routing and every comparison keep the raw tenant.
+        MDC.put(MDC_TENANT, LogText.mdcValue(tokenTenant));
         boolean isOperator = resolved.get().isRoot();
         String scope = resolved.get().scope();
 
@@ -225,7 +295,8 @@ public final class AuthFilter extends Filter {
             boolean mintSurface = path.equals("/v1/data-tokens")
                 || path.startsWith("/v1/data-tokens/");
             if (!mintSurface) {
-                log.debug("event=auth_rejected path={} reason=mint_scope_data_path_forbidden", path);
+                log.debug("event=auth_rejected path={} reason=mint_scope_data_path_forbidden",
+                    LogText.escapeControl(path));
                 sendError(exchange, 403, "forbidden");
                 return;
             }
@@ -246,7 +317,7 @@ public final class AuthFilter extends Filter {
             if (!boardCiSurface) {
                 log.debug("event=auth_rejected path={} method={} "
                         + "reason=board_ci_scope_surface_forbidden",
-                        path, exchange.getRequestMethod());
+                        LogText.escapeControl(path), LogText.escapeControl(exchange.getRequestMethod()));
                 sendError(exchange, 403, "forbidden");
                 return;
             }
@@ -274,7 +345,8 @@ public final class AuthFilter extends Filter {
         String claimedTenant = exchange.getRequestHeaders().getFirst(TENANT_HEADER);
         if (claimedTenant != null && !claimedTenant.equals(tenant)) {
             log.debug("event=tenant_header_ignored claimed={} resolved={} path={}",
-                      claimedTenant, tenant, exchange.getRequestURI().getPath());
+                      LogText.escapeControl(claimedTenant), tenant,
+                      LogText.escapeControl(exchange.getRequestURI().getPath()));
         }
 
         // RDR-204 Phase 1 (bead nexus-ft04v.3): THIS is the single per-request
@@ -319,28 +391,28 @@ public final class AuthFilter extends Filter {
         // 4. Publish the principal thread-confined; clear after dispatch.
         RequestContext.set(new RequestContext.Principal(
             tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
+        // Tenant (put at resolution) and session ids only: never the token or the credential hash.
+        if (sessionId != null) {
+            // A client chose this id (/v1/sessions/start takes any non-blank one): escape it for the prefix.
+            MDC.put(MDC_SESSION, LogText.mdcValue(sessionId));
+        }
         // nexus-8hdg9 phase 2: mint the request's embed deadline alongside the
         // principal, for EVERY route, from the budget resolved once at construction.
         // Phase 5: a client that declares its own budget via the advisory
         // X-Nexus-Request-Deadline-Ms header replaces the env default outright;
         // absent or malformed falls back to the default. Either is clamped to the
         // NX_EMBED_DEADLINE_MAX_MS hard ceiling (phase 3 carry-in).
-        // Cleared together with the principal in the finally below.
+        // Cleared together with the principal in doFilter's finally.
         long budgetMs = RequestDeadline.resolveBudgetMs(
             exchange.getRequestHeaders().getFirst(RequestDeadline.REQUEST_DEADLINE_HEADER),
             deadlineBudgetMs, deadlineMaxMs);
         RequestContext.setDeadlineNanos(RequestDeadline.newDeadlineNanos(budgetMs));
-        try {
-            chain.doFilter(exchange);
-        } finally {
-            RequestContext.clear();
-            RequestContext.clearDeadline();
-        }
+        chain.doFilter(exchange);
     }
 
     private void reject(HttpExchange exchange, String reason) throws IOException {
         log.debug("event=auth_rejected path={} reason={}",
-                  exchange.getRequestURI().getPath(), reason);
+                  LogText.escapeControl(exchange.getRequestURI().getPath()), reason);
         sendError(exchange, 401, "unauthorized");
     }
 

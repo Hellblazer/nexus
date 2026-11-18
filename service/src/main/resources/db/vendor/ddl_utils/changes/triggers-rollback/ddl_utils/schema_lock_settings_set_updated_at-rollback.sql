@@ -1,0 +1,1 @@
+DROP TRIGGER IF EXISTS schema_lock_settings_set_updated_at ON ddl_utils.schema_lock_settings;

@@ -7,8 +7,11 @@
 # threshold, which is fixed before any run, and for what counts):
 #
 #   LABEL-<k>-1  /prose-edit <copy> --genre reference-doc --budget 5
-#   LABEL-<k>-2  $ANSWER (default "Accept none. Reject all the edits."; the skill echoes: apply --dry-run)
-#   LABEL-<k>-3  "Yes, apply."                          (stores the rejections)
+#   LABEL-<k>-2  $ANSWER (default "Accept none. Reject all the edits."; the skill echoes: apply --dry-run). Under
+#                PROSE_EDIT_APP_RUNNER=1 it is just "reviewed": the author's decisions are the stand-in's statuses
+#                (markup_standin_decisions.json: every edit rejected for a -2 turn), and an App-decided run applies in
+#                this turn
+#   LABEL-<k>-3  "Yes, apply."                          (stores the rejections); only when turn 2 did not already apply
 #   LABEL-<k>-4  the same /prose-edit again, a fresh session
 #
 # No run is repeated and none is replaced: a run that errors stays in OUT_DIR for memory_gate_verdicts.py
@@ -23,6 +26,12 @@
 # is a sibling document of these; exit 75 when another holds it), sweeps the leftovers of an older runner and
 # removes $DIR on exit. The copies sit in a nested directory no built-in genre maps, so they are in no "Genre
 # paths:" list and the editor's Grep never meets them.
+# Under PROSE_EDIT_APP_RUNNER=1 the shipped decision table rejects every edit of a -2 turn, so a custom ANSWER would
+# disagree with the app: the run exits 1 when ANSWER is set without PROSE_EDIT_STANDIN_DECISIONS (a table that says the
+# same). GATE_JOBS above 1 exits 1 too: the sessions of one run share one stand-in state file. A stand-in gate batch is
+# a harness measurement, not a run of the preregistered gate (README.md).
+# T2: unless PROSE_EDIT_LOCAL_ENGINE=0 or PROSE_EDIT_NX is set, the run starts a throwaway local engine
+# (local_engine.bash); every T2 write goes to it, never to the operator's install.
 # Stop and report if a run shows a T2 failure; never repair it from here.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,9 +40,11 @@ LABEL="${1:?label}"
 SOURCE="${2:?source document}"
 N="${3:-10}"
 JOBS="${GATE_JOBS:-1}"
+ANSWER_SET="${ANSWER:-}"
 ANSWER="${ANSWER:-Accept none. Reject all the edits.}"
 OUT="${OUT_DIR:?set OUT_DIR}"
 . "$HERE/runner_guard.bash"
+. "$HERE/local_engine.bash"
 runner_lock run-memory-gate.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose216_}"
@@ -45,9 +56,22 @@ if [ "${PROSE_EDIT_APP_RUNNER:-0}" != 1 ]; then
   exit 3
 fi
 DIR=docs/zz-memgate  # nested, so no built-in genre maps it: --genre is passed
-mkdir -p "$OUT"
+if [ "${PROSE_EDIT_APP_RUNNER:-0}" = 1 ]; then
+  if [ "$JOBS" != 1 ]; then
+    echo "run-memory-gate.sh: GATE_JOBS=$JOBS is refused under PROSE_EDIT_APP_RUNNER=1: the sessions of one run share one stand-in state file (read and written without a lock), so the jobs would mix their suggestions and ids. Run one at a time." >&2
+    exit 1
+  fi
+  if [ -n "${ANSWER_SET:-}" ] && [ -z "${PROSE_EDIT_STANDIN_DECISIONS:-}" ]; then
+    echo "run-memory-gate.sh: ANSWER is set under PROSE_EDIT_APP_RUNNER=1 without PROSE_EDIT_STANDIN_DECISIONS. The shipped table rejects every edit of a -2 turn and the turn says only \"reviewed\", so a custom answer would disagree with what the app decides. Name a decision table that says what ANSWER says, or unset ANSWER." >&2
+    exit 1
+  fi
+fi
+mkdir -p "$OUT" || exit 1
+OUT="$(cd "$OUT" && pwd)"   # absolute before the cd "$WT" below, as run-cut.sh does
+runner_standin_reset "$OUT"
 cd "$WT" || exit 1
 [ -f "$SOURCE" ] || { echo "no such source: $SOURCE" >&2; exit 1; }
+local_engine_start run-memory-gate.sh
 runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"
 git status --short > "$OUT/$LABEL-repo-status-before.txt"
@@ -58,10 +82,11 @@ run() { OUT_DIR="$OUT" "$HERE/run-scenario.sh" "$@"; }
 
 one() {
   local k="$1" doc="$DIR/$LABEL-$1.md"
+  runner_standin_reset "$OUT"   # one run, one state file: GATE_JOBS is 1 under the stand-in, so nothing else uses it now
   cp "$SOURCE" "$WT/$doc" || return 1
   run "$LABEL-$k-1" "/prose-edit $doc --genre reference-doc --budget 5"
-  RESUME_FROM="$LABEL-$k-1" run "$LABEL-$k-2" "$ANSWER"
-  RESUME_FROM="$LABEL-$k-2" run "$LABEL-$k-3" "Yes, apply."
+  RESUME_FROM="$LABEL-$k-1" run "$LABEL-$k-2" "$(runner_answer "$ANSWER")"
+  runner_turn_applied "$OUT" "$LABEL-$k-2" || RESUME_FROM="$LABEL-$k-2" run "$LABEL-$k-3" "Yes, apply."
   run "$LABEL-$k-4" "/prose-edit $doc --genre reference-doc --budget 5"
 }
 

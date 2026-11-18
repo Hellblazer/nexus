@@ -96,7 +96,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
+
       - name: Run jOOQ codegen
         working-directory: service
         # generate-sources triggers the generate-jooq-sources exec of service/src/build/java/JooqCodegen.java
@@ -329,7 +334,11 @@ jobs:
           # use GraalVM's unified reachability-metadata schema (nexus-lp2qo).
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: native
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # RDR-160: in local mode the native binary constructs Bge768Embedder,
@@ -922,6 +931,75 @@ jobs:
         env:
           NATIVE_SMOKE_REQUIRE_SHAPES: "1"
         run: ./native-smoke.sh
+
+  # nexus-f3yqd.2.22 (RDR-246): the native binary's data-move boot, on the PG bundle this same run built. The
+  # vendored ddl_utils and dml_utils changelogs use Liquibase sqlFile and createProcedure changesets that no other
+  # nexus changelog uses, and no native build had loaded them; native-smoke.sh boots against a one-role pgvector,
+  # where the engine skips the libraries by design, so it cannot reach them. This job needs no Docker and builds
+  # nothing: it downloads the native binary and the PG bundle the two jobs above uploaded (the bytes that ship),
+  # provisions a two-role cluster from the bundle, and boots the binary twice (service/native-data-move-smoke.sh):
+  # with pg_background (both event=data_move_library_applied lines) and with its control file removed (Sam's 8.4
+  # ruling: event=data_move_libraries_skipped reason="pg_background is not installed", the schema walk completes,
+  # the engine serves), plus the log masking of nexus-f3yqd.2.18 on both. The log assertions are
+  # scripts/check_native_data_move_boot.py, unit-tested in tests/test_check_native_data_move_boot.py.
+  # promote-release needs this job, so a failed boot leaves the draft unpublished. Linux legs only: the mac-arm64
+  # binary is smoked on hellmini above, which has no provisioned-bundle leg. A non-tag workflow_dispatch run
+  # executes this job too, so it can be rehearsed on develop before a tag.
+  smoke-native-data-move:
+    name: Smoke the native data-move boot (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: [build-publish, build-publish-pg-bundle]
+    if: ${{ !cancelled() && needs.build-publish.result == 'success' && needs.build-publish-pg-bundle.result == 'success' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: linux-amd64, runner: ubuntu-latest }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Download the native binary the build leg uploaded
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: nexus-service-${{ matrix.arch }}
+          path: dist
+
+      - name: Download the PG bundle the bundle leg uploaded
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: nexus-pg-${{ matrix.arch }}
+          path: pgdist
+
+      - name: Place the binary and verify both digests
+        run: |
+          set -euo pipefail
+          test -f "dist/nexus-service-${{ matrix.arch }}" || { echo "FAIL: the artifact has no nexus-service-${{ matrix.arch }}"; ls -la dist; exit 1; }
+          test -f "pgdist/nexus-pg-${{ matrix.arch }}.txz" || { echo "FAIL: the artifact has no nexus-pg-${{ matrix.arch }}.txz"; ls -la pgdist; exit 1; }
+          ( cd dist && sha256sum -c "nexus-service-${{ matrix.arch }}.sha256" )
+          ( cd pgdist && sha256sum -c "nexus-pg-${{ matrix.arch }}.txz.sha256" )
+          mkdir -p service/target
+          cp "dist/nexus-service-${{ matrix.arch }}" service/target/nexus-service
+          # Actions artifacts do not keep the exec bit.
+          chmod 0755 service/target/nexus-service
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Install nexus (the smoke provisions its cluster with nexus.db.pg_provision)
+        run: uv sync
+
+      - name: Native data-move smoke (provisioned PG bundle, with and without pg_background)
+        working-directory: service
+        env:
+          BIN: ${{ github.workspace }}/service/target/nexus-service
+          PG_BUNDLE: ${{ github.workspace }}/pgdist/nexus-pg-${{ matrix.arch }}.txz
+        run: ./native-data-move-smoke.sh
 
   # RDR-161 P2 (nexus-9yt2p): publish the relocatable PostgreSQL+pgvector bundle
   # as a release asset so `nx daemon service install-binary` / `nx init --service`
@@ -1539,8 +1617,10 @@ jobs:
     # the explicit result checks below carry the all-succeeded requirement.
     # nexus-9q6ox: smoke-mac-arm64 must have SUCCEEDED too. A tag run always takes
     # the default mac runner, so the job is never skipped there.
-    needs: [create-release, build-publish, smoke-mac-arm64, build-publish-pg-bundle, build-publish-pg-bundle-windows, build-publish-engine-windows]
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/engine-service-v') && needs.create-release.result == 'success' && needs.build-publish.result == 'success' && needs.smoke-mac-arm64.result == 'success' && needs.build-publish-pg-bundle.result == 'success' && (vars.NX_WINDOWS_RELEASE_LEGS != 'on' || (needs.build-publish-pg-bundle-windows.result == 'success' && needs.build-publish-engine-windows.result == 'success')) }}
+    # nexus-f3yqd.2.22: smoke-native-data-move (both linux legs) must have SUCCEEDED too: it boots the native
+    # binary on the PG bundle with and without pg_background, which no other leg does.
+    needs: [create-release, build-publish, smoke-mac-arm64, smoke-native-data-move, build-publish-pg-bundle, build-publish-pg-bundle-windows, build-publish-engine-windows]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/engine-service-v') && needs.create-release.result == 'success' && needs.build-publish.result == 'success' && needs.smoke-mac-arm64.result == 'success' && needs.smoke-native-data-move.result == 'success' && needs.build-publish-pg-bundle.result == 'success' && (vars.NX_WINDOWS_RELEASE_LEGS != 'on' || (needs.build-publish-pg-bundle-windows.result == 'success' && needs.build-publish-engine-windows.result == 'success')) }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
@@ -1560,3 +1640,19 @@ jobs:
         run: |
           set -euo pipefail
           scripts/promote_engine_release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" "${WINDOWS_LEGS}"
+
+  # The engine-bundle canary (docs/agents/engine-service-release.md): develop's substrate on this tag's PG
+  # bundle, judged against the pinned bundle and tests/ddl_ceiling.toml. A reusable-workflow call, because the
+  # publish above is made with GITHUB_TOKEN, which raises no `release: published` event for
+  # engine-bundle-canary.yml to trigger on, and a called workflow resolves at this tag's commit, so it runs
+  # before main has the file. It needs promote-release, so a tag that stayed a draft is never tested, and its
+  # result never gates the publish (it runs after it). A tag's delta against the pinned bundle is a warning;
+  # a red here means develop drifted from its ceiling, a test is red on the bundle, or nothing was measured.
+  bundle-canary:
+    name: Engine bundle canary (after the release is promoted)
+    needs: promote-release
+    permissions:
+      contents: read
+    uses: ./.github/workflows/engine-bundle-canary.yml
+    with:
+      tag: ${{ github.ref_name }}

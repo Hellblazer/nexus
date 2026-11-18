@@ -101,6 +101,16 @@ public final class ChunksIsolationCheck {
     }
 
     static List<Violation> violations(DSLContext ctx) {
+        return violations(ctx, "nexus", "chunks");
+    }
+
+    /**
+     * {@link #violations(DSLContext)} for any table of the engine's schemas: the permissive policies on
+     * {@code schema.table}, other than {@code tenant_isolation}, that apply to the connected role. The same test
+     * {@link DrivingTableIsolationCheck} runs on every driving table of a data move (nexus-f3yqd.2.16). A table that
+     * does not exist has no policy and returns empty.
+     */
+    static List<Violation> violations(DSLContext ctx, String schema, String table) {
         var roles = DSL.table(DSL.name("pg_catalog", "pg_roles"));
         var rolname = DSL.field(DSL.name("rolname"), SQLDataType.VARCHAR);
         boolean rlsDoesNotBindMe = ctx.fetchExists(
@@ -117,8 +127,8 @@ public final class ChunksIsolationCheck {
         List<Violation> out = new ArrayList<>();
         for (Record2<String, String[]> row : ctx.select(policyname, policyRoles)
                 .from(policies)
-                .where(DSL.field(DSL.name("schemaname"), SQLDataType.VARCHAR).eq("nexus"))
-                .and(DSL.field(DSL.name("tablename"), SQLDataType.VARCHAR).eq("chunks"))
+                .where(DSL.field(DSL.name("schemaname"), SQLDataType.VARCHAR).eq(schema))
+                .and(DSL.field(DSL.name("tablename"), SQLDataType.VARCHAR).eq(table))
                 .and(DSL.field(DSL.name("permissive"), SQLDataType.VARCHAR).eq("PERMISSIVE"))
                 .and(policyname.ne(TENANT_POLICY))
                 .orderBy(policyname)

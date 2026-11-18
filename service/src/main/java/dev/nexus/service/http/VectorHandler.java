@@ -159,6 +159,22 @@ public final class VectorHandler implements HttpHandler {
     /** RDR-222 Phase 1: null when the handler is built without a ledger; a keyed request is then refused. */
     private final KeyedSweep keyedSweep;
     /**
+     * RDR-134 Step 2 (nexus-7fku2.1.2): the topic-coverage cache the routes in {@link #COVERAGE_OPS} drop through
+     * {@link #coverage}. Null when the handler is built without one (nothing is cached to invalidate).
+     */
+    private final dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage;
+    private final CoverageInvalidation coverage;
+
+    /**
+     * The routes that change which chunks are live or what a count sees: a store, and the two restores that put
+     * quarantined chunks back into their origin collection (re-referenced, so live and unassigned there).
+     * {@code /store-delete} is not listed: it deletes only chunks no manifest row names (PgVectorRepository#delete),
+     * which are in neither count. {@code /gc/quarantine-orphans} moves manifest-less chunks and {@code
+     * /gc/expire-quarantine} deletes quarantine rows: neither touches a live chunk.
+     */
+    private static final java.util.Set<String> COVERAGE_OPS =
+        java.util.Set.of("/upsert-chunks", "/gc/restore-rereferenced", "/gc/quarantine-restore");
+    /**
      * nexus-4lnn1.1.3 (RDR-230): the recall canary's query ring. Bound late by {@link #queryRing}, because the ring
      * needs the router's valid-index set, which Main builds after the service; {@code null} (a handler built without
      * one, or before the bind) admits nothing.
@@ -225,6 +241,21 @@ public final class VectorHandler implements HttpHandler {
                          OwnerlessWritePolicy ownerlessWritePolicy,
                          dev.nexus.service.db.RequestLedger requestLedger,
                          ChunkKeyAllowlistCheck chunkKeyCheck) {
+        this(embedderRouter, pgRepo, reranker, ownerlessWritePolicy, requestLedger, chunkKeyCheck, null);
+    }
+
+    /**
+     * Full wiring plus the topic-coverage cache (RDR-134 Step 2, nexus-7fku2.1.2). {@code NexusService} passes the one
+     * instance it also hands the taxonomy and catalog handlers, so a write on any of the three invalidates the same cache.
+     */
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
+                         dev.nexus.service.vectors.Reranker reranker,
+                         OwnerlessWritePolicy ownerlessWritePolicy,
+                         dev.nexus.service.db.RequestLedger requestLedger,
+                         ChunkKeyAllowlistCheck chunkKeyCheck,
+                         dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage) {
+        this.taxonomyCoverage = taxonomyCoverage;
+        this.coverage = new CoverageInvalidation(taxonomyCoverage, COVERAGE_OPS);
         this.chunkKeyCheck = java.util.Objects.requireNonNull(chunkKeyCheck, "chunkKeyCheck");
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
@@ -241,6 +272,11 @@ public final class VectorHandler implements HttpHandler {
         this.queryRing = ring;
     }
 
+    /** The coverage cache this handler invalidates on a write; null when built without one. */
+    public dev.nexus.service.db.TaxonomyCoverage taxonomyCoverage() {
+        return taxonomyCoverage;
+    }
+
     /**
      * Admit a search's vector to the query ring. Called AFTER the response has been sent, so the ring costs the
      * search nothing; never throws ({@link PciQueryRing#admit} contains its own failures).
@@ -254,9 +290,13 @@ public final class VectorHandler implements HttpHandler {
 
     @Override
     public void handle(HttpExchange exchange) throws IOException {
+        String coverageTenant = RequestContext.tenant();
+        final boolean armed = coverage.arm(exchange,
+            exchange.getRequestURI().getPath().replaceFirst("^/v1/vectors", ""), coverageTenant);
         try {
             dispatch(exchange);
         } finally {
+            coverage.finish(exchange, coverageTenant, armed);
             // A keyed sweep arms a before-send hook that HttpUtil.send fires; if the handler returned without
             // sending (it always sends today), drop it rather than let it sit in the registry.
             HttpUtil.discardBeforeSend(exchange);
@@ -589,6 +629,7 @@ public final class VectorHandler implements HttpHandler {
         var repo   = requirePgRepo(ex);
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
+        coverage.noteBody(ex, body);
         String collection           = requireString(body, "collection");
         List<String> ids            = requireStringList(body, "ids");
         // RDR-180 (nexus-jxizy.7/.8): ONE strict tier — chunk ids ARE
@@ -1940,6 +1981,7 @@ public final class VectorHandler implements HttpHandler {
         KeyedRequest keyed = keyedRequest(ex);   // RDR-222 Phase 1, as handleGcQuarantineOrphans
         byte[] raw = readBodyBytes(ex);
         Map<String, Object> body = parseBody(raw);
+        coverage.noteBody(ex, body);
         String quarantineCollection = requireString(body, "quarantine_collection");
         String originCollection     = requireString(body, "origin_collection");
 
@@ -2264,6 +2306,7 @@ public final class VectorHandler implements HttpHandler {
         KeyedRequest keyed = keyedRequest(ex);
         byte[] raw = readBodyBytes(ex);
         Map<String, Object> body = parseBody(raw);
+        coverage.noteBody(ex, body);
         String origin     = requireString(body, "origin_collection");
         // nexus-wbfpw.55: a "quarantine_collection" in the body is accepted and IGNORED. The engine finds the
         // sibling itself (origin name + the chunks' origin_collection tag): a client-derived name disagrees with

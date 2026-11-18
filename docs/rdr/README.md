@@ -152,7 +152,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-131](rdr-131-t2-session-rollup-summaries.md) | T2 Session Rollup Summaries (MemTree-Lite): Recency-Windowed Memory Consolidation for Compact Context Injection | Architecture | Abandoned | 2026-05-27 |
 | [RDR-132](rdr-132-scope-routed-t1-t2-promotion.md) | Scope-Routed T1 to T2 Promotion: Entity / Session / Project Scopes for Targeted Memory Retrieval | Architecture | Abandoned | 2026-05-27 |
 | [RDR-133](rdr-133-entity-cluster-cross-tier-aggregation.md) | Entity-Cluster Cross-Tier Aggregation: A First-Class Entity Handle Unifying T2 Memory, T3 Catalog, and T3 Chunks | Architecture | Abandoned | 2026-05-27 |
-| [RDR-134](rdr-134-taxonomy-aware-recall-in-nx-answer.md) | RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has | Architecture | Draft | 2026-05-27 |
+| [RDR-134](rdr-134-taxonomy-aware-recall-in-nx-answer.md) | RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has | Architecture | Accepted | 2026-05-27 |
 | [RDR-135](rdr-135-windowed-aspect-extraction.md) | Windowed Aspect Extraction with Cross-Window Merge: Stop Whole-Paper Single-Shot Extraction from Degrading on Long Inputs | Architecture | Deferred | 2026-05-27 |
 | [RDR-136](rdr-136-messagedisplay-projection-substrate.md) | Display Projection via the MessageDisplay Hook: One-Way Output Mirroring and Routing-Marker Hiding | Architecture | Deferred | 2026-05-27 |
 | [RDR-137](rdr-137-eliminate-repos-json.md) | Eliminate repos.json: Catalog as the Canonical Repo→Collection Source of Truth | Architecture | Closed | 2026-05-28 |
@@ -185,17 +185,17 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-164](rdr-164-collection-lifecycle-cascade-consolidation.md) | Collection- and Document-Lifecycle Cascade Consolidation: Replace SQLite-Era Client-Side Cross-Store Orchestration with Postgres-Native Atomic Cascades | Architecture | Closed | 2026-06-21 |
 | [RDR-165](rdr-165-agent-lifecycle-and-operations.md) | Agent Lifecycle & Operations: Document the nexus Agent (engine-service + nx CLI) and the Full Install / Uninstall / Upgrade Story | Documentation | Closed | 2026-06-22 |
 | [RDR-166](rdr-166-managed-service-consumer-journeys.md) | Managed-Service Consumer Journeys: Greenfield Onboarding and Local→Managed Migration to conexus-nexus.com | Architecture | Closed | 2026-06-22 |
-| [RDR-167](rdr-167-cross-tier-observability-correlation.md) | Cross-Tier Observability and Request Correlation for the Service Stack: X-Request-ID Propagation, SLF4J MDC, Readiness, and Structured Logs | Architecture | Draft | 2026-06-25 |
+| [RDR-167](rdr-167-cross-tier-observability-correlation.md) | Request Correlation Across Tiers: X-Correlation-ID Propagation and an SLF4J MDC Bridge for the Service Stack | Architecture | Accepted | 2026-06-25 |
 | [RDR-168](rdr-168-service-mode-catalog-interface-conformance.md) | Service-Mode Catalog Interface Conformance: Make HttpCatalogClient a Faithful Drop-In for the Local Catalog, Enforced by a Signature-Conformance Test | Bug Fix | Closed | 2026-06-25 |
 | [RDR-169](rdr-169-docuverse-storage-reference-only-chunks.md) | Docuverse Storage: Reference-Only Chunks — Retention Enum, Nullable Content, Reference-Only Search DTO, and the URI-Resolver / Embed-Without-Store Surface | Architecture | Closed | 2026-06-25 |
 | [RDR-170](rdr-170-migration-application-not-gated-on-package-version.md) | T2 Migration Application Must Not Gate on Package Version: Drop the apply_pending Upper Bound | Architecture | Closed | 2026-06-25 |
-| [RDR-171](rdr-171-finegrain-content-stable-spans.md) | Fine-Grain Content-Stable Catalog Spans: A dchash Document-Offset Span Form That Survives Re-Chunking | Architecture | Draft | 2026-06-26 |
+| [RDR-171](rdr-171-finegrain-content-stable-spans.md) | Fine-Grain Content-Stable Catalog Spans: A dchash Document-Offset Span Form That Survives Re-Chunking | Architecture | Accepted | 2026-06-26 |
 | [RDR-172](rdr-172-service-mode-aspect-enqueue-silent-failure.md) | Service-Mode Aspect-Enqueue Silent Failure: store_put's Enqueue 500s on the RDR-156 doc_id FK and the Hook Swallows It | Architecture | Closed | 2026-06-27 |
 | [RDR-173](rdr-173-service-mode-aspect-worker-hosting.md) | Aspect-Worker Hosting in the Post-RDR-152 Service Topology: The Extraction Worker Has No Persistent Host, So Short-Lived Store Paths Never Extract | Architecture | Closed | 2026-06-28 |
 | [RDR-174](rdr-174-unified-nx-init-service-lifecycle.md) | Unified nx init and Service-Supervisor Lifecycle: Collapse the Install to One Command and Close the Reboot-Persistence Gap | Architecture | Closed | 2026-06-28 |
 | [RDR-175](rdr-175-os-init-single-process-watchdog.md) | OS-Init as the Single Process Watchdog: Retire the In-Process Storage-Supervisor Respawn Layer | Technical Debt | Closed | 2026-06-28 |
 | [RDR-176](rdr-176-survivable-managed-migration-readiness.md) | Survivable Managed-Migration Readiness: Batched ETL, First-Class Downgrade with an Immutable Source, Unified Config-First Auth, Edge Route Coverage, and Migration Observability | Architecture | Closed | 2026-06-30 |
-| [RDR-177](rdr-177-tenant-telemetry-usage-metering.md) | Unified Tenant-Scoped Telemetry, Observability, and Usage Metering for the Engine Service: One Stats Layer for Local Users and Cloud Tenants | Architecture | Draft | 2026-07-01 |
+| [RDR-177](rdr-177-tenant-telemetry-usage-metering.md) | Unified Tenant-Scoped Telemetry, Observability, and Usage Metering for the Engine Service: One Stats Layer for Local Users and Cloud Tenants | Architecture | Deferred | 2026-07-01 |
 | [RDR-178](rdr-178-unattended-migration.md) | Unattended Migration: Industrialize the Store-Migration Path from Babysat to Autonomous | Architecture | Closed | 2026-07-01 |
 | [RDR-179](rdr-179-self-correction-machinery-remediation.md) | Self-Correction Machinery Remediation: Relight Plan-Reuse, Retrieval Benchmarking, Plan-Library Hygiene, and Taxonomy-Aware Recall | Architecture | Closed | 2026-07-04 |
 | [RDR-180](rdr-180-content-address-chash-binary-32byte.md) | Content-Address Chunks by a Canonical 32-Byte Binary chash: One Digest, Stored as Bytes, Hex Only at the Boundary | Architecture | Closed | 2026-07-04 |
@@ -211,26 +211,26 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-190](rdr-190-plan-ir-loop-collect-primitives.md) | Plan-IR Fan-Out and Fold: Add `loop` and `collect` Step Primitives So Plans Can Process More Than 100 Items Without Truncating or Round-Tripping Through the Agent | Architecture | Deferred | 2026-07-26 |
 | [RDR-191](rdr-191-unify-chunk-tables-enable-manifest-fk.md) | Unify the Dim-Sharded Chunk Tables into One nexus.chunks with Nullable Typed Embedding Columns: Make the Manifest FK Expressible and Retire the Client-Side Integrity Apparatus | Architecture | Closed | 2026-08-10 |
 | [RDR-192](rdr-192-superseded-note-chunks-outlive-manifest-less-is-live.md) | Superseded store_put note chunks are permanently live: the manifest-less-is-live contract outlived its transition | Bug Fix | Closed | 2026-08-12 |
-| [RDR-193](rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md) | Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs | Architecture | Accepted | 2026-08-15 |
+| [RDR-193](rdr-193-server-side-catalog-reconciliation-and-taxonomy-compute.md) | Server-Side Catalog Reconciliation and Taxonomy Compute: Move the Index-Time Catalog Diff/Housekeeping/Linking and the Taxonomy Discover Pipeline onto the Engine as Transactional SQL and Java Jobs | Architecture | Closed | 2026-08-15 |
 | [RDR-194](rdr-194-fk-census-structural-schema-warts.md) | Post-RDR-187 FK Census and Structural Wart Retirement: One chash Encoding, One doc_id Meaning, Tenant-Keyed Uniqueness Everywhere, One TTL Semantics, and Every Enforceable Relationship Enforced | Architecture | Closed | 2026-08-15 |
 | [RDR-195](rdr-195-voyage-batch-token-limit.md) | Token-Aware Voyage Batch Splitting: Make the 120K-Tokens-Per-Request Ceiling a Planned Bound Instead of an Opaque 500 | Bug Fix | Closed | 2026-08-19 |
 | [RDR-196](rdr-196-cost-aware-nx-answer.md) | Cost-Aware nx_answer: Per-Step Cost/Quality Telemetry, Per-Operator Model Routing, and Cost-Ranked Plan Choice — Closing the NOMA §5.1–5.3 Gap | Architecture | Closed | 2026-08-19 |
 | [RDR-197](rdr-197-plugin-only-release-channel.md) | Independent Plugin Release Channel (plugin-vX.Y.Z-n) | Architecture | Superseded by T2 nexus/design-plugin-only-fast-lane.md, the plugin-only fast lane on the client release (nexus-rbmja; Sam, 2026-10-26) | 2026-08-22 |
 | [RDR-198](rdr-198-collapse-duplicated-client-transport.md) | Collapse the Duplicated Client Transport: One Pooled Connection to One Engine | Architecture | Closed | 2026-08-23 |
-| [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Draft | 2026-08-23 |
+| [RDR-199](rdr-199-indexing-lifecycle-ref-identity.md) | Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In | Architecture | Deferred | 2026-08-23 |
 | [RDR-200](rdr-200-nx-answer-continuation-mode.md) | nx_answer Continuation Mode and the Composed-Retrieval Bridge Route | Architecture | Closed | 2026-09-01 |
 | [RDR-201](rdr-201-closed-vocabularies-as-checked-tables.md) | Closed Vocabularies as Checked Tables | Architecture | Closed | 2026-09-01 |
-| [RDR-202](rdr-202-containerize-release-battery.md) | Containerize the Release Battery: Layered Images, a Compose-Expressed Gate DAG, and the macOS-Native Residue | Architecture | Draft | 2026-09-04 |
+| [RDR-202](rdr-202-containerize-release-battery.md) | Containerize the Release Battery: Layered Images, a Compose-Expressed Gate DAG, and the macOS-Native Residue | Architecture | Abandoned | 2026-09-04 |
 | [RDR-203](rdr-203-composite-nx-answer-run-record.md) | One Composite Run Record: Collapse nx_answer's Three Telemetry Writes into a Single Engine Operation | Architecture | Closed | 2026-09-05 |
 | [RDR-204](rdr-204-embedding-profile-and-collection-authority.md) | Collections Stop Encoding Metadata in Their Names: An Install-Scoped Embedding Profile and catalog_collections as the Authority | Architecture | Closed | 2026-09-06 |
 | [RDR-205](rdr-205-linda-tuple-space-over-postgres.md) | Linda Tuple Space over Postgres: A Coordination Primitive for Agents and Instances | Architecture | Closed | 2026-09-09 |
 | [RDR-206](rdr-206-tuple-claim-renew-and-reply-in-ack.md) | Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1 | Feature | Closed | 2026-09-11 |
 | [RDR-207](rdr-207-summarization-at-the-t2-expiry-boundary.md) | Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut | Feature | Closed | 2026-09-12 |
 | [RDR-208](rdr-208-session-id-mail-addressing.md) | Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time | Architecture | Closed | 2026-09-14 |
-| [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Draft | 2026-09-14 |
+| [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Accepted | 2026-09-14 |
 | [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Closed | 2026-09-15 |
 | [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Closed | 2026-09-15 |
-| [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Draft | 2026-09-16 |
+| [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Deferred | 2026-09-16 |
 | [RDR-213](rdr-213-channel-delivery-without-a-proof-gate.md) | Channel Delivery Without a Proof Gate: Notify a Reference, Let the Session Claim | Architecture | Closed | 2026-09-17 |
 | [RDR-214](rdr-214-standing-code-correctness-review.md) | Standing-Code Correctness Review: From Pilot to Decision | Technical Debt | Abandoned | 2026-09-17 |
 | [RDR-215](rdr-215-plugin-hooks-as-nx-verbs.md) | Plugin Hooks as nx Verbs: Retire the Bash Hook Layer | Technical Debt | Closed | 2026-09-18 |
@@ -247,25 +247,29 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-227](rdr-227-per-collection-hnsw-above-the-router-threshold.md) | Per-Collection HNSW Indexes Above the Router Threshold | Architecture | Closed | 2026-10-09 |
 | [RDR-228](rdr-228-plugin-installs-the-cli.md) | The Plugin Installs the CLI | Feature | Closed | 2026-10-12 |
 | [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
-| [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Accepted | 2026-10-18 |
+| [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Closed | 2026-10-18 |
 | [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Closed | 2026-10-23 |
 | [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Closed | 2026-10-23 |
 | [RDR-233](rdr-233-channel-free-push-for-sessions-without-the-channel-flag.md) | Channel-Free Push: Wake a Session Launched Without the Channel Flag | Feature | Closed | 2026-10-22 |
-| [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Accepted | 2026-10-26 |
+| [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Closed | 2026-10-26 |
 | [RDR-236](rdr-236-chunk-row-metadata-normalization.md) | Chunk-row metadata normalization: document fields on the catalog document, position fields on the manifest, the chunk row keeps only what its text determines | Architecture | Accepted | 2026-10-26 |
 | [RDR-237](rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md) | MinerU-Only PDF Extraction with a Per-Page Fallback Ladder | Architecture | Closed | 2026-10-27 |
 | [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Accepted | 2026-10-31 |
 | [RDR-239](rdr-239-tuple-space-dictionary.md) | The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates | Feature | Closed | 2026-10-31 |
-| [RDR-240](rdr-240-procedures-as-sandboxed-lua-scripts.md) | Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It | Feature | Accepted | 2026-11-01 |
-| [RDR-241](rdr-241-no-client-walks-of-the-managed-catalog.md) | No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs | Architecture | Draft | 2026-11-02 |
-| [RDR-242](rdr-242-sandboxed-lua-runtime.md) | Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First | Architecture | Accepted | 2026-11-02 |
+| [RDR-240](rdr-240-procedures-as-sandboxed-lua-scripts.md) | Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It | Feature | Closed | 2026-11-01 |
+| [RDR-241](rdr-241-no-client-walks-of-the-managed-catalog.md) | No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs | Architecture | Accepted | 2026-11-02 |
+| [RDR-242](rdr-242-sandboxed-lua-runtime.md) | Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First | Architecture | Closed | 2026-11-02 |
 | [RDR-243](rdr-243-first-class-document-sensitivity.md) | First-Class Document Sensitivity: Route, Stamp and Exempt Sensitive Documents from Every LLM and External Surface | Feature | Closed | 2026-11-03 |
-| [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Accepted | 2026-11-03 |
+| [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Closed | 2026-11-03 |
 | [RDR-245](rdr-245-structured-asks-on-the-threads-board.md) | Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox | Feature | Accepted | 2026-11-05 |
+| [RDR-246](rdr-246-data-moves-are-background-jobs.md) | Data Moves Run as Batched, Resumable Background Jobs, Never at Engine Boot | Architecture | Accepted | 2026-11-10 |
 | [RDR-247](rdr-247-one-index-per-row.md) | One Index per Row: Index Each Vector Once, Not in Both the Leaf Graph and a Per-Collection Graph | Architecture | Deferred | 2026-11-10 |
 | [RDR-248](rdr-248-cloud-tenant-backup.md) | Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant | Feature | Closed | 2026-11-11 |
-| [RDR-249](rdr-249-declarative-auras.md) | Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure | Feature | Accepted | 2026-11-12 |
-| [RDR-250](rdr-250-multi-hop-answers-past-the-six-chunk-budget.md) | Multi-hop answers read past the six-chunk generator budget | Feature | Draft | 2026-11-15 |
+| [RDR-249](rdr-249-declarative-auras.md) | Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure | Feature | Closed | 2026-11-12 |
+| [RDR-250](rdr-250-multi-hop-answers-past-the-six-chunk-budget.md) | Multi-hop answers read past the six-chunk generator budget | Feature | Closed | 2026-11-15 |
+| [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Draft | 2026-11-16 |
+| [RDR-252](rdr-252-aura-relevance-and-one-responder.md) | Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment | Architecture | Accepted | 2026-11-16 |
+| [RDR-253](rdr-253-session-identity.md) | Session Identity: Named Seats That Outlive Sessions, a Binding Log, One Resolver, and Fenced Identity State | Architecture | Accepted | 2026-11-16 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- The migration_run ordered-key shape check in each form it has had: the
+         original (up to three columns, four kinds), widened for bytea, and
+         widened to four columns. Changesets 009 to 012 and their rollbacks expand
+         these into their SQL files, so each expression is written once and cannot
+         drift between them. The earlier two keep their names and values so the
+         changesets that already ran on an installed database expand unchanged.
+         Quotes are doubled because the expression is passed to the ddl_utils
+         helpers as a string literal. -->
+    <property name="ordered_key_shape_check_expression"
+              value="ordered_key_columns IS NULL
+        OR (pg_catalog.cardinality(ordered_key_columns) BETWEEN 1 AND 3
+        AND pg_catalog.cardinality(ordered_key_kinds)
+                = pg_catalog.cardinality(ordered_key_columns)
+        AND ordered_key_kinds &lt;@ ARRAY [''bigint'', ''text'', ''uuid'', ''timestamptz'', ''bytea'']::text[])"/>
+    <property name="ordered_key_shape_check_expression_four_columns"
+              value="ordered_key_columns IS NULL
+        OR (pg_catalog.cardinality(ordered_key_columns) BETWEEN 1 AND 4
+        AND pg_catalog.cardinality(ordered_key_kinds)
+                = pg_catalog.cardinality(ordered_key_columns)
+        AND ordered_key_kinds &lt;@ ARRAY [''bigint'', ''text'', ''uuid'', ''timestamptz'', ''bytea'']::text[])"/>
+    <property name="ordered_key_shape_check_expression_before_bytea"
+              value="ordered_key_columns IS NULL
+        OR (pg_catalog.cardinality(ordered_key_columns) BETWEEN 1 AND 3
+        AND pg_catalog.cardinality(ordered_key_kinds)
+                = pg_catalog.cardinality(ordered_key_columns)
+        AND ordered_key_kinds &lt;@ ARRAY [''bigint'', ''text'', ''uuid'', ''timestamptz'']::text[])"/>
+
+    <changeSet id="001-create-schema" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/001-create-schema.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/001-create-schema-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="002-create-lib-schema" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/002-create-lib-schema.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/002-create-lib-schema-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="003-create-data-schema" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/003-create-data-schema.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/003-create-data-schema-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Domains must exist before any routine that types its arguments with
+         them, so create them before the functions include. -->
+    <changeSet id="004-create-domains" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/004-create-domains.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/004-create-domains-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Adds the bytea array to the migration_key type created above. It is
+         listed here, not at the end, because the boundary-key check helper
+         below reads the new attribute, so a database built from scratch needs it
+         before that helper is created. A database upgraded from an earlier
+         release runs it on its own first, then re-applies the helper. -->
+    <changeSet id="008-add-bytea-key-kind" author="hellblazer" dbms="postgresql">
+        <!-- 008 commits on its own, and a database that has the fifth attribute
+             but not the routines that build it breaks in every new backend, so
+             this changeset must not run unless 009 and 010 can. They call the
+             ddl_utils helpers, which in turn call ddl_utils_lib: halt here,
+             before anything changes, when either schema is missing or the
+             migrating role cannot execute what the helpers use. This
+             is the one place a changeset carries SQL in the XML; Liquibase has
+             no file form of a precondition. -->
+        <preConditions onFail="HALT" onError="HALT">
+            <sqlCheck expectedResult="1">
+                SELECT CASE
+                    WHEN pg_catalog.to_regnamespace('ddl_utils') IS NULL THEN 0
+                    WHEN pg_catalog.to_regnamespace('ddl_utils_lib') IS NULL THEN 0
+                    WHEN NOT pg_catalog.has_schema_privilege(pg_catalog.current_user(), 'ddl_utils', 'USAGE') THEN 0
+                    WHEN NOT pg_catalog.has_schema_privilege(pg_catalog.current_user(), 'ddl_utils_lib', 'USAGE') THEN 0
+                    WHEN (SELECT pg_catalog.count(DISTINCT n.nspname || '.' || p.proname)
+                          FROM pg_catalog.pg_proc AS p
+                                   JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+                          WHERE (n.nspname, p.proname) IN (
+                                ('ddl_utils', 'drop_constraint'),
+                                ('ddl_utils', 'add_check_constraint'),
+                                ('ddl_utils', 'ensure_check_constraint'),
+                                ('ddl_utils', 'get_lock_settings'),
+                                ('ddl_utils_lib', 'alter_table'),
+                                ('ddl_utils_lib', 'add_check_constraint'),
+                                ('ddl_utils_lib', 'drop_constraint'),
+                                ('ddl_utils_lib', 'validate_constraint'),
+                                ('ddl_utils_lib', 'assert_no_top_level_comma'))
+                            AND pg_catalog.has_function_privilege(pg_catalog.current_user(), p.oid, 'EXECUTE')) = 9
+                        THEN 1
+                    ELSE 0
+                END
+            </sqlCheck>
+        </preConditions>
+        <sqlFile path="sql_changes/008-add-bytea-key-kind.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/008-add-bytea-key-kind-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- The boundary-key check helper. It needs only the migration_key type
+         (created above), so it is defined before the table whose CHECK calls
+         it. -->
+    <changeSet id="005-create-migration-key-check" author="lee.horner" dbms="postgresql"
+               runOnChange="true">
+        <sqlFile path="sql_changes/005-create-migration-key-check.sql"
+                 relativeToChangelogFile="true" splitStatements="false"/>
+        <rollback>
+            <sqlFile path="rollback/005-create-migration-key-check-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- The migration tables, including the partial index on
+         migration_boundary's pending rows. No triggers yet: the tables do not
+         depend on any routine, and the routines below reference them, so the
+         tables come first. The index is part of the table changeset, so it is a
+         plain CREATE INDEX: the table is new, so there is no completed prefix to
+         block and no need for CONCURRENTLY. -->
+    <changeSet id="006-create-migration-tables" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/006-create-migration-tables.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/006-create-migration-tables-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Revoke PUBLIC's default EXECUTE/USAGE on future objects before any
+         routine or type is created, so a newly added object cannot be
+         world-executable even if it is omitted from 999-grant-privileges. -->
+    <changeSet id="007-default-privileges" author="lee.horner" dbms="postgresql">
+        <sqlFile path="sql_changes/007-default-privileges.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/007-default-privileges-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Stored routines: one changeset each, one file per routine. They run
+         after the tables so routines may reference them. -->
+    <include file="functions.xml" relativeToChangelogFile="true"/>
+
+    <!-- The tables' triggers, one per file. They call the routines defined
+         above, so they run after the functions include. -->
+    <include file="triggers.xml" relativeToChangelogFile="true"/>
+
+    <!-- Lets a run record bytea as an ordered-key kind. It replaces a check on
+         migration_run and calls the ddl_utils helpers, which can fail on a lock
+         timeout or a missing grant, so it runs after the functions and triggers
+         includes: a failure here leaves the new routines in place against the
+         new five-attribute key type, never a mix of old routines and new type.
+         No routine, trigger or table definition above reads the check; it only
+         matters when a caller starts a run, which cannot happen during a
+         migration. The new check is added NOT VALID here and validated by the
+         next changeset. -->
+    <changeSet id="009-allow-bytea-ordered-key-kind" author="hellblazer" dbms="postgresql">
+        <sqlFile path="sql_changes/009-allow-bytea-ordered-key-kind.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/009-allow-bytea-ordered-key-kind-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Validates the check the previous changeset added NOT VALID. The
+         ddl_utils procedure commits between steps, so it runs outside a
+         transaction and is this changeset's only statement. -->
+    <changeSet id="010-validate-ordered-key-shape-check" author="hellblazer" dbms="postgresql"
+               runInTransaction="false">
+        <sqlFile path="sql_changes/010-validate-ordered-key-shape-check.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/010-validate-ordered-key-shape-check-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Lets a run record an ordered key of four columns, the shape of the
+         nexus chunks key (tenant, collection, hash, embedding model). Like 009
+         it replaces the check on migration_run through the ddl_utils helpers, so
+         it runs after the functions and triggers includes and adds the new check
+         NOT VALID; the next changeset validates it. The routines and the boundary
+         key check in 005 take a four-column key by then, and the key type needs
+         no change: its arrays are as long as the key. -->
+    <changeSet id="011-allow-four-column-ordered-key" author="hellblazer" dbms="postgresql">
+        <sqlFile path="sql_changes/011-allow-four-column-ordered-key.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/011-allow-four-column-ordered-key-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- Validates the check the previous changeset added NOT VALID, outside a
+         transaction for the same reason as 010. -->
+    <changeSet id="012-validate-four-column-ordered-key-check" author="hellblazer"
+               dbms="postgresql" runInTransaction="false">
+        <sqlFile path="sql_changes/012-validate-four-column-ordered-key-check.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/012-validate-four-column-ordered-key-check-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <!-- A single, re-runnable changeset for all caller grants. runOnChange
+         makes Liquibase re-apply it whenever this SQL changes, so new grants
+         reach existing databases. Keep the statements idempotent. -->
+    <changeSet id="999-grant-privileges" author="lee.horner" dbms="postgresql" runOnChange="true">
+        <sqlFile path="sql_changes/999-grant-privileges.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="rollback/999-grant-privileges-rollback.sql" relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

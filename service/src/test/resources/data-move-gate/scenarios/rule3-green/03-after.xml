@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-green. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-with-precondition" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-widgets-1' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-with-precondition</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-with-nested-precondition" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <and>
+                <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-gizmos-1' AND completed_at IS NOT NULL</sqlCheck>
+                <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-widgets-1' AND completed_at IS NOT NULL</sqlCheck>
+            </and>
+        </preConditions>
+        <comment>g-with-nested-precondition</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP TABLE nexus.gizmos;
+ALTER TABLE nexus.widgets RENAME COLUMN a TO b;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-constraint-and-default-changes-on-a-driven-table" author="fixture">
+        <comment>g-constraint-and-default-changes-on-a-driven-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP CONSTRAINT IF EXISTS c;
+ALTER TABLE nexus.widgets RENAME CONSTRAINT a TO b;
+ALTER TABLE nexus.widgets ALTER COLUMN x DROP DEFAULT;
+ALTER TABLE nexus.widgets ALTER COLUMN x DROP NOT NULL;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-unrelated-table" author="fixture">
+        <comment>g-unrelated-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.sprockets DROP COLUMN old_col;
+DROP TABLE nexus.sprockets_old;
+ALTER TABLE nexus.sprockets RENAME TO sprockets2;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-additive-on-a-driven-table" author="fixture">
+        <comment>g-additive-on-a-driven-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets ADD COLUMN more int;
+CREATE INDEX widgets_more_ix ON nexus.widgets (more);
+ALTER TABLE nexus.gizmos ADD CONSTRAINT g2_check CHECK (more &gt; 0) NOT VALID;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

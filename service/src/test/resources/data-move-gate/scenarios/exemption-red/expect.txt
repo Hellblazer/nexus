@@ -1,0 +1,12 @@
+# one line per changeset the gate must flag: file::id::author kind[,kind]; no line means the gate must pass it
+02-bad-exemptions.xml::ex-lifts-only-its-own-table::fixture r1.update
+02-bad-exemptions.xml::ex-names-a-driven-table::fixture exemption,r1.update
+02-bad-exemptions.xml::ex-names-a-growing-table::fixture exemption,r1.update
+02-bad-exemptions.xml::ex-names-a-per-model-table::fixture exemption,r2.validate
+02-bad-exemptions.xml::ex-names-a-table-the-changeset-never-touches::fixture exemption,r1.update
+02-bad-exemptions.xml::ex-small-target-reads-a-growing-table::fixture r1.update
+02-bad-exemptions.xml::ex-subselect-names-a-growing-table::fixture r1.update
+02-bad-exemptions.xml::ex-two-lines-each-lifts-only-its-own-table::fixture r1.update
+02-bad-exemptions.xml::ex-two-lines-one-names-a-growing-table::fixture exemption,r1.update
+02-bad-exemptions.xml::ex-without-a-reason::fixture r1.update
+02-bad-exemptions.xml::ex-without-the-colon-form::fixture r1.update

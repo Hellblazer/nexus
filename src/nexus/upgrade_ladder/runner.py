@@ -45,6 +45,7 @@ import structlog
 
 from nexus.redact import redact_credentials
 
+from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY
 from nexus.upgrade_ladder.completion import derive_ladder_position
 from nexus.upgrade_ladder.deadline import Deadline, active_deadline, active_expired, bound
 from nexus.upgrade_ladder.engine_outage import engine_unreachable
@@ -163,6 +164,9 @@ class RungRun:
     #: start: that rung did not defer, the budget ran out ahead of it (nexus-0sm1t counts it as no deferral).
     #: Left out of equality: it is provenance, not part of what a run reports.
     deadline_stop: bool = field(default=False, compare=False)
+    #: True only for a SKIPPED_NOT_APPLICABLE run whose rung declined this unattended run (its detect detail carries
+    #: ``INTERACTIVE_REMEDY``): it did not finish, so a rung with a hard edge from it waits. Provenance, like above.
+    declined: bool = field(default=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -258,6 +262,8 @@ class LadderRunner:
         runs: list[RungRun] = []
         #: Rungs that did not reach a recorded state this walk; a later rung with a hard edge from one waits.
         held: set[str] = set()
+        #: The rungs that deferred (not those that declined): a later hard failure is softened only after one of these.
+        deferred: set[str] = set()
         rungs = iter(self._registry)
         for rung in rungs:
             waits_on = self._registry.prerequisites(rung.name) & held
@@ -282,14 +288,14 @@ class LadderRunner:
             # before anything else runs. A deferred rung (non-fatal, retried later) holds back only the rungs with
             # a hard edge from it, transitively (nexus-dfemn): stopping the whole walk let one persistently
             # deferring rung starve the rungs that do not depend on it on every run, silently under --auto.
-            if run.outcome is RungOutcome.FAILED and held:
+            if run.outcome is RungOutcome.FAILED and deferred:
                 # A rung that raises after another deferred in this walk most likely hit the same cause (an engine
                 # that cannot be reached defers the backfill and makes the next detect raise): report it deferred,
                 # name the cause, and stop, so an outage stays the non-fatal retry it was before the walk went on
                 # past deferrals. Without an earlier deferral the same raise is a hard FAILED, as always.
                 run = RungRun(
                     rung.name, RungOutcome.DEFERRED,
-                    detail=f"failed after {', '.join(sorted(held))} deferred this run, retried next run: {run.detail}",
+                    detail=f"failed after {', '.join(sorted(deferred))} deferred this run, retried next run: {run.detail}",
                 )
                 runs[-1] = run
                 runs.extend(self._not_attempted(rungs))
@@ -298,6 +304,8 @@ class LadderRunner:
                 runs.extend(self._not_attempted(rungs))
                 break
             if run.outcome is RungOutcome.DEFERRED:
+                deferred.add(rung.name)
+            if run.outcome is RungOutcome.DEFERRED or run.declined:
                 held.add(rung.name)
         return LadderRunReport(
             runs=tuple(runs),
@@ -395,7 +403,10 @@ class LadderRunner:
 
         if not status.applicable:
             self._reporter.emit("ladder_rung_skipped_na", rung=rung.name)
-            return RungRun(rung.name, RungOutcome.SKIPPED_NOT_APPLICABLE)
+            # A rung that declined an unattended run (a managed service) is not done: its hard-edge dependents wait,
+            # as they do on a deferral, but without the deferral's warning.
+            declined = INTERACTIVE_REMEDY in (status.pending_detail or "")
+            return RungRun(rung.name, RungOutcome.SKIPPED_NOT_APPLICABLE, declined=declined)
 
         if status.converged and rung.name in self._store.verified_rungs():
             return RungRun(rung.name, RungOutcome.ALREADY_RECORDED)

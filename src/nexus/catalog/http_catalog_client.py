@@ -89,7 +89,8 @@ import time
 import httpx
 import structlog
 
-from nexus._log_safe_url import log_endpoint
+from nexus._log_safe_url import log_endpoint, scrub_transport_error
+from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable, sensitive_answer
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
@@ -99,7 +100,7 @@ from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
 from nexus.catalog.write_outcome import PreSendArgumentError
-from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused
+from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused, refuse_whitespace_filters as _refuse_ws, require_nonblank_filter as _nonblank, require_link_types as _link_types, require_tumbler_prefix as _tumbler_prefix, require_unlink_args as _unlink_args
 
 _log = structlog.get_logger(__name__)
 
@@ -174,6 +175,15 @@ _LINKS_BATCH_PAGE = 1000
 #: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
 #: 32767 bind-parameter ceiling.
 _REGISTER_MANY_PAGE = 1000
+
+
+def _check_spans(*spans: str) -> None:
+    """RDR-171: refuse a malformed ``dchash:`` span (ValueError) before any request goes out."""
+    from nexus.catalog.dchash import check_link_span  # noqa: PLC0415 — deferred: loading the client never loads dchash
+
+    for span in spans:
+        check_link_span(span)
+
 
 #: Page size for find_all_by_file_paths POSTs (nexus-1vc0n). Deliberately the
 #: generic QUOTAS.MAX_RECORDS_PER_WRITE (300), not the 1000 the other batch
@@ -1142,47 +1152,43 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return None
         return {"fillable": fillable, "limit": limit, "capped": capped}
 
-    def sensitive_documents(self, limit: int = 1000) -> dict | None:
-        """The tenant's live sensitive documents, from one bounded engine read (``GET /sensitive``, engine 0.1.188,
+    def sensitive_documents(self, limit: int = 1000, *, strict: bool = False) -> dict | None:
+        """The tenant's live sensitive documents, from one bounded engine read (``GET /v1/catalog/sensitive``, engine 0.1.188,
         nexus-f3yqd.6): ``{"count": n, "capped": bool, "documents": [{"tumbler", "physical_collection"}]}``, at most
-        *limit* documents; ``capped`` means there are more than the list holds.
+        *limit* documents, in tumbler order; ``capped`` means there are more than the list holds.
 
         ``None`` is "cannot say", never "none": the engine does not advertise ``catalog_sensitive_list_supported``
         (no request is sent then), the route answers 404 or 503 (the engine's own statement timeout), or the body is
-        malformed or inconsistent (an uncapped list whose length is not ``count``). A caller walks the catalog
-        instead on ``None``. Sent once, with a bound of its own, as :meth:`manifest_section_label_fillable` is.
+        malformed or inconsistent (an uncapped list whose length is not ``count``). Nothing walks the catalog
+        in its place (RDR-241). Sent once, with a bound of its own, as :meth:`manifest_section_label_fillable` is.
+        ``strict=True`` raises :class:`SensitiveListUnavailable` (its ``reason`` names which) in place of ``None``,
+        for a caller that reports the cause (``nx catalog list --sensitive``, the doctor rows).
         """
-        if self._version_flags().get("catalog_sensitive_list_supported") is not True:
+        def cannot_say(reason: str) -> dict | None:
+            if strict:
+                raise SensitiveListUnavailable(reason)
             return None
+
+        if self._version_flags().get("catalog_sensitive_list_supported") is not True:
+            # A probe that failed says nothing about the route; one that answered without the flag says "old engine".
+            return cannot_say(SensitiveListUnavailable.PROBE_FAILED if self._version_probe_failed
+                              else SensitiveListUnavailable.UNSUPPORTED)
         try:
             result = self._get("/sensitive", idempotent=False, timeout=_SECTION_LABEL_FILLABLE_TIMEOUT_S, limit=limit)
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code if exc.response is not None else 0
             _log.info("http_catalog_client.sensitive_documents_unavailable", status=status)
-            return None
-        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller walks instead
-            _log.info("http_catalog_client.sensitive_documents_unavailable", error=str(exc))
-            return None
-        if not isinstance(result, dict):
-            return None
-        count, capped, documents = result.get("count"), result.get("capped"), result.get("documents")
-        well_formed = (
-            not isinstance(count, bool) and isinstance(count, int) and count >= 0 and isinstance(capped, bool)
-            and isinstance(documents, list)
-            # A document flagged before it was indexed has no collection: the engine sends null, read as "",
-            # as _to_entry reads it for the walk.
-            and all(isinstance(d, dict) and isinstance(d.get("tumbler"), str) and "physical_collection" in d
-                    and isinstance(d["physical_collection"], (str, type(None))) for d in documents)
-            and (capped or len(documents) == count)
-        )
-        if not well_formed:
-            _log.warning("http_catalog_client.sensitive_documents_malformed", keys=sorted(result))
-            return None
-        return {
-            "count": count, "capped": capped,
-            "documents": [{"tumbler": d["tumbler"], "physical_collection": d.get("physical_collection") or ""}
-                          for d in documents],
-        }
+            return cannot_say({404: SensitiveListUnavailable.UNSUPPORTED, 503: SensitiveListUnavailable.TIMEOUT}
+                              .get(status, SensitiveListUnavailable.FAILED))
+        except Exception as exc:  # noqa: BLE001 — best-effort read of an optional route; the caller reports it unavailable
+            _log.info("http_catalog_client.sensitive_documents_unavailable", error=scrub_transport_error(exc, getattr(self, "_base_url", "")))
+            return cannot_say(SensitiveListUnavailable.FAILED)
+        answer = sensitive_answer(result)
+        if answer is None:
+            if isinstance(result, dict):
+                _log.warning("http_catalog_client.sensitive_documents_malformed", keys=sorted(result))
+            return cannot_say(SensitiveListUnavailable.MALFORMED)
+        return answer
 
     def _get_unprefixed(self, path: str, *, idempotent: bool = True, timeout: float | None = None) -> Any:
         """A GET outside ``/v1/catalog`` (the mixin's own ``_get``), for an engine route this client reads."""
@@ -1758,7 +1764,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         params: dict = {}
         if owner_prefix:
-            params["owner_prefix"] = owner_prefix
+            params["owner_prefix"] = _nonblank("coverage_by_content_type", "owner_prefix", owner_prefix)
         result = self._get("/coverage", **params)
         rows = result.get("coverage", []) if result else []
         return [
@@ -2420,6 +2426,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         propagated like :meth:`purge_trash`, never swallowed, so callers can
         tell "engine too old" apart from "engine answered zero rows".
         """
+        _refuse_ws("gc_audit_list", collection=collection, operation=operation)
         result = self._get(
             "/gc_audit/list",
             collection=collection, operation=operation,
@@ -2452,7 +2459,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """
         params: dict = {"q": query}
         if content_type:
-            params["content_type"] = content_type
+            params["content_type"] = _nonblank("find", "content_type", content_type)
         if limit > 0:
             params["limit"] = limit
         return self._docs_from(self._get("/search", **params))
@@ -2507,6 +2514,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         it did before, and is not read as absence.
         """
         owner_prefix = str(owner) if owner else None
+        _refuse_ws("find_by_title_exact", owner=owner_prefix, content_type=content_type)
         backoff = getattr(self, "_by_title_backoff", None)
         route_absent = backoff is not None and _monotonic() - backoff < _BY_TITLE_RETRY_S
         if title and not route_absent:
@@ -2539,23 +2547,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def by_file_path(
         self, owner: Tumbler | str, file_path: str
     ) -> CatalogEntry | None:
-        # nexus-h9f1w / GH #1350: the service /list ignores file_path when owner
-        # is set and returns the FULL owner list, so a brand-new file's query
-        # yields docs[0] (an unrelated doc). Trusting docs[0] mis-attributed the
-        # new file's chunks to that doc, overwriting its manifest (silent data
-        # corruption). Filter by exact file_path client-side; correct regardless
-        # of the server-side bug (Fix B tracked separately).
-        result = self._get("/list", owner=str(owner), file_path=file_path)
+        # nexus-h9f1w / GH #1350: the service /list ignores file_path when owner is set and returns the FULL owner
+        # list, so a brand-new file's query yields docs[0] (an unrelated doc) and its manifest was overwritten.
+        # Filter by exact file_path client-side. A blank owner or path is read as absent (nexus-uwggq.1.9).
+        result = self._get("/list", owner=str(_nonblank("by_file_path", "owner", owner)),
+                           file_path=_nonblank("by_file_path", "file_path", file_path))
         docs = result.get("documents", []) if result else []
         match = [d for d in docs if d.get("file_path") == file_path]
         return _to_entry(match[0]) if match else None
 
     def by_source_uri(self, uri: str) -> CatalogEntry | None:
-        # nexus-h9f1w / GH #1350: same docs[0]-trust class as by_file_path.
-        # Defense-in-depth exact-match filter (the server currently filters
-        # source_uri correctly; this guards against an owner-list-leak-style
-        # regression and keeps the sibling lookups consistent).
-        result = self._get("/list", source_uri=uri)
+        # nexus-h9f1w / GH #1350: same docs[0]-trust class as by_file_path. Exact-match filter as defense in depth
+        # (the server filters source_uri correctly today); keeps the sibling lookups consistent.
+        result = self._get("/list", source_uri=_nonblank("by_source_uri", "uri", uri))
         docs = result.get("documents", []) if result else []
         match = [d for d in docs if d.get("source_uri") == uri]
         return _to_entry(match[0]) if match else None
@@ -2607,7 +2611,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # nexus-h9f1w / GH #1350: exact-match guard, same class as by_file_path.
         # The owner-agnostic /list routes to documentsByFilePath (exact eq) so
         # this is a no-op today; kept for consistency + regression defense.
-        result = self._get("/list", file_path=file_path)
+        result = self._get("/list", file_path=_nonblank("find_all_by_file_path", "file_path", file_path))
         docs = result.get("documents", []) if result else []
         return [_to_entry(d) for d in docs if d.get("file_path") == file_path]
 
@@ -2674,10 +2678,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return result
 
     def by_owner(self, owner: Tumbler | str) -> list[CatalogEntry]:
-        return self._docs_from(self._get("/list", owner=str(owner)))
+        return self._docs_from(self._get("/list", owner=str(_nonblank("by_owner", "owner", owner))))
 
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
-        return self._docs_from(self._get("/list", content_type=content_type))
+        return self._docs_from(self._get("/list", content_type=_nonblank("by_content_type", "content_type", content_type)))
 
     def list_scoped(
         self,
@@ -2693,7 +2697,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         The call must be scoped: an *owner* with at least one content type, or a *source_uri_prefix*.
         Anything else would reach the engine's tenant-wide or single-filter branches, so it raises
         here instead of listing the tenant.
+
+        ``""`` is "not given" (the defaults); a whitespace-only owner or prefix is refused, because the engine reads
+        it as absent (``wantsCombinedList``) and drops that scope: the whole tenant's documents of the type, or a page.
+        A blank content type is refused too: ``queryParamAll`` drops it, which would widen the owner to every type.
         """
+        _refuse_ws("list_scoped", owner=str(owner), source_uri_prefix=source_uri_prefix)
         if not source_uri_prefix and not (owner and content_types):
             raise ValueError(
                 "list_scoped needs an owner with content_types, or a source_uri_prefix; "
@@ -2703,13 +2712,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if owner:
             params["owner"] = str(owner)
         if content_types:
-            params["content_type"] = list(content_types)
+            params["content_type"] = [_nonblank("list_scoped", "content_types entry", t) for t in content_types]
         if source_uri_prefix:
             params["source_uri_prefix"] = source_uri_prefix
         return self._docs_from(self._get("/list", **params))
 
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
-        return self._docs_from(self._get("/list", corpus=corpus))
+        return self._docs_from(self._get("/list", corpus=_nonblank("by_corpus", "corpus", corpus)))
 
     def all_documents(
         self, limit: int = 0, *, content_type: str = "", offset: int = 0,
@@ -2717,7 +2726,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if limit > 0:
             params: dict = {"limit": limit, "offset": offset}
             if content_type:
-                params["content_type"] = content_type
+                params["content_type"] = _nonblank("all_documents", "content_type", content_type)
             return self._docs_from(self._get("/list", **params))
         # limit == 0 means UNBOUNDED (canonical semantics).
         if content_type:
@@ -2729,7 +2738,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             # (same as before xoimv, now by design instead of by omission) — so a single
             # request still returns ALL matching rows in one shot and a pagination loop
             # here would just re-fetch the same full set every page and never terminate.
-            return self._docs_from(self._get("/list", content_type=content_type))
+            return self._docs_from(self._get("/list", content_type=_nonblank("all_documents", "content_type", content_type)))
         # Unfiltered: the service always respects limit/offset here (listDocuments
         # defaults limit to 200 whether or not the caller sends one — unlike the filter
         # branches above, which stay unbounded when limit is absent, per nexus-xoimv), so
@@ -2749,7 +2758,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def list_by_collection(
         self, physical_collection: str, *, limit: int | None = None,
     ) -> list[CatalogEntry]:
-        params: dict = {"collection": physical_collection}
+        # RDR-241 (nexus-uwggq.1.6): raise, never []. The engine reads a blank filter as absent and lists the tenant.
+        params: dict = {"collection": _nonblank("list_by_collection", "physical_collection", physical_collection)}
         if limit is not None:
             params["limit"] = limit
         return self._docs_from(self._get("/list", **params))
@@ -2817,7 +2827,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             result = self._get(
                 "/resolve",
                 file_path=source_path,  # wire key is file_path; canonical param is source_path
-                collection=collection,
+                collection=_nonblank("lookup_doc_id_by_collection_and_path", "collection", collection),
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
@@ -2848,19 +2858,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         11 of the 12 largest cloud-catalog subtrees, reproduced against the
         live 19,824-document catalog). That is what this route replaced.
 
-        Do NOT read "one server-side query" as "one INDEX SEEK". The route's
-        predicate is ``tumbler LIKE prefix || '.%'``, which a B-tree can
-        accelerate only under a pattern-indexable collation (C locale, which
-        the bundled local PG uses — ``initdb --no-locale`` in
-        ``scripts/build_pg_bundle.sh``) and with no ``text_pattern_ops``
-        index present anywhere. The managed cloud deployment's collation is
-        not provisioned or verified anywhere in this repo, so on cloud this
-        may be a sequential scan. What the route guarantees unconditionally
-        is COMPLETENESS; index acceleration is unverified there. (Carried
-        forward from the deleted fallback's docstring, which corrected
-        ab7907fb's commit message for asserting more than was established.)
+        "One server-side query" is not "one index seek": the predicate is ``tumbler LIKE prefix || '.%'``, which
+        a B-tree serves only under a pattern-indexable collation (C locale, as the bundled local PG uses) and
+        with no ``text_pattern_ops`` index. Cloud collation is unverified here, so cloud may sequential-scan.
+        The route guarantees COMPLETENESS, not index acceleration.
+
+        *prefix* must be ASCII digits and dots: the engine does not escape ``%`` / ``_`` in the LIKE pattern, so
+        the client refuses anything else (an engine-side escape is not yet planned; see the nexus-uwggq.1.9 notes).
         """
-        result = self._get("/descendants", prefix=prefix)
+        result = self._get("/descendants", prefix=_tumbler_prefix("descendants", prefix))
         return result.get("documents", []) if result else []
 
     def resolve_alias(self, tumbler: Tumbler | str, *, max_hops: int = 16) -> Tumbler:
@@ -3193,6 +3199,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         allow_dangling: bool = False,
         **meta: object,
     ) -> bool:
+        _check_spans(from_span, to_span)
         payload: dict = {
             "from_tumbler": str(from_t),
             "to_tumbler": str(to_t),
@@ -3230,6 +3237,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # the "if absent" contract holds. (TOCTOU is acceptable: the canonical
         # cross-process path is not atomic either, and the common case is a re-index
         # where the row already exists and we correctly no-op.)
+        _check_spans(from_span, to_span)  # RDR-171: before the existence read, so a bad span sends nothing
         existing = self.link_query(
             from_t=str(from_t), to_t=str(to_t), link_type=link_type, limit=1
         )
@@ -3260,6 +3268,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *edges*, not in its page. The engine answers a transient database error 503 with nothing
         written, so the transport's retry of the whole page is safe.
         """
+        _check_spans(*(e.get(k) or "" for e in edges for k in ("from_span", "to_span")))  # RDR-171: all pages, before the first
         out: dict = {"created": 0, "skipped": 0, "unresolved": []}
         for start in range(0, len(edges), _LINKS_BATCH_PAGE):
             result = self._post("/links/upsert_many", {"edges": edges[start:start + _LINKS_BATCH_PAGE]}) or {}
@@ -3297,7 +3306,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         to_t: Tumbler | str,
         link_type: str,
     ) -> int:
-        """Delete one or all link types between *from_t* and *to_t*.
+        """Delete the *link_type* links between *from_t* and *to_t*; all three are required (no all-types mode).
 
         Return-shape parity with local ``Catalog.unlink`` (nexus-h8rf6.3 audit):
         the server already returns the exact rowcount (``{"deleted": N}``,
@@ -3307,6 +3316,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``{"removed": removed}`` response printed/returned ``True``/``False``
         instead of a count.
         """
+        _unlink_args(from_t, to_t, link_type)  # the engine runs a bulk delete unless all three are named
         result = self._post("/unlink", {
             "from_tumbler": str(from_t),
             "to_tumbler": str(to_t),
@@ -3324,9 +3334,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # njrcn.5: forward link_types to the server-side IN filter (no client-side
         # over-fetch). link_types takes precedence; else the single link_type.
         if link_types:
-            params["link_types"] = ",".join(link_types)
+            params["link_types"] = _link_types("links", link_types)
         elif link_type:
-            params["link_type"] = link_type
+            params["link_type"] = _nonblank("links", "link_type", link_type)
         result = self._get("/links", **params)
         return [_link_from_dict(r) for r in (result.get("links_from", []) if result else [])]
 
@@ -3338,9 +3348,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     ) -> list[CatalogLink]:
         params: dict = {"tumbler": str(tumbler), "direction": "in"}
         if link_types:
-            params["link_types"] = ",".join(link_types)
+            params["link_types"] = _link_types("links", link_types)
         elif link_type:
-            params["link_type"] = link_type
+            params["link_type"] = _nonblank("links", "link_type", link_type)
         result = self._get("/links", **params)
         return [_link_from_dict(r) for r in (result.get("links_to", []) if result else [])]
 
@@ -3358,13 +3368,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         offset: int = 0,
     ) -> list[CatalogLink]:
         params: dict = {"limit": limit, "offset": offset}
-        if from_t:            params["from_tumbler"] = from_t
-        if to_t:              params["to_tumbler"] = to_t
-        if link_type:         params["link_type"] = link_type
-        if created_by:        params["created_by"] = created_by
-        if created_at_before: params["created_at_before"] = created_at_before
-        if direction:         params["direction"] = direction
-        if tumbler:           params["tumbler"] = tumbler
+        if from_t:            params["from_tumbler"] = _nonblank("link_query", "from_t", from_t)
+        if to_t:              params["to_tumbler"] = _nonblank("link_query", "to_t", to_t)
+        if link_type:         params["link_type"] = _nonblank("link_query", "link_type", link_type)
+        if created_by:        params["created_by"] = _nonblank("link_query", "created_by", created_by)
+        if created_at_before: params["created_at_before"] = _nonblank("link_query", "created_at_before", created_at_before)
+        if direction:         params["direction"] = _nonblank("link_query", "direction", direction)
+        if tumbler:           params["tumbler"] = _nonblank("link_query", "tumbler", tumbler)
         result = self._get("/link_query", **params)
         return [_link_from_dict(r) for r in (result.get("links", []) if result else [])]
 
@@ -3382,6 +3392,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         Canonical parity: requires at least one filter (unless ``dry_run``), and
         ``dry_run=True`` returns the count that *would* be deleted (no deletion).
         """
+        # A whitespace filter is read as absent by the engine: with no other filter it deletes every link.
+        _refuse_ws("bulk_unlink", from_t=from_t, to_t=to_t, link_type=link_type, created_by=created_by, created_at_before=created_at_before)
         has_filter = any((from_t, to_t, link_type, created_by, created_at_before))
         if not has_filter and not dry_run:
             raise ValueError(
@@ -3628,60 +3640,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return self._traverse(payload)
 
     def link_audit(self, *, t3: Any = None) -> dict:
-        """Audit the link graph: totals, per-type/creator breakdown, orphans, dupes.
+        """Audit the link graph; see :func:`nexus.catalog.dchash.link_audit.link_audit`."""
+        from nexus.catalog.dchash.link_audit import link_audit  # noqa: PLC0415 — deferred: loading the client never loads dchash
 
-        nexus-ai41v: this used to ``return {}`` — "not supported in initial
-        service-mode implementation". Service mode is now EVERY mode, and the
-        verb ships on two surfaces (``nx catalog link-audit`` and the MCP
-        ``catalog_link_audit`` tool), so an empty dict was not a graceful
-        degradation: ``--json`` printed ``{}``, which reads as a CLEAN audit.
-        That is the silent-false-clean shape this project has been burned by
-        before (nexus-ou4tb folded unreadable collections in as "no ghosts").
-
-        Everything here is computed from reads the engine already serves — the
-        paginated ``/link_query`` with no filters, and ``/links/orphaned``
-        (nexus-ysrwi) — so no engine change is required.
-
-        ``t3`` is accepted and ignored: the local implementation used it for a
-        stale-chash cross-check against T3, which this substrate answers from
-        the manifest instead. It stays in the signature for call-site parity.
-        """
-        by_type: dict[str, int] = defaultdict(int)
-        by_creator: dict[str, int] = defaultdict(int)
-        seen: dict[tuple[str, str, str], int] = defaultdict(int)
-        total = 0
-
-        page = 200
-        offset = 0
-        while True:
-            batch = self.link_query(limit=page, offset=offset)
-            if not batch:
-                break
-            for lk in batch:
-                total += 1
-                by_type[lk.link_type] += 1
-                by_creator[lk.created_by or ""] += 1
-                seen[(str(lk.from_tumbler), str(lk.to_tumbler), lk.link_type)] += 1
-            if len(batch) < page:
-                break
-            offset += page
-
-        duplicates = {k: n for k, n in seen.items() if n > 1}
-        result = self._get("/links/orphaned")
-        orphaned = (result.get("links", []) if result else [])
-
-        return {
-            "total": total,
-            "by_type": dict(by_type),
-            "by_creator": dict(by_creator),
-            "duplicate_count": len(duplicates),
-            "duplicates": [
-                {"from_tumbler": f, "to_tumbler": t, "link_type": lt, "count": n}
-                for (f, t, lt), n in sorted(duplicates.items())
-            ],
-            "orphaned_count": len(orphaned),
-            "orphaned": orphaned,
-        }
+        return link_audit(self, t3=t3)
 
     # ══════════════════════════════════════════════════════════════════════════
     # COLLECTIONS
@@ -3786,6 +3748,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         no ``owner_id`` filter, so a caller that wants one corpus's rows keeps
         those whose ``owner_id`` matches.
         """
+        _refuse_ws("list_collections", lifecycle_state=lifecycle_state, content_type=content_type)
         result = self._get(
             "/collections/list", lifecycle_state=lifecycle_state, content_type=content_type,
         )

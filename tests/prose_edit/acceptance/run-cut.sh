@@ -24,6 +24,9 @@
 # scenario runs ONCE: there is no retry loop, because a retry that keeps the run in which the model happened to behave
 # selects the pass (nexus-ger02.16). Do not run it while another runner holds the lock (one runner at a time; exit 75).
 #
+# T2: unless PROSE_EDIT_LOCAL_ENGINE=0 or PROSE_EDIT_NX is set, the run starts a throwaway local engine
+# (local_engine.bash) and every T2 write goes to it, never to the operator's install.
+#
 # Stop and report if a run shows a T2 failure; never repair it from here.
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +40,7 @@ for g in $SCENARIOS; do
   esac
 done
 . "$HERE/runner_guard.bash"
+. "$HERE/local_engine.bash"
 runner_lock run-cut.sh
 export TMPDIR="${TMPDIR:?set TMPDIR to a directory outside the repository}"
 export PROSE_EDIT_PROJECT_PREFIX="${PROSE_EDIT_PROJECT_PREFIX:-zzprose0210_}"
@@ -46,6 +50,7 @@ PAGE=web/getting-started.html
 mkdir -p "$OUT" || exit 1
 OUT="$(cd "$OUT" && pwd)"
 echo "$SCENARIOS" > "$OUT/scenarios.txt"
+local_engine_start run-cut.sh
 cd "$WT" || exit 1
 runner_sweep_stale
 mkdir -p "$DIR" && runner_track "$DIR"

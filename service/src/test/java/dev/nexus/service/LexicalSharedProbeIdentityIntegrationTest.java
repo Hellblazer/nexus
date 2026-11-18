@@ -161,11 +161,18 @@ class LexicalSharedProbeIdentityIntegrationTest {
         return new FanoutSettings(4, 60_000, 60_000, selectiveGateMax, shared);
     }
 
+    /** The same with the probe's workers named, so a test does not depend on the process environment. */
+    private static FanoutSettings settings(boolean shared, int selectiveGateMax, int probeWorkers) {
+        return new FanoutSettings(4, 60_000, 60_000, selectiveGateMax, shared, probeWorkers);
+    }
+
     /**
      * One request, the {@code shared_probe=} word and the {@code shared_dense=} count its lexical log line carries, and
-     * the fallback reason the probe logged ({@code null} when it did not fall back).
+     * the fallback reason the probe logged ({@code null} when it did not fall back), and the {@code probe_workers=} word
+     * (the setting the shared probe ran with, or {@code none}).
      */
-    private record Run(PerCollectionResult result, String sharedProbe, int sharedDense, String fallbackReason) {}
+    private record Run(PerCollectionResult result, String sharedProbe, int sharedDense, String fallbackReason,
+                       String probeWorkers) {}
 
     private Run run(String query, List<String> cols, Map<String, Object> where, boolean shared, int selectiveGateMax) {
         return run(repo, query, cols, where, shared, selectiveGateMax);
@@ -173,6 +180,11 @@ class LexicalSharedProbeIdentityIntegrationTest {
 
     private Run run(PgVectorRepository on, String query, List<String> cols, Map<String, Object> where, boolean shared,
                     int selectiveGateMax) {
+        return run(on, query, cols, where, settings(shared, selectiveGateMax));
+    }
+
+    private Run run(PgVectorRepository on, String query, List<String> cols, Map<String, Object> where,
+                    FanoutSettings settings) {
         var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(PgVectorRepository.class);
         var probeLogger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
             "dev.nexus.service.vectors.LexicalGateProbe");
@@ -183,7 +195,7 @@ class LexicalSharedProbeIdentityIntegrationTest {
         PerCollectionResult r;
         try {
             r = on.searchPerCollection(TENANT, query, cols, K, 1200, null, where, false, false, true,
-                                       settings(shared, selectiveGateMax));
+                                       settings);
         } finally {
             probeLogger.detachAppender(logs);
             logger.detachAppender(logs);
@@ -194,7 +206,7 @@ class LexicalSharedProbeIdentityIntegrationTest {
         String fallback = logs.list.stream().map(ILoggingEvent::getFormattedMessage)
             .filter(m -> m.startsWith("event=search_per_collection_shared_probe_fallback ")).findFirst().orElse(null);
         return new Run(r, word(line, "shared_probe="), Integer.parseInt(word(line, "shared_dense=")),
-                       fallback == null ? null : word(fallback, "reason="));
+                       fallback == null ? null : word(fallback, "reason="), word(line, "probe_workers="));
     }
 
     /** The space-delimited value after {@code key} in a log line (to its end for the last field). */
@@ -331,6 +343,30 @@ class LexicalSharedProbeIdentityIntegrationTest {
         Run run = run(ONE_TOKEN, List.of(S1), null, true, 5000);
         assertThat(run.sharedProbe()).isEqualTo("off");
         assertThat(lexicalHits(run.result())).isEqualTo(3);
+    }
+
+    // ── the log line names the workers the shared probe ran with ─────────────────
+
+    @Test
+    void theLexicalLogLine_carriesTheWorkersTheSharedProbeRanWith() {
+        assertThat(run(repo, ONE_TOKEN, ALL, null, settings(true, 5000, 3)).probeWorkers()).isEqualTo("3");
+        // 0 is a real setting (a serial probe), distinct from "no probe ran"
+        Run serial = run(repo, ONE_TOKEN, ALL, null, settings(true, 5000, 0));
+        assertThat(serial.sharedProbe()).isEqualTo("per_collection");
+        assertThat(serial.probeWorkers()).isEqualTo("0");
+        assertThat(lexicalHits(serial.result())).as("non-vacuity: the lexical leg answered").isGreaterThan(20);
+    }
+
+    @Test
+    void theLexicalLogLine_saysNoProbeRanWhenThereWasNoSharedProbe() {
+        // sharing off: every arm ran its own probe, whatever the workers setting says
+        Run off = run(repo, ONE_TOKEN, ALL, null, settings(false, 5000, 3));
+        assertThat(off.sharedProbe()).isEqualTo("off");
+        assertThat(off.probeWorkers()).isEqualTo("none");
+        // one collection: nothing to share
+        Run one = run(repo, ONE_TOKEN, List.of(S1), null, settings(true, 5000, 3));
+        assertThat(one.sharedProbe()).isEqualTo("off");
+        assertThat(one.probeWorkers()).isEqualTo("none");
     }
 
     @Test

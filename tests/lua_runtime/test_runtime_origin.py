@@ -16,6 +16,11 @@ worker's own chain, which only ever sees the bytes of a library file, and the
 static check that reads them. Anything else fails this test, and adding a name
 to the list is a decision a reviewer sees.
 
+``supervisor.supervise`` takes the source too, but as the ``"source"`` key of
+its start mapping, which a parameter scan cannot see. So a second scan pins
+every call of ``supervise`` under ``src/nexus/``: ``run_script``'s own chain is
+the only caller, and it passes the bytes ``library.find`` read.
+
 The one source-taking entry point for tests is
 ``tests/lua_runtime/_runtime_support.run_lua``; it lives under ``tests/``.
 """
@@ -103,6 +108,71 @@ def source_takers(root: pathlib.Path, package: str = "nexus") -> tuple[set[str],
 
         visit(tree, "")
     return found, examined
+
+
+#: ``module:qualified name`` of every function under ``src/nexus/`` that calls the supervisor's
+#: entry points. ``supervise`` takes script source in its start mapping (the ``"source"`` key), so a
+#: new caller is a new run path: it must read the source from the library, as run_script does.
+SUPERVISE_CALLERS: frozenset[str] = frozenset(
+    {
+        "nexus.lua_runtime.run:_run_script_with_stats",  # passes the bytes library.find read
+        "nexus.lua_runtime.supervisor:supervise",  # the slot-holding wrapper of _supervise
+    }
+)
+SUPERVISE_NAMES = frozenset({"supervise", "_supervise"})
+
+
+def supervise_callers(root: pathlib.Path, package: str = "nexus") -> set[str]:
+    """Every ``module:qualname`` under *root* whose body calls ``supervise`` or ``_supervise``."""
+    found: set[str] = set()
+    for path in sorted(root.rglob("*.py")):
+        module = ".".join((package, *path.relative_to(root).with_suffix("").parts))
+        if module.endswith(".__init__"):
+            module = module[: -len(".__init__")]
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if not _touches_lua_runtime(tree, module):
+            continue
+
+        def visit(node: ast.AST, prefix: str, owner: str) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    visit(child, f"{prefix}{child.name}.", f"{prefix}{child.name}")
+                elif isinstance(child, ast.ClassDef):
+                    visit(child, f"{prefix}{child.name}.", owner)
+                else:
+                    if isinstance(child, ast.Call):
+                        fn = child.func
+                        name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+                        if name in SUPERVISE_NAMES:
+                            found.add(f"{module}:{owner or '<module>'}")
+                    visit(child, prefix, owner)
+
+        visit(tree, "", "")
+    return found
+
+
+def test_only_run_scripts_chain_calls_the_supervisor() -> None:
+    found = supervise_callers(SRC)
+    assert "nexus.lua_runtime.run:_run_script_with_stats" in found, (
+        "the scan does not see run_script's own call of supervise: it is vacuous"
+    )
+    assert found <= SUPERVISE_CALLERS, f"new callers of supervise under src/nexus: {sorted(found - SUPERVISE_CALLERS)}"
+
+
+def test_the_supervise_scan_sees_a_planted_wrapper(tmp_path: pathlib.Path) -> None:
+    """A convenience wrapper that hands caller text to supervise goes red."""
+    (tmp_path / "wrapper.py").write_text(
+        textwrap.dedent(
+            """
+            from nexus.lua_runtime import supervisor
+
+            def eval_text(text: str) -> object:
+                return supervisor.supervise({"name": "x", "source": text})
+            """
+        )
+    )
+    (tmp_path / "unrelated.py").write_text("def supervise(x): return x\n\ndef f(): return supervise(1)\n")
+    assert supervise_callers(tmp_path) == {"nexus.wrapper:eval_text"}
 
 
 def test_no_function_under_src_takes_script_source_except_the_workers_chain() -> None:

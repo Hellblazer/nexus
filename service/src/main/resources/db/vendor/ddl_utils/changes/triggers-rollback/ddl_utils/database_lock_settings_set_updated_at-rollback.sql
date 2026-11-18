@@ -1,0 +1,1 @@
+DROP TRIGGER IF EXISTS database_lock_settings_set_updated_at ON ddl_utils.database_lock_settings;

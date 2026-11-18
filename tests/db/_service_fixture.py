@@ -63,6 +63,9 @@ _SERVICE_JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.j
 _SERVICE_SRC_DIRS = (
     _REPO_ROOT / "service" / "src" / "main" / "java",
     _REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog",
+    # nexus-f3yqd.2.11: the vendored ddl_utils/dml_utils changelogs the engine applies at boot; a re-pin changes
+    # what a booted engine installs, so it must mark the jar stale.
+    _REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "vendor",
     # nexus-aca0q.3: the jOOQ codegen runner and its generator config; an edit there regenerates the jar's
     # generated classes.
     _REPO_ROOT / "service" / "src" / "build",

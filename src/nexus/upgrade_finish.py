@@ -1787,27 +1787,35 @@ def _sweep_surviving_stack(
 
 
 def _unverified_candidate_note(unreadable: Sequence[int]) -> str:
-    """The sweep note for flagless ``daemon service start`` candidates whose
-    environment could not be read (nexus-qwn3p), or ``""`` when none is left.
+    """The sweep note for flagless ``daemon service start`` candidates (and a
+    ``NEXUS_SERVICE_JAR`` engine) whose environment could not be read (nexus-qwn3p), or ``""`` when none is left.
 
     Such a pid is never signalled: it may serve another directory. It is named
     here because the listing the sweep ran against was therefore incomplete,
     and "nothing left running" would be a claim this module cannot make. A pid
     that has exited, is a zombie, or now runs something that is not a
     ``daemon service start`` (a recycled pid) is dropped."""
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred: the daemon module imports from this package at load time
+        jar_launch_command_matches,
+        jar_launch_stack_marker,
+    )
+
+    marker = jar_launch_stack_marker()  # a NEXUS_SERVICE_JAR engine is placed by its environment too (nexus-f3yqd.2.22)
     live: list[int] = []
     for pid in unreadable:
         if not _pid_alive(pid) or process_state(pid) == "Z":
             continue
         current = process_command(pid)
-        if current and "daemon service start" not in current:
+        if current and "daemon service start" not in current and not (
+            marker is not None and jar_launch_command_matches(current, marker)
+        ):
             continue
         live.append(pid)
     if not live:
         return ""
     return (
         f"[stop-sweep] UNVERIFIED: pid(s) {', '.join(str(p) for p in live)} look like "
-        "a bare `nx daemon service start` whose environment could not be read, so "
+        "a bare `nx daemon service start` or a jar engine whose environment could not be read, so "
         "it is not known whether they serve this config dir; they were left running. "
         "If one is this stack's supervisor, stop it by hand before relying on the restart"
     )
@@ -3450,8 +3458,14 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
     # managed catalog or table reports itself not applicable instead (an interactive `nx upgrade` still
     # scans). nexus-mjmjl: and bounded on a local engine too, as in `nx doctor`: the first command after a
     # version change must not spend minutes in one rung's dry-run scan of a large local store.
+    from nexus.upgrade_ladder.auto_guard import INTERACTIVE_REMEDY, managed_service  # noqa: PLC0415 — deferred, CLI startup cost
     from nexus.upgrade_ladder.unattended import bounded_reads, unattended_run  # noqa: PLC0415 — deferred, CLI startup cost
 
+    # On a local engine a decline here is the bounded reads, and the session-start upgrade runs the rung anyway.
+    try:
+        managed = managed_service()
+    except Exception:  # noqa: BLE001 — unknown mode: no declined lines
+        managed = False
     lines: list[str] = []
     for rung in rungs:
         try:
@@ -3463,6 +3477,16 @@ def pending_data_rung_callout(*, upgrade_walks_ladder: bool = False) -> list[str
             )
             continue
         if not status.pending:
+            if (
+                managed and not status.applicable and not upgrade_walks_ladder
+                and INTERACTIVE_REMEDY in (status.pending_detail or "")
+            ):
+                # Declined this unattended check (a managed service): said once here, per version change, with the
+                # command; the session-start upgrade skips such a rung without a word.
+                lines.append(
+                    f"data rung '{rung.name}' not checked — {status.pending_detail.split('; ')[0]}; "
+                    "run `nx upgrade` interactively"
+                )
             continue
         if upgrade_walks_ladder:
             # The running command IS `nx upgrade`: it walks this rung next, so telling a

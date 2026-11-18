@@ -135,6 +135,15 @@ def _t2c(*, shows: bool = True, stores: bool = False, rejects: bool = True) -> l
     return ev + [_final(f"Applied. Keep this voice card for the document?\n\n{CARD if shows else '(not shown)'}")]
 
 
+def _t2(*, shows: bool = True, stores: bool = False, rejects: bool = True) -> list[dict]:
+    """The answer turn of an App-decided run (SKILL.md step 12): list_suggestions, `decisions --from-file`, the dry run, then
+    the real apply and the voice-card offer, all in this turn: no confirmation turn follows."""
+    flow = [_use("tl", "mcp__markupeditor__list_suggestions", {}), _res("tl", '{"ok": true, "suggestions": []}'),
+            *_bash("td", f"{REVIEW} decisions --work {WORK_DIR} --from-file {WORK_DIR}/statuses.json", {"undecided": []}),
+            *_bash("ty", f"{REVIEW} apply --work {WORK_DIR} --accept 1 --reject rest --dry-run", {"dry_run": True})]
+    return flow + _t2c(shows=shows, stores=stores, rejects=rejects)
+
+
 def _t3(*, stores: bool = True, shows: bool = True, error: bool = False) -> list[dict]:
     ev: list[dict] = []
     if stores:
@@ -254,7 +263,7 @@ def _write(out: Path, name: str, events: list[dict]) -> None:
 
 def _all_runs(out: Path, *, refused: bool = True) -> None:
     _write(out, "s6-1", _s6(edits=[WORKER]))
-    for name, events in (("t1", _t1()), ("t2", []), ("t2c", _t2c()), ("t3", _t3()), ("t4", _t4()), ("t4c", _t4c()),
+    for name, events in (("t1", _t1()), ("t2", _t2()), ("t3", _t3()), ("t4", _t4()), ("t4c", _t4c()),
                          ("t5", _t5())):
         _write(out, name, events)
     (out / "voice-card-after.json").write_text(json.dumps(AFTER), encoding="utf-8")

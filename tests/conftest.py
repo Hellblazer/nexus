@@ -2932,6 +2932,23 @@ def _restore_cwd():
 
 
 @pytest.fixture(autouse=True)
+def _correlation_id_reset():
+    """nexus-dngtz.1.1 (RDR-167): no test sees a correlation id another test bound, and none leaves one bound.
+    The CLI group callback and the MCP tool-call middleware bind one and reset it by token; a test that exits
+    with an id still bound in its own context fails here, so a missing reset is a red test and not a leak into
+    the next test in the worker. The var is then put back by token."""
+    from nexus import correlation  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    token = correlation._CORRELATION_ID.set(None)
+    try:
+        yield
+        leaked = correlation.current_correlation_id()
+        assert leaked is None, f"the test left correlation id {leaked!r} bound: a bind without its reset"
+    finally:
+        correlation._CORRELATION_ID.reset(token)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_version_probe(request, monkeypatch):
     """nexus-jypmj.21: the "Answer-kind extraction" doctor row runs ``claude --version`` when the ``cli`` backend is
     chosen, so any test that reaches ``run_health_checks()`` (the doctor tests, the console health panel) on a box
@@ -3212,6 +3229,7 @@ def _no_live_structured_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NX_ANSWER_STRUCTURED_EXTRACT", raising=False)
     monkeypatch.delenv("NX_ANSWER_KIND_ELIGIBILITY", raising=False)
     monkeypatch.delenv("NX_ANSWER_RESOLUTION_REPAIR", raising=False)  # RDR-147: tests read the shipped default (on since Phase 2); a developer's export must not change it
+    monkeypatch.delenv("NX_ANSWER_POOL_KEY_SCAN", raising=False)  # RDR-250: ships off; a developer's export must not turn the pool scan on in a test
     monkeypatch.setenv("NX_ANSWER_COVERAGE", "0")
     real = _dispatch.claude_dispatch
 

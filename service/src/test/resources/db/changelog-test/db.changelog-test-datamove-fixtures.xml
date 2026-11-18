@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.13 (RDR-246 Step 4; nexus-zrcj7: no SQL strings in Java, tests included): the driving tables
+    DataMoveWorkerIntegrationTest moves, rebuilt from nothing on every run. Schema dm_test, owned by the engine's
+    migration role nexus_admin_dmlutils (the fixed name DmlUtilsTestFixtures#ADMIN), so that role owns every table the way
+    production's nexus_admin owns nexus.*. Superuser, runAlways; run through DataMoveTestFixtures#rebuild.
+
+      plain_rows    (a text, b text, c bytea) key, 100000 rows, no tenant column, autovacuum off (the bloat scenario)
+      tenant_rows   FORCE row-level security keyed on nexus.tenant, plus nexus.chunks' owner-read shape (a permissive SELECT
+                    policy USING (true) for the migrating role); tenants default, acme, globex, orphan and sl/ash (an id with a slash), 200 rows each
+      chunk_leafed  nexus.chunks' shape: LIST (embedding_model) then LIST (tenant_id), a four-column key (tenant_id, collection, chash
+                    bytea, embedding_model), 150 rows per leaf (nexus-f3yqd.2.21)
+      four_key_plain (text, text, bytea, bigint) key, 4000 rows, columns 1 and 4 vary and 1-3 repeat; no tenant column (nexus-f3yqd.2.21)
+      leafed        LIST (model) then LIST (tenant_id), the shape of nexus.chunks with a three-column key; models m1 and m2,
+                    tenants default, acme and globex, 150 rows per leaf; every leaf carries its own copy of the policies
+                    (nexus.partition_copy_access does that for chunks)
+
+    Each table also has n (the move's counter: a row moved exactly once ends at 1) and touched_by (the tenant setting of
+    the session that moved it). tenant_plain, forced_noread, unforced_foreign and unforced_owned are the small tables of the
+    row-security scenarios: tenant_id with no row security, FORCE with no policy for the migrating role, row security on and
+    not forced and owned by someone else, and the same owned by the migrating role.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-fixtures-1" author="nexus-f3yqd.2.13" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+DROP SCHEMA IF EXISTS dm_test CASCADE;
+CREATE SCHEMA dm_test;
+
+CREATE TABLE dm_test.plain_rows (
+    a text NOT NULL, b text NOT NULL, c bytea NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (a, b, c)
+) WITH (autovacuum_enabled = false);
+INSERT INTO dm_test.plain_rows (a, b, c)
+SELECT 'a' || (g % 97), 'b' || g, decode(lpad(to_hex(g), 8, '0'), 'hex')
+  FROM generate_series(1, 100000) g;
+
+CREATE TABLE dm_test.tenant_rows (
+    tenant_id text NOT NULL, id bigint NOT NULL, payload text,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+ALTER TABLE dm_test.tenant_rows ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dm_test.tenant_rows FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.tenant_rows
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+CREATE POLICY owner_read ON dm_test.tenant_rows FOR SELECT TO nexus_admin_dmlutils USING (true);
+INSERT INTO dm_test.tenant_rows (tenant_id, id, payload)
+SELECT t, g, 'p' || g FROM unnest(ARRAY['default', 'acme', 'globex', 'orphan', 'sl/ash']) t, generate_series(1, 200) g;
+
+CREATE TABLE dm_test.leafed (
+    model text NOT NULL, tenant_id text NOT NULL, id bigint NOT NULL, payload text,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (model, tenant_id, id)
+) PARTITION BY LIST (model);
+DO $$
+DECLARE m text; t text; part text; leaf text;
+BEGIN
+    FOREACH m IN ARRAY ARRAY['m1', 'm2'] LOOP
+        part := 'leafed_' || m;
+        EXECUTE format('CREATE TABLE dm_test.%I PARTITION OF dm_test.leafed FOR VALUES IN (%L) PARTITION BY LIST (tenant_id)', part, m);
+        FOREACH t IN ARRAY ARRAY['default', 'acme', 'globex'] LOOP
+            leaf := part || '_' || t;
+            EXECUTE format('CREATE TABLE dm_test.%I PARTITION OF dm_test.%I FOR VALUES IN (%L)', leaf, part, t);
+            EXECUTE format('ALTER TABLE dm_test.%I ENABLE ROW LEVEL SECURITY', leaf);
+            EXECUTE format('ALTER TABLE dm_test.%I FORCE ROW LEVEL SECURITY', leaf);
+            EXECUTE format('CREATE POLICY tenant_isolation ON dm_test.%I USING (tenant_id = current_setting(%L, true)) WITH CHECK (tenant_id = current_setting(%L, true))',
+                           leaf, 'nexus.tenant', 'nexus.tenant');
+            EXECUTE format('CREATE POLICY owner_read ON dm_test.%I FOR SELECT TO nexus_admin_dmlutils USING (true)', leaf);
+            EXECUTE format('INSERT INTO dm_test.leafed (model, tenant_id, id, payload) SELECT %L, %L, g, ''p'' || g FROM generate_series(1, 150) g', m, t);
+        END LOOP;
+    END LOOP;
+END $$;
+ALTER TABLE dm_test.leafed ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dm_test.leafed FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.leafed
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+CREATE POLICY owner_read ON dm_test.leafed FOR SELECT TO nexus_admin_dmlutils USING (true);
+
+-- chunk_leafed: nexus.chunks' exact shape (nexus-f3yqd.2.21): LIST (embedding_model) then LIST (tenant_id) and a FOUR-column
+-- primary key (tenant_id, collection, chash bytea, embedding_model); models m1 and m2, tenants default, acme and globex,
+-- two collections and 150 rows per leaf, each leaf with its own copy of the policies
+CREATE TABLE dm_test.chunk_leafed (
+    tenant_id text NOT NULL, collection text NOT NULL, chash bytea NOT NULL, embedding_model text NOT NULL, payload text,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, collection, chash, embedding_model)
+) PARTITION BY LIST (embedding_model);
+DO $$
+DECLARE m text; t text; part text; leaf text;
+BEGIN
+    FOREACH m IN ARRAY ARRAY['m1', 'm2'] LOOP
+        part := 'chunk_leafed_' || m;
+        EXECUTE format('CREATE TABLE dm_test.%I PARTITION OF dm_test.chunk_leafed FOR VALUES IN (%L) PARTITION BY LIST (tenant_id)', part, m);
+        FOREACH t IN ARRAY ARRAY['default', 'acme', 'globex'] LOOP
+            leaf := part || '_' || t;
+            EXECUTE format('CREATE TABLE dm_test.%I PARTITION OF dm_test.%I FOR VALUES IN (%L)', leaf, part, t);
+            EXECUTE format('ALTER TABLE dm_test.%I ENABLE ROW LEVEL SECURITY', leaf);
+            EXECUTE format('ALTER TABLE dm_test.%I FORCE ROW LEVEL SECURITY', leaf);
+            EXECUTE format('CREATE POLICY tenant_isolation ON dm_test.%I USING (tenant_id = current_setting(%L, true)) WITH CHECK (tenant_id = current_setting(%L, true))',
+                           leaf, 'nexus.tenant', 'nexus.tenant');
+            EXECUTE format('CREATE POLICY owner_read ON dm_test.%I FOR SELECT TO nexus_admin_dmlutils USING (true)', leaf);
+            EXECUTE format('INSERT INTO dm_test.chunk_leafed (tenant_id, collection, chash, embedding_model, payload) SELECT %L, ''c'' || (g %% 2), decode(md5(g::text || %L || %L), ''hex''), %L, ''p'' || g FROM generate_series(1, 150) g', t, t, m, m);
+        END LOOP;
+    END LOOP;
+END $$;
+ALTER TABLE dm_test.chunk_leafed ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dm_test.chunk_leafed FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.chunk_leafed
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+CREATE POLICY owner_read ON dm_test.chunk_leafed FOR SELECT TO nexus_admin_dmlutils USING (true);
+
+-- four_key_plain: an unpartitioned table with a four-column primary key (text, text, bytea, bigint) where the first and the
+-- fourth columns both vary and the first three repeat across rows (a row's prefix is shared by about 11 others, told apart
+-- only by the fourth column), so the library's key order and its boundary pairs over all four columns are exercised
+-- (nexus-f3yqd.2.21). No tenant column, no row-level security: one plain run.
+CREATE TABLE dm_test.four_key_plain (
+    k1 text NOT NULL, k2 text NOT NULL, k3 bytea NOT NULL, k4 bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (k1, k2, k3, k4)
+);
+INSERT INTO dm_test.four_key_plain (k1, k2, k3, k4)
+SELECT 'a' || (g % 7), 'b' || (g % 5), decode(md5((g % 50)::text), 'hex'), g
+  FROM generate_series(1, 4000) g;
+
+-- tenant_id, and no row-level security at all: one run reads every row, a run per tenant would read them N times
+CREATE TABLE dm_test.tenant_plain (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+INSERT INTO dm_test.tenant_plain (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['default', 'acme', 'globex']) t, generate_series(1, 50) g;
+
+-- FORCE row-level security and no policy for the migrating role: the admin session reads no tenant's rows
+CREATE TABLE dm_test.forced_noread (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+ALTER TABLE dm_test.forced_noread ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dm_test.forced_noread FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.forced_noread
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+INSERT INTO dm_test.forced_noread (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['acme', 'globex']) t, generate_series(1, 20) g;
+
+-- row-level security on, not forced, owned by someone else (the superuser): the migrating role is subject to the policy
+CREATE TABLE dm_test.unforced_foreign (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+ALTER TABLE dm_test.unforced_foreign ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.unforced_foreign
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+INSERT INTO dm_test.unforced_foreign (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['acme', 'globex']) t, generate_series(1, 20) g;
+GRANT SELECT, UPDATE ON dm_test.unforced_foreign TO nexus_admin_dmlutils WITH GRANT OPTION;
+
+-- row-level security on, not forced, owned by the migrating role: the owner is exempt and reads every row
+CREATE TABLE dm_test.unforced_owned (
+    tenant_id text NOT NULL, id bigint NOT NULL,
+    n integer NOT NULL DEFAULT 0, touched_by text,
+    PRIMARY KEY (tenant_id, id)
+);
+ALTER TABLE dm_test.unforced_owned ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON dm_test.unforced_owned
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+INSERT INTO dm_test.unforced_owned (tenant_id, id)
+SELECT t, g FROM unnest(ARRAY['acme', 'globex']) t, generate_series(1, 20) g;
+
+-- nexus-f3yqd.2.15: a fault a move's template can be made to raise. A row in dm_test.fault makes dm_test.maybe_fail(id)
+-- raise its SQLSTATE for every row whose id is at least from_id; with no row it returns 1, so a template
+-- "SET n = t.n + dm_test.maybe_fail(t.id)" moves a row exactly like the stamping template. SECURITY DEFINER (the superuser
+-- that creates the fixtures), so the chunk's role needs no grant on the table. A row's message (nexus-f3yqd.2.18) is appended
+-- to the raised text, so a test can put text in a recorded chunk error.
+CREATE TABLE dm_test.fault (sqlstate text NOT NULL, from_id bigint NOT NULL DEFAULT 0, message text NOT NULL DEFAULT '');
+CREATE FUNCTION dm_test.maybe_fail(row_id bigint) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+AS $f$
+DECLARE s text; m text;
+BEGIN
+    SELECT f.sqlstate, f.message INTO s, m FROM dm_test.fault f WHERE row_id >= f.from_id LIMIT 1;
+    IF s IS NOT NULL THEN
+        RAISE EXCEPTION 'injected fault % %', s, m USING ERRCODE = s;
+    END IF;
+    RETURN 1;
+END
+$f$;
+
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = 'dm_test' AND c.relkind IN ('r', 'p') AND c.relname &lt;&gt; 'unforced_foreign' LOOP
+        EXECUTE format('ALTER TABLE dm_test.%I OWNER TO nexus_admin_dmlutils', r.relname);
+    END LOOP;
+END $$;
+ALTER SCHEMA dm_test OWNER TO nexus_admin_dmlutils;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

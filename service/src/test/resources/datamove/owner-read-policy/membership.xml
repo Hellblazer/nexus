@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.16, test support (not part of the pattern): GRANT ${granted} TO ${member} WITH INHERIT ${inherit}, to put a
+    role in the position vectors-029's guard exists for: a member that inherits the migrating role (the changeset must be
+    skipped, or a later boot must refuse), and one that does not (it must run). Both roles exist; the fixtures changelog
+    (db.changelog-test-datamove-ownerread-fixtures.xml) creates dm_ownerread_login, nexus_svc comes with the owner bootstrap.
+    The names are the test's own constants, never input; it lives here, beside the pattern it exercises, rather than under
+    db/changelog-test, whose parameterised changelogs RawSqlGateTest classifies against PgContainerHelper's validating methods.
+    Superuser, runAlways, through PgContainerHelper#runSuperuserTestChangelog.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="owner-read-membership-1" author="nexus-f3yqd.2.16" runAlways="true">
+        <comment>GRANT ${granted} TO ${member} WITH INHERIT ${inherit}</comment>
+        <sql splitStatements="false" stripComments="false">GRANT ${granted} TO ${member} WITH INHERIT ${inherit};</sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

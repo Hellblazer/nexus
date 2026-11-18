@@ -799,3 +799,13 @@ class TestLinkedJarFreshnessIsPerWorktree:
         self._watch(monkeypatch, repo, src)
         reason = jar_freshness_skip_reason(jar)
         assert reason is not None and "STALE" in reason
+
+
+def test_a_repin_of_the_vendored_changelogs_marks_the_jar_stale() -> None:
+    """nexus-f3yqd.2.11: the engine applies service/src/main/resources/db/vendor/{ddl_utils,dml_utils} at boot, so a
+    re-pin must mark the jar stale. Reads the real constant, not a synthetic tree."""
+    from tests.db import _service_fixture as fixture
+
+    vendor = fixture._REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "vendor"
+    assert vendor.is_dir() and any(vendor.rglob("*.xml")), "non-vacuity: the vendored trees exist"
+    assert vendor in fixture._SERVICE_SRC_DIRS

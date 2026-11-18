@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -95,6 +95,7 @@ __all__ = [
     "repair_reason",
     "unresolved_note",
     "usd_affordable",
+    "WIRE_FILTER_LOG_CAP",
     "WIRE_KEY_LIST_CAP",
 ]
 
@@ -256,6 +257,9 @@ JOINED_DROP_REASONS: tuple[str, ...] = ("cap", "no_text", "out_of_scope", "held"
 RESOLVED_RECORD_MAX_CHUNKS: int = 3
 #: Entries of one key list that the wire form carries; the rest is counted in ``<list>_truncated``.
 WIRE_KEY_LIST_CAP: int = 50
+#: Entries of ``pool_filter_log`` (one per filter call) that the wire form and the run summary carry; the rest is counted in
+#: ``pool_filter_log_truncated``.
+WIRE_FILTER_LOG_CAP: int = 20
 
 RepairOutcome = Literal[
     "not_attempted", "completed", "no_new_evidence", "not_merged", "retrieval_failed", "no_target",
@@ -325,6 +329,30 @@ class RepairReport:
     #: RDR-232's skip rule). ``CoverageBoundary.run`` sets it and nothing else does.
     joined_keys: tuple[str, ...] = ()
     generated_on_join: bool = False
+    #: RDR-250 (nexus-io7tw), the pool key scan (:mod:`nexus.plans.coverage_pool`); all of these are unset while
+    #: ``NX_ANSWER_POOL_KEY_SCAN`` is off, and the wire then carries none of them. ``pool_key_scan`` says the scan was
+    #: considered. ``pool_scanned`` is the pool chunks fetched; ``pool_candidate_keys`` the keys found only in the pool;
+    #: ``pool_keys_kept`` and ``pool_keys_rejected`` split them by the precision filter (a closed filter rejects all);
+    #: ``pool_filter_calls`` the assessment calls the filter started (a call cut or raised counts) and ``pool_filter_cost_usd`` their cost; ``pool_reason`` why the pool was skipped or closed
+    #: (:data:`nexus.plans.coverage_pool.POOL_REASONS`; empty when it ran through).
+    pool_key_scan: bool = False
+    pool_scanned: int = 0
+    pool_candidate_keys: tuple[str, ...] = ()
+    pool_keys_kept: tuple[str, ...] = ()
+    pool_keys_rejected: tuple[str, ...] = ()
+    pool_filter_calls: int = 0
+    pool_reason: str = ""
+    #: The summed cost of the filter's calls as the run accounted them, or ``None`` when the view cannot say.
+    pool_filter_cost_usd: float | None = None
+    #: When the pool was skipped for time or budget: the seconds one assessment call needs and the seconds the filter had.
+    pool_need_s: float | None = None
+    pool_room_s: float | None = None
+    #: nexus-w8d30: the filter calls that replied with no evidence record (a failed call, never a reject), and one entry per
+    #: call (``call``, ``payload_sha256``, ``reply_chars``, ``reply_sha256``, the runner's token, cache and model figures,
+    #: ``supports`` as accepted item and facet ids, ``unmatched``, ``host_rejected``, ``outcome``, ``error``): hashes, ids and
+    #: closed names, no chunk text.
+    pool_filter_empty_calls: int = 0
+    pool_filter_log: tuple[Mapping[str, Any], ...] = ()
 
     def to_wire(self) -> dict[str, Any]:
         wire: dict[str, Any] = {
@@ -346,6 +374,19 @@ class RepairReport:
                 values: tuple[str, ...] = getattr(self, name)
                 wire[name] = list(values[:WIRE_KEY_LIST_CAP])
                 wire[f"{name}_truncated"] = max(0, len(values) - WIRE_KEY_LIST_CAP)
+        if self.pool_key_scan:
+            # Additive, and only with the pool switch on: with it off the wire is what it was.
+            wire.update({
+                "pool_scanned": self.pool_scanned, "pool_filter_calls": self.pool_filter_calls, "pool_reason": self.pool_reason,
+                "pool_filter_cost_usd": self.pool_filter_cost_usd, "pool_need_s": self.pool_need_s, "pool_room_s": self.pool_room_s,
+                "pool_filter_empty_calls": self.pool_filter_empty_calls,
+                "pool_filter_log": [dict(c) for c in self.pool_filter_log[:WIRE_FILTER_LOG_CAP]],
+                "pool_filter_log_truncated": max(0, len(self.pool_filter_log) - WIRE_FILTER_LOG_CAP),
+            })
+            for name in ("pool_candidate_keys", "pool_keys_kept", "pool_keys_rejected"):
+                pool_values: tuple[str, ...] = getattr(self, name)
+                wire[name] = list(pool_values[:WIRE_KEY_LIST_CAP])
+                wire[f"{name}_truncated"] = max(0, len(pool_values) - WIRE_KEY_LIST_CAP)
         if self.generated_on_join:
             # Only on a run that generated on an uncovered ledger (option 1): any other run keeps the wire form it had.
             wire["generated_on_join"] = True

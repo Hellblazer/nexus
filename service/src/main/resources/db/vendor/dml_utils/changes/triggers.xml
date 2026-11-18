@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+    <!-- One changeset per trigger. Each trigger lives in its own file under
+         triggers/<schema>/ and is added with sqlFile. runOnChange re-applies
+         only the changeset whose body changed, and each one carries its own
+         rollback.
+
+         CREATE OR REPLACE TRIGGER (PostgreSQL 14+) makes the changeset
+         re-runnable without dropping the trigger first. -->
+    <changeSet id="trigger-dml_utils_data.migration_run_set_updated_at" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_run_set_updated_at.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_run_set_updated_at-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-dml_utils_data.migration_run_immutable" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_run_immutable.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_run_immutable-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-dml_utils_data.migration_boundary_set_updated_at" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_boundary_set_updated_at.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_boundary_set_updated_at-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-dml_utils_data.migration_boundary_immutable" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_boundary_immutable.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_boundary_immutable-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-dml_utils_data.migration_error_set_updated_at" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_error_set_updated_at.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_error_set_updated_at-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-dml_utils_data.migration_run_leaf_set_updated_at" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_run_leaf_set_updated_at.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_run_leaf_set_updated_at-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-dml_utils_data.migration_run_leaf_check" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_run_leaf_check.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_run_leaf_check-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="trigger-dml_utils_data.migration_boundary_leaf" author="lee.horner"
+               dbms="postgresql" runOnChange="true">
+        <sqlFile path="triggers/dml_utils_data/migration_boundary_leaf.sql"
+                 relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="triggers-rollback/dml_utils_data/migration_boundary_leaf-rollback.sql"
+                     relativeToChangelogFile="true" splitStatements="false"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

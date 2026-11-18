@@ -52,7 +52,8 @@ public final class RequestHandler implements HttpHandler {
         }
         String tenant = RequestContext.tenant();
         if (tenant == null) {
-            log.error("event=request_handler_no_tenant path={}", exchange.getRequestURI().getPath());
+            log.error("event=request_handler_no_tenant path={}",
+                LogText.escapeControl(exchange.getRequestURI().getPath()));
             HttpUtil.send(exchange, 500, "{\"error\":\"internal: tenant not set\"}");
             return;
         }

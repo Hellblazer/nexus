@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.17: a column-only grant to nexus_svc on the registry, for GrantsNexusSvcUpgradeIntegrationTest: the table's own
+    ACL holds nothing for nexus_svc, one column's does. grants-nexus-svc-1's REVOKE must take it back at the next boot.
+    Superuser, runAlways.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-data-moves-column-grant-1" author="nexus-f3yqd.2.17" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+GRANT SELECT (label) ON nexus.data_moves TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

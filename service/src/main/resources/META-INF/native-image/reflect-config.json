@@ -32,6 +32,21 @@
     "allDeclaredFields": true
   },
   {
+    "name": "dev.nexus.service.log.SafeMessageConverter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "dev.nexus.service.log.SafeThrowableConverter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "dev.nexus.service.log.SafeThreadConverter",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
     "name": "ch.qos.logback.classic.Logger",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
@@ -64,6 +79,41 @@
     "name": "liquibase.precondition.core.SqlPrecondition",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "liquibase.change.AbstractSQLChange",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "liquibase.change.core.RawSQLChange",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "liquibase.change.core.SQLFileChange",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "liquibase.change.core.CreateProcedureChange",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "liquibase.precondition.core.DBMSPrecondition",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
     "allDeclaredFields": true
   }
 ]

@@ -4165,6 +4165,9 @@ async def _plan_run_impl(
     )
     coverage_result: CoverageResult | None = None
     _coverage_calls = 0
+    #: The step indices of the pool filter's assessment calls (nexus-w8d30). They run on the pool filter's model, so
+    #: :func:`_assessment_cost_estimate` leaves them out of the mean the boundary's own (check-tier) calls are admitted on.
+    _pool_filter_steps: set[int] = set()
     #: Seconds the last boundary run took (assessment, repair, the reassessment). The terminal step's own
     #: ``elapsed_ms`` starts after it (nexus-jypmj.17): the assessment calls are their own StepRecords, and the run
     #: summary carries ``assessment_latency_ms``, so counting them in the terminal step's time too would charge the
@@ -4190,9 +4193,28 @@ async def _plan_run_impl(
         """One assessment call through the run's own dispatcher, accounted as a ``StepRecord``."""
         nonlocal _coverage_calls
         from nexus.plans.coverage_ledger import ASSESSMENT_OPERATOR  # noqa: PLC0415 — deferred; the ledger module imports this one's neighbours
+        from nexus.plans.coverage_pool import DISPATCH_USAGE_KEY, POOL_FILTER_KEY  # noqa: PLC0415 — deferred, as above
+
+        # nexus-w8d30: with the pool switch on, the call's token counts ride beside the reply (and on a raised exception) under
+        # this runner-owned key, for the pool filter's call log. The assessment reads only ``evidence``; with the switch off
+        # nothing is attached.
+        pool_log = coverage_boundary is not None and bool(getattr(coverage_boundary, "pool_key_scan", False))
+
+        def usage_counts(rolled: Any) -> dict[str, Any]:
+            if rolled is None:
+                return {}
+            counts: dict[str, Any] = {
+                name: n for name in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+                if isinstance(n := getattr(rolled, name, None), int) and not isinstance(n, bool)
+            }
+            if isinstance(model := getattr(rolled, "model", None), str):
+                counts["model"] = model[:80]
+            return counts
 
         step_index = len(steps) + _coverage_calls
         _coverage_calls += 1
+        if args.get(POOL_FILTER_KEY):
+            _pool_filter_steps.add(step_index)
         started = time.monotonic()
         usage: list[Any] = []
         try:
@@ -4200,28 +4222,46 @@ async def _plan_run_impl(
             # for it. Otherwise the dispatcher's operator hydration lets the stream (still marked at the
             # terminal step, fed by a rank) observe this call's payload as the terminal input and record every
             # reserved item dropped, which the repair's second ledger then reads as a missing named source.
+            # nexus-w8d30 (Sam 2026-11-18): a call the pool filter marked asks for the pool filter's model, not the check
+            # tier's; the marker never reaches the operator. The tier kill switch (NX_OPERATOR_MODEL_TIERING=0) sends it
+            # bare, as it does every operator.
+            call_args = {k: v for k, v in args.items() if k != POOL_FILTER_KEY}
+            if args.get(POOL_FILTER_KEY) and "model" not in call_args and _os.environ.get("NX_OPERATOR_MODEL_TIERING") != "0":
+                from nexus.operators.model_tiers import POOL_FILTER_ALIAS  # noqa: PLC0415 — deferred, as the default-path pin is
+                call_args["model"] = POOL_FILTER_ALIAS
             with _dispatch_mod.ambient_usage_sink(usage), reserved_scope(None):
-                raw = dispatch(ASSESSMENT_OPERATOR, {**args, "timeout": timeout})
+                raw = dispatch(ASSESSMENT_OPERATOR, {**call_args, "timeout": timeout})
                 result = await raw if inspect.iscoroutine(raw) else raw
             if not isinstance(result, dict):
                 raise PlanRunStepRefError(
                     ref=ASSESSMENT_OPERATOR,
                     reason=f"returned {type(result).__name__}; expected dict",
                 )
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as exc:
             # A cancelled call counts too (nexus-jypmj.17): the boundary cuts each concurrent call at its own timeout
             # from outside, and a call cut that way still spent what it spent.
+            rolled = _rollup_step_usage(usage)
             _record_step(
                 step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
-                elapsed_ms=int((time.monotonic() - started) * 1000), ok=False, usage=_rollup_step_usage(usage),
+                elapsed_ms=int((time.monotonic() - started) * 1000), ok=False, usage=rolled,
             )
+            if pool_log and (counts := usage_counts(rolled)):
+                with contextlib.suppress(Exception):  # an exception that refuses attributes just carries no counts
+                    setattr(exc, DISPATCH_USAGE_KEY, counts)
             raise
         _, result = _step_source(ASSESSMENT_OPERATOR, result)
+        rolled = _rollup_step_usage(usage)
         _record_step(
             step_index=step_index, operator=ASSESSMENT_OPERATOR, source="llm",
-            elapsed_ms=int((time.monotonic() - started) * 1000), ok=True, usage=_rollup_step_usage(usage),
+            elapsed_ms=int((time.monotonic() - started) * 1000), ok=True, usage=rolled,
         )
-        return result
+        if not pool_log:
+            return result
+        # a copy, so the dispatcher's own dict is not touched; a key the model put there is replaced, never trusted
+        reply = {k: v for k, v in result.items() if k != DISPATCH_USAGE_KEY}
+        if counts := usage_counts(rolled):
+            reply[DISPATCH_USAGE_KEY] = counts
+        return reply
 
     async def _coverage_retrieval(tool: str, args: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         """One repair retrieval call (a targeted query or the chunk fetch) through the run's dispatcher,
@@ -4296,12 +4336,23 @@ async def _plan_run_impl(
     def _assessment_cost_estimate() -> float | None:
         """The mean known cost of the assessment calls so far, or ``None`` (no call reported a cost). Assessment calls
         are the ``operator_check`` records numbered past the plan's own steps; a plan's own ``check`` steps (lower
-        indices, a different prompt and size) are not assessment calls and stay out of the mean."""
+        indices, a different prompt and size) are not assessment calls and stay out of the mean. The pool filter's calls
+        run on another model (nexus-w8d30) and stay out too; :func:`_assessment_cost_spent` still counts them."""
+        costs = [
+            r.cost_usd for r in step_records
+            if r.operator == "operator_check" and r.step_index >= len(steps) and r.cost_usd is not None
+            and r.step_index not in _pool_filter_steps
+        ]
+        return sum(costs) / len(costs) if costs else None
+
+    def _assessment_cost_spent() -> float | None:
+        """The summed known cost of the assessment calls so far (the records :func:`_assessment_cost_estimate` averages), or
+        ``None`` when none of them carries a cost."""
         costs = [
             r.cost_usd for r in step_records
             if r.operator == "operator_check" and r.step_index >= len(steps) and r.cost_usd is not None
         ]
-        return sum(costs) / len(costs) if costs else None
+        return sum(costs) if costs else None
 
     async def _run_coverage_boundary(
         texts: list[str], observed: bool, terminal_index: int,
@@ -4324,6 +4375,7 @@ async def _plan_run_impl(
                 retrieve=_coverage_retrieval if can_repair else None, fetch=_coverage_fetch if can_repair else None,
                 install_supplement=_install_supplement if can_repair else None, rehydrate=rehydrate if can_repair else None,
                 install_note=_install_note if can_repair else None, assessment_cost_estimate=_assessment_cost_estimate,
+                assessment_cost_spent=_assessment_cost_spent,
             ))
         except Exception as exc:  # noqa: BLE001 — the boundary never fails an answer
             _log.warning("nx_answer_coverage_boundary_failed", error=type(exc).__name__)  # the type only: an exception's text can carry prompt text

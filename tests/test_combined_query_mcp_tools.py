@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from nexus.errors import require_tumbler_prefix
 from nexus.mcp import core
 
 
@@ -529,3 +530,29 @@ class TestPlanRunnerRegistration:
         assert callable(getattr(core, "search_topic_scoped"))
         assert callable(getattr(core, "search_graph_hop"))
         assert callable(getattr(core, "search_aspect_scoped"))
+
+
+
+class _GuardedT3(_FakeServiceT3):
+    """Applies the client's subtree guard before recording, as ``HttpVectorClient.search_metadata_scoped`` does."""
+
+    def search_metadata_scoped(self, query, collection_names, *, subtree=None, **kw):
+        if subtree is not None:
+            require_tumbler_prefix("search_metadata_scoped", subtree)
+        return super().search_metadata_scoped(query, collection_names, subtree=subtree, **kw)
+
+
+class TestSubtreeRefusalAtTheToolBoundary:
+    """RDR-241 (nexus-uwggq.1.9): a subtree that is not a tumbler prefix is refused before the request (the SQL
+    builds an unescaped ``LIKE subtree || '.%'``); the tool returns the refusal as its error text."""
+
+    @pytest.mark.parametrize("subtree", ["%", "1_0"])
+    def test_search_metadata_scoped_returns_the_refusal_and_sends_nothing(self, monkeypatch, subtree):
+        t3 = _GuardedT3()
+        _wire(monkeypatch, t3, ["c1"])
+        monkeypatch.setattr(core, "collection_model", lambda name: None)  # model grouping reads the catalog; no tenant here
+
+        out = core.search_metadata_scoped("q", corpus="knowledge", subtree=subtree)
+
+        assert "is not a tumbler prefix" in out
+        assert t3.meta_calls == []

@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.datamove;
+
+import dev.nexus.service.db.AdminDdlSession;
+import dev.nexus.service.db.DmlUtilsInstaller;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.exception.DataAccessException;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.SQLException;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Step 1 of a pass (RDR-246, The move worker): grants what the libraries need on the driving table, then checks that
+ * dml_utils is installed, that the admin connection reads every row of the driving table, and that a
+ * {@code max_worker_processes} slot is free. Each named miss is a reason the move is {@code blocked:} with, and transient. A
+ * driving table that does not exist, or a check that itself raised, carries the {@link SQLException} it raised so the failure
+ * class can tell (a missing schema or table is permanent, the RDR's 3F000 example).
+ */
+final class MovePreflight {
+
+    private static final Logger log = LoggerFactory.getLogger(MovePreflight.class);
+
+    private MovePreflight() { /* static */ }
+
+    /** The end of the refusal's "Point NX_DB_ADMIN_* at ..." sentence: the role that reads every row of this table. */
+    private static final String VIEW_POINT_AT = "the role that owns the driving table and carries its owner-read SELECT "
+        + "policy (a migrating role, never the serving role)";
+
+    /**
+     * The backend types that do not take a {@code max_worker_processes} slot; every other row of
+     * {@code pg_stat_activity} (a parallel worker, a logical replication worker, an extension's worker such as
+     * pg_background's) is a background worker holding one.
+     */
+    private static final List<String> NO_SLOT = List.of("client backend", "autovacuum launcher", "autovacuum worker",
+        "background writer", "checkpointer", "archiver", "startup", "walreceiver", "walsender", "walwriter",
+        "standalone backend", "walsummarizer", "io worker");
+
+    /**
+     * What stops a pass at the preflight: the reason, and what the check raised ({@code null} for a miss the worker names:
+     * no install, a missing role, no slot, an admin that cannot see every row).
+     */
+    record Miss(String reason, SQLException raised) {
+        static Miss named(String reason) {
+            return new Miss(reason, null);
+        }
+    }
+
+    /**
+     * Runs the preflight on {@code session}, which names the move's driving table.
+     *
+     * @return what blocks the pass, or empty when it may go on to the runs
+     */
+    static Optional<Miss> check(AdminDdlSession session, DataMove move, DmlUtilsInstaller installer) {
+        Optional<String> install = installer.status().blockedReason();
+        if (install.isPresent()) {
+            return Optional.of(Miss.named(MoveReasons.withInstallHint(install.get())));
+        }
+        DSLContext ctx = session.ctx();
+        try {
+            if (!tableExists(ctx, move)) {
+                // what the CALL would raise (assert_schema_exists' 3F000 for a missing schema, 42P01 for a table), and the
+                // state the grant and the row-security read below would otherwise blur into "cannot see every row"
+                return Optional.of(new Miss("the driving table " + move.drivingTableLabel() + " does not exist",
+                    new SQLException("the driving table " + move.drivingTableLabel() + " does not exist", "42P01")));
+            }
+            Optional<String> leaked = servingRolePrivilege(ctx);
+            if (leaked.isPresent()) {
+                return Optional.of(Miss.named(leaked.get()));
+            }
+            grant(session, move);
+            if (!committingEntryPointInstalled(ctx)) {
+                return Optional.of(Miss.named("dml_utils.run_migration_chunks_committing is not installed"));
+            }
+            if (rowSecurity(ctx, move).narrowsAdmin()) {
+                try {
+                    session.requireUnrestrictedView(VIEW_POINT_AT);
+                } catch (AdminDdlSession.Refused refused) {
+                    return Optional.of(Miss.named(refused.getMessage()));
+                }
+            }
+            if (freeWorkerSlots(ctx) < 1) {
+                return Optional.of(Miss.named("waiting for a background worker slot"));
+            }
+        } catch (AdminDdlSession.Refused refused) {
+            return Optional.of(new Miss("the pass could not grant dml_utils_owner its access to "
+                + move.drivingTableLabel() + ": " + refused.getMessage(), DataMoveFailureClassifier.sqlExceptionOf(refused)));
+        } catch (DataAccessException e) {
+            return Optional.of(new Miss("a preflight check on " + move.drivingTableLabel() + " failed: sqlstate="
+                + e.sqlState() + " " + FailureHandler.oneLine(e.getMessage()), DataMoveFailureClassifier.sqlExceptionOf(e)));
+        }
+        return Optional.empty();
+    }
+
+    /** Whether the driving table (a table, a partitioned table or a view) exists. */
+    static boolean tableExists(DSLContext ctx, DataMove move) {
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return ctx.fetchExists(DSL.selectOne().from(c)
+            .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(move.drivingSchema()))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(move.drivingTable())));
+    }
+
+    /** The serving role, which RDR-246 gives no privilege on the registry. */
+    static final String SERVING_ROLE = "nexus_svc";
+
+    /**
+     * Where the engine runs on two roles, the serving role holds no privilege on {@code nexus.data_moves}: the move worker
+     * is the registry's one reader, on the admin connection. A privilege GRANTED to it there, on the table or on a column
+     * (a rollback to an engine that granted it, and a boot that did not take it back because the migrating role does not
+     * own the table), is a posture the RDR does not allow, so every open move is blocked with the reason until it is gone.
+     * Read from the table's and columns' ACLs, so a privilege the role merely inherits through a membership in the
+     * migrating role does not count: that posture has its own refusal ({@code DrivingTableIsolationCheck}). Not applied
+     * where the connection IS {@value #SERVING_ROLE} (one role, which owns the table) or where that role does not exist.
+     *
+     * @return the reason, or empty when the posture holds
+     */
+    static Optional<String> servingRolePrivilege(DSLContext ctx) {
+        boolean roleExists = ctx.fetchExists(DSL.selectOne().from(DSL.table(DSL.name("pg_catalog", "pg_roles")))
+            .where(DSL.field(DSL.name("rolname"), String.class).eq(SERVING_ROLE)));
+        if (!roleExists || SERVING_ROLE.equals(ctx.select(DSL.currentUser()).fetchOne(0, String.class))) {
+            return Optional.empty();
+        }
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        var a = DSL.table(DSL.name("pg_catalog", "pg_attribute")).as("a");
+        var aclType = SQLDataType.VARCHAR.getArrayDataType();
+        Field<String[]> tableAcl = DSL.field(DSL.name("c", "relacl")).cast(aclType);
+        Field<String[]> columnAcl = DSL.field(DSL.name("a", "attacl")).cast(aclType);
+        var rows = ctx.select(tableAcl, columnAcl,
+                DSL.function("pg_get_userbyid", SQLDataType.VARCHAR, DSL.field(DSL.name("c", "relowner"))))
+            .from(c).join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .leftJoin(a).on(DSL.field(DSL.name("a", "attrelid")).eq(DSL.field(DSL.name("c", "oid")))
+                .and(DSL.field(DSL.name("a", "attacl")).isNotNull()))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq("data_moves"))
+            .fetch();
+        boolean held = false;
+        String owner = "unknown";
+        for (var row : rows) {
+            owner = row.value3();
+            held |= grantsTo(row.value1(), SERVING_ROLE) || grantsTo(row.value2(), SERVING_ROLE);
+        }
+        if (!held) {
+            return Optional.empty();
+        }
+        return Optional.of(SERVING_ROLE + " holds a privilege on nexus.data_moves, which the engine's serving role must not "
+            + "hold (RDR-246): the boot's grants step takes it back only where the migrating role owns the table, and its "
+            + "owner here is " + owner + ". As that role run: REVOKE ALL ON TABLE nexus.data_moves FROM " + SERVING_ROLE);
+    }
+
+    /** Whether an ACL ({@code grantee=privileges/grantor} entries; an empty grantee is PUBLIC) gives {@code role} a privilege. */
+    static boolean grantsTo(String[] acl, String role) {
+        if (acl == null) {
+            return false;
+        }
+        for (String item : acl) {
+            int eq = item.indexOf('=');
+            int slash = item.indexOf('/', eq + 1);
+            if (eq > 0 && item.substring(0, eq).equals(role) && slash > eq + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Grants {@code dml_utils_owner} USAGE on the driving schema and SELECT on the parent and every existing leaf, only
+     * when the role exists and only where it does not already hold the privilege. Its SECURITY DEFINER boundary scan reads
+     * the table, and a per-leaf run names a leaf directly. Not left to the registering changeset, which runs once and may
+     * run before the bootstrap created the role. A leaf created later gets the parent's grants from the partition grant
+     * loop ({@code nexus.partition_copy_access}).
+     */
+    static void grant(AdminDdlSession session, DataMove move) {
+        DSLContext ctx = session.ctx();
+        String owner = DmlUtilsInstaller.OWNER_ROLE;
+        boolean roleExists = ctx.fetchExists(DSL.selectOne().from(DSL.table(DSL.name("pg_catalog", "pg_roles")))
+            .where(DSL.field(DSL.name("rolname"), String.class).eq(owner)));
+        if (!roleExists) {
+            return;
+        }
+        boolean schemaUsage = Boolean.TRUE.equals(ctx.select(DSL.function("has_schema_privilege", SQLDataType.BOOLEAN,
+                DSL.val(owner), DSL.val(move.drivingSchema()), DSL.val("USAGE"))).fetchOne(0, Boolean.class));
+        if (!schemaUsage) {
+            session.ddl("GRANT USAGE ON SCHEMA %I TO %I", List.of(move.drivingSchema(), owner));
+            log.info("event=data_move_grant label={} object=schema:{} role={}", move.label(), move.drivingSchema(), owner);
+        }
+        for (LeafCatalog.Leaf relation : LeafCatalog.relationsLackingSelect(ctx, move.drivingSchema(),
+                move.drivingTable(), owner)) {
+            session.ddl("GRANT SELECT ON TABLE %I.%I TO %I", List.of(relation.schema(), relation.name(), owner));
+            log.info("event=data_move_grant label={} object={}.{} role={}", move.label(), relation.schema(),
+                relation.name(), owner);
+        }
+    }
+
+    /** What row-level security does to the driving table: whether it is on, and whether the admin session is subject to it. */
+    record RowSecurity(boolean enabled, boolean narrowsAdmin) { }
+
+    /**
+     * Row-level security on the driving table: two questions with two different answers.
+     *
+     * <p>{@code narrowsAdmin}: can it hide rows from the admin session? A table without row security, or one the session
+     * owns that is not FORCE, is read whole by its owner; only otherwise is {@code requireUnrestrictedView}'s test (a
+     * permissive true-qual policy, a superuser or BYPASSRLS) the one that applies. (That method asks for one of the three
+     * whatever the table's state, which is right for {@code nexus.chunks}, always FORCE, and would block every move over a
+     * table with no row security.)
+     *
+     * <p>{@code enabled}: does it filter the run? Whatever the admin session sees, the boundary scan that cuts the table
+     * into chunks is SECURITY DEFINER and runs as {@code dml_utils_owner}, which does not own the table, so with row
+     * security on it sees only the rows of the session's tenant setting (none, with none set): a table the admin owns and
+     * that is not FORCE still needs a run per tenant. With row security off, one run reads every row, and a run per tenant
+     * would read them all N times.
+     *
+     * <p>A table that does not exist is treated as narrowing, so the check says why it fails.
+     */
+    static RowSecurity rowSecurity(DSLContext ctx, DataMove move) {
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        var row = ctx.select(DSL.field(DSL.name("c", "relrowsecurity"), Boolean.class),
+                DSL.field(DSL.name("c", "relforcerowsecurity"), Boolean.class),
+                DSL.function("pg_has_role", SQLDataType.BOOLEAN, DSL.currentUser(),
+                    DSL.field(DSL.name("c", "relowner")), DSL.inline("USAGE")))
+            .from(c).join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(move.drivingSchema()))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(move.drivingTable()))
+            .fetchOne();
+        if (row == null) {
+            return new RowSecurity(true, true);
+        }
+        boolean enabled = Boolean.TRUE.equals(row.value1());
+        boolean forced = Boolean.TRUE.equals(row.value2());
+        boolean owned = Boolean.TRUE.equals(row.value3());
+        return new RowSecurity(enabled, enabled && (forced || !owned));
+    }
+
+    static boolean committingEntryPointInstalled(DSLContext ctx) {
+        var p = DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return ctx.fetchExists(DSL.selectOne().from(p)
+            .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("p", "pronamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("dml_utils"))
+            .and(DSL.field(DSL.name("p", "proname"), String.class).eq("run_migration_chunks_committing")));
+    }
+
+    /** {@code max_worker_processes} less the background workers running now. */
+    static int freeWorkerSlots(DSLContext ctx) {
+        Integer max = ctx.select(DSL.cast(DSL.function("current_setting", SQLDataType.VARCHAR,
+            DSL.val("max_worker_processes")), SQLDataType.INTEGER)).fetchOne(0, Integer.class);
+        Integer used = ctx.selectCount().from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+            .where(DSL.field(DSL.name("backend_type"), String.class).notIn(NO_SLOT)).fetchOne(0, Integer.class);
+        return (max == null ? 0 : max) - (used == null ? 0 : used);
+    }
+}

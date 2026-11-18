@@ -12,8 +12,9 @@ The engine holds three admin routes under ``/v1/admin/chunk-keys``:
   while any tenant of the install (every tenant with chunk rows, token or not) is not ready, naming the tenant.
   Operator (root token) only.
 
-Nothing calls them on its own. This verb is the operator's way in, per tenant and per install; the upgrade-ladder rung
-that would run the sweep on every install ships later, after a cloud dry run has been read.
+This verb is the operator's way in, per tenant and per install, and the only way to accept a residue, to add the CHECKs
+and to validate them. The upgrade-ladder rung ``retire-keys-sweep`` (``nx upgrade``, nexus-6pfgb.43) runs the dry run and
+the apply on every install that runs the ladder, accepts nothing, and defers while a precondition stands in the way.
 
 ``--tenant`` names the tenant to sweep and is sent to the engine. A credential bound to that tenant sweeps it; the
 ROOT credential may name any registered tenant (the engine runs the call in that tenant's scope); a tenant credential

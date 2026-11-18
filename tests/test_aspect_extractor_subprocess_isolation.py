@@ -146,11 +146,14 @@ def test_timeout_kills_grandchild_not_just_direct_child(tmp_path) -> None:
     not merely that ``os.killpg`` was called (the prior test's weakness)."""
     pidfile = tmp_path / "grandchild.pid"
     child_prog = (
-        "import subprocess, sys, time\n"
+        "import os, subprocess, sys, time\n"
         # grandchild in child's group; its command line ends in this test's pid-file path, so the cleanup below
         # can tell it from every other sleeper on the box (nexus-xzorj)
         "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', sys.argv[1]])\n"
-        "open(sys.argv[1], 'w').write(str(gc.pid))\n"
+        # write then rename: the pid file appears only with its whole content, so a kill between the open and the
+        # write can never leave an empty file for the int() below
+        "with open(sys.argv[1] + '.tmp', 'w') as f: f.write(str(gc.pid))\n"
+        "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
         "time.sleep(30)\n"                                   # keep the group alive
     )
     # timeout=3.0 (not 1.5) so the child reliably starts python + spawns the
@@ -186,13 +189,15 @@ def test_pdeathsig_kills_child_when_parent_is_sigkilled(tmp_path) -> None:
     # Intermediate parent: spawns a sleeper armed with the SAME preexec the
     # extractor uses, records its pid, then blocks. We SIGKILL this parent.
     parent_prog = (
-        "import subprocess, sys, time\n"
+        "import os, subprocess, sys, time\n"
         "from nexus.pdeathsig import set_pdeathsig_preexec, LIBC\n"
         "child = subprocess.Popen(\n"
         "    [sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[1]], start_new_session=True,\n"
         "    preexec_fn=set_pdeathsig_preexec if LIBC is not None else None,\n"
         ")\n"
-        "open(sys.argv[1], 'w').write(str(child.pid))\n"
+        # write then rename, as above: the test reads the pid as soon as the file exists
+        "with open(sys.argv[1] + '.tmp', 'w') as f: f.write(str(child.pid))\n"
+        "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
         "sys.stdout.write('ready\\n'); sys.stdout.flush()\n"
         "time.sleep(60)\n"
     )

@@ -114,10 +114,26 @@ public final class TaxonomyHandler implements HttpHandler {
 
     private final TaxonomyRepository repo;
     private final TaxonomyCentroidRepository centroidRepo;
+    /** RDR-134 Step 2 (nexus-7fku2.1.2): drops the cached topic coverage of what a mutating route changed. */
+    private final CoverageInvalidation coverage;
+
+    /** The routes that change an input of the coverage count; a label rename or a link write changes none. */
+    private static final java.util.Set<String> COVERAGE_OPS = java.util.Set.of(
+        "/topics/insert", "/topics/delete", "/topics/merge", "/topics/persist_split", "/topics/persist_rebuild",
+        "/topics/persist_discovered", "/assignments/assign", "/assignments/assign_many",
+        "/assignments/assign_from_chashes", "/assignments/purge_doc", "/assignments/prune_projection",
+        "/purge_collection", "/rename_collection", "/import/topic", "/import/assignment", "/import_batch",
+        "/centroids/upsert", "/centroids/delete", "/centroids/purge");
 
     public TaxonomyHandler(TaxonomyRepository repo, TaxonomyCentroidRepository centroidRepo) {
+        this(repo, centroidRepo, null);
+    }
+
+    public TaxonomyHandler(TaxonomyRepository repo, TaxonomyCentroidRepository centroidRepo,
+                           dev.nexus.service.db.TaxonomyCoverage coverageCache) {
         this.repo = repo;
         this.centroidRepo = centroidRepo;
+        this.coverage = new CoverageInvalidation(coverageCache, COVERAGE_OPS);
     }
 
     @Override
@@ -131,6 +147,7 @@ public final class TaxonomyHandler implements HttpHandler {
         String path   = exchange.getRequestURI().getPath();
         String op     = path.replaceFirst("^/v1/taxonomy", "");
         String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
+        final boolean armed = coverage.arm(exchange, op, tenant);
 
         try {
             switch (op) {
@@ -269,6 +286,8 @@ public final class TaxonomyHandler implements HttpHandler {
             }
             log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
             HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+        } finally {
+            coverage.finish(exchange, tenant, armed);
         }
     }
 
@@ -619,6 +638,7 @@ public final class TaxonomyHandler implements HttpHandler {
         // any non-Boolean value means "run the cross pass"; only an explicit `false`
         // disables it.
         boolean crossCollection = !(body.get("cross_collection") instanceof Boolean b) || b;
+        if (crossCollection) coverage.widen(ex); // the cross pass writes projection rows onto other collections' topics
         Map<String, Object> result = repo.assignFromChashes(tenant, collection, chashes, crossCollection);
         HttpUtil.send(ex, 200, json(result));
     }
@@ -1079,7 +1099,9 @@ public final class TaxonomyHandler implements HttpHandler {
         try (InputStream is = ex.getRequestBody()) {
             byte[] bytes = is.readAllBytes();
             if (bytes.length == 0) return Map.of();
-            return MAPPER.readValue(bytes, MAP_TYPE);
+            Map<String, Object> body = MAPPER.readValue(bytes, MAP_TYPE);
+            coverage.noteBody(ex, body);
+            return body;
         }
     }
 

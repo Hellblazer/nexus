@@ -653,6 +653,11 @@ class TestParseEngineVersion:
 
 
 class TestFloorComparison:
+    def test_floor_carries_the_shared_lexical_probe(self) -> None:
+        # nexus-bbtc2: the route's lexical field is sent by default, which is only
+        # a win on an engine with the shared text-gate probe (engine-service v0.1.192).
+        assert REQUIRED_ENGINE_VERSION >= (0, 1, 192)
+
     def test_below_floor_compares_less(self) -> None:
         assert parse_engine_version("0.1.5") < REQUIRED_ENGINE_VERSION
 

@@ -160,6 +160,10 @@ def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
             f"  spans stripped (chunk no longer exists on this install): "
             f"{summary.links_missing_span}"
         )
+    if summary.links_refused_span:
+        click.echo(f"  links refused (malformed dchash span): {len(summary.links_refused_span)}")
+        for r in summary.links_refused_span:  # the error names the span
+            click.echo(f"    {r['from_uri']} -[{r['link_type']}]-> {r['to_uri']}: {r['error']}")
     if summary.docs_failed:
         click.echo(f"  DOC FAILURES: {summary.docs_failed}")
         for f in summary.doc_failures:

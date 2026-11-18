@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.22.xsd">
+
+    <!-- The XSD is pinned to the newest schema available in both Liquibase
+         versions that parse this changelog: liquibase-core 5.0.4 (runtime and
+         tests) and 4.22.0 (bundled by the jOOQ codegen plugin). Bump this when
+         both versions move. -->
+
+    <!-- The changelog is PostgreSQL-only. Fail fast on a misconfigured
+         connection instead of filtering out every changeset and reporting a
+         successful no-op update. -->
+    <preConditions onFail="HALT" onError="HALT">
+        <dbms type="postgresql"/>
+    </preConditions>
+
+    <include file="changes/changes.xml" relativeToChangelogFile="true"/>
+</databaseChangeLog>

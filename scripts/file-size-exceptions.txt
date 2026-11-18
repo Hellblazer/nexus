@@ -52,7 +52,6 @@ service/src/test/java/dev/nexus/service/db/GhostSweepDormantMarkingTest.java 121
 service/src/test/java/dev/nexus/service/db/RawSqlGateTest.java 3962
 service/src/test/java/dev/nexus/service/db/ReembedJobRepositoryTest.java 1124
 service/src/test/java/dev/nexus/service/db/RequestLedgerTest.java 1104
-service/src/test/java/dev/nexus/service/db/TenantKeyedStateGateTest.java 1166
 service/src/test/java/dev/nexus/service/db/TombstoneFilterGateTest.java 1288
 service/src/test/java/dev/nexus/service/http/CatalogHandlerReconcileRoutesTest.java 1132
 service/src/test/java/dev/nexus/service/reembed/ReembedCutoverTest.java 1281

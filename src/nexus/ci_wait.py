@@ -6,7 +6,8 @@ its next user prompt, so a session waiting on CI with nobody at the keyboard
 never wakes. Run as a background command, this parks on the CI board's
 ``--done`` topic (``board/ci/<repo>-<branch>--done``) for the sha and exits
 when its row arrives: the exit is the wake, and the one printed line is the
-result. It reads the tuple space only; it never polls GitHub for the wait.
+result. On develop and main it reads the tuple space only; for any other branch,
+or a topic the engine refuses, it waits on GitHub check-runs instead (GitHub-only mode, below).
 
 The ``--done`` row (conexus adapter, conexus-5wjs; nexus-1d6pz.11.1) has the
 body ``{state, sha, runs, url}``. Since .11.1 each ``runs`` entry is
@@ -32,10 +33,19 @@ for a wait started on a rerun while the earlier attempt's row is still there.
 The board wake is best effort (a dropped fold or deadline posts nothing), so at
 the deadline the command reads GitHub's push runs for the sha once, to tell a
 dropped wake from CI still running.
+
+A branch the board does not watch (anything but :data:`BOARD_BRANCHES`: a
+release branch, a feature branch) has no ``--done`` topic, and its CI runs on
+``pull_request`` events the push-run reads above never see. For those, and for
+a watched branch whose topic the engine refuses as unknown, :func:`wait_on_github`
+skips the board and reads the sha's check-runs (every event) once per
+:data:`GITHUB_POLL_S` until all are completed or the timeout passes
+(nexus-x4jok).
 """
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -72,6 +82,13 @@ PARK_CAP_S: int = 25
 _PAGE: int = 100
 #: Seconds between retries of a failed board read.
 _RETRY_S: float = 5.0
+#: The branches the engine's CI adapter posts ``board/ci/<repo>-<branch>--done``
+#: for (``nx tuple list`` shows only these two). Any other branch is waited on
+#: through GitHub alone.
+BOARD_BRANCHES: frozenset[str] = frozenset({"develop", "main"})
+#: Seconds between reads of GitHub's check-runs in GitHub-only mode: one
+#: request per interval, never faster, so a long wait stays far under the rate limit.
+GITHUB_POLL_S: float = 60.0
 
 
 class _Reader(Protocol):
@@ -112,6 +129,10 @@ def done_subspace(repo: str, branch: str) -> str:
 
 class BoardUnreadableError(RuntimeError):
     """The board could not be read before the deadline (engine down, refused read)."""
+
+
+class BoardSubspaceUnknownError(BoardUnreadableError):
+    """The engine has no template for the topic: no adapter posts it for this branch."""
 
 
 def parse_done_row(row: TupleRow) -> DoneRow | None:
@@ -282,6 +303,11 @@ def _transient(exc: BaseException) -> bool:
     return False
 
 
+def _unknown_subspace(exc: BaseException) -> bool:
+    from nexus.db.t2.http_tuple_store import UnknownSubspaceError  # noqa: PLC0415 — deferred: CLI startup cost
+    return isinstance(exc, UnknownSubspaceError)
+
+
 def find_done_row(
     store: _Reader, subspace: str, sha: str, *, timeout_s: float, fresh: bool = False,
     park_s: int = PARK_CAP_S, clock: Callable[[], float] = time.monotonic,
@@ -303,6 +329,8 @@ def find_done_row(
                 return store.rd(subspace, n=_PAGE, since=cursor, timeout_s=timeout)
             except Exception as exc:  # noqa: BLE001 — classified below: retried if transient, else reported
                 remaining = deadline - clock()
+                if _unknown_subspace(exc):
+                    raise BoardSubspaceUnknownError(f"{type(exc).__name__}: {exc}") from exc
                 if not _transient(exc) or remaining <= 0:
                     raise BoardUnreadableError(f"{type(exc).__name__}: {exc}") from exc
                 sleep(min(_RETRY_S, remaining))
@@ -366,8 +394,150 @@ def summarize(row: DoneRow) -> tuple[str, int]:
     return line, wait_exit_code(outcome)
 
 
+@dataclass(frozen=True)
+class CheckRun:
+    check_id: int
+    name: str
+    status: str
+    conclusion: str | None
+
+    @property
+    def completed(self) -> bool:
+        return self.status == "completed"
+
+
+class GhReadError(RuntimeError):
+    """A GitHub read failed; *permanent* when a retry cannot help (gh missing, bad credentials,
+    an unknown or unprocessable sha or repo)."""
+
+    def __init__(self, message: str, *, permanent: bool = False) -> None:
+        super().__init__(message)
+        self.permanent = permanent
+
+
+#: The jq filter ``gh api --jq`` applies to each page: one ``[id, name, status, conclusion]``
+#: array per line. Kept as a constant so a test runs the real filter over a recorded API page.
+CHECK_RUNS_JQ: str = ".check_runs[] | [.id, .name, .status, .conclusion]"
+#: A failed read that no retry fixes: HTTP 401 / 404 / 422 or gh asking to log in.
+_PERMANENT_GH_ERROR = re.compile(r"HTTP (?:401|404|422)\b|gh auth login|authentication", re.IGNORECASE)
+#: Consecutive failed reads with the same error that end a GitHub-only wait.
+_GH_FAIL_STREAK: int = 3
+#: Floor for one read's time limit, so a read begun at the deadline can still finish.
+_MIN_READ_S: float = 5.0
+_MAX_READ_S: float = 60.0
+
+
+def gh_check_runs(gh_repo: str, sha: str, timeout: float = _MAX_READ_S) -> list[CheckRun]:
+    """The latest check-run of each check on *sha*, whatever event started it (a push,
+    a pull_request), read with ``gh api --paginate``. Raises :class:`GhReadError`
+    when GitHub cannot be read or an output line is not a check-run."""
+    try:
+        out = run_bounded(
+            ["gh", "api", f"repos/{gh_repo}/commits/{sha}/check-runs?per_page=100&filter=latest", "--paginate",
+             "--jq", CHECK_RUNS_JQ],
+            timeout=timeout, check=True, stdin=subprocess.DEVNULL,
+        ).stdout
+    except FileNotFoundError as exc:
+        raise GhReadError(f"gh is not installed: {exc}", permanent=True) from exc
+    except subprocess.CalledProcessError as exc:
+        err = " ".join(str(exc.stderr or "").split())[:200]
+        raise GhReadError(f"gh exited {exc.returncode}: {err or 'no message'}",
+                          permanent=bool(_PERMANENT_GH_ERROR.search(err))) from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GhReadError(f"{type(exc).__name__}: {exc}") from exc
+    runs: list[CheckRun] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            entry = None
+        if not (isinstance(entry, list) and len(entry) == 4 and isinstance(entry[0], int)
+                and not isinstance(entry[0], bool) and isinstance(entry[1], str) and isinstance(entry[2], str)):
+            raise GhReadError(f"gh printed a line that is not a check-run: {line[:80]!r}")
+        runs.append(CheckRun(entry[0], entry[1], entry[2], entry[3] if isinstance(entry[3], str) else None))
+    return runs
+
+
+def wait_on_github(
+    gh_repo: str, sha: str, branch: str, *, timeout_s: float,
+    clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+    fetch: Callable[[str, str, float], list[CheckRun]] | None = None,
+) -> tuple[str, int]:
+    """The printed line and exit code for a wait on GitHub alone (no board).
+
+    Reads the sha's check-runs, never sooner than :data:`GITHUB_POLL_S` after the
+    previous read (a read that would fall after the deadline is skipped, and the
+    timeout is reported from the last one). A set that has a failure and no
+    unfinished check-run is final. Any other completed set is reported only when
+    the same check-run ids were completed on two consecutive reads, so a workflow
+    that registers late cannot turn a partial set into a success. The outcome
+    comes from :func:`reduce_outcome` and :func:`wait_exit_code`, as for a board row.
+    A set with no check-run at all (CI not yet started) is not complete, and waits.
+
+    A read that fails is retried at the next interval. :data:`EXIT_UNUSABLE` ends
+    the wait at once when the failure is permanent (gh missing, HTTP 401, 404 or
+    422, gh asking to log in), after :data:`_GH_FAIL_STREAK` consecutive failures
+    with the same error, or at the deadline when no read ever succeeded.
+    """
+    read = fetch or gh_check_runs
+    deadline = clock() + timeout_s
+    mode = f"GitHub only: the board was not used for {branch}"
+    url = f"https://github.com/{gh_repo}/commit/{sha}"
+    head = sha[:12]
+    runs: list[CheckRun] | None = None
+    confirmed: frozenset[int] | None = None  # ids all completed on the previous read
+    last_read: float | None = None
+    last_error: str | None = None
+    streak = 0
+    while True:
+        if last_read is not None:
+            due = last_read + GITHUB_POLL_S
+            if due > deadline:
+                break
+            if due > clock():
+                sleep(due - clock())
+        last_read = clock()
+        try:
+            runs = read(gh_repo, sha, min(_MAX_READ_S, max(deadline - last_read, _MIN_READ_S)))
+        except GhReadError as exc:
+            confirmed = None
+            message = str(exc)
+            streak = streak + 1 if message == last_error else 1
+            last_error = message
+            if exc.permanent or streak >= _GH_FAIL_STREAK:
+                return f"{head} unusable: GitHub could not be read: {message} ({mode})", EXIT_UNUSABLE
+            continue
+        last_error, streak = None, 0
+        if not runs or not all(r.completed for r in runs):
+            confirmed = None
+            continue
+        outcome = reduce_outcome([r.conclusion for r in runs])
+        ids = frozenset(r.check_id for r in runs)
+        if outcome != "failure" and ids != confirmed:
+            confirmed = ids
+            continue
+        bad = [r for r in runs if r.conclusion not in SUCCESS_CONCLUSIONS]
+        detail = (
+            f"{len(runs)} check-runs, all passed" if not bad else
+            f"{len(runs)} check-runs, {len(bad)} not passed: "
+            + ", ".join(f"{r.name} {r.conclusion or 'unknown'}" for r in bad)
+        )
+        return f"{head} {outcome or 'unknown'}: {detail} {url} ({mode})", wait_exit_code(outcome)
+    if last_error is not None and runs is None:
+        return f"{head} unusable: GitHub could not be read until the deadline: {last_error} ({mode})", EXIT_UNUSABLE
+    if not runs:
+        return f"{head} timeout: GitHub lists no check-runs for it yet ({mode})", EXIT_TIMEOUT
+    if confirmed is not None:
+        return f"{head} timeout: {len(runs)} check-runs completed, not yet confirmed by a second read ({mode})", EXIT_TIMEOUT
+    pending = sum(1 for r in runs if not r.completed)
+    return f"{head} timeout: {pending} of {len(runs)} check-runs still running ({mode})", EXIT_TIMEOUT
+
+
 __all__: list[str] = [
-    "BoardUnreadableError", "DoneRow", "Run", "complete_runs", "done_subspace", "fill_conclusions", "find_done_row",
+    "BOARD_BRANCHES", "BoardSubspaceUnknownError", "BoardUnreadableError", "CheckRun", "GITHUB_POLL_S",
+    "CHECK_RUNS_JQ", "GhReadError", "gh_check_runs", "wait_on_github", "DoneRow", "Run", "complete_runs", "done_subspace", "fill_conclusions", "find_done_row",
     "gh_push_runs", "gh_run_conclusion", "parse_done_row", "reduce_outcome", "result_line",
     "summarize", "wait_exit_code",
     "EXIT_CANCELLED", "EXIT_FAILURE", "EXIT_SUCCESS", "EXIT_TIMEOUT", "EXIT_UNKNOWN", "EXIT_UNUSABLE",

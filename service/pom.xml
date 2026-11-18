@@ -1962,6 +1962,13 @@
                                              stateless build-time-safe. Completes the existing ch.qos.logback
                                              build-time-init intent. -->
                                         <buildArg>--initialize-at-build-time=org.xml.sax.helpers</buildArg>
+                                        <!-- nexus-dngtz.1.11: the log sink's converters (%msgSafe, %exSafe, %threadSafe in
+                                             logback.xml). The build-time logback parse above makes them and keeps them in the
+                                             PatternLayout's converter chain, so they land in the image heap like the
+                                             ch.qos.logback converters beside them. Listed by class, not by package:
+                                             dev.nexus.service.log also holds SecretMask, whose state must not be baked in.
+                                             LogText is the escape they call; the four classes hold no static state. -->
+                                        <buildArg>--initialize-at-build-time=dev.nexus.service.log.SafeMessageConverter,dev.nexus.service.log.SafeThrowableConverter,dev.nexus.service.log.SafeThreadConverter,dev.nexus.service.http.LogText</buildArg>
                                         <!-- jOOQ 3.20.11 + GraalVM 25 native-image initialization.
                                              nexus-lp2qo spike (2026-06-12): community metadata now
                                              ships a jOOQ 3.20.0 entry (tested 3.20.0-3.21.5, covers

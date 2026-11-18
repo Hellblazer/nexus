@@ -83,9 +83,12 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
 
     cat = _cat_cmd._get_catalog()
 
+    # RDR-241: the engine reads the prefix (literal, case-sensitive, ordered by tumbler); no catalog walk.
+    # The client keeps its own case-sensitive check, so a CHROMA:// row stays out even if the engine's
+    # match ever changes; backfill etags keeps the same check for https://.
     chroma_rows = [
-        d for d in cat.all_documents()
-        if (getattr(d, "source_uri", "") or "").startswith("chroma://")
+        d for d in cat.list_scoped(source_uri_prefix="chroma://")
+        if (d.source_uri or "").startswith("chroma://")
     ]
 
     by_collection = Counter(d.physical_collection for d in chroma_rows)
@@ -240,7 +243,8 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
-    entries = cat.by_owner(Tumbler.parse(owner)) if owner else cat.all_documents(limit=0)
+    # RDR-241: with no owner the engine reads the https:// prefix, not the whole catalog.
+    entries = cat.by_owner(Tumbler.parse(owner)) if owner else cat.list_scoped(source_uri_prefix="https://")
 
     candidates = [
         e for e in entries

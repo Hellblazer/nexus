@@ -1219,19 +1219,19 @@ def _check_service_crossencoder_model() -> list[HealthResult]:
 #: The service can crash-loop BEFORE it answers any HTTP request, so the
 #: only evidence of *why* is in its own log file — never the whole file,
 #: just the most recent bytes, to keep this diagnostic O(1)-ish and never a
-#: meaningful drag on `nx doctor`.
-_BOOT_FAILURE_TAIL_BYTES: int = 64 * 1024
+#: meaningful drag on `nx doctor`. 1 MiB holds Main's failed line and a long Failed-SQL trace after it.
+_BOOT_FAILURE_TAIL_BYTES: int = 1024 * 1024
 
-#: Liquibase's failure marker, verbatim across both the wrapped GH #1390
-#: report and the raw stack trace: "Migration failed for changeset
-#: <changelog-path>::<changeset-id>::<author>".
+#: Liquibase's failure marker ("Migration failed for changeset <path>::<id>::<author>"), read only in the trace of
+#: Main's event=schema_migration_failed ERROR line, and its first match there, Liquibase's own outer wrapper: an
+#: ordinary line's message or a later exception message can carry client text (RDR-167, nexus-dngtz.1.11).
 _LIQUIBASE_CHANGESET_RE = re.compile(
-    r"Migration failed for changeset\s+(?P<path>\S+?)::(?P<id>[^:\s]+)::(?P<author>\S+)"
-)
+    r"Migration failed for changeset\s+"
+    r"(?P<path>\S+?)::(?P<id>[^:\s]+)::(?P<author>\S+)")
 #: The SQL error one-liner Liquibase's PSQLException wrapper emits, usually
 #: a few lines after the changeset marker (e.g. "Caused by: ...PSQLException:
 #: \n  ERROR: constraint ... does not exist").
-_ERROR_LINE_RE = re.compile(r"^[ \t]*(ERROR:.*)$", re.MULTILINE)
+_ERROR_LINE_RE = re.compile(r"^[ \t]*(?:(?:Caused by|Reason): [\w.$]+: )?(ERROR:.*)$", re.MULTILINE)
 #: Cap on the surfaced error one-liner so a doctor line never becomes an
 #: unbounded stack-trace dump.
 _ERROR_LINE_MAX_CHARS: int = 200
@@ -1249,9 +1249,9 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
     RDR (nexus-4m6i0.7): during a Liquibase-VALIDATE crash-loop (GH #1390 /
     ms57z) the service dies before it can answer any HTTP request, so the
     root cause has to come from its own log file, not a live probe. Reads at
-    most the last :data:`_BOOT_FAILURE_TAIL_BYTES` of *log_path* and looks
-    for the LAST ``Migration failed for changeset <path>::<id>::<author>``
-    marker plus, if present nearby, the SQL error one-liner that follows it.
+    most the last :data:`_BOOT_FAILURE_TAIL_BYTES` of *log_path*, takes the trace of the LAST migration-failed
+    line and the first ``Migration failed for changeset <path>::<id>::<author>`` in it, plus, if present nearby,
+    the SQL error one-liner that follows it.
 
     Returns ``None`` on ANY failure — missing file, not a regular file,
     unreadable, no marker found — this is diagnostic sugar layered on top of
@@ -1268,11 +1268,14 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
     except OSError:
         return None
 
-    matches = list(_LIQUIBASE_CHANGESET_RE.finditer(tail))
-    if not matches:
+    from nexus.daemon.readiness import RE_ENGINE_LINE, is_migration_failed_line  # noqa: PLC0415 - doctor-only path
+    lines = tail.splitlines()
+    at = next((i for i in range(len(lines) - 1, -1, -1) if is_migration_failed_line(lines[i])), None)
+    trace = [] if at is None else lines[at + 1 :]
+    trace = "\n".join(trace[: next((j for j, ln in enumerate(trace) if RE_ENGINE_LINE.match(ln)), len(trace))])
+    if (last := _LIQUIBASE_CHANGESET_RE.search(trace)) is None:
         return None
-    last = matches[-1]
-    changeset_id = last.group("id")
+    tail, changeset_id = trace, last.group("id")
 
     # Best-effort: scan forward from the marker for the nearest ERROR: line
     # (Liquibase wraps the underlying PSQLException a few lines below).
@@ -1283,7 +1286,8 @@ def _last_boot_failure_detail(log_path: Path) -> str | None:
     # the changeset id alone. The real Liquibase trace puts the
     # PSQLException within a few lines of the marker; anything farther
     # away is presumed unrelated and we degrade to the id-only form.
-    remainder = tail[last.end() : last.end() + _ERROR_SEARCH_WINDOW_CHARS]
+    # an RDR-167 sink writes a message's own line breaks as a literal \x0a; they are line breaks here
+    remainder = re.sub(r"\\x0[aAdD]", "\n", tail[last.end() : last.end() + _ERROR_SEARCH_WINDOW_CHARS])
     error_match = _ERROR_LINE_RE.search(remainder)
     if error_match:
         error_line = error_match.group(1).strip()[:_ERROR_LINE_MAX_CHARS]
@@ -4798,6 +4802,23 @@ _OWNERLESS_WRITES_LABEL = "Ownerless writes"
 def _status_int(value: object) -> int:
     """A counter from the engine's status body as an int; anything else is 0."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """RDR-246 data moves (nexus-f3yqd.2.17): ``nexus.data_moves_health.check_data_moves``. Named ``_check_*`` here, like
+    every other row of the sweep, so a test that steps over the sweep's ``_check_*`` rows steps over this one too instead
+    of letting it fetch the engine's status for real."""
+    from nexus.data_moves_health import check_data_moves  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_data_moves(engine_status)
+
+
+def _check_recall_canary(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+    """RDR-230 recall canary (nexus-4lnn1.1.10): ``nexus.recall_canary_health.check_recall_canary``. Named ``_check_*``
+    here for the same reason as :func:`_check_data_moves`."""
+    from nexus.recall_canary_health import check_recall_canary  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_recall_canary(engine_status)
 
 
 def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
@@ -10049,6 +10070,13 @@ def _check_beads_prime() -> list[HealthResult]:
     )]
 
 
+def _check_retired_chunk_keys() -> list[HealthResult]:
+    """nexus-6pfgb.43: the ``Retired chunk keys`` row (one T2 note and one ledger read; bounded, never raises)."""
+    from nexus.upgrade_ladder.retire_keys_state import doctor_row  # noqa: PLC0415 — deferred to avoid module-load cost
+
+    return [doctor_row()]
+
+
 def _check_pending_rungs() -> list[HealthResult]:
     """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
 
@@ -10110,8 +10138,17 @@ def _check_pending_rungs() -> list[HealthResult]:
             + ", ".join(f"{name} (recorded {when})" for name, when in answered_from_record)
         )
     # A rung that declined to read a managed catalog says so with the shared INTERACTIVE_REMEDY text.
+    # Each with its own reason's first clause: rdr192-manifest-backfill's says whether an older completion still
+    # answers the engine's reaper gate or none is recorded and the reaper stays refused.
+    # On a local engine the decline is doctor's bounded reads, not the managed rule, so the reason is left out there.
+    from nexus.upgrade_ladder.auto_guard import managed_service  # noqa: PLC0415 — deferred to avoid module-load cost
+
+    try:
+        managed = managed_service()
+    except Exception:  # noqa: BLE001 — unknown mode: names only, as before
+        managed = False
     not_checked = [
-        name for name, status in statuses
+        f"{name} ({status.pending_detail.split('; ')[0]})" if managed else name for name, status in statuses
         if not status.applicable and INTERACTIVE_REMEDY in (status.pending_detail or "")
     ]
     if not pending and not not_checked:
@@ -13603,9 +13640,11 @@ def run_health_checks(
     results.extend(_step("_check_storage_service_health", lambda: _check_storage_service_health()))
     results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
     results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
+    results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
     results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c
+    results.extend(_step("_check_recall_canary", lambda: _check_recall_canary(engine_status)))  # nexus-4lnn1.1.10 (RDR-230)
     results.extend(_step("_check_reranker", lambda: _check_reranker(engine_status)))  # nexus-yuh4a
     results.extend(_step("_check_embedding_family", lambda: _check_embedding_family()))  # nexus-wypwq
     results.extend(_step("_check_prose_index_recall", lambda: _check_prose_index_recall(_collections)))  # nexus-qqoak
@@ -13650,6 +13689,8 @@ def run_health_checks(
     results.extend(_step("_check_beads_prime", lambda: _check_beads_prime()))
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_step("_check_pending_rungs", lambda: _check_pending_rungs()))
+    # nexus-6pfgb.43 (RDR-236 Step 3): rows that still carry retired chunk keys, from the sweep rung's own note.
+    results.extend(_step("_check_retired_chunk_keys", lambda: _check_retired_chunk_keys()))
 
     # RDR-155 P4b: the legacy chunk-id census, migration-report, and
     # migration-divergence doctor rows died with the migration machinery;

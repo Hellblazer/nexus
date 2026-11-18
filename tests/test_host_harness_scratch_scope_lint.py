@@ -151,6 +151,14 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     # loopback endpoint (local_engine_refusal, tested), and its supported route is
     # tests/scripts/probe_capture_entry.py under the suite's self-provisioned engine. Every probe is a read or a
     # call refused before any write. Two of the four matches are prose and a probe definition.
+    # nexus-7fku2.1.7: one prose match, its module docstring naming the
+    # read-only `nx collection list` that prose_collections (taxonomy_ab2.py)
+    # runs; the script calls only read routes (reviewed by code-review-expert
+    # and substantive-critic) and refuses local mode before any read.
+    "scripts/bench/taxonomy_coverage.py": (
+        1,
+        "READ-ONLY: the match is docstring prose naming the `nx collection list` read; the script writes nothing",
+    ),
     "scripts/agent_error_probes.py": (
         4,
         "NX_LOCAL: capture refuses anything but a local loopback engine; probes are reads or refused writes; "

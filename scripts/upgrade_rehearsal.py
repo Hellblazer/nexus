@@ -73,6 +73,16 @@ engine before its tag).
     upgrade_rehearsal.py --work DIR --target-release 8.1.0 --from-version 8.0.0
     upgrade_rehearsal.py --work DIR --target-wheel W --from-version 7.76.0 --engine-jar service/target/nexus-service-X.jar
 
+Seed cache (``upgrade_rehearsal_seed_cache.py``, preparation only). Each start's prepared store is kept on
+the run host (``~/.cache/lab-remote/upgrade-rehearsal-seeds/``, ``$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE``) and
+restored in place of the seeder when the key matches (previous release, its engine pin, platform, prepare
+template and the sha256 of the seeder files). A restore is checked (an empty destination, a manifest inventory
+that hashes every file, clean shutdown, a PG-alone row count at or above the floor and equal to the manifest's)
+and any doubt seeds in full. A hit gives the store a fresh PG port and moves the old run dir to the new one in
+text files and the catalog's path columns. The cache is never a judged step: the prepare row of the table is a
+setup row, ``store restored from cache <key> (saved <date>)`` or ``seeded (cache miss, saved <key>)``. ``--no-seed-cache`` is a non-default setting; a custom
+``--prepare-cmd`` bypasses the cache.
+
 The last line is ``UPGRADE REHEARSAL GATE: <word> ...`` (the per-start lines say ``UPGRADE REHEARSAL START``)
 and the exit code says the same word. Exit 0 PASSED: every start passed and no non-default flag was used.
 1 FAILED: a breach, a step failure or a non-vacuity finding in any start (a failure outranks a pending
@@ -91,6 +101,7 @@ import errno
 import fcntl
 import getpass
 import glob
+import importlib.util
 import json
 import os
 import pty
@@ -110,6 +121,26 @@ import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from pathlib import Path
+
+
+
+def _load_seed_cache():
+    """The seed cache module beside this script (``scripts/upgrade_rehearsal_seed_cache.py``): loaded by
+    path, because this script is run, and imported by tests, without ``scripts/`` on ``sys.path``."""
+    name = "upgrade_rehearsal_seed_cache"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().with_name(f"{name}.py")
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+seed_cache = _load_seed_cache()
 
 # --- named limits, from the 2026-11-10 real-store runs (slowest measured in brackets) ---------
 DEFAULT_SILENCE_LIMIT_S: float = (
@@ -1540,6 +1571,7 @@ def build_verdict(
     engine_jar: str | None = None,
     store_rows: dict | None = None,
     engine: str | None = None,
+    setup: dict | None = None,
 ) -> dict:
     """One start's verdict. ``state`` is FAILED (a breach, a failed step, any finding, or no steps),
     else PENDING (a step whose ceiling is not set yet: never a pass), else PASSED; ``passed`` is true
@@ -1553,7 +1585,7 @@ def build_verdict(
     else:
         state = "PASSED"
     upgrade = next((s for s in steps if s.name == "upgrade"), None)
-    return {
+    verdict = {
         "from_version": from_version,
         "target": target,
         "passed": state == "PASSED",
@@ -1571,6 +1603,10 @@ def build_verdict(
         "write_rate": write_rate,
         "pci_check": pci_check,
     }
+    if setup is not None:
+        # How the store came to be (restored or seeded): never a judged step, never in ``steps``.
+        verdict["setup"] = setup
+    return verdict
 
 
 def _mb(n: int | None) -> str:
@@ -1650,6 +1686,12 @@ def format_table(verdict: dict) -> str:
     head = f"upgrade rehearsal: from {verdict['from_version']} to {verdict['target']}"
     cols = f"{'step':<19}{'status':<9}{'wall s':>9}{'longest gap s':>15}{'out bytes':>11}{'exit':>6}  note"
     lines = [head, cols, "-" * len(cols)]
+    prep = (verdict.get("setup") or {}).get("prepare")
+    if prep:
+        # a setup row: it says how the store was prepared and judges nothing
+        lines.append(
+            f"{'prepare (setup)':<19}{'setup':<9}{prep.get('wall_s', 0.0):>9.1f}{'':>15}{'':>11}{'':>6}  {prep['label']}"
+        )
     for s in verdict["steps"]:
         lines.append(
             f"{s['name']:<19}{s['status']:<9}{s['wall_s']:>9.1f}{s['longest_gap_s']:>15.1f}"
@@ -1815,6 +1857,11 @@ class Config:
         False  # --keep-work: the PG store (base, pg_wal) stays after each start
     )
     expected_engine: str | None = None  # the candidate wheel's REQUIRED_ENGINE_VERSION, "0.1.187"
+    # The seed cache (preparation only; see upgrade_rehearsal_seed_cache.py). None: not used, and
+    # ``seed_cache_off`` says why for the step table. ``seed_inputs`` are the files the seeder reads.
+    seed_cache_dir: Path | None = None
+    seed_cache_off: str | None = None
+    seed_inputs: tuple[Path, ...] = ()
 
 
 def _ambient_uv_dir() -> str:
@@ -2047,6 +2094,91 @@ def protected_cleanup() -> Iterator[None]:
         raise _Terminated(held)
 
 
+def installed_engine_pin(home: Path) -> str | None:
+    """The engine tag the previous release pins (``REQUIRED_ENGINE_VERSION``), read from the client
+    install-prev put in the throwaway HOME; None when it cannot be read."""
+    pattern = str(
+        home
+        / ".local/share/uv/tools/conexus/lib/python3*/site-packages/nexus/engine_version.py"
+    )
+    for path in sorted(glob.glob(pattern)):
+        try:
+            m = _PIN_RE.search(Path(path).read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if m:
+            return ".".join(m.groups())
+    return None
+
+
+def _store_sql(config: Path):
+    """psql against the install's own PG, as the cache's SQL helpers want it: a failure is a
+    ``SeedCacheError`` (not a ``ProbeError``, which no cache handler names) and a PG that is not
+    accepting connections is one too, since the cache starts it and waits for it."""
+    probe = PgProbe(config)
+
+    def sql(query: str) -> list[list[str]]:
+        try:
+            rows = probe.sql(query)
+        except ProbeError as exc:
+            raise seed_cache.SeedCacheError(f"ProbeError: {exc}") from exc
+        if rows is None:
+            raise seed_cache.SeedCacheError("PG is not accepting connections")
+        return rows
+
+    return sql
+
+
+def _offline_read(config: Path, olds):
+    """The store's rows and path-column hits, with its PG started alone and stopped again."""
+    return seed_cache.rows_with_pg_up(
+        config, lambda: seed_cache.read_store(_store_sql(config), olds)
+    )
+
+
+def _offline_rewrite(config: Path, pairs):
+    """The same, rewriting the saved run dir to this one in the path columns."""
+    return seed_cache.rows_with_pg_up(
+        config, lambda: seed_cache.rewrite_store(_store_sql(config), pairs)
+    )
+
+
+def seed_plan(cfg: Config, from_version: str, home: Path, log: Callable[[str], None]):
+    """The cache and the key for this start's preparation, or the reason there is none (a string)."""
+    if cfg.seed_cache_dir is None:
+        return cfg.seed_cache_off or "no seed cache directory"
+    pin = installed_engine_pin(home)
+    if pin is None:
+        return f"the engine pin of conexus {from_version} cannot be read from its install"
+    if not cfg.seed_inputs:
+        return "no seeder files to key on"
+    try:
+        seeder = seed_cache.hash_inputs(cfg.seed_inputs)
+    except OSError as exc:
+        return f"the seeder's files cannot be read: {exc}"
+    inputs = seed_cache.KeyInputs(
+        from_version=from_version,
+        kind="standin" if cfg.standin else "real",
+        engine_pin=pin,
+        python=cfg.python,
+        prepare_template=prepare_template_for(
+            from_version, cfg.prepare_cmd, standin=cfg.standin
+        ),
+        collections=cfg.pci_collections,
+        seeder=seeder,
+        platform=seed_cache.platform_tag(),
+    )
+    cache = seed_cache.SeedCache(
+        cfg.seed_cache_dir,
+        read_fn=_offline_read,
+        rewrite_fn=_offline_rewrite,
+        log=log,
+        pick_port=seed_cache.free_port,
+        clean_check=seed_cache.stopped_clean,
+    )
+    return cache, inputs
+
+
 def rehearse(from_version: str, cfg: Config) -> dict:
     run_dir = cfg.work / f"from-{from_version}"
     home, config, logs, cwd = (
@@ -2070,6 +2202,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
     pci_on = pci_check_enabled(cfg.pci_check, from_version, standin=cfg.standin)
     write_rate_info: dict | None = None
     store_rows: dict | None = None
+    setup_prepare: dict | None = None
     pci_evidence: dict | None = None
     why_not_run = (
         "an earlier step failed"  # the real reason, set where a step stops the run
@@ -2183,46 +2316,114 @@ def rehearse(from_version: str, cfg: Config) -> dict:
 
         if not stop:
             json_path = run_dir / "prepare.json"
-            argv = [
-                t.format(
-                    uv="uv",
-                    python=sys.executable,
-                    work=str(run_dir),
-                    prev=from_version,
-                    json=str(json_path),
-                    nx=nx,
-                    collections=cfg.pci_collections,
-                )
-                for t in shlex.split(
-                    prepare_template_for(
-                        from_version, cfg.prepare_cmd, standin=cfg.standin
-                    )
-                )
-            ]
-            r = go(
-                "prepare",
-                argv,
-                silence=None,
-                ceiling=PREPARE_CEILING_S,
-                where=cfg.repo,
-                judged=False,
+            prepare_t0 = time.monotonic()
+            plan = seed_plan(
+                cfg, from_version, home, lambda m: say(f"[{from_version}] {m}")
             )
-            stop = not r.ok
-            if stop:
-                why_not_run = f"setup step prepare {r.status}: {r.reason}"
-            else:
-                try:
-                    prepare = json.loads(json_path.read_text())
-                except (OSError, ValueError) as exc:
-                    findings.append(
-                        f"prepare left no readable JSON at {json_path}: {exc}"
+            rejected: str | None = None
+            if not isinstance(plan, str):
+                cache_, key_ = plan
+                res = cache_.restore(key_, run_dir, floor=cfg.rows_floor)
+                if res.ok:
+                    prepare = res.prepare
+                    setup_prepare = {
+                        "source": "cache",
+                        "key": key_.name,
+                        "label": (
+                            f"store restored from cache {key_.name}"
+                            + (f" (saved {res.saved_at[:10]})" if res.saved_at else "")
+                        ),
+                        "saved_at": res.saved_at,
+                        "pg_port": res.port,
+                        "path_rows_rewritten": res.path_rows,
+                        "seconds": round(res.seconds, 1),
+                        "rows": res.rows,
+                        "relocated_files": res.relocated.files,
+                        "relocated_links": res.relocated.links,
+                    }
+                    say(
+                        f"[{from_version}] prepare: {setup_prepare['label']} ({res.rows} rows, "
+                        f"{res.seconds:.1f}s, {res.relocated.files} files and {res.relocated.links} "
+                        "links rewritten to this run dir)"
                     )
-                    why_not_run = f"prepare left no readable JSON at {json_path}"
+                elif res.reason != "no entry":
+                    rejected = res.reason
+                    say(
+                        f"[{from_version}] seed cache: entry {key_.name} not used ({res.reason}): "
+                        "seeding in full"
+                    )
+            if prepare is None:
+                argv = [
+                    t.format(
+                        uv="uv",
+                        python=sys.executable,
+                        work=str(run_dir),
+                        prev=from_version,
+                        json=str(json_path),
+                        nx=nx,
+                        collections=cfg.pci_collections,
+                    )
+                    for t in shlex.split(
+                        prepare_template_for(
+                            from_version, cfg.prepare_cmd, standin=cfg.standin
+                        )
+                    )
+                ]
+                r = go(
+                    "prepare",
+                    argv,
+                    silence=None,
+                    ceiling=PREPARE_CEILING_S,
+                    where=cfg.repo,
+                    judged=False,
+                )
+                stop = not r.ok
+                if stop:
+                    why_not_run = f"setup step prepare {r.status}: {r.reason}"
+                else:
+                    try:
+                        prepare = json.loads(json_path.read_text())
+                    except (OSError, ValueError) as exc:
+                        findings.append(
+                            f"prepare left no readable JSON at {json_path}: {exc}"
+                        )
+                        why_not_run = f"prepare left no readable JSON at {json_path}"
+                        stop = True
+                if prepare is not None and prepare.get("verdict") != "prepared":
+                    findings.append(f"prepare verdict {prepare.get('verdict')!r}")
+                    why_not_run = f"prepare verdict {prepare.get('verdict')!r}"
                     stop = True
-            if prepare is not None and prepare.get("verdict") != "prepared":
-                findings.append(f"prepare verdict {prepare.get('verdict')!r}")
-                why_not_run = f"prepare verdict {prepare.get('verdict')!r}"
-                stop = True
+                if isinstance(plan, str):
+                    setup_prepare = {
+                        "source": "seeded",
+                        "key": None,
+                        "label": f"seeded (seed cache off: {plan})",
+                    }
+                elif not stop and prepare is not None:
+                    cache_, key_ = plan
+                    saved = cache_.save(key_, run_dir, floor=cfg.rows_floor)
+                    why = f"rejected: {rejected}; " if rejected is not None else ""
+                    label = (
+                        f"seeded (cache miss, {why}saved {key_.name})"
+                        if saved.saved
+                        else f"seeded (cache miss, {why}not saved: {saved.reason})"
+                    )
+                    setup_prepare = {
+                        "source": "seeded",
+                        "key": key_.name,
+                        "label": label,
+                        "saved": saved.saved,
+                        "save_seconds": round(saved.seconds, 1),
+                    }
+                    say(f"[{from_version}] prepare: {label}")
+                else:
+                    setup_prepare = {
+                        "source": "seeded",
+                        "key": None,
+                        "label": "seeded (the prepare step failed)",
+                    }
+            if setup_prepare is not None:
+                setup_prepare["wall_s"] = round(time.monotonic() - prepare_t0, 1)
 
         # The box a user upgrades has its engine running: the old stack comes up on the old data
         # before the package moves, so the new engine's first boot happens inside `nx upgrade`.
@@ -2500,6 +2701,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
         engine_jar=cfg.engine_jar,
         store_rows=store_rows,
         engine=serving_engine_from_doctor(texts.get("doctor", "")),
+        setup={"prepare": setup_prepare} if setup_prepare is not None else None,
     )
     write_verdict(verdict, run_dir / "verdict.json")
     say(format_table(verdict))
@@ -2625,6 +2827,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--pci-end-bound", type=float, default=PCI_END_STATE_BOUND_S)
     ap.add_argument(
+        "--no-seed-cache",
+        action="store_true",
+        help="seed every start in full instead of restoring a cached prepared store (the cache is "
+        "on by default; it changes only the preparation, never what is judged, and a run that "
+        "turns it off is not the release gate like any other non-default setting)",
+    )
+    ap.add_argument(
         "--keep-work",
         action="store_true",
         help="keep each start's PG store (base, pg_wal) instead of freeing it once the start has "
@@ -2733,6 +2942,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         query = args.sentinel_query or SENTINEL_QUERY
         expect = args.sentinel_expect or SENTINEL_EXPECT
 
+    scripts_dir = Path(__file__).resolve().parent
+    if args.standin:
+        seed_inputs = (scripts_dir / "upgrade_rehearsal_standin_prepare.py",)
+    else:
+        seed_inputs = (
+            scripts_dir / "upgrade_boot_writes.py",
+            scripts_dir / "upgrade_boot_seed.py",
+        )
+    seed_off: str | None = None
+    if args.no_seed_cache:
+        seed_off = "--no-seed-cache"
+    elif args.prepare_cmd:
+        seed_off = "a custom --prepare-cmd, whose inputs are not known"
     cfg = Config(
         work=args.work.resolve(),
         repo=repo,
@@ -2759,6 +2981,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         profile_upgrade=args.profile_upgrade,
         restart_gap_s=args.restart_gap,
         keep_work=args.keep_work,
+        seed_cache_dir=None if seed_off else seed_cache.default_cache_root(),
+        seed_cache_off=seed_off,
+        seed_inputs=seed_inputs,
     )
     cfg.work.mkdir(parents=True, exist_ok=True)
     say(f"upgrade rehearsal: candidate {label}; starting from {', '.join(versions)}")

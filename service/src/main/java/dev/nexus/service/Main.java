@@ -75,6 +75,13 @@ public final class Main {
             TrustAnchors.print(System.out);
             return;
         }
+        // nexus-dngtz.1.11 (RDR-167): the two log paths that bypass logback are made line-safe before anything else starts.
+        // An uncaught exception goes through the logback pattern, not the JVM's stderr handler; java.util.logging (Liquibase,
+        // and the JDK HttpServer through System.Logger) gets the formatter that escapes control characters. Neither is fatal.
+        dev.nexus.service.log.UncaughtExceptionLog.install();
+        if (dev.nexus.service.log.LineSafeFormatter.install() == 0) {
+            log.warn("event=jul_line_safe_inactive reason=\"no java.util.logging console handler: Liquibase's records are not escaped\"");
+        }
         goOfflineAtStartup();
         // nexus-rph82: one clock for the whole process, pinned before any
         // datasource negotiates a session zone. See SchemaMigrator.pinJvmTimeZoneToUtc.
@@ -117,6 +124,20 @@ public final class Main {
         String dbUrl  = requireEnv("NX_DB_URL");
         String dbUser = requireEnv("NX_DB_USER");
         String dbPass = requireEnv("NX_DB_PASS");
+        // nexus-f3yqd.2.18: the database passwords stay out of every log line, stack traces included, and out of the texts the
+        // data-move worker records and reports. Set here, before any pool or lock connects and before another thread logs, from
+        // the values the migration and the worker use (NX_DB_ADMIN_PASS is what AdminConnection.resolve takes when it is set).
+        // A masking install that fails is logged and the engine boots without it: it must never be the reason one does not.
+        dev.nexus.service.log.SecretMask.add(dbPass);
+        dev.nexus.service.log.SecretMask.add(System.getenv("NX_DB_ADMIN_PASS"));
+        try {
+            int masking = dev.nexus.service.log.LogMasking.install();   // it logs what it masked and what it could not
+            if (masking == 0) {
+                log.warn("event=log_masking_inactive reason=\"no appender masks: the engine's log lines are not scrubbed of the passwords\"");
+            }
+        } catch (Throwable t) {
+            log.warn("event=log_masking_not_installed cause=\"{}\"", dev.nexus.service.log.SecretMask.mask(t.toString()));
+        }
         int poolSize  = intEnv("NX_POOL_SIZE", 10);
         // RDR-248 (nexus-csayy.2): the export session tunables, checked before any pool or listener exists, like the
         // other environment values: a bad one is one clean line and exit 1, never a stack trace out of the service's
@@ -254,9 +275,14 @@ public final class Main {
         // setups where the application role also owns the schema.
         // RDR-227: the resolved admin values stay in scope for the per-collection index builder.
         var adminConnection = dev.nexus.service.db.AdminConnection.resolve(System::getenv, dbUrl, dbUser, dbPass);
+        // nexus-f3yqd.2.18: the admin password the worker and the migration connect with (added with the others at the top)
+        dev.nexus.service.log.SecretMask.add(adminConnection.password());
         var migrationDs = buildMigrationDataSource(adminConnection);
+        // nexus-f3yqd.2.11 (RDR-246): the vendored ddl_utils and dml_utils changelogs apply first, as dml_utils_owner,
+        // when the engine has a separate admin role; the installer keeps why they did not, for the data-move worker.
+        final var dmlUtilsInstaller = dev.nexus.service.db.DmlUtilsInstaller.forEngine(adminConnection.user(), dbUser);
         try {
-            SchemaMigrator.migrate(migrationDs);
+            SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller);
         } catch (SchemaMigrator.MigrationException e) {
             // Close the migration pool BEFORE System.exit: exit does not run finally blocks,
             // so explicit close here avoids leaking the pool on the error path.
@@ -276,6 +302,18 @@ public final class Main {
         } catch (dev.nexus.service.db.ChunksIsolationCheck.IsolationException e) {
             ds.close();
             log.error("event=chunks_isolation_check_failed error=\"{}\"", e.getMessage());
+            System.exit(1);
+        }
+
+        // nexus-f3yqd.2.16 (RDR-246): the same question of every driving table a registered data move names, whose
+        // owner-read policy (a changeset of its own, vectors-029's guard) reads every tenant's rows for the migrating
+        // role. The tables come from nexus.data_moves on the ADMIN connection (the service role holds no grant on it);
+        // the policies are asked about on the SERVICE pool. See DrivingTableIsolationCheck.
+        try {
+            dev.nexus.service.db.DrivingTableIsolationCheck.verifyAtStartup(ds, adminConnection);
+        } catch (dev.nexus.service.db.DrivingTableIsolationCheck.IsolationException e) {
+            ds.close();
+            log.error("event=driving_table_isolation_check_failed error=\"{}\"", e.getMessage());
             System.exit(1);
         }
 
@@ -637,6 +675,14 @@ public final class Main {
 
         log.info("event=service_ready port={}", service.getPort());
 
+        // nexus-f3yqd.2.13 (RDR-246): the data-move worker works the open moves of nexus.data_moves, one at a time, on its
+        // own admin connections, after the listener is bound. It reads the library install the migration above recorded.
+        // Never takes the engine down: a worker that cannot start is logged and the engine serves without it.
+        var dataMoveWorker = startDataMoveWorker(adminConnection, dmlUtilsInstaller, applicationName, singletonLock != null);
+        // nexus-f3yqd.2.17: each open or failed move is an entry of /v1/status boot_work, sampled on its own thread
+        // because the worker's is in a CALL for hours; nx doctor turns a blocked: or failed: one into a red row.
+        var moveBootWork = startMoveBootWork(bootWork, dataMoveWorker, adminConnection);
+
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving
         // JVM (the orphan would keep /health green while its lease ages out, and a
@@ -683,6 +729,12 @@ public final class Main {
         // (process exit closes the sockets, and the reaper has already ended the backends).
         Runnable stopAllButEmbedders = () -> {
             service.stop();
+            if (dataMoveWorker != null) {
+                dataMoveWorker.stop();   // cancels a CALL in flight at the server; the run resumes at the next boot
+            }
+            if (moveBootWork != null) {
+                moveBootWork.close();
+            }
             stopPciReconciler.run();
             // nexus-g17tf: right after the listener stops and the reconciler's stop
             // (both return at once: neither waits), ahead of the embedder
@@ -732,6 +784,48 @@ public final class Main {
 
         // Block main thread until shutdown
         Thread.currentThread().join();
+    }
+
+    /**
+     * Starts the data-move worker, or returns null when it cannot start. Any failure here is logged and swallowed: the
+     * engine serves whether or not a move can run, and every registered move then shows as not worked.
+     */
+    private static dev.nexus.service.datamove.DataMoveWorker startDataMoveWorker(
+            dev.nexus.service.db.AdminConnection admin, dev.nexus.service.db.DmlUtilsInstaller installer,
+            String engineApplicationName, boolean singletonLockHeld) {
+        try {
+            var worker = dev.nexus.service.datamove.DataMoveWorker.create(admin, installer,
+                dev.nexus.service.datamove.DataMoveWorker.Settings.fromEnv(System::getenv), engineApplicationName, singletonLockHeld);
+            worker.start();
+            return worker;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {   // a LinkageError or an initializer failure is the worker's, not the engine's
+            log.error("event=data_move_worker_not_started cause=\"{}\"", e.toString(), e);
+            return null;
+        }
+    }
+
+    /** The reporter of {@link #startDataMoveWorker}'s worker, or null when there is no worker or it cannot start; never throws. */
+    private static dev.nexus.service.datamove.MoveBootWork startMoveBootWork(BootWorkRegistry bootWork,
+            dev.nexus.service.datamove.DataMoveWorker worker, dev.nexus.service.db.AdminConnection admin) {
+        if (worker == null) {
+            // no worker: say so, or nx doctor reads "no data move is open" from an engine that works none
+            dev.nexus.service.datamove.MoveBootWork.reportWorkerNotRunning(bootWork);
+            return null;
+        }
+        try {
+            var reporter = new dev.nexus.service.datamove.MoveBootWork(bootWork, worker, admin);
+            reporter.start();
+            return reporter;
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable e) {
+            log.error("event=data_move_boot_work_not_started cause=\"{}\"", e.toString(), e);
+            // the worker runs and nothing reports its moves: say so, or nx doctor reads green over unseen moves
+            dev.nexus.service.datamove.MoveBootWork.reportReporterNotRunning(bootWork);
+            return null;
+        }
     }
 
     // ── One engine per database (nexus-5tykh) ────────────────────────────────

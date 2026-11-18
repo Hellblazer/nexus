@@ -136,7 +136,11 @@ things to avoid carefully; they are impossible.
    without it); its row carries the same GitHub conclusions a `kind=run` row
    does, one per run. One `gh api` read of the sha's check runs is the
    fallback. Never arm a Monitor or loop that polls check runs per push (Sam,
-   2026-11-08, ask qo36-conflicts).
+   2026-11-08, ask qo36-conflicts). The permitted wait for any branch is
+   `nx ci wait <sha> --branch <b>` as a background command: develop and main
+   read the board, every other branch (a release or feature PR) reads the sha's
+   check-runs from GitHub, one request about every 60 seconds and no faster, so
+   it is not the polling loop this rule forbids.
 
    To be woken when a develop sha's push runs have all completed, subscribe to
    `board/ci/nexus-develop--done`

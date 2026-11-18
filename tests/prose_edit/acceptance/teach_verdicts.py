@@ -11,7 +11,10 @@ usage: teach_verdicts.py OUT_DIR
 OUT_DIR holds what run-teach.sh writes:
 
   s6-1.jsonl                          scenario 6: a user-level entry, a document of another genre
-  t1 t2 t2c t3 .jsonl                 step 13, the voice card: edit, answer, confirm, then the author's yes
+  t1 t2 [t2c] t3 .jsonl               step 13, the voice card: edit, answer ("reviewed": the decisions are the
+                                      stand-in's statuses), then the author's yes. An App-decided run (SKILL.md step 12)
+                                      applies and offers the card in t2 itself; t2c, the confirmation, exists only when t2
+                                      asked "Apply" instead (the `decided` row fails it)
   t5.jsonl                            a second edit run, a fresh session, after the card is stored
   voice-card-after.json               `memory.py voice-card DOC`, run by the script after the yes
   promote-nodry.rc / .err             a real promote the script ran with no dry run (it must be refused)
@@ -19,11 +22,15 @@ OUT_DIR holds what run-teach.sh writes:
 
 Each verdict reads what the skill's own scripts printed, as the author would have seen it. Exit 1 on a FAIL, 3
 when none failed but a run is missing or NOT-MEASURABLE (it proves nothing, so it is never a pass), 0 when every
-check passed.
+check passed (a stand-in batch that would exit 0 exits 3). A run against the stand-in MarkupEditor server (a NAME.app file that says `standin`) prints `app: STAND-IN`
+first and tags each PASS row `PASS (stand-in)`: a harness measurement, not a run in the app.
 
+  decided    the decisions came from the app: in t2, a list_suggestions call, then `review.py decisions --from-file`,
+             then the dry run, then the real apply, in that order (every suggestion was decided in the app and nothing
+             was held, so the skill applies in the same turn). FAIL when t2 only asked and a confirmation turn applied
   s6         the entry is in the brief the editor read, with its layer label; the post-filter proposal holds an
              edit that replaces WORD with REPLACEMENT or a query that names one of them; the editor read brief.md
-  card       the card was shown at the offer (t2c) and not stored then; stored after the yes (t3) and shown back;
+  card       the card was shown at the offer (t2, or t2c when t2 did not apply) and not stored then; stored after the yes (t3) and shown back;
              `voice-card` after the yes returns the card the editor returned in t1 (whitespace aside)
   promote    a real promote with no dry run exits 1 naming a dry run; the skill dry-runs before it asks (t4), the
              entry's old text is in the reply that asks, and it promotes for real only after the confirm (t4c).
@@ -61,6 +68,18 @@ def _verdicts() -> ModuleType:
 
 
 V = _verdicts()
+
+
+def _review() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("prose_edit_review_verdicts_for_teach", HERE / "review_verdicts.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+RV = _review()
 
 
 def _norm(text: object) -> str:
@@ -250,6 +269,42 @@ def unclean_start(voice: Obj | None, rejections: Obj | None) -> str | None:
     return None
 
 
+def _has_real_apply(events: list[Obj] | None) -> bool:
+    return RV.real_apply(events or []) is not None
+
+
+def check_decided(t2: list[Obj] | None, t2c: list[Obj] | None, t1: list[Obj] | None = None) -> tuple[str, str]:
+    """The answer turn read the app's decisions and, every suggestion being decided and none held, applied in the same turn.
+    When t1 rendered a query or a paragraph proposal, SKILL.md step 11 Branch A asks question 1 and ends the answer turn
+    before any apply, which is right; when that deferred flow (t2 reads the app, t2c dry-runs and applies) holds, the row is
+    NOT-MEASURABLE rather than a FAIL of a correct skill, and when it is broken the row is a FAIL."""
+    counts = (RV.last(t1 or [], "review", "render") or {}).get("counts") or {}
+    if counts.get("queries") or counts.get("paragraphs"):
+        # question 1 comes first (step 11 Branch A), checked before the same-turn PASS so an apply ahead of question 1
+        # fails: the right flow reads the app in t2 and applies in t2c. A skill that never read the app, applied early,
+        # or never applied after the question, is a broken flow; a run with no t2c turn was not measured.
+        if t2c is None:
+            read_ok, read_note = RV.deferred_read(t2 or [])
+            if not read_ok:
+                return FAIL, f"t1 held a query or a paragraph proposal and t2's flow is broken (read {read_note})"
+            return NOT_MEASURABLE, f"t1 held a query or a paragraph proposal, t2 read the app ({read_note}), and no t2c turn ran"
+        deferred_ok, deferred_note = RV.deferred_flow(t2 or [], t2c)
+        if not deferred_ok:
+            return FAIL, (f"t1 rendered {counts.get('queries', 0)} queries and {counts.get('paragraphs', 0)} paragraph "
+                          f"proposals, so t2 should read the app and ask question 1 and t2c apply, and the flow is broken "
+                          f"({deferred_note})")
+        return NOT_MEASURABLE, (f"t1 rendered {counts.get('queries', 0)} queries and {counts.get('paragraphs', 0)} paragraph "
+                                f"proposals, so the answer turn asks question 1 before applying (step 11 Branch A) "
+                                f"and the same-turn apply is not exercised ({deferred_note})")
+    ok, note = RV.app_flow(t2 or [], applied=True)
+    if ok:
+        return PASS, f"t2 read list_suggestions, then decisions --from-file, then dry-ran and applied in the same turn ({note})"
+    if _has_real_apply(t2c) and not _has_real_apply(t2):
+        return FAIL, ("the run was App-decided (accept 1, reject the rest, in the app) but t2 only asked: a confirmation "
+                      f"turn applied ({note})")
+    return FAIL, f"t2 did not read the app's decisions and apply: {note}"
+
+
 def _read_events(out: Path, name: str) -> list[Obj] | None:
     path = out / f"{name}.jsonl"
     return V.load_events(path) if path.is_file() else None
@@ -301,18 +356,24 @@ def main(argv: list[str]) -> int:
         after = None
     rc = (out / "promote-nodry.rc").read_text(encoding="utf-8") if (out / "promote-nodry.rc").is_file() else None
     err = (out / "promote-nodry.err").read_text(encoding="utf-8") if (out / "promote-nodry.err").is_file() else ""
+    # the turn that applied and offered the card: t2 itself (App-decided), else the confirmation t2c
+    offer = "t2" if _has_real_apply(runs["t2"]) else "t2c"
     rows.append(row("s6", need("s6-1"), lambda: check_s6(runs["s6-1"] or [])))
-    rows.append(row("card", need("t1", "t2c", "t3"),
-                    lambda: check_card(runs["t1"] or [], runs["t2c"] or [], runs["t3"] or [], after)))
-    rows.append(row("promote", need("t1", "t2c", "t4", "t4c"),
+    rows.append(row("decided", need("t2"), lambda: check_decided(runs["t2"], runs["t2c"], runs["t1"])))
+    rows.append(row("card", need("t1", offer, "t3"),
+                    lambda: check_card(runs["t1"] or [], runs[offer] or [], runs["t3"] or [], after)))
+    rows.append(row("promote", need("t1", offer, "t4", "t4c"),
                     lambda: check_promote(rc, err, runs["t4"] or [], runs["t4c"] or [],
-                                          t1=runs["t1"] or [], t2c=runs["t2c"] or [])))
+                                          t1=runs["t1"] or [], t2c=runs[offer] or [])))
     rows.append(row("reuse", need("t5"), lambda: check_card_reuse(runs["t5"] or [], after)))
+    standin = V.standin_run(out)
+    if standin:
+        sys.stdout.write(V.STANDIN_HEADER + "\n")
     for name, verdict, note in rows:
-        sys.stdout.write(f"{name:8} {verdict:14} {note}\n")
+        sys.stdout.write(f"{name:8} {V.tag_standin(verdict, standin):14} {note}\n")
     if any(v == FAIL for _, v, _ in rows):
         return 1
-    return 3 if any(v == NOT_MEASURABLE for _, v, _ in rows) else 0
+    return V.standin_exit(3 if any(v == NOT_MEASURABLE for _, v, _ in rows) else 0, standin)
 
 
 if __name__ == "__main__":

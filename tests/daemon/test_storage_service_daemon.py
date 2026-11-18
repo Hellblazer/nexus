@@ -65,6 +65,9 @@ from tests._settle import settle
 # Helpers / Fixtures
 # ---------------------------------------------------------------------------
 
+#: An engine logback line from the logger that emits the schema-migration markers (RDR-167, nexus-dngtz.1.11).
+_SCHEMA_MIGRATOR_LINE = "2026-11-17 02:10:03,114 INFO  [main] dev.nexus.service.db.SchemaMigrator [cid=- tenant=- session=-] - "
+
 
 class _FakeClock:
     """Fixed, advanceable wall-clock surrogate."""
@@ -3084,6 +3087,25 @@ class TestExitReasonReaders:
         assert cause is not None and cause.startswith("connection refused")
         assert "hunter2" not in cause
 
+    def test_root_cause_ignores_a_forged_failed_marker(self, tmp_path: Path) -> None:
+        """RDR-167, nexus-dngtz.1.11: the marker inside a client value of another logger's ERROR line, or after
+        other message text in Main's, is not the migration failure and lends its trace no root cause."""
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            "2026-10-11 02:10:03,114 ERROR [HTTP-Dispatcher] dev.nexus.service.http.AuthFilter "
+            '[cid=nxe-0 tenant=t session=s] - event=request_failed path="/v1/event=schema_migration_failed"\n'
+            "Caused by: java.lang.IllegalStateException: forged cause one\n"
+            "2026-10-11 02:10:04,114 ERROR [main] dev.nexus.service.Main - event=other event=schema_migration_failed\n"
+            "Caused by: java.lang.IllegalStateException: forged cause two\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_root_cause(log, 0) is None
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(self._MIG + "\nCaused by: org.postgresql.util.PSQLException: ERROR: the real cause\n")
+        assert ssd.last_engine_root_cause(log, 0) == "the real cause"
+
     def test_root_cause_ignores_a_later_unrelated_error(self, tmp_path: Path) -> None:
         """nexus-bivz3.25 confirmation round: a later ERROR that is not the
         migration failure must not lend its cause to the migration's line."""
@@ -3167,6 +3189,78 @@ def test_replace_quiesce_start_service_imports_the_launcher(tmp_path: Path) -> N
     with patch.object(daemon_mod, "ensure_storage_supervisor") as ensure:
         replace_quiesce.default_ops(tmp_path).start_service()
     ensure.assert_called_once_with(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# nexus-dngtz.1.5: the engine log line now carries [cid= tenant= session=]
+# ---------------------------------------------------------------------------
+class TestRequestScopedEngineLogFormat:
+    """RDR-167 Step 3: ``logback.xml`` prints ``[cid=.. tenant=.. session=..]`` between the logger name
+    and `` - ``. The readers anchor on the line's front (``_ENGINE_LOGBACK_LINE``, ``_ENGINE_ERROR_LINE``)
+    and on message text, so the block must change nothing they read. The Java side pins the pattern against
+    the shipped logback.xml (``AuthFilterCorrelationTest``); these pin the readers against the new shape."""
+
+    _BARE_ERR = (
+        "2026-11-17 02:10:03,114 ERROR [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
+        'event=pg_session_env_invalid error="X must be in 60..3600, got: 10"'
+    )
+    _REQUEST_ERR = (
+        "2026-11-17 02:10:05,200 ERROR [HTTP-Dispatcher] dev.nexus.service.http.VectorHandler "
+        "[cid=nxe-0123456789abcdef0123456789abcdef tenant=tenant-a session=session-a1] - "
+        "event=vector_write_failed collection=docs__x"
+    )
+    _BARE_INFO = (
+        "2026-11-17 02:10:06,000 INFO  [main] dev.nexus.service.Main [cid=- tenant=- session=-] - shutdown complete"
+    )
+    _MIG = (
+        "2026-11-17 02:10:03,114 ERROR [main] dev.nexus.service.Main [cid=- tenant=- session=-] - "
+        'event=schema_migration_failed error="Liquibase migration failed"'
+    )
+
+    def test_the_front_anchored_regexes_match_the_new_lines_as_they_matched_the_old(self) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        for line in (self._BARE_ERR, self._REQUEST_ERR, self._BARE_INFO):
+            assert ssd._ENGINE_LOGBACK_LINE.match(line), line
+        assert ssd._ENGINE_ERROR_LINE.match(self._BARE_ERR)
+        assert ssd._ENGINE_ERROR_LINE.match(self._REQUEST_ERR)
+        assert not ssd._ENGINE_ERROR_LINE.match(self._BARE_INFO), "an INFO line is not an ERROR line"
+        # the old shape, unchanged
+        assert ssd._ENGINE_ERROR_LINE.match("2026-10-11 02:10:03,114 ERROR [main] d.n.service.Main - x")
+
+    def test_last_engine_error_line_returns_the_whole_new_format_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._INFO_BEFORE + "\n" + self._BARE_ERR + "\n\tat dev.nexus.service.Main.main(Main.java:166)\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_error_line(log, 0) == self._BARE_ERR
+        log.write_text(self._BARE_ERR + "\n" + self._REQUEST_ERR + "\n", encoding="utf-8")
+        assert ssd.last_engine_error_line(log, 0) == self._REQUEST_ERR
+
+    _INFO_BEFORE = "2026-11-17 02:10:02,000 INFO  [main] dev.nexus.service.Main [cid=- tenant=- session=-] - boot"
+
+    def test_boot_failure_reason_follows_the_final_new_format_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(self._BARE_ERR + "\n\tat dev.nexus.service.Main.main(Main.java:166)\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) == self._BARE_ERR
+        log.write_text(self._BARE_ERR + "\n" + self._BARE_INFO + "\n", encoding="utf-8")
+        assert ssd.engine_boot_failure_reason(log) is None, "an old ERROR before a clean stop"
+
+    def test_root_cause_reads_under_a_new_format_migration_failure_line(self, tmp_path: Path) -> None:
+        from nexus.daemon import storage_service_daemon as ssd
+
+        log = tmp_path / "storage_service_native.log"
+        log.write_text(
+            self._MIG + "\nCaused by: org.postgresql.util.PSQLException: ERROR: run the repair first\n"
+            + self._BARE_INFO + "\nCaused by: java.io.IOException: after the trace ended\n",
+            encoding="utf-8",
+        )
+        assert ssd.last_engine_root_cause(log, 0) == "run the repair first"
 
 
 # ---------------------------------------------------------------------------
@@ -5220,7 +5314,7 @@ class TestWaitForServiceReadyMigrationAware:
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=NEVER_ALIVE_PID)  # the readiness failure SIGTERMs its group for real
 
-        log_lines = iter([["event=schema_migration_start"]])
+        log_lines = iter([[_SCHEMA_MIGRATOR_LINE + "event=schema_migration_start"]])
 
         def fake_log_reader() -> list[str]:
             return next(log_lines, [])
@@ -5261,7 +5355,7 @@ class TestWaitForServiceReadyMigrationAware:
 
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=51010)
-        log_lines = iter([["event=schema_migration_start"]])
+        log_lines = iter([[_SCHEMA_MIGRATOR_LINE + "event=schema_migration_start"]])
         seen_during: list[str | None] = []
 
         def health(_port: int) -> HealthProbe:
@@ -5292,7 +5386,7 @@ class TestWaitForServiceReadyMigrationAware:
 
         sup = _make_supervisor(config_dir, clock)
         fake_proc = _FakeProc(pid=51011)
-        log_lines = iter([["event=schema_migration_start"]])
+        log_lines = iter([[_SCHEMA_MIGRATOR_LINE + "event=schema_migration_start"]])
         polls = {"n": 0}
 
         def poll() -> int | None:

@@ -16,7 +16,12 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog import sensitivity_doctor as sd
+from nexus.catalog.factory import _SharedServiceCatalogHandle
+from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable
+from nexus.commands import doctor as doctor_mod
+from nexus.commands.catalog_cmds.doctor import EXIT_COULD_NOT_CHECK
 from nexus.cli import main
+from nexus.service_handles import SharedClientSlot
 
 
 def _doc(tumbler: str, collection: str = "knowledge__sens__bge-base-en-v15-768__v1", sensitive: bool = True):
@@ -30,10 +35,14 @@ class _Reader:
     def catalog_sensitivity_probe(self):
         return self._supported, "1.2.3" if self._supported else "0.0.1"
 
-    def all_documents(self, limit=0):
+    def sensitive_documents(self, limit=1000, *, strict=False):
+        """The engine's bounded list (``GET /sensitive``): the sensitive documents only, uncapped. The rows make
+        no catalog walk, so this is the only read a row has (RDR-241, nexus-uwggq.1.8)."""
         if self._raises:
             raise self._raises
-        return self._docs
+        sensitive = [d for d in self._docs if d.sensitive]
+        return {"count": len(sensitive), "capped": False,
+                "documents": [{"tumbler": d.tumbler, "physical_collection": d.physical_collection} for d in sensitive]}
 
 
 class _Aspects:
@@ -119,7 +128,23 @@ def test_a_row_that_examined_no_sensitive_document_is_not_applicable_never_a_pas
     assert report["status"] == sd.NOT_APPLICABLE
     assert report["findings"] == []
     text = "\n".join(sd.render_text(report))
-    assert "not applicable" in text and "[✓]" not in text and "PASS" not in text.upper().replace("NOT APPLICABLE", "")
+    assert ("not applicable" in text or "not checked:" in text) and "[✓]" not in text
+    assert "PASS" not in text.upper().replace("NOT APPLICABLE", "")
+
+
+def test_a_list_that_fails_is_not_checked_with_the_cause_and_not_the_exception_text() -> None:
+    report = sd.check_sensitive_in_aspect_eligible(
+        reader=_Reader([], raises=OSError("engine unreachable")), aspects=_Aspects(), select=lambda c: object())
+    assert report["status"] == sd.NOT_APPLICABLE
+    assert report["reason"] == ("not checked: the engine could not be reached or failed; run nx doctor again; "
+                              "if it persists, check the engine's logs or the token")
+
+
+def test_an_engine_without_the_column_is_not_checked_and_says_what_to_do() -> None:
+    report = sd.check_sensitive_with_aspects(reader=_Reader([_doc("1.1.1")], supported=False))
+    assert report["reason"] == ("not checked: engine 0.0.1 does not advertise catalog_sensitivity_supported; "
+                                "a local engine needs a newer engine-service, and on a managed engine the public "
+                                "edge may trim the flag (ask the engine's operator)")
 
 
 def test_an_unreadable_aspect_store_is_not_applicable_with_the_cause_not_a_false_red() -> None:
@@ -130,6 +155,8 @@ def test_an_unreadable_aspect_store_is_not_applicable_with_the_cause_not_a_false
     report = sd.check_sensitive_with_aspects(
         reader=_Reader([_doc("1.1.1")]), aspects=Broken(), queue=object(), queued_doc_ids=lambda q: set())
     assert report["status"] == sd.NOT_APPLICABLE and "aspects store down" in report["reason"]
+    assert report["reason"].startswith("not checked: the aspect state could not be read (OSError: ")
+    assert report["reason"].endswith("); run nx doctor again") and sd.is_not_checked(report)
 
 
 # ── sensitive_in_external_embedder (nexus-rfvyy.8.7) ────────────────────────
@@ -176,7 +203,7 @@ def test_external_embedder_with_nothing_examined_is_not_applicable_never_a_pass(
     report = sd.check_sensitive_in_external_embedder(reader=reader)
     assert report["status"] == sd.NOT_APPLICABLE and report["findings"] == []
     text = "\n".join(sd.render_text(report))
-    assert "not applicable" in text and "[✓]" not in text
+    assert ("not applicable" in text or "not checked:" in text) and "[✓]" not in text
 
 
 # ── sensitivity.mcp_output (nexus-rfvyy.8.7 note: the Day 2 Verify column) ──
@@ -223,6 +250,113 @@ def test_nx_doctor_runs_the_two_new_rows_and_neither_gates(monkeypatch, capsys) 
     assert doctor_mod._run_check_sensitivity_mcp_output() is None
     out = capsys.readouterr().out
     assert "sensitive_in_external_embedder" in out and "sensitivity_mcp_output" in out
+
+
+# ── nx catalog doctor --sensitive-with-aspects: the exit status when the row could not look ───────
+
+
+class _NoList(_Reader):
+    """An engine that does not answer the sensitive list."""
+
+    def sensitive_documents(self, limit=1000, *, strict=False):
+        raise SensitiveListUnavailable(SensitiveListUnavailable.TIMEOUT)
+
+
+def _run_catalog_doctor(monkeypatch, reader, *flags):
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+    return CliRunner().invoke(main, ["catalog", "doctor", *flags])
+
+
+def test_the_could_not_check_exit_code_is_its_own_code() -> None:
+    assert EXIT_COULD_NOT_CHECK == 3
+    assert EXIT_COULD_NOT_CHECK not in {0, 1, 2}, "pass, fail and a usage error keep their codes"
+
+
+def test_catalog_doctor_with_aspects_exits_could_not_check_when_the_row_reads_not_checked(monkeypatch) -> None:
+    result = _run_catalog_doctor(monkeypatch, _NoList([_doc("1.1.1")]), "--sensitive-with-aspects")
+    assert result.exit_code == EXIT_COULD_NOT_CHECK, result.output
+    assert "not checked: the engine did not answer in time or was unavailable; run nx doctor again" in result.output
+    assert "[✓]" not in result.output
+
+
+def test_catalog_doctor_with_aspects_json_still_prints_the_row_when_it_exits_could_not_check(monkeypatch) -> None:
+    result = _run_catalog_doctor(monkeypatch, _NoList([_doc("1.1.1")]), "--sensitive-with-aspects", "--json")
+    assert result.exit_code == EXIT_COULD_NOT_CHECK, result.output
+    payload = json.loads(result.stdout)
+    assert payload["sensitive_with_aspects"]["status"] == "not_applicable"
+    assert payload["sensitive_with_aspects"]["reason"].startswith("not checked:")
+
+
+def test_catalog_doctor_with_aspects_exits_zero_on_a_catalog_with_no_sensitive_document(monkeypatch) -> None:
+    """It looked and found none: not "could not check"."""
+    result = _run_catalog_doctor(monkeypatch, _Reader([_doc("1.1.1", sensitive=False)]), "--sensitive-with-aspects")
+    assert result.exit_code == 0, result.output
+    assert "not applicable - no sensitive documents in this catalog" in result.output
+
+
+def test_catalog_doctor_with_aspects_still_exits_one_on_a_fail(monkeypatch) -> None:
+    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: _failing_report())
+    result = _run_catalog_doctor(monkeypatch, _Reader([]), "--sensitive-with-aspects")
+    assert result.exit_code == 1, result.output
+
+
+def test_catalog_doctor_with_aspects_exits_zero_on_a_pass(monkeypatch) -> None:
+    passing = {"name": sd.WITH_ASPECTS, "status": sd.PASS, "reason": "", "sensitive_documents": 1, "findings": []}
+    monkeypatch.setattr(sd, "check_sensitive_with_aspects", lambda **kw: passing)
+    result = _run_catalog_doctor(monkeypatch, _Reader([]), "--sensitive-with-aspects")
+    assert result.exit_code == 0, result.output
+
+
+def test_the_warn_rows_reading_not_checked_do_not_change_the_exit_status(monkeypatch) -> None:
+    """Only the gating row has a "could not check" status; the WARN rows keep "does not change the exit status"."""
+    result = _run_catalog_doctor(monkeypatch, _NoList([_doc("1.1.1")]),
+                                 "--sensitive-in-aspect-eligible", "--sensitive-in-external-embedder")
+    assert result.exit_code == 0, result.output
+    assert result.output.count("not checked:") == 2
+
+
+def test_nx_doctor_keeps_a_not_checked_row_non_gating(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _NoList([_doc("1.1.1")]))
+    assert doctor_mod._run_check_sensitive_with_aspects() is False
+    assert "not checked:" in capsys.readouterr().out
+
+
+# ── a reader whose attribute reads raise: the production handle when the service client cannot be built ─────
+
+
+def _handle_over_a_failing_build():
+    """The real lazy handle over a slot whose build raises: ``__getattr__`` builds the client and re-raises the failure,
+    which is a RuntimeError and not an AttributeError, so ``getattr(reader, name, default)`` does not return the
+    default. No client is ever built, so nothing touches an engine."""
+    def build():
+        raise RuntimeError("service client cannot be built")
+
+    return _SharedServiceCatalogHandle(SharedClientSlot(build=build, close=lambda client: None))
+
+
+def test_a_reader_whose_attribute_reads_raise_is_not_checked_and_the_handler_does_not_raise() -> None:
+    report = sd.check_sensitive_with_aspects(reader=_handle_over_a_failing_build(), aspects=_Aspects(),
+                                             queue=object(), queued_doc_ids=lambda q: set())
+    assert report["status"] == sd.NOT_APPLICABLE and sd.is_not_checked(report), report
+    assert report["reason"].startswith("not checked: the catalog could not be read (RuntimeError: ")
+
+
+def test_the_scrubber_helper_survives_a_reader_whose_base_url_read_raises() -> None:
+    class Hostile:
+        @property
+        def _base_url(self):
+            raise RuntimeError("no client")
+
+    assert sd._scrubbed(ValueError("plain text"), Hostile()) == "plain text"
+    assert sd._scrubbed(ValueError("plain text"), None) == "plain text"
+
+
+def test_catalog_doctor_with_aspects_exits_could_not_check_when_the_service_client_cannot_be_built(monkeypatch) -> None:
+    """Exit 3, not 1 and not a traceback: the state the exit code exists for."""
+    result = _run_catalog_doctor(monkeypatch, _handle_over_a_failing_build(), "--sensitive-with-aspects")
+    assert result.exit_code == EXIT_COULD_NOT_CHECK, (result.output, repr(result.exception))
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "not checked: the catalog could not be read (RuntimeError: " in result.output
 
 
 # ── the wiring, on the engine substrate ─────────────────────────────────────

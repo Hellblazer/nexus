@@ -1326,10 +1326,14 @@ def _resolve_enrich_targets(
                 continue
             found_any = False
             # Step 1: exact match on absolute or relative form.
-            for path_variant in (sp, sp.lstrip("/")):
-                tumbler_str = reader.lookup_doc_id_by_collection_and_path(
-                    collection_name or "", path_variant
-                )
+            for path_variant in filter(str.strip, (sp, sp.lstrip("/"))):  # skip a blank variant ("/" has no relative form)
+                # No collection means "any collection": the explicit owner-agnostic path lookup, never a blank
+                # collection (the engine reads a blank one as absent, and the client now refuses it; nexus-uwggq.1.9).
+                if collection_name:
+                    tumbler_str = reader.lookup_doc_id_by_collection_and_path(collection_name, path_variant)
+                else:
+                    by_path = reader.find_by_file_path(path_variant)
+                    tumbler_str = str(by_path.tumbler) if by_path is not None else ""
                 if tumbler_str:
                     target_tumblers.append(Tumbler.parse(tumbler_str))
                     found_any = True
@@ -4048,7 +4052,7 @@ def aspects_list_cmd(
 @enrich.command(name="aspects-backfill-uri")
 @click.option(
     "--collection", default="",
-    help="Repair one collection. Default: every collection holding aspect rows.",
+    help="Repair one collection. Default: every collection the catalog's live documents live in.",
 )
 @click.option(
     "--apply", is_flag=True,
@@ -4087,7 +4091,7 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
         else:
             collections = sorted({
                 c["name"] if isinstance(c, dict) else str(c)
-                for c in _aspect_bearing_collections(db)
+                for c in _catalog_collections(db)
             })
 
         per_collection: list[dict] = []
@@ -4159,12 +4163,15 @@ def aspects_backfill_uri_cmd(collection: str, apply: bool, as_json: bool) -> Non
         click.echo("Dry run — re-run with --apply to write.")
 
 
-def _aspect_bearing_collections(db) -> list[str]:
-    """Collection names that hold at least one aspect row.
+def _catalog_collections(db) -> list[str]:
+    """Collection names the catalog's live documents live in, sorted.
 
-    Derived from the catalog's collection projection rather than a distinct
-    scan of ``document_aspects``: the store exposes no such verb, and a
-    per-collection list is what the planner consumes anyway.
+    Not only collections that hold aspect rows: a collection with none plans
+    nothing, so the command's output is the same.
+
+    One engine request (``GET /v1/catalog/docs/distinct-collections``), not a walk
+    of every document: the planner consumes a per-collection list, and the catalog
+    already holds the distinct physical collections. RDR-241.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
@@ -4173,8 +4180,4 @@ def _aspect_bearing_collections(db) -> list[str]:
         raise click.ClickException(
             "Catalog is empty. Index or store documents first."
         )
-    names = {
-        d.physical_collection for d in cat.all_documents()
-        if getattr(d, "physical_collection", "")
-    }
-    return sorted(names)
+    return sorted(cat.distinct_doc_collections() or [])

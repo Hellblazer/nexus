@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-246 Minimum Viable Validation (nexus-f3yqd.2.22): the TEST-ONLY changeset that registers one data move over
+    nexus.chunks. It is never shipped: it lives under src/test/resources, and scripts/data_move_mvv.py make-jar copies a
+    gate jar and adds it (db/changelog/mvv-chunks-move.xml, included before grants-nexus-svc) so the harness can boot
+    "this branch's engine with one move registered". No main changelog includes it.
+
+    mvv_n is the move's counter: the template adds 1 to every row it is given, so a row moved exactly once ends at 1 and a
+    row moved twice (a chunk replayed after a kill) ends at 2. The verification returns the rows still at NULL.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="mvv-chunks-column-1" author="nexus-f3yqd.2.22">
+        <comment>MVV test column: the move's counter, nullable with no default, so a metadata-only change</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks ADD COLUMN mvv_n integer;
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE nexus.chunks DROP COLUMN mvv_n</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="mvv-chunks-move-1" author="nexus-f3yqd.2.22">
+        <comment>Register the MVV test move over nexus.chunks: one INSERT, nothing else</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('mvv-chunks-stamp',
+        'UPDATE <driving_table> SET mvv_n = coalesce(t.mvv_n, 0) + 1 WHERE <chunking_clause>',
+        'nexus', 'chunks', 1000, 0, 600000,
+        'SELECT 1 FROM nexus.chunks t WHERE t.mvv_n IS NULL AND (t.tenant_id = $1 OR $1 IS NULL)',
+        NULL, 'mvv-chunks-move-1');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'mvv-chunks-stamp'</sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

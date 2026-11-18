@@ -25,6 +25,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_EXCEPTION
+from contextvars import copy_context
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -2398,7 +2399,10 @@ def pipeline_index_pdf(
         all_futures: set[Future] = set()
         try:
             try:
+                # RDR-167: each submit runs in a fresh copied Context, so the correlation id reaches the
+                # stage thread (a bare submit does not carry a ContextVar; one Context cannot be shared).
                 extract_future = pool.submit(
+                    copy_context().run,
                     _extractor_loop_bound_to_cancel, pdf_path, content_hash, db, cancel,
                     extractor=extractor,
                     extraction_done=extraction_done,
@@ -2407,6 +2411,7 @@ def pipeline_index_pdf(
                 )
                 all_futures.add(extract_future)
                 chunk_future = pool.submit(
+                    copy_context().run,
                     chunker_loop, content_hash, db, cancel, embed_fn,
                     extraction_done=extraction_done, chunking_done=chunking_done,
                     pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
@@ -2418,6 +2423,7 @@ def pipeline_index_pdf(
                     hooks = HookRegistry()
                     install_default_hooks(hooks)
                 upload_future = pool.submit(
+                    copy_context().run,
                     uploader_loop, content_hash, db, t3, collection, cancel,
                     chunking_done,
                     catalog_doc_id=doc_id,

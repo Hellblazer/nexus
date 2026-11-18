@@ -133,6 +133,7 @@ import structlog
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     managed_service,
+    refuses_managed_unattended,
     refuses_unbounded_read,
     unattended_verify_refusal,
 )
@@ -153,7 +154,9 @@ from nexus.upgrade_ladder.protocol import (
     RungStatus,
 )
 from nexus.upgrade_ladder.registry import RUNG_RDR192_MANIFEST_BACKFILL
+from nexus.upgrade_ladder.retire_keys_state import swept_pin_reason
 from nexus.upgrade_ladder.runner import installed_package_version
+from nexus.upgrade_ladder.rungs.rdr192_memo import MEMO_PROJECT, MEMO_TITLE, ResidualMemo, T2ResidualMemo  # noqa: F401 — re-exported: the module's public names
 
 _log = structlog.get_logger(__name__)
 
@@ -173,13 +176,10 @@ DEFAULT_MAX_PASSES = 3
 #: ``totals`` (``VectorHandler``: "always carries all five bucket keys").
 _BUCKETS = ("superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified")
 
-#: T2 note holding the last failed attempt's residual fingerprint.
-MEMO_PROJECT = "upgrade_ladder_state"
-MEMO_TITLE = f"{RUNG_NAME}.residual"
 #: T2 note holding per-collection census readings and the time-limit cut count
-#: (nexus-y67n5; see :mod:`nexus.upgrade_ladder.census_progress`).
+#: (nexus-y67n5; see :mod:`nexus.upgrade_ladder.census_progress`). The residual-fingerprint memo note is
+#: :mod:`nexus.upgrade_ladder.rungs.rdr192_memo`.
 PROGRESS_TITLE = f"{RUNG_NAME}.census-progress"
-_MEMO_TTL_DAYS = 30
 
 #: Cap on the record ``detail`` (a TEXT column; a summary, not a dump).
 _DETAIL_MAX = 600
@@ -684,57 +684,6 @@ def _default_record() -> CompletionRecord | None:
         return store.completions().get(RUNG_NAME)
 
 
-class ResidualMemo(Protocol):
-    """Durable, per-tenant note of the last failed attempt."""
-
-    def load(self) -> dict[str, Any] | None: ...
-    def save(self, note: dict[str, Any]) -> None: ...
-    def clear(self) -> None: ...
-
-
-class T2ResidualMemo:
-    """The memo as a T2 memory note (engine-backed PG, per tenant). No local
-    state file and no new table: T2 memory already carries operational state
-    of this kind (``taxonomy_discover_health``). Every failure degrades to
-    'no memo', which only costs a retry."""
-
-    @contextlib.contextmanager
-    def _store(self) -> Iterator[Any]:
-        from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred; keeps cold CLI start cheap
-
-        store = HttpMemoryStore()
-        try:
-            yield store
-        finally:
-            store.close()
-
-    def load(self) -> dict[str, Any] | None:
-        try:
-            with self._store() as store:
-                row = store.get(project=MEMO_PROJECT, title=MEMO_TITLE)
-            return json.loads(row["content"]) if row else None
-        except Exception as exc:  # noqa: BLE001 — a memo that cannot be read is no memo
-            _log.debug("rdr192_residual_memo_load_failed", error=str(exc))
-            return None
-
-    def save(self, note: dict[str, Any]) -> None:
-        try:
-            with self._store() as store:
-                store.put(
-                    MEMO_PROJECT, MEMO_TITLE, json.dumps(note, sort_keys=True),
-                    tags="upgrade-ladder,rdr192", ttl=_MEMO_TTL_DAYS, agent="nx-upgrade",
-                )
-        except Exception as exc:  # noqa: BLE001 — losing the memo costs one retry, never correctness
-            _log.warning("rdr192_residual_memo_save_failed", error=str(exc))
-
-    def clear(self) -> None:
-        try:
-            with self._store() as store:
-                store.delete(project=MEMO_PROJECT, title=MEMO_TITLE)
-        except Exception as exc:  # noqa: BLE001 — a stale memo is harmless: it is keyed on the residual fingerprint
-            _log.debug("rdr192_residual_memo_clear_failed", error=str(exc))
-
-
 @contextlib.contextmanager
 def _cross_process_lock() -> Iterator[bool]:
     """Non-blocking exclusive lock so concurrent session starts do not stack
@@ -785,6 +734,8 @@ class Rdr192ManifestBackfillRung:
     lock_factory: Callable[[], contextlib.AbstractContextManager[bool]] = _cross_process_lock
     #: Is the engine a managed service? (nexus-75w5d: the unattended-run refusal in :meth:`converge`.)
     managed_fn: Callable[[], bool] = managed_service
+    #: The retire-keys sweep's completion record (RDR-236 pin, :func:`swept_pin_reason`); ``None``: the ledger's.
+    sweep_record_fn: RecordFn | None = None
     now_fn: Callable[[], datetime] = lambda: datetime.now(UTC)  # noqa: E731 — a dataclass default seam, not a def
     max_passes: int = DEFAULT_MAX_PASSES
     name: str = RUNG_NAME
@@ -834,6 +785,10 @@ class Rdr192ManifestBackfillRung:
             None,
         )
 
+    def _sweep_pin(self) -> str | None:
+        """Why this rung does not run: the retire-keys sweep completed on the install (nexus-6pfgb.43). ``None`` otherwise."""
+        return swept_pin_reason(self.sweep_record_fn, ledger_default=self.record_fn is _default_record)
+
     # ── detect ───────────────────────────────────────────────────────────────
 
     def detect(self) -> RungStatus:
@@ -861,6 +816,31 @@ class Rdr192ManifestBackfillRung:
             ledger_error = f" (the completion ledger could not be read: {exc})"
         if record is not None and record.package_version == version:
             return RungStatus(applicable=True, converged=True)
+        if (pinned := self._sweep_pin()) is not None:
+            return RungStatus(applicable=False, converged=False, pending_detail=pinned)
+        if refuses_managed_unattended(self.managed_fn):
+            # converge() refuses this run anyway (nexus-75w5d). Said here, as the sibling data rungs do, the walk
+            # skips the rung with no deferral warning and `nx doctor` lists it once as not checked; refused only
+            # in converge, it logged a warning at every unattended session start after each version bump. The runner
+            # still holds this rung's hard-edge dependents (RungRun.declined). On a local engine an unattended run is
+            # not refused: it censuses and backfills within the `--auto` time limit, resuming from its progress note.
+            if record is not None:
+                held = (
+                    f"the completion recorded at package version {record.package_version} stands (the engine's "
+                    "gate reads a record at any version)"
+                )
+            elif ledger_error:
+                held = ledger_error.strip().removeprefix("(").removesuffix(")")  # "the completion ledger could not be read: ..."
+            else:
+                held = "no completion is recorded, so the engine's reaper stays refused"
+            note = guarded("residual_note", self.memo.load, None)
+            if note and note.get("detail"):
+                held += f", and the last attempt ({note.get('at', '?')}) left a residual: {note['detail']}"
+            reason = (
+                f"{held}; unattended `nx upgrade` does not census a managed service's collections "
+                f"(one engine scan each); {INTERACTIVE_REMEDY}"
+            )
+            return RungStatus(applicable=False, converged=False, pending_detail=reason)
 
         if record is not None:
             state = (
@@ -886,6 +866,8 @@ class Rdr192ManifestBackfillRung:
         self._last_clean = None
         self._cut_at = None
         self._tally = CensusTally()
+        if (pinned := self._sweep_pin()) is not None:
+            return ConvergeResult(ConvergeOutcome.DEFERRED, detail=pinned)
         if refuses_unbounded_read(self.managed_fn):
             # nexus-75w5d: the census is one engine statement per collection, a per-chunk anti-join
             # whose cost grows with the collection (112 to 152 s on one 80,000-chunk collection, with no

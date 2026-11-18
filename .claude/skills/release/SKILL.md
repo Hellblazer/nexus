@@ -63,6 +63,7 @@ If it exits non-zero, STOP — do not proceed with the PyPI release. The gate fa
   ```
   Name the EXACT tag this release pairs with — never a guess. The flag accepts a below-floor cloud solely where that tag independently verifies as (a) a published, non-draft GH release carrying the `nexus-service-linux-amd64` asset (`gh release view` — a missing/failing `gh` fails the gate, it does not pass it), (b) exactly equal to `REQUIRED_ENGINE_VERSION`, (c) the newest published `engine-service-v*` tag, and (d) authored within 72h (`--paired-tag-max-age-hours` to override); the wire-contract ledger and the DATA EFFECT relay must also pass. Any single miss stays red with a named reason — this is a stricter, mechanized check, not a looser one. On acceptance it prints an explicit "PAIRED MODE" acknowledgment naming both versions and the POST-TAG VERIFY obligation. Do that verify: once the deploy lands, re-run the SAME command WITHOUT `--paired-deploy`. A still-behind cloud at that point is real drift, escalate loudly, do not re-arm the flag to silence it.
 - **a gated engine tag was never pinned** (`REQUIRED_ENGINE_VERSION` behind the newest published tag) → bump `REQUIRED_ENGINE_VERSION` to that tag (this alone also moves `PINNED_SERVICE_TAG`). This is the local-install delivery failure: cloud users get the deployed engine regardless, local-mode users get ONLY what this constant names, so an unpinned tag reaches nobody. When the unpinned tag carries engine halves of features whose CLIENT halves ship in THIS release, the bump into this release is mandatory, not optional — floor-lag ships a client whose pinned engine lacks the engine halves of its own features (the 7.1.0/v0.1.62 inversion).
+- **the release bumps `REQUIRED_ENGINE_VERSION`** (the bullet above, or any pin move) → read the `bundle-canary` job of that tag's engine release run (`gh run list --workflow=engine-service-release.yml --branch=<tag> --limit 1`, then `gh run view <id> --json jobs` and the job's summary; a call is a job of that run, and `gh run list --workflow=engine-bundle-canary.yml` shows only hand dispatches) and carry its measured count into `tests/ddl_ceiling.toml` `[python_unit] migration_ddl_per_worker` in the release commit, with the reason (the bundle's PostgreSQL or pgvector change, from the summary) in the commit message; a canary warning "changes migration DDL from P to T" names the new value T. No such job (the tag predates the canary): dispatch it by hand (`gh workflow run engine-bundle-canary.yml --ref develop -f tag=<tag>`), never while a `bundle-canary` job is running; the release PR's CI is otherwise the first to measure the new bundle (conexus 8.3.0, 2431 to 2578).
 
 Re-run (without `--paired-deploy`) until it exits 0 — including the post-tag verify for a paired release.
 
@@ -636,6 +637,43 @@ Wall time, from the measured parts: about 50 to 75 minutes. Preparing the store 
 about 13 minutes for each 86,000-row start and about 20 minutes for the five-collection
 7.76.0 start; `nx upgrade` takes 12 to 14 s from the other starts and 209 to 211 s from
 7.76.0; the PCI end wait adds up to 900 s; installs and the wheel build come on top.
+
+Seed cache (preparation only; no criterion, ceiling, limit, judgment or exit code
+changes). The cache touches the preparation in item 1 above and nothing else, and the
+wall-time sentence above describes a cache miss (a hit replaces the preparation with a copy,
+a PG start and stop, and a catalog rewrite). Once a start's store is prepared, the driver
+saves it on the run host under `~/.cache/lab-remote/upgrade-rehearsal-seeds/`
+(`$NEXUS_UPGRADE_REHEARSAL_SEED_CACHE` moves the root; it is never the work dir or the repo),
+keyed on the previous release, the engine tag that release pins, the platform, the Python, the
+prepare command and its collection arguments, and the sha256 of the seeder scripts. A later
+run with the same key restores that store, its PG cleanly stopped, in place of running the
+seeder, and goes on to start-old as before. One entry is kept per start and per prepare
+family (real or `--standin`), and an entry unused for 30 days is removed by the next run, so
+the host holds the starts of the releases cut in the last 30 days, about 2.4 to 2.6 GB each
+(three starts a release). An entry is used only when its destination is empty, it matches its
+manifest (every path, size and the sha256 of every file), its cluster reads as cleanly shut
+down, and a row count taken with PG started alone meets the 50,000-row floor and equals the
+manifest's. Any doubt (a corrupt, partial or mismatched entry, a failing read, a count that
+differs) seeds in full, the table says why, and an entry found defective is deleted; a
+restore that merely could not finish (a lock, a full disk, the 15-minute ceiling) leaves the
+entry alone.
+
+What a hit shows the judged steps, against a seed. The store is as old as its entry, and the
+table says when it was saved. The PG port is a fresh free one, written to `pg_credentials` and
+`postgresql.conf`, as a seed gets. The old run dir is rewritten to the new one in the small
+text files and symlinks of the copy, and in every `repo_root`, `source_uri`, `file_path` and
+`repo_path` text column of the `nexus` schema, by SQL with PG started alone, so `nx doctor`
+sees no dead catalog owner; the restore is refused unless the rows naming the old dir match
+the count recorded at save and none are left. Chunk titles, chunk metadata and the old
+engine and PG logs still hold the seeding run's dir as text; nothing judged reads them (the
+search step matches the sentinel note's text). The row counts before and after `nx upgrade`
+are PG's own read of the store that step ran on, as for a seed. The prepare row of each table
+is a setup row, not a step, and reads `store restored from cache <key> (saved <date>)` on a
+hit and `seeded (cache miss, saved <key>)` on a miss; say which in the relay. The cache is on
+by default, so a run that uses it is still the release gate (Sam, 2026-11-16, by dialog in
+halcyon's session: "On by default, counts as the gate"). `--no-seed-cache` seeds every
+start in full and, like any option set to other than its default, makes a pass NOT THE RELEASE
+GATE; a custom `--prepare-cmd` bypasses the cache.
 
 The plugin-only fast lane does not run it: the wheel and engine that lane ships are the
 base tag's, apart from the version, so there is nothing new to rehearse.

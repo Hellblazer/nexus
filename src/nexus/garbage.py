@@ -40,6 +40,8 @@ from typing import Any, Protocol
 
 import structlog
 
+from nexus.errors import BlankFilterError
+
 _log = structlog.get_logger(__name__)
 
 #: A rotated log (``name.log.N``) older than this is deleted.
@@ -286,7 +288,12 @@ def reclaim_catalog_garbage(
     """
     deleted = 0
     for link in (reader or client).orphaned_links():
-        deleted += client.unlink(link["from_tumbler"], link["to_tumbler"], link["link_type"])
+        try:
+            deleted += client.unlink(link["from_tumbler"], link["to_tumbler"], link["link_type"])
+        except BlankFilterError as exc:
+            # A link stored with a blank type (upsertLink does not validate it) cannot be named to the guarded
+            # unlink; skip it loudly rather than abort the reclaim part-way (nexus-uwggq.1.9).
+            _log.warning("garbage_catalog_reclaim_link_skipped", link=link, reason=str(exc))
     result = client.purge_trash(older_than_days=TRASH_MAX_AGE_DAYS, dry_run=False)
     report = ReclaimReport(
         links_deleted=deleted,

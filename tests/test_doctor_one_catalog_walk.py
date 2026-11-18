@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from nexus import health
+from nexus.commands import doctor as doctor_mod
 from nexus.upgrade_ladder.registry import RUNG_MANIFEST_SECTION_LABELS, LadderRegistry
 from nexus.upgrade_ladder.rungs.manifest_section_labels import ManifestSectionLabelsRung
 
@@ -117,6 +118,22 @@ def test_check_index_runs_does_not_walk_the_catalog_either(monkeypatch) -> None:
     assert cat.calls == 0, f"{cat.calls} full catalog walks in one --check-index-runs run"
     for label in ("stale index-run fences", "failed index runs with hidden chunks", "tumbler allocator drift"):
         assert rows[label].skipped is True and "census routes" in rows[label].detail, rows[label]
+
+
+def test_the_sensitivity_rows_do_not_walk_the_catalog_and_read_not_checked(monkeypatch, capsys) -> None:
+    """RDR-241 (nexus-uwggq.1.8): the supplementary sweep's three sensitive-document rows read the engine's bounded
+    list. Over a 43,700-document catalog that has no such list they walk nothing and each reads not checked,
+    and a not-checked row does not fail the sweep."""
+    cat = CountingCatalog()
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: cat)
+    keep = {"sensitive-in-aspect-eligible", "sensitive-with-aspects", "sensitive-in-external-embedder"}
+    monkeypatch.setattr(doctor_mod, "_SUPPLEMENTARY_CHECK_NAMES",
+                        tuple(n for n in doctor_mod._SUPPLEMENTARY_CHECK_NAMES if n in keep))
+    gating_failed = doctor_mod._run_supplementary_checks()
+    out = capsys.readouterr().out
+    assert cat.calls == 0 and cat.pages == 0, f"{cat.calls} catalog walks in the sensitivity rows"
+    assert out.count("not checked:") == 3, out
+    assert gating_failed is False
 
 
 def test_a_local_engine_does_not_scan_in_doctor_either(monkeypatch) -> None:

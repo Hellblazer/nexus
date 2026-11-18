@@ -34,11 +34,14 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "ANSWER_COVERAGE_ENABLED",
     "ANSWER_COVERAGE_ENV",
+    "ANSWER_POOL_KEY_SCAN_ENABLED",
+    "ANSWER_POOL_KEY_SCAN_ENV",
     "ANSWER_RESOLUTION_REPAIR_ENABLED",
     "ANSWER_RESOLUTION_REPAIR_ENV",
     "OFF_VALUES",
     "ON_VALUES",
     "coverage_enabled",
+    "pool_key_scan_enabled",
     "reset_warned",
     "resolution_repair_enabled",
     "warn_unrecognised",
@@ -125,4 +128,30 @@ def resolution_repair_enabled(environ: Mapping[str, str]) -> bool:
     if not raw:
         return ANSWER_RESOLUTION_REPAIR_ENABLED
     warn_unrecognised(ANSWER_RESOLUTION_REPAIR_ENV, raw, read_as="off")
+    return False
+
+
+#: The switch of the pool key scan inside the exact-key resolution branch (RDR-250 Phase 1 Steps 2 and 3, nexus-io7tw).
+ANSWER_POOL_KEY_SCAN_ENV = "NX_ANSWER_POOL_KEY_SCAN"
+#: What an unset or blank :data:`ANSWER_POOL_KEY_SCAN_ENV` means. Off: unlike the other two switches this one ships dark,
+#: the MVV passed (RDR-250, 250-research-8), and turning it on by default is a separate decision with no criteria set yet.
+ANSWER_POOL_KEY_SCAN_ENABLED: bool = False
+
+
+def pool_key_scan_enabled(environ: Mapping[str, str]) -> bool:
+    """Whether the resolution branch may also scan the search step's pool for entity keys, decided now from *environ*.
+
+    An on value (``1``, ``true``, ``yes``, ``on``): on. Unset or blank: :data:`ANSWER_POOL_KEY_SCAN_ENABLED` (``False``).
+    An off value, or a value in neither vocabulary (one warning per process): off. Off is the resolution branch exactly
+    as it was before RDR-250: the anchors alone are scanned, the pool is never fetched, and the report has no pool field.
+    The scan runs only inside the resolution branch, so it also needs ``NX_ANSWER_RESOLUTION_REPAIR`` on.
+    """
+    raw = str(environ.get(ANSWER_POOL_KEY_SCAN_ENV, "")).strip().lower()
+    if raw in ON_VALUES:
+        return True
+    if raw in OFF_VALUES:
+        return False
+    if not raw:
+        return ANSWER_POOL_KEY_SCAN_ENABLED
+    warn_unrecognised(ANSWER_POOL_KEY_SCAN_ENV, raw, read_as="off")
     return False

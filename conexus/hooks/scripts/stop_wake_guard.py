@@ -730,8 +730,8 @@ def block_reason(cls: str, clause: str) -> str:
         return (
             f'Stop-hook wake guard: your last message closes on a CI wait ("{quoted}"). This session is subscribed to '
             "a CI board's --done topic, but it was not launched with the conexus channel, so that post will not wake "
-            "it. Run `nx ci wait <sha>` as a background command now (its exit is the wake and its line is the result), "
-            "then end the turn."
+            "it. Run `nx ci wait <sha>` as a background command now (add `--branch <branch>` for a release or PR "
+            "branch; its exit is the wake and its line is the result), then end the turn."
         )
     what = {
         CLASS_CI_WAIT: "a CI or run wait",
@@ -745,7 +745,8 @@ def block_reason(cls: str, clause: str) -> str:
     return (
         f'Stop-hook wake guard: your last message closes on {what} ("{quoted}"), and nothing is armed to wake this '
         "session: no background task, Monitor or scheduled wakeup is running. Arm the wake now, then end the turn: "
-        + ("`nx ci wait <sha>` as a background command for a develop push's CI, a Monitor or a background Bash "
+        + ("`nx ci wait <sha> --branch <branch>` as a background command for a push, release or PR's CI (develop "
+           "and main read the CI board, any other branch reads GitHub), a Monitor or a background Bash "
            "until-loop for another run, " if cls == CLASS_CI_WAIT else
            "a Monitor or a background Bash until-loop for a run or CI, ")
         + "ScheduleWakeup or CronCreate for a timed step. "

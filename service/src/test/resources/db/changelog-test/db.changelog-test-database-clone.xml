@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-7fku2.1.1 (TS2 flake): CREATE DATABASE ${cloneDb} TEMPLATE ${sourceDb}, a copy of a seeded database in the
+    same cluster. ReadPathLeafPruningIntegrationTest times the same statements against two databases that differ only
+    in their tenant count, alternating between them, so both see the same load. jOOQ's createDatabase has no TEMPLATE
+    clause, hence a changelog. PostgreSQL refuses CREATE DATABASE inside a transaction block (runInTransaction="false")
+    and refuses a template that has any other session, so run it on a connection to a third database. Both names are
+    plain test identifiers (PgContainerHelper#cloneDatabase checks them). Run through its own databasechangelog table;
+    runAlways. A database ACL is not copied by a template clone; the clone keeps PUBLIC's default CONNECT.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-database-clone-1" author="nexus-7fku2.1.1" runAlways="true" runInTransaction="false">
+        <sql splitStatements="false" stripComments="false">CREATE DATABASE "${cloneDb}" TEMPLATE "${sourceDb}"</sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

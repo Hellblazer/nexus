@@ -109,7 +109,6 @@ from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_STOP_ELECTION_BUDGET,
     ElectionBusyError,
-    GracefulStopSend,
     ServiceRegistry,
     ServiceSupervisor,
     clear_stop_marker,
@@ -127,6 +126,7 @@ from nexus.daemon.service_registry import (
 )
 from nexus.daemon.service_registry import _WINDOWS_SHARING_RETRY_BUDGET_S
 from nexus.daemon.service_registry import spawn_lock_filename
+from nexus.daemon.stop_outcome import StopOutcome  # noqa: F401 — re-exported; the class lives there so this file stays under its size ceiling
 
 _log = structlog.get_logger(__name__)
 
@@ -535,6 +535,25 @@ def jar_launch_stack_marker() -> str | None:
     if not jar_override:
         return None
     return f"-jar {Path(jar_override).resolve(strict=False)}"
+
+
+#: The program names the JVM-fallback launch runs (``_resolve_java_executable``), case-folded.
+_JAVA_PROGRAM_NAMES = frozenset({"java", "java.exe"})
+_ABSOLUTE_PROGRAM = re.compile(r"^(?:/|[A-Za-z]:/)")  # POSIX, drive letter or UNC (//host), slashes normalised
+
+
+def jar_launch_command_matches(command: str, marker: str) -> bool:
+    """True when *command* is a JVM running the jar *marker* names, not one that only names it (``--jar <jar>``).
+
+    nexus-f3yqd.2.22: ``marker in command`` swept lab-run's root wrapper around the MVV driver (EPERM, stop exit 1
+    before PG). Process tables render argv unquoted, so the program is everything before the first `` -`` option
+    and its last path component must be java/java.exe; a spaced JDK path (``C:\\Program Files``) still matches.
+    """
+    if f" {marker} " not in f" {command} ":
+        return False
+    program = command.split(" -", 1)[0].strip().replace("\\", "/")
+    absolute_or_bare = "/" not in program or _ABSOLUTE_PROGRAM.match(program)  # not `sudo /usr/bin/java`
+    return bool(absolute_or_bare) and program.rsplit("/", 1)[-1].lower() in _JAVA_PROGRAM_NAMES
 
 
 #: Minimum JDK for the JVM-fallback launch. MUST equal
@@ -1014,9 +1033,12 @@ def _log_lines_since(log_path: Path, start_offset: int) -> list[str]:
 
 
 def _reason_text(line: str) -> str:
+    """The first physical line of a reason: an engine with the RDR-167 sink writes a multi-line message (PostgreSQL's
+    ``Where:``, Liquibase's ``Reason:``) as one line with a literal ``\\x0a``; the reason is its first non-blank part."""
     from nexus.redact import redact_credentials  # noqa: PLC0415 — deferred import — failure path only
 
-    return redact_credentials(line)[:_REASON_MAX_CHARS]
+    first = next((s for s in re.split(r"\\x0[ad]", line, flags=re.I) if s.strip()), "")
+    return redact_credentials(first.strip())[:_REASON_MAX_CHARS]
 
 
 def last_engine_error_line(log_path: Path, start_offset: int) -> str | None:
@@ -1117,11 +1139,7 @@ def last_engine_root_cause(log_path: Path, start_offset: int) -> str | None:
     """
     lines = _log_lines_since(log_path, start_offset)
     last_error = next(
-        (
-            i
-            for i in range(len(lines) - 1, -1, -1)
-            if _ENGINE_ERROR_LINE.match(lines[i]) and "event=schema_migration_failed" in lines[i]
-        ),
+        (i for i in range(len(lines) - 1, -1, -1) if readiness.is_migration_failed_line(lines[i])),
         None,
     )
     if last_error is None:
@@ -1131,8 +1149,8 @@ def last_engine_root_cause(log_path: Path, start_offset: int) -> str | None:
         if _ENGINE_LOGBACK_LINE.match(line):
             break
         if (m := _ENGINE_CAUSED_BY.match(line)) is not None:
-            cause = m.group("message").removeprefix("ERROR: ")
-    return None if cause is None else _reason_text(cause)
+            cause = m.group("message")
+    return None if cause is None else _reason_text(cause).removeprefix("ERROR: ")
 
 
 def last_supervisor_error_line(crash_log: Path, start_offset: int) -> str | None:
@@ -2554,7 +2572,7 @@ class StorageServiceSupervisor:
             self._kill_after_readiness_failure(proc)
             self._release_stale_changelog_lock(reason="migration_failed")
             raise StorageServiceStartError(
-                f"Schema migration failed on port {port}: {exc.raw_line}. "
+                f"Schema migration failed on port {port}: {_reason_text(exc.raw_line)}. "
                 f"Engine log: {self._log_path}"
             ) from exc
         except readiness.ReadinessStalledError as exc:
@@ -3998,98 +4016,14 @@ def _supervise_until_stopped(
     return exit_code
 
 
-@dataclass(frozen=True)
-class StopOutcome:
-    """Outcome of :func:`stop_storage_service` (nexus-oyo2g).
-
-    Honest-output contract: a lease MISS from ``ServiceRegistry.discover()``
-    is a discovery gap, never proof nothing is running (a TTL-expired lease
-    on a stalled-but-alive supervisor is indistinguishable from a genuinely
-    stopped service at the registry layer — the lz3f2/f9y78 stall
-    signature). ``source`` names HOW this outcome was reached so a caller
-    (the CLI) can print an honest message instead of a blanket "already
-    stopped" whenever nothing was signalled from the lease.
-
-    - ``"lease"``: a fresh lease named a live, signal-able process;
-      signalled from it.
-    - ``"process_table"``: the lease named nothing signal-able — either it
-      was absent entirely, or (``lease_seen=True``) it WAS found but
-      carried no usable pid (a malformed or legacy-shaped record) — and
-      the OS process table (ground truth) found live processes belonging
-      to this config_dir instead.
-    - ``"none"``: nothing was signalled from the lease AND the process
-      table confirms nothing is running — genuinely already stopped.
-    - ``"refused"``: the target runs in another Windows session, so the
-      console stop could not be sent (``refused`` names it and both session
-      ids). Nothing was signalled or killed.
-    - ``"process_table_unavailable"``: nothing was signalled from the
-      lease, and the process table itself could not be read (no ``ps``
-      and no ``/proc``) — degrades to the pre-nexus-oyo2g behaviour but
-      says so, rather than silently claiming the same clean "already
-      stopped".
-
-    ``lease_seen`` is True whenever ``ServiceRegistry.discover()`` found a
-    record at all, INDEPENDENT of ``source`` — a caller (the CLI) needs
-    this to avoid saying "no lease found" when a lease WAS found but had
-    no usable pid info (nexus-oyo2g review finding 2: ``source ==
-    "process_table"``/``"none"`` alone conflates "lease truly absent" with
-    "lease present but unusable", which is a different, honest-output-
-    relevant fact).
-
-    ``pids`` always includes every pid this call signalled (lease-named and/
-    or tree-swept); ``stubborn`` is the subset still alive after the
-    SIGTERM->SIGKILL escalation — a non-empty ``stubborn`` means the caller
-    must NOT treat this as a clean stop.
-
-    ``sweep_verified`` is True only when the phase-2/3 process-table sweep
-    actually ran (``sweep_matching_processes(...).available``). It is False
-    whenever the process table could not be read at all — INCLUDING the
-    case where the lease branch already signalled something, so ``source``
-    stays ``"lease"`` and the pids list is non-empty. Without this field
-    that case is indistinguishable from a fully-verified clean stop: the
-    docstring above calls the tree-completion sweep "not optional even on
-    the lease-found path", so silently dropping its own verification
-    status when it fails to run would contradict that claim (nexus-oyo2g
-    review round 2, Significant finding 2). A caller MUST treat
-    ``sweep_verified=False`` as "the tree-completion check could not run",
-    regardless of what ``source``/``pids`` otherwise say.
-    """
-
-    pids: tuple[int, ...]
-    stubborn: tuple[int, ...]
-    source: str
-    lease_seen: bool = False
-    sweep_verified: bool = True
-    #: Windows only (RDR-224, nexus-f9bgu.17): processes that could not be
-    #: reached because they run in another Windows session. NOT signalled and
-    #: NOT killed (Sam, 2026-10-05: a cross-session stop fails loud and never
-    #: hard-kills). ``source`` is ``"refused"`` when nothing else was signalled.
-    #: A refused pid is still running, so it is also in ``stubborn``.
-    refused: tuple[GracefulStopSend, ...] = ()
-    #: Running pids the stop could not identify, so it did not signal them: flagless
-    #: ``daemon service start`` processes it could not place in any directory
-    #: (unreadable or malformed environment, nexus-oacd3; ``sweep_verified`` is then
-    #: False), and a legacy lease's endpoint pid whose command line could not be read
-    #: (nexus-f3yqd). They may still be running, so the outcome is not "already stopped".
-    unreadable: tuple[int, ...] = ()
-    #: Supervisor pids a FRESH lease names that are not visible from this process
-    #: (nexus-dyfsw): a supervisor in another PID namespace sharing the config
-    #: directory, still heartbeating. Nothing was signalled and the lease was kept,
-    #: so this stop did not bring the service down.
-    invisible: tuple[int, ...] = ()
-
-    @property
-    def already_stopped(self) -> bool:
-        return not self.pids and not self.refused and not self.unreadable and not self.invisible
-
-
 def storage_service_running(config_dir: Path) -> list[str]:
     """Read-only: what :func:`stop_storage_service` would find and stop for *config_dir*, as printable evidence.
 
     Finds the service the way the stop does (a live lease from ``ServiceRegistry.discover()``, then the process
     table through the same matcher and member check), but signals and kills nothing. An empty list means neither
     found anything; like the stop, it cannot see past an unreadable process table, and it leaves a flagless start
-    whose directory cannot be read alone.
+    whose directory cannot be read alone. A ``NEXUS_SERVICE_JAR`` engine it cannot place IS listed (nexus-f3yqd.2.22):
+    the idle gate that reads this must refuse on one, because it may be this directory's engine.
     """
     from nexus.daemon.service_registry import (  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
         all_process_rows,
@@ -4111,10 +4045,15 @@ def storage_service_running(config_dir: Path) -> list[str]:
     skip = ancestor_pids(me)
     matcher = storage_service_stack_matcher(config_dir)
     member = storage_service_member_check(config_dir)
+    jar_marker = jar_launch_stack_marker()
     for pid, _age, command in rows:
-        if pid == me or pid in skip or not matcher(command) or member(pid, command) != "member":
+        if pid == me or pid in skip or not matcher(command):
             continue
-        found.append(f"process {pid}")
+        verdict = member(pid, command)
+        if verdict == "unreadable" and jar_marker is not None and jar_launch_command_matches(command, jar_marker):
+            found.append(f"process {pid} (a jar engine whose directory could not be read)")
+        elif verdict == "member":
+            found.append(f"process {pid}")
     return found
 
 
@@ -4209,7 +4148,7 @@ def stop_storage_service(
     )
     if invisible:
         outcome = dataclasses.replace(outcome, invisible=tuple(invisible))
-    if outcome.refused or outcome.stubborn or outcome.invisible:
+    if outcome.refused or outcome.stubborn or outcome.invisible or outcome.unsignalled:
         # The marker said "this service is meant to stay down". It must be
         # written BEFORE the signal (the signal itself can produce the exit the
         # launcher would otherwise answer with a respawn), so it cannot wait for
@@ -4530,6 +4469,7 @@ def _stop_marked_service(
             sweep_verified=sweep_verified,
             refused=sweep.refused,
             unreadable=unreadable,
+            unsignalled=sweep.unsignalled,
         )
 
     if not signalled:
@@ -4547,6 +4487,7 @@ def _stop_marked_service(
             lease_seen=lease_seen,
             sweep_verified=sweep_verified,
             unreadable=unreadable,
+            unsignalled=sweep.unsignalled,
         )
 
     return StopOutcome(
@@ -4557,4 +4498,5 @@ def _stop_marked_service(
         sweep_verified=sweep_verified,
         refused=sweep.refused,
         unreadable=unreadable,
+        unsignalled=sweep.unsignalled,
     )

@@ -820,10 +820,12 @@ class SchemaRollbackRoundTripIntegrationTest {
                 try (Connection c = ds.getConnection()) {
                     long widened = PgCatalogProbes.functionDefinitionsIn(dsl(c), "nexus").values().stream()
                         .filter(SchemaRollbackRoundTripIntegrationTest::carriesExcludeSensitive).count();
+                    // 31 widened by vectors-055-1, plus the 3 search_topic_set_<dim> functions vectors-062-1
+                    // (nexus-7fku2.1.1) creates with the argument; the rollback below runs through 062 too and drops them
                     assertThat(widened)
-                        .as("forward: exactly the 31 search functions carry p_exclude_sensitive "
-                            + "(non-vacuity: otherwise the rollback below restores nothing)")
-                        .isEqualTo(31);
+                        .as("forward: exactly the 31 widened search functions and vectors-062's 3 topic-set functions "
+                            + "carry p_exclude_sensitive (non-vacuity: otherwise the rollback below restores nothing)")
+                        .isEqualTo(34);
                     int depth = rollbackDepthThrough(c, "vectors-055-1");
                     assertThat(depth).as("vectors-055-1 must have executed, or the rollback below is a no-op")
                         .isGreaterThan(0);

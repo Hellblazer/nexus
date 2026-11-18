@@ -3538,6 +3538,17 @@ def _provision_impl(
                         _log.warning(
                             "pg_extension_relocation_backfill_failed", error=str(exc)
                         )
+                    # RDR-246 Phase 1 Step 4: pg_background, the dml_utils roles,
+                    # their grants and the liquibase schema, for an install that
+                    # predates them. Best-effort inside: a bundle without the
+                    # library or any failure is logged and leaves moves blocked.
+                    from nexus.db.pg_bootstrap.dml_utils import (  # noqa: PLC0415 — deferred: that module imports this one
+                        bootstrap_dml_utils_best_effort,
+                    )
+
+                    bootstrap_dml_utils_best_effort(
+                        _bins, stored_port, os_user, via="fast_path_backfill"
+                    )
                 _log.info(
                     "pg_provision_no_op",
                     port=stored_port,
@@ -3680,6 +3691,14 @@ def _provision_impl(
     # point. See relocate_vector_extensions_to_nexus_schema's own docstring for
     # the full derivation.
     relocate_vector_extensions_to_nexus_schema(bins, port, os_user)
+
+    # ── dml_utils prerequisites (RDR-246 Phase 1 Step 4) ───────────────────────
+    # After _create_roles: the grants to nexus_admin need it. Best-effort.
+    from nexus.db.pg_bootstrap.dml_utils import (  # noqa: PLC0415 — deferred: that module imports this one
+        bootstrap_dml_utils_best_effort,
+    )
+
+    bootstrap_dml_utils_best_effort(bins, port, os_user, via="fresh_provision")
 
     # ── Write credentials ──────────────────────────────────────────────────────
     _write_credentials(

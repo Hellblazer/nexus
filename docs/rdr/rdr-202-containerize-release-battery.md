@@ -2,7 +2,7 @@
 title: "Containerize the Release Battery: Layered Images, a Compose-Expressed Gate DAG, and the macOS-Native Residue"
 id: RDR-202
 type: Architecture
-status: draft
+status: abandoned
 priority: high
 author: Sam
 created: 2026-09-04
@@ -11,6 +11,8 @@ related_issues: [nexus-mfage, nexus-f2g8u, nexus-98zsp]
 ---
 
 # RDR-202: Containerize the Release Battery
+
+> **Abandoned 2026-11-16 (Sam, by dialog in halcyon's session: "abandon as superceded as you suggest").** Superseded by the release pipeline audit (nexus-jh1f2, cuts 3 to 7), which removed the repeated test passes this RDR measured: the 8.3.0 cut ran the whole battery in 76 s wall and about an hour of gate time in total, against the four hours measured here. The remaining long poles (the 6e upgrade rehearsal, about 48 minutes, and PR CI) are not what containerizing the battery addresses.
 
 ## Problem Statement
 

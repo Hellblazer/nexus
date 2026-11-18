@@ -1,0 +1,217 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-7fku2.1.1 (RDR-134 Step 1): nexus.search_topic_set_384, _768 and _1024, the topic-SET variants of
+    search_topic_scoped_<dim> (vectors-055-1). The routed per-collection search (Step 3) keeps the nearest topics of a
+    question from the centroid ANN, which returns topic IDS, and searches one collection for the chunks that carry ANY
+    of them. A function of one label could not do that without one call per topic and a merge outside the engine.
+
+    SHAPE. Same RETURNS TABLE, same body predicates and same posture as search_topic_scoped_<dim>: LANGUAGE sql STABLE,
+    SECURITY INVOKER (row-level security applies), operators schema-qualified (search-path-002), the model and tenant
+    predicates, the live-owner filter (chunk_live_owners), the p_exclude_sensitive NOT EXISTS in the shape the
+    vectors-055 guards read (one sublink, "WHERE p_exclude_sensitive IS NOT FALSE", the collection restriction repeated).
+    Two things differ.
+      1. p_topic_ids bigint[] replaces p_topic_label text. Topic membership is an EXISTS over topic_assignments joined to
+         topics (t.collection = p_collection, ta.topic_id = ANY(p_topic_ids)), not a join, so a chunk assigned to two
+         topics of the set comes back ONCE, and a repeated id repeats nothing. An empty or NULL array returns no rows
+         (no explicit guard: ANY of an empty array is false and of NULL is NULL, so the EXISTS never holds; the test pins the
+         behaviour). A topic that belongs to another collection never matches: c.collection and t.collection both
+         equal p_collection, and the join between a chunk and its assignment is by chash alone (as in the single-topic
+         function), so the t.collection guard is the one that stops a same-chash chunk of the searched collection.
+      2. The matching count functions of Step 2 share this predicate shape; keep the EXISTS and its three conjuncts
+         together when either changes.
+    A topic_assignments row whose source_collection is not the topic's collection (a projection row) still matches a
+    chunk of the searched collection with the same chash. That is the single-topic function's behaviour and is kept, so
+    a set of one topic returns exactly what search_topic_scoped returns for its label (the test seeds a projection row
+    and pins it); Step 2's
+    coverage ratio is the place that excludes projection rows from "assigned".
+
+    DECISION 1, THE THRESHOLD: it stays in Java. The plain search has no threshold in SQL either: plain_search_<dim>
+    returns its top p_n by distance and the per-collection fan-out (FanoutMerger.accept) applies the client's threshold
+    afterwards, because the per-collection statistics it reports (rawCount, dropped, minRawDistance, minDroppedDistance)
+    are taken over the arm's full top-K BEFORE the threshold. Step 3 reuses that merge, and the routed arm's
+    "fallback" decision (kept topics returned nothing) needs the same raw count. A SQL threshold would make LIMIT mean
+    "k rows under the threshold" on this path and "k rows" on the plain path, and would blind rawCount and dropped, so
+    the two arms of one request would report on different bases. So the function takes no threshold and returns raw
+    cosine distances, the same values plain_search returns (TopicSetSearchIntegrationTest pins both: no threshold
+    parameter, equal distances, a row above any threshold comes back).
+
+    DECISION 2, THE ROUTER (RDR-227): the functions mirror search_topic_scoped and are called directly
+    (PgVectorRepository.runCombinedQuery, via the generated SEARCH_TOPIC_SET_<dim> table functions), not through
+    runPlainSearchStatement. The router does NOT choose the pci_ index: the planner does, from the arm's
+    collection = ANY(p_collections) predicate under a custom plan (PciPlanCheck); the router's hasValidIndex only
+    sets walkWide, the widest ef_search for a one-collection statement with no index. A direct call goes through
+    runCombinedQuery, which also forces a custom plan, so the planner can still walk a collection's pci_ index here.
+    So the short-row exposure of these functions equals the single-topic function's, and Step 5a measures it. What a
+    direct call forgoes is the router's other three levers: the exact-scan route for a small selected set (the
+    cardinality probe against searchExactMaxRows, which is complete and needs no repair), the widest ef_search when no
+    pci_ index exists, and the empty-result exact re-run (exactOnUnderReturn). Step 3 decides whether the topic arm
+    needs any of them; the RDR's zero-row fallback to the unscoped search already covers the empty case. Step 3 also
+    needs its own arm method: runCombinedQuery returns flat maps under a fixed statement timeout, not the
+    FanoutMerger candidates under the arm bound that searchPerCollection merges. The call keeps the single-topic
+    call's session discipline (statement timeout, hnsw.iterative_scan = relaxed_order, ef_search from the request k,
+    the scan budget, a custom plan per execution). This changeset changes no index and no GUC. If a later step routes
+    these functions through the router, its probe must count the topic-filtered set, not the whole collection.
+
+    GRANTS. EXECUTE granted to nexus_svc on each, and revoked from PUBLIC as defence in depth (vectors-060 revokes only in
+    its SECURITY DEFINER branch, and the older search functions were left to the schema default; these are SECURITY
+    INVOKER, so row-level security is the access control and the revoke narrows who may call). 9 DDL statements: 3 CREATE FUNCTION, 3 REVOKE,
+    3 GRANT; no table, so the runAlways grants loop adds none.
+
+    No DATA EFFECT: function definitions only. Placed after vectors-061, before the grants-nexus-svc.xml runAlways
+    block.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-062-1" author="nexus-7fku2.1.1">
+        <comment>nexus-7fku2.1.1 (RDR-134 Step 1): nexus.search_topic_set_384/768/1024 take a SET of topic ids (bigint[]) instead of one label and return one collection's nearest live chunks that carry any of them, each chunk once, with search_topic_scoped's predicates (model, tenant, live owner, sensitivity exclusion). No threshold in SQL (the Java merge applies the client's, as for the plain search). Called directly, not through RDR-227's router. SECURITY INVOKER, EXECUTE revoked from PUBLIC and granted to nexus_svc. No data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+-- ---- search_topic_set_384
+CREATE FUNCTION nexus.search_topic_set_384(p_query nexus.vector, p_topic_ids bigint[], p_collection text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_384 OPERATOR(nexus.<=>) p_query)::float8,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = p_collection
+       AND c.embedding_384 IS NOT NULL
+       AND EXISTS (
+               SELECT 1
+                 FROM nexus.topic_assignments ta
+                 JOIN nexus.topics t
+                   ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                WHERE ta.tenant_id = c.tenant_id
+                  AND ta.doc_id = c.chash
+                  AND t.collection = p_collection
+                  AND ta.topic_id = ANY(p_topic_ids))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.catalog_document_chunks sm
+                 JOIN nexus.catalog_documents sd
+                   ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
+                WHERE p_exclude_sensitive IS NOT FALSE
+                  AND sm.tenant_id  = c.tenant_id
+                  AND sm.collection = c.collection
+                  AND sm.collection = p_collection
+                  AND sm.chash      = c.chash
+                  AND sd.deleted_at IS NULL
+                  AND sd.sensitive)
+     ORDER BY c.embedding_384 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$function$;
+
+REVOKE EXECUTE ON FUNCTION nexus.search_topic_set_384(nexus.vector,bigint[],text,integer,text,text,boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_set_384(nexus.vector,bigint[],text,integer,text,text,boolean) TO nexus_svc;
+
+-- ---- search_topic_set_768
+CREATE FUNCTION nexus.search_topic_set_768(p_query nexus.vector, p_topic_ids bigint[], p_collection text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_768 OPERATOR(nexus.<=>) p_query)::float8,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = p_collection
+       AND c.embedding_768 IS NOT NULL
+       AND EXISTS (
+               SELECT 1
+                 FROM nexus.topic_assignments ta
+                 JOIN nexus.topics t
+                   ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                WHERE ta.tenant_id = c.tenant_id
+                  AND ta.doc_id = c.chash
+                  AND t.collection = p_collection
+                  AND ta.topic_id = ANY(p_topic_ids))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.catalog_document_chunks sm
+                 JOIN nexus.catalog_documents sd
+                   ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
+                WHERE p_exclude_sensitive IS NOT FALSE
+                  AND sm.tenant_id  = c.tenant_id
+                  AND sm.collection = c.collection
+                  AND sm.collection = p_collection
+                  AND sm.chash      = c.chash
+                  AND sd.deleted_at IS NULL
+                  AND sd.sensitive)
+     ORDER BY c.embedding_768 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$function$;
+
+REVOKE EXECUTE ON FUNCTION nexus.search_topic_set_768(nexus.vector,bigint[],text,integer,text,text,boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_set_768(nexus.vector,bigint[],text,integer,text,text,boolean) TO nexus_svc;
+
+-- ---- search_topic_set_1024
+CREATE FUNCTION nexus.search_topic_set_1024(p_query nexus.vector, p_topic_ids bigint[], p_collection text, p_n integer, p_embedding_model text, p_tenant text, p_exclude_sensitive boolean DEFAULT false)
+ RETURNS TABLE(id text, content text, collection text, distance double precision, retention text)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    SELECT encode(c.chash, 'hex'),
+           c.chunk_text,
+           c.collection,
+           (c.embedding_1024 OPERATOR(nexus.<=>) p_query)::float8,
+           c.retention
+      FROM nexus.chunks c
+     WHERE c.embedding_model = p_embedding_model
+       AND c.tenant_id = p_tenant
+       AND c.collection = p_collection
+       AND c.embedding_1024 IS NOT NULL
+       AND EXISTS (
+               SELECT 1
+                 FROM nexus.topic_assignments ta
+                 JOIN nexus.topics t
+                   ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                WHERE ta.tenant_id = c.tenant_id
+                  AND ta.doc_id = c.chash
+                  AND t.collection = p_collection
+                  AND ta.topic_id = ANY(p_topic_ids))
+       AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+       AND NOT EXISTS (
+               SELECT 1
+                 FROM nexus.catalog_document_chunks sm
+                 JOIN nexus.catalog_documents sd
+                   ON sd.tenant_id = sm.tenant_id AND sd.tumbler = sm.doc_id
+                WHERE p_exclude_sensitive IS NOT FALSE
+                  AND sm.tenant_id  = c.tenant_id
+                  AND sm.collection = c.collection
+                  AND sm.collection = p_collection
+                  AND sm.chash      = c.chash
+                  AND sd.deleted_at IS NULL
+                  AND sd.sensitive)
+     ORDER BY c.embedding_1024 OPERATOR(nexus.<=>) p_query
+     LIMIT p_n
+$function$;
+
+REVOKE EXECUTE ON FUNCTION nexus.search_topic_set_1024(nexus.vector,bigint[],text,integer,text,text,boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION nexus.search_topic_set_1024(nexus.vector,bigint[],text,integer,text,text,boolean) TO nexus_svc;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+DROP FUNCTION IF EXISTS nexus.search_topic_set_384(nexus.vector,bigint[],text,integer,text,text,boolean);
+DROP FUNCTION IF EXISTS nexus.search_topic_set_768(nexus.vector,bigint[],text,integer,text,text,boolean);
+DROP FUNCTION IF EXISTS nexus.search_topic_set_1024(nexus.vector,bigint[],text,integer,text,text,boolean);
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

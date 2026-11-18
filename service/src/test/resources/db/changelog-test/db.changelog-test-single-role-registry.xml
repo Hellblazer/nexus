@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.17: the single-role posture's registry, for GrantsNexusSvcUpgradeIntegrationTest. The schemas nexus and t1 and
+    the table nexus.data_moves exist and are owned by nexus_svc, as they are where the engine's one role is nexus_svc.
+    Superuser, on an empty database. The grants changeset is then replayed AS nexus_svc: its REVOKE of nexus_svc's privileges
+    on the registry must be skipped, since an owner that revoked its own rights would lock out the one connection that works it.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-single-role-registry-1" author="nexus-f3yqd.2.17">
+        <sql splitStatements="false" stripComments="false">
+CREATE SCHEMA IF NOT EXISTS nexus;
+CREATE SCHEMA IF NOT EXISTS t1;
+ALTER SCHEMA nexus OWNER TO nexus_svc;
+ALTER SCHEMA t1 OWNER TO nexus_svc;
+CREATE TABLE nexus.data_moves (label TEXT NOT NULL);
+ALTER TABLE nexus.data_moves OWNER TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

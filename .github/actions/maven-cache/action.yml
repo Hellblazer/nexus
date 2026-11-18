@@ -1,0 +1,80 @@
+name: Maven local repository cache
+description: >-
+  Restores ~/.m2/repository and ~/.m2/wrapper (the Maven distribution
+  service/mvnw downloads) on a GitHub-hosted runner before a Maven step,
+  and saves them at the end of a job that succeeded, so a build resolves
+  from the cache instead of Maven Central. Every job class keeps its own
+  entry: under the one key that setup-java/setup-graalvm `cache: maven`
+  shared, the first job to save defined the content and a hit never saved
+  again, so the native trip-wire fetched what only it resolves (the shade
+  plugin's asm-commons, the native-image plugin) from Central on every run.
+  A pom change restores the same class's last entry. A tag run restores and
+  never saves: its scope is readable by no other run, and it reads only the
+  entries maven-cache-seed.yml keeps on main. A self-hosted runner keeps its
+  own ~/.m2, so the cache is skipped there.
+  Also sets MAVEN_ARGS for the rest of the job so the resolver retries a
+  transient Central error (see the retry step).
+
+inputs:
+  job-class:
+    description: >-
+      Which set of artifacts the job resolves: `package` (the shaded jar,
+      or generate-sources alone), `native` (-Pnative package) or `test`
+      (the Java test suites). Jobs with one class share an entry.
+    required: true
+
+outputs:
+  cache-hit:
+    description: "'true' when the exact key was restored (empty when the cache step was skipped)."
+    value: ${{ steps.cache.outputs.cache-hit || steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the job class
+      shell: bash
+      env:
+        JOB_CLASS: ${{ inputs.job-class }}
+      run: |
+        case "$JOB_CLASS" in
+          package|native|test) ;;
+          *) echo "::error::maven-cache: unknown job-class '$JOB_CLASS' (package, native or test)"; exit 1 ;;
+        esac
+
+    # The key has no runner.arch: the Maven repository holds jars and poms, so the linux-arm64 release leg can
+    # restore an entry saved on x64. The second restore key reads the entry setup-graalvm saved before this action.
+    - name: Restore the Maven local repository (saved at job end)
+      id: cache
+      if: runner.environment == 'github-hosted' && github.ref_type != 'tag'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      with:
+        path: |
+          ~/.m2/repository
+          ~/.m2/wrapper
+        key: m2-v1-${{ runner.os }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
+        restore-keys: |
+          m2-v1-${{ runner.os }}-${{ inputs.job-class }}-
+          setup-graalvm-${{ runner.os }}-maven-
+
+    - name: Restore the Maven local repository (tag run, no save)
+      id: restore
+      if: runner.environment == 'github-hosted' && github.ref_type == 'tag'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      with:
+        path: |
+          ~/.m2/repository
+          ~/.m2/wrapper
+        key: m2-v1-${{ runner.os }}-${{ inputs.job-class }}-${{ hashFiles('service/pom.xml', 'service/.mvn/**') }}
+        restore-keys: |
+          m2-v1-${{ runner.os }}-${{ inputs.job-class }}-
+          setup-graalvm-${{ runner.os }}-maven-
+
+    - name: Retry transient Maven Central errors
+      shell: bash
+      # Maven 3.9.9 (service/.mvn/wrapper) reads MAVEN_ARGS on every mvn call, with Maven Resolver 1.9.22's HTTP
+      # transport (maven.apache.org/resolver-archives/resolver-1.9.22/configuration.html). An I/O error is retried
+      # at once, up to count times. A status in serviceUnavailable is retried after interval x attempt (linear: 10 s,
+      # 20 s, ... about 210 s over 6 tries), or after Retry-After when Central sends one; a wait above intervalMax
+      # (default 300 s, left alone) fails at once. The default list is 429,503; 500, 502 and 504 are transient too.
+      run: |
+        echo "MAVEN_ARGS=${MAVEN_ARGS:+$MAVEN_ARGS }-Daether.connector.http.retryHandler.count=6 -Daether.connector.http.retryHandler.interval=10000 -Daether.connector.http.retryHandler.serviceUnavailable=429,500,502,503,504" >> "$GITHUB_ENV"

@@ -77,6 +77,7 @@ from typing import Any, Literal
 import structlog
 
 from nexus.plans.answer_text_class import ANSWER_CLASSES, CLASS_VERSION, classify_answer_text
+from nexus.plans.coverage_repair import WIRE_FILTER_LOG_CAP
 
 _log = structlog.get_logger(__name__)
 
@@ -316,13 +317,37 @@ def _resolution_counts(coverage: CoverageResult | None) -> dict[str, Any]:
     r = coverage.repair
     if not (r.resolution_entered or r.resolution_reason):
         return {}
-    return {
+    counts = {
         "resolution_entered": r.resolution_entered, "resolution_reason": r.resolution_reason,
         "resolution_resolved": len(r.resolved), "resolution_missing": len(r.missing),
         "resolution_ambiguous": len(r.ambiguous), "resolution_items_merged": r.joined_added,
         # RDR-147 option 1 (nexus-irndi): the run generated on a ledger that covers no facet. ``coverage_state`` stays
         # ``unavailable`` (the ledger is not rewritten), so a reader that counts answers reads this flag beside it.
         "resolution_generated_on_join": r.generated_on_join,
+    }
+    if r.pool_key_scan:  # RDR-250 (nexus-io7tw): counts only, and only with the pool switch on
+        counts.update({
+            "pool_scanned": r.pool_scanned, "pool_candidate_keys": len(r.pool_candidate_keys), "pool_keys_kept": len(r.pool_keys_kept),
+            "pool_keys_rejected": len(r.pool_keys_rejected), "pool_filter_calls": r.pool_filter_calls,
+            "pool_filter_cost_usd": r.pool_filter_cost_usd, "pool_reason": r.pool_reason,
+            "pool_need_s": r.pool_need_s, "pool_room_s": r.pool_room_s,
+            # nexus-w8d30: per filter call, scalars only (closed names and counts), cut at WIRE_FILTER_LOG_CAP; the id lists and
+            # hashes stay on the repair report's wire form
+            "pool_filter_empty_calls": r.pool_filter_empty_calls,
+            "pool_filter_log": [_pool_call_scalars(c) for c in r.pool_filter_log[:WIRE_FILTER_LOG_CAP]],
+            "pool_filter_log_truncated": max(0, len(r.pool_filter_log) - WIRE_FILTER_LOG_CAP),
+        })
+    return counts
+
+
+def _pool_call_scalars(call: Mapping[str, Any]) -> dict[str, Any]:
+    """One pool filter call as the run summary keeps it: the call number, its outcome and error class, the output tokens, the
+    reply's length and four counts. No id, hash or string a model wrote."""
+    return {
+        "call": call.get("call"), "outcome": call.get("outcome"), "error": call.get("error"),
+        "output_tokens": call.get("output_tokens"), "reply_chars": call.get("reply_chars"),
+        "supports": len(call.get("supports") or ()) + int(call.get("supports_truncated") or 0),
+        "unmatched": call.get("unmatched", 0), "host_rejected": call.get("host_rejected", 0),
     }
 
 

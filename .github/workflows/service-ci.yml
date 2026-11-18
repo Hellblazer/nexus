@@ -27,6 +27,7 @@ on:
     paths:
       - 'service/**'
       - '.github/workflows/service-ci.yml'
+      - '.github/actions/maven-cache/**'
   pull_request:
     branches: [main, develop]
 
@@ -77,6 +78,7 @@ jobs:
             service:
               - 'service/**'
               - '.github/workflows/service-ci.yml'
+              - '.github/actions/maven-cache/**'
 
       # nexus-jh1f2 cut 6 (Sam 2026-11-10): on a release PR (a pull request into main) whose
       # service/ tree is byte-identical to the engine tag the release pins
@@ -316,9 +318,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          # Cache Maven local repo across runs; bust when pom.xml changes.
-          # Not on the pool: its ~/.m2 is already warm and persistent.
-          cache: ${{ runner.environment == 'github-hosted' && 'maven' || '' }}
+
+      - name: Restore the Maven cache and set Central retries
+        # Hosted only (the action skips the cache on the pool, whose ~/.m2 is warm and persistent).
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: test
 
       - name: Cache MiniLM ONNX model
         if: runner.environment == 'github-hosted'

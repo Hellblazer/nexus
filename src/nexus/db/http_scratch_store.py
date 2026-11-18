@@ -127,6 +127,7 @@ from nexus.db.client_identity import client_identity_headers
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
+from nexus.correlation import stamp_request
 
 
 # ── HttpScratchStore ───────────────────────────────────────────────────────────
@@ -639,7 +640,13 @@ class HttpScratchStore:
         # indexer turned out not to construct stores per file at all
         # (T2 nexus_rdr/198-research-2, 198-research-3). Convert BEFORE
         # sharing, never after.
-        return httpx.Client(base_url=self._base_url, headers=self._headers, timeout=30.0)
+        # RDR-167 Step 2 (nexus-dngtz.1.3): the headers above are baked, so the correlation id is stamped
+        # per request instead (set to the bound id, removed when none is bound); every build, the rebind
+        # after a lease change included, goes through this method and so carries the hook.
+        return httpx.Client(
+            base_url=self._base_url, headers=self._headers, timeout=30.0,
+            event_hooks={"request": [stamp_request]},
+        )
 
     def close_session(self) -> int:
         """Delete all scratch entries for this session. Returns count deleted.

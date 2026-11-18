@@ -100,6 +100,25 @@
         splitStatements="false": the block contains multiple SQL statements.
     -->
     <changeSet id="grants-nexus-svc-1" author="nexus-net63" runAlways="true">
+        <!--
+            nexus-f3yqd.2.12 (RDR-246) edited this body: the loop below skips nexus.data_moves, the data-move
+            registry, which only the migrating role reads. Every migrated database holds the checksum of the text
+            before that edit, so it is listed as a validCheckSum. The same Liquibase 4.29.0 behaviour measured for
+            grants-004-monitor-wal-visibility (below) applies: the boot does not check a runAlways row's stored checksum, so
+            the entry is insurance, not the fix.
+
+            nexus-f3yqd.2.17 edited the body again: after the loop it REVOKEs ALL on nexus.data_moves from nexus_svc,
+            because a rollback to engine-service-v0.1.194 re-grants DML there (that engine's loop has no exclusion) and
+            the exclusion alone does not take it back on the roll-forward. The checksum of the text before this second
+            edit (9:6e8c...) is listed too, for the same insurance reason.
+
+            DO NOT ALSO LIST THE NEW CHECKSUM: Liquibase accepts a stored checksum when the changeset's CURRENT
+            checksum equals any validCheckSum entry, so listing the current one turns validation into a wildcard.
+            GrantsNexusSvcChecksumTest pins it. A later edit to this SQL adds the checksum of the text it
+            replaces, never its own.
+        -->
+        <validCheckSum>9:15c9a38e1a6119c0702314e7d6922d73</validCheckSum>
+        <validCheckSum>9:6e8c092f58aba2818bb3f31943dd8f2f</validCheckSum>
         <comment>
             Grant nexus_svc role the DML privileges it needs on the nexus and t1 schemas.
             REQUIRED: nexus_svc must exist before first migration; if missing, GRANT fails
@@ -137,6 +156,8 @@ BEGIN
         WHERE n.nspname IN ('nexus', 't1')
           AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
           AND pg_get_userbyid(c.relowner) = current_user
+          -- nexus.data_moves (RDR-246, datamoves-001-registry.xml) is admin-connection only: no nexus_svc grant.
+          AND NOT (n.nspname = 'nexus' AND c.relname = 'data_moves')
     LOOP
         IF rel.relkind = 'S' THEN
             EXECUTE format(
@@ -168,6 +189,30 @@ BEGIN
     IF skipped_count > 0 THEN
         RAISE NOTICE 'grants-nexus-svc-1: skipped % foreign-owned relation(s), not granted to nexus_svc (only their owner can grant): %',
             skipped_count, skipped_names;
+    END IF;
+END
+$$;
+
+-- nexus.data_moves (RDR-246) is admin-connection only: nexus_svc holds NO privilege on it. The loop above skips it,
+-- but a rollback to engine-service-v0.1.194 re-grants DML there (its loop has no exclusion), so every boot takes
+-- the grant back. Only where this role owns the table (a REVOKE by another role removes nothing it did not
+-- grant) and never where the migrating role IS nexus_svc (the single-role posture: an owner revoking its own rights
+-- would lock out the one connection that works the registry). And only when nexus_svc holds an ACL entry on the table or
+-- one of its columns, so a boot that has nothing to take back runs no REVOKE (a fresh walk, whose DDL count the
+-- migration ceiling pins, never holds one).
+DO $$
+BEGIN
+    IF current_user &lt;&gt; 'nexus_svc'
+       AND to_regclass('nexus.data_moves') IS NOT NULL
+       AND EXISTS (SELECT 1 FROM pg_class c
+                   WHERE c.oid = to_regclass('nexus.data_moves') AND pg_get_userbyid(c.relowner) = current_user)
+       AND (EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a
+                    WHERE c.oid = to_regclass('nexus.data_moves')
+                      AND a.grantee = (SELECT r.oid FROM pg_roles r WHERE r.rolname = 'nexus_svc'))
+            OR EXISTS (SELECT 1 FROM pg_attribute t, aclexplode(t.attacl) a
+                       WHERE t.attrelid = to_regclass('nexus.data_moves') AND t.attacl IS NOT NULL
+                         AND a.grantee = (SELECT r.oid FROM pg_roles r WHERE r.rolname = 'nexus_svc'))) THEN
+        REVOKE ALL ON TABLE nexus.data_moves FROM nexus_svc;
     END IF;
 END
 $$;

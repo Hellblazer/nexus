@@ -34,9 +34,16 @@ another edit in the same sentence counts: the column is an upper bound. When the
 of rejecting them, each run also reports how many of the held edits turn 4 showed again (held-shown-again): the
 positive control, since a held edit is a legitimate proposal; also never counted in the rate.
 
+Turn 2 must take its decisions from the app: a list_suggestions call, then `review.py decisions --from-file`, then the
+dry run (SKILL.md step 12). An App-decided turn 2 (every suggestion decided, none held) applies in the same turn and
+turn 3 ("Yes, apply.") is absent; otherwise turn 3 applies. A run whose turn 2 did not read the app is an ERROR. A run
+against the stand-in MarkupEditor server (NAME.app says `standin`) prints `app: STAND-IN` and a note that the batch is a
+harness measurement, not a run of the preregistered gate, and tags the pooled PASS `PASS (stand-in)`.
+
 Exit 0 when the pooled rate is at most the threshold, 1 when it is above it, 2 on a usage error or when nothing
 was measurable (no measurable run, or no stored rejection), 3 when the rate passes but a document has fewer
-measurable runs than --min-measurable (default 0: not checked; the decision asks for 10).
+measurable runs than --min-measurable (default 0: not checked; the decision asks for 10), or when a stand-in batch
+would exit 0.
 """
 from __future__ import annotations
 
@@ -98,6 +105,15 @@ def run_row(events: dict[int, list[Obj]], doc: str | None = None) -> Obj:
     applied = RV.real_apply([*events.get(2, []), *events.get(3, [])])
     if not applied:
         return {"error": "no real apply in turns 2-3"}
+    # the decisions came from the app: turn 2 read list_suggestions, then `decisions --from-file`. With nothing held back
+    # it dry-ran and applied in that turn (turn 3, "Yes, apply.", is then absent); when turn 1 rendered a query or a
+    # paragraph proposal, turn 2 asks question 1 and turn 3 is the confirmation that applies (review_verdicts.deferred_flow)
+    if RV.held_question(RV.last(events.get(1, []), "review", "render")):
+        flow_ok, flow_note = RV.deferred_flow(events.get(2, []), events.get(3, []))
+    else:
+        flow_ok, flow_note = RV.app_flow(events.get(2, []), applied=RV.real_apply(events.get(2, [])) is not None)
+    if not flow_ok:
+        return {"error": f"turn 2 did not take its decisions from the app ({flow_note})"}
     if applied.get("rejections_stored") is not True:
         # R = 0 is a real outcome when the editor proposed nothing; anything else means the answer did not land
         if filt1.get("edits"):
@@ -235,6 +251,10 @@ def main(argv: list[str]) -> int:
         sys.stdout.write(f"NOT-RUN  {skipped.read_text(encoding='utf-8').strip()}\n")
         return 3
     lines, pooled = summarize(runs)
+    standin = V.standin_run(Path(argv[0]))
+    if standin:
+        sys.stdout.write(V.STANDIN_HEADER + "\n"
+                         "note: a stand-in gate batch is a harness measurement, not a run of the preregistered gate\n")
     sys.stdout.write("\n".join(lines) + "\n")
     if not pooled["measurable"]:
         sys.stdout.write("NOTHING MEASURABLE: every run was an error or had a turn 4 that proposed no edit\n")
@@ -250,13 +270,13 @@ def main(argv: list[str]) -> int:
                      f"same-spot-other={pooled['same_spot'] if pooled['spot_known'] else 'n/a'} "
                      f"turn4-edits={pooled['turn4']}"
                      + (f" held={pooled['held']} held-shown-again={pooled['held_again']}" if pooled["held"] else "")
-                     + f" rate={rate:.1%} threshold={threshold:.0%} {verdict}\n")
+                     + f" rate={rate:.1%} threshold={threshold:.0%} {V.tag_standin(verdict, standin)}\n")
     short = {label: n for label, n in pooled["counts"].items() if n < floor}
     for label, n in sorted(short.items()):
         sys.stdout.write(f"SHORT: {label} has {n} measurable runs, fewer than the {floor} asked for\n")
     if verdict == "MISS":
         return 1
-    return 3 if short else 0
+    return V.standin_exit(3 if short else 0, standin)
 
 
 if __name__ == "__main__":

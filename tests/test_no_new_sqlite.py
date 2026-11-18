@@ -239,6 +239,13 @@ def test_scanner_is_nonvacuous() -> None:
 _SERVICE = REPO_ROOT / "service" / "src"
 _SERVICE_CHANGELOG = REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog"
 _SERVICE_TEST = _SERVICE / "test"
+# The vendored ddl_utils and dml_utils libraries (RDR-246, nexus-f3yqd.2.10): those libraries' own Liquibase
+# sqlFile bodies, copied byte for byte at a pinned revision by scripts/vendor_dml_utils.py. Sam ruled on
+# 2026-11-16 (linda's session) to exempt db/vendor narrowly from the DDL-lives-in-Liquibase scan. Narrow
+# means: only a file that PIN.manifest lists is exempt, so an unlisted file dropped in there is scanned
+# like any other.
+_SERVICE_VENDOR = REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "vendor"
+_VENDOR_MANIFEST = "PIN.manifest"
 
 _JAVA_SQLITE_RE = re.compile(r"org\.sqlite|jdbc:sqlite", re.IGNORECASE)
 _JAVA_DDL_RE = re.compile(r"CREATE\s+TABLE", re.IGNORECASE)
@@ -272,15 +279,40 @@ def test_service_tree_has_no_sqlite():
     )
 
 
+def _vendored_manifest_files() -> set[pathlib.Path]:
+    """Every file a vendored library's PIN.manifest lists, as an absolute path (the exempted set)."""
+    listed: set[pathlib.Path] = set()
+    for manifest in sorted(_SERVICE_VENDOR.glob(f"*/{_VENDOR_MANIFEST}")):
+        for line in manifest.read_text().splitlines():
+            m = re.match(r"^[0-9a-f]{40} (.+)$", line)
+            if m:
+                entry = (manifest.parent / m.group(1)).resolve()
+                # An absolute or escaping manifest path must never exempt a file outside the vendor tree.
+                assert manifest.parent.resolve() in entry.parents, f"{manifest}: {m.group(1)!r} leaves its library"
+                listed.add(manifest.parent / m.group(1))
+    return listed
+
+
 def test_service_ddl_lives_only_in_liquibase():
     """CREATE TABLE under service/src/main appears ONLY in Liquibase
-    changelogs; Java test sources may build PG fixtures."""
+    changelogs; Java test sources may build PG fixtures.
+
+    Exempt: the vendored ddl_utils / dml_utils files listed in their PIN.manifest. They are those libraries' own
+    Liquibase sqlFile bodies, and Sam ruled on 2026-11-16 to exempt db/vendor narrowly. The exemption carries a
+    non-vacuity check below: it must exempt files that exist, are listed, and carry DDL, or it is dead weight."""
     offenders = []
+    exempt_seen: set[pathlib.Path] = set()
+    ddl_in_exempt = 0
+    vendored = _vendored_manifest_files()
     main_tree = _SERVICE / "main"
     for path in main_tree.rglob("*"):
         if not path.is_file() or path.suffix not in (".java", ".xml", ".sql", ".properties"):
             continue
         if _SERVICE_CHANGELOG in path.parents:
+            continue
+        if path in vendored:
+            exempt_seen.add(path)
+            ddl_in_exempt += bool(_JAVA_DDL_RE.search(path.read_text(errors="replace")))
             continue
         text = path.read_text(errors="replace")
         for m in _JAVA_DDL_RE.finditer(text):
@@ -291,6 +323,17 @@ def test_service_ddl_lives_only_in_liquibase():
         + ", ".join(offenders)
         + "\nALL DDL goes through Liquibase (standing directive); hard "
         "failure, not a number to bump (nexus-146xx.18 Act 3)."
+    )
+    # Non-vacuity (nexus-moht0): an exemption that exempts nothing is a gate that checked nothing.
+    assert len(vendored) > 100, f"PIN.manifests list only {len(vendored)} vendored files; the exemption has nothing to stand on"
+    missing = sorted(str(p.relative_to(REPO_ROOT)) for p in vendored if not p.is_file())
+    assert not missing, f"PIN.manifest lists files that are not in the vendor tree: {missing[:5]}"
+    assert exempt_seen == {p for p in vendored if p.suffix in (".java", ".xml", ".sql", ".properties")}, (
+        "the scan did not visit every scannable vendored file it exempts"
+    )
+    assert ddl_in_exempt >= 2, (
+        f"only {ddl_in_exempt} exempted vendored files carry CREATE TABLE; the exemption is meant for dml_utils' 006 and "
+        "ddl_utils' 003 table scripts, so a count below 2 means it no longer covers what it was made for"
     )
 
 

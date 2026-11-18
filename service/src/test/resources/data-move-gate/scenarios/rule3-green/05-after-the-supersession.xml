@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-green. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-waits-on-the-superseded-label" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-widgets-1' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-waits-on-the-superseded-label</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_a;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-waits-on-the-replacement-label" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-widgets-2' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-waits-on-the-replacement-label</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_b;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="g-waits-on-the-replacement-for-its-own-table" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-widgets-2' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>g-waits-on-the-replacement-for-its-own-table</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets_v2 DROP COLUMN old_c;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

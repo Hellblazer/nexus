@@ -10,6 +10,7 @@ import json
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.commands import catalog as _cat_cmd
 
 
 class _FakeDoc:
@@ -23,8 +24,12 @@ class _FakeReader:
     def __init__(self, docs):
         self._docs = docs
 
-    def all_documents(self):
-        return self._docs
+    def all_documents(self, *_a, **_kw):
+        raise AssertionError("backfill-source-uri must read the chroma:// prefix, not walk the catalog")
+
+    def list_scoped(self, *, source_uri_prefix: str = "", **_kw):
+        assert source_uri_prefix == "chroma://", source_uri_prefix
+        return [d for d in self._docs if d.source_uri.startswith(source_uri_prefix)]
 
 
 class _FakeWriter:
@@ -41,8 +46,6 @@ class _FakeWriter:
 
 
 def _invoke(monkeypatch, docs, args, writer=None):
-    from nexus.commands import catalog as _cat_cmd
-
     monkeypatch.setattr(_cat_cmd, "_get_catalog", lambda: _FakeReader(docs))
     if writer is not None:
         monkeypatch.setattr(_cat_cmd, "_get_catalog_writer", lambda: writer)
@@ -82,8 +85,6 @@ def test_apply_rewrites_candidates_via_update_many(monkeypatch):
 
 
 def test_dry_run_never_constructs_a_writer(monkeypatch):
-    from nexus.commands import catalog as _cat_cmd
-
     def _boom():
         raise AssertionError("dry-run must never open a catalog writer")
 

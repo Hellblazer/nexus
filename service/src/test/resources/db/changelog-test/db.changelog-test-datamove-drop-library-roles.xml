@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.13: the database before a cloud's bootstrap has run: the library schemas gone (as
+    db.changelog-test-dml-utils-uninstall.xml) and the three library roles dropped with their grants. The pg_background
+    extension stays. DmlUtilsTestFixtures#bootstrapDmlUtils makes the roles again. Superuser, runAlways. Run through
+    DataMoveTestFixtures#dropLibraryRoles.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-drop-library-roles-1" author="nexus-f3yqd.2.13" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+DROP SCHEMA IF EXISTS ddl_utils, ddl_utils_lib, dml_utils, dml_utils_data, dml_utils_lib CASCADE;
+DROP SCHEMA IF EXISTS liquibase CASCADE;
+DROP OWNED BY dml_utils_owner, dml_utils_caller, ddl_utils_caller;
+DROP ROLE IF EXISTS dml_utils_owner, dml_utils_caller, ddl_utils_caller;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

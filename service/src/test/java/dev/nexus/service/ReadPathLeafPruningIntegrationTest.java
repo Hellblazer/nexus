@@ -61,6 +61,9 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_768;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_768;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
@@ -204,6 +207,10 @@ class ReadPathLeafPruningIntegrationTest {
         seedDs = svcPool("rp-seed");
         seedScope = new TenantScope(seedDs);
         seed();
+        // TS2's 300-tenant database is a copy of this one, taken now, before any other session opens on it
+        seedDs.close();
+        seedDs = null;
+        cloneForTs2();
         // After the seed: from here nexus_svc's NEW sessions log every plan, nested ones included.
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.enableAutoExplainForService(su);
@@ -218,8 +225,12 @@ class ReadPathLeafPruningIntegrationTest {
     }
 
     private HikariDataSource svcPool(String name) {
+        return svcPool(name, pg.getJdbcUrl());
+    }
+
+    private HikariDataSource svcPool(String name, String jdbcUrl) {
         var cfg = new HikariConfig();
-        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setJdbcUrl(jdbcUrl);
         cfg.setUsername(PgContainerHelper.SVC_USERNAME);
         cfg.setPassword(PgContainerHelper.SVC_PASSWORD);
         cfg.setMaximumPoolSize(3);
@@ -444,6 +455,14 @@ class ReadPathLeafPruningIntegrationTest {
         }
     }
 
+    @Test
+    void topicSet_oneLeaf() throws Exception {
+        for (String coll : List.of(CTX_1, CODE_1, BGE_1, MINI_1)) {
+            Seen s = observe(() -> rowsAs(TA, fnFor("search_topic_set", coll, TA, false)));
+            assertLeaves("search_topic_set " + coll, s, chunkLeaf(coll, TA));
+        }
+    }
+
     // ── taxonomy families ───────────────────────────────────────────────────
 
     @Test
@@ -492,7 +511,8 @@ class ReadPathLeafPruningIntegrationTest {
     private static final List<String> FAMILIES = List.of(
         "plain_search", "text_gated_search_hnsw_first", "text_gated_search_by_chash", "text_gated_search_allowed",
         "search_metadata_scoped",
-        "search_aspect_scoped", "search_graph_hop", "search_topic_scoped", "text_gate_probe", "taxonomy_ann_query",
+        "search_aspect_scoped", "search_graph_hop", "search_topic_scoped", "search_topic_set", "text_gate_probe",
+        "taxonomy_ann_query",
         "assign_from_chashes", "cross_preview", "manifest_search");
 
     private static final org.jooq.JSONB MANIFEST_ANY = org.jooq.JSONB.valueOf("{\"section_title\": \"\"}");
@@ -555,6 +575,12 @@ class ReadPathLeafPruningIntegrationTest {
                 case 384 -> SEARCH_TOPIC_SCOPED_384.call(q, TOPIC, coll, 10, model, t, false);
                 case 768 -> SEARCH_TOPIC_SCOPED_768.call(q, TOPIC, coll, 10, model, t, false);
                 default -> SEARCH_TOPIC_SCOPED_1024.call(q, TOPIC, coll, 10, model, t, false);
+            };
+            // nexus-7fku2.1.1 (RDR-134 Step 1): the topic-set variant, a set of the one topic the fixture seeds
+            case "search_topic_set" -> switch (dim) {
+                case 384 -> SEARCH_TOPIC_SET_384.call(q, new Long[] {topicId(t, coll)}, coll, 10, model, t, false);
+                case 768 -> SEARCH_TOPIC_SET_768.call(q, new Long[] {topicId(t, coll)}, coll, 10, model, t, false);
+                default -> SEARCH_TOPIC_SET_1024.call(q, new Long[] {topicId(t, coll)}, coll, 10, model, t, false);
             };
             case "text_gate_probe" -> switch (dim) {
                 case 384 -> TEXT_GATE_PROBE_384.call(COMMON, colls, null, null, 100, model, t);
@@ -674,86 +700,145 @@ class ReadPathLeafPruningIntegrationTest {
     private static final int TS2_WARMUP = 20;
     private static final int TS2_TENANTS = 300;
     /**
-     * Each figure, at 2 tenants and at 300, is the best (lowest) p95 of this many sets, so both phases are read
-     * with the same statistic. A box that is also running a build or another suite inflates single sets by 5x and
-     * more in either phase; a planning cost that GROWS with the tenant count shows in every set, so the minimum
-     * keeps the signal and drops the load. The bound is the RDR's: p95 at 300 tenants at most 2x the 2-tenant p95
-     * (see {@link #TS2_RATIO_MIN_DIFF_MS}) and at most 25 ms.
+     * Sets per family. A set is a PAIR, the 2-tenant and the 300-tenant p95 of plans timed in alternation (see
+     * {@link #ts2SetOnce}), and the rule is applied to each pair: a family fails only when every set fails, and
+     * its figures are those of its best set (see {@link Ts2Rule#judge}). The bound in each pair is the RDR's: p95 at
+     * 300 tenants at most 2x the 2-tenant p95 (see {@link Ts2Rule#RATIO_MIN_DIFF_MS}) and at most 25 ms.
      */
     private static final int TS2_ATTEMPTS = 5;
-    /**
-     * The 2x rule fails a family only when the 300-tenant p95 is also more than this many ms above the 2-tenant
-     * p95 (RDR-225 amendment of 2026-10-12). A family that plans in 0.6 ms moves by 0.6 ms from one phase to the
-     * next on a shared box, in either direction, and that alone is 2x: on develop aa226556f assign_from_chashes
-     * 1024 read 1.232 ms against 0.600 ms (2.05x) while text_gate_probe 768 went from 1.326 ms DOWN to 0.669 ms.
-     * A planning cost that grows with the tenant count is far above this: the control, plain_search_1024 with its
-     * tenant predicate removed, reads 15.4 ms against 0.9 ms. The 25 ms cap has no such allowance.
-     */
-    private static final double TS2_RATIO_MIN_DIFF_MS = 2.0;
-
     /** Families whose body is not inlined into the caller's statement: the call is timed, with its inner planning. */
     private static final Set<String> TS2_OPAQUE = Set.of("text_gate_probe", "assign_from_chashes", "cross_preview");
 
-    /** The pool TS2 times on: its sessions were opened with auto_explain off (see the test). */
-    private TenantScope ts2Scope;
+    /**
+     * The 300-tenant database: a template copy of the seeded one, made in {@link #startAll}, that TS2 alone gives
+     * 298 more tenants. The 2-tenant figure is read from the seeded database, which never gets them.
+     */
+    static final String TS2_MANY_DB = "rp_ts2_many";
+    /** An empty database to run the copy from: PostgreSQL refuses a template that has any session, the caller's too. */
+    static final String TS2_CTL_DB = "rp_ts2_ctl";
 
-    /** The TS2 rule on one family's two figures, in ms. */
-    static boolean ts2Violates(double p2, double p300) {
-        boolean overRatio = p300 > 2 * p2 && p300 - p2 > TS2_RATIO_MIN_DIFF_MS;
-        return overRatio || p300 > 25.0;
+    /** The pools TS2 times on: their sessions were opened with auto_explain off (see the test). */
+    private TenantScope ts2Few;
+    private TenantScope ts2Many;
+
+    private String urlFor(String db) {
+        return "jdbc:postgresql://" + pg.getHost() + ":" + pg.getMappedPort(PostgreSQLContainer.POSTGRESQL_PORT)
+            + "/" + db;
     }
 
-    /** The rule on recorded figures: the row that failed on noise passes, and the pruning control still fails. */
-    @Test
-    void ts2Rule_passesSubMillisecondNoise_andFailsThePruningControlAndTheCap() {
-        assertThat(ts2Violates(0.600, 1.232)).as("assign_from_chashes 1024 on develop aa226556f, 2.05x").isFalse();
-        assertThat(ts2Violates(0.9, 15.4)).as("plain_search_1024 with its tenant predicate removed").isTrue();
-        assertThat(ts2Violates(0.9, 3.0)).as("over 2x and 2.1 ms apart").isTrue();
-        assertThat(ts2Violates(0.9, 2.8)).as("over 2x but 1.9 ms apart").isFalse();
-        assertThat(ts2Violates(5.0, 9.0)).as("4 ms apart but under 2x").isFalse();
-        assertThat(ts2Violates(24.0, 25.5)).as("over the 25 ms cap, which has no allowance").isTrue();
+    private Connection superuserTo(String db) throws Exception {
+        return java.sql.DriverManager.getConnection(urlFor(db), pg.getUsername(), pg.getPassword());
     }
 
-    /** Best p95 of {@link #TS2_ATTEMPTS} sets of {@link #TS2_SAMPLES} timings of one family at one dimension, in ms. */
-    private double ts2P95(String family, String coll) {
-        double best = Double.MAX_VALUE;
-        for (int attempt = 0; attempt < TS2_ATTEMPTS; attempt++) {
-            best = Math.min(best, ts2P95Once(family, coll));
+    /** Copy the seeded database to {@link #TS2_MANY_DB}. Every session to the seeded database must be closed. */
+    private void cloneForTs2() throws Exception {
+        PgContainerHelper.requireTestIdentifier(pg.getDatabaseName());
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.createDatabase(su, TS2_CTL_DB);
         }
-        return best;
-    }
-
-    private double ts2P95Once(String family, String coll) {
-        long[] ns = new long[TS2_SAMPLES];
-        // One transaction, the serving settings set once, only the statement timed: the transaction's own round
-        // trips (tenant stamp, GUCs, commit) are the same at any tenant count and would bury a planning cost of a
-        // fraction of a millisecond.
-        ts2Scope.withTenant(TA, ctx -> {
-            PgSession.setSearchPlanCacheMode(ctx);
-            for (int i = -TS2_WARMUP; i < TS2_SAMPLES; i++) {      // warm-up runs, not recorded
-                Table<?> fn = fnFor(family, coll, TA, false);
-                long t0 = System.nanoTime();
-                if (TS2_OPAQUE.contains(family)) {
-                    ctx.selectFrom(fn).fetch();
-                } else {
-                    ctx.explain(ctx.selectFrom(fn));
-                }
-                long dt = System.nanoTime() - t0;
-                if (i >= 0) ns[i] = dt;
-            }
-            return null;
-        });
-        java.util.Arrays.sort(ns);
-        return ns[(int) Math.ceil(0.95 * TS2_SAMPLES) - 1] / 1e6;
+        try (Connection ctl = superuserTo(TS2_CTL_DB)) {
+            PgContainerHelper.cloneDatabase(ctl, pg.getDatabaseName(), TS2_MANY_DB);
+        }
     }
 
     /**
-     * TS2, as the RDR writes it: every search family planned 200 times per set at 2 tenants and at 300, p95 at 300 at most
-     * twice the 2-tenant p95 (counted only when the two differ by more than {@link #TS2_RATIO_MIN_DIFF_MS} ms) and
-     * at most 25 ms. A family is timed as EXPLAIN of its call (parse and plan, no
+     * The number of leaves of {@code table} ({@code chunks} or {@code taxonomy_centroids}) of the model of
+     * {@code coll}, one per tenant, as the session of {@code d} sees them.
+     */
+    private static int leavesOfModel(DSLContext d, String table, String coll) {
+        String leaf = table.equals("chunks") ? chunkLeaf(coll, TA) : centroidLeaf(coll, TA);
+        String modelPrefix = leaf.substring(0, leaf.indexOf("_t_") + 3);
+        return d.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_class")),
+            DSL.field(DSL.name("relname"), String.class).likeRegex("^" + modelPrefix + "[0-9a-f]{16}$"));
+    }
+
+    /**
+     * Non-vacuity, on the pools that are timed: the two databases differ by exactly the 298 tenants, in the chunk
+     * leaves and the taxonomy-centroid leaves (the taxonomy families plan against those) of every measured model.
+     * Counted through {@code ts2Few} and {@code ts2Many} themselves, so a pool that points at the wrong database
+     * fails here, not only a clone that was never grown.
+     */
+    private void requireTs2Databases() {
+        for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
+            for (String table : List.of("chunks", "taxonomy_centroids")) {
+                int few = ts2Few.withTenant(TA, c -> leavesOfModel(c, table, coll));
+                int many = ts2Many.withTenant(TA, c -> leavesOfModel(c, table, coll));
+                // the fixture's two tenants, and any the schema makes of its own (one, today)
+                assertThat(few).as("%s leaves of %s's model seen by the 2-tenant pool", table, coll).isBetween(2, 3);
+                assertThat(many - few).as("%s leaves of %s's model added for TS2, 300-tenant pool minus 2-tenant pool",
+                    table, coll).isEqualTo(TS2_TENANTS - 2);
+            }
+        }
+    }
+
+    private Ts2Rule.Figures ts2Figures(String family, String coll, int attempts) {
+        List<double[]> pairs = new ArrayList<>();
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            pairs.add(ts2SetOnce(family, coll));
+        }
+        return Ts2Rule.judge(pairs);
+    }
+
+    /**
+     * One set: {@link #TS2_SAMPLES} plans in each database, ALTERNATING between them, the first of each pair
+     * alternating too. The two databases are in one cluster and differ only in the tenant count, and plan i of one
+     * is timed next to plan i of the other, so whatever else the box is doing falls on both figures alike. Timing
+     * the 2-tenant pass minutes before the 300-tenant pass, as this test did before, let a build or another suite
+     * that started in between fail a family whose planning had not grown at all (nexus-7fku2.1.1 flake, 2026-11-16).
+     * One transaction per database, the serving settings set once, only the statement timed: the transaction's own
+     * round trips (tenant stamp, GUCs, commit) are the same at any tenant count and would bury a planning cost of a
+     * fraction of a millisecond.
+     */
+    private double[] ts2SetOnce(String family, String coll) {
+        long[] few = new long[TS2_SAMPLES];
+        long[] many = new long[TS2_SAMPLES];
+        boolean opaque = TS2_OPAQUE.contains(family);
+        ts2Few.withTenant(TA, cFew -> ts2Many.withTenant(TA, cMany -> {
+            PgSession.setSearchPlanCacheMode(cFew);
+            PgSession.setSearchPlanCacheMode(cMany);
+            for (int i = -TS2_WARMUP; i < TS2_SAMPLES; i++) {      // warm-up runs, not recorded
+                Table<?> fn = fnFor(family, coll, TA, false);
+                boolean fewFirst = (i & 1) == 0;
+                long first = ts2Time(fewFirst ? cFew : cMany, fn, opaque);
+                long second = ts2Time(fewFirst ? cMany : cFew, fn, opaque);
+                if (i >= 0) {
+                    few[i] = fewFirst ? first : second;
+                    many[i] = fewFirst ? second : first;
+                }
+            }
+            return null;
+        }));
+        return new double[] {p95Ms(few), p95Ms(many)};
+    }
+
+    /** EXPLAIN of the call (parse and plan) when the family is inlined, else the call itself, in ns. */
+    private static long ts2Time(DSLContext ctx, Table<?> fn, boolean opaque) {
+        long t0 = System.nanoTime();
+        if (opaque) {
+            ctx.selectFrom(fn).fetch();
+        } else {
+            ctx.explain(ctx.selectFrom(fn));
+        }
+        return System.nanoTime() - t0;
+    }
+
+    private static double p95Ms(long[] ns) {
+        long[] sorted = ns.clone();
+        java.util.Arrays.sort(sorted);
+        return sorted[(int) Math.ceil(0.95 * sorted.length) - 1] / 1e6;
+    }
+
+    /**
+     * TS2, per RDR-225: every search family planned {@value #TS2_SAMPLES} times per set at 2 tenants and at 300, p95
+     * at 300 at most twice the 2-tenant p95 (counted only when the two differ by more than
+     * {@link Ts2Rule#RATIO_MIN_DIFF_MS} ms) and at most 25 ms. The rule is applied to each set's pair of p95s, not to
+     * the lowest p95 of each column across sets as RDR-225 recorded it, and a family fails only when EVERY set fails
+     * (Sam, 2026-11-17; {@link Ts2Rule#judge}). A family is timed as EXPLAIN of its call (parse and plan, no
      * execution) when it is inlined into the caller's statement, and as the call itself when it is not (a
      * plpgsql function plans its own statements at call time: the probe, assign_from_chashes, cross_preview;
-     * their inputs are four rows, so the call is dominated by planning). The numbers are printed for the record.
+     * their inputs are four rows, so the call is dominated by planning). The 2-tenant and 300-tenant figures come
+     * from two databases of one cluster, timed in alternation (see {@link #ts2SetOnce}). The numbers are printed
+     * for the record, with every set's pair.
      */
     @Test
     void ts2_planningAt300Tenants_isWithinTwiceTheTwoTenantP95_andUnder25ms() throws Exception {
@@ -766,9 +851,23 @@ class ReadPathLeafPruningIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.disableAutoExplainForService(su);
         }
-        try (HikariDataSource ts2Ds = svcPool("rp-ts2")) {
-            ts2Scope = new TenantScope(ts2Ds);
-            ts2Body();
+        try {
+            long started = System.nanoTime();
+            try (Connection su = superuserTo(TS2_MANY_DB)) {
+                su.setAutoCommit(true);
+                DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
+                for (int i = 0; i < TS2_TENANTS - 2; i++) {
+                    PgContainerHelper.ensureTenantPartitions(dsl, "ts2-tenant-" + i);
+                }
+            }
+            long tenantsDone = System.nanoTime();
+            try (HikariDataSource fewDs = svcPool("rp-ts2-few", pg.getJdbcUrl());
+                 HikariDataSource manyDs = svcPool("rp-ts2-many", urlFor(TS2_MANY_DB))) {
+                ts2Few = new TenantScope(fewDs);
+                ts2Many = new TenantScope(manyDs);
+                requireTs2Databases();
+                ts2Body(started, tenantsDone);
+            }
         } finally {
             // the pooled sessions of the other tests keep what they were opened with; this is for any new one
             try (Connection su = pg.createConnection("")) {
@@ -777,52 +876,40 @@ class ReadPathLeafPruningIntegrationTest {
         }
     }
 
-    private void ts2Body() throws Exception {
-        long started = System.nanoTime();
-        // one unrecorded pass over every family first, so the first family measured does not carry the cold
-        // start of the server's caches and the JIT of this JVM into the 2-tenant baseline
+    private void ts2Body(long started, long tenantsDone) {
+        // one unrecorded set per family first, so the first family measured does not carry the cold start of the
+        // server's caches and the JIT of this JVM
         for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
             for (String family : FAMILIES) {
                 if (family.equals("cross_preview") && !coll.equals(CTX_1)) continue;
-                ts2P95(family, coll);
+                ts2Figures(family, coll, 1);
             }
         }
         long warmDone = System.nanoTime();
-        Map<String, Double> at2 = new java.util.LinkedHashMap<>();
-        for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
-            for (String family : FAMILIES) {
-                if (family.equals("cross_preview") && !coll.equals(CTX_1)) continue;
-                at2.put(family + " " + dimOf(coll), ts2P95(family, coll));
-            }
-        }
-        long at2Done = System.nanoTime();
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
-            for (int i = 0; i < TS2_TENANTS - 2; i++) {
-                PgContainerHelper.ensureTenantPartitions(dsl, "ts2-tenant-" + i);
-            }
-        }
-        long tenantsDone = System.nanoTime();
         List<String> failures = new ArrayList<>();
-        StringBuilder table = new StringBuilder("TS2 planning p95 (ms), best of " + TS2_ATTEMPTS + " sets of "
-            + TS2_SAMPLES + " plans\n");
+        StringBuilder table = new StringBuilder("TS2 planning p95 (ms), " + TS2_ATTEMPTS + " sets of "
+            + TS2_SAMPLES + " plans per database, alternating, the rule applied to each set's pair; a family fails "
+            + "when every set fails, and the figures shown are the best set's; sets as 2-tenant/300-tenant\n");
         for (String coll : List.of(CTX_1, BGE_1, MINI_1)) {
             for (String family : FAMILIES) {
                 if (family.equals("cross_preview") && !coll.equals(CTX_1)) continue;
                 String key = family + " " + dimOf(coll);
-                double p2 = at2.get(key);
-                double p300 = ts2P95(family, coll);
-                table.append(String.format("  %-34s  2 tenants %7.3f   300 tenants %7.3f%n", key, p2, p300));
-                if (ts2Violates(p2, p300)) failures.add(String.format("%s: p95 %.3f ms at 300 vs %.3f ms at 2", key, p300, p2));
+                Ts2Rule.Figures f = ts2Figures(family, coll, TS2_ATTEMPTS);
+                boolean violates = f.violates();
+                table.append(String.format("  %-34s  2 tenants %7.3f   300 tenants %7.3f   sets %s%s%n",
+                    key, f.few(), f.many(), f.sets(), violates ? "   FAIL" : ""));
+                if (violates) {
+                    failures.add(String.format("%s: over in every set; best p95 %.3f ms at 300 vs %.3f ms at 2",
+                        key, f.many(), f.few()));
+                }
             }
         }
         long end = System.nanoTime();
-        table.append(String.format("  wall: warm pass %.1f s, 2-tenant pass %.1f s, 298 tenants created %.1f s, 300-tenant pass %.1f s%n",
-            (warmDone - started) / 1e9, (at2Done - warmDone) / 1e9, (tenantsDone - at2Done) / 1e9, (end - tenantsDone) / 1e9));
+        table.append(String.format("  wall: 298 tenants created %.1f s, warm pass %.1f s, measured pass %.1f s%n",
+            (tenantsDone - started) / 1e9, (warmDone - tenantsDone) / 1e9, (end - warmDone) / 1e9));
         System.out.println(table);
         assertThat(failures).as("TS2 (p95 at 300 tenants <= 2x the 2-tenant p95, or within "
-            + TS2_RATIO_MIN_DIFF_MS + " ms of it, and <= 25 ms):%n%s", table).isEmpty();
+            + Ts2Rule.RATIO_MIN_DIFF_MS + " ms of it, and <= 25 ms):%n%s", table).isEmpty();
     }
 
     /**

@@ -135,13 +135,11 @@ jobs:
           java-version: "25.0.3"
           distribution: "graalvm"
 
-      - name: Cache Maven local repo (dev-jar build)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      - name: Restore the Maven cache and set Central retries (dev-jar build)
+        # A scheduled run saves under main; maven-cache-seed.yml is what keeps main's entries for tag runs.
+        uses: ./.github/actions/maven-cache
         with:
-          path: ~/.m2/repository
-          key: maven-${{ runner.os }}-${{ hashFiles('service/pom.xml') }}
-          restore-keys: |
-            maven-${{ runner.os }}-
+          job-class: package
 
       - name: Install ripgrep
         # test_doctor_runs_and_reports asserts rg presence. Not apt alone: see the script.
@@ -417,13 +415,11 @@ jobs:
           java-version: "25.0.3"
           distribution: "graalvm"
 
-      - name: Cache Maven local repo (dev-jar build)
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
+      - name: Restore the Maven cache and set Central retries (dev-jar build)
+        # A scheduled run saves under main; maven-cache-seed.yml is what keeps main's entries for tag runs.
+        uses: ./.github/actions/maven-cache
         with:
-          path: ~/.m2/repository
-          key: maven-${{ runner.os }}-${{ hashFiles('service/pom.xml') }}
-          restore-keys: |
-            maven-${{ runner.os }}-
+          job-class: package
 
       - name: Install ripgrep
         # test_doctor_runs_and_reports asserts rg presence. Not apt alone: see the script.

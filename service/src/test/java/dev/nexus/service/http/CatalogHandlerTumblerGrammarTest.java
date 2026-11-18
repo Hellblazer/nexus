@@ -109,6 +109,37 @@ class CatalogHandlerTumblerGrammarTest {
         assertThat(body.get("value")).isEqualTo("7777");
     }
 
+    /**
+     * nexus-dngtz.1.8: the offending value is client text, so the WARN line escapes it. The 400 body
+     * keeps the JSON-escaped value (the response is not a log line).
+     */
+    @Test
+    void aTumblerValueWithANewline_logsOneEscapedViolationLine() throws Exception {
+        var logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(CatalogHandler.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        CapturingExchange ex;
+        try {
+            ex = post("/v1/catalog/owners/upsert",
+                "{\"tumbler_prefix\":\"7\\nevent=forged\",\"name\":\"nl\",\"owner_type\":\"repo\"}");
+            handleWithTenant(ex);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+        assertThat(ex.status).as("response body: %s", ex.bodyString()).isEqualTo(400);
+        var lines = appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("event=catalog_handler_tumbler_grammar_violation"))
+            .toList();
+        assertThat(lines).as("non-vacuity: exactly one violation line was logged").hasSize(1);
+        assertThat(lines.get(0).getFormattedMessage())
+            .contains("field=tumbler_prefix value=7\\x0aevent=forged")
+            .doesNotContain("\n").doesNotContain("\r");
+        assertThat(MAPPER.readValue(ex.bodyString(), Map.class).get("value")).isEqualTo("7\nevent=forged");
+    }
+
     @Test
     void ownersUpsert_conformingPrefix_succeeds() throws Exception {
         CapturingExchange ex = post("/v1/catalog/owners/upsert",

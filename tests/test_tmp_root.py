@@ -980,6 +980,16 @@ _NOT_NEXUS_TEST_CODE = (
 _TMPDIR_OVERRIDE_EXEMPT: dict[str, str] = {
     "tests/e2e/lib/setup_journey.py::sandbox_env": _FROM_SCRATCH,
     "tests/prose_edit/conftest.py::prose": _NOT_NEXUS_TEST_CODE + " (prose-edit scripts and the nx CLI)",
+    # nexus-scmcs.3: the child is the bash acceptance runner (run-scenario.sh) or local_engine.bash's env -i
+    # wrapper, with a stub claude and nx; neither imports tests.* nor runs tests/conftest.py.
+    "tests/prose_edit/test_local_engine.py::Box.env": _NOT_NEXUS_TEST_CODE + " (local_engine.bash, stub nx)",
+    "tests/prose_edit/test_markup_standin_runner.py::_run": _NOT_NEXUS_TEST_CODE + " (run-scenario.sh, stub claude)",
+    "tests/prose_edit/test_markup_standin_runner.py::test_an_interpreter_without_mcp_stops_the_run_before_any_session_and_names_the_variable":
+        _NOT_NEXUS_TEST_CODE + " (run-scenario.sh, stub claude)",
+    "tests/prose_edit/test_markup_standin_runner.py::test_the_default_interpreter_is_checked_too":
+        _NOT_NEXUS_TEST_CODE + " (run-scenario.sh, stub claude)",
+    "tests/prose_edit/test_markup_standin_runner.py::test_a_session_run_through_run_scenario_with_the_switch_leaves_its_app_marker":
+        _NOT_NEXUS_TEST_CODE + " (run-scenario.sh, stub claude)",
     "tests/prose_edit/test_allow_rule_setup.py::_symlinked_tmp":
         _NOT_NEXUS_TEST_CODE,
     "tests/prose_edit/test_brief_review.py::test_tmpdir_refuses_a_location_inside_the_repository_and_leaves_nothing":

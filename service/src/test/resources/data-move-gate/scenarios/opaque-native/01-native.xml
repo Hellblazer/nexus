@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario opaque-native. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="o-update" author="fixture">
+        <comment>o-update</comment>
+        <update tableName="settings"><column name="v" valueNumeric="1"/></update>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-modify-data-type-on-chunks" author="fixture">
+        <comment>o-modify-data-type-on-chunks</comment>
+        <modifyDataType tableName="chunks" columnName="x" newDataType="bigint"/>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-custom-change" author="fixture">
+        <comment>o-custom-change</comment>
+        <customChange class="x.Y"/>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-exempt-native-change-on-a-small-table" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row</comment>
+        <update tableName="settings"><column name="v" valueNumeric="1"/></update>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-exemption-does-not-lift-a-native-change-on-chunks" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row</comment>
+        <update tableName="settings"><column name="v" valueNumeric="1"/></update>
+        <update tableName="chunks"><column name="v" valueNumeric="1"/></update>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-exemption-does-not-lift-a-custom-change" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+        </sql>
+        <customChange class="x.Y"/>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-inert-children-pass" author="fixture">
+        <comment>o-inert-children-pass</comment>
+        <sql splitStatements="false" stripComments="false">
+SELECT 1;
+        </sql>
+        <empty/>
+        <output message="x"/>
+        <tagDatabase tag="t1"/>
+        <stop message="x"/>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-sqlfile-passes" author="fixture">
+        <comment>o-sqlfile-passes</comment>
+        <sqlFile path="backfill.sql" relativeToChangelogFile="true"/>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="o-valid-checksum-and-rollback-pass" author="fixture">
+        <comment>o-valid-checksum-and-rollback-pass</comment>
+        <sql splitStatements="false" stripComments="false">
+SELECT 1;
+        </sql>
+        <validCheckSum>ANY</validCheckSum>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

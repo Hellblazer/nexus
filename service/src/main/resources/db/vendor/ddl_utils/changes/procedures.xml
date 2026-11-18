@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.22.xsd">
+
+    <!-- One changeset per stored procedure, mirroring functions.xml. Each
+         procedure lives in its own file under procedures/<schema>/ and is added
+         with createProcedure (Liquibase has no createFunction/createProcedure
+         distinction beyond the change type). runOnChange re-applies only the
+         body that changed, and each routine carries its own rollback under
+         procedures-rollback/<schema>/.
+
+         CREATE OR REPLACE only replaces a procedure with an identical
+         signature: changing a parameter name or type aborts the deploy or
+         silently leaves the old overload behind. When a signature changes, add
+         an explicit DROP PROCEDURE IF EXISTS <old signature>; in that
+         procedure's changeset. RoutineSignatureTest fails the build if a
+         routine name ends up with more than one signature unless the overload
+         is explicitly allow-listed.
+
+         A procedure commits between its ALTER TABLE steps, so a CALL must run
+         in autocommit (inside a client transaction block PostgreSQL raises
+         "invalid transaction termination"); see procedures/README.md. The
+         changesets below only issue CREATE OR REPLACE PROCEDURE, whose embedded
+         COMMITs are body text, so they do not need runInTransaction="false". -->
+    <changeSet id="procedure-ddl_utils.ensure_not_null" author="lee.horner" dbms="postgresql" runOnChange="true">
+        <createProcedure path="procedures/ddl_utils/ensure_not_null.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="procedures-rollback/ddl_utils/ensure_not_null-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="procedure-ddl_utils.ensure_check_constraint" author="lee.horner" dbms="postgresql"
+               runOnChange="true">
+        <createProcedure path="procedures/ddl_utils/ensure_check_constraint.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="procedures-rollback/ddl_utils/ensure_check_constraint-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="procedure-ddl_utils.ensure_foreign_key" author="lee.horner" dbms="postgresql" runOnChange="true">
+        <createProcedure path="procedures/ddl_utils/ensure_foreign_key.sql" relativeToChangelogFile="true"/>
+        <rollback>
+            <sqlFile path="procedures-rollback/ddl_utils/ensure_foreign_key-rollback.sql"
+                     relativeToChangelogFile="true"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

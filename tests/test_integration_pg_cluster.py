@@ -942,7 +942,7 @@ class TestEveryIntegrationClusterGetsTheConf:
         "test_ddl_uncounted_clusters_lint.py",
     }
 
-    #: The five files whose cluster is made by ``pg_provision.provision(config_dir)`` on a ``pg_data_tempdir``
+    #: The six files whose cluster is made by ``pg_provision.provision(config_dir)`` on a ``pg_data_tempdir``
     #: dir (nexus-0ajjm); the one list is ``tests/_ddl_cluster_sites.PROVISION_DRIVEN``, relative to this directory
     #: here. provision() runs initdb and starts the cluster inside one call, so there is no moment to append the conf
     #: before the first start. After provision() each fixture appends the settings a reload applies
@@ -956,6 +956,7 @@ class TestEveryIntegrationClusterGetsTheConf:
     _APPLY_CALLS = {
         "db/test_pg_provision.py": 4,
         "db/test_pg_provision_ca3_bundle.py": 1,
+        "db/test_pg_provision_dml_utils_bootstrap.py": 2,
         "db/test_pg_bundle_relocation.py": 1,
         "db/test_pg_scram_auth.py": 2,
         "daemon/test_storage_service_daemon_pg_monitor_backfill.py": 1,

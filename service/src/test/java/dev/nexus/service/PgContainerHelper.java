@@ -183,6 +183,39 @@ public final class PgContainerHelper {
     }
 
     /**
+     * nexus-f3yqd.2.8: {@link #newContainer(DockerImageName)} on the image with pg_background
+     * ({@link PgBackgroundImage} builds it). Every data-move test boots through here or
+     * {@link #startDataMove()}. It is a container of its own, not a database on the per-fork shared cluster
+     * ({@link SharedCluster} runs {@link #IMAGE}), so a data-move test migrates and cleans up its own cluster.
+     */
+    public static PostgreSQLContainer<?> newDataMoveContainer() {
+        return newContainer(PgBackgroundImage.dockerImageName());
+    }
+
+    /** {@link #newDataMoveContainer()}, started. The caller stops it. */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startDataMove() {
+        PostgreSQLContainer<?> c = newDataMoveContainer();
+        c.start();
+        return c;
+    }
+
+    /**
+     * {@link #startDataMove()} with server settings the cluster must START with, appended after the recipe's own
+     * ({@code "-c", "name=value"} pairs), as {@link #startDedicated(List)} does: a postmaster setting such as
+     * {@code max_worker_processes} cannot be applied to a running tmpfs container.
+     */
+    @SuppressWarnings("resource")
+    public static PostgreSQLContainer<?> startDataMove(List<String> serverArgs) {
+        PostgreSQLContainer<?> c = newDataMoveContainer();
+        List<String> command = new ArrayList<>(List.of(c.getCommandParts()));
+        command.addAll(serverArgs);
+        c.setCommand(command.toArray(new String[0]));
+        c.start();
+        return c;
+    }
+
+    /**
      * {@link #newContainer()} on another image derived from {@link #IMAGE} (one with an
      * extra extension installed, say). Every test Postgres container is built here, so
      * every one gets the tmpfs data directory and the memory limit
@@ -1619,6 +1652,26 @@ public final class PgContainerHelper {
             "databasechangelog_test_ext_plpgsql_check", Map.of());
     }
 
+    /**
+     * {@code CREATE EXTENSION pg_background} and {@code vector} (nexus-f3yqd.2.8), through
+     * {@code db.changelog-test-extension-pg-background.xml}, on a superuser connection to a container of
+     * {@link #newDataMoveContainer()}. Idempotent.
+     */
+    public static void createDataMoveExtensions(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-extension-pg-background.xml",
+            "databasechangelog_test_ext_pg_background", Map.of());
+    }
+
+    /**
+     * Two functions that each launch a pg_background worker and read its result ({@code nx_pgbg_smoke_value()} is 42,
+     * {@code nx_pgbg_smoke_worker_pid()} the worker's own backend pid), through
+     * {@code db.changelog-test-pg-background-smoke.xml}. After {@link #createDataMoveExtensions}.
+     */
+    public static void installPgBackgroundSmokeProbe(Connection su) throws Exception {
+        runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-pg-background-smoke.xml",
+            "databasechangelog_test_pg_background_smoke", Map.of());
+    }
+
     /** The bookkeeping table the concurrent-index helpers share, so one lock clear covers them all. */
     private static final String CONCURRENT_INDEX_BOOKKEEPING = "databasechangelog_test_concurrent_index";
 
@@ -1713,6 +1766,20 @@ public final class PgContainerHelper {
         requireTestIdentifier(name);
         su.setAutoCommit(true);
         DSL.using(su, SQLDialect.POSTGRES).createDatabase(DSL.name(name)).execute();
+    }
+
+    /**
+     * {@code CREATE DATABASE dst TEMPLATE src} (nexus-7fku2.1.1), through {@code db.changelog-test-database-clone.xml}:
+     * jOOQ's {@code createDatabase} has no TEMPLATE clause. {@code ctl} must be a connection to a THIRD database, and
+     * {@code src} must have no other session (PostgreSQL refuses a template in use). Both names go through
+     * {@link #requireTestIdentifier}.
+     */
+    public static void cloneDatabase(Connection ctl, String src, String dst) throws Exception {
+        requireTestIdentifier(src);
+        requireTestIdentifier(dst);
+        ctl.setAutoCommit(true);
+        runSuperuserTestChangelog(ctl, "db/changelog-test/db.changelog-test-database-clone.xml",
+            "databasechangelog_test_database_clone", Map.of("sourceDb", src, "cloneDb", dst));
     }
 
     /** {@code DROP DATABASE IF EXISTS name} (nexus-cbo4a batch 11), jOOQ {@code dropDatabaseIfExists}; autocommit as in {@link #createDatabase}. */

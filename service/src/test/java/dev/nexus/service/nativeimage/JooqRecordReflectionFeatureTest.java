@@ -310,7 +310,13 @@ class JooqRecordReflectionFeatureTest {
     // 131 -> 134: nexus-bbtc2, vectors-060-text-gate-probe-by-collection.xml added nexus.text_gate_probe_by_collection_384/768/1024,
     // three RETURNS TABLE functions, three generated Record types (TextGateProbeByCollection384Record, ...768Record,
     // ...1024Record), +3.
-    private static final int EXPECTED_RECORD_TYPES = 134;
+    // 134 -> 135: nexus-f3yqd.2.12 (RDR-246 Step 4), datamoves-001-registry.xml added the table nexus.data_moves, one generated
+    // Record type (DataMovesRecord), +1.
+    // 135 -> 138: nexus-7fku2.1.1 (RDR-134 Step 1), vectors-062-topic-set-search.xml added nexus.search_topic_set_384/768/1024,
+    // three RETURNS TABLE functions, three generated Record types (SearchTopicSet384Record, ...768Record, ...1024Record), +3.
+    // 138 -> 141: nexus-7fku2.1.2 (RDR-134 Step 2), taxonomy-022-coverage-counts.xml added nexus.taxonomy_coverage_counts_384/768/1024,
+    // three RETURNS TABLE functions, three generated Record types (TaxonomyCoverageCounts384Record, ...768Record, ...1024Record), +3.
+    private static final int EXPECTED_RECORD_TYPES = 141;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

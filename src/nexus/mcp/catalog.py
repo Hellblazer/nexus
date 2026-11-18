@@ -665,8 +665,8 @@ def catalog_link(
         description="Link type: a built-in (cites, implements, implements-heuristic, supersedes, relates, quotes, comments) or a custom string.",
     )],
     created_by: Annotated[str, Field(description="Who or what created this link.")] = "user",
-    from_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the source.")] = "",
-    to_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the target.")] = "",
+    from_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the source: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'.")] = "",
+    to_span: Annotated[str, Field(description="Optional span identifier anchoring the link to a location within the target: 'line-line', 'chunk:char-char', 'chash:<hex>', 'chash:<hex>:<start>-<end>', or 'dchash:<hash>:<start>-<end>'.")] = "",
 ) -> dict:
     """Create a relationship between two catalog documents.
 
@@ -926,7 +926,8 @@ def catalog_unlink(
 ) -> dict:
     """Remove a specific link between two documents. Accepts tumblers or titles.
 
-    If link_type is empty, removes ALL link types between the pair. Returns {removed: count}.
+    link_type is required: an empty one is refused with an error (there is no remove-all-types mode).
+    Returns {removed: count}.
     """
     cat, err = _require_catalog()
     if err:

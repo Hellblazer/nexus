@@ -3484,19 +3484,26 @@ def per_collection_route_enabled() -> bool:
     }
 
 
-#: nexus-n51v1: opt-in for the route's ``lexical`` field (nexus-xd2rc).
+#: nexus-n51v1 added this as an opt-in for the route's ``lexical`` field (nexus-xd2rc);
+#: nexus-bbtc2 (2026-11-16) made the field the default and this the off switch.
 ROUTE_LEXICAL_ENV = "NX_SEARCH_ROUTE_LEXICAL"
 
 
 def route_lexical_enabled() -> bool:
-    """True only when ``NX_SEARCH_ROUTE_LEXICAL`` is ``1``/``true``/``on``/``yes``.
+    """False only when ``NX_SEARCH_ROUTE_LEXICAL`` is ``0``/``false``/``off``/``no`` (any case).
 
-    Off by default (nexus-n51v1): with the field the engine runs one lexical arm per
-    collection, 0.3 to 0.65 s each, and a default ``--lexical`` search over 118
-    collections took 11.99 s against 6.90 s for the batched ``/hybrid-search`` leg
-    (engine-service-v0.1.163, 2026-10-22). Read on every search.
+    On by default since nexus-bbtc2 (Sam, 2026-11-16). It had been off since nexus-n51v1: on
+    engine-service-v0.1.163 the per-collection lexical arms made a default ``--lexical`` search
+    over 118 collections take 11.99 s against 6.90 s for the batched ``/hybrid-search`` leg. The
+    engine since runs the arms' text-gate probe once for the whole request (v0.1.192, with
+    ``NX_SEARCH_ROUTE_PROBE_WORKERS`` defaulting to 2 workers), and at v0.1.194 the route won
+    the measured queries (6.08 s against 7.36 s, 4.37 s against 5.41 s, a tie on the third). The
+    engine pin (``REQUIRED_ENGINE_VERSION``) is past v0.1.192, so no version gate sits here: the
+    pin is a hard gate for managed engines (``managed_endpoint.py`` refuses one below it) and a
+    converged one for local engines (a local engine below the pin can run until convergence; the
+    cost there is performance only, the per-arm probes of the old default). Read on every search.
     """
-    return os.environ.get(ROUTE_LEXICAL_ENV, "").strip().lower() in {"1", "true", "on", "yes"}
+    return os.environ.get(ROUTE_LEXICAL_ENV, "").strip().lower() not in {"0", "false", "off", "no"}
 
 
 #: The first engine release that serves ``/v1/vectors/search-per-collection``
@@ -4950,7 +4957,9 @@ class HttpVectorClient:
         if corpus is not None:
             body["corpus"] = corpus
         if subtree is not None:
-            body["subtree"] = subtree
+            # The SQL builds ``LIKE subtree || '.%'`` unescaped, so ``%`` or ``_`` would widen the scope to the tenant.
+            from nexus.errors import require_tumbler_prefix  # noqa: PLC0415 — deferred, as this module's other nexus.errors imports
+            body["subtree"] = require_tumbler_prefix("search_metadata_scoped", subtree)
         if where:
             body["where"] = where
         result = _post("/v1/vectors/search-metadata-scoped", body, tenant=self._tenant)

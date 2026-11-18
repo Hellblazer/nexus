@@ -437,6 +437,15 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("stamp_chunks_on_manifest_update()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "trigger function that stamps chunk_orphaned_at; no result row"));
+        CLASSIFIED_DEFINITION_READERS.put("taxonomy_coverage_counts_1024(p_collection text)",
+            new Classified("TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)", Exposure.NO_TEXT,
+                "counts of live chunks and of those without a topic assignment: numbers, not text"));
+        CLASSIFIED_DEFINITION_READERS.put("taxonomy_coverage_counts_384(p_collection text)",
+            new Classified("TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)", Exposure.NO_TEXT,
+                "counts of live chunks and of those without a topic assignment: numbers, not text"));
+        CLASSIFIED_DEFINITION_READERS.put("taxonomy_coverage_counts_768(p_collection text)",
+            new Classified("TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)", Exposure.NO_TEXT,
+                "counts of live chunks and of those without a topic assignment: numbers, not text"));
         CLASSIFIED_DEFINITION_READERS.put("taxonomy_unassigned_chashes_1024(p_collection text, p_limit integer, p_after text)",
             new Classified("TABLE(has_taxonomy boolean, chashes text[], next_after text)", Exposure.NO_TEXT,
                 "chashes of chunks without a topic assignment: hashes, not text"));

@@ -183,6 +183,7 @@ on:
       - .github/actions/resolve-windows-python/**
       - .github/actions/windows-engine-leg/**
       - .github/actions/windows-job-cleanup/**
+      - .github/actions/maven-cache/**
       - .github/workflows/windows-pg-bundle-rehearsal.yml
   workflow_dispatch:
 
@@ -283,7 +284,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
+
       - name: Run jOOQ codegen
         working-directory: service
         run: ./mvnw -q generate-sources
@@ -410,9 +416,14 @@ jobs:
       # pid it cannot see or identify, with POSIX process groups and pid probes, so the module skips on win32
       # (8 skips). Run here they pushed the count to 205 against the ceiling of 204 (0 failed, run 43818953671).
       # The shared identity check it relies on stays in the set (test_holder_identity.py, the conformance cells).
+      # tests/daemon/test_stop_real_processes_posix.py (nexus-f3yqd.2.22) holds the stop sweep's real-process and
+      # EPERM cases, which signal real POSIX children or read a child's environment, so the module skips on win32
+      # (8 skips). Run here they pushed the count to 206 against the ceiling of 204 (0 failed, run 44246880793).
+      # Their platform-independent siblings, the Windows jar and spaced-JDK cases included, stay in the set
+      # (test_stop_sibling_matches.py, test_stop_spares_processes_naming_the_jar.py).
       - name: Windows test set
         run: |
-          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
+          uv run --python 3.13 --frozen pytest --ignore=tests/daemon/test_service_stop_mineru.py --ignore=tests/daemon/test_stop_flagless_start_real_processes.py --ignore=tests/daemon/test_spawn_lock_hold.py --ignore=tests/daemon/test_storage_service_running.py --ignore=tests/hooks/test_session_facts_posix.py --ignore=tests/daemon/test_legacy_chash_guard_real_pg.py --ignore=tests/daemon/test_storage_stop_invisible.py --ignore=tests/daemon/test_stop_real_processes_posix.py tests/daemon/ tests/test_process_group_safety.py tests/test_session_sweep_orphan_trackers.py tests/test_win_console.py tests/test_winsec.py tests/test_winproc_core.py tests/test_install_generation_real_windows.py tests/test_session_end_real_windows.py tests/test_mcp_win_stdin.py tests/test_mcp_win_stdin_real_windows.py tests/test_os_trust_store.py tests/test_mcpb_bootstrap.py tests/test_mcpb_launcher_venv.py tests/test_pg_ctl_console_isolation_real_windows.py tests/test_off_cwd_resolver_real_windows.py tests/hooks/ tests/test_install_ps1.py tests/test_install_source.py tests/test_pdf_stack.py tests/test_installer_rebuild.py tests/test_mineru_cmd.py tests/test_mineru_spawn_windows_flags.py tests/test_context.py::TestSubagentHookInjection tests/test_context.py::TestSessionHookInjection -p no:cacheprovider -q -rs --junitxml=windows-tests-junit.xml
 
       # A run that skipped itself on Windows would pass having proved nothing. The
       # floor is sized from the measured run above: junit counts an xfail as a skip,

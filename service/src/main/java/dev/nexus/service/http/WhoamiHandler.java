@@ -45,7 +45,8 @@ public final class WhoamiHandler implements HttpHandler {
         String tenant = RequestContext.tenant();
         if (tenant == null) {
             // Defensive: should not happen if filter chain is correctly wired
-            log.error("event=whoami_no_tenant path={}", exchange.getRequestURI().getPath());
+            log.error("event=whoami_no_tenant path={}",
+                LogText.escapeControl(exchange.getRequestURI().getPath()));
             HttpUtil.send(exchange, 500, "{\"error\":\"internal: tenant not set\"}");
             return;
         }

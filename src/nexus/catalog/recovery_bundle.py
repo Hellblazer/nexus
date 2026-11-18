@@ -62,6 +62,7 @@ from nexus.aspect_readers import (
     is_note_uri,
     uri_for,
 )
+from nexus.catalog.dchash import check_link_span
 from nexus.catalog.types import CatalogEntry
 from nexus.errors import NoteUriEngineTooOldError
 from nexus.ttl import MAX_TTL_DAYS
@@ -156,6 +157,10 @@ class ImportSummary:
 
     Only ``docs_imported`` is verified; ``docs_unverified`` is the other three together, and the
     ``nx catalog import`` exit status is non-zero when it is not zero.
+
+    ``links_refused_span`` lists each link record not written because its ``from_span`` or ``to_span``
+    starts with ``dchash:`` and does not parse (RDR-171): ``{from_uri, to_uri, link_type, span, error}``.
+    It does not change the exit status, which counts documents only.
     """
 
     docs_imported: int = 0
@@ -166,6 +171,7 @@ class ImportSummary:
     links_merged: int = 0
     links_missing_span: int = 0
     unresolvable_links: list[dict] = field(default_factory=list)
+    links_refused_span: list[dict] = field(default_factory=list)
     doc_failures: list[dict] = field(default_factory=list)
     doc_unverified: list[dict] = field(default_factory=list)
 
@@ -716,6 +722,8 @@ def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
     An old bundle carries ``chroma://`` (RDR-231): *uri* goes through
     :func:`canonical_note_uri` first, so the compare and the parse both see
     the stored ``nx-note://`` form (Test Plan rows 557 and 564)."""
+    if not uri or not uri.strip():
+        return None  # a blank URI names no document; the engine would read it as "no filter" (nexus-uwggq.1.9)
     uri = canonical_note_uri(uri)
     entry = reader.by_source_uri(uri)
     if entry is not None or not uri.startswith(NOTE_URI_SCHEME):
@@ -837,6 +845,25 @@ def import_bundle(
                 link_type=rec["link_type"],
             )
             continue
+        # RDR-171: refuse a malformed dchash span on the raw record, before
+        # _validated_span probes chash spans and counts a stripped one, so a
+        # refused link is never also counted under links_missing_span.
+        bad = rec.get("from_span", "")
+        try:
+            check_link_span(bad)
+            bad = rec.get("to_span", "")
+            check_link_span(bad)
+        except ValueError as exc:
+            summary.links_refused_span.append({
+                "from_uri": rec["from_source_uri"], "to_uri": rec["to_source_uri"],
+                "link_type": rec["link_type"], "span": bad, "error": str(exc),
+            })
+            _log.warning(
+                "recovery_import_link_span_refused",
+                from_uri=rec["from_source_uri"], to_uri=rec["to_source_uri"],
+                link_type=rec["link_type"], span=bad, error=str(exc),
+            )
+            continue
         from_span = _validated_span(reader, rec.get("from_span", ""), summary)
         to_span = _validated_span(reader, rec.get("to_span", ""), summary)
         created = writer.link(
@@ -862,5 +889,6 @@ def import_bundle(
         links_created=summary.links_created,
         links_merged=summary.links_merged,
         unresolvable=len(summary.unresolvable_links),
+        links_refused_span=len(summary.links_refused_span),
     )
     return summary

@@ -2126,10 +2126,16 @@ def terminate_pids(
     platform: str | None = None,
     console_api: "win_console.WinConsoleApi | None" = None,
     refused_out: list[GracefulStopSend] | None = None,
+    unsignalled_out: list[int] | None = None,
 ) -> list[int]:
     """Graceful stop (:func:`request_graceful_stop`), wait up to *grace_s*,
     then the hard kill. Returns pids still RUNNING afterwards (never
     zombies, see :func:`pid_running`).
+
+    A pid that both signals fail on with EPERM (another user owns it, nexus-f3yqd.2.22) was never
+    stopped and did not survive a kill either. When *unsignalled_out* is given it is listed there,
+    still running, and left out of the return; without it it is returned with the survivors, as it
+    always was. The hard kill is tried at once for such a pid: there is no graceful stop to wait for.
 
     A SIGSTOPped process never acts on SIGTERM while stopped, which is
     exactly why the escalation to the uncatchable, unblockable SIGKILL is
@@ -2154,14 +2160,19 @@ def terminate_pids(
     candidates = [p for p in pids if pid_running(p)]
     refused: list[int] = []
     live: list[int] = []
+    denied: list[int] = []
     for pid in candidates:
         send = request_graceful_stop(pid, platform=platform, console_api=console_api)
         if send.refused:
             refused.append(pid)
             if refused_out is not None:
                 refused_out.append(send)
+        elif not send.sent and not send.gone and not _is_windows(platform):
+            denied.append(pid)  # POSIX EPERM: request_graceful_stop answers sent=False, gone=False
         else:
             live.append(pid)
+    live.extend(pid for pid in denied if hard_kill_pid(pid, platform=platform))
+    unsignalled = [p for p in denied if p not in live and pid_running(p)]
     deadline = time.monotonic() + grace_s
     while time.monotonic() < deadline:
         live = [p for p in live if pid_running(p)]
@@ -2177,7 +2188,10 @@ def terminate_pids(
             if not live or time.monotonic() >= settle_deadline:
                 break
             time.sleep(0.1)
-    return live + [p for p in refused if pid_running(p)]
+    if unsignalled_out is not None:
+        unsignalled_out.extend(unsignalled)
+        unsignalled = []
+    return live + [p for p in refused if pid_running(p)] + unsignalled
 
 
 @dataclass(frozen=True)
@@ -2593,6 +2607,7 @@ def storage_service_stack_matcher(
         str(Path(bin_override).resolve(strict=False)) if bin_override else None
     )
     from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred, avoids an import cycle (storage_service_daemon imports FROM this module at load time)
+        jar_launch_command_matches,
         jar_launch_stack_marker,
     )
 
@@ -2607,6 +2622,7 @@ def storage_service_stack_matcher(
         engine_override_path = fold(engine_override_path)
     if jar_override_marker is not None:
         jar_override_marker = fold(jar_override_marker)
+    windows = _is_windows(platform)
     config_dir_eq = fold(f" --config-dir={target}")
     config_dir_sp = fold(f" --config-dir {target}")
 
@@ -2619,19 +2635,23 @@ def storage_service_stack_matcher(
             or command.startswith(engine_override_path + " ")
         ):
             return True
-        if jar_override_marker is not None and jar_override_marker in command:
+        # nexus-f3yqd.2.22: a JVM running the jar, never a command that only names it
+        # as an option value (a driver's own jar flag; see jar_launch_command_matches).
+        if jar_override_marker is not None and jar_launch_command_matches(command, jar_override_marker):
             return True
-        if "daemon service start" not in command:
+        # nexus-f3yqd.2.22: an nx entry point must stand at the head of the argv, with or without
+        # the flag; ``sudo -n lab-hand-exec ... nx daemon service start --config-dir X``, ``ssh h
+        # ...`` and ``bash -c "..."`` only carry the text, and a root-owned one meets EPERM.
+        if not _is_bare_supervisor_head(command, windows=windows):
             return False
         if command.endswith(config_dir_eq) or (config_dir_eq + " ") in command:
             return True
         if command.endswith(config_dir_sp) or (config_dir_sp + " ") in command:
             return True
-        if "--config-dir" in command:
-            return False  # an explicit OTHER config-dir; never match by omission
-        # A bare supervisor names no directory (nexus-uy35j): offer it for any
-        # target and let storage_service_member_check decide which one it serves.
-        return _is_bare_supervisor_head(command)
+        # An explicit OTHER config-dir never matches by omission. A bare supervisor names no
+        # directory (nexus-uy35j): offer it for any target and let storage_service_member_check
+        # decide which one it serves.
+        return "--config-dir" not in command
 
     return _match
 
@@ -2644,46 +2664,88 @@ _NX_ENTRY_POINT_NAMES: frozenset[str] = frozenset({"nx.exe", "nx"})
 _SUPERVISOR_HEAD_SHELLS: frozenset[str] = frozenset({"sh", "bash", "dash", "zsh"})
 
 
-def _is_bare_supervisor_head(command: str) -> bool:
+def _is_bare_supervisor_head(command: str, *, windows: bool = False) -> bool:
     """True when everything before ``daemon service start`` in *command* is
     an nx entry point and nothing else (nexus-mqfu0).
 
-    The flagless fallback in :func:`storage_service_stack_matcher` has no
-    ``--config-dir`` token to anchor on, so the verb's text alone decided
-    the match. A shell running ``nx daemon service stop && nx daemon
-    service start``, an ssh client, ``watch``, a pager or an editor carries
-    that text too, and ``nx daemon service stop`` signalled all of them.
-    The accepted heads are ``<nx>``, ``<python or shell> <nx>`` and
+    The supervisor arms of :func:`storage_service_stack_matcher` have to
+    anchor on the argv: the verb's text alone is carried by a shell running
+    ``nx daemon service stop && nx daemon service start``, an ssh client,
+    ``watch``, a pager, an editor and, with ``--config-dir <dir>`` in their
+    tail too, by ``sudo -n lab-hand-exec ... nx daemon service start
+    --config-dir <dir>``, ``lab-run -- ...`` and ``bash -c "..."``
+    (nexus-f3yqd.2.22: a root-owned one meets EPERM on both signals). The
+    accepted heads are ``<nx>``, ``<python or shell> <nx>`` and
     ``<python> -m nexus.cli``; ``<nx>`` is a path whose last component is
     ``nx`` or ``nx.exe``.
 
     This splits on whitespace, which the matcher's space-safety note
-    forbids for a config_dir. Here it fails closed: a legacy flagless unit
-    whose nx path contains a space is no longer matched from the process
-    table and is stopped through its lease alone. Every unit and spawn
-    nexus writes today passes ``--config-dir``; what reaches this function
-    is a legacy unit installed before that fix and a bare ``nx daemon
-    service start`` a user types (the release battery's local-service gate
-    was one, nexus-oacd3).
+    forbids for a config_dir. Here it fails closed: an nx path that contains
+    a space is not matched from the process table and is stopped through its
+    lease alone. Windows is the exception (*windows*): a process table renders
+    ``C:\\Users\\you there\\...\\python.exe`` unquoted, so a head with exactly one
+    ``.exe`` in it, ending in ``<nx>.exe`` or ``<python>.exe -m nexus.cli``,
+    is one program and is accepted (``ssh.exe host nx`` and ``lab-run.exe --
+    nx.exe`` name a second program and are not).
     """
     head, verb, _tail = command.partition("daemon service start")
     if not verb or (head and not head[-1].isspace()):
         return False
     tokens = head.split()
-
-    def base(token: str) -> str:
-        return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
-
+    if (windows and _is_single_exe_head(head)) or _is_spaced_posix_head(head):
+        return True
     if len(tokens) == 3:
-        return base(tokens[0]).startswith("python") and tokens[1:] == ["-m", "nexus.cli"]
-    if not tokens or base(tokens[-1]) not in _NX_ENTRY_POINT_NAMES:
+        return _path_base(tokens[0]).startswith("python") and tokens[1:] == ["-m", "nexus.cli"]
+    if not tokens or _path_base(tokens[-1]) not in _NX_ENTRY_POINT_NAMES:
         return False
     if len(tokens) == 1:
         return True
-    interpreter = base(tokens[0])
+    interpreter = _path_base(tokens[0])
     return len(tokens) == 2 and (
         interpreter.startswith("python") or interpreter in _SUPERVISOR_HEAD_SHELLS
     )
+
+
+def _path_base(token: str) -> str:
+    """The last component of a POSIX or Windows path, lowercased."""
+    return token.replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _is_spaced_posix_head(head: str) -> bool:
+    """POSIX: *head* is one or two ABSOLUTE programs, spaces inside a path allowed (``/Users/you there/.local/bin/nx``).
+
+    The process table is one space-joined string, so such a path arrives as words and the token test cannot
+    place it. A new path starts at ``" /"``: the head is cut there, after dropping a trailing ``-m nexus.cli``,
+    and must be ``<nx>``, ``<python or shell> <nx>`` or ``<python> -m nexus.cli``. A wrapper puts a non-program
+    first (``sudo -n /usr/bin/nx``, ``ssh h /usr/bin/nx``, ``lab-run -- /x/nx``) or a third program in the chain,
+    and is refused.
+    """
+    text = head.strip()
+    if not text.startswith("/"):
+        return False
+    module_form = text.endswith(" -m nexus.cli")
+    parts = text.removesuffix(" -m nexus.cli").split(" /")
+    if module_form:
+        return len(parts) == 1 and _path_base(parts[0]).startswith("python")
+    if len(parts) == 1:
+        return _path_base(parts[0]) in _NX_ENTRY_POINT_NAMES
+    interpreter = _path_base(parts[0])
+    return (
+        len(parts) == 2
+        and (interpreter.startswith("python") or interpreter in _SUPERVISOR_HEAD_SHELLS)
+        and _path_base(parts[1]) in _NX_ENTRY_POINT_NAMES
+    )
+
+
+def _is_single_exe_head(head: str) -> bool:
+    """Windows: *head* is ONE absolute program, a spaced path included, that is nx or python running nexus.cli."""
+    text = head.strip().lower()
+    if text.count(".exe") != 1 or not re.match(r"[a-z]:[\\/]", text):
+        return False
+    if text.endswith(".exe"):
+        return _path_base(text) in _NX_ENTRY_POINT_NAMES
+    program, _, rest = text.partition(".exe")
+    return rest.split() == ["-m", "nexus.cli"] and _path_base(program).startswith("python")
 
 
 def process_environment_values(
@@ -2896,21 +2958,44 @@ def storage_service_member_check(
     be read fails closed as ``unreadable``: the process is left alone, a real
     supervisor is still stopped through its lease, and the sweep reports the
     pid (``ProcessSweepResult.unreadable``) so the caller can say the stop was
-    not verified. Every other command (an explicit ``--config-dir``
-    supervisor, the engine) is ``member`` unchanged.
+    not verified. The same holds for a JVM running the ``NEXUS_SERVICE_JAR``
+    jar (nexus-f3yqd.2.22): the jar path names no directory, so an engine
+    another install launched from the same jar is ``other``; Windows, which
+    has no environment reader, takes a jar match as a ``member``. Every other
+    command (an explicit ``--config-dir`` supervisor, the well-known engine)
+    is ``member`` unchanged.
     """
     target = Path(config_dir).resolve(strict=False)
     windows = _is_windows(platform)
+    from nexus.daemon.storage_service_daemon import (  # noqa: PLC0415 — deferred, as in the matcher: storage_service_daemon imports FROM this module at load time
+        jar_launch_command_matches,
+        jar_launch_stack_marker,
+    )
+
+    jar_marker = jar_launch_stack_marker()
+    if jar_marker is not None and windows:
+        jar_marker = jar_marker.lower()
+
+    def _is_jar_engine(command: str) -> bool:
+        return jar_marker is not None and jar_launch_command_matches(
+            command.lower() if windows else command, jar_marker,
+        )
 
     def _check(pid: int, command: str) -> MemberVerdict:
-        if not _is_flagless_start_command(command, windows=windows):
+        # nexus-f3yqd.2.22: a JVM running the opt-in jar names no directory either, and two installs can
+        # share one jar path, so it is placed by its own environment too. Windows has no environment
+        # reader (every read is None), so a jar match is a member there, as it was before the check.
+        jar_engine = _is_jar_engine(command)
+        if jar_engine and windows:
+            return "member"
+        if not jar_engine and not _is_flagless_start_command(command, windows=windows):
             return "member"
         owner = process_config_dir(pid, platform=platform, environment_of=environment_of)
         if owner is None:
-            _log.warning("stack_member_flagless_owner_unreadable", pid=pid, command=command[:120])
+            _log.warning("stack_member_owner_unreadable", pid=pid, command=command[:120])
             return "unreadable"
         if owner != target:
-            _log.info("stack_member_flagless_other_dir", pid=pid, command=command[:120])
+            _log.info("stack_member_other_dir", pid=pid, command=command[:120])
             return "other"
         return "member"
 
@@ -2961,11 +3046,16 @@ class ProcessSweepResult:
     #: (another session; nexus-f9bgu.17). They were not signalled and not
     #: killed, and they are also among ``stubborn`` while still running.
     refused: tuple[GracefulStopSend, ...] = ()
-    #: Flagless candidates the ``member_check`` could not place in any
-    #: directory (an unreadable or malformed environment, nexus-oacd3). They
-    #: were NOT signalled and may still be running, so a caller must not
-    #: report the sweep as verified while this is non-empty.
+    #: Candidates the ``member_check`` could not place in any directory (an
+    #: unreadable or malformed environment, nexus-oacd3). They were NOT
+    #: signalled and may still be running, so a caller must not report the
+    #: sweep as verified while this is non-empty.
     unreadable: tuple[int, ...] = ()
+    #: Members, identified as this directory's stack, that both signals failed
+    #: on with EPERM because another user owns them (nexus-f3yqd.2.22). They
+    #: are still running and were never stopped; in neither ``found`` nor
+    #: ``stubborn``, so they are not mistaken for survivors of a SIGKILL.
+    unsignalled: tuple[int, ...] = ()
 
     @property
     def pids(self) -> tuple[int, ...]:
@@ -3068,12 +3158,17 @@ def sweep_matching_processes(
         )
 
     refused: list[GracefulStopSend] = []
+    unsignalled: list[int] = []
     stubborn = tuple(
         terminate_pids(
             [pid for pid, _cmd in found], grace_s=grace_s, refused_out=refused,
+            unsignalled_out=unsignalled,
         )
     )
+    if unsignalled:
+        _log.warning("sweep_matching_processes_unsignalled_eperm", pids=unsignalled)
     return ProcessSweepResult(
-        available=True, error=None, found=tuple(found), stubborn=stubborn,
-        refused=tuple(refused), unreadable=tuple(unreadable),
+        available=True, error=None,
+        found=tuple((p, c) for p, c in found if p not in unsignalled), stubborn=stubborn,
+        refused=tuple(refused), unreadable=tuple(unreadable), unsignalled=tuple(unsignalled),
     )

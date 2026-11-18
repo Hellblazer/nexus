@@ -9,6 +9,9 @@ module itself is consulted by exactly two production call sites
 (``plans/runner.py::_default_dispatcher``, the isolated-operator-step
 path; ``mcp/core.py::_nx_answer_plan_miss``, the inline planner) — see
 ``tests/test_operator_model_tiers.py::TestNotConsultedRepoWide``.
+``plans/runner.py`` also reads one constant, :data:`POOL_FILTER_ALIAS`, in
+its coverage check, for the calls the RDR-250 pool filter marks
+(nexus-w8d30); that read resolves no tier.
 
 **RDR-196 .p2d landed (nexus-nyry9.17, 2026-08-21)**: the DEFAULT path
 (``NX_OPERATOR_MODEL_TIERING`` unset, the common case) now routes the
@@ -158,6 +161,19 @@ FLIPPED_OPERATORS: Final[frozenset[str]] = frozenset({
 #: re-measured. Alias probe-verified: --model opus resolves
 #: claude-opus-5.
 STRONG_DEFAULT_ALIAS: Final[str] = "opus"
+
+#: nexus-w8d30 (Sam decision 2026-11-18): the model the RDR-250 pool filter's
+#: ``operator_check`` calls ask for, in place of the check tier's cheap alias.
+#: The 2026-11-17 stability probe (T2 nexus_rdr/250-stability-probe-2026-11-17)
+#: found the cheap tier's keep/reject verdict varied on identical input (one
+#: keep in ten calls). Read only by ``plans/runner.py``'s coverage check, and
+#: only for a call the pool filter marked; the boundary's own assessment keeps
+#: the check tier's routing. Its own literal, not ``_TIER_ALIASES["strong"]``:
+#: that entry belongs to the NX_OPERATOR_MODEL_TIERING=1 measurement override,
+#: and re-pointing it for an A/B must not move the production filter. Sonnet,
+#: not STRONG_DEFAULT_ALIAS (opus): a step up that keeps the call inside the
+#: filter's time slice, which is sized from the check tier's latency.
+POOL_FILTER_ALIAS: Final[str] = "sonnet"
 
 
 class UnknownTierError(ValueError):

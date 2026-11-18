@@ -1454,6 +1454,10 @@ class RefreshableHttpStoreMixin:
         """
         if resp.is_success:
             return
+        # RDR-167 (nexus-dngtz.1.10): the client half of the cross-tier pair; the structlog processor stamps the bound
+        # correlation_id, and path is the route, never a query or body. DEBUG, shown by -v: this runs on every attempt,
+        # before a 401 re-mint and before callers that treat a 400/404/409 as control flow, so a louder level is noise.
+        _log.debug("engine_request_failed", status=resp.status_code, path=op)
         # nexus-cmzib: an EDGE-refused request (WAF; positive Server-header
         # test) must never surface its raw HTML error page — render the
         # structured refusal, with the shell-substitution defang hint when

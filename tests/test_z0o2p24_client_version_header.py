@@ -22,13 +22,23 @@ log names them by the ABSENCE of this header.
 from __future__ import annotations
 
 import ast
+import contextlib
 import re
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
 import pytest
 
 import nexus.db.http_vector_client as hvc
+from nexus import correlation
+from nexus.backup.cloud_export import ExportClient
+from nexus.backup.cloud_import import ImportClient
+from nexus.backup.pg_backup import BackupRefused
+from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.db.http_scratch_store import HttpScratchStore
+from nexus.db.t2.http_memory_store import HttpMemoryStore
+from nexus.db.t2.http_token_store import HttpTokenStore
 from nexus.db.client_identity import CLIENT_VERSION_HEADER, client_identity_headers, client_version
 from tests._changelog import changelog_text
 
@@ -167,6 +177,258 @@ def test_the_httpx_scratch_store_sends_the_version() -> None:
         assert request.headers[CLIENT_VERSION_HEADER] == client_version()
     finally:
         store.close()
+
+
+# -- RDR-167 Step 2 (nexus-dngtz.1.3): X-Correlation-ID on every engine client's wire ------------------
+#
+# One driver per sender: it builds the client (the BUILD happens before any id is bound in the late-bind
+# tests) and returns a ``send`` that makes one real request through the client's own code path into a
+# transport that records the request AS SENT. A driver that asserts from outside the request path would
+# pass on a header the wire never carries. The census below pins that every module importing
+# ``client_identity`` has a driver per ``client_identity_headers()`` call site.
+
+_CID_HEADER = correlation.HEADER.lower()
+
+
+class _Wire:
+    """The requests that reached the transport, header names lower-cased."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, str]] = []
+
+    def record(self, headers: object) -> None:
+        self.sent.append({k.lower(): v for k, v in headers.items()})  # type: ignore[attr-defined]
+
+    def handler(self, body: dict | None = None) -> Callable[[httpx.Request], httpx.Response]:
+        def _handle(request: httpx.Request) -> httpx.Response:
+            self.record(request.headers)
+            return httpx.Response(200, json=body if body is not None else {})
+        return _handle
+
+
+@contextlib.contextmanager
+def _bound(cid: str | None) -> Iterator[None]:
+    """Bind *cid* for the block and reset it by token; ``None`` binds nothing."""
+    if cid is None:
+        yield
+        return
+    token = correlation.bind(cid)
+    try:
+        yield
+    finally:
+        correlation.reset(token)
+
+
+class _Creds:
+    def bearer(self) -> str:
+        return "tok"
+
+    def rejected(self, sent: str) -> bool:
+        return False
+
+
+def _client_over(monkeypatch: pytest.MonkeyPatch, wire: _Wire, body: dict | None = None) -> None:
+    """Make every ``httpx.Client`` a production module builds from now on talk to *wire*'s transport. The
+    production keyword arguments (``event_hooks`` included) are passed through unchanged."""
+    real = httpx.Client
+    transport = httpx.MockTransport(wire.handler(body))
+    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: real(*a, transport=transport, **kw))
+
+
+def _drive_t3(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    class _Opener:
+        def open(self, req, timeout=None):
+            wire.record(dict(req.header_items()))
+            return _FakeResponse()
+
+    mp.setattr(hvc, "_keepalive_opener", lambda: _Opener())
+    mp.setattr(hvc, "_resolve_endpoint", lambda: ("http://127.0.0.1:9", "tok"))
+    return lambda: hvc._request_once("POST", "/v1/vectors/search", tenant="t1", timeout=5, body={"collection": "c"})
+
+
+def _drive_mixin(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    store = HttpMemoryStore(base_url="http://127.0.0.1:9", _token="tok")
+    store._client = httpx.Client(transport=httpx.MockTransport(wire.handler()))
+    return lambda: store._get("/v1/memory/list")
+
+
+def _drive_catalog(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    client = HttpCatalogClient(
+        base_url="http://127.0.0.1:9", _token="tok",
+        client=httpx.Client(transport=httpx.MockTransport(wire.handler())),
+    )
+    return lambda: client._get("/owners")
+
+
+def _drive_scratch(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    _client_over(mp, wire)
+    store = HttpScratchStore(base_url="http://127.0.0.1:9", _token="tok", session_id="s1", _session_token="st")
+    return lambda: store._post("/v1/t1/scratch/list", {}, mutates=False)
+
+
+def _drive_token(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    _client_over(mp, wire)
+    store = HttpTokenStore(base_url="http://127.0.0.1:9", _token="tok")
+    return lambda: store._get("/v1/tokens/list")
+
+
+def _export(wire: _Wire, body: dict | None = None):
+    return ExportClient(
+        "http://127.0.0.1:9", _Creds(),  # type: ignore[arg-type]
+        http=httpx.Client(transport=httpx.MockTransport(wire.handler(body))), sleep=lambda _s: None,
+    )
+
+
+def _import(wire: _Wire, body: dict | None = None):
+    return ImportClient(
+        "http://127.0.0.1:9", _Creds(),  # type: ignore[arg-type]
+        http=httpx.Client(transport=httpx.MockTransport(wire.handler(body))), sleep=lambda _s: None,
+    )
+
+
+def _drive_export_request(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    client = _export(wire)
+    return lambda: client._request("GET", "/v1/tenant/export/x/rows", what="a page")
+
+
+def _drive_export_probe(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    client = _export(wire, {"tenant_export_supported": True})
+    return lambda: client.check_engine()
+
+
+def _drive_export_delete(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    client = _export(wire)
+    return lambda: client._delete_quietly("sid")
+
+
+def _drive_import_request(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    client = _import(wire)
+    return lambda: client._exchange("GET", "/v1/tenant/import/x", what="a part")
+
+
+def _drive_import_probe(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    client = _import(wire, {"tenant_import_supported": True})
+
+    def send() -> None:
+        with contextlib.suppress(BackupRefused):  # the probe's verdict on the body is not under test
+            client.check_engine()
+
+    return send
+
+
+def _drive_import_delete(mp: pytest.MonkeyPatch, wire: _Wire) -> Callable[[], None]:
+    client = _import(wire)
+    return lambda: client._delete_quietly("sid", "/v1/tenant/import")
+
+
+#: Driver name -> driver. The export and import drivers say in their ids that sending the id to the cloud
+#: engine is intended: the id is a random per-invocation token, it names no tenant data, and the engine
+#: logs it so a failed cloud backup call can be tied to its client log line.
+_DRIVERS: dict[str, Callable[[pytest.MonkeyPatch, _Wire], Callable[[], None]]] = {
+    "t3": _drive_t3,
+    "mixin": _drive_mixin,
+    "catalog": _drive_catalog,
+    "scratch": _drive_scratch,
+    "token": _drive_token,
+    "export_request": _drive_export_request,
+    "export_probe": _drive_export_probe,
+    "export_delete": _drive_export_delete,
+    "import_request": _drive_import_request,
+    "import_probe": _drive_import_probe,
+    "import_delete": _drive_import_delete,
+}
+#: The two clients that bake their headers into an ``httpx.Client`` when it is built.
+_BAKED = ("scratch", "token")
+_A, _B = "a" * 32, "b" * 32
+
+
+def _sent_headers(name: str, mp: pytest.MonkeyPatch, *, built_under: str | None, sent_under: str | None) -> list[dict[str, str]]:
+    assert correlation.current_correlation_id() is None, "a correlation id leaked in from another test"
+    wire = _Wire()
+    with _bound(built_under):
+        send = _DRIVERS[name](mp, wire)
+    with _bound(sent_under):
+        send()
+    assert wire.sent, f"{name}: no request reached the transport, so nothing was checked"
+    return wire.sent
+
+
+@pytest.mark.parametrize("name", list(_DRIVERS))
+def test_a_bound_id_is_on_the_wire_of_every_sender(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Includes the cloud export and import clients (``export_*``, ``import_*``): sending the id to the
+    cloud engine is intended. It is a random per-invocation token naming no tenant data, and the engine
+    logs it so a failed cloud backup call can be tied to its client log line."""
+    sent = _sent_headers(name, monkeypatch, built_under=_A, sent_under=_A)
+    assert [h.get(_CID_HEADER) for h in sent] == [_A] * len(sent)
+    assert all(h[CLIENT_VERSION_HEADER.lower()] == client_version() for h in sent), "the version rides along"
+
+
+@pytest.mark.parametrize("name", list(_DRIVERS))
+def test_no_header_is_sent_when_no_id_is_bound(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _sent_headers(name, monkeypatch, built_under=None, sent_under=None)
+    assert all(_CID_HEADER not in h for h in sent)
+
+
+@pytest.mark.parametrize("name", list(_DRIVERS))
+def test_a_client_built_before_the_bind_sends_the_later_id(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Built with nothing bound, sent under B."""
+    sent = _sent_headers(name, monkeypatch, built_under=None, sent_under=_B)
+    assert [h.get(_CID_HEADER) for h in sent] == [_B] * len(sent)
+
+
+@pytest.mark.parametrize("name", list(_DRIVERS))
+def test_a_client_built_under_one_id_sends_the_next_one_not_the_old(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _sent_headers(name, monkeypatch, built_under=_A, sent_under=_B)
+    assert [h.get(_CID_HEADER) for h in sent] == [_B] * len(sent)
+
+
+@pytest.mark.parametrize("name", list(_DRIVERS))
+def test_a_client_built_under_an_id_sends_no_id_once_it_is_unbound(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stale-id case: the scratch and token clients bake ``client_identity_headers()`` at build time,
+    so the id bound then is in their default headers; the request hook must remove it."""
+    sent = _sent_headers(name, monkeypatch, built_under=_A, sent_under=None)
+    assert all(_CID_HEADER not in h for h in sent)
+
+
+@pytest.mark.parametrize("name", _BAKED)
+def test_the_rebuilt_client_carries_the_hook_too(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client built by ``_build_client`` under id A still sends B. That every rebuild (the lease rebind, the
+    401 re-mint) uses ``_build_client`` is pinned by the one-construction test below."""
+    wire = _Wire()
+    _client_over(monkeypatch, wire)
+    if name == "scratch":
+        with _bound(_A):
+            store = HttpScratchStore(base_url="http://127.0.0.1:9", _token="tok", session_id="s1", _session_token="st")
+            store._client = store._build_client()
+        send = lambda: store._post("/v1/t1/scratch/list", {}, mutates=False)  # noqa: E731
+    else:
+        with _bound(_A):
+            store = HttpTokenStore(base_url="http://127.0.0.1:9", _token="tok")
+            store._client = store._build_client()
+        send = lambda: store._get("/v1/tokens/list")  # noqa: E731
+    with _bound(_B):
+        send()
+    with _bound(None):
+        send()
+    assert [h.get(_CID_HEADER) for h in wire.sent] == [_B, None]
+
+
+@pytest.mark.parametrize("rel", ["src/nexus/db/http_scratch_store.py", "src/nexus/db/t2/http_token_store.py"])
+def test_each_hooked_store_builds_its_httpx_client_in_one_place_with_the_hook(rel: str) -> None:
+    """The scratch and token stores keep one long-lived client; the correlation hook only covers it if every
+    construction goes through the one call that passes ``event_hooks``. A second ``httpx.Client(...)`` would
+    bypass the hook with every wire test still green."""
+    tree = ast.parse((Path(__file__).resolve().parents[1] / rel).read_text(encoding="utf-8"))
+    calls = [c for c in ast.walk(tree) if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+             and c.func.attr == "Client" and isinstance(c.func.value, ast.Name) and c.func.value.id == "httpx"]
+    assert len(calls) == 1, f"{rel}: {len(calls)} httpx.Client(...) calls; the hook covers exactly one"
+    assert any(kw.arg == "event_hooks" for kw in calls[0].keywords), f"{rel}: httpx.Client(...) has no event_hooks"
+
+
+def test_the_identity_headers_carry_the_bound_id_and_the_version() -> None:
+    with _bound(_A):
+        assert client_identity_headers() == {CLIENT_VERSION_HEADER: client_version(), correlation.HEADER: _A}
+    assert client_identity_headers() == {CLIENT_VERSION_HEADER: client_version()}
 
 
 # -- the scope of the claim ---------------------------------------------------
@@ -453,6 +715,26 @@ def test_the_census_places_a_new_module_in_any_spelling(tmp_path: Path) -> None:
     assert importers == {"nexus/quiet.py"}
 
 
+def _placement_problems(calls: set[str], importers: set[str], not_senders: dict[str, str]) -> list[str]:
+    """What is wrong with how the HTTP call sites are placed: each must import ``client_identity`` (and so
+    send the header, checked on the wire above) or be named in *not_senders* with a reason."""
+    problems: list[str] = []
+    both = importers & set(not_senders)
+    if both:
+        problems.append(f"listed as non-senders yet import the module: {sorted(both)}")
+    if [m for m in importers if m.startswith("nexus/hooks/")]:
+        problems.append("a hook imports client_identity")
+    if importers - calls:
+        problems.append(f"import the module but make no HTTP call: {sorted(importers - calls)}")
+    unplaced = calls - importers - set(not_senders)
+    if unplaced:
+        problems.append(f"HTTP call sites that neither send the header nor say why not: {sorted(unplaced)}")
+    stale = set(not_senders) - calls
+    if stale:
+        problems.append(f"_NOT_SENDERS entries with no HTTP call site left: {sorted(stale)}")
+    return problems
+
+
 def test_every_http_call_site_is_a_sender_or_a_named_non_sender() -> None:
     """A new engine-facing call site fails here until it sends the header (and the documents' scope stays
     true) or is named in ``_NOT_SENDERS`` with a reason, so the claim cannot widen or narrow unseen."""
@@ -466,14 +748,92 @@ def test_every_http_call_site_is_a_sender_or_a_named_non_sender() -> None:
         "nexus/db/t2/_refreshable_client.py", "nexus/db/t2/http_token_store.py",
     } <= importers
 
-    both = importers & set(_NOT_SENDERS)
-    assert not both, f"listed as non-senders yet import the module: {sorted(both)}"
-    assert not [m for m in importers if m.startswith("nexus/hooks/")], "a hook imports client_identity"
-    assert not (importers - calls), f"import the module but make no HTTP call: {sorted(importers - calls)}"
-    unplaced = calls - importers - set(_NOT_SENDERS)
-    assert not unplaced, f"HTTP call sites that neither send the header nor say why not: {sorted(unplaced)}"
-    stale = set(_NOT_SENDERS) - calls
-    assert not stale, f"_NOT_SENDERS entries with no HTTP call site left: {sorted(stale)}"
+    assert _placement_problems(calls, importers, _NOT_SENDERS) == []
+
+
+# -- the census, extended: every importer of client_identity has a wire driver per call site ----------------
+
+#: Every module under ``src/nexus`` that imports ``client_identity``, with the drivers above that put one of
+#: its ``client_identity_headers()`` call sites on the wire (one driver per site).
+_WIRE_DRIVERS: dict[str, tuple[str, ...]] = {
+    "nexus/db/http_vector_client.py": ("t3",),
+    "nexus/db/t2/_refreshable_client.py": ("mixin",),
+    "nexus/db/http_scratch_store.py": ("scratch",),
+    "nexus/db/t2/http_token_store.py": ("token",),
+    "nexus/backup/cloud_export.py": ("export_request", "export_probe", "export_delete"),
+    "nexus/backup/cloud_import.py": ("import_request", "import_probe", "import_delete"),
+}
+
+
+def _header_call_sites(source: str) -> int:
+    """How many times the module calls ``client_identity_headers`` (by name or as an attribute)."""
+    count = 0
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) == "client_identity_headers":
+                count += 1
+    return count
+
+
+def _wire_coverage_problems(src: Path = _SRC, drivers: dict[str, tuple[str, ...]] = _WIRE_DRIVERS) -> list[str]:
+    """Problems in the wire coverage: an importer with no driver, a module whose driver count differs from
+    its ``client_identity_headers()`` call-site count (a site added without a driver, or a driver kept for a
+    site that went), a driver name that does not exist, and an entry for a module that no longer imports."""
+    problems: list[str] = []
+    seen: set[str] = set()
+    for path in (src / "nexus").rglob("*.py"):
+        if path.name == "client_identity.py":
+            continue
+        source = path.read_text()
+        if not _imports_client_identity(source):
+            continue
+        rel = path.relative_to(src).as_posix()
+        seen.add(rel)
+        sites = _header_call_sites(source)
+        if rel not in drivers:
+            problems.append(f"{rel} imports client_identity and has no wire driver")
+        elif len(drivers[rel]) != sites:
+            problems.append(f"{rel}: {sites} client_identity_headers() call sites, {len(drivers[rel])} wire drivers")
+    problems += [f"{m}: wire drivers for a module that no longer imports client_identity" for m in sorted(set(drivers) - seen)]
+    problems += [f"{m}: unknown driver {d}" for m, ds in drivers.items() for d in ds if d not in _DRIVERS]
+    return problems
+
+
+def test_every_importer_of_client_identity_has_a_wire_driver_per_call_site() -> None:
+    assert _wire_coverage_problems() == []
+    # non-vacuity: the real tree has the six importers and the sites the bead names (1+1+1+1+3+3)
+    assert sum(len(v) for v in _WIRE_DRIVERS.values()) == 10
+    assert sorted(_WIRE_DRIVERS) == sorted(_census()[1])
+
+
+def test_the_wire_census_fails_on_a_new_importer_and_on_a_new_call_site(tmp_path: Path) -> None:
+    pkg = tmp_path / "nexus"
+    pkg.mkdir()
+    (pkg / "new_sender.py").write_text(
+        "import httpx\nfrom nexus.db.client_identity import client_identity_headers\n"
+        "httpx.get(u, headers=client_identity_headers())\n"
+    )
+    (pkg / "covered.py").write_text(
+        "import httpx\nfrom nexus.db.client_identity import client_identity_headers\n"
+        "httpx.get(u, headers=client_identity_headers())\nhttpx.get(u, headers=client_identity_headers())\n"
+    )
+    problems = _wire_coverage_problems(tmp_path, {"nexus/covered.py": ("t3",), "nexus/gone.py": ("t3", "nope")})
+    assert any("new_sender.py imports client_identity and has no wire driver" in p for p in problems)
+    assert any("covered.py: 2 client_identity_headers() call sites, 1 wire drivers" in p for p in problems)
+    assert any("gone.py: wire drivers for a module that no longer imports" in p for p in problems)
+    assert any("unknown driver nope" in p for p in problems)
+
+
+def test_the_placement_check_fails_on_a_synthetic_sender_that_is_neither_importer_nor_named(tmp_path: Path) -> None:
+    """A module that calls httpx, does not import ``client_identity`` and is not in ``_NOT_SENDERS`` is
+    unplaced (the ``_census`` walk, run over a synthetic tree as the real one is)."""
+    pkg = tmp_path / "nexus"
+    pkg.mkdir()
+    (pkg / "rogue.py").write_text("import httpx\nhttpx.post(u)\n")
+    calls, importers = _census(tmp_path)
+    assert _placement_problems(calls, importers, {}) == ["HTTP call sites that neither send the header nor say why not: ['nexus/rogue.py']"]
+    assert _placement_problems(calls, importers, {"nexus/rogue.py": "named"}) == []
 
 
 #: How the documents state the scope. Each must (a) name the mechanism (the vector client) and an exception

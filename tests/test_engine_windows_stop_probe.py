@@ -36,6 +36,19 @@ def test_count_changesets_ignores_xml_comments_and_walks_subdirectories(tmp_path
     assert probe.count_changesets(tmp_path) == 3
 
 
+def test_count_changesets_skips_the_vendored_libraries_changelogs(tmp_path: Path) -> None:
+    """db/vendor holds ddl_utils' and dml_utils' changelogs, which the engine master does not include (nexus-f3yqd.2.10)."""
+    (tmp_path / "vendor" / "dml_utils").mkdir(parents=True)
+    (tmp_path / "vendor" / "dml_utils" / "master.xml").write_text('<databaseChangeLog><changeSet id="v"/></databaseChangeLog>')
+    (tmp_path / "changelog").mkdir()
+    (tmp_path / "changelog" / "a.xml").write_text('<databaseChangeLog><changeSet id="a"/></databaseChangeLog>')
+    assert probe.count_changesets(tmp_path) == 1
+    # only the top-level vendor directory is skipped; a changelog subdirectory that happens to be named so still counts
+    (tmp_path / "changelog" / "vendor").mkdir()
+    (tmp_path / "changelog" / "vendor" / "b.xml").write_text('<databaseChangeLog><changeSet id="b"/></databaseChangeLog>')
+    assert probe.count_changesets(tmp_path) == 2
+
+
 def test_count_changesets_agrees_with_the_smokes_include_following_count_on_the_real_changelog() -> None:
     """Two counters over one changelog: the probe's directory walk and the smoke's include walk. They must agree,
     or one of them is counting something that is not applied."""
@@ -273,3 +286,14 @@ def test_the_probes_clean_stop_exit_code_is_the_smokes_and_is_128_plus_sigbreak(
     """Two scripts name the CTRL_BREAK exit code separately; a drift between them would make the probe
     call clean what the release smoke refuses (or the reverse)."""
     assert probe.CLEAN_STOP_EXIT_CODE == es.WINDOWS_STOP_EXIT_CODE == 128 + 21 == 149
+
+
+def test_the_mid_changeset_trigger_counts_the_nexus_walk_only_not_the_vendored_libraries() -> None:
+    """nexus-f3yqd.2.11: the engine applies db/vendor/{ddl_utils,dml_utils} before the nexus walk, so its log carries
+    their Running Changeset lines first. The trigger's midpoint is half of the nexus master's changesets, so only
+    db/changelog/ lines count: 300 library lines then 3 nexus lines is 3 running, not 303."""
+    library = "".join(f"Running Changeset: db/vendor/dml_utils/changes/changes.xml::{n}::lee.horner\n" for n in range(300))
+    nexus = "".join(f"INFO Running Changeset: db/changelog/memory-001.xml::m-{n}::nexus\n" for n in range(3))
+    assert probe.running_nexus_changesets(library) == 0
+    assert probe.running_nexus_changesets(library + nexus) == 3
+    assert probe.running_nexus_changesets("") == 0

@@ -14,3 +14,6 @@ tests/daemon/fixtures/rdr161/** -text
 service/src/test/resources/ddl/** -text
 # The RDR-248 backup fixture is a binary .nxtenant file pinned by SHA-256 (TenantImportFixtureTest): byte-exact on any checkout (nexus-csayy.7).
 service/src/test/resources/fixtures/** -text
+# Vendored ddl_utils and dml_utils files are byte-exact: their manifests hold git blob ids, and an end-of-line
+# conversion on a Windows checkout would change every one (nexus-f3yqd.2.10).
+service/src/main/resources/db/vendor/** -text

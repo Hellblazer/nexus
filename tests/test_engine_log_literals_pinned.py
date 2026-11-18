@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import engine_windows_smoke as es
+from nexus.daemon import readiness
 import engine_windows_stop_probe as probe
 
 REPO = Path(__file__).resolve().parent.parent
@@ -171,3 +172,27 @@ def test_the_current_java_log_literals_still_render_the_lines_the_real_windows_r
     assert all(any(_java_literal_regex(lit).search(ln) for lit in literals) for ln in real), (
         f"no {source.name} literal for event={event} matches the real line {real[0]!r}; literals: {literals}"
     )
+
+
+# RDR-167, nexus-dngtz.1.11: the supervisor's readiness scanner accepts a schema-migration marker only from the
+# logger that writes it, by the name logback prints. A moved class, a renamed package, a name logback would
+# abbreviate (over 36 characters for %logger{36}) or the failed line dropping below ERROR blinds readiness while
+# every Python test, which feeds hand-written lines, stays green. These pins fail at that change.
+def test_readiness_logger_names_are_the_java_loggers_as_logback_prints_them() -> None:
+    for name, path in ((readiness.SCHEMA_MIGRATOR_LOGGER, SCHEMA_MIGRATOR), (readiness.ENGINE_MAIN_LOGGER, MAIN)):
+        package, cls = name.rsplit(".", 1)
+        code = _code(path)
+        assert re.search(rf"^package {re.escape(package)};", code, re.M), (name, path)
+        assert f"LoggerFactory.getLogger({cls}.class)" in code, (name, path)
+        assert path.stem == cls, (name, path)
+        assert len(name) <= 36, f"{name} is longer than %logger{{36}} and would print abbreviated"
+    pattern = (REPO / "service" / "src" / "main" / "resources" / "logback.xml").read_text(encoding="utf-8")
+    # the message converter may be renamed (the engine's escaping converter); its place after "] - " may not
+    assert "%logger{36}" in pattern and re.search(r"\] - %[A-Za-z]+(?:\{[^}]*\})?%n", pattern)
+
+
+def test_the_failed_marker_is_logged_by_main_at_error_and_the_others_by_schema_migrator() -> None:
+    assert re.search(r'\blog\.error\(\s*"' + re.escape(readiness.MARKER_FAILED) + r'[ "]', _code(MAIN))
+    migrator = _code(SCHEMA_MIGRATOR)
+    for marker in (readiness.MARKER_START, readiness.MARKER_PENDING, readiness.MARKER_COMPLETE):
+        assert re.search(r'\blog\.info\(\s*"' + re.escape(marker) + r'[ "]', migrator), marker

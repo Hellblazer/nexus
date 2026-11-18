@@ -26,7 +26,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * a clone of the per-fork template costs a file copy. The suite's DDL is dominated by classes that walk the
  * changelog into an empty database or boot a container of their own, so each such class has to earn it. The
  * table {@code src/test/resources/db-start-classification.tsv} lists every class that calls
- * {@code PgContainerHelper.startEmptyDatabase}, {@code startDedicated} or {@code newContainer}, with the reason
+ * {@code PgContainerHelper.startEmptyDatabase}, {@code startDedicated}, {@code newContainer},
+ * {@code startDataMove} or {@code newDataMoveContainer} (the last two boot the pg_background image), with the reason
  * and one kind from a closed vocabulary:
  * <ul>
  *   <li>{@code WALK}, {@code MIGRATOR}, {@code OWNERSHIP}: the class's subject is the migration (a part-way walk
@@ -63,15 +64,18 @@ class DbStartClassificationGateTest {
         "startEmptyDatabase", Set.of("WALK", "MIGRATOR", "OWNERSHIP", "SKELETON", "INFRA"),
         "startDedicated", Set.of("CLUSTER_STATE", "SIZED", "INFRA"),
         "newContainer", Set.of("NETWORK", "IMAGE", "INFRA"),
+        // nexus-f3yqd.2.8: the container with pg_background; a class that boots it wants that image.
+        "startDataMove", Set.of("IMAGE", "INFRA"),
+        "newDataMoveContainer", Set.of("IMAGE", "INFRA"),
         "clone", Set.of("CLONE", "CLONE_OWNER"));
 
     private static final Pattern CALL = Pattern.compile(
-        "\\bPgContainerHelper\\s*\\.\\s*(startEmptyDatabase|startDedicated|newContainer)\\s*\\(");
+        "\\bPgContainerHelper\\s*\\.\\s*(startEmptyDatabase|startDedicated|newContainer|startDataMove|newDataMoveContainer)\\s*\\(");
     /** A method reference ({@code PgContainerHelper::startDedicated}) hands the entry point to a helper that boots it. */
     private static final Pattern METHOD_REF = Pattern.compile(
-        "\\bPgContainerHelper\\s*::\\s*(startEmptyDatabase|startDedicated|newContainer)\\b");
+        "\\bPgContainerHelper\\s*::\\s*(startEmptyDatabase|startDedicated|newContainer|startDataMove|newDataMoveContainer)\\b");
     private static final Pattern STATIC_IMPORT = Pattern.compile(
-        "import\\s+static\\s+[\\w.]*PgContainerHelper\\s*\\.\\s*(startEmptyDatabase|startDedicated|newContainer|\\*)");
+        "import\\s+static\\s+[\\w.]*PgContainerHelper\\s*\\.\\s*(startEmptyDatabase|startDedicated|newContainer|startDataMove|newDataMoveContainer|\\*)");
     private static final Pattern TAKES_CLONE =
         Pattern.compile("\\bPgContainerHelper\\s*(?:\\.\\s*start\\s*\\(\\s*\\)|::\\s*start\\b)");
     private static final Pattern TAKES_OWNER_CLONE =
@@ -201,6 +205,10 @@ class DbStartClassificationGateTest {
             .as("startDedicated callers found").isGreaterThanOrEqualTo(8);
         assertThat(callers.stream().filter(c -> c.endsWith(" newContainer")).count())
             .as("newContainer callers found").isGreaterThanOrEqualTo(4);
+        // nexus-f3yqd.2.8: PgBackgroundImageSmokeTest boots the data-move container; the first later data-move test
+        // adds a second. A scan that stopped seeing the entry point finds none.
+        assertThat(callers.stream().filter(c -> c.endsWith(" startDataMove") || c.endsWith(" newDataMoveContainer")).count())
+            .as("startDataMove / newDataMoveContainer callers found").isGreaterThanOrEqualTo(1);
 
         List<Row> rows = parse(Files.readAllLines(TABLE));
         assertThat(rows.size()).as("rows in the table").isGreaterThanOrEqualTo(52);
@@ -267,6 +275,21 @@ class DbStartClassificationGateTest {
         assertThat(callsIn("X", codeOnly(src))).containsExactly("X newContainer", "X startDedicated", "X startEmptyDatabase");
         assertThat(TAKES_CLONE.matcher(codeOnly(src)).find()).as("PgContainerHelper::start is a clone").isTrue();
         assertThat(callsIn("X", codeOnly("var f = PgContainerHelper::startMigratedByOwner; // not an entry point"))).isEmpty();
+    }
+
+    @Test
+    void the_data_move_entry_points_count_as_calls_and_a_static_import_of_them_is_seen() {
+        String src = """
+            var a = PgContainerHelper.startDataMove();
+            var b = PgContainerHelper.startDataMove(List.of("-c", "max_worker_processes=2"));
+            var c = PgContainerHelper.newDataMoveContainer();
+            Supplier<?> s = PgContainerHelper::startDataMove;
+            """;
+        assertThat(callsIn("X", codeOnly(src))).containsExactly("X newDataMoveContainer", "X startDataMove");
+        assertThat(STATIC_IMPORT.matcher("import static dev.nexus.service.PgContainerHelper.startDataMove;").find()).isTrue();
+        assertThat(STATIC_IMPORT.matcher("import static dev.nexus.service.PgContainerHelper.newDataMoveContainer;").find()).isTrue();
+        List<Row> rows = List.of(new Row("X", "startDataMove", "WALK", REASON));
+        assertThat(diff(rows, Set.of("X startDataMove"))).singleElement().asString().contains("kind WALK is not one of");
     }
 
     @Test

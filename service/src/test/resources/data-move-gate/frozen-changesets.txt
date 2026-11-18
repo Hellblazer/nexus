@@ -1,0 +1,78 @@
+# DataMoveChangesetGateTest: the frozen list (RDR-246 Step 5, nexus-f3yqd.2.19).
+#
+# The shipped changesets that the three gate rules (row DML, boot scans on a table that grows, a destructive statement on a
+# registered move's table) find, one `<file>::<changeset id>::<author>` per line, derived by the gate at its own revision.
+# They ran in earlier releases and are exempt from the rules.
+#
+# What the test checks of this file: every entry names a changeset that exists; every entry still has a finding (a stale entry
+# fails, so the list is the offenders and no more); no entry sits in the freeze-point include or after it, so a changeset in a
+# newer include cannot be added. What it does not check: a new changeset put into an include that sits before the freeze point
+# is not refused by the test, and review is what stops it. The list only shrinks.
+#
+# A new changeset that needs a boot-time rewrite registers a move in nexus.data_moves (RDR-246), or carries an exemption line
+# naming a table whose size does not grow with user data; it is never added here.
+#
+# freeze-point: taxonomy-023-coverage-counts-set-based.xml
+aspects-003-type-hygiene.xml::aspects-003-1-document-aspects-type-hygiene::nexus-cefa1.4
+aspects-003-type-hygiene.xml::aspects-003-2-promotion-log-type-hygiene::nexus-cefa1.4
+aspects-004-doc-id-backfill.xml::aspects-004-1::nexus-ubnwk
+catalog-002-hygiene.xml::catalog-002-1-temporal-typing::nexus-70r3c.2
+catalog-013-chash-checks-validate.xml::catalog-013-0::nexus-e0hd2
+catalog-013-chash-checks-validate.xml::catalog-013-1b::nexus-1wjmq
+catalog-013-chash-checks-validate.xml::catalog-013-2::nexus-e0hd2
+catalog-015-fts-filename-tokens.xml::catalog-015-0::nexus-8gue1
+catalog-016-source-uri-unique.xml::catalog-016-0::nexus-78n33
+catalog-017-fts-diacritic-folding.xml::catalog-017-0::nexus-23wlw
+catalog-021-index-run-fence-check.xml::catalog-021-1::nexus-5xn3k.2
+catalog-025-collection-not-null.xml::catalog-025-0::nexus-71gw2
+catalog-029-manifest-chunk-fk.xml::catalog-029-2::nexus-o8dil.29
+catalog-031-type-hygiene.xml::catalog-031-1-documents-temporal::nexus-cefa1.2
+catalog-031-type-hygiene.xml::catalog-031-2-links-created-at::nexus-cefa1.2
+catalog-031-type-hygiene.xml::catalog-031-3-collections-legacy-bool::nexus-cefa1.2
+catalog-032-links-tumbler-fk.xml::catalog-032-2::nexus-tk070.p1
+catalog-032-links-tumbler-fk.xml::catalog-032-3::nexus-tk070.p1
+fk-001-catalog-cross-store.xml::fk-001-2::nexus-b7v6i
+fk-001-catalog-cross-store.xml::fk-001-3::nexus-b7v6i
+fk-001-catalog-cross-store.xml::fk-001-4::nexus-b7v6i
+fk-001-catalog-cross-store.xml::fk-001-5::nexus-b7v6i
+fk-002-collection-registry.xml::fk-002-0-backfill-stubs::nexus-70r3c.2
+fk-002-validate.xml::fk-002-11::nexus-70r3c.3
+fk-002-validate.xml::fk-002-6-reconcile::nexus-70r3c.3
+fk-002-validate.xml::fk-002-7::nexus-70r3c.3
+fk-002-validate.xml::fk-002-8::nexus-70r3c.3
+fk-002-validate.xml::fk-002-9::nexus-70r3c.3
+fk-003-collection-registry-extra.xml::fk-003-0-backfill-stubs::nexus-dcqml
+fk-003-validate.xml::fk-003-6-reconcile::nexus-p9aw6
+fk-004-chunks-collection-registry.xml::fk-004-1-reconcile::nexus-o8dil.49
+fk-004-chunks-collection-registry.xml::fk-004-2::nexus-o8dil.49
+hygiene-001-not-null.xml::hygiene-001-4::nexus-tk070.p6a
+hygiene-001-not-null.xml::hygiene-001-5::nexus-tk070.p6a
+hygiene-001-not-null.xml::hygiene-001-7::nexus-tk070.p6a
+hygiene-001-not-null.xml::hygiene-001-8::nexus-tk070.p6a
+memory-001-baseline.xml::memory-001-4::nexus-gmiaf.5
+memory-002-fts-separator-tokens.xml::memory-002-1::nexus-22r1f
+note-uri-001-backfill.xml::note-uri-001-1::nexus-bivz3.5
+pipeline-002-per-row-identity.xml::pipeline-002-2::nexus-edjmu
+plans-001-baseline.xml::plans-001-3::nexus-gmiaf.11
+plans-002-jsonb.xml::plans-002-1-type-hygiene::nexus-cefa1.5
+rdr180-001-bytea-chash.xml::rdr180-3-convert-chunks-384::nexus-jxizy.2
+rdr180-001-bytea-chash.xml::rdr180-4-convert-chunks-768::nexus-jxizy.2
+rdr180-001-bytea-chash.xml::rdr180-5-convert-chunks-1024::nexus-jxizy.2
+rdr180-001-bytea-chash.xml::rdr180-6-convert-manifest::nexus-jxizy.2
+rdr180-001-bytea-chash.xml::rdr180-7-convert-chash-index::nexus-jxizy.2
+remap-003-new-chash-bytea.xml::remap-003-1::nexus-tk070.2
+service-tokens-003-scope-column.xml::service-tokens-003-1::nexus-868dq
+t1-001-baseline.xml::t1-001-4::nexus-gmiaf.13
+taxonomy-007-unify-centroids.xml::taxonomy-007-1::nexus-jv3ue
+taxonomy-008-link-types-jsonb.xml::taxonomy-008-1-link-types-jsonb::nexus-cefa1.6
+taxonomy-010-source-collection-backfill.xml::taxonomy-010-1::nexus-tk070.p3b
+taxonomy-011-doc-id-bytea.xml::taxonomy-011-1::nexus-tk070.p3c
+taxonomy-012-doc-id-chunk-fk.xml::taxonomy-012-3::nexus-tk070.p3d
+telemetry-004-type-hygiene.xml::telemetry-004-1-hook-failures-type-hygiene::nexus-cefa1.3
+tuples-003-body-size-limit.xml::tuples-003-2::nexus-r7xao
+tuples-004-clear-consumed-body.xml::tuples-004-1::nexus-8zoyp
+tuples-012-retire-ledger.xml::tuples-012-1::nexus-onjvw
+vectors-004-unify-chunks.xml::vectors-004-1::nexus-o8dil.12
+vectors-014-retention.xml::vectors-014-2::nexus-zw2em
+vectors-030-model-tenant-partition-functions.xml::vectors-030-1::nexus-3wh8d.7
+vectors-046-request-ledger-tenants.xml::vectors-046-4::nexus-yye8l.21

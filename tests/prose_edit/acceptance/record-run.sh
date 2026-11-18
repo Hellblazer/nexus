@@ -10,6 +10,9 @@
 # Also NAME.model (the session's model, from the stream-json init event; "unknown" when the transcript has none)
 # and NAME.status (`git status --porcelain` of the tree when the run ended). HEAD alone hides a dirty tree, and the
 # model is part of the evidence: a haiku orchestrator and an opus editor are a different claim than one model.
+# And NAME.app: `standin` when the session ran against the stand-in MarkupEditor server (NAME.mcp.json exists, which
+# run-scenario.sh writes only then), else `none`. A stand-in run is a harness measurement, not a run in the app, and the
+# verdict scripts say so in their output (nexus-scmcs.3).
 # The status lists the runner's own untracked scenario copies while it runs, so it is read, not scored.
 set -u
 OUT="${1:?out dir}"
@@ -32,3 +35,4 @@ for line in open(sys.argv[1], encoding="utf-8"):
         model = str(event["model"])
         break
 sys.stdout.write(model + "\n")' "$OUT/$NAME.jsonl" > "$OUT/$NAME.model" || exit 1
+if [ -f "$OUT/$NAME.mcp.json" ]; then echo standin > "$OUT/$NAME.app"; else echo none > "$OUT/$NAME.app"; fi

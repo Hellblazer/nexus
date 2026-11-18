@@ -145,4 +145,30 @@ class TokenStoreSessionSweepTest {
         assertThat(store.sweepExpiredSessions("", Instant.now())).isEqualTo(0);
         assertThat(store.sweepExpiredSessions("   ", Instant.now())).isEqualTo(0);
     }
+
+    /**
+     * nexus-dngtz.1.11: the session id is client-chosen (/v1/sessions/start), so the {@code
+     * session_token_closed} line prints it escaped: a newline, {@code ]}, space and {@code =} cannot
+     * forge a second line or a field. The expected text is a hand-written literal.
+     */
+    @Test
+    void closeSession_aClientChosenSessionIdIsLoggedEscapedOnOneLine() throws Exception {
+        String tenant = "close-escape-" + System.nanoTime();
+        String forged = "x\n] - event=schema_migration_pending a=b";
+        insertSessionToken(tenant, forged, Instant.now().plusSeconds(3600));
+
+        var capture = new AuthFilterCorrelationFixture.Capture(TokenStore.class.getName(),
+            ch.qos.logback.classic.Level.INFO);
+        int deleted;
+        try (capture) {
+            deleted = store.closeSession(tenant, forged);
+        }
+
+        assertThat(deleted).as("the row with the raw id was found and deleted").isEqualTo(1);
+        assertThat(capture.appender.list).as("exactly one session_token_closed line").hasSize(1);
+        String text = capture.appender.list.get(0).getFormattedMessage();
+        assertThat(text).isEqualTo("event=session_token_closed tenant=" + tenant
+            + " session=x\\x0a\\x5d\\x20-\\x20event\\x3dschema_migration_pending\\x20a\\x3db deleted=1");
+        assertThat(text).doesNotContain("\n").doesNotContain("\r");
+    }
 }

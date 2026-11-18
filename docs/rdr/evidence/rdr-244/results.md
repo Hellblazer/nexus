@@ -38,9 +38,41 @@ These are not comparable numbers, and no claim is made from the difference. The 
 
 - Engine: self-provisioned loopback engine, release 0.1.181, `embedding_mode` onnx-local, `embedding_profile` bge; conexus 7.97.0 at cc378a4a6, clean tree. Host chas, `lab-run -c lab-m`. Every pin is in `step2/results.json`; each dataset's sample manifest and text hashes sit beside it.
 - Attempt 1 (`step2-attempt1/`) stopped partway: the client session holding the run dropped after about 60 minutes and took the run with it, partway through codefeedback-mt's ingest. Sam: "Yes, rerun unchanged" (2026-11-07). Attempt 2 (`step2/`) is the published run. Its codetrans-dl and codetrans-contest per-query rankings, scores, intervals, manifest hashes and pins are identical to attempt 1's.
-- The two codefeedback datasets were dropped by the pre-registered cap, not substituted: neither dataset's 5,000-document sample finished ingesting within 1,800 s (how many had loaded at the cut is not recorded). The run's own ingest rates were 0.22 s per document (codetrans-dl), 0.58 s (codetrans-contest) and 0.07 s (synthetic-text2sql). A run with the codefeedback datasets is a different run and would be labelled as one.
+- The two codefeedback datasets were dropped by the pre-registered cap, not substituted: neither dataset's 5,000-document sample finished ingesting within 1,800 s (how many had loaded at the cut is not recorded). The run's own ingest rates were 0.22 s per document (codetrans-dl), 0.58 s (codetrans-contest) and 0.07 s (synthetic-text2sql). A run with the codefeedback datasets is a different run and would be labelled as one. They were the subset's only natural-language-to-general-code datasets, so the scored three are code-to-code translation (two) and text-to-SQL, and this run gives no figure for searching general code from a plain-language request.
 - Refusals that did not fire: no rerank, bibliographic or boost signal on any row; 0 taxonomy assignments on bench chunks; no excluded documents or queries; no query with fewer than ten distinct documents.
 
 ## RDR-090, beside it
 
 RDR-090's internal bench compared three routes on five queries over the nexus RDR corpus, NDCG@3 (`scripts/spikes/spike_rdr090_5q_summary.json`, unedited): path A, plain `nx search`, 0.555 at 9.0 s mean latency; path B, nx_answer under a fixed plan, 0.277 at 48.5 s; path C, nx_answer planning each query, 0.277 at 36.8 s. Its pre-registered criterion, a path difference of at least 0.05 in NDCG@3 on at least 3 of 5 queries, failed: two of five passed (Q3 and Q4, where A scored 0.917 and 0.469 and B and C scored 0). The recorded causes (T2 `nexus_rdr/090-research-2`) are part of the result: plan leakage, plan-library pollution, Q2's labels using words the indexed text does not (it scored 0 on every path), and the Chroma-era substrate it ran on. The N=30 run it planned never ran.
+
+## Running it yourself
+
+The harness is `scripts/bench/coir_run.py` (sampling `coir_sample.py`, scoring `coir_score.py`). A run needs:
+
+- A clean source checkout of this repository, with the engine gate jar built (`scripts/build-gate-jar.sh`, which needs a JDK). The harness boots its own loopback engine through `tests._engine_substrate`, so an installed `nx` alone is not enough. It refuses a dirty tree, because `git_sha` must name the code that ran.
+- `NX_VOYAGE_API_KEY` unset. The run embeds with local bge-base-en-v1.5 at no cost and refuses to start if the engine would use Voyage.
+- Time: each dataset's ingest is capped at 30 minutes, then 50 queries run.
+
+Fetch the data at the pinned revisions. Each dataset has two Hugging Face repositories, `CoIR-Retrieval/<name>-queries-corpus` and `CoIR-Retrieval/<name>-qrels`, at the revisions in the table in `preregistration.md` (full hashes in `coir_run.py`'s `POOL`, which the commands below read). The harness reads the parquet files directly under `DATA/<name>-queries-corpus/` (`corpus-*.parquet`, `queries-*.parquet`) and `DATA/<name>-qrels/` (`test-*.parquet`). The repositories keep them in a `data/` folder, so move them up one level:
+
+```bash
+DATA=$HOME/coir-data   # outside the checkout: the harness refuses a dirty tree
+fetch() {  # fetch NAME KIND REVISION
+  hf download "CoIR-Retrieval/$1-$2" --repo-type dataset --revision "$3" --local-dir "$DATA/$1-$2"
+  mv "$DATA/$1-$2"/data/*.parquet "$DATA/$1-$2"/
+}
+# every dataset's two repositories at the revisions pinned in coir_run.py's POOL
+uv run python -c 'from scripts.bench.coir_run import POOL; [print(n, k, r) for n, d in POOL.items() for k, r in d.revisions.items()]' |
+  while read -r name kind rev; do fetch "$name" "$kind" "$rev"; done
+```
+
+Then run from the checkout, writing outside it:
+
+```bash
+mkdir -p "$HOME/coir-out"
+NX_ALLOW_PROD_WRITE="RDR-244 Track A run against its own loopback engine" \
+  uv run --with pyarrow python scripts/bench/coir_run.py \
+  --data "$DATA" --out "$HOME/coir-out/results.json" --datasets codetrans-dl codetrans-contest synthetic-text2sql
+```
+
+`NX_ALLOW_PROD_WRITE` is needed because the run writes from a source checkout, which the production-write guard refuses without a stated reason. The writes go only to the engine the harness boots on loopback (it refuses any other host) and to a tenant it mints there. The published run used this opt-in, scoped to the run (2026-11-07). Leave out `--datasets` to run all five; the two codefeedback datasets are then dropped at the cap, as they were here. With the same checkout and data, the per-query rankings and scores reproduce exactly; latency does not.

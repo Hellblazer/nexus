@@ -2,7 +2,7 @@
 title: "ORB Cockpit Surfaces over the Tuple Space"
 id: RDR-212
 type: Architecture
-status: draft
+status: deferred
 priority: medium
 author: Sam
 reviewed-by: self
@@ -64,6 +64,8 @@ Terms used throughout:
   shapes, and a mandatory markdown sidecar.
 - **Textual**: a Python terminal-application framework built on Rich, with a
   CSS dialect for styling and keyed table widgets.
+
+> **Deferred 2026-11-16 (Sam, by dialog in halcyon's session, on the draft triage in T2 nexus/draft-rdr-triage-2026-11-16).** Deferred, not abandoned: RDR-249 relies on this RDR's exclusion of reaction loops (rdr-212:409). Revive when Sam asks for a live claims and activity view, or when RDR-252 needs claim visibility.
 
 ## Problem Statement
 

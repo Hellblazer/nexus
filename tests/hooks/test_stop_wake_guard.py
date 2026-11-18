@@ -1025,7 +1025,9 @@ class TestCiWakeArmed:
         decision = self._decide(tmp_path)
         assert decision.block and decision.reason == swg.CLASS_CI_WAIT, decision
         reason = swg.block_reason(decision.reason, decision.clause)
-        assert "`nx ci wait <sha>` as a background command" in reason
+        assert "`nx ci wait <sha> --branch <branch>` as a background command" in reason
+        assert "release or PR" in reason and "any other branch reads GitHub" in reason
+        assert "Monitor" in reason  # still offered for a run that is not CI
 
     def test_channel_and_a_done_subscription_cover_a_ci_wait(self, tmp_path: Path) -> None:
         _status(tmp_path)

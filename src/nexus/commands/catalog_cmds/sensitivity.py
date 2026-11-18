@@ -39,6 +39,10 @@ _BATCH: int = 500
 
 def _check_usage(tumbler: str | None, collection: str, path: str, owner: str, clear: bool, reason: str) -> None:
     """Every refusal that needs no network. Raises ``click.UsageError``."""
+    if collection and not collection.strip():
+        # A blank name is not "no --collection": the engine reads a blank collection filter as absent and would
+        # list the tenant, and this verb would flag what it listed (RDR-241, nexus-uwggq.1.6).
+        raise click.UsageError("--collection is blank; name a physical collection.")
     if tumbler is not None:
         if collection or path or owner:
             raise click.UsageError("TUMBLER cannot be combined with --collection, --path or --owner.")

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-246 Step 4 (nexus-f3yqd.2.16), the REGISTERING half of the owner-read pattern for a driving table other than
+    nexus.chunks: the changeset that registers a move with its one INSERT into nexus.data_moves, and nothing else. It
+    runs in EVERY posture, including the single-role one, which is exactly why the owner-read policy is not in it:
+    a Liquibase precondition skips its WHOLE changeset, so the policy's guard on this changeset would skip the INSERT too.
+
+    The policy is the next changeset, in its own file (policy.xml here; in the real changelog, the next changeset in
+    master order). Parameters: ${label} (no '/', not empty), ${driving_schema} and ${driving_table}. A real move writes
+    the three literals; the fixture takes them so one file serves the tables of the tests.
+
+    The template and verification text are string VALUES of the INSERT, not DML: DataMoveChangesetGateTest's rule 1 reads
+    the statement, not what the move will run. The move is a stamp (n = n + 1) so the test can count each row moved once.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="owner-read-register-1" author="nexus-f3yqd.2.16">
+        <comment>Register the data move ${label} over ${driving_schema}.${driving_table} (RDR-246): one INSERT into nexus.data_moves, no policy</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('${label}',
+        'UPDATE <driving_table> SET n = t.n + 1, touched_by = current_setting(''nexus.tenant'', true) WHERE <chunking_clause>',
+        '${driving_schema}', '${driving_table}', 50, 0, 60000,
+        'SELECT 1 FROM <driving_table> WHERE t.n = 0 AND (t.tenant_id = $1 OR $1 IS NULL)',
+        NULL, 'owner-read-register-1');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = '${label}'</sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

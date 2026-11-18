@@ -1,0 +1,16 @@
+# one line per changeset the gate must flag: file::id::author kind[,kind]; no line means the gate must pass it
+01-row-dml.xml::r1-after-a-comment-and-a-literal::fixture r1.update
+01-row-dml.xml::r1-alter-type-short::fixture r1.alter-type
+01-row-dml.xml::r1-alter-type::fixture r1.alter-type
+01-row-dml.xml::r1-ctas-columns::fixture r1.ctas
+01-row-dml.xml::r1-ctas::fixture r1.ctas
+01-row-dml.xml::r1-delete::fixture r1.delete
+01-row-dml.xml::r1-generated-no-space::fixture r1.generated
+01-row-dml.xml::r1-generated-readded::fixture r1.generated
+01-row-dml.xml::r1-insert-select::fixture r1.insert-select
+01-row-dml.xml::r1-merge::fixture r1.merge
+01-row-dml.xml::r1-quoted-delete::fixture r1.delete
+01-row-dml.xml::r1-quoted-update::fixture r1.update
+01-row-dml.xml::r1-select-into::fixture r1.select-into
+01-row-dml.xml::r1-update::fixture r1.update
+01-row-dml.xml::r1-with-dml::fixture r1.with-dml

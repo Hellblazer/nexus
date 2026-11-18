@@ -171,14 +171,16 @@ def blocked_message(outcome: Any, *, replacing: Replacing) -> str | None:
 
     A refused pid is the Windows cross-session case: nothing was signalled or
     killed, and the message says whose session to run the upgrade from. A pid
-    that survived the whole escalation is another. A supervisor a heartbeating
-    lease names but this process cannot see (another PID namespace, nexus-dyfsw)
-    is the third. Each says that no file was replaced.
+    that survived the whole escalation is another, and a member of the stack that
+    another user owns (``unsignalled``: both signals failed with EPERM) a third. A
+    supervisor a heartbeating lease names but this process cannot see (another PID
+    namespace, nexus-dyfsw) is the fourth. Each says that no file was replaced.
     """
     what = "engine" if replacing == "engine" else "PostgreSQL bundle"
     refused = tuple(getattr(outcome, "refused", ()) or ())
     refused_pids = {r.pid for r in refused}
-    stubborn = [p for p in getattr(outcome, "stubborn", ()) if p not in refused_pids]
+    unsignalled = tuple(getattr(outcome, "unsignalled", ()) or ())
+    stubborn = [p for p in getattr(outcome, "stubborn", ()) if p not in refused_pids and p not in unsignalled]
     parts: list[str] = []
     remedies: list[str] = []
     for r in refused:
@@ -220,6 +222,12 @@ def blocked_message(outcome: Any, *, replacing: Replacing) -> str | None:
             "escalation and may still be running"
         )
         remedies.append("Stop them by hand, then run the upgrade again.")
+    if unsignalled:
+        parts.append(
+            f"pid(s) {', '.join(str(p) for p in unsignalled)} were identified as this directory's service "
+            "but could not be signalled (another user owns them, EPERM) and may still be running"
+        )
+        remedies.append("Stop them as their owner, then run the upgrade again.")
     invisible = tuple(getattr(outcome, "invisible", ()) or ())
     if invisible:
         parts.append(
@@ -297,7 +305,7 @@ def quiesced(
 
     outcome = effects.stop_service()
     refused_pids = {r.pid for r in getattr(outcome, "refused", ()) or ()}
-    survivors = set(getattr(outcome, "stubborn", ()) or ())
+    survivors = set(getattr(outcome, "stubborn", ()) or ()) | set(getattr(outcome, "unsignalled", ()) or ())
     state.stopped_service = any(
         p not in refused_pids and p not in survivors for p in getattr(outcome, "pids", ())
     )

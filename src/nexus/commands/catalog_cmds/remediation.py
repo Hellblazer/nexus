@@ -24,10 +24,14 @@ from __future__ import annotations
 import re as _re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 
 from nexus.catalog.tumbler import Tumbler
+
+if TYPE_CHECKING:
+    from nexus.catalog.catalog_protocol import CatalogReader
 
 # Default file extensions the remediator considers candidates. Mirrors the
 # set of types the catalog tracks: PDFs (papers / docs__), markdown (RDR /
@@ -43,6 +47,19 @@ _REMEDIATE_DEFAULT_EXTENSIONS: frozenset[str] = frozenset({
 # dash, then the slug. Three or more digits accommodates the eventual
 # four-digit RDRs without rewriting the regex.
 _RDR_PREFIX_RE = _re.compile(r"^(rdr-\d{3,}-)")
+
+
+def _collection_entries(cat: CatalogReader, collection: str) -> list:
+    """The live documents whose ``physical_collection`` is exactly *collection*, in tumbler order.
+
+    One ``GET /list?collection=...`` (``list_by_collection``) instead of a walk of the whole catalog
+    (RDR-241, nexus-uwggq.1.6). A whitespace-only name is a usage error before any request, as
+    ``nx catalog sensitive`` refuses it: the engine reads a blank ``collection`` param as absent, and a
+    report of "nothing to consider" would read as a clean result.
+    """
+    if not collection.strip():
+        raise click.UsageError("--collection is blank; name a physical collection.")
+    return cat.list_by_collection(collection)
 
 
 def _build_basename_index(
@@ -299,12 +316,7 @@ def remediate_paths_cmd(
     if owner:
         entries = cat.by_owner(Tumbler.parse(owner))
     elif collection:
-        # CatalogTaxonomy doesn't expose by_physical_collection directly;
-        # walk all_documents and filter.
-        entries = [
-            e for e in cat.all_documents()
-            if e.physical_collection == collection
-        ]
+        entries = _collection_entries(cat, collection)
     else:
         entries = cat.all_documents()
 
@@ -512,10 +524,7 @@ def prune_stale_cmd(
     if owner:
         entries = cat.by_owner(Tumbler.parse(owner))
     elif collection:
-        entries = [
-            e for e in cat.all_documents()
-            if e.physical_collection == collection
-        ]
+        entries = _collection_entries(cat, collection)
     else:
         entries = cat.all_documents()
 

@@ -486,7 +486,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        if: steps.jar-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
 
       - name: Build shaded jar (no tests, no native)
         if: steps.jar-cache.outputs.cache-hit != 'true'
@@ -2738,6 +2743,7 @@ jobs:
             svc:
               - 'service/**'
               - '.github/workflows/ci.yml'
+              - '.github/actions/maven-cache/**'
 
       - name: Verify the svc predicate is usable (fail loud, never default-skip)
         # nexus-cqquo: every step below is path-gated `if: ... == 'true'`, and
@@ -2767,7 +2773,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        if: steps.changes.outputs.svc == 'true'
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: native
 
       - name: Generate jOOQ sources (codegen runner, Docker)
         if: steps.changes.outputs.svc == 'true'
@@ -2803,7 +2814,7 @@ jobs:
         run: |
           set -euo pipefail
           export NATIVE_IMAGE_OPTIONS="-H:+UnlockExperimentalVMOptions -H:+GenerateEmbeddedResourcesFile"
-          ./mvnw -B -ntp -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=11g package 2>&1 | tee "$RUNNER_TEMP/native-build.log"
+          ./mvnw -B -ntp -e -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=11g package 2>&1 | tee "$RUNNER_TEMP/native-build.log"
 
       - name: Check the embedded native resources (nexus-vwfc0)
         # Reads what the binary ACTUALLY embeds, not what the pom says it should.
@@ -2909,6 +2920,7 @@ jobs:
               - 'tests/db/conftest.py'
               - 'tests/db/_service_fixture.py'
               - '.github/workflows/ci.yml'
+              - '.github/actions/maven-cache/**'
               # Dep bump can change the Python env or service contract without
               # touching the above paths; gate on lockfile + manifest so such a
               # change re-runs the gate (same rationale as CA-3 jobs above).
@@ -2943,7 +2955,12 @@ jobs:
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
-          cache: 'maven'
+
+      - name: Restore the Maven cache and set Central retries
+        if: steps.changes.outputs.seam == 'true'
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
 
       - uses: astral-sh/setup-uv@v7
         if: steps.changes.outputs.seam == 'true'

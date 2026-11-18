@@ -3069,8 +3069,10 @@ def get_superseded_sweep_stats() -> dict:
     "reason": str}, ...], "deferred_discarded": int,
     "deferred_pending": int, "deferred_pending_doc_ids": [str, ...]}``.
     ``swept`` is the total count of T3 rows actually deleted; ``skipped``
-    names every run where the sweep could not complete (and therefore may
-    have left superseded rows searchable) — never silent.
+    names every run where the sweep could not complete — never silent. A
+    row it left that no other document owns is out of search and the get/list
+    reads (no live owner, RDR-192) but readable by chash until the engine
+    reaper collects it.
     ``deferred_discarded`` counts documents whose deferred sweep
     (nexus-4pj54) was dropped because their run failed or was fenced;
     ``deferred_pending`` counts documents stashed since the last reset

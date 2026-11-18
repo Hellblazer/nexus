@@ -1,0 +1,4267 @@
+{
+ "summary": {
+  "n": 33,
+  "prod_collections": 123,
+  "routed_collections": 37,
+  "rdr": {
+   "n": 25,
+   "P0": {
+    "ndcg3": 0.020111945400975276,
+    "recall10": 0.11
+   },
+   "P0s": {
+    "ndcg3": 0.33484824401786956,
+    "recall10": 0.8166666666666667
+   },
+   "OFF": {
+    "ndcg3": 0.33484824401786956,
+    "recall10": 0.8166666666666667
+   },
+   "top1_F0": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8233333333333334,
+    "wins": 9,
+    "losses": 0
+   },
+   "top1_Fk": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8233333333333334,
+    "wins": 9,
+    "losses": 0
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8233333333333334,
+    "wins": 9,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 25,
+     "mean_delta_ndcg3": 0.0
+    }
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8233333333333334,
+    "wins": 9,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 25,
+     "mean_delta_ndcg3": 0.0
+    }
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8033333333333333,
+    "wins": 9,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 25,
+     "mean_delta_ndcg3": 0.0
+    }
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8033333333333333,
+    "wins": 9,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 25,
+     "mean_delta_ndcg3": 0.0
+    }
+   }
+  },
+  "title": {
+   "n": 8,
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.5
+   },
+   "P0s": {
+    "ndcg3": 0.5,
+    "recall10": 0.6666666666666666
+   },
+   "OFF": {
+    "ndcg3": 0.5,
+    "recall10": 0.6666666666666666
+   },
+   "top1_F0": {
+    "ndcg3": 0.5383216995478411,
+    "recall10": 0.6666666666666666,
+    "wins": 1,
+    "losses": 0
+   },
+   "top1_Fk": {
+    "ndcg3": 0.5383216995478411,
+    "recall10": 0.6666666666666666,
+    "wins": 1,
+    "losses": 0
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.5383216995478411,
+    "recall10": 0.6666666666666666,
+    "wins": 1,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 8,
+     "mean_delta_ndcg3": 0.0
+    }
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.5383216995478411,
+    "recall10": 0.6666666666666666,
+    "wins": 1,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 8,
+     "mean_delta_ndcg3": 0.0
+    }
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.5,
+    "recall10": 0.6666666666666666,
+    "wins": 0,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 1,
+     "same": 7,
+     "mean_delta_ndcg3": -0.03832169954784115
+    }
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.5,
+    "recall10": 0.6666666666666666,
+    "wins": 0,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 1,
+     "same": 7,
+     "mean_delta_ndcg3": -0.03832169954784115
+    }
+   }
+  },
+  "all": {
+   "n": 33,
+   "P0": {
+    "ndcg3": 0.01523632227346612,
+    "recall10": 0.20454545454545456
+   },
+   "P0s": {
+    "ndcg3": 0.37488503334687084,
+    "recall10": 0.7803030303030303
+   },
+   "OFF": {
+    "ndcg3": 0.37488503334687084,
+    "recall10": 0.7803030303030303
+   },
+   "top1_F0": {
+    "ndcg3": 0.48684015484572984,
+    "recall10": 0.7853535353535354,
+    "wins": 10,
+    "losses": 0
+   },
+   "top1_Fk": {
+    "ndcg3": 0.48684015484572984,
+    "recall10": 0.7853535353535354,
+    "wins": 10,
+    "losses": 0
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.48684015484572984,
+    "recall10": 0.7853535353535354,
+    "wins": 10,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 33,
+     "mean_delta_ndcg3": 0.0
+    }
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.48684015484572984,
+    "recall10": 0.7853535353535354,
+    "wins": 10,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 0,
+     "same": 33,
+     "mean_delta_ndcg3": 0.0
+    }
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.47755004586443506,
+    "recall10": 0.7702020202020202,
+    "wins": 9,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 1,
+     "same": 32,
+     "mean_delta_ndcg3": -0.009290108981294823
+    }
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.47755004586443506,
+    "recall10": 0.7702020202020202,
+    "wins": 9,
+    "losses": 0,
+    "vs_ungated": {
+     "better": 0,
+     "worse": 1,
+     "same": 32,
+     "mean_delta_ndcg3": -0.009290108981294823
+    }
+   }
+  },
+  "fallback": {
+   "routed": 36,
+   "zero": 0,
+   "short": 11.181818181818182,
+   "no_topics": 87
+  }
+ },
+ "prod": [
+  "docs__1-13__voyage-context-3__v1",
+  "docs__1-15__voyage-context-3__v1",
+  "docs__1-1__voyage-context-3__v1",
+  "docs__1-20__voyage-context-3__v1",
+  "docs__1-27__voyage-context-3__v1",
+  "docs__1-28__voyage-context-3__v1",
+  "docs__1-29__voyage-context-3__v1",
+  "docs__1-2__voyage-context-3__v1",
+  "docs__1-39__voyage-context-3__v1",
+  "docs__1-3__voyage-context-3__v1",
+  "docs__1-41__voyage-context-3__v1",
+  "docs__1-43__voyage-context-3__v1",
+  "docs__1-45__voyage-context-3__v1",
+  "docs__1-46__voyage-context-3__v1",
+  "docs__1-4__voyage-context-3__v1",
+  "docs__1-5__voyage-context-3__v1",
+  "docs__1-70__voyage-context-3__v1",
+  "docs__1-72__voyage-context-3__v1",
+  "docs__1-75__voyage-context-3__v1",
+  "docs__1-76__voyage-context-3__v1",
+  "docs__1-77__voyage-context-3__v1",
+  "docs__1-78__voyage-context-3__v1",
+  "docs__1-79__voyage-context-3__v1",
+  "docs__1-80__voyage-context-3__v1",
+  "docs__1-81__voyage-context-3__v1",
+  "docs__1-82__voyage-context-3__v1",
+  "docs__1-83__voyage-context-3__v1",
+  "docs__1-84__voyage-context-3__v1",
+  "docs__1-85__voyage-context-3__v1",
+  "docs__1-86__voyage-context-3__v1",
+  "docs__1-87__voyage-context-3__v1",
+  "docs__1-90__voyage-context-3__v1",
+  "docs__1-91__voyage-context-3__v1",
+  "docs__1-92__voyage-context-3__v1",
+  "docs__1-93__voyage-context-3__v1",
+  "docs__1-94__voyage-context-3__v1",
+  "docs__1-95__voyage-context-3__v1",
+  "docs__1-9__voyage-context-3__v1",
+  "docs__default__voyage-context-3__v1",
+  "knowledge__ART-rdr-research__voyage-context-3__v1",
+  "knowledge__agent-cockpit__voyage-context-3__v1",
+  "knowledge__agent-memory__voyage-context-3__v1",
+  "knowledge__agent-orchestration__voyage-context-3__v1",
+  "knowledge__agent-tool-use__voyage-context-3__v1",
+  "knowledge__agentic-scholar-papers__voyage-context-3__v1",
+  "knowledge__ah__voyage-context-3__v1",
+  "knowledge__ai-model-releases__voyage-context-3__v1",
+  "knowledge__art-architecture__voyage-context-3__v1",
+  "knowledge__art-papers__voyage-context-3__v1",
+  "knowledge__art-systemone__voyage-context-3__v1",
+  "knowledge__augur-community-papers__voyage-context-3__v1",
+  "knowledge__augur-oracle-papers__voyage-context-3__v1",
+  "knowledge__ci-infrastructure__voyage-context-3__v1",
+  "knowledge__claude-code-integration__voyage-context-3__v1",
+  "knowledge__code-review-patterns__voyage-context-3__v1",
+  "knowledge__conexus-infra__voyage-context-3__v1",
+  "knowledge__conexus-ops__voyage-context-3__v1",
+  "knowledge__consumer-tech__voyage-context-3__v1",
+  "knowledge__data-versioning__voyage-context-3__v1",
+  "knowledge__debugging__voyage-context-3__v1",
+  "knowledge__distributed-systems__voyage-context-3__v1",
+  "knowledge__document-extraction__voyage-context-3__v1",
+  "knowledge__dt-papers__voyage-context-3__v1",
+  "knowledge__embedded-ops__voyage-context-3__v1",
+  "knowledge__german-language-pedagogy__voyage-context-3__v1",
+  "knowledge__herdr-app__voyage-context-3__v1",
+  "knowledge__herdr-core__voyage-context-3__v1",
+  "knowledge__herdr__voyage-context-3__v1",
+  "knowledge__homelab__voyage-context-3__v1",
+  "knowledge__infrastructure-costs__voyage-context-3__v1",
+  "knowledge__interface-design__voyage-context-3__v1",
+  "knowledge__interpretability__voyage-context-3__v1",
+  "knowledge__knowledge__voyage-context-3__v1",
+  "knowledge__lab-pool-scheduling__voyage-context-3__v1",
+  "knowledge__labrun__voyage-context-3__v1",
+  "knowledge__llama-cpp-vulkan__voyage-context-3__v1",
+  "knowledge__llm-api-integration__voyage-context-3__v1",
+  "knowledge__local-inference__voyage-context-3__v1",
+  "knowledge__macos-tcc__voyage-context-3__v1",
+  "knowledge__nexus-answer-pipeline__voyage-context-3__v1",
+  "knowledge__nexus-architecture__voyage-context-3__v1",
+  "knowledge__nexus-catalog-integrity__voyage-context-3__v1",
+  "knowledge__nexus-catalog__voyage-context-3__v1",
+  "knowledge__nexus-debugging__voyage-context-3__v1",
+  "knowledge__nexus-engine__voyage-context-3__v1",
+  "knowledge__nexus-indexing__voyage-context-3__v1",
+  "knowledge__nexus-mailbox__voyage-context-3__v1",
+  "knowledge__nexus-plan-runner__voyage-context-3__v1",
+  "knowledge__nexus-rdr-research__voyage-context-3__v1",
+  "knowledge__nexus-search__voyage-context-3__v1",
+  "knowledge__nexus-testing__voyage-context-3__v1",
+  "knowledge__nexus__voyage-context-3__v1",
+  "knowledge__postgres-jdbc__voyage-context-3__v1",
+  "knowledge__prose-edit__voyage-context-3__v1",
+  "knowledge__python-subprocess-management__voyage-context-3__v1",
+  "knowledge__research-methods__voyage-context-3__v1",
+  "knowledge__rune__voyage-context-3__v1",
+  "knowledge__scheduling__voyage-context-3__v1",
+  "knowledge__semantic-operators__voyage-context-3__v1",
+  "knowledge__shell-testing__voyage-context-3__v1",
+  "knowledge__systemd__voyage-context-3__v1",
+  "knowledge__systems-theory__voyage-context-3__v1",
+  "knowledge__technical-writing__voyage-context-3__v1",
+  "knowledge__test-infrastructure__voyage-context-3__v1",
+  "knowledge__test-reliability__voyage-context-3__v1",
+  "knowledge__testing__voyage-context-3__v1",
+  "knowledge__tuple-space__voyage-context-3__v1",
+  "knowledge__vector-search__voyage-context-3__v1",
+  "knowledge__windows-hyper-v__voyage-context-3__v1",
+  "knowledge__wow-addon-dev__voyage-context-3__v1",
+  "knowledge__writing-craft__voyage-context-3__v1",
+  "rdr__1-1__voyage-context-3__v1",
+  "rdr__1-20__voyage-context-3__v1",
+  "rdr__1-27__voyage-context-3__v1",
+  "rdr__1-2__voyage-context-3__v1",
+  "rdr__1-3__voyage-context-3__v1",
+  "rdr__1-41__voyage-context-3__v1",
+  "rdr__1-46__voyage-context-3__v1",
+  "rdr__1-4__voyage-context-3__v1",
+  "rdr__1-5__voyage-context-3__v1",
+  "rdr__1-78__voyage-context-3__v1",
+  "rdr__1-79__voyage-context-3__v1",
+  "rdr__1-86__voyage-context-3__v1"
+ ],
+ "results": [
+  {
+   "qid": "Q1-factual-tumblers",
+   "kind": "rdr",
+   "gt": {
+    "rdr049": 3,
+    "rdr053": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "xanadu-in-nexus.md",
+     "CHANGELOG.md",
+     "catalog.md"
+    ],
+    "s": 3.1333575840108097
+   },
+   "P0s": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "s": 50.21006216609385
+   },
+   "top1_F0": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q2-factual-chash",
+   "kind": "rdr",
+   "gt": {
+    "rdr086": 3,
+    "rdr061": 1,
+    "rdr075": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "architecture.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ],
+    "s": 2.886344625032507
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "180-content-address-chash-binary-32byte.md",
+     "rdr-236-chunk-row-metadata-normalization.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "180-content-address-chash-binary-32byte.md",
+     "rdr-236-chunk-row-metadata-normalization.md"
+    ],
+    "s": 40.589200708898716
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q3-factual-taxonomy",
+   "kind": "rdr",
+   "gt": {
+    "rdr070": 3,
+    "rdr067": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "cli-reference.md",
+     "architecture.md",
+     "catalog.md"
+    ],
+    "s": 2.1273550000041723
+   },
+   "P0s": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "s": 38.705914207967
+   },
+   "top1_F0": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q4-comparative-hooks",
+   "kind": "rdr",
+   "gt": {
+    "rdr070": 3,
+    "rdr095": 3,
+    "rdr089": 3,
+    "rdr086": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "s": 2.688543749973178
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "s": 38.56631266698241
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 8,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q5-compositional-retrieval",
+   "kind": "rdr",
+   "gt": {
+    "rdr078": 3,
+    "rdr080": 3,
+    "rdr088": 3,
+    "rdr091": 3,
+    "rdr092": 2,
+    "rdr079": 1,
+    "rdr093": 1
+   },
+   "P0": {
+    "ndcg3": 0.5027986350243819,
+    "recall10": 0.25,
+    "top3": [
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md",
+     "CHANGELOG.md",
+     "2026-04-15-rdr-079-operator-dispatch-plan.md"
+    ],
+    "s": 1.9495047089876607
+   },
+   "P0s": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ],
+    "s": 39.27663583296817
+   },
+   "top1_F0": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G04-lookup-min-confidence",
+   "kind": "rdr",
+   "gt": {
+    "rdr079": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "plan-centric-retrieval.md",
+     "plan-authoring-guide.md",
+     "cli-reference.md"
+    ],
+    "s": 2.3732687500305474
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "s": 39.72352458408568
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 15,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G05-lookup-hybridrag-cap",
+   "kind": "title",
+   "gt": {
+    "hybridrag": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "2408.04948.pdf",
+     "2604.15583.pdf",
+     "report.md"
+    ],
+    "s": 1.9800542920129374
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "rdr-098-abstract-question-plan-template.md"
+    ],
+    "s": 38.3008544590557
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__knowledge__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__knowledge__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G07-synthesis-rdr155",
+   "kind": "rdr",
+   "gt": {
+    "rdr155": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "migration-runbook.md",
+     "container-integration.md"
+    ],
+    "s": 2.1683682090369985
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md"
+    ],
+    "s": 38.959056542022154
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G15-comparison-harnesses",
+   "kind": "rdr",
+   "gt": {
+    "rdr090": 3,
+    "rdr196": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "benchmarking.md",
+     "cli-reference.md",
+     "CHANGELOG.md"
+    ],
+    "s": 2.0443452909821644
+   },
+   "P0s": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "benchmarking.md",
+     "cli-reference.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "benchmarking.md",
+     "cli-reference.md"
+    ],
+    "s": 39.95467045903206
+   },
+   "top1_F0": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "rdr-134-taxonomy-aware-recall-in-nx-answer.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "rdr-134-taxonomy-aware-recall-in-nx-answer.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "critique.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-79__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "rdr-134-taxonomy-aware-recall-in-nx-answer.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "rdr-134-taxonomy-aware-recall-in-nx-answer.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "critique.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-79__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G16-audit-rdr210",
+   "kind": "rdr",
+   "gt": {
+    "rdr210": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "beyond-similarity-search-application.md",
+     "uri-docuverse-working-notes.md"
+    ],
+    "s": 2.3811932919779792
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ],
+    "s": 39.27531870896928
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ],
+    "top3_coll": [
+     "rdr__1-79__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ],
+    "top3_coll": [
+     "rdr__1-79__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H01",
+   "kind": "rdr",
+   "gt": {
+    "rdr064": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "CHANGELOG.md",
+     "a2ui-summary.md"
+    ],
+    "s": 2.2477915420895442
+   },
+   "P0s": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "CHANGELOG.md"
+    ],
+    "s": 38.46872424997855
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H02",
+   "kind": "rdr",
+   "gt": {
+    "rdr205": 3,
+    "rdr206": 3,
+    "rdr211": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "architecture.md",
+     "linda-in-nexus.md",
+     "tuple-space.md"
+    ],
+    "s": 1.9832335420651361
+   },
+   "P0s": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+    ],
+    "s": 38.62223320803605
+   },
+   "top1_F0": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H03",
+   "kind": "rdr",
+   "gt": {
+    "rdr012": 3,
+    "rdr021": 3,
+    "rdr044": 3,
+    "rdr046": 3,
+    "rdr047": 3,
+    "rdr048": 3,
+    "rdr148": 3,
+    "rdr237": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "README.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ],
+    "s": 2.0605919170193374
+   },
+   "P0s": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "s": 37.66575412498787
+   },
+   "top1_F0": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H04",
+   "kind": "rdr",
+   "gt": {
+    "rdr110": 3,
+    "rdr205": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "tuple-space.md"
+    ],
+    "s": 2.1491162920137867
+   },
+   "P0s": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ],
+    "s": 39.40706825000234
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H05",
+   "kind": "rdr",
+   "gt": {
+    "rdr163": 3,
+    "rdr172": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "configuration.md",
+     "CHANGELOG.md",
+     "migration-runbook.md"
+    ],
+    "s": 2.165934875025414
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "configuration.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "configuration.md",
+     "CHANGELOG.md"
+    ],
+    "s": 39.282277291989885
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H06",
+   "kind": "rdr",
+   "gt": {
+    "rdr201": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "README.md",
+     "204-gate-critique-2026-09-07i.md",
+     "rdr-audit.md"
+    ],
+    "s": 2.356617124984041
+   },
+   "P0s": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "README.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "README.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md"
+    ],
+    "s": 38.571818374912255
+   },
+   "top1_F0": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-241-no-client-walks-of-the-managed-catalog.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-241-no-client-walks-of-the-managed-catalog.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "grounding-checks.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-79__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-241-no-client-walks-of-the-managed-catalog.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-241-no-client-walks-of-the-managed-catalog.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "grounding-checks.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-79__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H07",
+   "kind": "rdr",
+   "gt": {
+    "rdr188": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "wire-contract-pending.md",
+     "storage-tiers.md",
+     "CHANGELOG.md"
+    ],
+    "s": 1.9428660001140088
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "wire-contract-pending.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "wire-contract-pending.md"
+    ],
+    "s": 39.118914625025354
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "rdr-038-local-t3-backend.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "graph-augmented-retrieval.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "graph-augmented-retrieval.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "graph-augmented-retrieval.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "graph-augmented-retrieval.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "graph-augmented-retrieval.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 14,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H09",
+   "kind": "title",
+   "gt": {
+    "lostinthemiddlehowlanguagemode": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "report.md",
+     "README.md"
+    ],
+    "s": 1.7105207500280812
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "s": 38.614000042085536
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "2604.15583.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-81__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-81__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-81__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-81__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H10",
+   "kind": "rdr",
+   "gt": {
+    "rdr158": 3,
+    "rdr186": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "container-integration.md",
+     "architecture.md"
+    ],
+    "s": 2.38964541698806
+   },
+   "P0s": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ],
+    "s": 38.880220749997534
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H11",
+   "kind": "title",
+   "gt": {
+    "towardsrobustnessacritiqueofcu": 3,
+    "thecaseagainstpgvector": 3,
+    "dontbeapotstirrerauthorizedvec": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "prompt.md",
+     "beyond-similarity-search-application.md",
+     "SPATIAL_INDEX_PERFORMANCE_COMPARISON.md"
+    ],
+    "s": 1.5016089170239866
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "s": 37.97537020803429
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H13",
+   "kind": "title",
+   "gt": {
+    "manticoresearchautochunkingchu": 3,
+    "manticoresearchautochunkingcro": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "repo-indexing.md",
+     "cli-reference.md"
+    ],
+    "s": 2.0575165839400142
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-048-streaming-pdf-pipeline.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-048-streaming-pdf-pipeline.md"
+    ],
+    "s": 39.409006666974165
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "results.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "uri-docuverse-working-notes.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "uri-docuverse-working-notes.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "uri-docuverse-working-notes.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "uri-docuverse-working-notes.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "uri-docuverse-working-notes.md"
+    ],
+    "top3_coll": [
+     "rdr__1-27__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1",
+     "docs__1-41__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H14",
+   "kind": "rdr",
+   "gt": {
+    "rdr158": 3,
+    "rdr186": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "wire-contract-pending.md",
+     "storage-tiers.md"
+    ],
+    "s": 2.257361750002019
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "ROLLBACK.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "ROLLBACK.md"
+    ],
+    "s": 39.62909708393272
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H16",
+   "kind": "rdr",
+   "gt": {
+    "rdr070": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "architecture.md",
+     "cli-reference.md",
+     "querying-guide.md"
+    ],
+    "s": 1.6277468749321997
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "s": 39.453857208020054
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H17",
+   "kind": "rdr",
+   "gt": {
+    "rdr143": 3,
+    "rdr228": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "cli-reference.md",
+     "README.md"
+    ],
+    "s": 1.9859985830262303
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ],
+    "s": 39.03166095900815
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H18",
+   "kind": "rdr",
+   "gt": {
+    "rdr218": 3,
+    "rdr224": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "windows-install.md",
+     "CHANGELOG.md",
+     "journey-from-7-6-1.md"
+    ],
+    "s": 2.0327097499975935
+   },
+   "P0s": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "windows-install.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "windows-install.md",
+     "CHANGELOG.md"
+    ],
+    "s": 40.05712312506512
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H20",
+   "kind": "title",
+   "gt": {
+    "lostinthemiddlehowlanguagemode": 3,
+    "contextlengthalonehurtsllmperf": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "RESEARCH.md",
+     "Memory in the LLM Era- Modular Architectures and Strategies in a Unified Framework.pdf"
+    ],
+    "s": 1.8203131249174476
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "s": 39.724355667014606
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H21",
+   "kind": "rdr",
+   "gt": {
+    "rdr197": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ],
+    "s": 2.219228208065033
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ],
+    "s": 39.50491866702214
+   },
+   "top1_F0": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H22",
+   "kind": "title",
+   "gt": {
+    "contextlengthalonehurtsllmperf": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "report.md",
+     "FluctlightDB- A Memory Model of Data for AI Agents.pdf"
+    ],
+    "s": 2.2231362919555977
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "s": 39.02554654201958
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "rdr__1-27__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 16,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H23",
+   "kind": "title",
+   "gt": {
+    "thecaseagainstpgvector": 3,
+    "rdr227": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "wire-contract-pending.md",
+     "CHANGELOG.md"
+    ],
+    "s": 1.8945234999991953
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf"
+    ],
+    "s": 40.19486441707704
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "rdr-227-per-collection-hnsw-above-the-router-threshold.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "rdr-227-per-collection-hnsw-above-the-router-threshold.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__default__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "docs__default__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "rdr-227-per-collection-hnsw-above-the-router-threshold.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "rdr-227-per-collection-hnsw-above-the-router-threshold.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "docs__default__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "knowledge__dt-papers__voyage-context-3__v1",
+     "docs__default__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H24",
+   "kind": "title",
+   "gt": {
+    "lostinthemiddlehowlanguagemode": 3,
+    "contextlengthalonehurtsllmperf": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "2408.04948.pdf",
+     "RESEARCH.md"
+    ],
+    "s": 1.834567749989219
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "s": 142.44946912501473
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "top3_coll": [
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "knowledge__agent-tool-use__voyage-context-3__v1",
+     "docs__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H26",
+   "kind": "rdr",
+   "gt": {
+    "rdr151": 3,
+    "rdr129": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "2026-06-05-daemon-concurrency-forensics.md"
+    ],
+    "s": 2.4258135829586536
+   },
+   "P0s": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "s": 38.738060917006806
+   },
+   "top1_F0": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "top3_coll": [
+     "docs__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H28",
+   "kind": "rdr",
+   "gt": {
+    "rdr146": 3,
+    "rdr168": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "custom_catalog_changes.md",
+     "CHANGELOG.md",
+     "catalogs.md"
+    ],
+    "s": 2.2919617919251323
+   },
+   "P0s": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-146-catalog-store-behind-daemon.md",
+     "rdr-229-collection-name-becomes-a-label.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-146-catalog-store-behind-daemon.md",
+     "rdr-229-collection-name-becomes-a-label.md"
+    ],
+    "s": 38.852114417008124
+   },
+   "top1_F0": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 7,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H30",
+   "kind": "rdr",
+   "gt": {
+    "rdr208": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "mcp-servers.md"
+    ],
+    "s": 1.769927665940486
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "rdr-239-doc-blocks.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "rdr-239-doc-blocks.md"
+    ],
+    "s": 37.62648454203736
+   },
+   "top1_F0": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ]
+   },
+   "top1_F0@g0.9": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_F0@g0.96": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ]
+   },
+   "top1_Fk@g0.9": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "top1_Fk@g0.96": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ],
+    "top3_coll": [
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1",
+     "rdr__1-1__voyage-context-3__v1"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  }
+ ],
+ "gate": {
+  "from": "bench/results/rdr134-taxonomy-coverage-2026-11-16.json",
+  "unrouted": {
+   "0.9": [
+    "docs__1-28__voyage-context-3__v1",
+    "docs__1-41__voyage-context-3__v1",
+    "docs__1-75__voyage-context-3__v1",
+    "docs__1-77__voyage-context-3__v1",
+    "docs__1-78__voyage-context-3__v1",
+    "docs__1-79__voyage-context-3__v1",
+    "docs__1-80__voyage-context-3__v1",
+    "docs__1-81__voyage-context-3__v1",
+    "rdr__1-20__voyage-context-3__v1",
+    "rdr__1-41__voyage-context-3__v1",
+    "rdr__1-78__voyage-context-3__v1"
+   ],
+   "0.96": [
+    "docs__1-28__voyage-context-3__v1",
+    "docs__1-41__voyage-context-3__v1",
+    "docs__1-75__voyage-context-3__v1",
+    "docs__1-77__voyage-context-3__v1",
+    "docs__1-78__voyage-context-3__v1",
+    "docs__1-79__voyage-context-3__v1",
+    "docs__1-80__voyage-context-3__v1",
+    "docs__1-81__voyage-context-3__v1",
+    "knowledge__dt-papers__voyage-context-3__v1",
+    "rdr__1-20__voyage-context-3__v1",
+    "rdr__1-41__voyage-context-3__v1",
+    "rdr__1-78__voyage-context-3__v1",
+    "rdr__1-79__voyage-context-3__v1"
+   ]
+  },
+  "routed_not_in_report": []
+ },
+ "notes": [
+  "Gated arms reuse the plain and top-1 reads of the same run, so they cost no engine call; the ungated arms are scored in the same run. The F0 and Fk fallbacks apply to the routed collections of a gated arm as in the ungated one."
+ ]
+}

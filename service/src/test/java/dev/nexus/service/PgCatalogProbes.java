@@ -156,6 +156,32 @@ public final class PgCatalogProbes {
             .fetchOne(relpersistence);
     }
 
+    /** The oid of {@code schema.table} in {@code pg_class}, as a scalar subquery. */
+    private static Field<Long> relOid(String schema, String table) {
+        return DSL.field(DSL.select(DSL.field(DSL.name("c", "oid"), Long.class))
+            .from(pgClassAs("c"))
+            .join(pgNamespaceAs("n"))
+                .on(DSL.field(DSL.name("c", "relnamespace")).eq(DSL.field(DSL.name("n", "oid"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq(schema))
+            .and(DSL.field(DSL.name("c", "relname"), String.class).eq(table)));
+    }
+
+    /** Rows of {@code pg_statistic} for {@code schema.table}: zero when the planner holds no column statistics on it. */
+    public static int statisticRows(DSLContext ctx, String schema, String table) {
+        return ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_statistic")),
+            DSL.field(DSL.name("starelid"), Long.class).eq(relOid(schema, table)));
+    }
+
+    /**
+     * Delete {@code schema.table}'s planner statistics (superuser only), so a test can pin the never-analyzed state
+     * of a fresh install. Pair it with {@code autovacuum_enabled = false} on the table, or autoanalyze can refill them.
+     */
+    public static int clearStatistics(DSLContext ctx, String schema, String table) {
+        return ctx.deleteFrom(DSL.table(DSL.name("pg_catalog", "pg_statistic")))
+            .where(DSL.field(DSL.name("starelid"), Long.class).eq(relOid(schema, table)))
+            .execute();
+    }
+
     /** {@code pg_class.reloptions} of {@code schema.relation} ({@code text[]}, may be null). */
     public static String[] relOptions(DSLContext ctx, String schema, String relation) {
         Field<String[]> reloptions = DSL.field(DSL.name("c", "reloptions"), String[].class);

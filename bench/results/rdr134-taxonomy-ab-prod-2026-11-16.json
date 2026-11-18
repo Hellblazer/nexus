@@ -1,0 +1,2238 @@
+{
+ "summary": {
+  "n": 33,
+  "prod_collections": 123,
+  "routed_collections": 37,
+  "rdr": {
+   "n": 25,
+   "P0": {
+    "ndcg3": 0.020111945400975276,
+    "recall10": 0.11
+   },
+   "P0s": {
+    "ndcg3": 0.33484824401786956,
+    "recall10": 0.8166666666666667
+   },
+   "OFF": {
+    "ndcg3": 0.33484824401786956,
+    "recall10": 0.8166666666666667
+   },
+   "top1_F0": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8233333333333334,
+    "wins": 9,
+    "losses": 0
+   },
+   "top1_Fk": {
+    "ndcg3": 0.47036606054105423,
+    "recall10": 0.8233333333333334,
+    "wins": 9,
+    "losses": 0
+   }
+  },
+  "title": {
+   "n": 8,
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.5
+   },
+   "P0s": {
+    "ndcg3": 0.5,
+    "recall10": 0.6666666666666666
+   },
+   "OFF": {
+    "ndcg3": 0.5,
+    "recall10": 0.6666666666666666
+   },
+   "top1_F0": {
+    "ndcg3": 0.5383216995478411,
+    "recall10": 0.6666666666666666,
+    "wins": 1,
+    "losses": 0
+   },
+   "top1_Fk": {
+    "ndcg3": 0.5383216995478411,
+    "recall10": 0.6666666666666666,
+    "wins": 1,
+    "losses": 0
+   }
+  },
+  "all": {
+   "n": 33,
+   "P0": {
+    "ndcg3": 0.01523632227346612,
+    "recall10": 0.20454545454545456
+   },
+   "P0s": {
+    "ndcg3": 0.37488503334687084,
+    "recall10": 0.7803030303030303
+   },
+   "OFF": {
+    "ndcg3": 0.37488503334687084,
+    "recall10": 0.7803030303030303
+   },
+   "top1_F0": {
+    "ndcg3": 0.48684015484572984,
+    "recall10": 0.7853535353535354,
+    "wins": 10,
+    "losses": 0
+   },
+   "top1_Fk": {
+    "ndcg3": 0.48684015484572984,
+    "recall10": 0.7853535353535354,
+    "wins": 10,
+    "losses": 0
+   }
+  },
+  "fallback": {
+   "routed": 36,
+   "zero": 0,
+   "short": 11.181818181818182,
+   "no_topics": 87
+  }
+ },
+ "prod": [
+  "docs__1-13__voyage-context-3__v1",
+  "docs__1-15__voyage-context-3__v1",
+  "docs__1-1__voyage-context-3__v1",
+  "docs__1-20__voyage-context-3__v1",
+  "docs__1-27__voyage-context-3__v1",
+  "docs__1-28__voyage-context-3__v1",
+  "docs__1-29__voyage-context-3__v1",
+  "docs__1-2__voyage-context-3__v1",
+  "docs__1-39__voyage-context-3__v1",
+  "docs__1-3__voyage-context-3__v1",
+  "docs__1-41__voyage-context-3__v1",
+  "docs__1-43__voyage-context-3__v1",
+  "docs__1-45__voyage-context-3__v1",
+  "docs__1-46__voyage-context-3__v1",
+  "docs__1-4__voyage-context-3__v1",
+  "docs__1-5__voyage-context-3__v1",
+  "docs__1-70__voyage-context-3__v1",
+  "docs__1-72__voyage-context-3__v1",
+  "docs__1-75__voyage-context-3__v1",
+  "docs__1-76__voyage-context-3__v1",
+  "docs__1-77__voyage-context-3__v1",
+  "docs__1-78__voyage-context-3__v1",
+  "docs__1-79__voyage-context-3__v1",
+  "docs__1-80__voyage-context-3__v1",
+  "docs__1-81__voyage-context-3__v1",
+  "docs__1-82__voyage-context-3__v1",
+  "docs__1-83__voyage-context-3__v1",
+  "docs__1-84__voyage-context-3__v1",
+  "docs__1-85__voyage-context-3__v1",
+  "docs__1-86__voyage-context-3__v1",
+  "docs__1-87__voyage-context-3__v1",
+  "docs__1-90__voyage-context-3__v1",
+  "docs__1-91__voyage-context-3__v1",
+  "docs__1-92__voyage-context-3__v1",
+  "docs__1-93__voyage-context-3__v1",
+  "docs__1-94__voyage-context-3__v1",
+  "docs__1-95__voyage-context-3__v1",
+  "docs__1-9__voyage-context-3__v1",
+  "docs__default__voyage-context-3__v1",
+  "knowledge__ART-rdr-research__voyage-context-3__v1",
+  "knowledge__agent-cockpit__voyage-context-3__v1",
+  "knowledge__agent-memory__voyage-context-3__v1",
+  "knowledge__agent-orchestration__voyage-context-3__v1",
+  "knowledge__agent-tool-use__voyage-context-3__v1",
+  "knowledge__agentic-scholar-papers__voyage-context-3__v1",
+  "knowledge__ah__voyage-context-3__v1",
+  "knowledge__ai-model-releases__voyage-context-3__v1",
+  "knowledge__art-architecture__voyage-context-3__v1",
+  "knowledge__art-papers__voyage-context-3__v1",
+  "knowledge__art-systemone__voyage-context-3__v1",
+  "knowledge__augur-community-papers__voyage-context-3__v1",
+  "knowledge__augur-oracle-papers__voyage-context-3__v1",
+  "knowledge__ci-infrastructure__voyage-context-3__v1",
+  "knowledge__claude-code-integration__voyage-context-3__v1",
+  "knowledge__code-review-patterns__voyage-context-3__v1",
+  "knowledge__conexus-infra__voyage-context-3__v1",
+  "knowledge__conexus-ops__voyage-context-3__v1",
+  "knowledge__consumer-tech__voyage-context-3__v1",
+  "knowledge__data-versioning__voyage-context-3__v1",
+  "knowledge__debugging__voyage-context-3__v1",
+  "knowledge__distributed-systems__voyage-context-3__v1",
+  "knowledge__document-extraction__voyage-context-3__v1",
+  "knowledge__dt-papers__voyage-context-3__v1",
+  "knowledge__embedded-ops__voyage-context-3__v1",
+  "knowledge__german-language-pedagogy__voyage-context-3__v1",
+  "knowledge__herdr-app__voyage-context-3__v1",
+  "knowledge__herdr-core__voyage-context-3__v1",
+  "knowledge__herdr__voyage-context-3__v1",
+  "knowledge__homelab__voyage-context-3__v1",
+  "knowledge__infrastructure-costs__voyage-context-3__v1",
+  "knowledge__interface-design__voyage-context-3__v1",
+  "knowledge__interpretability__voyage-context-3__v1",
+  "knowledge__knowledge__voyage-context-3__v1",
+  "knowledge__lab-pool-scheduling__voyage-context-3__v1",
+  "knowledge__labrun__voyage-context-3__v1",
+  "knowledge__llama-cpp-vulkan__voyage-context-3__v1",
+  "knowledge__llm-api-integration__voyage-context-3__v1",
+  "knowledge__local-inference__voyage-context-3__v1",
+  "knowledge__macos-tcc__voyage-context-3__v1",
+  "knowledge__nexus-answer-pipeline__voyage-context-3__v1",
+  "knowledge__nexus-architecture__voyage-context-3__v1",
+  "knowledge__nexus-catalog-integrity__voyage-context-3__v1",
+  "knowledge__nexus-catalog__voyage-context-3__v1",
+  "knowledge__nexus-debugging__voyage-context-3__v1",
+  "knowledge__nexus-engine__voyage-context-3__v1",
+  "knowledge__nexus-indexing__voyage-context-3__v1",
+  "knowledge__nexus-mailbox__voyage-context-3__v1",
+  "knowledge__nexus-plan-runner__voyage-context-3__v1",
+  "knowledge__nexus-rdr-research__voyage-context-3__v1",
+  "knowledge__nexus-search__voyage-context-3__v1",
+  "knowledge__nexus-testing__voyage-context-3__v1",
+  "knowledge__nexus__voyage-context-3__v1",
+  "knowledge__postgres-jdbc__voyage-context-3__v1",
+  "knowledge__prose-edit__voyage-context-3__v1",
+  "knowledge__python-subprocess-management__voyage-context-3__v1",
+  "knowledge__research-methods__voyage-context-3__v1",
+  "knowledge__rune__voyage-context-3__v1",
+  "knowledge__scheduling__voyage-context-3__v1",
+  "knowledge__semantic-operators__voyage-context-3__v1",
+  "knowledge__shell-testing__voyage-context-3__v1",
+  "knowledge__systemd__voyage-context-3__v1",
+  "knowledge__systems-theory__voyage-context-3__v1",
+  "knowledge__technical-writing__voyage-context-3__v1",
+  "knowledge__test-infrastructure__voyage-context-3__v1",
+  "knowledge__test-reliability__voyage-context-3__v1",
+  "knowledge__testing__voyage-context-3__v1",
+  "knowledge__tuple-space__voyage-context-3__v1",
+  "knowledge__vector-search__voyage-context-3__v1",
+  "knowledge__windows-hyper-v__voyage-context-3__v1",
+  "knowledge__wow-addon-dev__voyage-context-3__v1",
+  "knowledge__writing-craft__voyage-context-3__v1",
+  "rdr__1-1__voyage-context-3__v1",
+  "rdr__1-20__voyage-context-3__v1",
+  "rdr__1-27__voyage-context-3__v1",
+  "rdr__1-2__voyage-context-3__v1",
+  "rdr__1-3__voyage-context-3__v1",
+  "rdr__1-41__voyage-context-3__v1",
+  "rdr__1-46__voyage-context-3__v1",
+  "rdr__1-4__voyage-context-3__v1",
+  "rdr__1-5__voyage-context-3__v1",
+  "rdr__1-78__voyage-context-3__v1",
+  "rdr__1-79__voyage-context-3__v1",
+  "rdr__1-86__voyage-context-3__v1"
+ ],
+ "results": [
+  {
+   "qid": "Q1-factual-tumblers",
+   "kind": "rdr",
+   "gt": {
+    "rdr049": 3,
+    "rdr053": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "xanadu-in-nexus.md",
+     "CHANGELOG.md",
+     "catalog.md"
+    ],
+    "s": 2.0719263330101967
+   },
+   "P0s": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "s": 41.986998999956995
+   },
+   "top1_F0": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q2-factual-chash",
+   "kind": "rdr",
+   "gt": {
+    "rdr086": 3,
+    "rdr061": 1,
+    "rdr075": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "architecture.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ],
+    "s": 2.305261042085476
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "180-content-address-chash-binary-32byte.md",
+     "rdr-236-chunk-row-metadata-normalization.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "180-content-address-chash-binary-32byte.md",
+     "rdr-236-chunk-row-metadata-normalization.md"
+    ],
+    "s": 40.43738137499895
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "180-content-address-chash-binary-32byte.md",
+     "architecture.md",
+     "rdr-199-indexing-lifecycle-ref-identity.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q3-factual-taxonomy",
+   "kind": "rdr",
+   "gt": {
+    "rdr070": 3,
+    "rdr067": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "cli-reference.md",
+     "architecture.md",
+     "catalog.md"
+    ],
+    "s": 2.066806082963012
+   },
+   "P0s": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "s": 42.50099441700149
+   },
+   "top1_F0": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q4-comparative-hooks",
+   "kind": "rdr",
+   "gt": {
+    "rdr070": 3,
+    "rdr095": 3,
+    "rdr089": 3,
+    "rdr086": 1
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "s": 2.2802427080459893
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "s": 42.747152915922925
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 8,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "Q5-compositional-retrieval",
+   "kind": "rdr",
+   "gt": {
+    "rdr078": 3,
+    "rdr080": 3,
+    "rdr088": 3,
+    "rdr091": 3,
+    "rdr092": 2,
+    "rdr079": 1,
+    "rdr093": 1
+   },
+   "P0": {
+    "ndcg3": 0.5027986350243819,
+    "recall10": 0.25,
+    "top3": [
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md",
+     "CHANGELOG.md",
+     "2026-04-15-rdr-079-operator-dispatch-plan.md"
+    ],
+    "s": 2.1282875000033528
+   },
+   "P0s": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ],
+    "s": 42.176628625020385
+   },
+   "top1_F0": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md",
+     "rdr-080-retrieval-layer-consolidation.md",
+     "2026-04-14-rdr-078-plan-centric-retrieval-impl-plan.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G04-lookup-min-confidence",
+   "kind": "rdr",
+   "gt": {
+    "rdr079": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "plan-centric-retrieval.md",
+     "plan-authoring-guide.md",
+     "cli-reference.md"
+    ],
+    "s": 1.8447909170063213
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "s": 43.62951483391225
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 15,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G05-lookup-hybridrag-cap",
+   "kind": "title",
+   "gt": {
+    "hybridrag": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "2408.04948.pdf",
+     "2604.15583.pdf",
+     "report.md"
+    ],
+    "s": 2.32962045900058
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "rdr-098-abstract-question-plan-template.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "rdr-098-abstract-question-plan-template.md"
+    ],
+    "s": 43.41234675003216
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G07-synthesis-rdr155",
+   "kind": "rdr",
+   "gt": {
+    "rdr155": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "migration-runbook.md",
+     "container-integration.md"
+    ],
+    "s": 1.863189166993834
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md"
+    ],
+    "s": 41.9461831250228
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md",
+     "rdr-248-cloud-tenant-backup.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G15-comparison-harnesses",
+   "kind": "rdr",
+   "gt": {
+    "rdr090": 3,
+    "rdr196": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "benchmarking.md",
+     "cli-reference.md",
+     "CHANGELOG.md"
+    ],
+    "s": 2.2941886669723317
+   },
+   "P0s": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "benchmarking.md",
+     "cli-reference.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "benchmarking.md",
+     "cli-reference.md"
+    ],
+    "s": 41.61632837494835
+   },
+   "top1_F0": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "088-agenticscholar-operator-completion.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md",
+     "088-agenticscholar-operator-completion.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "G16-audit-rdr210",
+   "kind": "rdr",
+   "gt": {
+    "rdr210": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "beyond-similarity-search-application.md",
+     "uri-docuverse-working-notes.md"
+    ],
+    "s": 2.300031542079523
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ],
+    "s": 42.72754812496714
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H01",
+   "kind": "rdr",
+   "gt": {
+    "rdr064": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "CHANGELOG.md",
+     "a2ui-summary.md"
+    ],
+    "s": 2.7693234159378335
+   },
+   "P0s": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "CHANGELOG.md"
+    ],
+    "s": 43.18295616703108
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H02",
+   "kind": "rdr",
+   "gt": {
+    "rdr205": 3,
+    "rdr206": 3,
+    "rdr211": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "architecture.md",
+     "linda-in-nexus.md",
+     "tuple-space.md"
+    ],
+    "s": 2.2118150419555604
+   },
+   "P0s": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+    ],
+    "s": 41.67858441697899
+   },
+   "top1_F0": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.7653606369886218,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+     "tuple-space.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H03",
+   "kind": "rdr",
+   "gt": {
+    "rdr012": 3,
+    "rdr021": 3,
+    "rdr044": 3,
+    "rdr046": 3,
+    "rdr047": 3,
+    "rdr048": 3,
+    "rdr148": 3,
+    "rdr237": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "README.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ],
+    "s": 2.168358249939047
+   },
+   "P0s": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "s": 43.07208745798562
+   },
+   "top1_F0": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H04",
+   "kind": "rdr",
+   "gt": {
+    "rdr110": 3,
+    "rdr205": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "tuple-space.md"
+    ],
+    "s": 2.3686417079297826
+   },
+   "P0s": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ],
+    "s": 42.7865391660016
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H05",
+   "kind": "rdr",
+   "gt": {
+    "rdr163": 3,
+    "rdr172": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "configuration.md",
+     "CHANGELOG.md",
+     "migration-runbook.md"
+    ],
+    "s": 1.993925500079058
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "configuration.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "configuration.md",
+     "CHANGELOG.md"
+    ],
+    "s": 42.12518850003835
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "migration-runbook.md",
+     "rdr-173-service-mode-aspect-worker-hosting.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H06",
+   "kind": "rdr",
+   "gt": {
+    "rdr201": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "README.md",
+     "204-gate-critique-2026-09-07i.md",
+     "rdr-audit.md"
+    ],
+    "s": 2.3271188749931753
+   },
+   "P0s": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "README.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "README.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md"
+    ],
+    "s": 42.30309020797722
+   },
+   "top1_F0": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-186-client-persistence-closure-no-sqlite.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-186-client-persistence-closure-no-sqlite.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H07",
+   "kind": "rdr",
+   "gt": {
+    "rdr188": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "wire-contract-pending.md",
+     "storage-tiers.md",
+     "CHANGELOG.md"
+    ],
+    "s": 2.1509123330470175
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "wire-contract-pending.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "wire-contract-pending.md"
+    ],
+    "s": 42.85638445895165
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "rdr-038-local-t3-backend.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "graph-augmented-retrieval.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 14,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H09",
+   "kind": "title",
+   "gt": {
+    "lostinthemiddlehowlanguagemode": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "report.md",
+     "README.md"
+    ],
+    "s": 3.4734944170340896
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "s": 41.53993095899932
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "2604.15583.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H10",
+   "kind": "rdr",
+   "gt": {
+    "rdr158": 3,
+    "rdr186": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "container-integration.md",
+     "architecture.md"
+    ],
+    "s": 2.3464306669775397
+   },
+   "P0s": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ],
+    "s": 41.299076583003625
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "152-postgres-java-storage-service.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H11",
+   "kind": "title",
+   "gt": {
+    "towardsrobustnessacritiqueofcu": 3,
+    "thecaseagainstpgvector": 3,
+    "dontbeapotstirrerauthorizedvec": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "prompt.md",
+     "beyond-similarity-search-application.md",
+     "SPATIAL_INDEX_PERFORMANCE_COMPARISON.md"
+    ],
+    "s": 1.8003513748990372
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "s": 41.92898404202424
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H13",
+   "kind": "title",
+   "gt": {
+    "manticoresearchautochunkingchu": 3,
+    "manticoresearchautochunkingcro": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "repo-indexing.md",
+     "cli-reference.md"
+    ],
+    "s": 2.060706292046234
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-048-streaming-pdf-pipeline.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-048-streaming-pdf-pipeline.md"
+    ],
+    "s": 42.292929374962114
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "results.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "RDR-023-markdown-chunk-coalescing.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "uri-docuverse-working-notes.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H14",
+   "kind": "rdr",
+   "gt": {
+    "rdr158": 3,
+    "rdr186": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "wire-contract-pending.md",
+     "storage-tiers.md"
+    ],
+    "s": 2.472429124987684
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "ROLLBACK.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "ROLLBACK.md"
+    ],
+    "s": 39.92397512495518
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H16",
+   "kind": "rdr",
+   "gt": {
+    "rdr070": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "architecture.md",
+     "cli-reference.md",
+     "querying-guide.md"
+    ],
+    "s": 2.4724449580535293
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "s": 39.07922337495256
+   },
+   "top1_F0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H17",
+   "kind": "rdr",
+   "gt": {
+    "rdr143": 3,
+    "rdr228": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "cli-reference.md",
+     "README.md"
+    ],
+    "s": 1.9017257080413401
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ],
+    "s": 38.43718570889905
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 9,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H18",
+   "kind": "rdr",
+   "gt": {
+    "rdr218": 3,
+    "rdr224": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "windows-install.md",
+     "CHANGELOG.md",
+     "journey-from-7-6-1.md"
+    ],
+    "s": 2.1145112920785323
+   },
+   "P0s": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "windows-install.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "windows-install.md",
+     "CHANGELOG.md"
+    ],
+    "s": 38.539890334010124
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H20",
+   "kind": "title",
+   "gt": {
+    "lostinthemiddlehowlanguagemode": 3,
+    "contextlengthalonehurtsllmperf": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "RESEARCH.md",
+     "Memory in the LLM Era- Modular Architectures and Strategies in a Unified Framework.pdf"
+    ],
+    "s": 1.725913874921389
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "s": 40.27712816698477
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H21",
+   "kind": "rdr",
+   "gt": {
+    "rdr197": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ],
+    "s": 2.195514374994673
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ],
+    "s": 39.85799016698729
+   },
+   "top1_F0": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-197-plugin-only-release-channel.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 11,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H22",
+   "kind": "title",
+   "gt": {
+    "contextlengthalonehurtsllmperf": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "report.md",
+     "FluctlightDB- A Memory Model of Data for AI Agents.pdf"
+    ],
+    "s": 2.0064966659992933
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "s": 39.93864766706247
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 16,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H23",
+   "kind": "title",
+   "gt": {
+    "thecaseagainstpgvector": 3,
+    "rdr227": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "wire-contract-pending.md",
+     "CHANGELOG.md"
+    ],
+    "s": 11.391251583001576
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf"
+    ],
+    "s": 64.38213516701944
+   },
+   "top1_F0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "rdr-227-per-collection-hnsw-above-the-router-threshold.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "rdr-227-per-collection-hnsw-above-the-router-threshold.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 10,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H24",
+   "kind": "title",
+   "gt": {
+    "lostinthemiddlehowlanguagemode": 3,
+    "contextlengthalonehurtsllmperf": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "2604.15583.pdf",
+     "2408.04948.pdf",
+     "RESEARCH.md"
+    ],
+    "s": 1.6313790830317885
+   },
+   "P0s": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "s": 38.95767620904371
+   },
+   "top1_F0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H26",
+   "kind": "rdr",
+   "gt": {
+    "rdr151": 3,
+    "rdr129": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "2026-06-05-daemon-concurrency-forensics.md"
+    ],
+    "s": 2.1513754579937086
+   },
+   "P0s": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "s": 39.583592333015986
+   },
+   "top1_F0": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 13,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H28",
+   "kind": "rdr",
+   "gt": {
+    "rdr146": 3,
+    "rdr168": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "custom_catalog_changes.md",
+     "CHANGELOG.md",
+     "catalogs.md"
+    ],
+    "s": 2.0362157080089673
+   },
+   "P0s": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-146-catalog-store-behind-daemon.md",
+     "rdr-229-collection-name-becomes-a-label.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-146-catalog-store-behind-daemon.md",
+     "rdr-229-collection-name-becomes-a-label.md"
+    ],
+    "s": 38.715914500062354
+   },
+   "top1_F0": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 7,
+    "routed": 36,
+    "no_topics": 87
+   }
+  },
+  {
+   "qid": "H30",
+   "kind": "rdr",
+   "gt": {
+    "rdr208": 3
+   },
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "mcp-servers.md"
+    ],
+    "s": 1.9704659159760922
+   },
+   "P0s": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "rdr-239-doc-blocks.md"
+    ]
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "rdr-239-doc-blocks.md"
+    ],
+    "s": 38.535018792026676
+   },
+   "top1_F0": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ]
+   },
+   "top1_Fk": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md",
+     "JDR-002-tuple-sender-claims.md"
+    ]
+   },
+   "stats": {
+    "zero": 0,
+    "short": 12,
+    "routed": 36,
+    "no_topics": 87
+   }
+  }
+ ]
+}

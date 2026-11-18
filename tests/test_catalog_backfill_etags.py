@@ -15,10 +15,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from click.testing import CliRunner
 
+from nexus import aspect_readers as ar_mod
 from nexus.aspect_readers import HTTPS_ETAG_META_KEY
 from nexus.cli import main
+from nexus.commands import catalog as _cat_cmd
 
 
 class _FakeDoc:
@@ -35,8 +38,12 @@ class _FakeReader:
     def __init__(self, docs: list[_FakeDoc]) -> None:
         self._docs = docs
 
-    def all_documents(self, limit: int = 0) -> list[_FakeDoc]:
-        return self._docs
+    def all_documents(self, *_a: Any, **_kw: Any) -> list[_FakeDoc]:
+        raise AssertionError("backfill-etags with no owner must read the https:// prefix, not walk the catalog")
+
+    def list_scoped(self, *, source_uri_prefix: str = "", **_kw: Any) -> list[_FakeDoc]:
+        assert source_uri_prefix == "https://", source_uri_prefix
+        return [d for d in self._docs if d.source_uri.startswith(source_uri_prefix)]
 
     def by_owner(self, owner: Any) -> list[_FakeDoc]:
         prefix = f"{owner}."
@@ -59,8 +66,6 @@ class _FakeWriter:
 
 
 def _invoke(monkeypatch, docs, args, *, writer=None, capture=None):
-    from nexus.commands import catalog as _cat_cmd
-
     monkeypatch.setattr(_cat_cmd, "_get_catalog", lambda: _FakeReader(docs))
     if writer is not None:
         monkeypatch.setattr(_cat_cmd, "_get_catalog_writer", lambda: writer)
@@ -178,10 +183,6 @@ def test_env_opt_out_makes_no_head_request(monkeypatch) -> None:
     tightest possible proof that no HEAD request reaches the network at
     all, regardless of which client instance backfill_etags_cmd builds.
     """
-    import httpx
-
-    from nexus import aspect_readers as ar_mod
-
     monkeypatch.setenv(ar_mod.NX_REFERENCE_ETAG_CAPTURE_ENV, "0")
 
     head_calls: list[str] = []

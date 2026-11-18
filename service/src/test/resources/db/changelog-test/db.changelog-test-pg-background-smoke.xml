@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.8: two probe functions for PgBackgroundImageSmokeTest, each of which launches a background worker and
+    reads its result back. pg_background_result returns SETOF record and needs a column definition list, which a typed
+    jOOQ call cannot give it, so the launch and the read live here and the test calls the functions through
+    DSL.function. Run through PgContainerHelper#installPgBackgroundSmokeProbe on a superuser connection after
+    createDataMoveExtensions; bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="pg-background-smoke-probe" author="nexus-f3yqd.2.8" runAlways="true">
+        <sql splitStatements="false">
+            CREATE OR REPLACE FUNCTION public.nx_pgbg_smoke_value() RETURNS integer
+            LANGUAGE plpgsql AS $fn$
+            DECLARE
+                answer integer;
+            BEGIN
+                SELECT r.v INTO answer
+                  FROM pg_background_launch('SELECT 6 * 7') h,
+                       LATERAL pg_background_result(h.pid, h.cookie) AS r(v int);
+                RETURN answer;
+            END
+            $fn$;
+
+            CREATE OR REPLACE FUNCTION public.nx_pgbg_smoke_worker_pid() RETURNS integer
+            LANGUAGE plpgsql AS $fn$
+            DECLARE
+                worker integer;
+            BEGIN
+                SELECT r.v INTO worker
+                  FROM pg_background_launch('SELECT pg_backend_pid()') h,
+                       LATERAL pg_background_result(h.pid, h.cookie) AS r(v int);
+                RETURN worker;
+            END
+            $fn$;
+        </sql>
+    </changeSet>
+</databaseChangeLog>

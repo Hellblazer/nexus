@@ -147,19 +147,34 @@ def _review_verdicts() -> ModuleType:
     return mod
 
 
-def _script(script: str, verb: str, tid: str, out: dict) -> list[dict]:
-    cmd = f"python3 .claude/skills/prose-edit/scripts/{script}.py {verb} x"
+def _script(script: str, verb: str, tid: str, out: dict, flags: str = "") -> list[dict]:
+    cmd = f"python3 .claude/skills/prose-edit/scripts/{script}.py {verb} x {flags}".rstrip()
     return [_use(tid, "Bash", {"command": cmd}), _res(tid, json.dumps(out))]
+
+
+def _app_turn(tid: str, dry: dict, real: dict | None = None, *, list_first: bool = True) -> list[dict]:
+    """An answer turn decided in the app (SKILL.md steps 11-12): list_suggestions, `review.py decisions --from-file`, the
+    dry run and, for an App-decided run, the real apply in the same turn."""
+    ev: list[dict] = []
+    if list_first:
+        ev += [_use(f"{tid}l", "mcp__markupeditor__list_suggestions", {}), _res(f"{tid}l", '{"ok": true, "suggestions": []}')]
+    ev += _script("review", "decisions", f"{tid}d", {"accept": [], "reject": [], "hold": [], "undecided": []},
+                  "--work /w --from-file /w/statuses.json")
+    ev += _script("review", "apply", f"{tid}y", {"dry_run": True, **dry}, "--work /w --accept 1 --dry-run")
+    if real is not None:
+        ev += _script("review", "apply", f"{tid}p", real, "--work /w --accept 1")
+    return ev
 
 
 def _check_a_runs(rejected_n: list[int], a3_filter: dict) -> dict[str, list[dict]]:
     filt1 = {"edits": [{"n": 1, "old": "A", "new": "a"}, {"n": 2, "old": "really quite ", "new": ""}], "dropped": []}
     return {
         "a1": _script("brief", "filter", "f1", filt1) + _script("review", "render", "r1", {"counts": {"edits": 2}}),
-        "a2": _script("review", "apply", "d2", {"dry_run": True, "accept": [{"n": 1}], "reject": [{"n": 2}]}),
-        "a2c": _script("review", "apply", "p2", {"applied": [{"n": 1}], "rejected": rejected_n, "rejections_stored": True}),
+        # App-decided (edit 1 accepted, the rest rejected in the app): the answer turn applies in the same turn
+        "a2": _app_turn("a2", {"accept": [{"n": 1}], "reject": [{"n": 2}]},
+                        {"applied": [{"n": 1}], "rejected": rejected_n, "rejections_stored": True}),
         "a3": _script("brief", "filter", "f3", a3_filter),
-        "a4": _script("review", "apply", "d4", {"dry_run": True, "accept": [], "hold": [{"n": 1}]}),
+        "a4": _app_turn("a4", {"accept": [], "hold": [{"n": 1}]}),
         "a4c": _script("review", "apply", "p4", {"applied": [], "rejected": [], "held": [1]}),
     }
 
@@ -177,9 +192,10 @@ def test_the_review_verdicts_fail_a_rejected_fix_shown_again_and_never_call_it_v
     absent = {"edits": [{"n": 1, "old": "C", "new": "c"}], "dropped": []}
     rows = {n: (v, note) for n, v, note in rv.check_a(_check_a_runs([2], absent))}
     assert rows["a3"][0] == "PASS" and "not proposed again" in rows["a3"][1]
-    # an answer turn that applied for real, without the echo and the author's confirmation, is a failure
+    # an answer turn that applied for real with no dry run before it, or that never read the app, is a failure
     runs = _check_a_runs([2], dropped)
-    runs["a2"] = _script("review", "apply", "p2", {"applied": [{"n": 1}], "rejected": [2], "rejections_stored": True})
+    runs["a2"] = _script("review", "apply", "p2", {"applied": [{"n": 1}], "rejected": [2], "rejections_stored": True},
+                         "--work /w --accept 1")
     assert {n: v for n, v, _ in rv.check_a(runs)}["a2"] == "FAIL"
     # nothing was rejected in turn 2, so turn 3 proves nothing: that is a failure, not a pass
     nothing = {n: v for n, v, _ in rv.check_a(_check_a_runs([], absent))}
@@ -216,9 +232,9 @@ def _gate_run(label: str, k: int, rejected: list[dict], shown: list[dict], dropp
     n = [{**e, "n": i} for i, e in enumerate(rejected, start=1)]
     return {
         f"{label}-{k}-1": _script("brief", "filter", f"f{k}", {"edits": n, "dropped": []}),
-        f"{label}-{k}-2": _script("review", "apply", f"d{k}", {"dry_run": True}),
-        f"{label}-{k}-3": _script("review", "apply", f"p{k}", {"applied": [], "rejected": [e["n"] for e in n],
-                                                            "held": [], "rejections_stored": True}),
+        # every edit rejected in the app: an App-decided turn 2 applies in the same turn, so there is no turn 3
+        f"{label}-{k}-2": _app_turn(f"g{k}", {}, {"applied": [], "rejected": [e["n"] for e in n],
+                                                  "held": [], "rejections_stored": True}),
         f"{label}-{k}-4": _script("brief", "filter", f"g{k}", {"edits": shown, "dropped": dropped}),
     }
 
@@ -289,7 +305,7 @@ def test_the_review_verdicts_need_the_removed_edit_back_and_a_stdin_run_that_sto
         "b1": _script("memory", "rejections", "l", listed),
         "b2": _script("memory", "rejections", "d", {"rejections": [{"n": 1, "old": "B"}]}),
         "b3": _script("brief", "filter", "f", {"edits": [{"n": 1, "old": "A"}], "dropped": [{"n": 2, "old": "B", "cause": "rejected"}]}),
-        "b4": _script("review", "apply", "d", {"dry_run": True, "accept": []}),
+        "b4": _app_turn("b4", {"accept": []}),
         "b4c": _script("review", "apply", "p", {"applied": [], "rejected": [], "held": [1]}),
     }
     assert {n: v for n, v, _ in rv.check_b(runs)} == {"b1": "PASS", "b2": "PASS", "b3": "PASS", "b4": "PASS"}
@@ -431,7 +447,7 @@ def test_same_spot_other_replacement_is_reported_and_never_counted_in_the_rate(
 def test_the_gate_script_keeps_a_copy_of_the_source_for_the_same_spot_column() -> None:
     sh = (ACC / "run-memory-gate.sh").read_text()
     assert 'cp "$SOURCE" "$OUT/$LABEL-source.txt"' in sh  # the command, not a comment that names the file
-    assert 'run "$LABEL-$k-2" "$ANSWER"' in sh and "Accept none. Reject all the edits." in sh
+    assert 'run "$LABEL-$k-2" "$(runner_answer "$ANSWER")"' in sh and "Accept none. Reject all the edits." in sh
 
 
 def test_a3_is_not_measurable_when_the_fresh_run_proposed_nothing_at_all() -> None:
@@ -462,7 +478,7 @@ def _b_runs(removed: dict, b3: dict) -> dict[str, list[dict]]:
         "b1": _script("memory", "rejections", "l", {"rejections": [{"n": 1, **removed}, {"n": 2, "old": "B", "new": ""}]}),
         "b2": _script("memory", "rejections", "d", {"rejections": [{"n": 1, "old": "B", "new": ""}]}),
         "b3": _script("brief", "filter", "f", b3),
-        "b4": _script("review", "apply", "d", {"dry_run": True, "accept": []}),
+        "b4": _app_turn("b4", {"accept": []}),
         "b4c": _script("review", "apply", "p", {"applied": [], "rejected": [], "held": [1]}),
     }
 
@@ -489,8 +505,7 @@ def test_held_edits_are_a_positive_control_reported_and_never_counted_in_the_rat
     fresh = [{"n": 1, "old": "The scheduler just wakes", "new": "The scheduler wakes"}]  # the held fix comes back
     runs = {
         "sub-1-1": _script("brief", "filter", "f", {"edits": edits, "dropped": []}),
-        "sub-1-2": _script("review", "apply", "d", {"dry_run": True}),
-        "sub-1-3": _script("review", "apply", "p", {"applied": [], "rejected": [1], "held": [2], "rejections_stored": True}),
+        "sub-1-2": _app_turn("g", {}, {"applied": [], "rejected": [1], "held": [2], "rejections_stored": True}),
         "sub-1-4": _script("brief", "filter", "g", {"edits": fresh, "dropped": []}),
     }
     _write_runs(tmp_path, runs)

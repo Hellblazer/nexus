@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-green. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="g-drop-before-registration" author="fixture">
+        <comment>g-drop-before-registration</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.gizmos DROP COLUMN old_col;
+DROP TABLE nexus.gizmos_old;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

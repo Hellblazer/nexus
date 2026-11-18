@@ -2,7 +2,8 @@
 title: "Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes"
 id: RDR-230
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-17
 priority: medium
 author: Sam
 reviewed-by: self
@@ -130,8 +131,10 @@ except a schema migration that rewrites the leaf.
 storage parameters through Liquibase in both modes (scale factor 0.05, threshold
 1000, insert scale factor 0.05, analyze scale factor 0.02), is bead nexus-s9wav.
 R4, bloat visibility per leaf and per `pci_` index in `/v1/status` and one
-`nx doctor` row over HTTP, is bead nexus-dxsjc; that row is also where a red
-canary from this RDR is surfaced to an operator. The prerequisite that the
+`nx doctor` row over HTTP, is bead nexus-dxsjc. A red canary from this RDR is
+surfaced to an operator by a separate `Recall canary` doctor row
+(`src/nexus/recall_canary_health.py`, nexus-4lnn1.1.10); this text first gave it to
+nexus-dxsjc's row, which closed on 2026-10-19 without it. The prerequisite that the
 builder drop its own invalid `_ccnew`/`_ccold` leftovers landed as nexus-rn1yd
 (`4a7794543`, ledger entry `f90da05f8`; Sam's carve-out
 `nexus_rdr/227-decision-4-amendment-reindex-leftovers`). The proposal's R5 (do
@@ -160,7 +163,8 @@ What changed since the bead was filed, each with its record:
 
 ### Technical Environment
 
-- PostgreSQL 17, pgvector 0.8.2, HNSW `m` 16 and `ef_construction` 64,
+- PostgreSQL 17, pgvector 0.8.2 (0.8.7 in the bundle and the cloud since
+  engine-service-v0.1.194, 8013eb3ef), HNSW `m` 16 and `ef_construction` 64,
   `nexus.vector_cosine_ops`.
 - Builder: `PciBuilderSession` (direct admin connection, autocommit,
   `application_name` `nexus-pci-builder-<boot id>`, advisory lock
@@ -197,7 +201,7 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
 | nexus engine (`service/src/main`) | Yes | The builder's DDL set is exactly build and drop; the canary's two statements already exist as the serving and exact routes. |
-| pgvector 0.8.2 | Docs (README, via the proposal) | `REINDEX INDEX CONCURRENTLY` then `VACUUM` for heavy deletes; HNSW `VACUUM` repairs neighbours of deleted elements and reuses their slots on insert. |
+| pgvector 0.8.2 (0.8.7 since engine-service-v0.1.194) | Docs (README, via the proposal) | `REINDEX INDEX CONCURRENTLY` then `VACUUM` for heavy deletes; HNSW `VACUUM` repairs neighbours of deleted elements and reuses their slots on insert. |
 | PostgreSQL 17 | Docs | `REINDEX CONCURRENTLY` and `VACUUM` cannot run in a transaction block; storage parameters cannot be set on a partitioned parent. |
 
 ### Key Discoveries
@@ -210,7 +214,10 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
   Taxonomy P02 (`nexus/p02-hnsw-incremental-recall-2026-09-25`): at
   `ef_search` 400 or more, zero wrong results in every state tested
   (incremental, dead tuples present, vacuumed, reindexed). This contradicts the
-  first half of RDR-217's premise and of nexus-4lnn1's mechanism (a).
+  first half of RDR-217's premise and of nexus-4lnn1's mechanism (a). One
+  exception turned up later, in the Phase 2 fork rehearsal: a dense cluster of
+  near-duplicate inserted rows lowers recall (see the near-duplicate finding at
+  the end of this section). So inserts are recall-neutral except for that case.
 - **✅ Verified** (measurement). Drift in the STEP-6 evidence is a step
   function keyed to rewrite events. kw-006 was byte-stable for 31 runs
   (2026-07-07 to 07-27) and stepped only on heap or index rewrites: the 08-14
@@ -230,7 +237,9 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
 - **✅ Verified** (measurement). A `pci_` index rebuilds in 9 to 21 s on the
   production fork (`nexus_rdr/227-research-12`); locally 60,000 rows took 44 s
   at 64 MB `maintenance_work_mem` (`nexus_rdr/227-research-11`). A leaf rebuild
-  on the managed instance is unmeasured.
+  was measured in the Phase 2 fork rehearsal: a hand `REINDEX` of the 3.39 GB leaf
+  index took 613 s and the index stayed attached (T2
+  `nexus/rdr-230-p24-findings-2026-11-15`, fork 1).
 - **✅ Verified** (measurement). An exact scan of a 60k-row collection costs
   0.3 to 0.6 s alone (RDR-227 Gap 2), so ten exact queries on each of five
   indexes is about 25 s of database time.
@@ -309,6 +318,35 @@ conexus records [23758], [22578], [22526] and conexus-h2ol.
   in the view era, only through a grant by name (in the legacy era it reads
   every table; `-32`), and `relevance_log` already stores query text
   (Technical Design 6; `nexus_rdr/230-research-23`, `-24`, `-25`).
+- **✅ Verified** (Phase 2 fork rehearsals, 2026-11-15; T2
+  `nexus/rdr-230-p24-findings-2026-11-15`). On a PITR fork of production (the
+  first fork), about 5,950 near-identical real code rows (6% of `code__1-1`)
+  were inserted. They made three far queries, with no cluster row in their true
+  top 120, read recall 0. Deleting the rows and `VACUUM` did not help; a quiet
+  REINDEX restored 0.9948. A synthetic run (60k rows, no REINDEX) read mean recall
+  0.987, 0.958, 0.851, 0.727 and 0.665 near a cluster of 500, 1,000, 2,000, 4,000
+  and 6,000 rows (k 40 to 120); far queries stayed at 1.0 and deleting plus `VACUUM`
+  restored it. A second fork, where only copies of real `code__1-1` rows were
+  written, read 0.9946 cold, 0.9948 after the engine's REINDEX and 0.9925 after a
+  killed REINDEX and its retry. So REINDEX was not the cause; the cluster was.
+  Not measured: the cluster size at which far queries start to fail on real data.
+  Exposure: a collection that ingests thousands of near-identical chunks
+  (generated code, repeated headers, one file re-chunked many times) can lose
+  recall well outside that content; only a REINDEX repairs it, and the canary
+  would show it as red.
+- **Disposition** (Sam, 2026-11-16; bead comment on nexus-4lnn1.1.10, T2
+  `nexus/phase-review-rdr-230-phases-1-2-2026-11-16`). The near-duplicate finding
+  is closed as option D, with the red bar kept as it is (option a). The design
+  stays as written, with no insert-keyed rule: inserts are recall-neutral except
+  for dense near-duplicate clusters, which the canary shows as red. Sam's words: "D, and a for
+  the red bar". Option D closes it as a known HNSW limit: the production survey
+  found dense clusters only in `docs__1-82` and `code__1-30`, both under the
+  20,000-row exact-search threshold, and none near the fork's ~5,950-row cluster
+  in any HNSW-served collection. The survey (`p24/near-dup-survey.sql`) is rerun
+  if an HNSW-served collection grows a dense cluster, or a red appears that no
+  REINDEX fixes. The decision assumes production uses the default
+  `NX_SEARCH_EXACT_MAX_ROWS`; that was not checked. Sam also chose the
+  `red_unfixed` hold in the same phase (Technical Design 3).
 
 ### Critical Assumptions
 
@@ -316,19 +354,35 @@ These are the proposal's Unknowns that this design depends on. Each says how it
 gets verified; the first canary run on the cloud is the missing aged-index
 measurement.
 
-- [ ] **A1.** An aged `pci_` index on production data still meets the Gap 1 bar
+- [partly verified: five of six `pci_` indexes read green (T2 `conexus/rdr230-a1-canary-2026-11-08`, `conexus/rdr230-a6-seven-day-reading-2026-11-14`); `code__1-87` read red at ten queries on 2026-11-15 and 2026-11-16, a red this item names as its falsification, for a cause not shown to be graph age (Later reading below)] **A1.** An aged `pci_` index on production data still meets the Gap 1 bar
   at serving `ef_search` (mean recall at least 0.99 at k 40 to 120, no top-1
-  miss). **Status**: Unverified at the bar, answered in part
-  (`nexus_rdr/230-research-18`): on a production fork every `pci_` index
+  miss). **Status**: Partly verified (see the box and the Later reading). Before
+  the cloud canary, it was answered in part (`nexus_rdr/230-research-18`): on a production fork every `pci_` index
   scored 1.0000 at k 10 with no top-1 miss, but only one was read as aged
   (the L17 ones had just been vacuumed), and k 40 to 120 was not measured.
   **Method**: the canary's first
   runs on the cloud in Phase 1, with REINDEX not yet shipped, so the reading is
   of the indexes as they aged. A red result is the falsification of "aged `pci_`
   graphs are fine at `ef_search` 600" and is acted on by hand in Phase 1.
-- [ ] **A2.** Vacuum graph repair does not degrade recall at `ef_search` 600 on
+  **Later reading** (2026-11-15 to 2026-11-17): the A1 box above records the
+  green reading of `code__1-1`; one index, `code__1-87`, did read red. The
+  red-canary trigger needs ten queries, so it read red on at least ten, on
+  2026-11-15 and again on 2026-11-16 (the re-measure after the 2026-11-16
+  12:38Z REINDEX: mean 0.9851, min 0.8625, one top-1 miss; T2
+  `conexus/reads-2026-11-16-census-code187-reindex`). It stayed red after a
+  REINDEX each time, so graph age does not explain it (inferred, not measured on
+  the missed query). On 2026-11-15 the miss was not a near-tie: the top two
+  distances were 0.0078 apart (T2 `nexus/rdr-230-p24-findings-2026-11-15`). This is
+  the case the `red_unfixed` hold (Technical Design 3) answers. The hold engaged
+  on 2026-11-16 at 12:39:39Z, no red-canary REINDEX fired through the 12:38Z
+  backoff expiry on 2026-11-17, and a green daily canary at 12:43:41Z (10 queries,
+  min 0.9917, mean 0.9997, no top-1 miss) cleared it at 12:53:42Z (T2
+  `conexus/reads-2026-11-17-code187-quiet`). That green follows the canary's moving
+  window of the ten newest queries, so it does not show that the missed query now
+  succeeds.
+- [partly verified: no before-and-after pairs were recorded; the canary runs after each vacuum, and the vacuum-triggered run on `code__1-1` (2026-11-07 05:52Z, T2 `conexus/rdr230-a1-canary-2026-11-08`) and seven days of runs (T2 `conexus/rdr230-a6-seven-day-reading-2026-11-14`) found no red that a vacuum explained] **A2.** Vacuum graph repair does not degrade recall at `ef_search` 600 on
   real vectors (P02 says not at 400 or more, on synthetic data). **Status**:
-  Unverified. **Method**: the canary runs after each vacuum of a leaf that had
+  Partly verified (see the box). **Method**: the canary runs after each vacuum of a leaf that had
   deletes or non-HOT updates to reap, so Phase 1 yields before-and-after pairs on
   the cloud.
 - [x] **A3.** Index bytes per row is a usable bloat signal: pure ingest keeps it
@@ -353,7 +407,9 @@ measurement.
   autovacuum's throttle (`nexus_rdr/230-research-19`): 145.0 s for the
   busiest leaf (228,457 rows, five HNSW indexes totalling 3,140 MB) and 61.4 s
   for the next (101,262 rows, one 791 MB index). Leaf `REINDEX` time stays
-  with the PITR fork in Phase 2 (Minimum Viable Validation). The measurement also showed that
+  with the PITR fork in Phase 2 (Minimum Viable Validation); it was then
+  measured at 613 s for a hand REINDEX of the 3.39 GB leaf index (T2
+  `nexus/rdr-230-p24-findings-2026-11-15`). The measurement also showed that
   non-HOT updates, not deletes, are most of the churn (Technical Design 3).
 - [x] **A5.** `REINDEX INDEX CONCURRENTLY` on a leaf's HNSW index keeps it
   attached to the partitioned parent index, and a comment on an index survives
@@ -362,7 +418,7 @@ measurement.
   `pci_` partial index; the name, the predicate and the parent's validity are
   unchanged. The substrate tests in Phase 1 (comment) and Phase 2 (attachment)
   still pin it in the engine's own roles and schemas.
-- [ ] **A6.** Enough own-topic queries accumulate in the persisted ring
+- [x] **A6.** (Read 2026-11-14, T2 `conexus/rdr230-a6-seven-day-reading-2026-11-14`: all six `pci_` indexes green, every ring at 3 or more queries after restarts.) Enough own-topic queries accumulate in the persisted ring
   (Technical Design 6) for each indexed collection with own-topic traffic to
   get a first verdict within about seven days of the Phase 1 deploy, and a daily re-measure after
   that. **Status**: The draft's form of A6 (a verdict at least daily from an
@@ -423,12 +479,26 @@ its PostgreSQL comment, on the same session:
 
 ```text
 COMMENT ON INDEX <leaf schema>.<index> IS
-  '{"nexus_pci":1,"built_at":"2026-10-20T08:00:00Z","rows":58588,"bytes":480116736,"origin":"built"}'
+  '{"nexus_pci":1,"built_at":"2026-10-20T08:00:00Z","rows":58588,"bytes":480116736,"origin":"built","relfilenode":1655272}'
 ```
 
 `rows` is the collection's row count on its leaf, counted uncapped right after
 the build (rows present in the table, not RDR-192's owned-chunk sense of
-"live"); `bytes` is `pg_relation_size` of the index. A comment lives and dies
+"live"); `bytes` is `pg_relation_size` of the index. `relfilenode` is the
+index's `pg_class.relfilenode`, the number of the file PostgreSQL keeps it in.
+It exists because a comment follows an index through `REINDEX CONCURRENTLY`
+while the relfilenode changes with every rebuild, so an anchor can describe a
+build the engine did not do (a REINDEX by hand, for one). If the anchor's
+relfilenode differs from the index's now, the index was rebuilt since the anchor
+was written (`PciCatalog.Anchor.rebuiltSince`); an anchor with no relfilenode, or
+an index whose relfilenode could not be read, is never counted as rebuilt, for
+want of evidence. The field is optional: an anchor without it stays valid,
+`nexus_pci` stays 1 so that an engine which knows only the older fields reads
+the text and ignores the rest (a rollback or a mixed-engine fleet does not
+re-adopt), and the engine stamps the relfilenode once, on the same session,
+right before its `COMMENT` (commits `359276955` and `f59e6ff37`). Phase 2 adds a
+second optional field, `red_unfixed`, to the anchors of indexes that a REINDEX
+did not cure (item 3). A comment lives and dies
 with its index, needs no table, no changeset and no row-level security, and is
 readable by any role through `obj_description`, so the read half can report it.
 An index the builder did not anchor (the five built before this RDR ships, or
@@ -486,7 +556,7 @@ holder's pass:
 | Size | `bytes_now / rows_now >= 1.4 x anchor.bytes / anchor.rows`; for an adopted index, against the install reference for its dimension | REINDEX |
 | Deletes since build | `max(0, anchor.rows + written_since - rows_now) >= 0.25 x rows_now` | REINDEX |
 | Bulk delete | `rows_now` fell by at least 10% since this engine's previous check of the index | REINDEX, then `VACUUM (ANALYZE)` of the leaf |
-| Red canary | item 5: red on a run that had at least 10 queries (`RED_CANARY_MIN_QUERIES`), and not within 24 hours of the anchor's `built_at` or of the index's last red-canary REINDEX | REINDEX, then re-measure with the same queries |
+| Red canary | item 5: red on a run that had at least 10 queries (`RED_CANARY_MIN_QUERIES`), and not within 24 hours of the anchor's `built_at` or of the index's last red-canary REINDEX, and not while the anchor's `red_unfixed` hold stands (below) | REINDEX, then re-measure with the same queries |
 
 For a leaf's own HNSW index: the size rule at 1.5 times the install reference
 for its dimension. The leaf's rows are `max(n_live_tup, reltuples)` (an estimate
@@ -544,9 +614,16 @@ registry, and RDR-227's rules drop the old index in both cases (a fresh build
 follows under the new name). Their dead tuples are left to autovacuum, which
 nexus-s9wav sets to act at 5% per leaf.
 
-*Never on ingest or a migration walk.* No rule keys on inserts (they are
-recall-neutral as measured), and pure ingest holds bytes per row at 1.000 of
-the build (A3, measured). The builder never runs during a migration (RDR-227),
+*Never on ingest or a migration walk.* No rule keys on inserts. Inserts are
+recall-neutral as measured, except for a dense cluster of near-duplicate rows:
+in the Phase 2 fork rehearsal, about 5,950 near-identical real code rows (6% of
+`code__1-1`) took three queries far from the cluster to recall 0, and the damage
+survived deleting the rows and `VACUUM`; only a REINDEX repaired it (Research
+Findings; T2 `nexus/rdr-230-p24-findings-2026-11-15`, Finding 3). The canary shows
+that case as red, and the red-canary REINDEX is its only repair. Sam closed the
+finding as option D with the red bar kept as it is (option a); no insert-keyed
+rule was added (2026-11-16, Research Findings).
+Pure ingest holds bytes per row at 1.000 of the build (A3, measured). The builder never runs during a migration (RDR-227),
 and a walk that rewrites leaves rebuilds every index fresh, with a fresh anchor.
 
 *Limits on how often.* REINDEXes run after the pass's drops and builds, one at
@@ -560,8 +637,10 @@ with no rebuild between), and at most once per index per 24 hours. The
 plus 24 hours), so the limit holds across a restart or a change of holder, and a
 persistent red is not rebuilt on every restart. If the re-measure is still red,
 the index is reported `red_after_reindex`, logged as
-`event=pci_red_after_reindex` and shown on `canary_indexes` (item 7). A later
-canary run that is green clears the flag but does not lift the 24-hour floor: the
+`event=pci_red_after_reindex` and shown on `canary_indexes` (item 7), and the
+anchor gets a `red_unfixed` hold that stops the next red-canary REINDEX (the
+paragraph after this one). A later canary run that is green clears the flag and
+the hold but does not lift the 24-hour floor: the
 floor is read from the anchor, and holds whatever the canary reads, because a
 REINDEX of a graph under a day old rebuilds essentially the same graph. When
 several triggers fire for one index, the label is the first of bulk delete, red
@@ -579,6 +658,50 @@ old anchor's). The REINDEX phase never fails the pass (a runtime error is
 logged as `event=pci_reindex_phase_failed` and the rest of the pass still runs).
 Once the anchor is written, the size and deletes rules reset themselves, because
 it is a fresh one.
+
+*A red that a REINDEX did not cure is held, not retried daily (`red_unfixed`).*
+With only the 24-hour floor, an index that stays red after a REINDEX would be
+rebuilt every day for as long as it stayed red, and a rebuild that comes back red
+shows that the cause is not graph age. Sam chose a hold over that retry (T2
+`nexus/phase-review-rdr-230-phases-1-2-2026-11-16`, "Decisions found during the
+phase"). It shipped in commits `1c4905e19`, `c721af09c`, `fd6cc1d46` and
+`798c4e723`. It works like this:
+
+- *When it is recorded.* A REINDEX that was started with the canary red is
+  re-measured with the red run's own queries. If that re-measure is still red,
+  the builder writes the anchor a second time (a second `COMMENT`, after the fresh
+  anchor the REINDEX wrote) with an optional field:
+  `"red_unfixed":{"at":"<ISO-8601 Z>","relfilenode":N,"rows":N,"queries":["<16 hex>",...]}`.
+  The field holds the time of the re-measure, the index's relfilenode (the REINDEX's
+  fresh file) and the collection's row count at that red, and the ids of the
+  queries that read red: sorted, never empty, at most the canary's window of ten
+  (`PciCatalog.RedUnfixed`). The engine logs `event=pci_red_unfixed_recorded`.
+  If the write does not land it logs `event=pci_red_unfixed_not_written`, or
+  `event=pci_red_unfixed_failed` on an error; the REINDEX and its anchor stand,
+  the failure is never charged to the canary, and the next red-canary REINDEX
+  records the field.
+- *What it holds.* Only the red-canary trigger: while the hold stands, that
+  trigger skips the index. The size, deletes-since-build and bulk-delete triggers
+  are not held. The hold lives in the anchor, so a restart or a change of holder
+  keeps it (`red_after_reindex` is in the holder's memory and does not survive
+  either).
+- *What keeps it.* All of these must be true (`PciReindexPolicy.redUnfixedHolds`):
+  the index still has the relfilenode the field names; every query that reads red
+  in the canary's latest run is among the ones the field lists; and the
+  collection's rows have not grown by 10% or more since the red
+  (`RED_UNFIXED_GROWTH_PERCENT = 10`: the rows now times 100 are below the
+  recorded rows times 110). A red set that only shrinks keeps the hold. The
+  canary's window is the newest ten queries and moves with every new search, so
+  the oldest red query can leave it while the graph is the same.
+- *What lifts it.* A rebuild (the relfilenode changes: a REINDEX by hand, or one
+  of the other triggers), a red query the field does not list (a new cause), or
+  growth of 10% or more. These lift it with no write; the red-canary trigger is
+  then free again, subject to its other limits. A green canary run ends it with a
+  write: the pass writes the anchor again without the field
+  (`PciAnchorLedger.clearRedUnfixed`, logged `event=pci_red_unfixed_cleared`,
+  "a green canary run").
+
+The first production case is `code__1-87` (Research Findings, A1).
 
 **4. The REINDEX itself.** On the pass's admin session, with the build's
 settings (no `lock_timeout`, and the build's 6-hour `statement_timeout`,
@@ -875,7 +998,11 @@ operators. The list is capped at 64 entries, red first, then unmeasured, then
 green. `trigger` is `after_build`, `vacuum`, `daily` or `after_reindex`, the last
 for the re-measure that follows a REINDEX. `red_after_reindex` is a boolean: true
 while the index's last red-canary REINDEX re-measured red and neither a later green
-run nor 24 hours have passed (item 3); it is on the operator route only.
+run nor 24 hours have passed (item 3); it is on the operator route only. It is
+the holder's memory and is lost on a restart; the `red_unfixed` hold (item 3) is
+in the anchor and is not. `canary_indexes` does not carry the hold (no
+`red_unfixed` appears in `PciMaintenanceStatus`); the log lines
+`event=pci_red_unfixed_recorded` and `event=pci_red_unfixed_cleared` show it.
 `size_ratio` is null for an adopted index (its anchor is not a build
 figure), and `deletes_since_build` counts from the anchor, so for an adopted
 index it counts since adoption. Results are
@@ -884,8 +1011,10 @@ this engine's own history and stay after it becomes a standby, like
 empty list. A client against an engine that predates the key finds none and
 reports not-applicable. The two keys go in the wire ledger
 (`docs/wire-contract-pending.md`) and the client fixture
-(`tests/fixtures/pci_status_bodies.json`); the doctor row that reads it, and
-warns on a red canary, is nexus-dxsjc's.
+(`tests/fixtures/pci_status_bodies.json`); the doctor row that reads it is the
+`Recall canary` row (nexus-4lnn1.1.10). It warns when `red` is above 0 and names
+`canary_indexes` on `GET /v1/admin/chunks-leaves` as where the red indexes are
+listed.
 
 **8. Switches.** REINDEX and the post-delete `VACUUM` are part of the builder's
 DDL, so `NX_SEARCH_PCI=0` stops them along with builds. A new setting,
@@ -967,7 +1096,10 @@ original action).
 poorly fitting queries every time (kw-006 stepped on each rewrite and was
 byte-stable between them, conexus [23758]) and buys no expected recall: build
 mode and REINDEX were measured recall-neutral (`225-recall-per-leaf-analysis`,
-`rdr-192-livec-recall-extended`, P02). A calendar pays build time and load on a
+`rdr-192-livec-recall-extended`, P02), and so were inserts, except for a dense
+cluster of near-duplicate rows (Research Findings), which only a REINDEX repairs
+and which the canary shows as red, so the red-canary trigger covers it without a
+calendar. A calendar pays build time and load on a
 schedule for no measured benefit, and would make STEP-6 parity move on the
 calendar. Sam, decision 2: no calendar REINDEX.
 
@@ -1042,7 +1174,8 @@ near-tie noise.
   480 MB for the cloud's `pci_` indexes, RDR-227 A3) and write amplification on
   that collection for its duration.
 - The holder's pass runs longer: up to two REINDEXes (9 to 21 s each for `pci_`
-  indexes, leaves unmeasured) and up to 60 s of canary. Peers read `standby`
+  indexes; a leaf REINDEX measured 613 s for the 3.39 GB leaf index, T2
+  `nexus/rdr-230-p24-findings-2026-11-15`) and up to 60 s of canary. Peers read `standby`
   for longer, which RDR-227's status already explains.
 - Each REINDEX re-rolls near-tie neighbourhoods. conexus is told before the
   first REINDEX on the cloud and re-gates STEP-6 after it, expecting near-tie
@@ -1065,15 +1198,20 @@ near-tie noise.
 - **Risk**: the size trigger fires on ingest. **Mitigation**: measured not to
   (A3: 1.000 under pure ingest to twice the built size); the cloud's first
   readings come before Phase 2 enables REINDEX; the threshold is a constant in
-  one class.
+  one class. Ingest can still cost recall in one case, a dense cluster of
+  near-duplicate rows (Research Findings); that is not this trigger's case. The
+  canary shows it as red, and the red-canary REINDEX is its only repair.
 - **Risk**: the canary goes red because of ordinary approximation on far
   queries, and REINDEX loops. **Mitigation**: own-topic admission, the
   ten-query floor and the 24-hour floor from the anchor, which holds across a
   restart and whatever the canary reads; `red_after_reindex` marks the case where a
   REINDEX did not turn the red green, and is itself the evidence that the cause is
-  not graph age.
+  not graph age. The `red_unfixed` hold (Technical Design 3) then stops the daily
+  retry while the index, the red queries and the collection's size stay the same.
 - **Risk**: a leaf REINDEX on the managed instance takes long enough to matter
-  (unmeasured; A4 measured the leaf state but not this). **Mitigation**: the Phase 2 fork rehearsal measures it; the
+  (measured at 613 s for a hand REINDEX of the 3.39 GB leaf index on a production
+  fork, T2 `nexus/rdr-230-p24-findings-2026-11-15`; A4 had measured only the leaf
+  state). **Mitigation**: the Phase 2 fork rehearsal measured it; the
   builder runs it one at a time under the build's 6-hour statement timeout; the
   migrator terminates it like a build.
 - **Risk**: a REINDEX cut off mid-way leaves an invalid duplicate that costs
@@ -1153,10 +1291,11 @@ drops the leftover; show the canary before and after reads within the Gap 1 bar.
 
 ### Proposed beads
 
-Not created; this list is for planning at acceptance. Each implementation bead
+Written for planning at acceptance; the beads were created as epic
+nexus-4lnn1.1 (P2.2 to P2.R folded into nexus-4lnn1.1.10). Each implementation bead
 is test-first: its failing test lands first in the same branch.
 
-**Phase 1: anchor and canary (no REINDEX)**
+**Phase 1 (CLOSED, 2026-11-17): anchor and canary (no REINDEX)**
 
 - P1.1 The anchor: `runComment` and its sanction; write after each build; adopt
   unanchored indexes; read it in the reconciler and the read half. Tests: a build
@@ -1231,7 +1370,7 @@ is test-first: its failing test lands first in the same branch.
 - P1.R Review gate (code-review-expert and substantive-critic; "Ship when the
   canary's tests are green on the substrate and the status fixture round-trips").
 
-**Phase 2: event-keyed REINDEX**
+**Phase 2 (CLOSED, 2026-11-17): event-keyed REINDEX**
 
 - P2.1 Thresholds re-read against P1.5 and P1.6; Sam confirms or changes them
   (Open Question 1).
@@ -1259,14 +1398,15 @@ blocks P2.2 and P2.3. P1.6 is done at its seven-day reading; a collection whose
 ring has not reached three queries by then is reported and does not hold P2.1. P2.4 blocks P2.5. nexus-s9wav (R1) is independent but
 should land before P2.5, so autovacuum is already acting at 5% when REINDEX is
 enabled; nexus-dxsjc (R4) consumes the status object and may land before or
-after P1.4.
+after P1.4. The `Recall canary` row (nexus-4lnn1.1.10) consumes
+`maintenance.canary` and landed after P1.4.
 
 ### Day 2 Operations
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | Anchor comments | `obj_description` on `pci_` indexes | the `canary_indexes` entry's `anchor`, `size_ratio`, `deletes_since_build` | dropped with the index | adopted again if unparsable | N/A (derived) |
-| Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the doctor row (nexus-dxsjc) | logs |
+| Canary results | status `maintenance.canary` | `event=pci_canary` log lines | lost on restart by design | the `Recall canary` doctor row (nexus-4lnn1.1.10) | logs |
 | REINDEX | status `reindexing` (`in_flight`), `last_reindex_at` | `event=pci_ddl_done op=reindex took_ms=` | N/A | `reindex_leftover` returns to 0 | N/A |
 | Query ring | rows of `nexus.canary_query_ring` under the tenant's scope as nexus_svc (nexus_diag is denied SELECT in the view era, P1.2a's test) | the `canary_indexes` entry's `queries`; `event=pci_ring_write_failed` | cascades with the collection's registry row; an operator may delete a ring's rows under the tenant's scope | the doctor's RLS canary lists the table | in database backups and PITR forks, as query content |
 
@@ -1301,8 +1441,9 @@ rehearsal for scale.
 
 Canary: about 25 to 35 s of database time per full run over the cloud's five
 indexes, spread over passes by the 60 s budget. REINDEX of a `pci_` index: 9 to
-21 s each on production-shaped data. Leaf REINDEX: unmeasured on the managed
-instance (A4). No serving statement changes, so no serving latency change is
+21 s each on production-shaped data. Leaf REINDEX: 613 s for a hand REINDEX of
+the 3.39 GB leaf index on a production fork (Phase 2 rehearsal, T2
+`nexus/rdr-230-p24-findings-2026-11-15`). No serving statement changes, so no serving latency change is
 expected outside a REINDEX's write amplification. The search path gains only
 the ring's enqueue, after the response is built; the writes themselves are off
 the request path, about 33 a day at the measured rates
@@ -1368,15 +1509,26 @@ recommendations"); question 5 answered the same day; question 6 answered
 RDR-217's premise that a bulk-built index retrieves better contradicts the
 measurements this design rests on; it is recorded under Relationship to Prior
 RDRs and not edited. Within this RDR, "never on ingest" and the size rule do
-not conflict: A3 measured pure ingest at 1.000 of the build.
+not conflict: A3 measured pure ingest at 1.000 of the build. One qualification:
+inserts are recall-neutral except for a dense cluster of near-duplicate rows
+(Research Findings), which the canary shows as red and only a REINDEX repairs; "never
+on ingest" means no rule keys on the insert itself, and the red-canary trigger
+still acts on that case.
 
 ### Assumption Verification
 
 A3 and A5 are verified by a local spike (2026-10-20); P1.5 and the tests in
 P1.1 and P2.3 pin them in the engine. A4 is verified in part by a read-only
 production query and a fork measurement of `VACUUM` duration (2026-10-20); leaf
-`REINDEX` time remains for the Phase 2 fork. A1, A2 and A6 are unverified and are verified by
-Phase 1's cloud run. A1 is answered in part by a recall run on a production
+`REINDEX` time was measured in the Phase 2 fork rehearsal (613 s, a hand REINDEX
+of the 3.39 GB leaf index). A1, A2 and A6 were to be verified by Phase 1's cloud
+run, and were read there (the boxes in Critical Assumptions have the records): A1
+read green on `code__1-1` (2026-11-08), but `code__1-87` read red from
+2026-11-15 and stayed red after a REINDEX, which the `red_unfixed` hold answers
+(A1; Technical Design 3), and a later green on the canary's moving window does not
+show that its missed query now succeeds; A2 is partly verified (no
+before-and-after pairs were recorded); A6 was read on 2026-11-14. Before Phase 1,
+A1 was answered in part by a recall run on a production
 fork (k 10, all `pci_` indexes 1.0000; one read as aged). A6 in the draft's
 form was refuted by the 2026-11-03 census and is restated for the persisted
 ring; its new form is read seven days into Phase 1, where a collection still
@@ -1387,7 +1539,7 @@ not hold Phase 2.
 
 | API Call | Library | Verification |
 | --- | --- | --- |
-| `REINDEX INDEX CONCURRENTLY` on a partial HNSW index and on an attached partition index | PostgreSQL 17, pgvector 0.8.2 | Docs; substrate tests P1.1 and P2.3 (A5) |
+| `REINDEX INDEX CONCURRENTLY` on a partial HNSW index and on an attached partition index | PostgreSQL 17, pgvector 0.8.2 (0.8.7 since engine-service-v0.1.194) | Docs; substrate tests P1.1 and P2.3 (A5) |
 | `COMMENT ON INDEX`, `obj_description` | PostgreSQL 17 | Docs; test P1.1 |
 | `VACUUM (ANALYZE)` on a leaf partition by its owner | PostgreSQL 17 | Docs; existing precedent `TenantScope.vacuumAnalyze` |
 | `pg_stat_user_tables` per leaf | PostgreSQL 17 | Docs; the proposal's [23759] note that per-leaf counts are fractions, not totals |
@@ -1395,7 +1547,11 @@ not hold Phase 2.
 ### Scope Verification
 
 Both Minimum Viable Validations are in the plan (P1.6, P2.4) and neither is
-deferred.
+deferred. Phase 2's ran below the rate it names: the inserts into the leaf were
+about 2.5 a second on the first fork and about 2 a second on the second, not one
+every 0.2 s (5 a second); the peak rate was not shown (production's busiest minute
+is 16.83 a second, 1,010 rows on 2026-10-19 09:37). T2
+`nexus/rdr-230-p24-findings-2026-11-15`, "Limits" and the fork sections.
 
 ### Cross-Cutting Concerns
 
@@ -1424,8 +1580,9 @@ deferred.
   (P2.4). Sam chose the comment anchor (Open Question 2), so the anchor adds
   no changeset.
 - **Credentials**: unchanged from RDR-227 (restart-bound admin credentials).
-- **Versioning**: the status key is additive; the client half (doctor row) is
-  nexus-dxsjc's and tolerates its absence.
+- **Versioning**: the status key is additive; the client half is the `Recall
+  canary` doctor row (nexus-4lnn1.1.10), which reports not applicable on an
+  engine without the key.
 
 ### Proportionality
 
@@ -1486,3 +1643,6 @@ bulk delete, both on an existing session under an existing lock.
 - 2026-11-06: Wording brought to the reviewed Phase 1 code (nexus-4lnn1.1.7): the seven admitting routes and the single-collection rule for the filtered scoped routes; the 30-day delete's typed per-tenant statement and its tenant source, leaf tenants included; a cross-model re-home deletes the source's ring; the anchor-changed recount trigger; the canary error retry wait.
 - 2026-11-06: Technical Design 7 follows Sam's answer to ask `pci-names-on-status` (option b): `/v1/status` carries the canary counts only, and the per-index list is `canary_indexes` on `GET /v1/admin/chunks-leaves`; adopted-index `size_ratio` is null and `deletes_since_build` counts since adoption.
 - 2026-11-15: Wording brought to the reviewed Phase 2 code (nexus-4lnn1.1.10): the REINDEX `statement_timeout` is the build's 6 hours; `reindexing` reads `in_flight` on `/v1/status`, `unanchored` joins `maintenance`, and `canary_indexes` gains `red_after_reindex` and the `after_reindex` trigger; the red-canary REINDEX needs ten queries (Sam, 2026-11-14) and a 24-hour floor read from the anchor; the size-change recount in Technical Design 2; the leaf rule's row floor; the trigger-label precedence, owed bulk deletes and owed anchors, and the REINDEX phase never failing the pass.
+- 2026-11-17: Closed. Both phases shipped (engine-service-v0.1.194, REINDEX on in the cloud since 2026-11-16 07:13Z); phase-review gate PASSED, T2 `nexus/phase-review-rdr-230-phases-1-2-2026-11-16`. The `red_unfixed` hold (a field in an index's anchor that stops the daily red-canary REINDEX while the red is unchanged; Technical Design 3) saw no REINDEX fire through the 2026-11-17 backoff expiry (the engine logs nothing when the hold suppresses a trigger, so the suppression itself was not observed) and cleared on a green canary (T2 `conexus/reads-2026-11-17-code187-quiet`).
+- 2026-11-17: Wording brought to the shipped Phase 2 code at close: the anchor's `relfilenode` field and the `red_unfixed` hold with its conditions and the 10% growth constant (Technical Design 1, 3, 7; commits `359276955`, `f59e6ff37`, `1c4905e19`, `c721af09c`, `fd6cc1d46`, `798c4e723`); inserts are recall-neutral except for dense near-duplicate clusters, with Sam's 2026-11-16 disposition (Research Findings, Technical Design 3, Alternative 1, Risks, Contradiction Check); the `code__1-87` red that a REINDEX did not cure, read in A1; the Phase 2 rehearsal's insert rate below the 0.2 s it names (Scope Verification) and the measured 613 s leaf REINDEX in place of "unmeasured".
+- 2026-11-17: Close round 2. The red-canary doctor row this text gave to nexus-dxsjc was never built (dxsjc closed 2026-10-19 without it); it shipped as the `Recall canary` row (nexus-4lnn1.1.10), and the five passages that named dxsjc's row now name it. A1 is marked partly verified (the `code__1-87` red), and the pgvector version notes 0.8.7.

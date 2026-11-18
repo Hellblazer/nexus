@@ -2,7 +2,8 @@
 title: "Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It"
 id: RDR-240
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-16
 priority: medium
 author: Sam
 reviewed-by: self
@@ -108,7 +109,7 @@ scripts behind it.
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-238 Memory Curation | Parent; split from it | It owns supersession by deletion, the bounded index and the curation habits. Its curation report's cold-state section takes MCP tool, CLI verb and injected-context counts from this RDR's transcript queries (RDR-238 Technical Design 4); its round-1 gate (2026-11-01) blocked on that dependency, and its fix made this RDR a prerequisite of its Phase 2 and of `nx memory curate`, calling with the argument object `{query, since, until, project}` the `memory`, `tools`, `loads` and `violations` queries (RDR-238 Technical Design 5). |
-| RDR-242 Sandboxed Lua Runtime (nexus-mdbds.1, accepted 2026-11-07) | Depends on it | It owns the sandbox: the interpreter (`lupa`, PUC Lua 5.4), the worker process, the static check, the verb table, the limits, the library lookup and the shadowing refusal (its Technical Design 2 to 13). Its version 1 has no write verb; one waits for an approval document (its Technical Design 1 and 10). This RDR owns the procedure header that RDR-242 reads the grants from (Technical Design 1 here; RDR-242 residual S4), the argument check, the procedures and their queries, and states what the queries need from `transcripts.sessions` (Technical Design 4 here). Whether a repo root runs by default is a question RDR-242's round-3 gate left open for Sam (its residual S5, on nexus-mdbds; RDR-242 as accepted runs both roots). Three of the four procedures here ship in the package root; `preflight` is nexus's own and lives in the nexus repo's root (Technical Design 8), so it alone depends on the answer. |
+| RDR-242 Sandboxed Lua Runtime (nexus-mdbds.1, accepted 2026-11-07) | Depends on it | It owns the sandbox: the interpreter (`lupa`, PUC Lua 5.4), the worker process, the static check, the verb table, the limits, the library lookup and the shadowing refusal (its Technical Design 2 to 13). Its version 1 has no write verb; one waits for an approval document (its Technical Design 1 and 10). This RDR owns the procedure header that RDR-242 reads the grants from (Technical Design 1 here; RDR-242 residual S4), the argument check, the procedures and their queries, and states what the queries need from `transcripts.sessions` (Technical Design 4 here). Whether a repo root runs by default was RDR-242's round-3 residual S5, resolved on 2026-11-08 (Sam, ask baton/s5-repo-root, option a): the repo root `.nexus/procedures` is off by default and on only when `NX_PROCEDURES_REPO_ROOT` is exactly `1` (`src/nexus/lua_runtime/library.py`), and the nexus repo turns it on in its project `.claude/settings.json`. Three of the four procedures here ship in the package root; `preflight` is nexus's own and lives in the nexus repo's root (Technical Design 8), so it alone depends on that variable. |
 | RDR-239 The Tuple-Space Dictionary | Sibling in the same epic (nexus-mdbds) | Stage 1 of the scriptable tuple space. The runtime exposes what the dictionary describes; these procedures read memory and transcripts, not tuples, so they use no dictionary entry in v1. |
 | RDR-209 Heat-Based Graduation | Consumer | Its gate-record rollup reads the tags the gate-record script derives. Until its Phase 0b read counter lands, the transcript queries here are its read-count source. |
 | RDR-111 The ORB | Abandoned; lesson kept | Its arc (RDR-110 to 119) built a composition layer ahead of its consumers and was scrapped. This RDR is the runtime's first consumer, and ships one procedure at a time. |
@@ -193,11 +194,21 @@ the header question (`nexus_rdr/240-research-4`, `-5`).
   counted, and about 22 MB of JSON per verb result before 64 MB of Lua memory
   is full (measured 2.8 times JSON size for session-like records;
   `nexus_rdr/240-research-4`). Verification: Phase 1 Step 1's spike, timed
-  and sized, with its pass lines there.
+  and sized, with its pass lines there. One exception to the fit line (the
+  largest one-day result at most half the verb bound, 10.5 MB): it is met on
+  the nexus project only. On the shipped default project `all` the busiest
+  day exceeds it (`tools` 14.2 MB, `violations` 12.9 MB, `procedures`
+  12.3 MB, measured 2026-11-09 on develop `094ad9167`), though every result
+  stays under the 20 MiB bound and the peak Lua memory under the 64 MiB cap
+  (`tools` 42.4 MB). Sam accepted this and kept `all` as the default (ask
+  q40-all-default, option 2, "Accept 'all'", 2026-11-09; bead
+  nexus-qo7ie.40).
 - **A3:** Agents call a script when one exists instead of improvising.
   Verification: the transcript query `procedures` counts script runs against
   hand-written equivalents (heredoc transcript scans, `memory_put` calls
-  carrying gate tags) for 30 days after each script lands.
+  carrying gate tags) for 30 days after each script lands. The reading has
+  an owner: a due-dated thread on the threads board (session tamsin), first
+  reading due 2026-12-09, results to T2 (`nexus_rdr/240-a3-reading-<date>`).
 - **A4:** The four largest procedural files can move into a skill, a script
   or a hook without losing a rule. Verification: Phase 3's loss check on
   each one.
@@ -321,9 +332,12 @@ schema.
    `ScriptBusyError`), which `run_procedure` passes through unchanged. No
    procedure writes in version 1 (A1), so a failed run leaves nothing to undo.
 3. **Front doors.** The MCP tool `procedure_run` and the CLI verb `nx run`
-   both call `run_procedure` and nothing else. `nx run --list` and the MCP
-   tool's description list the library's procedures with their header's
-   `summary`. An error comes back as its kind and detail: the MCP tool
+   both call `run_procedure` and nothing else. `nx run --list` lists the
+   library's procedures with their header's `summary`, repo root included
+   when it is on. The MCP tool's description lists the shipped procedures
+   only, read once when the module is imported: a listing that also read
+   the server's own repo root would run `git` at import
+   (`src/nexus/mcp/core.py`, `_procedure_run_description`). An error comes back as its kind and detail: the MCP tool
    returns it as text, and `nx run` prints it and exits nonzero.
 4. **Host verbs the four procedures use.** RDR-242's version 1 verbs,
    exactly (its Technical Design 10): `memory.get(project, title)`,
@@ -366,7 +380,12 @@ schema.
    test, called with the argument object `{query, since, until, project}`
    (`since` and `until` UTC dates or timestamps, `until` defaulting to the reserved `now`
    of Technical Design 2, `project` a
-   Claude Code project directory name or `all`). Rows of `memory`, `tools`
+   Claude Code project directory name, `repo` (every project directory of
+   the repository the run started in, its linked worktrees included) or
+   `all`, which is the default when `project` is absent; a project
+   directory literally named `repo` cannot be asked for by name; header of
+   `src/nexus/procedures/transcripts.lua`, consumer
+   `src/nexus/memory_curate/cold.py`). Rows of `memory`, `tools`
    and `loads` carry a session id, a name, a count, a last-use time and a
    size; rows of `violations` carry a rule, a count and the number of main
    sessions in the window (RDR-238 Technical Design 5):
@@ -380,7 +399,9 @@ schema.
    carry no title, and what loaded into a subagent's
    instructions), `violations` (named rule detectors, counted per 100 main
    sessions and reading message bodies inside the procedure, RDR-238's Phase
-   2 before and after counts), `loads` (instruction files, their types and
+   2 before and after counts; a count is a floor, because a record over the
+   1 MB per-record cut loses the tails of its assistant text and tool calls,
+   13 of 178 records in the re-derivation run, `nexus_rdr/238-research-rederived-2026-11-08`), `loads` (instruction files, their types and
    sizes, per main session and per dispatch), and
    `procedures` (script runs against hand-written equivalents, A3). Cost
    uses one dated price table and says it is an estimate.
@@ -429,7 +450,10 @@ schema.
    `now` and `repo`. Every kind is a title token the audit-tag table already
    matches (`src/nexus/tables/audit-tags.toml`). Returns `{project, title,
    tags, content}`: T2 project `<repo>`, the title
-   `<kind>-<sha>-<slug>-<date>` with the date taken from `now`, the tags
+   `<kind>-<sha>-<bead id>-<date>` with the date taken from `now`, and
+   `-r<round>` appended when the optional integer argument `round` (1 to 99)
+   is given, so a re-dispatched pass of one kind on one sha and bead gets its
+   own title (`src/nexus/procedures/gate_record.lua`), the tags
    `kind:gate,bead:B[,rdr:N]`, and the record text; the caller writes it with
    `memory_put`, passing the four fields unchanged and no TTL. It refuses an
    outcome outside the verdict vocabulary the review agents already use. The
@@ -474,7 +498,10 @@ schema.
    through `lab-remote` at the caller's hand. A new class is a row in that
    table, not prose. Its classes are nexus's own, so by the Approach's rule
    it lives in the nexus repo's root, `.nexus/procedures/preflight.lua`, and
-   is the one procedure here that needs the repo root to run.
+   is the one procedure here that needs the repo root to run. That root is
+   off unless `NX_PROCEDURES_REPO_ROOT` is exactly `1`, so `preflight` runs
+   only where that variable is `1`: the nexus repo sets it in its project
+   `.claude/settings.json`.
 9. **Promotion recipe.** A section in the `writing-nx-skills` skill: the
    criterion, the target choice, the citation of sources, and a loss check in
    which `substantive-critic` compares the target with its source files and
@@ -499,7 +526,7 @@ A fixed sequence becomes a script because a procedure that is read and then
 carried out can be misread, and Gap 2's evidence is that it was, with the
 rule against it in memory. A script library behind one runner, rather than a
 verb per procedure, keeps the MCP surface fixed: one tool, whose description
-lists the procedures, instead of a schema per procedure in every context.
+lists the shipped procedures, instead of a schema per procedure in every context.
 Lua in a sandbox, rather than Python in the package, means a repo can add a
 procedure without a release, and a procedure can do only what its header
 declares. Promotion keeps its sources because the one paper that tests it
@@ -562,12 +589,15 @@ run than to reread. Skills stay the target for procedures that need judgment.
   (Technical Design 4 and 5); Phase 1 Step 1 measures them before any query
   ships, with a remedy for each miss.
 - **A repo procedure nobody reviewed runs.** RDR-242's residual (its
-  Technical Design 2, residual S5): an agent that can write to
-  `.nexus/procedures/` in a checkout, or a cloned repo that carries one, can
-  run a file nobody has reviewed. Version 1 bounds that by the sandbox and
-  the read-only verbs. Of the four procedures here only `preflight` lives in
-  a repo root, the nexus repo's own, where it is reviewed like any source
-  file.
+  Technical Design 2): in a repo that turns the repo root on, an agent that
+  can write to `.nexus/procedures/` in a checkout, or a cloned repo that
+  carries one, can run a file nobody has reviewed. The root is off by
+  default (on only when `NX_PROCEDURES_REPO_ROOT` is exactly `1`; Sam
+  resolved S5 on 2026-11-08, ask baton/s5-repo-root), and the nexus repo
+  turns it on in its project `.claude/settings.json`. Version 1 bounds the
+  residual by the sandbox and the read-only verbs. Of the four procedures
+  here only `preflight` lives in a repo root, the nexus repo's own, where it
+  is reviewed like any source file.
 - **Agents keep improvising.** Mitigation: the `procedures` query measures it
   (A3), and the skills and agent write-back lines name the script.
 - **A promotion drops a rule.** Mitigation: the loss check (Technical Design
@@ -605,7 +635,7 @@ run than to reread. Skills stay the target for procedures that need judgment.
 ### Prerequisites
 
 - [x] The Lua runtime RDR accepted: RDR-242, 2026-11-07.
-- [ ] RDR-242's read-only runtime landed: `run_script`, the worker, the
+- [x] RDR-242's read-only runtime landed: `run_script`, the worker, the
       static check and the version 1 verbs (its Phases 1 to 3), with
       `run_script` calling the header parser, which RDR-242's Phase 3 Step 3
       builds to this RDR's format (Technical Design 1), so the parser does
@@ -643,7 +673,8 @@ so RDR-242's limits apply. It records:
   JSON-to-Lua ratio (about 22 MB of JSON for this shape,
   `nexus_rdr/240-research-4`; RDR-242's text still says 64 MB), the other
   half left for the query's own state; peak Lua memory under the 64 MB
-  `max_memory`.
+  `max_memory`. The default project `all` is the accepted exception to the
+  half-bound line (Assumption A2).
 - the number of runs each 30-day query took, the largest page in JSON
   bytes, and every day split into hours. Pass: every page under the 1 MB
   result cap.
@@ -655,8 +686,13 @@ line still missed at one hour, comes back to this RDR and to RDR-242
 before any query ships, with two of the remedies RDR-242's residual S3
 names: a page-by-page verb, or a larger memory limit for a named procedure.
 A page line missed (a `result-window:` error or RDR-242's result limit)
-comes back the same way. Done when the spike passes and RDR-238's research 2, 4 and 5 can be
-re-derived from the queries.
+comes back the same way. Done when the spike passes. The re-derivation of
+RDR-238's research (`nexus_rdr/238-research-rederived-2026-11-08`) came out
+in three parts: research 2 is re-derived; research 5 holds in direction
+only, since the `loads` row has no version field and so gives no version
+range; research 4 cannot be re-derived, because its 188 sessions against the
+query's 178 and its differently defined rule counts differ by definition, so
+RDR-238 Phase 2 takes its baseline from the same query.
 
 #### Step 2: `preflight`
 
@@ -751,15 +787,17 @@ None of its own. `lupa>=2.8,<3`, which RDR-242 adds.
 
 Runner and procedure tests on fixture directories and a test T2 substrate;
 the `procedures` query (A3) read at 30 days after each script lands, stored
-in T2.
+in T2. A due-dated thread on the threads board (session tamsin) owns the
+reading, first due 2026-12-09.
 
 ### Performance Expectations
 
 A2's bounds, measured in Phase 1 Step 1: every paged run of a 30-day
 transcript query under 60 s on the laptop, verb time included, with the
 30-day total recorded; the largest
-one-day verb result at most half of RDR-242's verb-result bound; every page
-under the 1 MB result cap.
+one-day verb result at most half of RDR-242's verb-result bound, except on
+the default project `all`, which Sam accepted over it (Assumption A2); every
+page under the 1 MB result cap.
 
 ## Finalization Gate
 
@@ -816,9 +854,10 @@ RDR-238's bead (nexus-qo7ie).
 
 Four procedures, one runner, two front doors, one header format, and a
 promotion recipe. Out of scope: any write verb (RDR-242's approval
-document), tuple-space verbs (RDR-239 and the aura stage), and whether a
-repo root runs by default (left open for Sam by RDR-242's round-3 gate,
-residual S5). The RDR gate flow's own records in `<repo>_rdr` are out of
+document), tuple-space verbs (RDR-239 and the aura stage), and the repo
+root's default, which RDR-242's residual S5 settled on 2026-11-08 (off, on
+only when `NX_PROCEDURES_REPO_ROOT` is exactly `1`; the nexus repo turns it
+on in its project `.claude/settings.json`). The RDR gate flow's own records in `<repo>_rdr` are out of
 `gate_record`'s scope (Technical Design 6). The bare-argument
 refusal of `rdr-research -- add` retires a CLI argument form; it is listed
 in Technical Design 7 so the acceptance covers it.
@@ -877,3 +916,4 @@ keep a caller write until a write verb exists, rather than adding one here.
 | 2026-11-08 | Technical Design 4 amended to match the reviewed record of `transcripts.sessions` (nexus-mdbds.8, reviews `nexus/review-nexus-mdbds.8-038adb33b` and `nexus/nexus-mdbds.8-critique-038adb33b`): instruction-load type and size, assistant turns, first-turn context tokens, slash-command names, and list tails dropped and counted past 1 MB. |
 | 2026-11-08 | Technical Design 4 amended to match reviewed code (nexus-qo7ie.31; standing grant 3): RDR-242's `transcripts.sessions` takes a fifth argument, `fields` (RDR-242 Technical Design 10), the A2 remedy Sam chose on 2026-11-08. |
 | 2026-11-08 | A2's time line made per run (Sam, ask a2-time-line, option 2, 2026-11-08): every paged run of the 30-day `tools` and `violations` queries under RDR-242's 60 s limit, the 30-day totals recorded, in Assumptions, Phase 1 Step 1 and Performance Expectations. The re-run after the fields filter (`nexus_rdr/240-a2-spike-2026-11-08-r2`) passes it: slowest run 15.4 s, totals 113.6 s and 105.3 s; the speed-ups follow as their own beads, measured against the same lines. |
+| 2026-11-16 | Amended to match reviewed code before close (standing grant 3, close critique T2 `nexus/critique-9b4618611-nexus-qo7ie.2-2026-11-16`): A2, Phase 1 Step 1 and Performance Expectations name the default project `all` as the accepted exception to the half-bound fit line (tools 14.2 MB, violations 12.9 MB, procedures 12.3 MB; nexus-qo7ie.40; Sam, ask q40-all-default, option 2, 2026-11-09); A3 and Validation name the owner of the 30-day `procedures` reading (threads board, session tamsin, first reading due 2026-12-09); Technical Design 6 states the record title `<kind>-<sha>-<bead id>-<date>` with the optional `round` suffix (`gate_record.lua`); Technical Design 3 says the MCP tool description lists shipped procedures only (`src/nexus/mcp/core.py`); the Prerequisites box for RDR-242's runtime is ticked. Confirmation critique round 2 (`nexus/critique-9b4618611-nexus-qo7ie.2-2026-11-16-r2`): the Relationship table, Risks, Scope Verification and Technical Design 8 now record that RDR-242's repo-root question (S5) was resolved on 2026-11-08 (off by default, on only when `NX_PROCEDURES_REPO_ROOT` is exactly `1`, on in the nexus repo's `.claude/settings.json`; ask baton/s5-repo-root, option a); Phase 1 Step 1's done-when states the re-derivation outcome for RDR-238's research 2, 4 and 5 (`nexus_rdr/238-research-rederived-2026-11-08`); Technical Design 5 adds that `project` accepts `repo` and defaults to `all`, and that a violations count is a floor; the Decision Rationale says the MCP description lists the shipped procedures. |

@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable
 
 _BODY = {"count": 2, "limit": 1000, "capped": False,
          "documents": [{"tumbler": "1.2.3", "physical_collection": "knowledge__a__voyage-context-3__v1"},
@@ -90,3 +91,55 @@ def test_a_transport_error_is_cannot_say(monkeypatch: pytest.MonkeyPatch, exc: E
 
     c, _calls = _client(monkeypatch, get=fail)
     assert c.sensitive_documents() is None
+
+
+# ── strict mode (nexus-uwggq.1.7): the cause of "cannot say", for a caller that must not walk instead ──────────
+
+
+def _status_error(status: int):
+    def fail(path, **kw):
+        request = httpx.Request("GET", "http://engine/v1/catalog/sensitive")
+        raise httpx.HTTPStatusError("x", request=request, response=httpx.Response(status, request=request))
+    return fail
+
+
+@pytest.mark.parametrize(("setup", "reason"), [
+    (dict(flag=False, get=_BODY), SensitiveListUnavailable.UNSUPPORTED),
+    (dict(flag=None, get=_BODY), SensitiveListUnavailable.UNSUPPORTED),
+    (dict(get=_status_error(404)), SensitiveListUnavailable.UNSUPPORTED),
+    (dict(get=_status_error(503)), SensitiveListUnavailable.TIMEOUT),
+    (dict(get=_status_error(500)), SensitiveListUnavailable.FAILED),
+    (dict(get=_status_error(403)), SensitiveListUnavailable.FAILED),
+    (dict(get={"count": "2"}), SensitiveListUnavailable.MALFORMED),
+    (dict(get=[]), SensitiveListUnavailable.MALFORMED),
+], ids=["flag-false", "flag-absent", "404", "503", "500", "403", "malformed", "not-a-dict"])
+def test_strict_raises_the_cause(monkeypatch: pytest.MonkeyPatch, setup: dict, reason: str) -> None:
+    c, _calls = _client(monkeypatch, **setup)
+    with pytest.raises(SensitiveListUnavailable) as caught:
+        c.sensitive_documents(strict=True)
+    assert caught.value.reason == reason
+
+
+def test_strict_transport_error_is_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(path, **kw):
+        raise httpx.ConnectError("refused")
+
+    c, _calls = _client(monkeypatch, get=fail)
+    with pytest.raises(SensitiveListUnavailable) as caught:
+        c.sensitive_documents(strict=True)
+    assert caught.value.reason == SensitiveListUnavailable.FAILED
+
+
+def test_strict_returns_the_answer_like_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    c, _calls = _client(monkeypatch, get=_BODY)
+    assert c.sensitive_documents(1000, strict=True) == c.sensitive_documents(1000)
+
+
+def test_strict_a_failed_version_probe_is_its_own_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    c, calls = _client(monkeypatch, flag=None, get=_BODY)
+    monkeypatch.setattr(c, "_version_probe_failed", True, raising=False)
+    with pytest.raises(SensitiveListUnavailable) as caught:
+        c.sensitive_documents(strict=True)
+    assert caught.value.reason == SensitiveListUnavailable.PROBE_FAILED
+    assert calls == []
+    assert c.sensitive_documents() is None, "the default contract is unchanged"

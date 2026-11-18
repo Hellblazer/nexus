@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.13: drop the leaf dm_test.leafed_m2_globex (a tenant removal mid-move; the vanished-leaf scenario).
+    Superuser, runAlways. Run through DataMoveTestFixtures#dropGlobexLeaf.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-datamove-drop-leaf-1" author="nexus-f3yqd.2.13" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE dm_test.leafed_m2 DETACH PARTITION dm_test.leafed_m2_globex;
+DROP TABLE dm_test.leafed_m2_globex;
+        </sql>
+        <rollback>
+            <!-- Test-only. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

@@ -31,12 +31,27 @@ class MainSingletonLockWiringTest {
         String src = code();
         int validation = src.indexOf("event=pg_session_env_invalid");
         int lock = src.indexOf("bootSingletonLock(ds, dbUrl, dbUser, dbPass, applicationName);");
-        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs)");
+        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller)");
 
         assertThat(validation).isPositive();
         assertThat(lock).as("the lock is taken in main").isGreaterThan(validation);
         assertThat(migration).as("a second engine must not migrate either").isGreaterThan(lock);
         assertThat(src.indexOf("bootSingletonLock(ds,", lock + 1)).as("taken once").isNegative();
+    }
+
+    /**
+     * nexus-f3yqd.2.11: the library install's posture (a separate admin role, or one role) is decided by
+     * {@code DmlUtilsInstaller.forEngine}, which {@code DmlUtilsInstallerTest} drives in both postures. Main must
+     * hand it the admin connection's user and the service user, in that order, and migrate with the installer it built.
+     */
+    @Test
+    void theInstallerIsBuiltByForEngineFromTheAdminAndServiceUsers_beforeTheMigrationUsesIt() throws Exception {
+        String src = code();
+        int build = src.indexOf("DmlUtilsInstaller.forEngine(adminConnection.user(), dbUser)");
+        int migration = src.indexOf("SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller)");
+        assertThat(build).as("Main builds the installer through forEngine(admin user, service user)").isPositive();
+        assertThat(migration).as("and migrates with that installer").isGreaterThan(build);
+        assertThat(src).as("no second place decides the posture").doesNotContain("new dev.nexus.service.db.DmlUtilsInstaller(");
     }
 
     @Test

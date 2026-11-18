@@ -22,7 +22,8 @@ the extractor is faked and the task is an identity body, so the journey starts
 at the producer. Document 7 raises a retryable error twice, then succeeds.
 Document 13 crashes its worker on every claim (a ``BaseException`` out of the
 extractor ends the worker thread with the claim held, so nothing nacks, acks or
-releases it) until the engine dead-letters it. Leases are 2 s (10 s in an external run), the RDR-163
+releases it) until the engine dead-letters it. Leases are 6 s (10 s in an external run), renewed at
+production's ratio of a fifth of the lease, the RDR-163
 ladder is 2 s * 2**attempts with no jitter, both through the worker's own
 configuration (``tuple_options`` and the ladder module constants).
 
@@ -78,6 +79,10 @@ from nexus.aspect_worker import AspectExtractionWorker
 from nexus.aspect_worker_tuples import TupleQueueSide
 from nexus.db.t2.http_tuple_store import ClaimNotFoundError
 from tests import _external_engine
+from tests._rdr235_mvv_wire import SUBSPACE as _WIRE_SUBSPACE
+from tests._rdr235_mvv_wire import Ledger as _Ledger
+from tests._rdr235_mvv_wire import PauseWatch as _PauseWatch
+from tests._rdr235_mvv_wire import plain_tracebacks as _plain_tracebacks
 
 pytestmark = pytest.mark.usefixtures("t2_service_env")
 
@@ -86,6 +91,7 @@ pytestmark = pytest.mark.usefixtures("t2_service_env")
 _HANG_S = 180.0
 
 _SUB = "aspects"
+assert _SUB == _WIRE_SUBSPACE
 _KEYS = {"queue": "aspects"}
 
 N_DOCS = 50
@@ -93,11 +99,18 @@ DOC_RETRY = 7
 DOC_CRASH = 13
 
 #: Lease asked of every claim in the journey. The engine's template cap is 900;
-#: 2 s makes the six lapses of document 13 take seconds, not an hour (gate O6).
-_LEASE_S = 2
+#: 6 s keeps the six lapses of document 13 to about 40 s, not an hour (gate O6).
+#: RESIDUAL: renewed every ``_RENEW_RATIO * _LEASE_S`` (1.2 s), a claim survives a process
+#: pause of up to about 4.8 s in any claim window; a longer pause lapses it under a live worker,
+#: and the bullet-1 or bullet-2 message then shows the pause (``_PauseWatch``). It was 2 s renewed
+#: every 0.5 s (about 1.5 s of tolerance) until nexus-bpikw: on CI's loaded ``-n 4`` shards the
+#: journey lapsed doc 7's claim four times, and run 44056253456 shows a ~3 s pause.
+_LEASE_S = 6
+#: Renew interval over lease, production's own (``RENEW_INTERVAL_S`` 120 over ``LEASE_S`` 600).
+_RENEW_RATIO = 0.2
 #: The lease in an external run (nexus-ckejb): every renewal is a WAN round trip, and one that runs long against
-#: a 2 s lease lets the claim lapse under a live worker (``by_doc == 1`` then fails and the fresh tenant is
-#: burned). Bullet 3's six lapses then take about a minute instead of seconds.
+#: a short lease lets the claim lapse under a live worker (``by_doc == 1`` then fails and the fresh tenant is
+#: burned). Bullet 3's six lapses then take about a minute. Never below ``_LEASE_S``.
 _WAN_LEASE_S = 10
 #: The ladder, shrunk through the module's own constants: base * 2**attempts,
 #: no jitter, so the intervals are 2 s then 4 s.
@@ -166,6 +179,7 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import nexus.mcp_infra as infra
     from nexus.db.t2 import T2Database
 
+    _plain_tracebacks()
     monkeypatch.setenv("NX_ASPECT_WORKER_AUTOSTART", "0")
     # UNSET, not "tuples": the default is the thing under test (nexus-lnwn1). A test
     # that needs the table path sets it to "table" itself.
@@ -175,115 +189,6 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(infra, "t2_index_write", lambda fn, **kw: fn(d))
     yield d
     d.close()
-
-
-class _Ledger:
-    """Observes the wire the worker uses, without changing it.
-
-    Wraps ``HttpTupleStore`` claim, ack, nack and release and
-    ``HttpDocumentAspectsStore.upsert``: each wrapper calls the real method and
-    records what came back (a claim row with the engine's ``claimed_at`` and
-    ``lease_until``, or the typed error). Nothing is faked or short-circuited;
-    the engine answers every call.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self.claims: list[dict[str, Any]] = []
-        self.ends: list[dict[str, Any]] = []
-        self.upserts: list[dict[str, Any]] = []
-
-    def reset(self) -> None:
-        with self._lock:
-            self.claims.clear()
-            self.ends.clear()
-            self.upserts.clear()
-
-    def install(self, mp: pytest.MonkeyPatch) -> None:
-        from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore
-        from nexus.db.t2.http_tuple_store import HttpTupleStore
-
-        led = self
-        orig_inp, orig_in = HttpTupleStore.inp, HttpTupleStore.in_
-        orig_ack, orig_nack, orig_release = (
-            HttpTupleStore.ack, HttpTupleStore.nack, HttpTupleStore.release,
-        )
-        orig_upsert = HttpDocumentAspectsStore.upsert
-
-        def _claim(subspace: str, claimant: str, got: Any) -> None:
-            if subspace != _SUB or got is None:
-                return
-            row, claim_id = got
-            with led._lock:
-                led.claims.append({
-                    "task_id": row.id, "claim_id": claim_id, "claimant": claimant,
-                    "attempts": row.attempts, "claimed_at": _ts(row.claimed_at),
-                    "lease_until": _ts(row.lease_until), "created_at": _ts(row.created_at),
-                })
-
-        def inp(self_, subspace, keys, *, claimant, lease_s):
-            got = orig_inp(self_, subspace, keys, claimant=claimant, lease_s=lease_s)
-            _claim(subspace, claimant, got)
-            return got
-
-        def in_(self_, subspace, keys, *, claimant, lease_s, timeout_s=0):
-            got = orig_in(self_, subspace, keys, claimant=claimant, lease_s=lease_s, timeout_s=timeout_s)
-            _claim(subspace, claimant, got)
-            return got
-
-        def _end(kind: str, fn, claim_id, claimant, **kw):
-            rec = {"kind": kind, "claim_id": claim_id, "claimant": claimant, "error": None, **kw}
-            try:
-                return fn()
-            except BaseException as exc:
-                rec["error"] = type(exc).__name__
-                raise
-            finally:
-                with led._lock:
-                    led.ends.append(rec)
-
-        def ack(self_, claim_id, claimant, reply=None):
-            return _end("ack", lambda: orig_ack(self_, claim_id, claimant, reply), claim_id, claimant)
-
-        def nack(self_, claim_id, claimant, *, retry_after_s=None, dead=False):
-            return _end(
-                "nack",
-                lambda: orig_nack(self_, claim_id, claimant, retry_after_s=retry_after_s, dead=dead),
-                claim_id, claimant, retry_after_s=retry_after_s, dead=dead,
-            )
-
-        def release(self_, claim_id, claimant):
-            return _end("release", lambda: orig_release(self_, claim_id, claimant), claim_id, claimant)
-
-        def upsert(self_, record, *, claim_id=None, claimant=None):
-            rec = {
-                "doc_id": record.doc_id, "claim_id": claim_id, "claimant": claimant, "error": None,
-            }
-            try:
-                return orig_upsert(self_, record, claim_id=claim_id, claimant=claimant)
-            except BaseException as exc:
-                rec["error"] = type(exc).__name__
-                raise
-            finally:
-                with led._lock:
-                    led.upserts.append(rec)
-
-        mp.setattr(HttpTupleStore, "inp", inp)
-        mp.setattr(HttpTupleStore, "in_", in_)
-        mp.setattr(HttpTupleStore, "ack", ack)
-        mp.setattr(HttpTupleStore, "nack", nack)
-        mp.setattr(HttpTupleStore, "release", release)
-        mp.setattr(HttpDocumentAspectsStore, "upsert", upsert)
-
-    def claims_of(self, task_id: str) -> list[dict[str, Any]]:
-        with self._lock:
-            return sorted(
-                (c for c in self.claims if c["task_id"] == task_id), key=lambda c: c["claimed_at"],
-            )
-
-    def ends_of(self, claim_id: str) -> list[dict[str, Any]]:
-        with self._lock:
-            return [e for e in self.ends if e["claim_id"] == claim_id]
 
 
 class _Extractor:
@@ -397,7 +302,7 @@ class _Fleet:
 
 def _worker_opts(**over: Any) -> dict[str, Any]:
     opts: dict[str, Any] = {
-        "lease_s": _LEASE_S, "park_timeout_s": 1, "renew_every_s": 0.5,
+        "lease_s": _LEASE_S, "park_timeout_s": 1, "renew_every_s": _RENEW_RATIO * _LEASE_S,
         "deadline_s": lambda n: 30.0,
     }
     opts.update(over)
@@ -407,8 +312,8 @@ def _worker_opts(**over: Any) -> dict[str, Any]:
 @dataclass(frozen=True)
 class _Timing:
     """The journey's lease and fence timings: one lease, the renew cadences and the fence variant's renewer
-    deadline, all scaled together so the ratios the assertions rely on (renew well inside the lease; the fence
-    renewer gives up long before the lease ends) hold on either engine."""
+    deadline, all fractions of the lease so the ratios the assertions rely on (renew well inside the lease; the
+    fence renewer gives up long before the lease ends) hold at either lease."""
 
     lease_s: int
     renew_every_s: float
@@ -417,11 +322,12 @@ class _Timing:
 
 
 def _timing(request: pytest.FixtureRequest) -> _Timing:
-    """Local values unchanged; an external run (``in_external_mode``, keyed on the same pair-and-marker rule
-    the fixture uses) gets WAN-sized ones."""
+    """``_LEASE_S`` locally; an external run (``in_external_mode``, keyed on the same pair-and-marker rule
+    the fixture uses) gets the WAN-sized ``_WAN_LEASE_S``. The fence renewer renews at 0.15 of the lease and
+    stops at 0.2 of it, so its claim lapses about one lease after the stale worker stalls."""
     lease = _WAN_LEASE_S if _external_engine.in_external_mode(request) else _LEASE_S
-    scale = lease / _LEASE_S
-    return _Timing(lease, 0.5 * scale, 0.3 * scale, 0.4 * scale)
+    assert _WAN_LEASE_S >= _LEASE_S
+    return _Timing(lease, _RENEW_RATIO * lease, 0.15 * lease, 0.2 * lease)
 
 
 @pytest.mark.scenario
@@ -506,6 +412,9 @@ def test_mvv_journey_on_the_tuple_queue(
     assert len({g[0].id for g in got}) == 1
     db.tuples.release(got[0][1], "one-claimant")
     ledger.reset()
+    watch = _PauseWatch()
+    watch.start()
+    request.addfinalizer(watch.stop)
 
     # ── the run: worker A, a crashing document, and a second worker mid-run ───
     fleet = _Fleet(_worker_opts(lease_s=timing.lease_s, renew_every_s=timing.renew_every_s))
@@ -526,7 +435,7 @@ def test_mvv_journey_on_the_tuple_queue(
                 and census.available == 0 and census.claimed == 0 and census.dead >= 1
             ):
                 break
-            assert time.monotonic() < deadline, f"hang bound ({_HANG_S}s): {census}"
+            assert time.monotonic() < deadline, f"hang bound ({_HANG_S}s): {census}\n{watch.report()}"
             time.sleep(0.2)
     finally:
         fleet.stop_all()
@@ -537,7 +446,7 @@ def test_mvv_journey_on_the_tuple_queue(
     with ledger._lock:
         ok_upserts = [u for u in ledger.upserts if u["error"] is None]
         failed_upserts = [u for u in ledger.upserts if u["error"] is not None]
-    assert not failed_upserts, f"a write met a claim that was not live: {failed_upserts}"
+    assert not failed_upserts, f"a write met a claim that was not live: {failed_upserts}\n{watch.report()}"
     by_doc: dict[str, int] = {}
     for u in ok_upserts:
         by_doc[u["doc_id"]] = by_doc.get(u["doc_id"], 0) + 1
@@ -547,22 +456,30 @@ def test_mvv_journey_on_the_tuple_queue(
             assert rec is None and docs[i] not in by_doc, "the crashing document wrote nothing"
             continue
         assert rec is not None and rec.problem_formulation == f"extracted:{_doc_path(i)}", i
-        assert by_doc.get(docs[i]) == 1, f"document {i}: {by_doc.get(docs[i])} writes, want exactly 1"
+        assert by_doc.get(docs[i]) == 1, f"document {i}: {by_doc.get(docs[i])} writes, want exactly 1\n{watch.report()}"
         want_calls = 3 if i == DOC_RETRY else 1
         assert ex.count(_doc_path(i)) == want_calls, (i, ex.count(_doc_path(i)))
 
     # ── bullet 2: document 7 succeeds on its third claim, ladder-spaced ──────
     c7 = ledger.claims_of(task7)
-    assert [c["attempts"] for c in c7] == [0, 1, 2], "three claims; attempts 0, 1, 2"
+    story7 = f"{ledger.story(task7)}\n{watch.report()}"
+    assert [c["attempts"] for c in c7] == [0, 1, 2], f"three claims; attempts 0, 1, 2\n{story7}"
     nacks7 = [e for e in ledger.ends if e["kind"] == "nack" and e["claim_id"] in {c["claim_id"] for c in c7}]
     nacks7.sort(key=lambda e: [c["claim_id"] for c in c7].index(e["claim_id"]))
     intervals = [e["retry_after_s"] for e in nacks7]
-    assert intervals == [w._backoff_interval_seconds(0), w._backoff_interval_seconds(1)] == [_RETRY_BASE_S, 2 * _RETRY_BASE_S]
-    assert all(e["error"] is None and not e["dead"] for e in nacks7)
+    ladder = [w._backoff_interval_seconds(0), w._backoff_interval_seconds(1)]
+    assert ladder == [_RETRY_BASE_S, 2 * _RETRY_BASE_S], f"the shrunk ladder is not in force: {ladder}"
+    assert intervals == ladder, f"nack intervals {intervals}, want the ladder {ladder}\n{story7}"
+    bad = [e for e in nacks7 if e["error"] is not None or e["dead"]]
+    assert not bad, (
+        "a nack of document 7 did not land as a live retry; (claim, error, dead) per bad nack: "
+        f"{[(e['claim_id'], e['error'], e['dead']) for e in bad]}\n{story7}"
+    )
     for (prev, nxt), interval in zip(zip(c7, c7[1:]), intervals):
         gap = (nxt["claimed_at"] - prev["claimed_at"]).total_seconds()
-        assert gap >= interval, f"engine-clock gap {gap}s is under the ladder interval {interval}s"
-    assert [e["kind"] for e in ledger.ends_of(c7[2]["claim_id"])] == ["ack"], "the third claim is acked"
+        assert gap >= interval, f"engine-clock gap {gap}s is under the ladder interval {interval}s\n{story7}"
+    third = [e["kind"] for e in ledger.ends_of(c7[2]["claim_id"])]
+    assert third == ["ack"], f"the third claim is acked, once; its ending calls were {third}\n{story7}"
 
     # ── bullet 3: document 13 dead-letters after the attempt cap ─────────────
     c13 = ledger.claims_of(task13)
@@ -707,7 +624,7 @@ def test_mvv_journey_on_the_tuple_queue(
     assert [t.id for t in _tasks(db)] == [task13], "only the dead task remains"
 
     # ── bullet 5, live half: a worker that IS renewing keeps its claim through a stall anywhere ──
-    # The renewer runs from the start of process() to the last verdict. A batch of two, the lease 2 s: the first claim's
+    # The renewer runs from the start of process() to the last verdict. A batch of two, the journey's lease: the first claim's
     # catalog check stalls longer than the lease (before the extractor, the window the renewer once missed),
     # and the first claim's write stalls longer than the lease (after the extractor, the other window; the
     # second claim waits behind it). Both stalls are in the side's own injected seams, so nothing is patched

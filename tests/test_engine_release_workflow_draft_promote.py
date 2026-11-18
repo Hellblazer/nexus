@@ -34,7 +34,8 @@ def _jobs() -> dict:
 
 
 def _step_text(job: dict) -> str:
-    return "\n".join(step.get("run", "") for step in job["steps"])
+    # A reusable-workflow call job (`uses:`, bundle-canary) has no steps.
+    return "\n".join(step.get("run", "") for step in job.get("steps", []))
 
 
 def test_release_is_a_draft_until_only_promote_release_publishes() -> None:

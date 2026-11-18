@@ -9,11 +9,9 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.exception.LiquibaseException;
-import liquibase.lockservice.DatabaseChangeLogLock;
-import liquibase.lockservice.LockService;
-import liquibase.lockservice.LockServiceFactory;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import liquibase.ui.LoggerUIService;
+import liquibase.ui.UIService;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record4;
@@ -22,6 +20,7 @@ import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
+import dev.nexus.service.log.LineSafeUIService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -386,6 +385,9 @@ public final class SchemaMigrator {
      * connection. The HikariCP pool returns it to the pool; subsequent service
      * requests use it normally.
      *
+     * <p>Not the engine's boot entry: that is {@link #migrate(DataSource, DmlUtilsInstaller)}. This one
+     * installs the vendored libraries with an installer nobody reads afterwards.
+     *
      * @param ds migration-capable datasource (schema-owner or superuser rights)
      * @return the walk's real counts — also logged as
      *         {@code event=schema_migration_complete}
@@ -476,9 +478,12 @@ public final class SchemaMigrator {
      * (that constant's classpath string is duplicated test-side rather than
      * widened). A bare constant tolerates duplication; this seam is behavior,
      * not a value, so there is nothing to duplicate — widening visibility is
-     * the smaller change. The single-arg {@link #migrate(DataSource)} stays
-     * the only entry point any real caller (service boot, migration
-     * rehearsals) uses.
+     * the smaller change. The engine boots through {@link #migrate(DataSource,
+     * DmlUtilsInstaller)}, which keeps the installer whose status the data-move
+     * worker reads; this and the single-arg overload build an installer of
+     * their own ({@code new DmlUtilsInstaller(true)}), so they attempt the
+     * vendored library install too when its prerequisites hold (migration
+     * rehearsals, the test suite).
      */
     public static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook) {
         return migrate(ds, afterUpdateHook, LocalDiskPreflight::dataDirFreeBytesFromEnv);
@@ -498,6 +503,24 @@ public final class SchemaMigrator {
     private static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook,
                                             java.util.function.Supplier<java.util.OptionalLong> dataDirFreeBytes,
                                             Duration migrationLockWait) {
+        return migrate(ds, afterUpdateHook, dataDirFreeBytes, migrationLockWait, new DmlUtilsInstaller(true));
+    }
+
+    /**
+     * The boot entry point (nexus-f3yqd.2.11, RDR-246 Install sequence steps 2-3): as {@link #migrate(DataSource)},
+     * with the {@link DmlUtilsInstaller} the caller keeps. Under the migration lock, after the walk's
+     * schema-work decision about the index builders and before nexus's changelog, the installer applies the vendored
+     * {@code ddl_utils} and {@code dml_utils} changelogs as {@code dml_utils_owner}, or records why it did not; its
+     * {@link DmlUtilsInstaller#status()} is what the data-move worker reports. The library changesets are not in the
+     * pending count this walk takes schema work from: they take no lock on any nexus relation.
+     */
+    public static MigrationOutcome migrate(DataSource ds, DmlUtilsInstaller installer) {
+        return migrate(ds, () -> { }, LocalDiskPreflight::dataDirFreeBytesFromEnv, DEFAULT_MIGRATION_LOCK_WAIT, installer);
+    }
+
+    private static MigrationOutcome migrate(DataSource ds, Runnable afterUpdateHook,
+                                            java.util.function.Supplier<java.util.OptionalLong> dataDirFreeBytes,
+                                            Duration migrationLockWait, DmlUtilsInstaller installer) {
         log.info("event=schema_migration_start changelog={}", MASTER_CHANGELOG);
         try {
             pinJvmTimeZoneToUtc();
@@ -568,6 +591,9 @@ public final class SchemaMigrator {
                     terminatePciBuilders(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
                     terminateChashValidators(conn, "reason=schema_changesets_pending n=" + schemaChangesets);
                 }
+
+                // nexus-f3yqd.2.11: the vendored libraries, as dml_utils_owner, then back to this role.
+                installer.install(conn);
 
                 // nexus-jl08t: identify THIS walk's own rows via a pre-walk
                 // orderexecuted WATERMARK, not Liquibase's own deployment_id.
@@ -698,18 +724,16 @@ public final class SchemaMigrator {
     }
 
     /**
-     * Runs the walk, under a {@link LoggerUIService} scope when {@link #UI_PROPERTY} asks for one.
+     * Runs the walk, under a {@link LoggerUIService} scope when {@link #UI_PROPERTY} asks for one, and otherwise under a
+     * {@link LineSafeUIService} scope (nexus-dngtz.1.11): the console UI as always, with each message escaped so the
+     * PostgreSQL error text a failed changeset reports cannot start a new line.
      * Liquibase's root scope is per thread and always binds a ConsoleUIService, so a child scope
      * around the call is the only place the UI can be swapped for every caller of migrate().
      */
-    private static void update(Liquibase liquibase) throws LiquibaseException {
-        if (!UI_LOGGER.equals(System.getProperty(UI_PROPERTY))) {
-            liquibase.update(new Contexts(), new LabelExpression());
-            return;
-        }
+    static void update(Liquibase liquibase) throws LiquibaseException {
+        UIService ui = UI_LOGGER.equals(System.getProperty(UI_PROPERTY)) ? new LoggerUIService() : new LineSafeUIService();
         try {
-            Scope.child(Scope.Attr.ui, new LoggerUIService(),
-                    () -> liquibase.update(new Contexts(), new LabelExpression()));
+            Scope.child(Scope.Attr.ui, ui, () -> liquibase.update(new Contexts(), new LabelExpression()));
         } catch (LiquibaseException | RuntimeException e) {
             throw e;
         } catch (Exception e) {
@@ -865,14 +889,6 @@ public final class SchemaMigrator {
     }
 
     /**
-     * The {@code application_name} prefix of the per-collection index builder's backend (RDR-227). Equal to
-     * {@code PciBuilderSession.APPLICATION_NAME_PREFIX}; held here too because {@code db} does not depend on
-     * {@code vectors}, and {@code PciBuilderSessionIntegrationTest}/{@code PciBuilderTerminationIntegrationTest}
-     * pin the two together through the real backend's name.
-     */
-    static final String PCI_BUILDER_APPLICATION_NAME_PREFIX = "nexus-pci-builder-";
-
-    /**
      * RDR-227 Migrations (nexus-43ulx.17): end every per-collection index builder backend in this database. A walk
      * that alters a leaf queues behind an in-flight {@code CREATE INDEX CONCURRENTLY}, and the build waits for the
      * walk's transactions in turn; ending the build's session settles it. Terminate, never cancel: a cancel ends the
@@ -899,22 +915,7 @@ public final class SchemaMigrator {
      * @param why the {@code reason=...} fields of the log line
      */
     private static void terminatePciBuilders(Connection conn, String why) {
-        var pid = DSL.field(DSL.name("pid"), Integer.class);
-        try {
-            int terminated = 0;
-            for (Boolean ended : DSL.using(conn, SQLDialect.POSTGRES)
-                    .select(DSL.function("pg_terminate_backend", SQLDataType.BOOLEAN, pid))
-                    .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                    .where(pciBuilderBackends())
-                    .fetch(0, Boolean.class)) {
-                if (Boolean.TRUE.equals(ended)) {
-                    terminated++;
-                }
-            }
-            log.info("event=pci_builders_terminated count={} {}", terminated, why);
-        } catch (DataAccessException e) {
-            log.error("event=pci_builders_terminate_failed cause=\"{}\"", e.toString());
-        }
+        PciBuilders.terminate(DSL.using(conn, SQLDialect.POSTGRES), why, log);
     }
 
     /**
@@ -950,11 +951,10 @@ public final class SchemaMigrator {
     /** The walk has only runAlways (or self-retrying) work: say how many builder backends it leaves running, and what it let pass. */
     private static void logPciBuildersKept(Connection conn, List<ChangeSet> retrying) {
         try {
-            Integer count = DSL.using(conn, SQLDialect.POSTGRES)
-                .selectCount()
-                .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
-                .where(pciBuilderBackends())
-                .fetchOne(0, Integer.class);
+            int count = PciBuilders.count(DSL.using(conn, SQLDialect.POSTGRES), log);
+            if (count < 0) {
+                return;   // the count failed and was logged: no line rather than count=-1
+            }
             log.info("event=pci_builders_kept count={} reason=only_run_always_pending retrying={}", count, retrying.size());
             for (ChangeSet cs : retrying) {
                 log.info("event=pci_build_kept_for_retrying id={} reason=self_retrying_precondition",
@@ -963,15 +963,6 @@ public final class SchemaMigrator {
         } catch (DataAccessException e) {
             log.warn("event=pci_builders_count_failed cause=\"{}\"", e.toString());
         }
-    }
-
-    /** Builder-named backends of this database other than this session. */
-    private static org.jooq.Condition pciBuilderBackends() {
-        var applicationName = DSL.field(DSL.name("application_name"), String.class);
-        var datname = DSL.field(DSL.name("datname"), String.class);
-        return applicationName.startsWith(PCI_BUILDER_APPLICATION_NAME_PREFIX)
-            .and(DSL.field(DSL.name("pid"), Integer.class).ne(DSL.function("pg_backend_pid", SQLDataType.INTEGER)))
-            .and(datname.eq(DSL.function("current_database", SQLDataType.VARCHAR)));
     }
 
     /**
@@ -1506,114 +1497,6 @@ public final class SchemaMigrator {
      * Unchecked exception thrown when {@link #migrate(DataSource)} cannot
      * complete. {@code Main.java} catches this and calls {@code System.exit(1)}.
      */
-    /**
-     * The migrator's session-level advisory lock, held from before Liquibase takes its changelog lock until
-     * after the walk (nexus-8sph2).
-     *
-     * <p>Liquibase's lock is a committed row in {@code databasechangeloglock}. A walker stopped mid-walk
-     * (SIGTERM, CTRL_BREAK, a crash) leaves the row {@code locked=true}, and the next boot waited five
-     * minutes for it and failed (measured 2026-10-05, T2 nexus_rdr/224-research-19). The row cannot tell a
-     * dead walker from a live one. A session-level advisory lock can: PostgreSQL drops it when the holding
-     * session ends, however the process stopped. Every migrator takes it first, so a migrator that holds it
-     * knows no other migrator is walking, and a locked row it finds is stale. It releases that row through
-     * Liquibase's own {@link LockService#forceReleaseLock()} and lets Liquibase take its lock as before.
-     * Liquibase's lock stays in place, so an engine that predates this lock still waits on the row.
-     *
-     * <p>The lock is SESSION-scoped, so the migration connection must be a real PostgreSQL session for the
-     * whole walk. A transaction-mode pooler (PgBouncer {@code pool_mode=transaction}) between the migrator and
-     * PostgreSQL can hand each statement a different server session, which silently voids the lock: the
-     * migrator would then release a live walker's row. Point the migrator at PostgreSQL directly or through
-     * a session-mode pool.
-     *
-     * <p>Accepted gap: an engine that predates this lock, walking at the same moment as one that has it,
-     * holds the row but not the advisory lock, and would have its row released. That needs two engine
-     * versions booting against one database at once; the cloud runs one engine and a local install one.
-     */
-    private static final class MigrationLock implements AutoCloseable {
-        private static final Duration POLL = Duration.ofSeconds(1);
-        private final Connection conn;
-
-        private MigrationLock(Connection conn) {
-            this.conn = conn;
-        }
-
-        static MigrationLock acquire(Connection conn, Database database, Duration wait) throws LiquibaseException {
-            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-            long deadline = System.nanoTime() + wait.toNanos();
-            boolean logged = false;
-            while (!tryLock(ctx)) {
-                if (!logged) {
-                    log.info("event=schema_migration_lock_wait key={} holder_pid={} wait_s={}",
-                             MIGRATION_ADVISORY_LOCK_KEY, holderPid(ctx), wait.toSeconds());
-                    logged = true;
-                }
-                long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) {
-                    throw new MigrationException("another migrator holds the migration lock (advisory key "
-                        + MIGRATION_ADVISORY_LOCK_KEY + ", holder pid " + holderPid(ctx) + ") after waiting "
-                        + wait.toSeconds() + " s");
-                }
-                try {
-                    Thread.sleep(Math.min(POLL.toMillis(), Math.max(1, remaining / 1_000_000)));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new MigrationException("interrupted waiting for the migration lock", e);
-                }
-            }
-            MigrationLock lock = new MigrationLock(conn);
-            try {
-                releaseStaleChangelogLock(database);
-            } catch (LiquibaseException | RuntimeException e) {
-                lock.close();
-                throw e;
-            }
-            return lock;
-        }
-
-        private static boolean tryLock(DSLContext ctx) {
-            return Boolean.TRUE.equals(ctx.select(DSL.function("pg_try_advisory_lock", SQLDataType.BOOLEAN,
-                    DSL.val(MIGRATION_ADVISORY_LOCK_KEY)))
-                .fetchOne(0, Boolean.class));
-        }
-
-        /** The pid holding the migration lock, or -1 when none is visible; for the log line only. */
-        private static int holderPid(DSLContext ctx) {
-            try {
-                return migrationLockHolderPid(ctx);
-            } catch (DataAccessException e) {
-                return -1;
-            }
-        }
-
-        /** Under the migration lock any locked changelog row is stale: release it, naming who left it. */
-        private static void releaseStaleChangelogLock(Database database) throws LiquibaseException {
-            LockService lockService = LockServiceFactory.getInstance().getLockService(database);
-            DatabaseChangeLogLock[] locks = lockService.listLocks();
-            if (locks.length == 0) {
-                return;
-            }
-            for (DatabaseChangeLogLock stale : locks) {
-                log.warn("event=schema_changelog_lock_stale_released lockedby=\"{}\" lockgranted={}",
-                         stale.getLockedBy(), stale.getLockGranted() == null ? null
-                             : stale.getLockGranted().toInstant());
-            }
-            lockService.forceReleaseLock();
-        }
-
-        @Override
-        public void close() {
-            try {
-                DSL.using(conn, SQLDialect.POSTGRES)
-                    .select(DSL.function("pg_advisory_unlock", SQLDataType.BOOLEAN,
-                        DSL.val(MIGRATION_ADVISORY_LOCK_KEY)))
-                    .fetchOne();
-            } catch (DataAccessException e) {
-                // The session ending releases it anyway; a failed unlock on a broken connection is not fatal.
-                log.warn("event=schema_migration_lock_release_failed cause=\"{}\"", e.toString());
-            }
-        }
-    }
-
     public static final class MigrationException extends RuntimeException {
         public MigrationException(String message, Throwable cause) {
             super(message, cause);

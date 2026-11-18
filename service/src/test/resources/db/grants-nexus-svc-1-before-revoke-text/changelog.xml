@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    grants-nexus-svc-1 exactly as it stood at c40f3b085 (after nexus-f3yqd.2.12 made the loop skip nexus.data_moves, before
+    nexus-f3yqd.2.17 added the REVOKE), kept ONLY so GrantsNexusSvcChecksumTest can compute the checksum that text produced
+    and prove the shipped changeset lists it (validCheckSum). Never loaded by the master changelog. Do not edit.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="grants-nexus-svc-1" author="nexus-net63" runAlways="true">
+        <!--
+            nexus-f3yqd.2.12 (RDR-246) edited this body: the loop below skips nexus.data_moves, the data-move
+            registry, which only the migrating role reads. Every migrated database holds the checksum of the text
+            before that edit, so it is listed as a validCheckSum. The same Liquibase 4.29.0 behaviour measured for
+            grants-004-monitor-wal-visibility (below) applies: the boot does not check a runAlways row's stored checksum, so
+            the entry is insurance, not the fix.
+
+            DO NOT ALSO LIST THE NEW CHECKSUM: Liquibase accepts a stored checksum when the changeset's CURRENT
+            checksum equals any validCheckSum entry, so listing the current one turns validation into a wildcard.
+            GrantsNexusSvcChecksumTest pins it. A later edit to this SQL adds the checksum of the text it
+            replaces, never its own.
+        -->
+        <validCheckSum>9:15c9a38e1a6119c0702314e7d6922d73</validCheckSum>
+        <comment>
+            Grant nexus_svc role the DML privileges it needs on the nexus and t1 schemas.
+            REQUIRED: nexus_svc must exist before first migration; if missing, GRANT fails
+            loudly and migration aborts (fail-fast — no silent skip).
+            runAlways: re-executed on every startup so a role created after the first
+            migration is automatically provisioned on the next restart.
+            Owner-restricted per-relation iteration (nexus-46yy3 class, GH #1402,
+            nexus-0gis0): the bulk GRANT ... ON ALL TABLES/SEQUENCES form hard-errors on
+            any relation this role (nexus_admin, NOSUPERUSER) does not own — specifically
+            the deliberately superuser-owned nexus.diag_chash_conformance view (RLS-exempt
+            owner required, nexus-vounk) — aborting every engine boot once the view
+            exists. Foreign-owned relations are intentionally skipped: nexus_svc does not
+            need access to them, and only their owner can grant on them anyway.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+-- Schema usage
+GRANT USAGE ON SCHEMA nexus TO nexus_svc;
+GRANT USAGE ON SCHEMA t1    TO nexus_svc;
+
+DO $$
+DECLARE
+    rel RECORD;
+    skipped_count integer;
+    skipped_names text;
+BEGIN
+    -- DML + sequence usage on every relation THIS role owns (nexus_admin
+    -- created the schema, so this covers every table/view/sequence in
+    -- normal operation). Foreign-owned relations (e.g. the superuser-owned
+    -- diag_chash_conformance view) are skipped by construction — nexus_svc
+    -- does not need them.
+    FOR rel IN
+        SELECT n.nspname, c.relname, c.relkind
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname IN ('nexus', 't1')
+          AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+          AND pg_get_userbyid(c.relowner) = current_user
+          -- nexus.data_moves (RDR-246, datamoves-001-registry.xml) is admin-connection only: no nexus_svc grant.
+          AND NOT (n.nspname = 'nexus' AND c.relname = 'data_moves')
+    LOOP
+        IF rel.relkind = 'S' THEN
+            EXECUTE format(
+                'GRANT USAGE, SELECT ON %I.%I TO nexus_svc', rel.nspname, rel.relname
+            );
+        ELSE
+            EXECUTE format(
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON %I.%I TO nexus_svc',
+                rel.nspname, rel.relname
+            );
+        END IF;
+    END LOOP;
+
+    -- Operator visibility (review finding): a foreign-owned relation is
+    -- skipped BY DESIGN — only its owner can grant on it, and nexus_svc does
+    -- not need the diag view today. But a deployment that ever drifts from
+    -- the nexus_admin-owns-everything contract (e.g. a future
+    -- superuser-provisioned object nexus_svc DOES need) would otherwise fail
+    -- silently at first query instead of visibly at boot. NOTICE, not
+    -- WARNING: skip is by design, not an error.
+    SELECT count(*), string_agg(n.nspname || '.' || c.relname, ', ')
+    INTO skipped_count, skipped_names
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname IN ('nexus', 't1')
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      AND pg_get_userbyid(c.relowner) != current_user;
+
+    IF skipped_count > 0 THEN
+        RAISE NOTICE 'grants-nexus-svc-1: skipped % foreign-owned relation(s), not granted to nexus_svc (only their owner can grant): %',
+            skipped_count, skipped_names;
+    END IF;
+END
+$$;
+
+-- MAINTAIN on chash_alias (rdr180-17 / F2, production 2026-07-20) — RETIRED
+-- at nexus-lgdel.l1: nexus.chash_alias is DROPPED (legacy-001-drop-chash-
+-- alias.xml), and its only two callers (RekeyOps.rekey, StagingPromoteOps.
+-- promoteCollection's refreshAliasStats call) are deleted in that same
+-- commit. Editing this runAlways changeset's body is checksum-safe
+-- (ValidatingVisitor skips the MD5SUM comparison for shouldAlwaysRun() —
+-- see grants-003-purge-vacuum-maintain's comment for the identical
+-- precedent). This grant is removed outright rather than guarded, unlike
+-- grants-003's early-return pattern: that guard exists for a table that is
+-- CONDITIONALLY present depending on unify-migration state; chash_alias has
+-- no such conditional existence going forward, so there is nothing left to
+-- guard for.
+
+-- Default privileges: future tables/sequences created by the schema owner automatically
+-- carry the same grants for nexus_svc (self-healing for new migrations).
+ALTER DEFAULT PRIVILEGES IN SCHEMA nexus GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO nexus_svc;
+ALTER DEFAULT PRIVILEGES IN SCHEMA nexus GRANT USAGE, SELECT                  ON SEQUENCES TO nexus_svc;
+ALTER DEFAULT PRIVILEGES IN SCHEMA t1    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO nexus_svc;
+ALTER DEFAULT PRIVILEGES IN SCHEMA t1    GRANT USAGE, SELECT                  ON SEQUENCES TO nexus_svc;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

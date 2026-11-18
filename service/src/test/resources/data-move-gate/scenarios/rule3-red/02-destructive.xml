@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario rule3-red. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="r3-drop-column" author="fixture">
+        <comment>r3-drop-column</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-drop-table" author="fixture">
+        <comment>r3-drop-table</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP TABLE IF EXISTS nexus.widgets CASCADE;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-rename-to" author="fixture">
+        <comment>r3-rename-to</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets RENAME TO widgets_old;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-rename-column" author="fixture">
+        <comment>r3-rename-column</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets RENAME COLUMN a TO b;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-swap-in" author="fixture">
+        <comment>r3-swap-in</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets_new RENAME TO widgets;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-wrong-label" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-other-1' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>r3-wrong-label</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-halt-not-continue" author="fixture">
+        <preConditions onFail="HALT" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-widgets-1' AND completed_at IS NOT NULL</sqlCheck>
+        </preConditions>
+        <comment>r3-halt-not-continue</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-not-completed-at" author="fixture">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE label = 'm-widgets-1' AND failed_at IS NULL</sqlCheck>
+        </preConditions>
+        <comment>r3-not-completed-at</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-label-only-in-a-comment" author="fixture">
+        <preConditions onFail="CONTINUE">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves WHERE completed_at IS NOT NULL -- m-widgets-1</sqlCheck>
+        </preConditions>
+        <comment>r3-label-only-in-a-comment</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP COLUMN old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-drop-without-column-keyword" author="fixture">
+        <comment>r3-drop-without-column-keyword</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-drop-if-exists-without-column-keyword" author="fixture">
+        <comment>r3-drop-if-exists-without-column-keyword</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets DROP IF EXISTS old_col;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-rename-without-column-keyword" author="fixture">
+        <comment>r3-rename-without-column-keyword</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.widgets RENAME a TO b;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="r3-drop-table-list" author="fixture">
+        <comment>r3-drop-table-list</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP TABLE nexus.sprockets, nexus.widgets;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

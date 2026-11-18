@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-f3yqd.2.11 (RDR-246 Step 4; Sam's rule, nexus-zrcj7: no SQL strings in Java, tests included):
+    the superuser half of the data-move install, as nexus.db.pg_bootstrap.dml_utils creates it on the bundled cluster
+    (Install sequence step 1): the three NOLOGIN NOBYPASSRLS library roles, CREATE on the database and on public for
+    dml_utils_owner, ddl_utils_caller and pgbackground_role to dml_utils_owner, dml_utils_owner to nexus_admin_dmlutils WITH
+    INHERIT FALSE, SET TRUE, dml_utils_caller and pgbackground_role to nexus_admin_dmlutils WITH INHERIT TRUE, and the
+    liquibase schema owned by dml_utils_owner. Needs the pg_background extension (pgbackground_role), so run it after
+    PgContainerHelper#createDataMoveExtensions. The admin role is the fixed name DmlUtilsInstallIntegrationTest#ADMIN (a
+    placeholder here would put this changelog on RawSqlGateTest's parameterised-changelog lists). runAlways and idempotent: it also restores the database CREATE grant
+    that DmlUtilsTestFixtures#revokeDmlUtilsOwnerDatabaseCreate takes away. Run through DmlUtilsTestFixtures#bootstrapDmlUtils.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-dml-utils-roles-1" author="nexus-f3yqd.2.11" runAlways="true">
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE r text;
+BEGIN
+    FOREACH r IN ARRAY ARRAY['dml_utils_owner', 'dml_utils_caller', 'ddl_utils_caller'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+            EXECUTE format('CREATE ROLE %I NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE', r);
+        END IF;
+    END LOOP;
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO dml_utils_owner', current_database());
+END $$;
+
+GRANT CREATE ON SCHEMA public TO dml_utils_owner;
+GRANT ddl_utils_caller, pgbackground_role TO dml_utils_owner;
+GRANT dml_utils_owner TO nexus_admin_dmlutils WITH INHERIT FALSE, SET TRUE;
+GRANT dml_utils_caller, pgbackground_role TO nexus_admin_dmlutils WITH INHERIT TRUE, SET TRUE;
+CREATE SCHEMA IF NOT EXISTS liquibase AUTHORIZATION dml_utils_owner;
+        </sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fixture for DataMoveChangesetGateTest, scenario exemption-red. The statements are read as text; none runs. -->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">
+
+    <changeSet id="ex-names-a-growing-table" author="fixture">
+        <comment>data-move-exempt: nexus.chunks: trust me</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.chunks SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-names-a-per-model-table" author="fixture">
+        <comment>data-move-exempt: chunks_m0abc: small</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks_m0abc VALIDATE CONSTRAINT c;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-names-a-table-the-changeset-never-touches" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.chunks SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-names-a-driven-table" author="fixture">
+        <comment>data-move-exempt: nexus.widgets: small</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.widgets SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-lifts-only-its-own-table" author="fixture">
+        <comment>data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.plans SET a = 1;
+UPDATE nexus.chunks SET a = 2;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-subselect-names-a-growing-table" author="fixture">
+        <comment>data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.chunks SET a = (SELECT max(a) FROM nexus.plans);
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-small-target-reads-a-growing-table" author="fixture">
+        <comment>data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.plans p SET a = c.a FROM nexus.chunks c WHERE c.id = p.id;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-two-lines-one-names-a-growing-table" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row
+data-move-exempt: nexus.chunks: trust me</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+UPDATE nexus.chunks SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-two-lines-each-lifts-only-its-own-table" author="fixture">
+        <comment>data-move-exempt: nexus.settings: one row
+data-move-exempt: nexus.plans: a few rows</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+UPDATE nexus.plans SET a = 1;
+UPDATE nexus.other SET a = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-without-a-reason" author="fixture">
+        <comment>data-move-exempt: nexus.settings:</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+    <changeSet id="ex-without-the-colon-form" author="fixture">
+        <comment>exempt nexus.settings, it is small</comment>
+        <sql splitStatements="false" stripComments="false">
+UPDATE nexus.settings SET v = 1;
+        </sql>
+        <rollback>SELECT 1;</rollback>
+    </changeSet>
+
+</databaseChangeLog>

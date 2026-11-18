@@ -24,6 +24,7 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Any
 
@@ -481,7 +482,10 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 max_workers=min(ENQUEUE_FANOUT_WORKERS, len(work)),
                 thread_name_prefix="aspect-enqueue",
             ) as pool:
-                results = list(pool.map(one, work))
+                # RDR-167: each item runs in its own copied Context (taken here, on the caller's
+                # thread), so the correlation id reaches the worker and no Context is shared.
+                futures = [pool.submit(copy_context().run, one, item) for item in work]
+                results = [f.result() for f in futures]
 
         enqueued = 0
         fatal: BaseException | None = None

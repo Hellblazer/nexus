@@ -21,6 +21,7 @@ from nexus.upgrade_ladder.registry import (
     RUNG_MANIFEST_SECTION_LABELS,
     RUNG_MANIFEST_SPAN_FILL,
     RUNG_NOTE_TAGS_ARRAY,
+    RUNG_RETIRE_KEYS_SWEEP,
     LadderRegistry,
     default_registry,
 )
@@ -30,8 +31,9 @@ from tests.upgrade.conftest import InMemoryCompletionLedger
 
 #: The rungs that answer an unattended run on a managed service only from a record (or, on an engine with the route,
 #: manifest-section-labels from the engine's count; this install's fake engine has none). The aspect-queue rung
-#: was retired with the table (nexus-hbnml). manifest-span-fill has no engine count at all (nexus-l8o33).
-REFUSABLE = (RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL)
+#: was retired with the table (nexus-hbnml). manifest-span-fill has no engine count at all (nexus-l8o33), and nor does
+#: retire-keys-sweep, whose dry run is an engine job (nexus-6pfgb.43).
+REFUSABLE = (RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL, RUNG_RETIRE_KEYS_SWEEP)
 
 
 class _Install:
@@ -103,7 +105,15 @@ def install(monkeypatch: pytest.MonkeyPatch, cloud_mode) -> _Install:
     monkeypatch.setattr("nexus.db.t2.http_memory_store.HttpMemoryStore", Memory)
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: Catalog())
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda *a, **k: Catalog())
-    monkeypatch.setattr("nexus.db.make_t3", lambda *a, **k: object())
+
+    class T3:
+        """The retire-keys dry run of an install with nothing to sweep (an engine job, not a catalog read)."""
+
+        def chunk_keys_dry_run(self, **_kw) -> dict:
+            return {"tenant": "t", "collections": [], "preconditions": {}, "blocking": [],
+                    "totals": {"retired_key_rows": 0, "sweepable_rows": 0, "blocked_rows": 0, "wrong_width_rows": 0}}
+
+    monkeypatch.setattr("nexus.db.make_t3", lambda *a, **k: T3())
     return inst
 
 
@@ -137,7 +147,7 @@ def test_the_interactive_run_the_remedy_names_clears_every_not_checked_entry(ins
     refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
     report = LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
     assert [(r.name, r.outcome) for r in report.runs] == [(n, RungOutcome.RECORDED) for n in (
-        RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL)], [
+        RUNG_NOTE_TAGS_ARRAY, RUNG_MANIFEST_SECTION_LABELS, RUNG_MANIFEST_SPAN_FILL, RUNG_RETIRE_KEYS_SWEEP)], [
         (r.name, r.outcome, r.detail) for r in report.runs]
     assert install.ledger.verified_rungs() == frozenset(REFUSABLE)
     install.scan_reads.clear()
@@ -148,8 +158,9 @@ def test_the_interactive_run_the_remedy_names_clears_every_not_checked_entry(ins
     for rung in REFUSABLE:
         assert rung not in head, (rung, row.detail)
     assert install.scan_reads == [], "the row answered from the records, without a scan"
-    # rdr192-manifest-backfill has no record here and says so: pending, which `nx upgrade` clears.
-    assert "rdr192-manifest-backfill" in row.detail
+    # rdr192-manifest-backfill has no record here, but the retire-keys sweep is recorded now, and the backfill refuses to
+    # run after it (it attributes a chunk by the keys the sweep removed): not applicable, so it is not named pending.
+    assert "rdr192-manifest-backfill" not in row.detail
 
 
 def test_a_walk_over_the_production_registry_under_auto_lists_nothing_once_recorded(install: _Install) -> None:
@@ -175,7 +186,7 @@ def test_a_row_answered_from_a_record_says_so_and_when_the_record_was_made(insta
     refusing = LadderRegistry(tuple(r for r in default_registry() if r.name in REFUSABLE))
     LadderRunner(refusing, install.ledger, package_version_fn=lambda: "9.9.9").run()
     records = install.ledger.completions()
-    answered = (RUNG_NOTE_TAGS_ARRAY,)
+    answered = (RUNG_NOTE_TAGS_ARRAY, RUNG_RETIRE_KEYS_SWEEP)
     assert all(records[r].verified_at for r in answered), "non-vacuity: the records carry a time"
 
     row = _row()

@@ -2,7 +2,7 @@
 title: "Indexing Lifecycle: Give the Corpus a Nameable Source Revision — Index the Mainline Ref from the Git Object Store, Diff-Driven and Opt-In"
 id: RDR-199
 type: Architecture
-status: draft
+status: deferred
 priority: high
 author: Sam
 created: 2026-08-23
@@ -11,6 +11,8 @@ related_issues: [nexus-ws67k]
 ---
 
 # RDR-199: Indexing Lifecycle — Give the Corpus a Nameable Source Revision
+
+> **Deferred 2026-11-16 (Sam, by dialog in halcyon's session, on the draft triage in T2 nexus/draft-rdr-triage-2026-11-16).** The cost half is solved by `--since-head` (nexus-fltb4, nexus-0l5so); revision provenance has no consumer today. Revive on CI-side indexing or an incident caused by a misleading corpus.
 
 ## Problem Statement
 

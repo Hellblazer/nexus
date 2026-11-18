@@ -1570,8 +1570,12 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
 
     config_dir = Path(config_dir_str) if config_dir_str else _config.nexus_config_dir()
     outcome = stop_storage_service(config_dir=config_dir)
-    pid = outcome.pids[0] if outcome.pids else None
-    pids_str = ", ".join(str(p) for p in outcome.pids)
+    # A pid the stop identified but could not signal was not stopped, though the lease path counts the
+    # supervisor in ``pids`` (nexus-f3yqd.2.22): it is reported once, below, and never as "stopped".
+    unsignalled = set(outcome.unsignalled)
+    stopped = [p for p in outcome.pids if p not in unsignalled]
+    pid = stopped[0] if stopped else None
+    pids_str = ", ".join(str(p) for p in stopped)
     refused_pids = {r.pid for r in outcome.refused}
 
     # Honest-output contract (nexus-oyo2g): a lease MISS is never proof
@@ -1584,9 +1588,9 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # printed, never just the first (review finding 1) — a partial pid
     # list is a partial truth for a command whose entire point here is
     # honest reporting.
-    if (outcome.refused or outcome.invisible) and not outcome.pids:
-        # Printed below, with the refusal or the invisible-supervisor warning;
-        # "stopped" or "already stopped" would both be false here.
+    if (outcome.refused or outcome.invisible or outcome.unsignalled) and not stopped:
+        # Printed below, with the refusal, the invisible-supervisor warning or the unsignalled-member
+        # failure; "stopped" or "already stopped" would both be false here.
         pass
     elif outcome.source == "none" and outcome.unreadable:
         # nexus-oacd3: a flagless start whose directory could not be read is
@@ -1633,7 +1637,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             else "No storage service lease was found"
         )
         click.echo(
-            f"{lease_clause}, but {len(outcome.pids)} live process(es) "
+            f"{lease_clause}, but {len(stopped)} live process(es) "
             f"were found on the system — signalled pid(s) {pids_str}."
         )
     else:
@@ -1658,10 +1662,10 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     if outcome.unreadable:
         click.echo(
             f"Warning: pid(s) {', '.join(str(p) for p in outcome.unreadable)} "
-            "could not be identified: a bare 'nx daemon service start' whose "
-            "environment could not be read, or the service lease's pid whose "
-            "command line could not be read. It is unknown whether they "
-            "serve this config directory. They were NOT signalled and may "
+            "could not be identified: a bare 'nx daemon service start' or an "
+            "engine whose environment could not be read, or the service lease's "
+            "pid whose command line could not be read. It is unknown whether "
+            "they serve this config directory. They were NOT signalled and may "
             "still be running; stop them by hand if they are this "
             "directory's service.",
             err=True,
@@ -1682,11 +1686,12 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # was never signalled: "survived SIGKILL" would be false for it, and the
     # refusal block below already says what happened (nexus-f9bgu.17 round 2,
     # measured on Windows 11).
-    killed_survivors = [p for p in outcome.stubborn if p not in refused_pids]
+    killed_survivors = [p for p in outcome.stubborn if p not in refused_pids and p not in unsignalled]
     if killed_survivors:
         click.echo(
             f"Warning: pid(s) {', '.join(str(p) for p in killed_survivors)} "
-            "survived SIGKILL and may still be running.",
+            "survived SIGKILL, or could not be signalled at all because "
+            "another user owns them (EPERM), and may still be running.",
             err=True,
         )
 
@@ -1698,10 +1703,13 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
     # means the stop was NOT verified clean, and `start`'s lease-only
     # short-circuit (_start_locked, unchanged by this fix) would happily
     # proceed onto the old process if the shell `&&` sees exit 0 here.
-    # A failed/unverified stop must break that chain. Exiting here (before
-    # any --with-pg Postgres teardown) is deliberate: touching Postgres
-    # while the storage-service state is unverified is itself unsafe, not
-    # just unhelpful.
+    # A stack member that is still running (a survivor, a refusal, an
+    # invisible supervisor, or one another user owns and no signal could
+    # reach) must break that chain. Exiting here (before any --with-pg
+    # Postgres teardown) is deliberate: touching Postgres under a service
+    # that is still running is unsafe, not just unhelpful. A pid the stop
+    # could not IDENTIFY (``unreadable``) is not known to be a member: it
+    # warns above and the stop goes on.
     if outcome.refused:
         # RDR-224 (nexus-f9bgu.17), Sam DECIDED 2026-10-05: a stop from
         # another Windows session cannot attach to the service's console and
@@ -1709,7 +1717,16 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
         # it from; exit non-zero so a `stop && start` chain breaks.
         for line in _refused_stop_lines(outcome.refused):
             click.echo(line, err=True)
-    stubborn_only = [p for p in outcome.stubborn if p not in refused_pids]
+    stubborn_only = [p for p in outcome.stubborn if p not in refused_pids and p not in unsignalled]
+    if outcome.unsignalled:
+        click.echo(
+            f"nx daemon service stop: FAILED — pid(s) "
+            f"{', '.join(str(p) for p in outcome.unsignalled)} were identified as this config "
+            "directory's service but could not be signalled (another user owns them, EPERM), "
+            "and may still be running. Stop them as their owner. Do not run "
+            "'nx daemon service start' until this is resolved.",
+            err=True,
+        )
     if stubborn_only:
         click.echo(
             f"nx daemon service stop: FAILED — pid(s) "
@@ -1718,7 +1735,7 @@ def service_stop_cmd(config_dir_str: str | None, with_pg: bool) -> None:
             "'nx daemon service start' until this is resolved manually.",
             err=True,
         )
-    if stubborn_only or outcome.refused or outcome.invisible:
+    if stubborn_only or outcome.refused or outcome.invisible or outcome.unsignalled:
         sys.exit(1)
     if outcome.source == "process_table_unavailable" and not outcome.pids:
         click.echo(

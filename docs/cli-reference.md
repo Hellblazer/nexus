@@ -135,7 +135,7 @@ This brake is a per-PROCESS coordination mechanism — it cannot see or pace OTH
 
 Two related output lines are new since the RUNFENCE arc (nexus-5xn3k): `skipped: index fresh (use --force)` on `repo`/`pdf`/`md`/`rdr`/`nx dt index` paths where a staleness no-op previously printed nothing or `Indexed 0 chunk(s)`; and an end-of-run `WARNING: N of the M indexed above had completion refused by the engine's fail-closed verify (fence left at 'indexing') — NOT fully indexed. Re-index or --force to retry.` The refusal warning means the manifest write succeeded but the engine's completion-verify step declined to stamp the document complete — `index_state` stays `'indexing'`, the chunks are real (already counted among the files indexed this run) but the document is not fully indexed until a subsequent run — usually `--force` — completes the fence. `nx catalog show TUMBLER_OR_TITLE` (`index_state`) and `nx doctor`'s `stale index-run fences` check (see [nx doctor](#nx-doctor)) both name documents left in this state (`nx catalog manifest-verify`, formerly the other pointer here, is [retired](#nx-catalog-manifest-verify--retired) as of RDR-191 Phase 6). Since 7.22.0 (nexus-l6tr7) a `nx dt index` batch that mixes a flush-grain refusal (counted in `indexed`) with a propagating one (bucketed into `failed`) prints the split instead — `N completion refusal(s) …: K of the M indexed above and J listed under failed` — and a bucket count the run-wide collector cannot account for is reported as recording drift (`complete_refused_count_mismatch`), never clamped; either way the run exits non-zero.
 
-**Superseded-chunk sweep summary (nexus-39upx):** when a re-index changes a document's extracted text, the new chunks land under new content hashes and the old ones fall out of the manifest — searchable T3 rows referenced by nothing until swept. `nx index repo` / `nx dt index` / `nx index pdf` / `nx index md` now report this at end-of-run: `swept N superseded T3 chunk(s) left behind by a changed re-index (nexus-39upx)` is informational (a successful cleanup, not a problem — it does not affect the exit code). `WARNING: superseded-chunk sweep skipped for N document(s) (REASON, ...) — old/superseded T3 rows may still be searchable. Re-index, or run 'nx t3 gc -c COLLECTION' once the underlying issue clears.` means the sweep could not verify orphanhood or note-safety for one or more documents this run (reasons: `before_read_failed`, `note_lookup_failed`, `delete_failed`) — capability-honest, never silent, and counted toward the non-zero exit described next.
+**Superseded-chunk sweep summary (nexus-39upx):** when a re-index changes a document's extracted text, the new chunks land under new content hashes and the old ones fall out of the manifest. An old chunk no other document owns is then out of search and the get/list reads, which require a live owner in the chunk's own collection (RDR-192), but it stays in T3 until swept, and a lookup by chash (a citation, `resolve_chash`/`resolve_span`) still returns its text by default (`resolve_chash` until the reaper's quarantine copy is deleted). `nx index repo` / `nx dt index` / `nx index pdf` / `nx index md` report the sweep at end-of-run: `swept N superseded T3 chunk(s) left behind by a changed re-index (nexus-39upx)` is informational (a successful cleanup, not a problem — it does not affect the exit code). `WARNING: superseded-chunk sweep skipped for N document(s) (REASON, ...): dropped chunks no other document owns are out of search but stay in T3, readable by chash, until the engine reaper collects them (quarantined after a 30-day grace, deleted 14 days later).` means the post-commit sweep did not delete the chunks one or more documents dropped this run. Reasons: `gate_timeout` (a lock wait over 2 s in the sweep's transaction, either the per-collection sweep gate, which concurrent writes and other sweeps on that collection hold, or a row lock; the engine reports both as SQLSTATE 55P03), `statement_timeout`, `sweep_failed`, `before_read_failed`, `note_lookup_failed`, `delete_failed`, `no_catalog`. A dropped chunk another document still owns stays searchable, as it should. The engine reaper finds ownerless chunks from the manifest with no record of the skip, when it is enabled and its checks pass (a refusal is a `gc_audit` row and an engine WARN). No command reclaims them sooner: a re-index does not drop them again, and `nx t3 gc` uses the reaper's grace; when the reaper is disabled or refuses, `nx t3 gc -c COLLECTION` collects them once the grace has passed. The run also logs one `superseded_sweep_skipped` event with the skip count, the distinct document count, the count per reason and the collections, and the line still counts toward the non-zero exit described next.
 
 **Exit code (nexus-tp8yk):** `nx index repo` and `nx dt index` now EXIT NON-ZERO when the run ends with any completion refusal, catalog manifest-write failure, manifest-identity drop, or superseded-chunk sweep skip — the WARNING classes described above. Previously these were WARNING-only (`rc=0`); a script or CI job that gated on the exit code alone could not tell a damaged run from a clean one. The failure message names the remedy (re-index with `--force`; `nx catalog manifest-verify <tumbler>`, formerly also named here, is [retired](#nx-catalog-manifest-verify--retired) as of RDR-191 Phase 6 — use `nx catalog show <tumbler>` instead). This is a NEW exit-code condition on an existing command — a "clean" run that used to exit 0 with WARNING lines now exits non-zero; any automation keying on `nx index repo` / `nx dt index`'s rc should account for this. An UNCONFIRMED completion stamp (a pre-fence engine's `None` sentinel — no verify was possible at all) is a separate case and stays WARNING-only at `rc=0`; only a POSITIVE engine verdict (a refusal) or a write/identity failure triggers the non-zero exit.
 
@@ -838,7 +838,7 @@ Changes only `source_uri`, and only where it is empty, so a second run is a no-o
 
 | Flag | Description |
 |------|-------------|
-| `--collection NAME` | Repair one collection (default: every collection holding aspect rows) |
+| `--collection NAME` | Repair one collection (default: every collection the catalog's live documents live in, read with one distinct-collections call; a collection with no aspect rows plans nothing, so the output is the same) |
 | `--apply` | Perform the repair (default: dry-run report only) |
 | `--json` | Emit JSON instead of the human-readable report |
 
@@ -986,6 +986,8 @@ migration-capable 6.x release.
 
 Document catalog — track indexed documents and the relationships between them.
 
+**Blank filters are refused.** The engine reads a blank or whitespace-only filter value as absent, so a catalog read given one would widen to the whole catalog. The client refuses it before any request and the CLI reports a usage error (exit 2) instead of an empty or full result. This holds across the catalog reads (owner, collection, content type, file path, source URI, link type, link creator and the like). A link-type entry made only of commas and spaces (`","`) names no type and is refused too, and a subtree or descendants prefix must be ASCII digits joined by dots (`1`, `1.2`). An omitted option, or an empty string for an optional filter, still means "no filter".
+
 ### nx catalog setup / init (retired)
 
 ```
@@ -1091,17 +1093,27 @@ nx catalog link FROM TO --type TYPE [--from-span SPAN] [--to-span SPAN]
 
 Create a typed link. Both endpoints accept tumblers or titles. Types: `cites`, `implements`, `implements-heuristic`, `supersedes`, `quotes`, `relates`, `comments`, `formalizes`.
 
-Span formats: `line-line` (positional), `chunk:char-char` (positional), `chash:<sha256hex>` (whole chunk, content-addressed), or `chash:<sha256hex>:<start>-<end>` (character range within a chunk). Content-hash spans survive re-indexing; positional spans may become stale.
+Span formats: `line-line` (positional), `chunk:char-char` (positional), `chash:<sha256hex>` (whole chunk, content-addressed), `chash:<sha256hex>:<start>-<end>` (character range within a chunk), or `dchash:<hash>:<start>-<end>` (character offsets in the document's canonical text; make one with `nx catalog span`). A `dchash` span survives re-chunking of unchanged text, and a `chash` span does not (re-chunking changes the chunk's text and so its hash); positional spans may become stale. A `dchash:` span that does not parse (a hash that is not 64 lowercase hex digits, an offset with a leading zero, or a start that is not below the end) is refused before the link is written, on the CLI, the MCP tool, the batch writer and `nx catalog import`; the import lists each such link under `links refused` and imports the rest.
 
 **Dangling endpoints are refused** (engine >= v0.1.61, nexus-9ssih): if either `FROM` or `TO` does not resolve to a live catalog document, the engine returns `400 {"code": "dangling_endpoint", ...}` and the CLI surfaces a clean `ValueError`-derived message naming both endpoints — no edge is written. Older engines that don't emit this code accept the link silently, same as before. `allow_dangling=True` bypasses the refusal but is **Python-API-only** (`HttpCatalogClient.link(..., allow_dangling=True)`) — the CLI `nx catalog link` command has no `--allow-dangling` flag.
 
 ### nx catalog unlink
 
 ```
-nx catalog unlink FROM TO [--type TYPE]
+nx catalog unlink FROM TO --type TYPE
 ```
 
-Remove link(s). Omit `--type` to remove all link types between the pair.
+Remove the links of one type between the pair. `--type` is required; there is no remove-all-types mode.
+
+### nx catalog span
+
+```
+nx catalog span TUMBLER (--passage TEXT | --start N --end N)
+```
+
+Print a `dchash:<hash>:<start>-<end>` span for a passage of the document's source file, for `nx catalog link --from-span` or `--to-span`. Exactly one mode: `--passage` (recommended) quotes the passage, which must occur exactly once in the document (overlapping matches count, so `aa` in `aaa` is refused); line ends in the quote match LF or CRLF in the file. `--start`/`--end` give half-open offsets instead. Offsets are Unicode code points in the document's canonical text (strict UTF-8, one leading BOM removed, CRLF and lone CR turned into LF), not bytes. `--passage` with offsets, neither mode, or one offset alone is a usage error (exit 2). The span is printed alone on one line.
+
+Refused (exit 1, with the reason): a PDF (content type `paper` or `pdf`, or a `.pdf` suffix on the file path or the source URI path), a document with no file source (an `nx-note://` note, or a source `nx` cannot find), an offset range outside `0 <= start < end <= length`, a passage that is empty, absent or repeated, a source file that is missing or cannot be read, and a source file that is not valid UTF-8. An empty TUMBLER is a usage error (exit 2). The span is checked against the file on disk, so it is only as current as that file.
 
 ### nx catalog link-audit (hidden)
 
@@ -1123,7 +1135,8 @@ nx catalog link-bulk-delete [--from TUMBLER] [--to TUMBLER] [--type TYPE]
 ```
 
 Hidden from `--help` but fully functional. Bulk-remove links matching the
-given filters (all optional; omitting every filter matches every link).
+given filters (all optional; omitting every filter matches every link, but a
+whitespace-only `--type`, `--created-by` or `--created-at-before` is a usage error, exit 2).
 Same double-gate as `nx catalog gc`: report-only by default, and
 `--no-dry-run` alone still only reports — pass `--confirm` alongside it to
 actually delete (nexus-9nim, 4.29.1 inverted the old delete-unless-dry-run
@@ -1412,11 +1425,11 @@ nx catalog list --sensitive [--owner O] [--type T] [-n N] [--offset K] [--json]
 
 RDR-243 (see [Sensitive documents](sensitivity.md)). Sets or clears the document sensitivity flag after the document was written. Setting needs no reason; clearing needs `--reason`, and every change writes a row (old, new, reason, actor, time) to the engine's `catalog_sensitivity_changes` table. There is no CLI view of that table yet, and no MCP tool clears the flag.
 
-`TUMBLER` is a dotted tumbler (never a title) and excludes the other options. `--collection C` takes every document in that physical collection. `--path GLOB` is an `fnmatch` pattern on the document's file path (`*` crosses `/`); the engine has no glob, so it reads the catalog, and `--collection` or `--owner` narrows that read first. `--owner` is accepted only with `--path`.
+`TUMBLER` is a dotted tumbler (never a title) and excludes the other options. `--collection C` takes every document in that physical collection. `--path GLOB` is an `fnmatch` pattern on the document's file path (`*` crosses `/`); the engine has no glob, so it reads the catalog, and `--collection` or `--owner` narrows that read first. `--owner` is accepted only with `--path`. A whitespace-only `--collection` is a usage error (exit 2, `--collection is blank; name a physical collection.`), because the engine would read it as no filter and list the tenant.
 
 The verb refuses, before it resolves a target or calls the engine, when the engine does not advertise `catalog_sensitivity_supported` (an engine without the column would drop the flag without an error). A target that matches nothing is an error. A large target is sent in batches of 500; a failure part-way names how many documents changed, and re-running the same command finishes the rest.
 
-`nx catalog list --sensitive` keeps only flagged documents. It scans the catalog like `--meta` does, and `-n`/`--offset` page the matches.
+`nx catalog list --sensitive` keeps only flagged documents, and `-n`/`--offset` page the matches. Without `--owner` it reads the engine's sensitive list (`GET /v1/catalog/sensitive`, engine-service 0.1.188 or later), in tumbler order, and resolves the tumblers it needs: with no `--type` or `--meta`, only the first `--offset` + `-n` tumblers are asked for and only the page is resolved, so a first page works on a tenant of any size (the route's count is exact and gives the "Next page" line); with `--type` or `--meta` every listed tumbler is resolved and the page is cut from the matches. It never scans the catalog instead, and it exits non-zero, with a message, in each of these cases: the engine does not advertise the route or answers 404 (`needs an engine with the sensitive list route (engine-service 0.1.188 or later)`); the `GET /version` probe failed, so no capability could be read (`the engine's capabilities could not be read; try again`); the route answers 503 (`the engine could not answer in time`, which also suggests `--owner`); the route fails another way or cannot be reached (`the engine could not be reached or failed`); the answer is not the route's shape (`the engine's sensitive list answer could not be read`); and the list is capped (the tenant has more than 10000 sensitive documents) while the command needs more than its first 10000, that is a `--type` or `--meta` listing or a page reaching past the first 10000 (the message names `--owner` as the way to narrow). With `--owner` it reads that owner's documents and keeps the flagged ones, as before.
 
 ### nx catalog link-generate
 
@@ -1589,6 +1602,8 @@ Repair catalog entries whose `file_path` is a bare basename or points at a file 
 - `--rdr-prefix-mode` adds a fallback for RDRs renamed end-to-end: when basename match fails, match by the durable `rdr-NNN-` prefix instead.
 - `--mark-missing` sets `meta.status='missing'` on entries with no candidate, so `nx catalog gc` can sweep them.
 
+A whitespace-only `--collection` is a usage error (exit 2, `--collection is blank; name a physical collection.`); an omitted one means no collection filter.
+
 Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are resolved. Empty-`file_path` entries (MCP-stored knowledge with no source file) are never touched.
 
 ### nx catalog prune-stale
@@ -1598,6 +1613,8 @@ nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [
 ```
 
 Drop catalog entries whose `file_path` is missing on disk. This is the supported stale-content sweep: `nx t3 prune-stale` was retired in 7.0.0 (nexus-bm8dd), and this verb followed by `nx t3 gc` replaces it. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. **Not reversible in-product** (the pre-delete snapshots died with the local catalog, 7.0.0/nexus-i711w).
+
+A whitespace-only `--collection` is a usage error (exit 2, `--collection is blank; name a physical collection.`).
 
 Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default; `--no-rdr-prefix-skip` disables it), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
@@ -1868,12 +1885,12 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--store-put-integrity`: store_put-origin integrity (nexus-b6enc, GH #1419 Issue 8) — for `content_type='knowledge'` documents with no `file_path`: FAIL on `chunk_count` != manifest-row count (drift) and on ghosts (catalog row with zero manifest rows AND zero T3 chunks), reporting title + tumbler so the content can be re-created while it is still remembered.
 - `--link-coverage` (7.16.4, nexus-glivh): per-content-type link coverage. FAILs only on a content type holding at least 10 documents with ZERO links — which means no generator has ever run for that type, not that its documents are unrelated. Percentages are reported and never flagged: a measured full generator pass over this corpus yields 133 links, so a low percentage is the natural ceiling of filepath extraction and no available remedy moves it. Index-time generation only links NEWLY registered tumblers, so a corpus can sit permanently unlinked with every other check green. Remediate with `nx catalog generate-links --dry-run` first.
 - `--visible-outside-manifest` (nexus-wbfpw.26, RDR-192 Step 14): a canary for a live(c) regression. Under live(c) a chunk with no manifest row in its own collection is hidden from search and get. For each `knowledge__` collection the check takes the manifest-less census's `superseded` bucket (chunks whose owning note is live and whose manifest names a different chash) and asks the normal `get` reader, never the stored-row one (no `include_non_live`), whether each is visible. A visible chunk is a finding naming the collection, the note's tumbler and title, and the chash, and fails the check (exit 1); the census and the probe are separate reads, so re-run to confirm a finding. A healthy engine finds none; a finding means live(c), or a predicate that drifted from it, stopped hiding the chunk. A split note legitimately has several live chunks, so the check does not count chunks per title; it flags only chunks the census classes as superseded. It probes `get` only, not search: a search probe needs the superseded chunk's text, and the engine never returns text for a stored row that live(c) hides. It reads at most 300 per call, probes each census page as it lands, probes at most 5,000 chunks and checks a 120-second budget between calls (one call can run to the 120-second HTTP timeout, so a run can take about 240 seconds), and prints `checked N of M` so a clean result says what it covered. A run cut short by either budget says so and still passes if it probed something and found nothing visible; a run cut short before it probed anything reads **INCONCLUSIVE** and exits 1. When the superseded bucket is empty in every collection (the steady state once the reaper has drained it) it reads **nothing to probe** (exit 0, no PASS word, `vacuous: true` in `--json`): that run could not have detected a regression. It reads **not applicable** (exit 0, no PASS line) on a box with no `knowledge__` collection and against an engine without the census route. Needs an engine that carries `POST /v1/vectors/manifest-less-census`.
-- `--sensitive-in-aspect-eligible` (RDR-243, nexus-rfvyy.6.17): WARN for each sensitive document whose collection has an aspect extractor (`select_config`, which includes an opted-in `docs__` collection) or already holds aspect rows. Does not change the exit status. Reads **not applicable**, never a pass, on a tenant with no sensitive documents, on an engine without `catalog_sensitivity_supported`, and when the catalog or the aspect store cannot be read.
-- `--sensitive-with-aspects` (RDR-243, nexus-rfvyy.6.17): FAIL (exit 1) for each sensitive document that already has an aspect row or a queued aspect task in either side of the queue, with `nx enrich delete --tumbler <t>` printed per document. Same not-applicable rule. Both rows read the catalog's documents once to find the sensitive ones.
-- `--sensitive-in-external-embedder` (RDR-243, nexus-rfvyy.8.7): WARN for each sensitive document in a collection embedded by an external service: a Voyage model token, or a legacy name that carries none. A collection whose name carries a local model token (`bge-base-en-v15-768`, `minilm-l6-v2-384`) is not flagged. Does not change the exit status. Same not-applicable rule as the two rows above.
+- `--sensitive-in-aspect-eligible` (RDR-243, nexus-rfvyy.6.17): WARN for each sensitive document whose collection has an aspect extractor (`select_config`, which includes an opted-in `docs__` collection) or already holds aspect rows. Does not change the exit status. Reads the engine's bounded sensitive list (`GET /v1/catalog/sensitive`, engine-service 0.1.188) and never the catalog's documents. Reads **not applicable**, never a pass, on a tenant with no sensitive documents. Reads **not checked: ...** (with the cause and what to do) when the list is unavailable, capped above 10,000 documents, the engine does not advertise `catalog_sensitivity_supported`, or the catalog or the aspect store cannot be read.
+- `--sensitive-with-aspects` (RDR-243, nexus-rfvyy.6.17): FAIL (exit 1) for each sensitive document that already has an aspect row or a queued aspect task in either side of the queue, with `nx enrich delete --tumbler <t>` printed per document. Same not-applicable and not-checked rules; the row reads the same bounded list, never the catalog's documents. A row that reads **not checked** exits **3**, "could not check", so a gate that could not run is not a pass; a fail still exits 1 and wins over 3. Over 10,000 sensitive documents this gate exits 3 until the list can be paged (RDR-241 Phase 2). See [Sensitivity, Doctor rows](sensitivity.md#doctor-rows).
+- `--sensitive-in-external-embedder` (RDR-243, nexus-rfvyy.8.7): WARN for each sensitive document in a collection embedded by an external service: a Voyage model token, or a legacy name that carries none. A collection whose name carries a local model token (`bge-base-en-v15-768`, `minilm-l6-v2-384`) is not flagged. Does not change the exit status. Same not-applicable and not-checked rules as the two rows above.
 - `--sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7): prints the posture the MCP tools apply for `sensitivity.mcp_output` (`withhold`, the default, or `flag`), read through the tools' own reader: the global `config.yml` only, never a repo's `.nexus.yml`. WARN when it is `flag` (sensitive content reaches the session model with a badge), when the value is not one of the two (the tools withhold, and the row says so), or when the file cannot be read (the tools withhold). A config row, so it never reads not applicable. Does not change the exit status.
 
-Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
+Returns 1 on any check failure, and 3 when `--sensitive-with-aspects` could not check (a failure wins over 3). `--json` emits the per-check result for CI consumption.
 
 ### nx catalog verify
 
@@ -2245,7 +2262,7 @@ nx t3 retire-keys --add-check [--replace] --apply [--max-rps R] [--json]
 nx t3 retire-keys --validate --apply [--max-rps R] [--json]
 ```
 
-The sweep vehicle of RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): the operator's way into the engine's `POST /v1/admin/chunk-keys/sweep`, `/add-constraints` and `/validate-constraints`. Nothing calls those routes on its own; the upgrade-ladder rung that would run the sweep on every install is a later bead that ships after a cloud dry run has been read. The allowed keys, the bypass prefixes and the quarantine implication are rendered from the key table (`src/nexus/tables/chunk-metadata-keys.toml`) into every request, because the engine cannot name the ROW keys; the engine pins what it receives (the ROW keys by a digest generated from the table, the bypass set exactly the quarantine and taxonomy prefixes, the implication pair) and answers 400 to a plan that differs, since a dropped key would be stripped from every row and an extra prefix would exempt a collection from the CHECK for good.
+The sweep vehicle of RDR-236 Phase 4 Step 3 (bead nexus-6pfgb.43): the operator's way into the engine's `POST /v1/admin/chunk-keys/sweep`, `/add-constraints` and `/validate-constraints`. `nx upgrade` runs the same sweep as the `retire-keys-sweep` rung (the last of the five; see [migration-runbook](migration-runbook.md#the-retire-keys-sweep-rung)): `nx upgrade --auto` runs it on a local engine, which is an unattended write; it defers and writes nothing while a precondition stands. The rung never accepts a residue, so `--accept`, `--add-check` and `--validate` stay operator-only. The allowed keys, the bypass prefixes and the quarantine implication are rendered from the key table (`src/nexus/tables/chunk-metadata-keys.toml`) into every request, because the engine cannot name the ROW keys; the engine pins what it receives (the ROW keys by a digest generated from the table, the bypass set exactly the quarantine and taxonomy prefixes, the implication pair) and answers 400 to a plan that differs, since a dropped key would be stripped from every row and an extra prefix would exempt a collection from the CHECK for good.
 
 Order, per install: dry run for each tenant, `--apply` for each tenant, then `--add-check --apply` once, then `--validate --apply` once.
 
@@ -2985,7 +3002,7 @@ ever — not unlimited.
 
 ## nx ci
 
-CI results read from the CI board, without polling GitHub.
+CI results: develop and main from the CI board, any other branch from GitHub's check-runs.
 
 ### nx ci wait
 
@@ -3006,9 +3023,20 @@ The board wake is best effort: a run set the adapter could not fold posts no row
 | 2 | no row for the sha before `--timeout`, and GitHub does not show every run finished |
 | 3 | runs were cancelled or stale and none failed |
 | 4 | a conclusion could not be read, is one this table does not know, or disagrees with the board's outcome; or the board row was capped (its `n` counts more runs than it lists, none listed failed) and GitHub's runs for the sha are not exactly the missing ones |
-| 5 | the wait could not run: not a sha, no tuple store, a refused board read, or the engine unreachable until the deadline |
+| 5 | the wait could not run: not a sha, no tuple store, a refused board read, or the engine unreachable until the deadline, or a `--gh-repo` that is not `OWNER/NAME` (checked before either mode) |
 
 Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as for every `nx` command.
+
+**GitHub-only mode.** The board has CI topics for `develop` and `main` only. For any other `--branch` (a release or feature branch, whose CI runs on `pull_request` events the board never sees), or when the engine refuses the topic as unknown, the board is skipped and the wait reads the sha's check-runs from GitHub (`gh api repos/<gh-repo>/commits/<sha>/check-runs --paginate`, all events, the latest run of each check). Reads are about 60 seconds apart and never closer, so a wait is a request a minute, plus one read at the deadline's edge; a read that would fall after `--timeout` is skipped. A finished set that includes a failure is reported at once. Any other finished set is reported only when two consecutive reads list the same completed check-runs, so a workflow that registers within one read interval is not missed; the cost is one extra read, 60 seconds. A sha with no check-runs yet waits. When a watched branch falls back, the time already spent on the board counts against `--timeout`. The result line ends `(GitHub only: the board was not used for <branch>)` and names the check-runs that did not pass. `--fresh` is ignored. `--gh-repo` must be `OWNER/NAME` (default `Hellblazer/<repo>`).
+
+| Exit (GitHub-only) | Meaning |
+|---|---|
+| 0 | every check-run completed as success, neutral or skipped, on two consecutive reads |
+| 1 | a check-run failed (`failure`, `timed_out`, `startup_failure`, `action_required`) |
+| 2 | `--timeout` passed with check-runs still running, unconfirmed, or none listed |
+| 3 | check-runs were cancelled or stale and none failed |
+| 4 | a conclusion is missing or one this table does not know |
+| 5 | GitHub could not be read: at once for `gh` missing, HTTP 401, 404 or 422 or a login prompt; after 3 consecutive failed reads with the same error; or at the deadline when no read worked. The line names the last error. Also a `--gh-repo` that is not `OWNER/NAME` |
 
 ## nx collection
 
@@ -3772,11 +3800,14 @@ nexus-rfvyy.6.17) are the same two rows `nx catalog doctor
 --sensitive-in-aspect-eligible` and `--sensitive-with-aspects` print: a sensitive document
 whose collection has an aspect extractor or already holds aspect rows (warn), and a sensitive
 document that already has an aspect row or a queued aspect task (fail; one `nx enrich delete
---tumbler <t>` line each). Both read `[ ]` not applicable, never a pass, on a tenant with no
-sensitive documents, on an engine without the sensitivity column, and when the catalog or the
-aspect store cannot be read. The warn row prints and never changes the exit code; a `sensitive-with-aspects`
+--tumbler <t>` line each). Both read the engine's bounded sensitive list
+(`GET /v1/catalog/sensitive`), never the catalog's documents. Both read `[ ]` not applicable, never a pass, on a tenant
+with no sensitive documents, and `[ ] not checked: <cause>` when the list is unavailable or capped above 10,000
+documents, the engine lacks the sensitivity column, or the catalog or the aspect store cannot be read. A "not checked" row
+never fails `nx doctor`. The warn row prints and never changes the exit code; a `sensitive-with-aspects`
 fail is the one supplementary finding that gates: `nx doctor` (text mode) exits 1 on it, as
-`nx catalog doctor --sensitive-with-aspects` does.
+`nx catalog doctor --sensitive-with-aspects` does. That dedicated command also exits 3 when its row reads "not checked";
+`nx doctor` does not. See [Sensitivity, Doctor rows](sensitivity.md#doctor-rows).
 `sensitive-in-external-embedder` and `sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7) are the rows `nx catalog
 doctor --sensitive-in-external-embedder` and `--sensitivity-mcp-output` print; both warn and neither gates.
 `ghost-sweep` (nexus-29drn) reports the
@@ -4116,6 +4147,10 @@ the `--check-*` modes. `--verbose` here is the `nx doctor` flag, not the global 
 engine's view has `expired`, and when its reads have failed since it started and none has succeeded (`ever_read`, `consecutive_failures`).
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
+
+**Data moves (RDR-246, nexus-f3yqd.2.17).** The engine's move worker reports each open or failed data move (a row move registered in `nexus.data_moves`) as a `data-move:<label>` entry of the `boot_work` list in the same `GET /v1/status` body, and `nx doctor` turns the entries into rows. `Data move <label>` is red for a `blocked:` move (the engine retries it by itself) and for a `failed:` one (not retried; the failure text is in `nexus.data_moves.failure` and the engine log). It is a warning for a `stalled:` move, a CALL with no chunk done for `NX_DATA_MOVE_STALL_MINUTES` (default 15; a slow chunk looks the same), and a note, never red, for a `paused:` one (the fix line gives the `UPDATE` that resumes it). A move that is working, queued or complete has no row of its own. `Data move worker` is red when the engine reports that its move worker is not running (every registered move then waits), and `Data move reporting` is red when the worker runs but nothing reports its moves (a green summary would hide a blocked or failed one). `Data moves` is the summary row, always green: it counts the open or failed moves by state, or says "no data move is open or failed". The status carries only the move's label, a class and an SQLSTATE, so each row's hint says where the full text is. Not applicable (green) when the engine cannot be reached or predates `boot_work`. The state table, with what each state means and what to do, is in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
+
+**Recall canary (nexus-4lnn1.1.10, RDR-230 Technical Design 7).** `nx doctor`'s "Recall canary" row reads `per_collection_indexes.this_engine.maintenance.canary` from the same `GET /v1/status` body: the counts of this engine's per-collection (`pci_`) indexes whose recall canary reads green, red or unmeasured, and when the canary last ran. The route is unauthenticated, so it carries counts only. The row warns when any index reads red and points to the operator-only `GET /v1/admin/chunks-leaves`, whose `canary_indexes` entry names each red index with its `min_recall`, `trigger` and `red_after_reindex`; the engine log's `event=pci_canary` lines name them too. This row never calls that route. With no red it shows the counts. The counts are this engine's own history: a standby keeps the counts from when it held the builder lock, and the row says so. An engine without the `maintenance` or `canary` key reads not applicable, and a value the row cannot read says "could not read" rather than passing.
 
 **Reranker (nexus-yuh4a, RDR-210 P3.1).** `nx doctor`'s "Reranker" row reads `reranker_available` from the same `GET /v1/status`
 body. `reranker` names the reranker the profile chose even when the cross-encoder's model files are absent, so the name does not say
@@ -4576,6 +4611,8 @@ indexing auto-starts, when `mineru.pid` names one (what `nx mineru stop` and
 `nx uninstall` key on), and prints `MinerU server stopped (PID n)`. A
 `mineru-api` you started without nexus has no pid file and is left alone, and a
 `--config-dir` other than the default never reaches the default dir's MinerU.
+
+A process the stop identified as this directory's service (an explicit `--config-dir` supervisor, the engine, or a start whose own environment names this directory) but could not signal, because another user owns it (EPERM on both signals), is reported separately from one that survived a kill: `stop` prints `FAILED`, names the pids, says to stop them as their owner and not to run `start` until then, and exits 1. That exit comes before PostgreSQL, so `--with-pg` leaves the cluster running. The sweep signals only what it can place in this directory: a process that merely names the engine jar (as another command's `--jar` option value) is not a JVM running it, and a wrapper such as `sudo`, `ssh` or `lab-run` that carries the supervisor's command line is not the supervisor, so neither is signalled.
 
 On Windows (RDR-224), `stop` sends the supervisor CTRL_BREAK and waits;
 a supervisor that does not exit in time is ended through its Job Object, which
@@ -5219,8 +5256,10 @@ The single trigger for the upgrade ladder ([RDR-185](rdr/rdr-185-single-ladder-c
 Upgrading nexus is: update the code ([`nx self install`](#nx-self-install)), then run `nx upgrade`. That single trigger
 converges everything else — it brings the package, engine, and process
 preconditions current, then walks one ordered ladder that auto-applies whichever
-data migrations your install actually needs (the pre-RDR-108 chunk-identity
-rekey is the standing rung; RDR-155 P4b retired the T2-schema and
+data migrations your install actually needs (the ladder holds five rungs:
+`rdr192-manifest-backfill`, `note-tags-array`, `manifest-section-labels`,
+`manifest-span-fill` and `retire-keys-sweep`, each described in the
+[migration runbook](migration-runbook.md#the-normal-path). RDR-155 P4b retired the T2-schema and
 Chroma→pgvector substrate rungs together with the migration machinery — a
 pre-PG install is redirected to the pinned last migration-capable release by
 the stranded-install detector), each rung detecting, converging, and verifying
@@ -5241,7 +5280,7 @@ nx upgrade --yes                  # Unattended: pre-approve a billed re-embed (=
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`. Nothing is written; a rung's `detect()` may READ the completion ledger (`rdr192-manifest-backfill` does, and takes no census), so an unreachable engine reports the rung pending with the reason. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
-| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)) |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)). On a local engine it can write unattended: the `retire-keys-sweep` rung runs at every session start until the install is swept, and defers, writing nothing, when a precondition stands in its way |
 | `--skip-t3` | Skips the precondition stage's engine install and process cycle (verdicts are still reported), the storage-service restart, the PDF stack carry-forward, the installer rebuild and the collection-name check. The old service keeps running until you run a plain `nx upgrade`. The data steps still run |
 | `--yes` | Pre-approve a billed re-embedding of your collections, for an unattended run (same as `NX_ASSUME_YES=1`). Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic. Nothing in `nx upgrade` asks for this today, so the flag currently changes nothing |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
@@ -6561,7 +6600,8 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   library_check, builtins_checked, undeclared_builtins, undeclared_builtin_names, branches,
   excluded_total, excluded_plan_ids, returned, selected, fallback_reason, enforced_reasons,
   enforced_excluded_total, refused_recorded_kinds}`. `refused_recorded_kinds` maps each kind a
-  grown plan recorded to the number of its `grown_route_not_lookup` and `grown_route_not_discovery` exclusions, counted like
+  grown plan recorded to the number of its `grown_route_not_lookup`, `grown_route_not_discovery` and
+  `grown_route_untrusted_label` exclusions, counted like
   `excluded` (one plan found by two branches counts twice); `{}` when there were none.
   `request_kind` and `kind_decision` are those of `request_coverage`. `branches` has
   `cosine`, `category_route` (the below-floor category route) and `fts` (the FTS5
@@ -6577,7 +6617,10 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   recorded kind never widens eligibility but does narrow it, nexus-indyo), `grown_route_not_discovery`
   (a discovery/listing request refusing a grown plan that recorded another kind, nexus-a4g2a),
   `grown_route_unrecorded` (a lookup or discovery/listing request refusing a grown plan that recorded no kind;
-  a curated claim without the builtin tag is refused there under `untrusted_curated_claim`, nexus-a4g2a), `unattested_plan`
+  a curated claim without the builtin tag is refused there under `untrusted_curated_claim`, nexus-a4g2a),
+  `grown_route_untrusted_label` (a lookup or discovery/listing request refusing a grown plan that recorded the
+  request's own kind: that kind is the growing request's label, not a check of the plan's steps, so a grown plan
+  on an untrusted route serves no request kind until a reviewed decision names its route, nexus-a4g2a), `unattested_plan`
   (a lookup or discovery/listing request refusing a plan that declares no answer kind, such as a
   user-saved one; the other request kinds refuse it under their own reasons, nexus-rflvp),
   `saved_unknown_plan` (a saved plan of unknown kind serves no request), `saved_other_project` (a saved
@@ -6848,7 +6891,7 @@ is the run's coverage object, below (`coverage`, nexus-jypmj.3.6); the same obje
   `out_of_scope` (the record lies outside the caller's scope), `held` (the input already holds that joined text, or an earlier anchor with the same text made that join in this run) or
   `self` (the anchor is the resolved record itself, which joins nothing)), `tokens_dropped` (the keys the item cap
   kept from being resolved) and `anchor_key_ids` (every distinct key the anchors named, less a key only its own record
-  names) and `joined_keys` (the distinct keys of the joined items that were merged). Each of these seven lists holds at most 50 entries and `<list>_truncated` counts the rest. A record is cut at
+  names) and `joined_keys` (the distinct keys of the joined items that were merged). Each of these seven lists holds at most 50 entries and `<list>_truncated` counts the rest. With `NX_ANSWER_POOL_KEY_SCAN` on (off by default; RDR-250, nexus-io7tw) `repair` also adds `pool_scanned` (the search step's chunks the generator does not read, fetched), `pool_candidate_keys` (keys found only there), `pool_keys_kept` and `pool_keys_rejected` (the candidates the precision filter did and did not keep; a closed filter rejects all), `pool_filter_calls` (calls started, including ones cut or failed), `pool_filter_cost_usd` (their summed cost, or null when unknown) and `pool_need_s` and `pool_room_s` (when the pool was skipped for time or budget: the seconds one assessment call needs, and the seconds the filter had; null otherwise) and `pool_reason` (`cap_full`, `no_search_step`, `no_fetch`, `fetch_failed`, `no_facets`, `resolution_failed`, `filter_skipped_budget`, `filter_skipped_deadline`, `filter_timeout`, `filter_failed`, `filter_empty_reply` (every filter call that did not complete replied with no evidence record; such a reply is a failed call, not a reject), `filter_partial_failure`, `filter_unread`, `pool_resolve_failed` or `pool_error`; empty when the scan ran through), `pool_filter_empty_calls` (filter calls that replied with no evidence record) and `pool_filter_log` (one entry per filter call, cut at 20 with `pool_filter_log_truncated`: call number, `payload_sha256` of the items and instruction sent, reply length and sha256 over the model's evidence records, input and output tokens, cache token counts and model as the runner recorded them (null when none), the `supports` item and facet ids the assessment would accept, `unmatched` and `host_rejected` counts, `outcome` (`supports`, `no_support`, `empty`, `all_rejected`, `malformed`, `raised` or `timeout`) and `error` for a raised or timed-out call; no chunk text; the run summary keeps per-call scalars only); the three key lists are cut at 50 with `<list>_truncated`, and with the switch off none of these appear. A record is cut at
   its first 3 chunks, and the cut is named in `detail`. Every answer from a run that merged a joined item opens with
   `[exact-key join: <n> record(s) joined by exact key (<keys>)]` (`<n>` is the distinct records, ahead of the
   insufficient-evidence notice on a partial answer). When the final ledger covers no facet (`unavailable` /

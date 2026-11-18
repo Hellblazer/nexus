@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-7fku2.1.2 (RDR-134 Step 2), develop CI red on ea8a47528: taxonomy_coverage_counts_384/768/1024 from
+    one set-based aggregation instead of a chunk_live_owners probe per chunk.
+    WHY. taxonomy-022 tested liveness with EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection,
+    c.chash)) per chunk. The function's arguments are outer references, so the planner keeps it a correlated SubPlan,
+    and the index that SubPlan uses depends only on whether nexus.catalog_document_chunks has statistics. With none
+    (a fresh install, a restore or a tenant import, between the first large ingest and the first autoanalyze) it
+    takes idx_catalog_chunks_collection and filters on chash, so it reads the collection's whole manifest once per
+    chunk: about 2.5 billion row visits at 50k chunks, past the 30 s taxonomy statement bound. With statistics it
+    takes idx_catalog_chunks_chash and the count takes about 0.3 s. This is the move vectors-032 (nexus-mz9jv) made
+    for collection_vector_stats.
+    SHAPE. One UNION ALL of three scans over the collection (its chunks at the dimension, its live manifest rows, its
+    assignments to its own topics), grouped by (tenant_id, chash), then two FILTERed counts. The only joins are to
+    catalog_documents and topics on their primary keys and no per-row probe remains: measured 149 to 211 ms at 50k
+    chunks (one document, one topic) in all 16 combinations of analyzed and unanalyzed chunks leaf, manifest,
+    documents and assignments with topics. Same counts as taxonomy-022: chunks is
+    unique on (tenant_id, collection, chash), so one group per chash is one chunk; a collection with no centroids
+    reads (false, 0, 0) without scanning.
+    A NEW CHANGESET, not an edit of taxonomy-022: taxonomy-022 is on origin/develop, and a database that applied it
+    would fail checksum validation. CREATE OR REPLACE FUNCTION keeps the signature, owner and the EXECUTE grants
+    taxonomy-022 set. 3 DDL statements (3 CREATE OR REPLACE FUNCTION). The rollback restores taxonomy-022's bodies.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-023-1" author="nexus-7fku2.1.2">
+        <comment>nexus-7fku2.1.2: taxonomy_coverage_counts_384/768/1024 count by one set-based aggregation (UNION ALL of the collection's chunks, live manifest rows and own-topic assignments, grouped by chash) instead of a chunk_live_owners probe per chunk, so the count no longer goes quadratic when the manifest has no planner statistics. Same signature, grants and counts. No data effect: function definitions only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_coverage_counts_384(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+        ) AS v
+    ),
+    keyed AS (
+        -- the collection's chunks at this dimension
+        SELECT c.tenant_id, c.chash, 1 AS is_chunk, 0 AS is_owned, 0 AS is_assigned
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_384 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+        UNION ALL
+        -- chunk_live_owners' predicate (vectors-018), read once for the collection: a manifest row whose document
+        -- is not tombstoned
+        SELECT m.tenant_id, m.chash, 0, 1, 0
+          FROM nexus.catalog_document_chunks m
+          JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE m.collection = p_collection
+           AND d.deleted_at IS NULL
+           AND (SELECT v FROM has_tax)
+        UNION ALL
+        -- an assignment to a topic of this collection (projection rows onto other collections' topics do not count)
+        SELECT ta.tenant_id, ta.doc_id, 0, 0, 1
+          FROM nexus.topic_assignments ta
+          JOIN nexus.topics t ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+         WHERE t.collection = p_collection
+           AND (SELECT v FROM has_tax)
+    ),
+    per_chash AS (
+        SELECT max(is_chunk) = 1 AS is_chunk, max(is_owned) = 1 AS is_owned, max(is_assigned) = 1 AS is_assigned
+          FROM keyed
+         GROUP BY tenant_id, chash
+    )
+    SELECT (SELECT v FROM has_tax),
+           count(*) FILTER (WHERE is_chunk AND is_owned),
+           count(*) FILTER (WHERE is_chunk AND is_owned AND NOT is_assigned)
+      FROM per_chash
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_coverage_counts_768(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+        ) AS v
+    ),
+    keyed AS (
+        -- the collection's chunks at this dimension
+        SELECT c.tenant_id, c.chash, 1 AS is_chunk, 0 AS is_owned, 0 AS is_assigned
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_768 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+        UNION ALL
+        -- chunk_live_owners' predicate (vectors-018), read once for the collection: a manifest row whose document
+        -- is not tombstoned
+        SELECT m.tenant_id, m.chash, 0, 1, 0
+          FROM nexus.catalog_document_chunks m
+          JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE m.collection = p_collection
+           AND d.deleted_at IS NULL
+           AND (SELECT v FROM has_tax)
+        UNION ALL
+        -- an assignment to a topic of this collection (projection rows onto other collections' topics do not count)
+        SELECT ta.tenant_id, ta.doc_id, 0, 0, 1
+          FROM nexus.topic_assignments ta
+          JOIN nexus.topics t ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+         WHERE t.collection = p_collection
+           AND (SELECT v FROM has_tax)
+    ),
+    per_chash AS (
+        SELECT max(is_chunk) = 1 AS is_chunk, max(is_owned) = 1 AS is_owned, max(is_assigned) = 1 AS is_assigned
+          FROM keyed
+         GROUP BY tenant_id, chash
+    )
+    SELECT (SELECT v FROM has_tax),
+           count(*) FILTER (WHERE is_chunk AND is_owned),
+           count(*) FILTER (WHERE is_chunk AND is_owned AND NOT is_assigned)
+      FROM per_chash
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_coverage_counts_1024(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+        ) AS v
+    ),
+    keyed AS (
+        -- the collection's chunks at this dimension
+        SELECT c.tenant_id, c.chash, 1 AS is_chunk, 0 AS is_owned, 0 AS is_assigned
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_1024 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+        UNION ALL
+        -- chunk_live_owners' predicate (vectors-018), read once for the collection: a manifest row whose document
+        -- is not tombstoned
+        SELECT m.tenant_id, m.chash, 0, 1, 0
+          FROM nexus.catalog_document_chunks m
+          JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE m.collection = p_collection
+           AND d.deleted_at IS NULL
+           AND (SELECT v FROM has_tax)
+        UNION ALL
+        -- an assignment to a topic of this collection (projection rows onto other collections' topics do not count)
+        SELECT ta.tenant_id, ta.doc_id, 0, 0, 1
+          FROM nexus.topic_assignments ta
+          JOIN nexus.topics t ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+         WHERE t.collection = p_collection
+           AND (SELECT v FROM has_tax)
+    ),
+    per_chash AS (
+        SELECT max(is_chunk) = 1 AS is_chunk, max(is_owned) = 1 AS is_owned, max(is_assigned) = 1 AS is_assigned
+          FROM keyed
+         GROUP BY tenant_id, chash
+    )
+    SELECT (SELECT v FROM has_tax),
+           count(*) FILTER (WHERE is_chunk AND is_owned),
+           count(*) FILTER (WHERE is_chunk AND is_owned AND NOT is_assigned)
+      FROM per_chash
+$function$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.taxonomy_coverage_counts_384(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_384 IS NOT NULL
+        ) AS v
+    ),
+    live AS MATERIALIZED (
+        SELECT c.tenant_id, c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_384 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+    ),
+    total AS (
+        SELECT count(*) AS n FROM live
+    ),
+    unassigned_live AS (
+        SELECT count(*) AS n
+          FROM live l
+         WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM nexus.topic_assignments ta
+                     JOIN nexus.topics t
+                       ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                    WHERE ta.tenant_id = l.tenant_id
+                      AND ta.doc_id = l.chash
+                      AND t.collection = p_collection)
+    )
+    SELECT (SELECT v FROM has_tax),
+           (SELECT n FROM total),
+           (SELECT n FROM unassigned_live)
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_coverage_counts_768(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_768 IS NOT NULL
+        ) AS v
+    ),
+    live AS MATERIALIZED (
+        SELECT c.tenant_id, c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_768 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+    ),
+    total AS (
+        SELECT count(*) AS n FROM live
+    ),
+    unassigned_live AS (
+        SELECT count(*) AS n
+          FROM live l
+         WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM nexus.topic_assignments ta
+                     JOIN nexus.topics t
+                       ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                    WHERE ta.tenant_id = l.tenant_id
+                      AND ta.doc_id = l.chash
+                      AND t.collection = p_collection)
+    )
+    SELECT (SELECT v FROM has_tax),
+           (SELECT n FROM total),
+           (SELECT n FROM unassigned_live)
+$function$;
+
+CREATE OR REPLACE FUNCTION nexus.taxonomy_coverage_counts_1024(p_collection text)
+ RETURNS TABLE(has_taxonomy boolean, chunks bigint, unassigned bigint)
+ LANGUAGE sql
+ STABLE
+AS $function$
+    WITH has_tax AS (
+        SELECT EXISTS (
+            SELECT 1 FROM nexus.taxonomy_centroids ct
+             WHERE ct.collection = p_collection
+               AND ct.embedding_1024 IS NOT NULL
+        ) AS v
+    ),
+    live AS MATERIALIZED (
+        SELECT c.tenant_id, c.chash
+          FROM nexus.chunks c
+         WHERE c.collection = p_collection
+           AND c.embedding_1024 IS NOT NULL
+           AND (SELECT v FROM has_tax)
+           AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))
+    ),
+    total AS (
+        SELECT count(*) AS n FROM live
+    ),
+    unassigned_live AS (
+        SELECT count(*) AS n
+          FROM live l
+         WHERE NOT EXISTS (
+                   SELECT 1
+                     FROM nexus.topic_assignments ta
+                     JOIN nexus.topics t
+                       ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id
+                    WHERE ta.tenant_id = l.tenant_id
+                      AND ta.doc_id = l.chash
+                      AND t.collection = p_collection)
+    )
+    SELECT (SELECT v FROM has_tax),
+           (SELECT n FROM total),
+           (SELECT n FROM unassigned_live)
+$function$;
+]]></sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

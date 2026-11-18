@@ -620,6 +620,8 @@ BASE = {
     "create-release": "success", "build-publish": "success", "build-publish-pg-bundle": "success",
     # nexus-9q6ox: the mac-arm64 smoke is its own job (hellmini) and promotion requires it.
     "smoke-mac-arm64": "success",
+    # nexus-f3yqd.2.22: the native data-move boot (both linux legs) is its own job and promotion requires it.
+    "smoke-native-data-move": "success",
 }
 
 
@@ -631,6 +633,7 @@ def test_promotion_with_the_switch_off_is_what_it_was_before_the_windows_legs_ex
     assert _promotes("", **{**BASE, "build-publish-pg-bundle": "failure"}, **skipped) is False
     for bad in ("failure", "skipped", "cancelled"):
         assert _promotes("", **{**BASE, "smoke-mac-arm64": bad}, **skipped) is False, bad
+        assert _promotes("", **{**BASE, "smoke-native-data-move": bad}, **skipped) is False, bad
 
 
 def test_promotion_with_the_switch_on_needs_both_windows_legs() -> None:

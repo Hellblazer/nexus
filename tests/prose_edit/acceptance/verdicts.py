@@ -9,7 +9,7 @@ run-canaries.sh also work-dirs-before.txt and work-dirs-after.txt. A run's kind 
 without a trailing -N. Exit 1 when any run fails; exit 3 when none failed but a run was
 NOT-MEASURABLE or VACUOUS (it proves nothing, so it is never a pass) or a scenario was NOT-RUN (a runner skipped it on
 purpose and wrote "NAME: reason" to not-run.txt, as run-scenario.sh does for a path run with no MarkupEditor harness;
-it has no transcript); 0 only when every run passed.
+it has no transcript) or a stand-in batch would exit 0; 0 only when every run passed in the app.
 
 The kinds that edit a document (xanadu, linda, refrain, qa, qb, qc, protected, budget, range, compression) are scored on
 the post-filter proposal: the last `brief.py filter` output in the transcript, which is what the author sees.
@@ -232,6 +232,30 @@ COMPRESSION_DENSE: tuple[str, tuple[str, ...]] = (
 _FUNCTION_WORDS = frozenset((
     "a an the of for to in on at by with from into after before when while that which who where is are was were be been "
     "it its each every per as and or than then has have had so because if this these those their they does do").split())
+
+
+STANDIN_HEADER = ("app: STAND-IN (the MarkupEditor tools were answered by markup_standin.py from recorded replies and a script of "
+                  "the author's decisions, not by the app: a harness measurement, not a run in the app)")
+
+
+def standin_run(out_dir: Path) -> bool:
+    """Whether any session of the run in OUT_DIR ran against the stand-in MarkupEditor server: a NAME.app file that
+    says `standin`, or any NAME.mcp.json. run-scenario.sh writes the config before the session starts and only for a
+    stand-in session, while record-run.sh writes NAME.app last, after four steps that can each end it, so a run whose
+    record step failed still reads as a stand-in run."""
+    return (any(p.read_text(encoding="utf-8").strip() == "standin" for p in out_dir.glob("*.app"))
+            or any(out_dir.glob("*.mcp.json")))
+
+
+def standin_exit(code: int, standin: bool) -> int:
+    """A stand-in batch that would exit 0 exits 3, the code for "not a clean real pass" that NOT-RUN and NOT-MEASURABLE
+    already use: an all-PASS stand-in batch must not read as a real-app pass to a caller that only looks at the status."""
+    return 3 if standin and code == 0 else code
+
+
+def tag_standin(verdict: str, standin: bool) -> str:
+    """A PASS in a stand-in run says so. Other verdicts are already not a pass."""
+    return f"{verdict} (stand-in)" if standin and verdict == "PASS" else verdict
 
 
 def load_events(path: Path) -> list[Obj]:
@@ -550,15 +574,15 @@ def _norm(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def _on_card(card: str, markers: tuple[str, ...]) -> bool:
-    return any(_norm(m) in _norm(card) for m in markers)
+def _on_card(voice: str, markers: tuple[str, ...]) -> bool:
+    return any(_norm(m) in _norm(voice) for m in markers)
 
 
 def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: list[Obj],
-                     card: str = "") -> tuple[list[str], str | None, str]:
+                     voice: str = "") -> tuple[list[str], str | None, str]:
     """(what touches a device, a reason the device lists cannot be applied to this document or None, a note on the
     card-conditional devices). The always-protected devices are scored whatever the card says; a card-conditional
-    one only when `card` (the editor's reply voice_card) names it."""
+    one only when `voice` (the editor's reply voice card) names it."""
     spans: dict[str, tuple[int, int]] = {}
     conditional = CARD_DEVICES.get(kind, ())
     for phrase in (*DEVICES.get(kind, ()), *(p for p, _ in conditional)):
@@ -566,7 +590,7 @@ def _device_problems(kind: str, doc_text: str, edits: list[Obj], paragraphs: lis
         if len(found) != 1:
             return [], f"the device {phrase[:50]!r} is in the document {len(found)} times; the list no longer matches it", ""
         spans[phrase] = found[0]
-    scored = [p for p, markers in conditional if _on_card(card, markers)]
+    scored = [p for p, markers in conditional if _on_card(voice, markers)]
     for phrase, _ in conditional:
         if phrase not in scored:
             del spans[phrase]  # not on the card: the editor may restructure it
@@ -692,7 +716,7 @@ def _unpacks(prefix: str, old: str, new: str) -> bool:
 
 
 def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
-                        card: str) -> tuple[str | None, list[str], str]:
+                        voice: str) -> tuple[str | None, list[str], str]:
     """(a reason the oracle tables no longer fit the document or None, what fails the run, the note) for a compression
     run. Hits and decoys are read from the post-filter edits and queries by plain span arithmetic on the document."""
     table: list[tuple[str, str, tuple[int, int]]] = []
@@ -705,7 +729,7 @@ def _compression_scored(doc_text: str, edits: list[Obj], queries: list[Obj],
         table.append((label, text, found[0]))
     seeded_at = {e[0]: table[i][2] for i, e in enumerate(COMPRESSION_SEEDED)}
     scored = table[len(COMPRESSION_SEEDED):]
-    dense_named = _on_card(card, COMPRESSION_DENSE[1])
+    dense_named = _on_card(voice, COMPRESSION_DENSE[1])
     applicable = _unique_edits(doc_text, edits)
     problems: list[str] = []
     for e in edits:
@@ -789,11 +813,11 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
         return NOT_MEASURABLE, f"edits {stale} are not in the document: it is not the one the run edited"
     reply_edits = [e for e in reply.get("edits") or [] if isinstance(e, dict)]
     extra = ""
-    card_note = ""
+    voice_note = ""
     problems += _nonunique_problems(doc_text, edits)
     if kind == "compression":
-        card = str(reply.get("voice_card") or proposal.get("voice_card") or "")
-        stale_table, found_c, card_note = _compression_scored(doc_text, edits, queries, card)
+        voice = str(reply.get("voice_card") or proposal.get("voice_card") or "")
+        stale_table, found_c, voice_note = _compression_scored(doc_text, edits, queries, voice)
         if stale_table:
             return NOT_MEASURABLE, stale_table
         problems += found_c
@@ -831,17 +855,17 @@ def doc_verdict(kind: str, events: list[Obj], c: Obj, doc_text: str | None) -> t
     if filler and not any(_cuts(e, filler) for e in edits):
         problems.append(f"the filler word {filler!r} was not cut (a filler word is cut, not queried or left)")
     if kind in DEVICE_KINDS:
-        card = str(reply.get("voice_card") or proposal.get("voice_card") or "")
-        found, stale_list, card_note = _device_problems(kind, doc_text, edits, paragraphs, card)
+        voice = str(reply.get("voice_card") or proposal.get("voice_card") or "")
+        found, stale_list, voice_note = _device_problems(kind, doc_text, edits, paragraphs, voice)
         if stale_list:
             return NOT_MEASURABLE, stale_list
         problems += found
     if problems:
-        return FAIL, "; ".join(problems) + f"; {drops}" + (f"; {card_note}" if card_note else "")
+        return FAIL, "; ".join(problems) + f"; {drops}" + (f"; {voice_note}" if voice_note else "")
     note = (f"{len(edits)} edits, {len(queries)} queries, {len(paragraphs)} paragraph proposals after the filter; "
             f"{drops}{extra}")
-    if card_note:
-        note += f"; {card_note}"
+    if voice_note:
+        note += f"; {voice_note}"
     if kind in ("xanadu", "linda"):
         note += f"; semicolon queries: {_semicolon_queries(queries)} (the document holds {doc_text.count(';')} ';')"
     if kind in EDITS_EXPECTED and not edits:
@@ -1216,6 +1240,9 @@ def main(argv: list[str]) -> int:
     fails = 0
     unmeasured = 0
     totals: Counter[str] = Counter()
+    standin = standin_run(out_dir)
+    if standin:
+        sys.stdout.write(STANDIN_HEADER + "\n")
     for rc in sorted(out_dir.glob("*.rc")):
         name = rc.stem
         kind = re.sub(r"-[0-9]+$", "", name)
@@ -1235,7 +1262,7 @@ def main(argv: list[str]) -> int:
         counts = {k: (len(val) if isinstance(val, list) else val) for k, val in c.items()}
         for k, val in counts.items():
             totals[k] += int(val)
-        sys.stdout.write(f"{name:14} {v:5} {note} | {json.dumps(counts)}\n")
+        sys.stdout.write(f"{name:14} {tag_standin(v, standin):5} {note} | {json.dumps(counts)}\n")
     skipped = not_run_rows(out_dir)
     for name, reason in skipped:
         sys.stdout.write(f"{name:14} {NOT_RUN:5} {reason}\n")
@@ -1246,7 +1273,7 @@ def main(argv: list[str]) -> int:
     models = sorted({m.read_text(encoding="utf-8").strip() for m in out_dir.glob("*.model")} - {""})
     if models:  # the session model each run recorded (the orchestrator's; the editor's is the agent file's)
         sys.stdout.write(f"MODELS {' '.join(models)}\n")
-    return 1 if fails else (3 if unmeasured or skipped else 0)
+    return standin_exit(1 if fails else (3 if unmeasured or skipped else 0), standin)
 
 
 if __name__ == "__main__":

@@ -1273,10 +1273,25 @@ class TestLexicalLeg:
         _search(engine, cols)
         assert "lexical" not in engine.route_calls()[0]
 
-    def test_a_lexical_search_does_not_send_the_field_unless_opted_in(self, monkeypatch):
-        """nexus-n51v1: the route's lexical arms cost the engine one ~280 ms statement per
-        collection, so --lexical keeps the batched /hybrid-search leg by default."""
+    def test_a_lexical_search_sends_the_field_by_default(self, monkeypatch):
+        """nexus-bbtc2 (Sam, 2026-11-16): with the engine's shared probe (v0.1.192 and up, the
+        pinned engine is past it) the route's lexical field beats the batched /hybrid-search leg
+        on the measured queries, so a --lexical search on the route sends it with no env set."""
         monkeypatch.delenv(hvc.ROUTE_LEXICAL_ENV, raising=False)
+        cols = _cols("code", _BGE, 2)
+        engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
+        engine.serve_lexical = True
+        engine.lexical_rows = [{"id": "lex-only", "content": "t", "distance": 0.8, "collection": cols[1]}]
+        results = _search(engine, cols, lexical=True)
+        assert engine.route_calls()[0]["lexical"] is True
+        assert engine.paths() == [_ROUTE], "the arms rode the route, no /hybrid-search leg"
+        assert "lex-only" in [r.id for r in results]
+
+    @pytest.mark.parametrize("value", ["0", "false", "FALSE", " Off ", "no", "No"])
+    def test_a_lexical_search_keeps_the_hybrid_leg_when_the_field_is_turned_off(self, monkeypatch, value):
+        """nexus-n51v1's behaviour, now behind the explicit off: the field is not sent and the
+        leg runs on /hybrid-search."""
+        monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, value)
         cols = _cols("code", _BGE, 2)
         engine = _FakeEngine(monkeypatch, {c: _rows(c[-6:], 3, 0.1) for c in cols})
         engine.serve_lexical = True
@@ -1289,11 +1304,17 @@ class TestLexicalLeg:
     @pytest.mark.parametrize(
         ("value", "on"),
         [("1", True), ("true", True), (" TRUE ", True), ("on", True), ("yes", True),
-         ("", False), ("0", False), ("off", False), ("2", False)],
+         ("", True), ("2", True), ("anything", True),
+         ("0", False), ("false", False), ("FALSE", False), ("off", False), (" Off ", False),
+         ("no", False), ("NO", False)],
     )
-    def test_the_opt_in_reads_only_the_documented_values(self, monkeypatch, value, on):
+    def test_the_flag_is_on_unless_one_of_the_documented_off_values(self, monkeypatch, value, on):
         monkeypatch.setenv(hvc.ROUTE_LEXICAL_ENV, value)
         assert hvc.route_lexical_enabled() is on
+
+    def test_the_flag_is_on_when_unset(self, monkeypatch):
+        monkeypatch.delenv(hvc.ROUTE_LEXICAL_ENV, raising=False)
+        assert hvc.route_lexical_enabled() is True
 
 
 # ── nexus-079ly: raw and dropped are the engine's facts, kept is explicit ────

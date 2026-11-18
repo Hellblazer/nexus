@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import math
 import re
+import time
+from typing import NoReturn
 
 import click
 
 from nexus import ci_wait
 
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
+_GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
+#: The clock the unknown-subspace fallback measures the board wait with (a seam for tests).
+_now = time.monotonic
 
 
 def _store():
@@ -19,21 +24,25 @@ def _store():
 
 @click.group(name="ci")
 def ci_group() -> None:
-    """CI results read from the CI board, without polling GitHub."""
+    """CI results: develop and main from the CI board, any other branch from GitHub's check-runs."""
 
 
 @ci_group.command(name="wait")
 @click.argument("sha")
 @click.option("--timeout", "timeout_min", type=click.FloatRange(min=0, max=24 * 60), default=60.0,
-              show_default=True, help="Minutes to wait for the sha's --done row (at most a day).")
+              show_default=True, help="Minutes to wait for the sha's --done row, or, in GitHub-only mode, for its "
+                   "check-runs to complete (at most a day).")
 @click.option("--fresh", is_flag=True,
               help="Count only a row that arrives after the wait starts: for a wait on a rerun, "
-                   "while the earlier attempt's row is still on the topic.")
+                   "while the earlier attempt's row is still on the topic. Ignored in GitHub-only mode.")
 @click.option("--repo", default="nexus", show_default=True, help="Repository part of the board topic.")
-@click.option("--branch", default="develop", show_default=True, help="Branch part of the board topic.")
+@click.option("--branch", default="develop", show_default=True,
+              help="Branch part of the board topic. Only develop and main have one; any other branch "
+                   "(a release or feature branch) is waited on through GitHub's check-runs, not the board.")
 @click.option("--gh-repo", default=None,
               help="owner/name for the GitHub reads (a row with no conclusions, a row capped by the "
-                   "board's size limit, and the one read at the deadline) [default: Hellblazer/<repo>].")
+                   "board's size limit, the one read at the deadline, and every read in GitHub-only mode) "
+                   "[default: Hellblazer/<repo>].")
 @click.option("--park-s", type=click.IntRange(1, ci_wait.PARK_CAP_S), default=ci_wait.PARK_CAP_S,
               hidden=True, help="Seconds per park (tests).")
 def ci_wait_cmd(
@@ -59,6 +68,26 @@ def ci_wait_cmd(
     and 5 when the wait could not run (a bad SHA, no tuple store, a refused
     board read, or the board unreachable until the deadline).
     Click's own usage errors (a missing SHA, --timeout out of range) exit 2.
+
+    GitHub-only mode: the board has topics for develop and main only. For any
+    other --branch (a release or feature branch), or when the engine refuses
+    the topic as unknown, the board is skipped and the wait reads SHA's
+    check-runs from GitHub (all events, so a pull_request's CI counts), never
+    sooner than 60 seconds after the previous read, until every check-run has
+    completed or --timeout passes. A finished set that includes a failure is
+    reported at once; any other is reported only when two consecutive reads
+    (60 s apart) list the same completed check-runs, so a workflow that
+    registers within one read interval is not missed. The timeout counts from the start of the
+    command, a board wait that fell back included. The result line says
+    "GitHub only: the board was not used". Exit codes are the same: 0 all
+    passed, 1 any failed, 3 cancelled and none failed, 4 a conclusion this
+    table does not know, 2 timeout (check-runs still running or unconfirmed,
+    or none yet). Exit 5 when GitHub cannot be read: at once for gh missing,
+    HTTP 401, 404 or 422 or a login prompt, after 3 consecutive failed reads
+    with the same error, or at the deadline when no read ever worked; the
+    line names the last error. --fresh has no meaning without the board and is
+    ignored; SHA may be a prefix, which GitHub resolves; --gh-repo must be
+    OWNER/NAME (anything else exits 5).
     """
     if not math.isfinite(timeout_min):
         click.echo(f"{sha} unusable: --timeout must be a number of minutes")
@@ -68,16 +97,24 @@ def ci_wait_cmd(
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
     sha = sha.lower()
     gh = gh_repo or f"Hellblazer/{repo}"
+    if not _GH_REPO.fullmatch(gh) or any(set(part) <= {"."} for part in gh.split("/")):
+        click.echo(f"{sha[:12]} unusable: the GitHub repository must be OWNER/NAME, got {gh!r}")
+        raise SystemExit(ci_wait.EXIT_UNUSABLE)
+    if branch not in ci_wait.BOARD_BRANCHES:
+        _github_only(sha, gh, branch, timeout_min * 60)
     subspace = ci_wait.done_subspace(repo, branch)
     try:
         store = _store()
     except Exception as exc:  # noqa: BLE001 — no store, no wait: say so, never exit 1 ("a run failed")
         click.echo(f"{sha[:12]} unusable: no tuple store: {type(exc).__name__}: {exc}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE) from None
+    started = _now()
     try:
         row = ci_wait.find_done_row(
             store, subspace, sha, timeout_s=timeout_min * 60, fresh=fresh, park_s=park_s,
         )
+    except ci_wait.BoardSubspaceUnknownError:
+        _github_only(sha, gh, branch, max(0.0, timeout_min * 60 - (_now() - started)))
     except ci_wait.BoardUnreadableError as exc:
         click.echo(f"{sha[:12]} unusable: {subspace} could not be read: {exc}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE) from None
@@ -91,6 +128,13 @@ def ci_wait_cmd(
         click.echo(line)
         raise SystemExit(code)
     line, code = ci_wait.summarize(ci_wait.complete_runs(ci_wait.fill_conclusions(row, gh), gh, branch))
+    click.echo(line)
+    raise SystemExit(code)
+
+
+def _github_only(sha: str, gh_repo: str, branch: str, timeout_s: float) -> NoReturn:
+    """Wait on GitHub's check-runs alone, print the one line and exit."""
+    line, code = ci_wait.wait_on_github(gh_repo, sha, branch, timeout_s=timeout_s)
     click.echo(line)
     raise SystemExit(code)
 

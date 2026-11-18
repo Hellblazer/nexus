@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from nexus.catalog.catalog_protocol import CatalogReader
+from nexus.catalog.dchash import check_link_span
 
 # ── Dry-run preview (nexus-glivh) ────────────────────────────────────────────
 #
@@ -62,6 +63,9 @@ class DryRunLinkWriter:
         self, from_t: object, to_t: object, link_type: str,
         created_by: str = "", **_meta: object,
     ) -> bool:
+        # RDR-171: the client refuses a malformed dchash span, so the preview must not call it "would link".
+        check_link_span(str(_meta.get("from_span") or ""))
+        check_link_span(str(_meta.get("to_span") or ""))
         key = (str(from_t), str(to_t), str(link_type))
         # Dedupe within the run as well as against the catalog: a generator
         # that proposes the same edge twice must not be counted twice, or the
@@ -92,6 +96,9 @@ class DryRunLinkWriter:
         resolve and the links that exist, an UPPER BOUND, and ``path_edges`` says how many of the
         proposals are such.
         """
+        for edge in edges:  # RDR-171: every edge, before any is proposed, as the client refuses them
+            check_link_span(str(edge.get("from_span") or ""))
+            check_link_span(str(edge.get("to_span") or ""))
         resolved = self._resolve_paths(edges)
         targets = resolved or {}
 
