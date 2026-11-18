@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -176,8 +177,10 @@ DEFAULT_MAX_THOUGHT_HISTORY: int = 1000
 
 
 def max_thought_history(environ: dict[str, str] | None = None) -> int:
+    # ASCII digits only and at most 15 of them, as upstream's /^\d+$/ plus its safe-integer check: str.isdigit
+    # accepts "²", which int() refuses, and a crash here would end the server at start.
     raw = (os.environ if environ is None else environ).get("MAX_THOUGHT_HISTORY", "").strip()
-    return int(raw) if raw.isdigit() and int(raw) >= 1 else DEFAULT_MAX_THOUGHT_HISTORY
+    return int(raw) if re.fullmatch(r"[0-9]{1,15}", raw) and int(raw) >= 1 else DEFAULT_MAX_THOUGHT_HISTORY
 
 
 class SequentialThinking:
