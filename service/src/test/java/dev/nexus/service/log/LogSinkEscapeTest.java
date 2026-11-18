@@ -80,7 +80,7 @@ class LogSinkEscapeTest {
     private static void assertOnePhysicalLine(String rendered) {
         assertThat(rendered).endsWith("\n");
         assertThat(rendered.substring(0, rendered.length() - 1)).as("no line break inside the line").doesNotContain("\n", "\r",
-            "\u0085", " ", " ");
+            "\u0085", "\u2028", "\u2029");
     }
 
     // ── the two paths: the encoder logback.xml builds, and the one LogMasking swaps in ──
@@ -125,7 +125,7 @@ class LogSinkEscapeTest {
         bothPaths(r -> {
             var cause = new IllegalArgumentException("cause\n" + FORGED_LINE);
             var top = new IllegalStateException("top\r\n" + FORGED_LINE, cause);
-            top.addSuppressed(new RuntimeException("supp " + FORGED_LINE));
+            top.addSuppressed(new RuntimeException("supp\u2028" + FORGED_LINE));
             String out = r.render(event("dev.nexus.service.db.SchemaMigrator", Level.ERROR, "event=boom", top));
 
             List<String> lines = out.lines().toList();
@@ -175,7 +175,7 @@ class LogSinkEscapeTest {
     @Test
     void carriageReturnNextLineAndLineSeparatorAreEachEscapedInAMessage() {
         bothPaths(r -> {
-            String out = r.render(event("t.X", Level.INFO, "a\rb\u0085c d e", null));
+            String out = r.render(event("t.X", Level.INFO, "a\rb\u0085c\u2028d\u2029e", null));
             assertOnePhysicalLine(out);
             assertThat(out).contains("a\\x0db\\x85c\\u2028d\\u2029e");
         });

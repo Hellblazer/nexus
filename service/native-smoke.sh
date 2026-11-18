@@ -303,8 +303,13 @@ fi
 
 # nexus-dngtz.1.11: the log sink in the NATIVE image. The sink escapes control characters through three converters logback
 # makes by name from logback.xml (%msgSafe, %exSafe, %threadSafe); the native build lists them by hand in reflect-config.json
-# and initializes them at build time, so a missing entry shows up here as a %PARSER_ERROR in every line, or as a raw
-# newline from a client path. HttpExchange's decoded path carries a real newline, so a %0A in the path is the probe.
+# and initializes them at build time, so a missing entry shows up here as a %PARSER_ERROR in every line. Two probes:
+#  1. a %0A in the request path: AuthFilter's request_failed line escapes the path at the call site (LogText.escapeControl),
+#     so this proves that call-site escape survives natively. It does NOT prove the sink: with the sink removed it still passes.
+#  2. a "\n" in a collection name sent to /v1/vectors/search: the engine's unregistered-collection warning prints that name
+#     RAW (no call-site escape, PgVectorRepository search_skipped and HttpUtil's unregistered-collection line), so only the
+#     sink turns the newline into \x0a. This is the probe that fails when %msgSafe is %msg. It is a 422 on a collection that
+#     does not exist: no row is read or written.
 echo "log sink escapes (nexus-dngtz.1.11):"
 code=$(curl -s -o "$SMOKE_TMP/sink1.out" -w '%{http_code}' -H 'Authorization: Bearer not-the-token' \
   "$U/v1/_whoami%0Aforged-sink-probe=1")
@@ -314,7 +319,7 @@ if sink_line=$(_log_line 'forged-sink-probe' 'event=request_failed'); then
   forged_n=$(grep -c -E -- '^forged-sink-probe=1' "$SMOKE_TMP/svc.log" || true)
   probe_n=$(grep -c -E -- 'event=request_failed.*forged-sink-probe' "$SMOKE_TMP/svc.log" || true)
   if [ "$code" = "401" ] && [[ $sink_line =~ $sink_re ]] && [ "$forged_n" = "0" ] && [ "$probe_n" = "1" ]; then
-    echo "  ok   a %0A in the request path is one escaped svc.log line: $sink_line"
+    echo "  ok   a %0A in the request path is one escaped svc.log line (the call-site escape): $sink_line"
   else
     echo "  FAIL %0A in the request path: status $code (want 401), $probe_n request_failed line(s) (want 1) matching" \
       "path=/v1/_whoami\\x0aforged-sink-probe=1, $forged_n line(s) starting with forged-sink-probe=1 (want 0):"
@@ -323,6 +328,25 @@ if sink_line=$(_log_line 'forged-sink-probe' 'event=request_failed'); then
 else
   echo "  FAIL svc.log has no event=request_failed line for the %0A path probe (status $code):"
   tail -20 "$SMOKE_TMP/svc.log"; fail=1
+fi
+# Probe 2: a value no call site escapes. The newline is a JSON "\n" in the collection name, so the handler holds a real
+# newline and the logger prints it raw; the escaped \x0a form on the log line is the sink's work. The "forged-sink-raw-probe"
+# token is hyphenated on purpose (not an event name: a log-event rot lint would flag a snake_case one).
+raw_code=$(curl -s -o "$SMOKE_TMP/sink2.out" -w '%{http_code}' "${A[@]}" "${J[@]}" -X POST \
+  -d '{"collections":["x\nforged-sink-raw-probe=1"],"query":"q","limit":1}' "$U/v1/vectors/search")
+if raw_line=$(_log_line 'WARN' 'collection=x\\x0aforged-sink-raw-probe=1$'); then
+  raw_forged=$(grep -c -E -- '^forged-sink-raw-probe=1' "$SMOKE_TMP/svc.log" || true)
+  raw_n=$(grep -c -F -- 'collection=x\x0aforged-sink-raw-probe=1' "$SMOKE_TMP/svc.log" || true)
+  if [ "$raw_code" = "422" ] && [ "$raw_forged" = "0" ] && [ "$raw_n" = "1" ]; then
+    echo "  ok   a newline in a collection name no call site escapes is one escaped svc.log line (the sink): $raw_line"
+  else
+    echo "  FAIL newline in an unregistered collection name: status $raw_code (want 422), $raw_n line(s) with" \
+      "collection=x\\x0aforged-sink-raw-probe=1 (want 1), $raw_forged line(s) starting with forged-sink-raw-probe=1 (want 0):"
+    grep -m 4 'forged-sink-raw-probe' "$SMOKE_TMP/svc.log" || true; fail=1
+  fi
+else
+  echo "  FAIL svc.log has no WARN line ending collection=x\\x0aforged-sink-raw-probe=1 (status $raw_code); the sink did not escape the newline:"
+  grep -m 4 'forged-sink-raw-probe' "$SMOKE_TMP/svc.log" || tail -20 "$SMOKE_TMP/svc.log"; fail=1
 fi
 # The installers that make the escape reach Liquibase and the JDK log (java.util.logging) say so when they cannot, and the
 # pattern says so ("%PARSER_ERROR") when a converter was not found: none of them may be in this run's log.

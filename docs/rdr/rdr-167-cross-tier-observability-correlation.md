@@ -19,7 +19,9 @@ related: [RDR-030, RDR-087, RDR-152, RDR-155, RDR-161, RDR-166, RDR-168, RDR-222
 
 > Narrowed on 2026-11-16 per Sam's draft triage. This RDR now covers one thing: a
 > correlation id that a client mints and the engine writes on every log line it
-> emits for that request. The readiness gap shipped by other work and is struck.
+> emits for that request. Since 2026-11-18 it also records the log sink escape (nexus-dngtz.1.11), which
+> keeps a client value from starting a log line and which the readers' anchoring depends on.
+> The readiness gap shipped by other work and is struck.
 > The JSON appender is kept as an optional later phase. Every statement about
 > current code was re-read from the working tree at develop `2e09b8cfc` and cites
 > `file:line`; the research records are `nexus_rdr/167-research-1` to `-9`.
@@ -71,7 +73,7 @@ publishes it in a `ThreadLocal` (set at `service/src/main/java/dev/nexus/service
 cleared in the `finally` at `:218-219`; `RequestContext.java:67-73`). As found, before
 Phase 1, nothing in `service/src/main` called SLF4J's `MDC` (the per-thread key/value
 map Logback can print on every line), and the log pattern had no MDC field (it was at
-`service/src/main/resources/logback.xml:8`, and is at `:9` now). So a log line carries a tenant only
+`service/src/main/resources/logback.xml:8`, and is at `:17` now). So a log line carries a tenant only
 when a call site wrote `tenant={}` into the message by hand, which many do and some
 do not (`CatalogHandler.java:593` logs the field and value but no tenant). A
 correlation id from Gap 1 is useless unless it lands on every engine line.
@@ -86,8 +88,8 @@ no longer belongs to this RDR (`nexus_rdr/167-research-6`):
   `SELECT 1` probe that answers 503 on failure (`NexusService.java:714`,
   `HealthHandler.java:32-58`).
 - The process does not bind its HTTP port until Liquibase has migrated the schema
-  (`Main.java:245-248`) and the local bge-768 model is loaded (`Main.java:450`
-  precedes `new NexusService` at `:574` and `service.start()` at `:582`). A process
+  (`Main.java:285`) and the local bge-768 model is loaded (`Main.java:488`
+  precedes `new NexusService` at `:612` and `service.start()` at `:620`). A process
   that answers at all is migrated and has its local embedder.
 - The supervisor tracks boot with a migration-aware state machine
   (`src/nexus/daemon/readiness.py:1-30`; nexus-8vp0i), and `/v1/status` reports boot
@@ -101,7 +103,7 @@ probe". Step 5 (nexus-dngtz.1.12) corrected it to say that `/health` is readines
 
 #### Gap 4: Java logs are plain text on a synchronous appender (DEFERRED: optional later phase)
 
-Logback writes plain text to stdout (`logback.xml:3-11`). For a managed deployment a
+Logback writes plain text to stdout (`logback.xml:11-19`). For a managed deployment a
 log aggregator would prefer JSON with MDC fields as keys. This is kept, but only as
 Phase 3, tied to the managed deployment, because the local case does not need it
 and Gaps 1 and 2 are useful without it.
@@ -128,7 +130,7 @@ at a time, against the design below (`nexus_rdr/167-research-9`):
   `project` on `/v1/plans/get` (commit `3da30e2af`: "The Java plan handler rejected a
   blank `project` query param as 'missing required query param'"). Today the
   engine's handler for that 400 logs at DEBUG (`PlanHandler.java:97-98`), below the
-  root level INFO (`logback.xml:13`), so no line existed. The failure line added in
+  root level INFO (`logback.xml:21`), so no line existed. The failure line added in
   Phase 1 (see Technical Design) would carry the id and tie it to the client's line.
 - **The chash-backfill AttributeError: not joined.** `1db06147c`: "In service mode t3
   is an HttpVectorClient (no _client), so the loop raised AttributeError". That is a
@@ -165,10 +167,21 @@ created; it does not reopen the local design.
   `TenantImportWiring.java:34-35`).
 - **Managed deployment:** conexus engine and controlplane images; log shipping today
   is the container log driver only.
-- **Log consumers that parse engine output** (a pattern change must not break them):
-  the supervisor recognises engine log lines by a leading date, time and level
-  (`src/nexus/daemon/storage_service_daemon.py:986-987`) and finds migration
-  markers by `event=...` inside the message (`src/nexus/daemon/readiness.py:105-106`).
+- **Log consumers that parse engine output** (a pattern change must not break them).
+  The log sink is the last step that turns a log event into text, just before the bytes
+  are written; the sink change below (nexus-dngtz.1.11) works there. The supervisor
+  recognises an engine log line by a leading date, time and level
+  (`src/nexus/daemon/storage_service_daemon.py:1005-1006`). It finds a schema-migration
+  marker (`event=schema_migration_start`, `_pending`, `_complete`, `_failed`) only as the
+  first token of the message, meaning the text after the pattern's `] - ` up to the
+  first space, and only on a line from the logger that emits it:
+  `dev.nexus.service.db.SchemaMigrator` for start, pending and complete, and
+  `dev.nexus.service.Main` at ERROR for failed (`src/nexus/daemon/readiness.py:122-169`;
+  `Main.java:290`). Liquibase's own lines are not logback lines. "Running Changeset:" is bare
+  text on its UI channel, and the changelog-lock wait is a `java.util.logging` (JUL) record whose
+  second line reads `INFO: Waiting for changelog lock`; each counts only at the start of a line.
+  A reason shown to the user is cut at the first literal `\x0a` or `\x0d`
+  (`_reason_text`, `storage_service_daemon.py:1035`).
 
 ## Research Findings
 
@@ -184,7 +197,7 @@ source reads of the working tree.
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| Logback `logback-classic` 1.5.18 | Yes | `%X{key:-default}` is a constructor reference, `DEFAULT_CONVERTER_SUPPLIER_MAP.put("X", MDCConverter::new)` (`PatternLayout.java:107`), so it needs no native-image reflection entry; a run rendered `- - hi` with no MDC and `abc - hi` with the key set. `JsonEncoder` ships in logback-classic with an MDC block (`JsonEncoder.java:65,117,174-175`), so the JSON phase needs no `logstash-logback-encoder`. Those were JVM runs and source reads. No native binary has printed the pattern yet: `service/native-smoke.sh` now checks it (nexus-dngtz.1.9), and its first native run is the engine-service 0.1.195 release smoke on its linux and mac legs (Sam's ruling, 2026-11-17), so until then the native result is pending. |
+| Logback `logback-classic` 1.5.18 | Yes | `%X{key:-default}` is a constructor reference, `DEFAULT_CONVERTER_SUPPLIER_MAP.put("X", MDCConverter::new)` (`PatternLayout.java:107`), so it needs no native-image reflection entry; a run rendered `- - hi` with no MDC and `abc - hi` with the key set. `JsonEncoder` ships in logback-classic with an MDC block (`JsonEncoder.java:65,117,174-175`), so the JSON phase needs no `logstash-logback-encoder`. Those were JVM runs and source reads. The sink's three converters are different: `%msgSafe`, `%exSafe` and `%threadSafe` are our classes, named in `logback.xml` and made by Logback through reflection, so each needs a `reflect-config.json` entry and is initialized at image build time (Technical Design, Log sink). No native binary has printed the pattern or run those converters yet: `service/native-smoke.sh` now checks both (nexus-dngtz.1.9 and nexus-dngtz.1.11), and its first native run is the engine-service 0.1.195 release smoke on its linux and mac legs (Sam's ruling, 2026-11-17), so until then the native result is pending. |
 | SLF4J `MDC` (`LogbackMDCAdapter`) | Yes, and spiked | `ThreadLocal`-backed; correct under the engine's server shape (research-1). Not inherited by child threads. |
 | `structlog.contextvars` | Yes, and spiked | `bind_contextvars` plus `merge_contextvars` stamps every line; an event's own keyword overrides a bound value (research-5). Not used in the shipped design: one `ContextVar` and a structlog processor that reads it (see Technical Design). |
 | `anyio` / `asyncio` thread hops | Spiked; live MCP server path run in nexus-dngtz.1.11 | `anyio.to_thread.run_sync`, `asyncio.to_thread` and `copy_context().run` carry the context; a bare `ThreadPoolExecutor.submit` does not (research-4). |
@@ -313,9 +326,11 @@ optional and later.
    write one `request_failed` line (WARN; a sent 404 with nothing thrown at INFO) for every response of an authenticated route with status 400 or above,
    for a request that sent no response, and for a request whose chain threw.
    Add the three keys to the log pattern. Echo the id in the response so a caller that sent none can still
-   learn the id the engine made.
+   learn the id the engine made. Escape control characters at the log sink so no value a client chose can
+   start a log line of its own (nexus-dngtz.1.11, see Log sink).
 3. **Optional, Phase 3: JSON logs (Gap 4).** Switch the managed image to
-   `JsonEncoder` behind a toggle. Taken up only with the managed deployment.
+   `JsonEncoder` behind a toggle. Taken up only with the managed deployment, and it must keep
+   what the sink change gave the pattern layout (see Phase 3).
 
 ### Technical Design
 
@@ -427,7 +442,9 @@ doFilter(exchange, chain):
   `/v1/sessions/start` takes any non-blank session id from the client, and printed raw one
   could end the prefix early, write a second line or add a field such as
   `event=schema_migration_pending`. Raw values stay in the token store and in routing; only
-  the printed text changes. Where a handler threw
+  the printed text changes. These call-site escapes are the first of two layers: the log sink
+  escapes again behind them (see Log sink), and it does not double a backslash, so the two do
+  not stack. Where a handler threw
   and no status was sent, `getResponseCode()` is -1 and the client sees a dropped
   connection; the line then says `status=none` and names the exception class, and the
   exception is rethrown unchanged. A handler that sent 200 and then threw while
@@ -439,7 +456,7 @@ doFilter(exchange, chain):
   (`MemoryHandler.java:610`, `TenantExportHandler.java:357`) and a thrown handler
   never reaches it. The status read was run on the engine's server shape: 200, 404,
   chunked 503 and body-less 400 all read back correctly, and a throw read -1
-  (research-9). WARN is the right level: root is INFO (`logback.xml:13`), so WARN is
+  (research-9). WARN is the right level: root is INFO (`logback.xml:21`), so WARN is
   printed, while the lines that exist today for these failures are DEBUG
   (the `auth_rejected` lines at `AuthFilter.java:298,318,414`, `PlanHandler.java:98`) and are not. A sent 404 with nothing thrown logs at INFO instead, still printed: the Step 3 measurement found 404 was 16 of 18 failure lines, and Sam ruled on 2026-11-17 that 404 goes at INFO and every other failure stays WARN. Cost: 404 is an
   ordinary answer on some routes (the `PlanHandlerTest` contract returns 404 for an
@@ -455,18 +472,160 @@ doFilter(exchange, chain):
   so its ids never carry the marker, and the Phase 2 probe can tell a stripped inbound header
   from an overwritten one. This blocks log-line injection through the id. It covers only the
   id: the tenant and session values are not limited to that character set, so they are
-  escaped when printed (see Failure line), not rejected. `MDC` keys never carry a token or its hash (`credentialHash` stays out), only
+  escaped when printed (see Failure line), not rejected, and every other value an engine line
+  prints is escaped at the sink (see Log sink). `MDC` keys never carry a token or its hash (`credentialHash` stays out), only
   `correlation_id`, `tenant` and `session`.
-- **Pattern.** Insert `[cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}]`
-  after `%logger{36}` and before ` - %msg%n` in `logback.xml:9`. The date, time and
-  level stay at the front of the line and `event=...` stays in the message, so the
-  supervisor's recognisers (`storage_service_daemon.py:986-987`,
-  `readiness.py:105-106`) keep matching. The escape of the tenant and session values keeps the
-  prefix at exactly three fields, so a recogniser that anchors on the date, time and level or
-  matches `event=...` in the message is unaffected. The Java test holds a literal copy of the
+- **Pattern.** The shipped pattern is
+  `%d{ISO8601, UTC} %-5level [%threadSafe] %logger{36} [cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}] - %msgSafe%n%exSafe`
+  (`logback.xml:17`), with three `<conversionRule>` elements (`:6`, `:7`, `:10`) that name the
+  classes behind `%msgSafe`, `%exSafe` and `%threadSafe` (a conversion rule maps a pattern word
+  to the Logback class that renders it). Phase 1 inserted
+  `[cid=... tenant=... session=...]` after `%logger{36}` and before ` - `; the sink change
+  (nexus-dngtz.1.11) then replaced `%thread` with `%threadSafe` and `%msg` with `%msgSafe`, and
+  put `%exSafe` after `%n`. The date, time and level stay at the front of the line and
+  `event=...` stays the first token of the message, so the supervisor's recognisers keep
+  matching (see the reader contract below). The escape of the tenant and session values keeps
+  the prefix at exactly three fields, so a recogniser that anchors on the date, time and level
+  or matches `event=...` in the message is unaffected. The Java test holds a literal copy of the
   supervisor's line regex (it must be re-confirmed there if the supervisor's regex moves); the
   Python tests pin sample lines of the new format against the real recognisers
   (`tests/daemon/test_storage_service_daemon.py`, `tests/daemon/test_readiness.py`).
+- **Log sink (nexus-dngtz.1.11).** The census of the engine's log calls (T2
+  `nexus/rdr-167-engine-log-client-value-census-2026-11-17`) found 877 calls, 359 of them printing a
+  client-controlled value raw, and 174 more printing exception text, which can carry PostgreSQL
+  error detail that echoes stored values. Escaping at each call site would never be finished, so
+  Sam ruled (option b, 2026-11-17) that the engine escapes once, at the sink, in 8.4. The escape is
+  `LogText.lineSafe` (`service/src/main/java/dev/nexus/service/http/LogText.java`): a control
+  character (C0, 0x7F, C1 0x80 to 0x9F, so U+0085 too), U+2028 or U+2029 is written as `\xNN`
+  (lowercase hex) below 0x100 and as `\uNNNN` above, and nothing else changes: it does not double a
+  backslash, and it leaves space, `[`, `]` and `=` alone, because a call site has already escaped
+  its own value with `escapeControl` or `mdcValue` and the sink must not escape that text again. A
+  string with nothing to escape comes back as the same instance. Four paths reach it:
+  - *Logback.* `%msgSafe` (`SafeMessageConverter`) writes the formatted message through it, so it
+    covers every log call in the engine and every library that logs through Logback. `%exSafe`
+    (`SafeThrowableConverter`) runs Logback's own trace renderer on a view of the throwable whose
+    class name and message are escaped, for the exception, each cause and each suppressed one, so the
+    shape is unchanged: the first line `<class>: <message>`, one `\tat ...` line per frame, and
+    `Caused by:`, `Suppressed:` and the frame counts each on their own line. Listing it in the
+    pattern stops Logback adding its plain `%ex`, so a trace prints once. `%threadSafe`
+    (`SafeThreadConverter`) writes the thread name through `LogText.mdcValue`, so a name holding a
+    line break, `]`, a space or `=` cannot end the first bracketed block early; `main` and
+    `t1-ttl-sweep` print as before, a thread with no name prints `[]`, and Hikari's
+    `HikariPool-1 housekeeper` prints as `HikariPool-1\x20housekeeper`. The effect on a reader of
+    the log: a message that used to run over several physical lines, such as a PostgreSQL error with
+    its `Where:` line, is now one line with `\x0a` for each line break. A message or exception text with nothing to
+    escape is byte for byte what it was; the thread field is the exception, because `%threadSafe`
+    also escapes space, `[`, `]` and `=` (the Hikari name above). `LogMasking` still swaps the encoder for
+    `MaskingPatternLayoutEncoder` with the same pattern and masks the text the layout produced, so
+    the secret mask runs after the escape.
+  - *JUL.* Liquibase logs through `java.util.logging`, and so does the JDK HTTP server, through
+    `System.Logger`, so neither reaches Logback. `LineSafeFormatter` extends the JDK's
+    `SimpleFormatter`, and `LineSafeFormatter.install()` sets it on every `ConsoleHandler` of the
+    JUL root logger. A record with nothing to escape formats byte for byte as the JDK formats it,
+    its `java.util.logging.SimpleFormatter.format` property and the blank line after a trace
+    included (for a throwable that does not override `toString`: the copy renders as `Throwable.toString`
+    does); a record with an exception is formatted from a copy of the throwable whose messages
+    are escaped, causes and suppressed ones too (followed to a depth of 32). A handler that is not a
+    console handler is left alone. If no console handler exists `Main` logs
+    `event=jul_line_safe_inactive` at WARN, and if the install throws the formatter logs
+    `event=jul_line_safe_failed`; neither stops the engine.
+  - *The Liquibase UI channel.* When a changeset fails Liquibase sends `ERROR: Exception Primary
+    Reason:  <the PostgreSQL error text>` through its UI service, to stdout, past both Logback and
+    JUL. `LineSafeUIService` extends Liquibase's `ConsoleUIService` and writes `sendMessage` and
+    both forms of `sendErrorMessage` through `lineSafe`. `SchemaMigrator.update` runs the walk
+    under a Liquibase scope that binds it (the test forks that set `nexus.liquibase.ui=logger`
+    get Liquibase's `LoggerUIService` instead, and the engine never sets it). It pins
+    `getOutputStackTraces()` to `false`, because the trace the console UI would print carries each
+    exception's message raw; Liquibase's own default is already false and nothing in the engine
+    turns it on, so the pin closes a path against a later change. "Running Changeset: <changelog
+    file>::<id>::<author>" lines are unchanged: they carry the ids of the engine's own changelog
+    files.
+  - *Uncaught exceptions.* The JVM's default handler prints `Exception in thread "x" <class>:
+    <message>` straight to stderr. `UncaughtExceptionLog.install()` makes a handler that logs
+    `event=uncaught_exception thread=<name through mdcValue> exception=<class>` at ERROR through
+    SLF4J, with the throwable as the last argument, so its message and its causes' pass through
+    `%exSafe`; the message itself names the class only. It never throws. The engine's own code
+    writes nothing to `System.out` or `System.err` outside the trust-anchors mode, which starts
+    nothing. That is a grep result with no test behind it: a search of `service/src/main/java` for
+    `System.out` and `System.err` finds the one use, `Main.java:75`, and a later one would not fail a
+    build. Library code, and native libraries that write to stderr (ONNX Runtime can), are not audited
+    (see What the sink does not cover).
+  `Main.main` installs the handler and the JUL formatter right after the trust-anchors check and
+  before `goOfflineAtStartup()`, the singleton lock, the secret masking and the migration, so
+  nothing that fails early prints a raw line (`MainLogSinkWiringTest` pins the order on the text of
+  `Main.java`, because `main` cannot run in a test. It checks the handler against the trust-anchors
+  check, `goOfflineAtStartup()`, the secret masking and the singleton lock, and checks that the
+  handler's install appears once; it checks the formatter against the trust-anchors check,
+  `goOfflineAtStartup()` and the secret masking only, so the formatter's install-once and its place
+  against the lock are not pinned).
+  *Native image.* Each of the three converters has an entry in `reflect-config.json`
+  (`allDeclaredConstructors` and `allDeclaredMethods`), because Logback makes a class named in
+  `logback.xml` by reflection. `service/pom.xml` adds
+  `--initialize-at-build-time` for the three converter classes and `LogText`, listed by class
+  and not by package: `dev.nexus.service.log` also holds `SecretMask`, whose state must not be
+  baked into the image. `LineSafeUIService` is made with `new` and needs no entry. A converter
+  missing from the native image would show as `%PARSER_ERROR` in every line, which is why
+  `LogbackNativeConfigTest` checks the entries and `service/native-smoke.sh` looks for it. The native
+  result is pending until the engine-service 0.1.195 release smoke, as for nexus-dngtz.1.9.
+
+- **Reader contract (nexus-dngtz.1.11).** The client half is in `src/nexus/daemon/readiness.py`,
+  `src/nexus/daemon/storage_service_daemon.py` and `src/nexus/health.py`.
+  - An engine logback line is recognised by `RE_ENGINE_LINE`: date, time, level, `[thread]`, logger,
+    an optional `[cid=... tenant=... session=...]` block, then ` - ` and the message. The block is
+    optional so an engine from before Phase 1, which may still be running during an upgrade, is
+    still read. No prefix value can hold `] - `: the id has a grammar, and the tenant, session and
+    thread values go through `mdcValue`.
+  - A marker counts only as the first token of the message (the marker, then the end of the message
+    or a space), from the logger that writes it, as `%logger{36}` prints it: start, pending and
+    complete from `dev.nexus.service.db.SchemaMigrator`, failed from `dev.nexus.service.Main` at
+    ERROR. Both names are 36 characters or fewer, so Logback prints them unabbreviated. Those
+    loggers write their own literal first, so a client value is never the first token.
+    `tests/test_engine_log_literals_pinned.py` pins the names, the 36-character bound, the levels
+    and the place of the message converter against the Java.
+  - `Running Changeset:` and the JUL `Waiting for changelog lock` count only at the start of a line
+    (the JUL one may carry a `LEVEL: ` prefix). They start the MIGRATING phase, which has a longer
+    wait bound, and name a changeset; they never mark a migration complete or failed.
+  - A reason shown to the user is the first non-blank part of the text before a literal `\x0a` or
+    `\x0d` (`_reason_text`), with credentials redacted and a length cap; `last_engine_root_cause`
+    drops PostgreSQL's `ERROR: ` after the cut, so the RDR-231 halt cause ends at the runbook URL
+    and not at the `Where:` text; the supervisor's schema-migration-failed message shows Main's line
+    through the same function. `nx doctor` (`_last_boot_failure_detail`) reads the failing changeset
+    only in the trace of Main's failed line, takes the first match (Liquibase's outer wrapper), turns
+    escaped line breaks back into line breaks to find the SQL `ERROR:` one-liner, and reads a tail of
+    1 MiB, up from 64 KiB, so a long `Failed SQL` trace cannot push Main's line out of it.
+  - Anchoring holds only while no value can start a line of its own, which is what the sink gives:
+    against an engine without the sink, a value carrying a newline and then a whole engine-shaped
+    line would pass every anchor. The two halves ship in the same release.
+  - Readers that only display, and already match at a line start, keep their own code
+    (`last_engine_error_line`, `engine_boot_failure_reason`, `last_supervisor_error_line`,
+    `_migration_halt_cause`, `upgrade_finish._start_failure_reason`). The first three show their
+    line through `_reason_text`, so they get the cut at an escaped line break; `_migration_halt_cause`
+    shows what `engine_root_cause` returns, which is cut the same way, and `_start_failure_reason`
+    shows the output of `nx daemon service start`. The harness-run gate and
+    rehearsal readers read engines the harness started itself, with fixed inputs and no outside
+    client, and are out of scope.
+
+- **What the sink does not cover, named.**
+  - `Running Changeset:` lines are bare text on Liquibase's UI channel with no logback prefix, so the
+    reader cannot check a logger for them. Only the ids of the engine's own changelog files reach
+    them, and the line-start anchor plus the sink (no value can start a line) is what protects them.
+  - JUL and UI output is not secret-masked. `LogMasking` swaps only Logback's `PatternLayoutEncoder`;
+    the sink change escapes control characters in the JUL and UI text and masks nothing there. This
+    is a confidentiality gap that predates the sink change.
+  - Bidirectional and other Unicode format characters (category Cf, for example U+202E) are not
+    escaped; only control characters (category Cc), U+2028 and U+2029 are. They cannot start a line,
+    so the risk is a display spoof when a person reads the log.
+  - The sink does not double a backslash, so text printed through it alone is not injective: a
+    client-typed literal `\x0a` reads the same as an escaped newline, and a reader that cuts a
+    displayed reason at the first literal `\x0a` can truncate it at client-typed text. Values escaped
+    at a call site (`escapeControl`, `mdcValue`) do double it. The effect is a shorter reason on
+    screen; no marker is read after the cut.
+  - Anything that writes to the process's standard output or error outside Logback and
+    `java.util.logging` bypasses the sink: library code that calls `System.out` or `System.err`, and
+    native libraries that write to stderr (ONNX Runtime can). The engine's own code does not, outside
+    the trust-anchors mode, and "none does today" is a grep result (`Main.java:75` is the only use in
+    `service/src/main/java`) with no test behind it; the libraries are not audited.
+
 - **Not covered, by design.** The five contexts outside `AuthFilter` carry no tenant
   and their lines stay without an id. Lines logged from the two engine-started fan-out
   threads (research-2) show `-`. Neither is worth a copy-the-MDC change now; both are
@@ -486,9 +645,11 @@ doFilter(exchange, chain):
 | Client failure line | `RefreshableHttpStoreMixin._raise_for_status` in `src/nexus/db/t2/_refreshable_client.py` | Extend: one DEBUG `engine_request_failed` line with status and path; the T3, scratch and token clients have none |
 | Pin that every engine client sends it | `tests/test_z0o2p24_client_version_header.py` census (`_census`, `_NOT_SENDERS`) | Extend the same census so a new client must send or be named, and drive each of the ten call sites on the wire |
 | MDC bridge | `AuthFilter.java:194-`, `CorrelationId.java`, `LogText.java`, `RequestContext.java` | Extend: accept or generate at the top, put inside a `try`, clear in a `finally` over the whole method |
-| Log pattern | `service/src/main/resources/logback.xml:9` | Extend with three `%X{...:--}` fields |
+| Log pattern | `service/src/main/resources/logback.xml:17` | Extend with three `%X{...:--}` fields; the sink change swaps `%thread`, `%msg` and the implicit `%ex` for `%threadSafe`, `%msgSafe` and `%exSafe` |
+| Log sink escape | `LogText` (`escapeControl`, `mdcValue`), `LogMasking`'s encoder swap | Extend: `LogText.lineSafe`, three Logback converters, `LineSafeFormatter` (JUL), `LineSafeUIService` (Liquibase UI) and `UncaughtExceptionLog`, all in `service/src/main/java/dev/nexus/service/log/`; `LogMasking` unchanged and masks after the escape |
+| Engine-log readers | `readiness.py` (`MigrationLogScanner`), `storage_service_daemon.py` (`last_engine_root_cause`, `_reason_text`), `health.py` (`_last_boot_failure_detail`) | Extend: markers anchored as the first token of the message from the emitting logger, displayed reasons cut at the first literal `\x0a` or `\x0d` |
 | Log-capture test pattern | `ListAppender` in 56 test files, e.g. `OwnerlessWriteRefusalTest.java:657` | Reuse |
-| JSON appender (Phase 3) | `logback-classic` `JsonEncoder` | Reuse; add its reflect-config entry |
+| JSON appender (Phase 3) | `logback-classic` `JsonEncoder` | Reuse; add its reflect-config entry; keep line-safety and reader compatibility, and account for the secret mask (Phase 3) |
 
 ### Decision Rationale
 
@@ -559,7 +720,24 @@ entry. Most operations (searches, T2 and catalog reads) have none.
   crossover; the test keeps it that way.
 - **Risk**: a pattern change breaks a log reader. **Mitigation**: the new field goes
   after the logger name, and a test asserts the supervisor's two recognisers still
-  match a real engine line.
+  match a real engine line. The sink change swapped `%msg` for `%msgSafe` in the same place:
+  `AuthFilterCorrelationTest` pins the pattern from `%logger{36}` to its end (the cid block, ` - `,
+  `%msgSafe%n%exSafe`), `LogSinkEscapeTest` renders events through the shipped file and so covers the
+  thread field (`%threadSafe`), and `tests/test_engine_log_literals_pinned.py` pins that a message converter, under any name, sits
+  after `] - `.
+- **Risk**: a client value forges an engine log line or a migration marker. **Mitigation**: three
+  layers. Call sites escape the values they know are client text (`escapeControl`, `mdcValue`); the
+  sink escapes control characters in every message and exception message, in JUL and Liquibase UI
+  output and in uncaught exceptions, so no value can start a line; and the readers accept a marker
+  only as the first token of the message from the logger that emits it. Residuals are named under
+  Log sink: bare `Running Changeset:` lines, JUL and UI output that is not secret-masked, bidi
+  format characters, a client-typed literal `\x0a`, and anything written straight to `System.out`
+  or `System.err` (engine code does not, by grep and no test; libraries and native code such as ONNX
+  Runtime can).
+- **Risk**: a converter is missing from the native image, which would break every log line.
+  **Mitigation**: `LogbackNativeConfigTest` checks that each `<conversionRule>` class has a
+  constructor entry in `reflect-config.json`, and `service/native-smoke.sh` fails on `%PARSER_ERROR`
+  in the native log; the native run is pending until the 0.1.195 release smoke.
 - **Risk**: a worker thread drops the id. **Mitigation**: `copy_context().run` at the four
   engine-bound indexer pools, pinned by an AST test over four files; a missing id degrades
   to an engine-generated one. The `search_engine.py` fan-out pools and other pools are not
@@ -635,7 +813,7 @@ Wrap `AuthFilter.doFilter`; validate the id and generate an `nxe-` one when need
 `LogText.mdcValue`; echo on the response; in the
 `finally`, write the `request_failed` line (WARN; a sent 404 at INFO) for a status of 400 or above, none or a
 thrown chain (naming the exception class) and clear. Update
-`logback.xml`. On the engine-substrate run, count failure lines per 1000 requests and
+`logback.xml` (the pattern, and the sink's three conversion rules, Step 6). On the engine-substrate run, count failure lines per 1000 requests and
 record the number in the bead (done in nexus-dngtz.1.6: 52 per 1000 client calls on a scenario
 run of about 350 calls, which is not indexing volume).
 
@@ -648,6 +826,15 @@ docs; keep the RDR-222 `request_id` fields unchanged and say so beside them. Don
 nexus-dngtz.1.12 (`docs/configuration.md` Logging, `docs/architecture.md` Request
 correlation), which also matched this RDR's Technical Design and Phase 2 text to the reviewed
 code.
+
+#### Step 6: Log sink and reader anchoring (nexus-dngtz.1.11)
+Sam's option (b) on the log-forgery census. Engine, develop `775bc535d`: `LogText.lineSafe`;
+`%msgSafe`, `%exSafe` and `%threadSafe` in `logback.xml`; `LineSafeFormatter` on the JUL console
+handlers; `LineSafeUIService` in `SchemaMigrator.update`; `UncaughtExceptionLog`; their
+installs first in `Main.main`; the three `reflect-config.json` entries and the
+`--initialize-at-build-time` list in `service/pom.xml`; the `native-smoke.sh` asserts. Client,
+develop `b1345a3f1`, `a002fbe68`, `55b3b55c3`, `84fd68b0b` and `9a3175a30`: the anchored readers and the cut at a literal `\x0a`. The text is
+under Technical Design (Log sink, Reader contract).
 
 ### Phase 2: Managed-deployment check (only with the managed deployment)
 
@@ -667,7 +854,18 @@ This closes the assumption in research-8.
 
 Switch the managed image to `JsonEncoder` behind a toggle; add its
 `reflect-config.json` entry; run the native smoke; confirm the log consumers in the
-Technical Environment. Taken up only with the managed deployment.
+Technical Environment. Taken up only with the managed deployment. The JSON encoder must keep two things
+the sink change gave the pattern layout, and Phase 3 must account for a third that the engine already
+has (nexus-dngtz.1.11):
+- Line-safety. Every record is one physical line, with control characters escaped in the message, the
+  MDC values and the stack trace, and no value able to start a line of its own.
+- Reader compatibility. `RE_ENGINE_LINE` reads the pattern layout (date, time, level, `[thread]`,
+  logger, the optional `[cid=...]` block, ` - `, message), and the marker rules anchor on it. A JSON
+  line needs the readers changed and tested in the same change, or the supervisor stops seeing
+  `schema_migration_*`.
+- The secret mask, which Phase 3 must account for. `LogMasking` swaps only `PatternLayoutEncoder`,
+  so a `JsonEncoder` appender is reported as unmasked (`event=log_masking_unmasked`) until the mask
+  is extended to it. This is how the engine already works, not a new requirement of the sink change.
 
 ### Day 2 Operations
 
@@ -675,10 +873,13 @@ Technical Environment. Taken up only with the managed deployment.
 | --- | --- | --- | --- | --- | --- |
 | Correlation id | N/A (not stored) | `grep <id>` on client and engine logs | N/A | The cross-tier test | N/A |
 | Log pattern | N/A | engine log lines | N/A | Pattern test | N/A |
+| Log sink escape | N/A | a line break inside a message reads `\x0a` in the engine log | N/A | `LogSinkEscapeTest`; the native smoke | N/A |
 
 ### New Dependencies
 
-None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7).
+None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7). The sink change adds no
+dependency: `LineSafeFormatter` extends the JDK's `SimpleFormatter` and `LineSafeUIService` extends
+the `ConsoleUIService` that Liquibase already ships.
 
 ## Test Plan
 
@@ -715,6 +916,49 @@ None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7).
   in `storage_service_daemon.py` if the regex moves; the Python tests pin sample lines of the
   new format against the real recognisers (`tests/daemon/test_storage_service_daemon.py`,
   `tests/daemon/test_readiness.py`).
+- **Java, sink.** `LogSinkEscapeTest` renders events through the shipped `logback.xml` pattern, once
+  with the encoder the file builds and once with the masking encoder `LogMasking` swaps in. A newline
+  and a forged engine line inside a message argument render on one physical line; a forged
+  `] - event=schema_migration_failed` with no newline stays on one line and the real event token
+  still comes first; an exception whose message and cause message hold forged lines renders
+  escaped, with its frames on their own lines, once; a thread name holding a forged terminator
+  and a newline renders escaped; CR, U+0085, U+2028 and U+2029 are each escaped; a normal line, a
+  normal exception and an exception with no message render as before; a secret is still masked in
+  the message and in the exception message. `LogTextTest` pins `lineSafe`: all 67 characters (C0,
+  0x7F to 0x9F, U+2028, U+2029) in `\xNN` or `\uNNNN` form, no backslash doubling, space, brackets
+  and `=` left alone, the same instance when nothing needs escaping, and `null` staying `null`.
+- **Java, JUL and Liquibase UI.** `LiquibaseLineSafeTest`: a clean record formats exactly as the
+  JDK's `SimpleFormatter` does, and a record with an exception does too, its closing blank line
+  included; a newline in a message becomes `\x0a` in the same two lines; parameters are formatted
+  and then escaped; a thrown exception keeps its frames and has its messages escaped, and a
+  throwable whose `getMessage` throws still gets its record; `install` sets the formatter on a
+  console handler and leaves a handler that is not one alone; the UI service writes a message with a
+  newline as one line, never prints a stack trace even when asked to, and leaves a
+  `Running Changeset:` message unchanged; a `System.Logger` record, the JDK HTTP server's path,
+  reaches the root handler as one escaped line.
+- **Java, uncaught exception and wiring.** `UncaughtExceptionLogTest`: a thread that throws a
+  message with forged lines is logged once, at ERROR, through the engine's logger, as one escaped
+  line that names the class only, with its frames on their own lines and a cause message escaped;
+  `install` sets the default handler and a failing logger does not throw out of it.
+  `MainBootEnvValidationIntegrationTest` now looks for `event=uncaught_exception thread=main`, in
+  place of the JVM's `Exception in thread "main"` banner. `MainLogSinkWiringTest` pins that the
+  handler is installed once and that the handler and the formatter come after the trust-anchors check
+  and before `goOfflineAtStartup()` and the secret masking (the handler also before the singleton lock);
+  the formatter's install-once is not pinned. `LogbackNativeConfigTest` pins that each
+  `<conversionRule>` class in `logback.xml` has a constructor entry in `reflect-config.json` (and
+  that the file names exactly the three converters, so it cannot pass on an empty list); it cannot
+  show that the native image works.
+- **Python, readers.** `tests/daemon/test_readiness.py`: a marker inside a client value is ignored; a
+  marker mid-line, or from a logger other than the one that writes it, is ignored; the lock-wait flag
+  is not sticky. `tests/test_health.py`: the doctor detail ignores the changeset marker inside a
+  logged value. `tests/test_engine_log_literals_pinned.py`: the logger names, their 36-character
+  bound, the levels and the place of the message converter match the Java.
+  `tests/daemon/test_engine_log_post_sink.py` replays the RDR-231 halt and an uncaught exception as
+  the sink renders them (`tests/fixtures/rdr231_halt/*_post_sink.txt`): the root cause ends at the
+  runbook URL, the engine error line shows no text after an escaped line break, an uncaught
+  exception gives its reason and not its forged second line, the doctor detail keeps the SQL
+  one-liner and stops at the line break, a reason that starts with an escaped line break is not
+  empty, and escaped and empty thread fields still parse.
 - **Python, binding.** The CLI callback and the MCP middleware bind an id and leave nothing
   bound; two concurrent tool calls see different ids; `copy_context().run` carries it into a
   pool (`tests/test_correlation_id.py`). The binding is also pinned on a real `MCPServer`,
@@ -741,7 +985,20 @@ None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7).
   a 401 that echoes it and a `request_failed` line with that `cid=`, and sends a malformed
   document tumbler to `/v1/catalog/register` and expects a 400 whose line carries a resolved
   `tenant=`. It has passed on the JVM jar; its first native run is the engine-service 0.1.195
-  release smoke (nexus-dngtz.1.9, native-pending).
+  release smoke (nexus-dngtz.1.9, native-pending). The same script checks the sink
+  (nexus-dngtz.1.11) with two probes. A bad-bearer request to `/v1/_whoami%0Aforged-sink-probe=1`
+  (the decoded path carries a real newline, so `%0A` is the probe) answers 401 and leaves exactly one
+  `request_failed` line with `path=/v1/_whoami\x0aforged-sink-probe=1 ` and no line that starts
+  with `forged-sink-probe=1`. `AuthFilter` already escapes the path at the call site, so this probe shows
+  that the call-site escape survives natively and would pass without the sink. The second probe is a
+  POST to `/v1/vectors/search` naming an unregistered collection with a JSON `\n` in the name
+  (`x\nforged-sink-raw-probe=1`): it answers 422, no row is read or written, and the engine's warnings
+  print the name raw (no call-site escape), so exactly one line ends `collection=x\x0aforged-sink-raw-probe=1`
+  and none starts with `forged-sink-raw-probe=1`. That is the probe that fails when `%msgSafe` becomes
+  `%msg`; on the JVM jar it passes as shipped and fails with that one change, on 2026-11-18. The log also
+  holds no `event=jul_line_safe_inactive`, `event=jul_line_safe_failed`, `%PARSER_ERROR` or
+  `PARSER_ERROR[`. The first native run of all of this is the 0.1.195 release smoke, so it is
+  native-pending too.
 
 ## Validation
 
@@ -753,12 +1010,18 @@ None. `JsonEncoder` (Phase 3) is already in logback-classic (research-7).
    tenant crossover.
 3. **Scenario**: pattern change against the supervisor's recognisers. **Expected**:
    both still match.
+4. **Scenario**: the log sink, a client value holding a newline in a message, an exception message or a
+   thread name, and a reader given a forged marker. **Expected**: one physical line with `\x0a`, and the
+   readers ignore the forged marker (`LogSinkEscapeTest`, `LiquibaseLineSafeTest`,
+   `UncaughtExceptionLogTest`, `tests/daemon/test_readiness.py`, the native smoke).
 
 ### Performance Expectations
 
-One map put and clear per request and three short fields per log line. No target is
-claimed; the Java concurrency test also times 400 requests so a gross regression
-shows.
+One map put and clear per request and three short fields per log line. The sink adds a scan of
+each message, exception message and thread name for characters to escape, and a copy of the throwable's
+message chain for a record with an exception (`%exSafe`, and the JUL formatter); a message with nothing
+to escape builds no new string. No target is claimed for it either; the Java concurrency test also times
+400 requests so a gross regression shows.
 
 ## Finalization Gate
 
@@ -783,9 +1046,9 @@ live-engine run is done as the MVV (nexus-dngtz.1.10). The managed edge is still
 struck with Gap 3. Nothing is presented as measured that was not: the Python spike used `anyio`
 directly (the live MCP server path was added later, in nexus-dngtz.1.11, as
 `tests/test_correlation_id_mcp_stack.py` on a provisional `mcp` 2.x API), and no
-native image has printed the pattern yet. The native check exists in `service/native-smoke.sh`,
-and its first native run is the engine-service 0.1.195 release smoke, so that part is
-native-pending (Sam's ruling, 2026-11-17).
+native image has printed the pattern or run the sink's three converters yet. The native checks
+exist in `service/native-smoke.sh`, and their first native run is the engine-service 0.1.195
+release smoke, so that part is native-pending (Sam's ruling, 2026-11-17).
 
 #### API Verification
 
@@ -807,14 +1070,20 @@ Not in scope: a line per successful request (failures of 400 or above get one), 
 ### Cross-Cutting Concerns
 
 - **Versioning**: additive request and response headers; `/version` unchanged.
-- **Build tool compatibility**: `%X` needs no reflection entry (research-7); the
-  Phase 3 `JsonEncoder` does and is checked there.
+- **Build tool compatibility**: `%X` needs no reflection entry (research-7). The sink's
+  `%msgSafe`, `%exSafe` and `%threadSafe` do: they are our classes, made by Logback by name, so each
+  has a `reflect-config.json` entry, and each is initialized at image build time with `LogText`
+  (by class, so `SecretMask` stays out). The Phase 3 `JsonEncoder` needs an entry too and is
+  checked there.
 - **Licensing**: no new dependency.
 - **Deployment model**: the local engine needs no edge change; the managed edge is
   Phase 2.
 - **Secret and credential lifecycle**: the id is client text; it is validated before
   it is logged, the tenant and session values are escaped when printed, and no token or token
-  hash enters MDC.
+  hash enters MDC. Every other value an engine line prints, and every exception message, has its
+  control characters escaped at the sink; the secret mask (`LogMasking`) then runs over the escaped
+  text, on Logback lines only. JUL and Liquibase UI output is escaped but not masked, a gap that
+  predates the sink change.
 - **Cloud backup clients**: the export and import clients (`backup/cloud_export.py`,
   `backup/cloud_import.py`, three `client_identity_headers()` call sites each) send the id to
   the cloud engine too. It is a random per-invocation token that names no tenant data, and the
@@ -827,8 +1096,9 @@ Not in scope: a line per successful request (failures of 400 or above get one), 
 
 Right-sized: about two to three days for the two pieces (a leaf module, one function
 and two request hooks on the client; one filter, one pattern line and tests on the engine),
-over seams that already exist. The heavy option, full OpenTelemetry, stays rejected,
-and the JSON appender is not built until something needs it.
+over seams that already exist. The sink escape (nexus-dngtz.1.11) came after that estimate: Sam ruled
+it (option b, 2026-11-17) and accepted a delay of about a day to the 0.1.195 candidate. The heavy
+option, full OpenTelemetry, stays rejected, and the JSON appender is not built until something needs it.
 
 ## References
 
@@ -838,10 +1108,15 @@ and the JSON appender is not built until something needs it.
   idempotency key and the name `request_id`).
 - Engine: `service/src/main/resources/logback.xml`, `AuthFilter.java`, `CorrelationId.java`,
   `LogText.java`, `RequestContext.java`, `HealthHandler.java`, `LivezHandler.java`,
-  `NexusService.java`, `Main.java`, `service/native-smoke.sh`.
+  `NexusService.java`, `Main.java`, `SchemaMigrator.java`, `service/native-smoke.sh`,
+  `service/src/main/java/dev/nexus/service/log/` (the sink: `SafeMessageConverter`,
+  `SafeThrowableConverter`, `SafeThreadConverter`, `LineSafeFormatter`, `LineSafeUIService`,
+  `UncaughtExceptionLog`), `META-INF/native-image/reflect-config.json`.
 - Client: `src/nexus/correlation.py`, `src/nexus/logging_setup.py`, `src/nexus/cli.py`,
   `src/nexus/mcp/_tool_call_log.py`, `src/nexus/db/client_identity.py`,
   `src/nexus/db/t2/_refreshable_client.py`, `tests/test_z0o2p24_client_version_header.py`.
+  Engine-log readers: `src/nexus/daemon/readiness.py`, `src/nexus/daemon/storage_service_daemon.py`,
+  `src/nexus/health.py`.
 - Operator docs: `docs/configuration.md` (Logging), `docs/architecture.md` (Request correlation).
 - T2: `nexus_rdr/167-research-1` to `-9`; `nexus/draft-rdr-triage-2026-11-16`.
 
@@ -869,3 +1144,9 @@ and the JSON appender is not built until something needs it.
   - Risks and figures: the raw client-chosen session id as a risk; the 52-per-1000 figure scoped to a scenario run of about 350 calls.
   - Status: CA-2 is verified for a local engine. The native check (`service/native-smoke.sh`) is native-pending until the engine-service 0.1.195 release smoke (Sam's ruling, 2026-11-17).
   - Review round 1 (same bead): the `request_failed` scope (authenticated routes only), the session header (`X-Nexus-T1-Session` carries the token, not the id), stale sentences and line cites corrected.
+- 2026-11-18: Sink amendment (nexus-dngtz.1.12, standing grant 3: wording matched to reviewed code; status and decisions unchanged). Sam's ruling on the engine log-forgery census, option (b) (2026-11-17, by dialog in halcyon's session): escape at the log sink in 8.4, accepting a delay of about a day to the 0.1.195 candidate. Landed as develop `775bc535d` (engine) and `b1345a3f1`, `a002fbe68`, `55b3b55c3`, `84fd68b0b` and `9a3175a30` (readers). This amendment describes it:
+  - Technical Environment and Technical Design: the readers find a marker only as the first token of the message from the logger that emits it; the shipped pattern with `%msgSafe`, `%exSafe` and `%threadSafe` and its three conversion rules; the Log sink (control characters to `\xNN` or `\uNNNN`, no backslash doubling; the JUL formatter; `LineSafeUIService`; the uncaught-exception handler; install order; native image); the Reader contract; and the named residuals (bare `Running Changeset:` lines, JUL and UI output not secret-masked, bidi format characters, a client-typed literal `\x0a`, and anything written straight to `System.out` or `System.err`, which bypasses the sink: engine code does not, by grep with no test, and libraries and native code such as ONNX Runtime are not audited).
+  - Risks, Phase 1 Step 6, Test Plan (Java sink, JUL and UI, uncaught and wiring, Python readers, native smoke with two sink probes: a path value the call site escapes, and a collection name only the sink escapes), Cross-Cutting and the Existing Infrastructure Audit rows.
+  - Phase 3: a JSON encoder must keep line-safety and reader compatibility, and Phase 3 must account for the secret mask (`LogMasking` applies it to the pattern layout only).
+  - Native: the three converters' `reflect-config.json` entries and the `--initialize-at-build-time` list are in; the native result is pending until the engine-service 0.1.195 release smoke, as for nexus-dngtz.1.9.
+  - Line cites re-read in this tree: `logback.xml:17`, `:21`, `Main.java:285`, `:488`, `:612`, `:620`.

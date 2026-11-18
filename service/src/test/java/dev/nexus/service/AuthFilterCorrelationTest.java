@@ -506,7 +506,7 @@ class AuthFilterCorrelationTest {
         assertThat(encoder.getPattern())
             .contains("%logger{36} [cid=%X{correlation_id:--} tenant=%X{tenant:--} session=%X{session:--}] - %msgSafe%n%exSafe");
 
-        // Engine reader of record: src/nexus/daemon/storage_service_daemon.py:986,
+        // Engine reader of record: src/nexus/daemon/storage_service_daemon.py:1005,
         // _ENGINE_LOGBACK_LINE = r"^\d{4}-\d\d-\d\d[ T]\S+\s+[A-Z]+\s". Re-confirm there if it moves.
         Pattern engineLine = Pattern.compile("^\\d{4}-\\d\\d-\\d\\d[ T]\\S+\\s+[A-Z]+\\s");
 
