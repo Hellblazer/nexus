@@ -66,9 +66,12 @@ class HnswServingGucParityTest {
      * (nexus-bbtc2): the fan-out's one shared text-gate probe bounds its per-collection probe statement. It scans no
      * HNSW index, so it belongs to no iterative-scan site; {@link #everyFetchingTenantBlockBoundsItsStatementsFirst}
      * holds the block to its own ordering (it fetches with {@code ctx.selectFrom(fn)}, an anchor of that test).
+     * {@code TopicRouteArm#attachMetadata} (nexus-7fku2.1.3, RDR-134 Step 3): the by-id metadata read of the rows a
+     * routed search kept, bounded like a search statement. It reads chunks by key and scans no HNSW index, so it
+     * belongs to no iterative-scan site; the site of that class is {@code topicSearch}, which carries all five GUCs.
      */
     private static final java.util.Map<String, Integer> EXTRA_STATEMENT_BOUNDS =
-        java.util.Map.of("PgVectorRepository.java", 1, "LexicalGateProbe.java", 1);
+        java.util.Map.of("PgVectorRepository.java", 1, "LexicalGateProbe.java", 1, "TopicRouteArm.java", 1);
 
     /**
      * Deliberate {@code setSearchPlanCacheMode(} calls beyond one per iterative-scan site, per file: the three

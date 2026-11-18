@@ -800,7 +800,10 @@ public final class VectorHandler implements HttpHandler {
      *   "rerank_top_k":       null,             // optional; requires rerank
      *   "rerank_max_candidates": null,          // optional; requires rerank; score at most this many rows
      *   "content_chars": 300,                   // optional (nexus-tao37); cap each row's text at N code points
-     *   "lexical": false                        // optional (nexus-xd2rc); add each collection's text-gated rows, see below
+     *   "lexical": false,                       // optional (nexus-xd2rc); add each collection's text-gated rows, see below
+     *   "topic_route": {"mode": "top1",         // optional (nexus-7fku2.1.3, RDR-134); route through topics, see below
+     *                   "width": 0.1,           // "band" only, required there, >= 0: similarity within the nearest topic's
+     *                   "collections": [...]}   // optional; the collections to route, each also in collections
      * }
      * </pre>
      *
@@ -809,7 +812,9 @@ public final class VectorHandler implements HttpHandler {
      * {
      *   "results": [ ...the /search row shape, at most limit rows... ],
      *   "per_collection": [{"collection", "raw_count", "dropped", "min_raw_distance",
-     *                       "min_dropped_distance", "error", "error_kind"}, ...],
+     *                       "min_dropped_distance", "error", "error_kind",
+     *                       "topic_route_status", "topic_route_error", "topic_route_coverage",
+     *                       "topic_route_topics"}, ...],   // the last four keys only with topic_route, see below
      *   "per_collection_k": 40,   // echo
      *   "limit": 300,             // echo
      *   // when rerank: rerank_degraded / rerank_model / rerank_error, as on /search
@@ -835,6 +840,40 @@ public final class VectorHandler implements HttpHandler {
      * {@code NX_SEARCH_FANOUT_BUDGET_MS}, default 20 s, was spent before or while it ran);
      * {@code error} and {@code error_kind} are both {@code null} for a collection that answered. Pool or admission exhaustion, an expired
      * request budget and any other transient database failure fail the whole request with 503.
+     *
+     * <p><strong>{@code topic_route} (nexus-7fku2.1.3, RDR-134 Step 3).</strong> Optional. For each collection it names
+     * (all of the request's when {@code collections} is absent; none when it is present and empty, which is
+     * byte-identical to no {@code topic_route}), the engine ranks the collection's topic centroids against the query
+     * vector it already computed, keeps the nearest topic ({@code top1}) or every topic within {@code width}
+     * similarity of it ({@code band}), and searches the collection's chunks assigned to those topics, with the same
+     * k, thresholds and sensitivity exclusion as the unscoped search. Merging is unchanged. A collection the route does
+     * not name is searched unscoped. Each {@code per_collection} entry then carries {@code topic_route_status}:
+     * {@code routed}; {@code no_topics} (no centroids, no chunks, coverage below 0.9, or the coverage reading or the
+     * centroid ranking unavailable: searched unscoped); {@code fallback} (the kept topics returned no rows, or the topic
+     * search failed: searched unscoped); {@code skipped} (not named, or the request carries {@code chash_allow} or
+     * {@code where}, which are never routed). The status key is absent for a collection whose {@code error} is set: it
+     * is never {@code skipped} then. Three more keys are additive and each appears only when it has a value:
+     * {@code topic_route_error}, a short text (what failed, SQLSTATE, root cause class; no SQL) when the route degraded
+     * the collection because the coverage reading, the centroid ranking or the topic search failed;
+     * {@code topic_route_coverage}, the coverage ratio the route read, when the collection has centroids and chunks (so
+     * for {@code routed}, {@code fallback} and a {@code no_topics} that had a taxonomy); and {@code topic_route_topics},
+     * the number of topics kept, when the centroid ranking ran. None of the four keys appears when {@code topic_route}
+     * is absent or its {@code collections} list is empty: the response is byte-identical then.
+     *
+     * <p>A routed row is the row an unscoped search returns for the chunk. A routed collection's
+     * {@code min_raw_distance} is the nearest distance within its routed subset, not the collection's nearest, and a
+     * routed collection does not take part in choosing the recall canary's query-ring arm.
+     *
+     * <p><strong>Which route failures degrade, and which do not.</strong> A coverage lookup that throws or answers
+     * nothing, a coverage count or centroid ranking cut by its bound, and a centroid ranking that fails otherwise
+     * degrade the collection to {@code no_topics}, searched unscoped. A topic search that fails, a statement timeout
+     * under the search bound included, degrades it to {@code fallback}. These never fail the request. They do not
+     * degrade: a spent fan-out budget (before a stage, or a topic-search statement cut by the fan-out bound) is isolated
+     * to the collection as {@code fanout_budget_exhausted}, as for an unrouted arm, with no status; and an expired
+     * request budget (before a stage, or a statement cut by the request bound), pool or admission exhaustion and any
+     * other transient database failure (SQLSTATE class 08, 53, 57P, 40001, 40P01, 55P03) fail the whole request with 503.
+     * A bad {@code mode}, a {@code band} without a numeric {@code width} {@code >= 0}, or a name not in
+     * {@code collections} is a 400. The capability flag is Step 4's.
      *
      * <p><strong>Rerank semantics.</strong> The rerank stage runs once over the merged rows (at
      * most {@code limit}), not once per batch of a client fan-out, so a row beyond the distance
@@ -888,6 +927,8 @@ public final class VectorHandler implements HttpHandler {
         boolean lexical             = optBool(body, "lexical", false);
         byte[][] chashAllow         = optChashAllow(body);
         boolean excludeSensitive    = optExcludeSensitive(body);
+        var topicRoute              = dev.nexus.service.vectors.TopicRoute.parse(body.get("topic_route"), collections,
+            taxonomyCoverage == null ? (t, c, ms) -> java.util.Optional.empty() : taxonomyCoverage::lookup);
         Integer contentChars        = optInteger(body, "content_chars");
         if (contentChars != null && contentChars < 1) {
             throw new IllegalArgumentException("field 'content_chars' must be at least 1, got " + contentChars);
@@ -901,7 +942,7 @@ public final class VectorHandler implements HttpHandler {
         long handlerStartNanos = System.nanoTime();
         var result = repo.searchPerCollection(tenant, queryText, collections, perK, limit,
                                               thresholds, where, includeSourceUri, includeEmbeddings, lexical,
-                                              chashAllow, excludeSensitive);
+                                              chashAllow, excludeSensitive, topicRoute);
         long repoMs = (System.nanoTime() - handlerStartNanos) / 1_000_000L;
         emitTokenUsage(ex, result.tokens());
         emitSkippedCollections(ex, result.skippedCollections());
@@ -929,6 +970,19 @@ public final class VectorHandler implements HttpHandler {
             m.put("min_dropped_distance", stat.minDroppedDistance());
             m.put("error", stat.error());
             m.put("error_kind", stat.errorKind() == null ? null : stat.errorKind().wire());
+            // RDR-134 Step 3: each key only when the route has something to say about the collection
+            if (stat.routeStatus() != null) {
+                m.put("topic_route_status", stat.routeStatus());
+            }
+            if (stat.routeError() != null) {
+                m.put("topic_route_error", stat.routeError());
+            }
+            if (stat.routeCoverage() != null) {
+                m.put("topic_route_coverage", stat.routeCoverage());
+            }
+            if (stat.routeTopics() != null) {
+                m.put("topic_route_topics", stat.routeTopics());
+            }
             if (lexical) {
                 var lex = result.lexical().get(i);
                 m.put("lexical_count", lex.count());

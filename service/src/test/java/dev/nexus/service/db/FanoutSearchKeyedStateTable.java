@@ -31,5 +31,12 @@ final class FanoutSearchKeyedStateTable {
             + "probe; dies with the request");
         notKeyed.put("SharedLexicalProbe.dense", "the collections one fan-out search's shared probe found dense; "
             + "dies with the request");
+        // RDR-134 Step 3 (nexus-7fku2.1.3): the topic route of one search-per-collection request
+        notKeyed.put("TopicRoute.collections", "the collections one request's topic_route names; a record component "
+            + "of that request's parsed route, dies with the request");
+        notKeyed.put("TopicRouteArm.tenantScope", "a TenantScope handle: it holds the DataSource wrapper only, the "
+            + "same handle every repository is built with; the arm itself is built per request");
+        notKeyed.put("TopicRouteArm.Attempt.rows", "the candidate rows of one collection's routed arm; handed to the "
+            + "merge and dropped with the request");
     }
 }

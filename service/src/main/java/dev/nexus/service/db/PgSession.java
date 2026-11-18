@@ -480,6 +480,16 @@ public final class PgSession {
                                 TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS);
     }
 
+    /**
+     * {@link #setTaxonomyAssignBounds(DSLContext)} with the statement bound clamped to at most {@code maxStatementMs}
+     * (floor 1: to Postgres {@code 0} means DISABLED). For a read that runs inside another bound, such as the routed
+     * search arm's coverage count (RDR-134 Step 3), which must not outlive what is left of the arm's budget.
+     */
+    public static void setTaxonomyReadBounds(DSLContext ctx, int maxStatementMs) {
+        setTaxonomyAssignBounds(ctx, Math.max(1, Math.min(TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS, maxStatementMs)),
+                                TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS);
+    }
+
     /** Explicit-bound form, for tests that need bounds shorter than the env-resolved ones. */
     static void setTaxonomyAssignBounds(DSLContext ctx, int statementTimeoutMs, int lockTimeoutMs) {
         setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);

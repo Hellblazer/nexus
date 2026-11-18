@@ -55,6 +55,12 @@ final class ArmProbeDataSource {
      * nexus-92q1p): stands in for a DB error or statement timeout in the by-id vector read.
      */
     volatile boolean failEmbeddingFill = false;
+    /**
+     * When set, an arm connection fails (with {@link #failure}) the moment a statement whose SQL text satisfies this is
+     * prepared: stands in for one stage of a routed attempt failing (RDR-134 Step 3), as a real error of that SQL would,
+     * through jOOQ's own wrapping. Null = never.
+     */
+    volatile java.util.function.Predicate<String> failSqlWhen = null;
     /** Every statement_timeout value an arm connection was given, in the order it was set. */
     final List<Integer> statementTimeouts = new CopyOnWriteArrayList<>();
     /**
@@ -88,15 +94,22 @@ final class ArmProbeDataSource {
         failFromArm = 0;
         borrowDelayMs = 0L;
         failEmbeddingFill = false;
+        failSqlWhen = null;
         failure = () -> new SQLException("probe failure");
         statementTimeouts.clear();
         armStatements.clear();
         armCommits.set(0);
     }
 
+    /**
+     * A fan-out arm: a {@code PgVectorRepository#runArm} frame, or any frame of {@code TopicRouteArm} (RDR-134 Step 3:
+     * the routed attempt, whose coverage, centroid and topic statements are an arm's, and the metadata read that
+     * follows the merge).
+     */
     private static boolean inArm() {
         return StackWalker.getInstance().walk(
-            frames -> frames.anyMatch(f -> f.getMethodName().equals("runArm")));
+            frames -> frames.anyMatch(f -> f.getMethodName().equals("runArm")
+                || f.getClassName().endsWith(".TopicRouteArm")));
     }
 
     private static boolean inEmbeddingFill() {
@@ -143,6 +156,10 @@ final class ArmProbeDataSource {
             }
             if (cm.getName().equals("prepareStatement") && cargs != null && cargs.length > 0
                     && cargs[0] instanceof String sql) {
+                var failWhen = failSqlWhen;
+                if (failWhen != null && failWhen.test(sql)) {
+                    throw failure.get();
+                }
                 return spy((PreparedStatement) out, sql);
             }
             return out;
