@@ -1936,8 +1936,6 @@ class CliBackend:
             # now that the subprocess that owned it is gone. No-op when this
             # dispatch never minted (tool-free, or a failed mint).
             _close_dispatch_session(_minted_session_id, _minted_session_token)
-            if _delegated is not None:  # RDR-253 Step 4: stop renewing, delete its token file, append `end`
-                await _delegated.afinish()
             # nexus-vzy2v: delete the temp prompt file on every path -- success,
             # harness failure, timeout-kill, or a spawn failure that raised
             # before any of the above ran. Best-effort: an already-completed
@@ -1952,3 +1950,10 @@ class CliBackend:
                         path=str(prompt_path),
                         error=str(exc),
                     )
+            # RDR-253 Step 4: stop renewing, delete its token file, append `end`. Last, after the prompt file, because the
+            # bounded wait for `end` can be cancelled; a failure here never masks the dispatch outcome.
+            if _delegated is not None:
+                try:
+                    await _delegated.afinish()
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("operator_dispatch_delegated_end_failed", error=str(exc))

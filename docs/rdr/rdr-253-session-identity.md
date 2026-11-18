@@ -534,7 +534,7 @@ file. The caller's previous identity is closed: an ephemeral one gets `end`
 `release`, leaving that seat `unheld`. `nx identity release <seat>` frees a
 seat whose holder is gone: on the holder's host it runs the holder check and
 is refused while the holder runs; for a holder on another host it is refused
-while the lease is live. Because it frees only a gone holder's seat and binds
+until the lease has lapsed and its 10-minute reservation has passed. Because it frees only a gone holder's seat and binds
 nothing, it needs no interactivity or ancestry guard, and a person can run it
 from a plain shell. A clean exit appends `end`: the MCP server sends it at
 shutdown, with its expected generation, so a late `end` from a superseded

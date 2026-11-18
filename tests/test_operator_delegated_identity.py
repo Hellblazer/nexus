@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from nexus.hooks.identity_bind import bind_at_session_start
 from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError
@@ -30,6 +31,7 @@ from nexus.identity.delegated import (
 from nexus.identity.holder import GONE, OTHER_HOST, RUNNING, epoch_seconds
 from nexus.identity.sweep import sweep_host
 from nexus.identity.token_file import TokenFile, read_token_file, token_path, write_token_file
+from nexus.operators import dispatch as dispatch_module
 from nexus.operators.dispatch import claude_dispatch
 from nexus.operators.delegated_identity import DelegatedIdentity, start_delegation
 from tests._module_seam import patch_in
@@ -456,6 +458,113 @@ async def test_cancelling_the_dispatch_while_the_child_runs_ends_the_identity_an
     assert isinstance(seen["raised"], asyncio.CancelledError)
     assert not delegated_token_path(box.identity_dir, delegated).exists()
     assert box.events(delegated) == ["start", "end"] and box.engine.bound(delegated)["state"] == "ended"
+
+
+def _gate_end(box: Machine, gate: threading.Event, started: threading.Event, wait_s: float = 2.0) -> None:
+    """The engine's ``end`` blocks on *gate* (at most *wait_s*), and says when it has started."""
+    real_bind = box.engine.bind
+
+    def gated(identity: str, event: str, *a: Any, **k: Any) -> Any:
+        if event == "end":
+            started.set()
+            gate.wait(wait_s)
+        return real_bind(identity, event, *a, **k)
+
+    box.engine.bind = gated                                                 # type: ignore[method-assign]
+
+
+@pytest.mark.asyncio
+async def test_the_dispatch_exit_waits_for_end_off_the_event_loop(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pins claude_dispatch to ``afinish``: with the engine's ``end`` blocked, a dispatch run to completion leaves the
+    event loop serving other tasks through its bounded wait. The synchronous ``finish()`` would block the loop on the
+    engine's call (the ticker would stand still for the whole gate)."""
+    monkeypatch.setattr("nexus.operators.delegated_identity.END_TIMEOUT_S", 0.4)
+    box.as_child_of_claude_100(monkeypatch)
+    gate, started = threading.Event(), threading.Event()
+    _gate_end(box, gate, started)
+    ticks, at_end = {"n": 0}, {}
+
+    async def ticker() -> None:
+        while True:
+            await asyncio.sleep(0.005)
+            ticks["n"] += 1
+            if started.is_set() and "n" not in at_end:
+                at_end["n"] = ticks["n"]
+
+    other_call = asyncio.ensure_future(ticker())
+    seen = await _dispatch(box, spawn=_ok)
+    during_exit = ticks["n"] - at_end.get("n", ticks["n"])
+    other_call.cancel()
+    gate.set()
+    assert "raised" not in seen
+    assert during_exit >= 20, f"the loop ticked {during_exit} times while `end` was blocked: it served other work"
+    (delegated,) = box.delegated_ids()
+    for _ in range(300):                                                    # `end` lands once the engine answers
+        if box.events(delegated) == ["start", "end"]:
+            break
+        await asyncio.sleep(0.01)
+    assert box.events(delegated) == ["start", "end"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_cancel_during_the_bounded_wait_for_end_still_cleans_up(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wait for `end` is cancellable, so it runs LAST in the dispatch's cleanup: a second cancel there must not skip
+    the prompt temp file's unlink or leave the token file, and `end` (in a thread the cancel does not interrupt) still
+    lands once the engine answers."""
+    box.as_child_of_claude_100(monkeypatch)
+    gate, started = threading.Event(), threading.Event()
+    _gate_end(box, gate, started, wait_s=10.0)
+    prompt_files: list[Path] = []
+    real_write = dispatch_module._write_prompt_file
+
+    def spy(prompt: str) -> Path:
+        path = real_write(prompt)
+        prompt_files.append(path)
+        return path
+
+    monkeypatch.setattr(dispatch_module, "_write_prompt_file", spy)
+    task = asyncio.ensure_future(_dispatch(box, spawn=_hangs, timeout=60.0))
+    for _ in range(300):                                                    # the child "runs"
+        await asyncio.sleep(0.01)
+        ids = box.delegated_ids()
+        if ids and delegated_token_path(box.identity_dir, ids[0]).exists() and prompt_files:
+            break
+    (delegated,) = box.delegated_ids()
+    assert prompt_files and prompt_files[0].exists(), "the prompt file is on disk while the child runs"
+    task.cancel()                                                           # the first cancel: the dispatch unwinds
+    for _ in range(300):
+        if started.is_set():                                                # `end` is asked and blocked: afinish is waiting
+            break
+        await asyncio.sleep(0.01)
+    assert started.is_set()
+    task.cancel()                                                           # the second cancel, inside the bounded wait
+    seen = await task
+    assert isinstance(seen["raised"], asyncio.CancelledError)
+    assert not prompt_files[0].exists(), "the prompt temp file was unlinked before the wait that a cancel can cut short"
+    assert not delegated_token_path(box.identity_dir, delegated).exists()
+    assert box.events(delegated) == ["start"], "`end` is still blocked in its thread"
+    gate.set()
+    for _ in range(300):
+        if box.events(delegated) == ["start", "end"]:
+            break
+        await asyncio.sleep(0.01)
+    assert box.events(delegated) == ["start", "end"] and box.engine.bound(delegated)["state"] == "ended"
+
+
+@pytest.mark.asyncio
+async def test_an_afinish_that_raises_does_not_mask_the_dispatch_result_and_is_logged(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    box.as_child_of_claude_100(monkeypatch)
+
+    async def broken(self: DelegatedIdentity, timeout_s: float | None = None) -> None:
+        self.close_local()
+        raise RuntimeError("to_thread broke")
+
+    monkeypatch.setattr(DelegatedIdentity, "afinish", broken)
+    with capture_logs() as logs:
+        seen = await _dispatch(box, spawn=_ok)
+    assert "raised" not in seen, "the dispatch's own outcome stands"
+    failed = [entry for entry in logs if entry["event"] == "operator_dispatch_delegated_end_failed"]
+    assert len(failed) == 1 and "to_thread broke" in failed[0]["error"]
 
 
 @pytest.mark.asyncio
