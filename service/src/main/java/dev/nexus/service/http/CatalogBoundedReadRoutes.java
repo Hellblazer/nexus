@@ -255,8 +255,8 @@ final class CatalogBoundedReadRoutes {
         sendPage(exchange, page);
     }
 
-    private static final Pattern BOUND_TEXT = Pattern.compile("-?[0-9]{1," + CatalogDocReads.MAX_BOUND_DIGITS + "}");
-    private static final Set<String> BY_META_PLAIN = Set.of("content_type", "limit", "offset");
+    private static final Pattern BOUND_TEXT = Pattern.compile("-?[0-9]+");
+    private static final Set<String> BY_META_PLAIN = Set.of("content_type", "limit", "offset", "sensitive");
 
     /**
      * GET /v1/catalog/docs/by-meta?content_type=&meta.KEY=VALUE&meta_min.KEY=N&meta_default.KEY=TEXT&limit=&offset=
@@ -264,13 +264,17 @@ final class CatalogBoundedReadRoutes {
      *
      * <p>At least one {@code meta.} or {@code meta_min.} parameter is required (a 400 otherwise), so the route can never
      * serve as an unfiltered listing; {@code content_type} is optional and exact. {@link CatalogDocReads} has the
-     * reading rules. A {@code meta_min} value that is not an integer, an empty key, a {@code meta_default.KEY} with no
+     * reading rules. {@code sensitive=true} (the only value; any other is a 400) keeps only the live documents whose
+     * {@code sensitive} flag is set; it narrows a request that already has a {@code meta.} or {@code meta_min.} clause, and
+     * does not stand for one. A {@code meta_min} value that is not an integer (at most 131,072 characters, the digit
+     * limit of PostgreSQL's numeric), an empty key, a {@code meta_default.KEY} with no
      * {@code meta.KEY} beside it, a repeated {@code meta_default.KEY}, and any parameter this route does not name are
      * each a 400: a misspelt clause must never widen the answer.
      */
     void byMeta(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         String contentType = null;
+        boolean sensitiveOnly = false;
         List<String[]> eq = new ArrayList<>();
         List<CatalogDocReads.MetaMin> bounds = new ArrayList<>();
         Map<String, String> defaults = new LinkedHashMap<>();
@@ -281,6 +285,10 @@ final class CatalogBoundedReadRoutes {
             String value = kv.length == 2 ? decode(kv[1]) : "";
             if (BY_META_PLAIN.contains(key)) {
                 if (key.equals("content_type")) contentType = value.isEmpty() ? null : value;
+                if (key.equals("sensitive")) {
+                    if (!"true".equals(value)) { badRequest(exchange, "sensitive takes only the value true"); return; }
+                    sensitiveOnly = true;
+                }
                 continue;   // limit and offset are read by their helpers
             }
             String family = key.startsWith("meta_min.") ? "meta_min." : key.startsWith("meta_default.") ? "meta_default."
@@ -291,7 +299,7 @@ final class CatalogBoundedReadRoutes {
             switch (family) {
                 case "meta." -> eq.add(new String[]{name, value});
                 case "meta_min." -> {
-                    if (!BOUND_TEXT.matcher(value).matches()) {
+                    if (value.length() > CatalogDocReads.MAX_BOUND_DIGITS || !BOUND_TEXT.matcher(value).matches()) {
                         badRequest(exchange, "meta_min." + name + " must be an integer");
                         return;
                     }
@@ -319,7 +327,7 @@ final class CatalogBoundedReadRoutes {
         for (String[] e : eq) eqs.add(new CatalogDocReads.MetaEq(e[0], e[1], defaults.get(e[0])));
         CatalogDocReads.Page page;
         try {
-            page = docReads.byMeta(tenant, new CatalogDocReads.MetaFilter(contentType, eqs, bounds), limit, offset);
+            page = docReads.byMeta(tenant, new CatalogDocReads.MetaFilter(contentType, eqs, bounds, sensitiveOnly), limit, offset);
         } catch (RuntimeException e) {
             if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
             log.warn("event=catalog_docs_by_meta_timeout tenant={} limit={} offset={}", tenant, limit, offset);

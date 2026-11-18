@@ -126,6 +126,52 @@ class CatalogDocsByMetaRouteTest extends Rdr241RouteTestBase {
         assertThat(hits("meta_min.m=0&meta.k=a")).containsExactly("5.1.1", "5.1.2", "5.1.3");   // an absent m is no integer
     }
 
+    @Test
+    void aBoundOfFiveThousandDigitsIsComparedExactly_asTheOracleTakesAnyLength() throws Exception {
+        String bound = "1" + "0".repeat(4999);               // 10^4999, 5,000 digits
+        seed("{\"m\":\"" + bound + "\"}", "{\"m\":\"" + "9".repeat(5000) + "\"}", "{\"m\":\"" + "9".repeat(4999) + "\"}",
+            "{\"m\":5}", "{\"m\":\"" + "-" + bound + "\"}");
+        assertThat(hits("meta_min.m=" + bound)).containsExactlyInAnyOrder("5.1.1", "5.1.2");
+        assertThat(hits("meta_min.m=-" + bound)).containsExactlyInAnyOrder("5.1.1", "5.1.2", "5.1.3", "5.1.4", "5.1.5");
+    }
+
+    @Test
+    void aStoredIntegerTextTooLongForNumericIsReadAsNoInteger_andNeverFailsTheRead() throws Exception {
+        // 131,073 digits: one more than PostgreSQL's numeric holds. The cast would raise 22003 and fail the whole read.
+        seed("{\"m\":\"" + "7".repeat(131_073) + "\"}", "{\"m\":9}");
+        var body = ok(PATH + "?meta_min.m=0");
+        assertThat(tumblers(body)).containsExactly("5.1.2");
+        assertThat(body).containsEntry("count", 1);
+    }
+
+    // ── sensitive=true ──────────────────────────────────────────────────────
+
+    @Test
+    void sensitiveTrueKeepsOnlyLiveSensitiveRows_composedWithEveryOtherClause() throws Exception {
+        insert(Row.of("5.1.1").flagged().meta("{\"k\":\"v\",\"m\":5}"), Row.of("5.1.2").meta("{\"k\":\"v\",\"m\":5}"),
+            Row.of("5.1.3").flagged().meta("{\"k\":\"w\"}"), Row.of("5.1.4").flagged().tombstoned().meta("{\"k\":\"v\"}"),
+            Row.of("5.1.5").flagged().type("paper").meta("{\"k\":\"v\"}"),
+            Row.of("5.1.6").tenant(TENANT_B).flagged().meta("{\"k\":\"v\"}"));
+        assertThat(hits("meta.k=v")).containsExactly("5.1.1", "5.1.2", "5.1.5");
+        var body = ok(PATH + "?meta.k=v&sensitive=true");
+        assertThat(tumblers(body)).containsExactly("5.1.1", "5.1.5");
+        assertThat(body).containsEntry("count", 2);
+        assertThat(hits("meta.k=v&sensitive=true&content_type=paper")).containsExactly("5.1.5");
+        assertThat(hits("meta_min.m=1&sensitive=true")).containsExactly("5.1.1");
+        assertThat(documents(body).get(0)).containsEntry("sensitive", true);
+        var theirs = ok(TOKEN_B, TENANT_B, PATH + "?meta.k=v&sensitive=true");
+        assertThat(tumblers(theirs)).containsExactly("5.1.6");
+    }
+
+    @Test
+    void sensitiveTakesOnlyTrue_andDoesNotStandForAMetaClause() throws Exception {
+        seed("{\"k\":\"v\"}");
+        for (String q : List.of("meta.k=v&sensitive=false", "meta.k=v&sensitive=1", "meta.k=v&sensitive=", "meta.k=v&sensitive=TRUE",
+            "sensitive=true", "sensitive=true&content_type=prose", "meta.k=v&sensitive=true&sensitive=maybe")) {
+            assertThat(status(PATH + "?" + q)).as("query: " + q).isEqualTo(400);
+        }
+    }
+
     // ── the 400s ────────────────────────────────────────────────────────────
 
     @Test

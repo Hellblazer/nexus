@@ -56,8 +56,14 @@ public final class CatalogDocReads {
     /** The page size a call without a limit uses. */
     public static final int DEFAULT_LIMIT = 1_000;
 
-    /** A {@code meta_min} bound: an optional minus sign and digits, at most this many (numeric compares any length). */
-    public static final int MAX_BOUND_DIGITS = 38;
+    /**
+     * The most characters a {@code meta_min} bound or a stored integer text may have: PostgreSQL's {@code numeric} holds up to
+     * 131,072 digits before the decimal point, so that is the bound (the oracle, {@code meta_at_least}, takes any length
+     * through Python's Decimal). A request that is longer is limited by the HTTP server's own request-line limit first.
+     * A stored text longer than this is read as no integer, so the cast can never raise numeric overflow and fail the
+     * read: the one place the engine departs from the oracle, for a value nothing writes.
+     */
+    public static final int MAX_BOUND_DIGITS = 131_072;
 
     /** The answer: {@code count} is every live match; {@code documents} is the page at {@code offset}, at most {@code limit}. */
     public record Page(int count, int limit, int offset, List<Map<String, Object>> documents) {}
@@ -68,8 +74,11 @@ public final class CatalogDocReads {
     /** {@code meta_min.<key>=<n>}. */
     public record MetaMin(String key, BigInteger min) {}
 
-    /** The by-meta filter: an exact content type (or null), equalities, and integer lower bounds; at least one of the last two. */
-    public record MetaFilter(String contentType, List<MetaEq> equalities, List<MetaMin> bounds) {
+    /**
+     * The by-meta filter: an exact content type (or null), equalities, integer lower bounds (at least one of those two),
+     * and {@code sensitiveOnly}, which keeps only the live documents whose {@code sensitive} flag is set.
+     */
+    public record MetaFilter(String contentType, List<MetaEq> equalities, List<MetaMin> bounds, boolean sensitiveOnly) {
         public MetaFilter {
             if (equalities.isEmpty() && bounds.isEmpty()) {
                 throw new IllegalArgumentException("a metadata filter needs at least one meta. or meta_min. clause");
@@ -128,7 +137,7 @@ public final class CatalogDocReads {
      */
     private static Condition metaMin(MetaMin m) {
         Field<String> t = metaText(m.key());
-        Field<Boolean> guarded = DSL.when(t.likeRegex(INTEGER_TEXT),
+        Field<Boolean> guarded = DSL.when(t.likeRegex(INTEGER_TEXT).and(DSL.length(t).le(MAX_BOUND_DIGITS)),
                 DSL.field(t.cast(SQLDataType.NUMERIC).ge(new BigDecimal(m.min()))))
             .otherwise(DSL.inline(false));
         return DSL.condition(guarded);
@@ -138,6 +147,7 @@ public final class CatalogDocReads {
     public static Condition metaWhere(String tenant, MetaFilter filter) {
         Condition c = liveOfTenant(tenant);
         if (filter.contentType() != null) c = c.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(filter.contentType()));
+        if (filter.sensitiveOnly()) c = c.and(DSL.condition(CATALOG_DOCUMENTS.SENSITIVE));
         for (MetaEq e : filter.equalities()) c = c.and(metaEq(e));
         for (MetaMin m : filter.bounds()) c = c.and(metaMin(m));
         return c;
