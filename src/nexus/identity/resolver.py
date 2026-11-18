@@ -4,7 +4,8 @@
 
 One function replaces the four-tier session resolver for identity. Its inputs, in order:
 
-1. an explicit identity token (a delegated child): ``NX_IDENTITY_TOKEN`` names the token file it was given;
+1. an explicit identity token (a delegated child): ``NX_IDENTITY_TOKEN`` names the token file it was given; when that
+   file cannot be read the answer is None, never the inputs below (they would name the parent);
 2. the hook payload's session id;
 3. ``CLAUDE_CODE_SESSION_ID``;
 4. the token file of the nearest Claude ancestor process.
@@ -123,8 +124,11 @@ def resolve_identity(
     explicit = (environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip()
     if explicit:
         record = read_token_file(Path(explicit))
-        if record is not None:
-            answers.append(Answer(SOURCE_EXPLICIT, record.identity, record.generation, explicit))
+        if record is None:
+            # a process given a token file is a delegated child: once its file is gone (or it was given none, the
+            # never-existing sentinel), it has no identity. Falling through would answer with its parent's.
+            return None
+        answers.append(Answer(SOURCE_EXPLICIT, record.identity, record.generation, explicit))
 
     seen: set[str] = set()
     for source, sid in ((SOURCE_PAYLOAD, payload_session_id), (SOURCE_SESSION_ID, (environ.get(CLAUDE_SESSION_ENV) or "").strip())):
