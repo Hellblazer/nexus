@@ -1318,21 +1318,23 @@ refuses uncommitted or untracked paths, and refuses `--skip-preflight`):
 
 ```bash
 git push -u origin release/vX.Y.N
-gh pr create --base main --head release/vX.Y.N --title "conexus X.Y.N: ..." --body-file <body>   # body shape as in Step 9: short opening, keywords, then <details>
+gh pr create --draft --base main --head release/vX.Y.N --title "release: conexus X.Y.N" --body-file <body>   # a draft: CI runs on it, and it cannot be merged before the battery passes. Body shape as in Step 9; keep <body> outside the worktree, the battery refuses an untracked path
 uv run python scripts/check_plugin_only_eligibility.py --base vX.Y.Z   # on the exact PR head: git rev-parse HEAD equals git rev-parse origin/release/vX.Y.N
 tests/e2e/release-battery.sh --plugin-only vX.Y.Z
+gh pr ready release/vX.Y.N   # only after the battery prints its PLUGIN-ONLY PASSED line
 ```
 
 After any later push to the branch, re-run the eligibility script on the exact PR head
 before the merge.
 
-There is no hand unit suite in this lane. The release PR's CI runs the full unit
-suite and every integration file on the exact head, and AGENTS.md rule 13 says no
-tree gets two green full runs (Sam 2026-11-18, T2
-`nexus/sam-ruling-fast-lane-trim-2026-11-18`). The hand `pytest -n auto` on lab-l
-that ran here before cost 8.3.1 about an hour (a 29-minute wait for the memory
-grant, a run that exited 75 because the copy had no gate jar, and a rerun) for a
-tree PR CI then ran in full. A hand run that does need the engine substrate builds
+There is no hand unit suite in this lane. The release PR's CI runs, on the head
+merged into main, the unit shards with the default markers (`not integration and
+not slow and not lint`, the same set a hand `pytest -n auto` selects), the lint job,
+and every integration file in three shards, less the markers CI deselects on every
+PR (`lived_in`, `keyed_voyage`, `mandatory_regression_pin`, `pg_bundle_artifact`). AGENTS.md
+rule 13 says no tree gets two green full runs (Sam 2026-11-18, T2
+`nexus/sam-ruling-fast-lane-trim-2026-11-18`, which records what the hand run cost on
+8.3.1). A hand run that does need the engine substrate builds
 the gate jar first with `scripts/build-gate-jar.sh --lab-run <class>`, never inside
 a lab-run grant (AGENTS.md rule 13).
 
@@ -1352,7 +1354,8 @@ identical-code bump (2026-10-26, all six legs passed). Step 11c below stays in t
 lane as the post-publish control for exactly this risk.
 
 **6. Publish.** The merge waits for both: the PR's CI green on the exact head, and
-the battery's PLUGIN-ONLY verdict. A later push re-opens items 4 and 5. Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release
+the battery's PLUGIN-ONLY verdict (the PR leaves draft only on that verdict). A later
+push means item 4's eligibility check and the battery run again. Then merge (never squash), Sam's "tag and push" (Step 9; its paired-release
 deploy paragraph does not apply, because the engine pin is unchanged), Step 10
 (release.yml publishes the identical nx code under the new version), Step 11, and
 Step 11b's back-merge of `main` into `develop`.
@@ -1417,7 +1420,7 @@ push its tags once their gates are green (engine-release skill Step 4 states the
 - **Freehanding a version surface or a tag from memory of AGENTS.md instead of invoking this skill.** It skips the pre-push and post-publish verification that catches a failed publish (v4.32.13: the tag's workflow failed, PyPI was skipped, and the release was declared done anyway). Invoke `release` (or `engine-release`) before touching either.
 - **Bumping only `pyproject.toml` and missing the four plugin manifests.** CI parity check catches this late. Run the Step 8 pre-push check.
 - **Merging a release PR whose integration shards did not all run.** On a pull request into main, CI runs every integration file in three shards (nexus-jh1f2 cut 4); `pytest-gate` needs all three green. A release PR CI where `pytest (integration, affected, shard k/3)` is missing or skipped is not evidence: re-run it.
-- **Running the full unit suite CONCURRENTLY with the E2E gates** (neither the full release path nor the plugin-only lane runs one by hand any more: nexus-jh1f2 cut 5, and Sam's 2026-11-18 ruling for the lane). (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
+- **Running the full unit suite CONCURRENTLY with the E2E gates** (neither the full release path nor the plugin-only lane runs one by hand any more: nexus-jh1f2 cut 5, and Sam's 2026-11-18 ruling for the lane; the lane's battery runs beside the PR's CI, which runs on the CI runners, not on the box the battery runs on). (2026-08-17, 7.9.0 battery.) The E2E gates parallelize safely among THEMSELVES, but their teardown phases (`nx daemon service stop --with-pg`, gate cleanup, the engine-substrate orphan sweep) share a machine-wide blast radius with the unit suite's self-provisioned engine substrates — the suite ran clean to ~75% then block-failed the moment a sandbox teardown fired. Sequence: E2E gates in parallel, the unit suite SERIAL (before or after). A block-shaped mass failure under concurrency is contention-shaped, but the quiet re-run of the failed set is mandatory evidence either way.
 - **Using `gh release create` after `git push origin vX.Y.Z`.** Duplicate release. The Release workflow already creates one.
 - **Forgetting `uv sync`.** `uv.lock` not updated; CI fails or local install resolves differently.
 - **Forgetting the coordinated install after tag-push (Step 12).** Local `nx` stays on the old version; the post-merge "verify locally" step lies. The opposite slip is also a mistake: running `scripts/reinstall-tool.sh` or `nx upgrade` in one session while others are live.

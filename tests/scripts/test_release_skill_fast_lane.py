@@ -131,8 +131,8 @@ def test_engine_floor_check_precedes_the_pr_and_closes_the_lane() -> None:
     flat = _flat(section)
     assert "newest published `engine-service-v*` tag is the one the base tag pins" in flat
     assert "closes the lane" in flat
-    # "before the PR": it sits in the gate block, which comes before the Publish item that opens the PR
-    assert section.index(floor) < section.index("**6. Publish.**")
+    # "before the PR": the floor check comes before the command that opens the PR
+    assert section.index(floor) < section.index("gh pr create --draft --base main")
 
 
 def test_base_tag_machinery_is_checked_not_named_by_version() -> None:
