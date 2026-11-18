@@ -46,6 +46,15 @@ _bounded() {
 }
 trap 'trap - INT; kill -INT $$' INT
 
+# nexus-rc4pz: every port here comes from a probe that binds port 0 and closes the socket, so another
+# process can take the port before the engine or docker binds it. names_a_taken_port <file>: the file
+# names that failure: the JDK's BindException and docker's proxy say "Address already in use", Windows
+# says "Only one usage of each socket address", docker says "port is already allocated". Such a start
+# gets one retry on a fresh port; every other failure is final.
+names_a_taken_port() {
+  grep -qiF -e 'Address already in use' -e 'only one usage of each socket address' -e 'port is already allocated' "$1"
+}
+
 OWN_PG=0
 if [ -z "${NX_DB_URL:-}" ]; then
   OWN_PG=1
@@ -54,9 +63,21 @@ if [ -z "${NX_DB_URL:-}" ]; then
   # only (its password is nexus:nexus).
   PGNAME="nx-smoke-pg-$$-${RANDOM}"
   PGPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
-  _bounded 600 docker run -d --name "$PGNAME" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
-    -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGPORT}:5432" pgvector/pgvector:pg17 >/dev/null \
-    || { echo "FAIL: could not start the throwaway pgvector container $PGNAME"; exit 2; }
+  start_pg() {
+    _bounded 600 docker run -d --name "$PGNAME" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
+      -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGPORT}:5432" pgvector/pgvector:pg17 >/dev/null 2>"$SMOKE_TMP/pg-run.err"
+    local rc=$?
+    cat "$SMOKE_TMP/pg-run.err" >&2
+    return "$rc"
+  }
+  if ! start_pg; then
+    names_a_taken_port "$SMOKE_TMP/pg-run.err" \
+      || { echo "FAIL: could not start the throwaway pgvector container $PGNAME"; exit 2; }
+    echo "  retry  pgvector host port $PGPORT was taken before the container could bind it (port is already allocated); one more start on a fresh port"
+    _bounded 60 docker rm -f "$PGNAME" >/dev/null 2>&1
+    PGPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
+    start_pg || { echo "FAIL: could not start the throwaway pgvector container $PGNAME"; exit 2; }
+  fi
   PG_UP=0
   for _ in $(seq 1 90); do
     _bounded 10 docker exec "$PGNAME" pg_isready -U nexus >/dev/null 2>&1 && { PG_UP=1; break; }
@@ -134,12 +155,15 @@ start_service() {
   SVCPID=$!
   U="http://localhost:${SVCPORT}"
 }
-# wait_healthy: 0 healthy, 1 the engine exited, 2 not healthy after 60 polls.
+# wait_healthy: 0 healthy, 1 the engine exited, 2 not healthy after 60 polls. A 200 from /health
+# counts only once OUR engine has logged that it serves SVCPORT: a process that took the port can
+# answer /health while our engine dies at its bind (nexus-rc4pz).
 wait_healthy() {
   local _
   for _ in $(seq 1 60); do
     kill -0 "$SVCPID" 2>/dev/null || return 1
-    curl -fsS "$U/health" >/dev/null 2>&1 && return 0
+    curl -fsS "$U/health" >/dev/null 2>&1 \
+      && grep -qF "event=service_started port=$SVCPORT" "$SMOKE_TMP/svc.log" && return 0
     sleep 1
   done
   return 2
@@ -147,11 +171,10 @@ wait_healthy() {
 
 start_service
 wait_healthy; HEALTH=$?
-# nexus-rc4pz: SVCPORT comes from a probe that closes its socket, so another process can bind the
-# port before the engine does; the engine then dies with the JDK's uncaught BindException, "Address
-# already in use". That boot gets one retry on a fresh port (the first log is kept as
+# nexus-rc4pz: SVCPORT comes from the probe above, so the engine can die at its bind with the JDK's
+# uncaught BindException. That boot gets one retry on a fresh port (the first log is kept as
 # svc.port-taken.log); any other failure is final, as before.
-if [ "$HEALTH" = "1" ] && grep -qF 'Address already in use' "$SMOKE_TMP/svc.log"; then
+if [ "$HEALTH" = "1" ] && names_a_taken_port "$SMOKE_TMP/svc.log"; then
   echo "  retry  port $SVCPORT was taken before the engine bound it (Address already in use); one more boot on a fresh port"
   wait "$SVCPID" 2>/dev/null
   mv "$SMOKE_TMP/svc.log" "$SMOKE_TMP/svc.port-taken.log"

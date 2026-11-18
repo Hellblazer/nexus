@@ -79,7 +79,14 @@ def _stub_env(fake: Path, settled: Path) -> dict[str, str]:
 _DOCKER = """#!/bin/sh
 echo "$*" >> "$DOCKER_LOG"
 case "$1" in
-  run) exit "${DOCKER_RUN_RC:-0}" ;;
+  run)
+    # The host port taken between the script's probe and docker's bind, on the run's first start only.
+    if [ -n "${DOCKER_RUN_PORT_TAKEN_ONCE:-}" ] && [ ! -e "$DOCKER_RUN_PORT_TAKEN_ONCE" ]; then
+      : > "$DOCKER_RUN_PORT_TAKEN_ONCE"
+      echo "docker: Error response from daemon: driver failed programming external connectivity: Bind for 127.0.0.1:5432 failed: port is already allocated." >&2
+      exit 125
+    fi
+    exit "${DOCKER_RUN_RC:-0}" ;;
   exec) case "$*" in *"CREATE DATABASE"*) exit "${CREATE_DB_RC:-0}" ;; *) exit "${PG_READY_RC:-0}" ;; esac ;;
   *) exit 0 ;;
 esac
@@ -93,21 +100,55 @@ esac
 # holds the script's ticks meanwhile, because the fake has not settled. With ``retry_s`` 0 the fake dies
 # at the taken port, as the engine does (an uncaught BindException), and the script's own retry on a
 # fresh port is what saves the run. ``held_for`` > 0 makes another process take the port first, for that
-# many seconds, at the run's first bind only (the ``held_once`` marker), so a retry boot binds clean.
+# many seconds, at each of the run's first ``hold_binds`` binds (counted in ``count_file``), so a retry boot
+# past them binds clean. With ``thief`` the holder answers 200 to every GET, and the fake binds (and dies)
+# only after the holder has answered one: the script has seen a /health 200 from a process that is not
+# its engine.
 _BIND = r'''
 import errno, time
 
+_HOLDER = """
+import http.server, socket, sys, time
+port, secs, thief = int(sys.argv[1]), float(sys.argv[2]), sys.argv[3] == "1"
+if thief:
+    class T(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            print("served", flush=True)
 
-def bind_service_port(handler, retry_s, held_for, held_once):
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", port), T)
+    srv.timeout = 0.2
+    print("held", flush=True)
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        srv.handle_request()
+else:
+    s = socket.socket()
+    s.bind(("127.0.0.1", port))
+    s.listen()
+    print("held", flush=True)
+    time.sleep(secs)
+"""
+
+
+def bind_service_port(handler, retry_s, held_for, hold_binds, count_file, thief, settle=None):
     port = int(os.environ["NX_SERVICE_PORT"])
-    if held_for and not os.path.exists(held_once):
-        open(held_once, "w").close()
+    binds = int(open(count_file).read() or 0) if os.path.exists(count_file) else 0
+    with open(count_file, "w") as f:
+        f.write(str(binds + 1))
+    if held_for and binds < hold_binds:
         import subprocess
-        holder = subprocess.Popen(
-            [sys.executable, "-c", "import socket, sys, time; s = socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1]))); "
-             "s.listen(); print('held', flush=True); time.sleep(float(sys.argv[2]))", str(port), str(held_for)],
-            stdout=subprocess.PIPE, text=True)
+        holder = subprocess.Popen([sys.executable, "-c", _HOLDER, str(port), str(held_for), "1" if thief else "0"],
+                                  stdout=subprocess.PIPE, text=True)
         assert holder.stdout.readline() == "held\n"
+        if thief:
+            settle()  # waiting on the script's /health: its ticks must run, or the sleep stub holds them for us
+            assert holder.stdout.readline() == "served\n"
     deadline = time.monotonic() + retry_s
     while True:
         try:
@@ -128,6 +169,11 @@ with open(os.environ["FAKE_BIN_PIDS"], "a") as f:
     f.write(f"{os.getpid()}\\n")
 if os.environ["FAKE_BIN_MODE"] == "exit":
     sys.exit(3)
+if os.environ["FAKE_BIN_MODE"] == "hang-naming-a-taken-port":  # alive, never serving, the string in its log
+    print("WARN a client of this engine: connect failed: Address already in use", flush=True)
+    with open(os.environ["FAKE_SETTLED"], "a") as f:
+        f.write(f"{os.getpid()}\\n")
+    signal.pause()
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -136,7 +182,10 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 srv = bind_service_port(H, float(os.environ["FAKE_BIND_RETRY_S"]), float(os.environ["FAKE_PORT_HELD_FOR"]),
-                        os.environ["FAKE_BIN_PIDS"] + ".held")
+                        int(os.environ["FAKE_HOLD_BINDS"]), os.environ["FAKE_BIN_PIDS"] + ".binds",
+                        os.environ["FAKE_PORT_THIEF"] == "1",
+                        lambda: open(os.environ["FAKE_SETTLED"], "a").write(f"{os.getpid()}\\n"))
+print(f"event=service_started port={srv.server_address[1]}", flush=True)  # as NexusService.start() logs it
 with open(os.environ["FAKE_SETTLED"], "a") as f:  # serving: the sleep stub's ticks count from here
     f.write(f"{os.getpid()}\\n")
 srv.serve_forever()
@@ -145,6 +194,7 @@ srv.serve_forever()
 
 def _run(
     tmp_path: Path, *, mode: str, run_rc: int = 0, ready_rc: int = 0, bind_retry_s: float = 20.0, port_held_for: float = 0.0,
+    hold_binds: int = 1, port_thief: bool = False, docker_port_taken_once: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], list[int]]:
     stubs = tmp_path / "stubs"
     stubs.mkdir(parents=True)
@@ -164,8 +214,11 @@ def _run(
         DOCKER_LOG=str(log), DOCKER_RUN_RC=str(run_rc), PG_READY_RC=str(ready_rc),
         FAKE_BIN_MODE=mode, FAKE_BIN_PIDS=str(pids), NX_NO_TELEMETRY="1",
         FAKE_BIND_RETRY_S=str(bind_retry_s), FAKE_PORT_HELD_FOR=str(port_held_for),
+        FAKE_HOLD_BINDS=str(hold_binds), FAKE_PORT_THIEF="1" if port_thief else "0",
         **_stub_env(fake, tmp_path / "bin.settled"),
     )
+    if docker_port_taken_once:
+        env["DOCKER_RUN_PORT_TAKEN_ONCE"] = str(tmp_path / "docker.port-taken")
     proc = subprocess.run(["bash", str(SMOKE)], cwd=SERVICE, env=env, capture_output=True, text=True, timeout=180)
     calls = log.read_text().splitlines() if log.exists() else []
     started = [int(p) for p in pids.read_text().split()] if pids.exists() else []
@@ -236,6 +289,65 @@ def test_a_port_taken_before_the_engine_binds_gets_one_more_boot_on_a_fresh_port
     finally:
         for pid in started:
             kill_if_identity(pid, str(tmp_path / "nexus-service"))
+
+
+def test_a_process_that_took_the_port_and_answers_health_is_not_taken_for_the_engine(tmp_path: Path) -> None:
+    """The critique of 59e45b852: a process that took SVCPORT can answer /health 200 while our engine dies at
+    its bind, and the health wait took that 200 for the engine. Here the thief answers the script's first
+    /health before the fake binds and dies. A 200 counts only once our engine has logged
+    event=service_started for SVCPORT, so the script sees its engine exit, retries on a fresh port, and the
+    second boot reaches the first real assertion."""
+    proc, calls, started = _run(tmp_path, mode="health", bind_retry_s=0, port_held_for=5.0, port_thief=True)
+    out = proc.stdout + proc.stderr
+    try:
+        assert proc.returncode == 1 and "FAIL: migration did not apply" in out, out
+        assert len(_RETRY_LINE.findall(proc.stdout)) == 1 and len(started) == 2, (started, out)
+    finally:
+        for pid in started:
+            kill_if_identity(pid, str(tmp_path / "nexus-service"))
+
+
+def test_a_retry_whose_port_is_taken_again_fails_as_before_with_no_second_retry(tmp_path: Path) -> None:
+    proc, calls, started = _run(tmp_path, mode="health", bind_retry_s=0, port_held_for=3.0, hold_binds=2)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "FAIL: service exited during startup" in out, out
+    assert len(_RETRY_LINE.findall(proc.stdout)) == 1 and len(started) == 2, (started, out)
+
+
+def test_a_live_engine_whose_log_names_a_taken_port_is_never_retried(tmp_path: Path) -> None:
+    proc, calls, started = _run(tmp_path, mode="hang-naming-a-taken-port")
+    out = proc.stdout + proc.stderr
+    try:
+        assert proc.returncode == 1 and "FAIL: service never became healthy" in out, out
+        assert not _RETRY_LINE.search(proc.stdout) and len(started) == 1, (started, out)
+    finally:
+        for pid in started:
+            kill_if_identity(pid, str(tmp_path / "nexus-service"))
+
+
+_PG_RETRY_LINE = re.compile(r"retry:? +pgvector host port (\d+) was taken before the container could bind it")
+
+
+def _pg_runs(calls: list[str]) -> list[tuple[str, str]]:
+    """(container name, host port) of every ``docker run`` call."""
+    runs = [re.search(r"--name (\S+) .* -p 127\.0\.0\.1:(\d+):5432 ", c) for c in calls if c.startswith("run ")]
+    assert all(runs), calls
+    return [(m.group(1), m.group(2)) for m in runs if m]
+
+
+def test_a_pg_host_port_taken_before_docker_binds_it_gets_one_more_start_on_a_fresh_port(tmp_path: Path) -> None:
+    """nexus-rc4pz (critique S2): PGPORT comes from the same probe-and-close, so docker can find it taken. The
+    container that failed to start is removed and docker runs once more on a fresh port; the run then goes on
+    to the engine (which dies at boot here, as the dies-at-boot run does). Without the retry: the run stops at
+    "could not start the throwaway pgvector container"."""
+    proc, calls, started = _run(tmp_path, mode="exit", docker_port_taken_once=True)
+    out = proc.stdout + proc.stderr
+    assert "FAIL: service exited during startup" in out and len(started) == 1, out
+    runs = _pg_runs(calls)
+    assert len(runs) == 2 and runs[0][0] == runs[1][0] and runs[0][1] != runs[1][1], calls
+    assert calls.index(f"rm -f {runs[0][0]}") < [i for i, c in enumerate(calls) if c.startswith("run ")][1], calls
+    assert len(_PG_RETRY_LINE.findall(proc.stdout)) == 1 and "port is already allocated" in proc.stderr, out
+    assert calls[-1] == f"rm -f {runs[0][0]}", calls
 
 
 def test_a_binary_that_answers_health_is_killed_and_its_container_removed(tmp_path: Path) -> None:
@@ -465,8 +577,10 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-srv = bind_service_port(H, BIND_RETRY_S, PORT_HELD_FOR, PIDS + ".held")
-if DEFECT != "cloud-never-ready":
+srv = bind_service_port(H, BIND_RETRY_S, PORT_HELD_FOR, HOLD_BINDS, PIDS + ".binds", False)
+if DEFECT == "cloud-hangs-naming-a-taken-port":  # alive and never ready, with the string in its log
+    log("WARN a client of this engine: connect failed: Address already in use")
+if DEFECT not in ("cloud-never-ready", "cloud-hangs-naming-a-taken-port"):
     log("event=service_ready")
 settle()
 srv.serve_forever()
@@ -502,7 +616,8 @@ class _ShapesRun:
 def _run_shapes(
     tmp_path: Path, *, defect: str = "", db_url: str | None = None, require_shapes: bool = False,
     borrowed_pg: tuple[str, str] | None = None, tick: float = 0.1, start_delay: float = 0.0,
-    port_held_for: float = 0.0, bind_retry_s: float = 20.0, **docker_rc: int,
+    port_held_for: float = 0.0, bind_retry_s: float = 20.0, hold_binds: int = 1, docker_port_taken_once: bool = False,
+    **docker_rc: int,
 ) -> _ShapesRun:
     stubs = tmp_path / "stubs"
     stubs.mkdir(parents=True)
@@ -517,6 +632,7 @@ def _run_shapes(
     fake.write_text(
         f"#!/usr/bin/env python3\nDEFECT = {defect!r}\nPIDS = {str(pids)!r}\nSETTLED = {str(settled)!r}\n"
         f"START_DELAY = {start_delay!r}\nPORT_HELD_FOR = {port_held_for!r}\nBIND_RETRY_S = {bind_retry_s!r}\n"
+        f"HOLD_BINDS = {hold_binds!r}\n"
         f"{_BIND}{_SHAPES_BODY}"
     )
     fake.chmod(0o755)
@@ -526,6 +642,8 @@ def _run_shapes(
     env = child_env_with_tmpdir(base, scratch)
     env.update(PATH=f"{stubs}{os.pathsep}{env.get('PATH', '')}", BIN=str(fake), DOCKER_LOG=str(log), NX_NO_TELEMETRY="1")
     env.update(_stub_env(fake, settled))
+    if docker_port_taken_once:
+        env["DOCKER_RUN_PORT_TAKEN_ONCE"] = str(tmp_path / "docker.port-taken")
     env["NX_RC4PZ_AMBIENT"] = "1"  # the script boots under env -i; the fake records whether this leaked through
     env.update({k.upper(): str(v) for k, v in docker_rc.items()})
     if db_url is not None:
@@ -611,6 +729,28 @@ def test_a_port_the_engine_cannot_bind_gets_one_more_cloud_boot_on_a_fresh_port(
     assert run.leftover == [] and run.kept() == [], "every engine ended, and a passing run removes its scratch dir"
 
 
+def test_a_cloud_retry_whose_port_is_taken_again_fails_as_before_with_no_second_retry(tmp_path: Path) -> None:
+    run = _run_shapes(tmp_path, port_held_for=3.0, bind_retry_s=0, hold_binds=2)
+    assert run.proc.returncode == 1, run.out
+    verdicts = run.verdicts()
+    assert verdicts["cloud-shape"][0] == "FAIL" and [g for g in verdicts["cloud-shape"][1] if g.startswith("reaches service_ready")], run.out
+    assert {s: v[0] for s, v in verdicts.items() if s != "cloud-shape"} == dict.fromkeys(_SHAPES[1:], "PASS"), run.out
+    assert len(_RETRY_LINE.findall(run.proc.stdout)) == 1 and len(run.boots) == len(_SHAPES) + 1, run.out
+
+
+def test_a_pg_host_port_taken_before_docker_binds_it_gets_one_more_start_for_the_shapes(tmp_path: Path) -> None:
+    """nexus-rc4pz (critique S2): the throwaway pgvector's host port, as native-smoke.sh's. Without the retry:
+    "cannot start the throwaway pgvector container", exit 2, no boot."""
+    run = _run_shapes(tmp_path, docker_port_taken_once=True)
+    assert run.proc.returncode == 0, run.out
+    assert run.verdicts() == {shape: ("PASS", []) for shape in _SHAPES}, run.out
+    runs = _pg_runs(run.calls)
+    assert len(runs) == 2 and runs[0][0] == runs[1][0] and runs[0][1] != runs[1][1], run.calls
+    assert len(_PG_RETRY_LINE.findall(run.proc.stdout)) == 1, run.out
+    assert {url.rsplit("/", 1)[0] for _, url in run.boots} == {f"jdbc:postgresql://localhost:{runs[1][1]}"}, run.boots
+    assert run.calls[-1] == f"rm -f {runs[0][0]}", run.calls
+
+
 def test_an_engine_that_starts_slower_than_the_scripts_bounds_still_passes_every_shape(tmp_path: Path) -> None:
     """The script's bounds are counts of ``sleep`` ticks, and a plain stub's ticks run on while the fake
     engine is still starting (or waiting out a taken port). Here 90 ticks are well under a second of stub
@@ -639,6 +779,8 @@ _EXIT = ("exits within the bound", "exits non-zero, not a crash or a kill")
     ("defect", "fails"),
     [
         ("cloud-never-ready", {"cloud-shape": ["reaches service_ready"]}),
+        # A live engine whose log happens to name a taken port is never retried (nexus-rc4pz).
+        ("cloud-hangs-naming-a-taken-port", {"cloud-shape": ["reaches service_ready"]}),
         ("cloud-dies-before-ready", {"cloud-shape": ["reaches service_ready"]}),
         ("cloud-presence-wrong", {"cloud-shape": ["probe saw the voyage key and no bge"]}),
         ("cloud-no-version", {"cloud-shape": ["GET /version answers", "/version reports embedding_mode voyage"]}),

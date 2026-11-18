@@ -85,6 +85,16 @@ fail=0
 
 free_port() { python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()"; }
 
+# nexus-rc4pz: free_port closes its probe socket, so another process can take the port before the engine binds
+# it, and the engine dies with the JDK's uncaught BindException. names_a_taken_port <file>: the log names that
+# failure ("Address already in use"; Windows says "Only one usage of each socket address"). The engine binds after
+# its migrations and the data move, so a retry over the same cluster would hand the checker a restart's log: the
+# mode is run once more from a fresh cluster and port instead (PORT_RETRY_LEFT). Every other failure is final.
+names_a_taken_port() {
+  grep -qiF -e 'Address already in use' -e 'only one usage of each socket address' "$1"
+}
+PORT_RETRY_LEFT=1
+
 cleanup() {
   local rc=$?
   [ -n "$BOOT_PID" ] && kill -9 "$BOOT_PID" 2>/dev/null
@@ -126,9 +136,9 @@ sys.stdout.write(out + "\n")
 PY
 }
 
-run_mode() {
+run_mode() { # run_mode <mode> [<scratch dir name, default the mode>]
   local mode="$1"
-  local d="$SMOKE_TMP/$mode" bundle ctl log creds port pgdata U
+  local d="$SMOKE_TMP/${2:-$1}" bundle ctl log creds port pgdata U
   echo "== $mode =="
   mkdir -p "$d/jtmp" "$d/home" "$d/ort" "$d/models" "$d/cfg" "$d/x" || return 2
   tar -xJf "$PG_BUNDLE" -C "$d/x" || { echo "FAIL: cannot extract $PG_BUNDLE"; return 2; }
@@ -177,6 +187,12 @@ run_mode() {
     sleep 1
   done
   U="http://127.0.0.1:${port}"
+  if [ "$up" != "1" ] && [ "$PORT_RETRY_LEFT" = "1" ] && ! kill -0 "$BOOT_PID" 2>/dev/null && names_a_taken_port "$log"; then
+    echo "  retry  port $port was taken before the engine bound it (Address already in use); the mode runs once more on a fresh cluster and port"
+    wait "$BOOT_PID" 2>/dev/null; BOOT_PID=""
+    "$bundle/bin/pg_ctl" -D "$pgdata" stop -m fast >/dev/null 2>&1 || true
+    return 3
+  fi
   if [ "$up" != "1" ]; then
     echo "FAIL: the engine never logged event=service_ready (exited or timed out)"
     redacted_tail "$log"
@@ -218,6 +234,11 @@ run_mode() {
 for mode in with-pg-background without-pg-background; do
   run_mode "$mode"
   rc=$?
+  if [ "$rc" = "3" ]; then
+    PORT_RETRY_LEFT=0
+    run_mode "$mode" "$mode.retry"
+    rc=$?
+  fi
   if [ "$rc" = "2" ]; then echo "NATIVE DATA-MOVE SMOKE: SETUP FAILED ($mode)"; exit 2; fi
   [ "$rc" = "0" ] || fail=1
 done
