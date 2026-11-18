@@ -4705,15 +4705,17 @@ class HttpVectorClient:
 
         *topic_route* (RDR-134 Step 5a-i, nexus-7fku2.1.5) asks the engine to search each named collection
         inside the topic(s) nearest the query: ``{"mode": "top1"}`` or ``{"mode": "band", "width": w}``, with an
-        optional ``"collections"`` narrowing. Default off: a request without it is byte-identical to today's and
+        optional ``"collections"`` narrowing and an optional ``"min_coverage"`` (a number from 0 to 1, forwarded
+        as given: the coverage a collection needs to be routed, the engine's default 0.9). Default off: a request without it is byte-identical to today's and
         spends no capability probe. The field reaches the body only when (a) the request holds a prose-prefix
         collection (knowledge, docs, rdr, paper), (b) it carries no *chash_allow* and no *where* (the engine
         leaves such a request unrouted), and (c) :meth:`supports_topic_route` reads true; ``collections`` is then
         always an explicit list of the prose names, never absent or null (the engine reads those as "route every
         collection"), so a code collection never carries it. Each ``per_collection`` entry then carries
         ``topic_route_status`` (``routed``, ``no_topics``, ``fallback`` or ``skipped``; absent on an arm that
-        errored) and, when the engine reports them, ``topic_route_error``, ``topic_route_coverage`` and
-        ``topic_route_topics``. ``ValueError`` for a mode or width the engine would refuse, before any request.
+        errored) and, when the engine reports them, ``topic_route_error``, ``topic_route_coverage``,
+        ``topic_route_topics`` and ``topic_route_min_coverage`` (the threshold the status was decided at).
+        ``ValueError`` for a mode, width or min_coverage the engine would refuse, before any request.
         """
         _check_sensitivity(sensitivity)  # before the write-off return: a bad value is never read as include
         route_field = None

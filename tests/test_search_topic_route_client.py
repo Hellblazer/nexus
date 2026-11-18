@@ -211,6 +211,34 @@ class TestRequestBody:
         assert band == {"mode": "band", "width": 0.05, "collections": cols}
         assert top1 == {"mode": "top1", "collections": cols}
 
+    @pytest.mark.parametrize("given, sent", [
+        (0.5, 0.5), (0, 0.0), (1, 1.0), (0.9, 0.9), (1.0, 1.0),
+    ])
+    def test_min_coverage_is_forwarded_in_the_field_as_a_float(self, monkeypatch, given, sent) -> None:
+        cols = _cols("docs", _BGE, 1)
+        engine = _engine(monkeypatch, cols)
+        _client_search(engine, cols, topic_route={"mode": "top1", "min_coverage": given})
+        carrier = engine.route_calls()[0]["topic_route"]
+        assert carrier == {"mode": "top1", "min_coverage": sent, "collections": cols}
+        assert isinstance(carrier["min_coverage"], float)
+
+    @pytest.mark.parametrize("given", [{"mode": "top1"}, {"mode": "top1", "min_coverage": None}])
+    def test_without_a_min_coverage_the_field_has_no_such_key_and_the_engine_keeps_its_default(
+        self, monkeypatch, given,
+    ) -> None:
+        cols = _cols("docs", _BGE, 1)
+        engine = _engine(monkeypatch, cols)
+        _client_search(engine, cols, topic_route=given)
+        assert "min_coverage" not in engine.route_calls()[0]["topic_route"]
+
+    def test_min_coverage_reaches_the_body_from_search_cross_corpus_too(self, monkeypatch) -> None:
+        cols = _cols("docs", _BGE, 1)
+        engine = _engine(monkeypatch, cols)
+        _search(engine, cols, topic_route={"mode": "band", "width": 0.05, "min_coverage": 0.25})
+        assert engine.route_calls()[0]["topic_route"] == {
+            "mode": "band", "width": 0.05, "min_coverage": 0.25, "collections": cols,
+        }
+
     @pytest.mark.parametrize("given", [{"mode": "top1"}, {"mode": "top1", "collections": None}])
     def test_the_client_always_sends_an_explicit_list_never_a_null_or_an_absent_key(self, monkeypatch, given) -> None:
         # The engine reads an absent or JSON-null ``collections`` as "route every collection of the request",
@@ -268,6 +296,11 @@ class TestRequestBody:
         {"mode": "band", "width": float("inf")}, {"mode": "band", "width": "wide"},
         {"mode": "band", "width": True}, {"mode": "top1", "collections": "docs__x"},
         {"mode": "top1", "collections": ["docs__not_requested"]},
+        # min_coverage is a number from 0 to 1, as the engine's 400 says (nan, bool, string, list are not numbers in range)
+        {"mode": "top1", "min_coverage": -0.01}, {"mode": "top1", "min_coverage": 1.01},
+        {"mode": "top1", "min_coverage": 2}, {"mode": "top1", "min_coverage": float("nan")},
+        {"mode": "top1", "min_coverage": float("inf")}, {"mode": "top1", "min_coverage": "0.5"},
+        {"mode": "top1", "min_coverage": True}, {"mode": "band", "width": 0.1, "min_coverage": [0.5]},
     ])
     def test_a_bad_value_raises_before_any_request(self, monkeypatch, bad) -> None:
         cols = _cols("docs", _BGE, 1)
@@ -275,6 +308,20 @@ class TestRequestBody:
         with pytest.raises(ValueError):
             _client_search(engine, cols, topic_route=bad)
         assert engine.calls == [] and engine.version_calls == 0
+
+    def test_a_bad_min_coverage_raises_even_when_the_request_would_go_unrouted(self, monkeypatch) -> None:
+        # a bad value must not hide behind a where, a chash_allow or a code-only group
+        cols = _cols("docs", _BGE, 1)
+        code = _cols("code", _BGE, 1)
+        engine = _engine(monkeypatch, cols + code)
+        bad = {"mode": "top1", "min_coverage": 3}
+        with pytest.raises(ValueError, match="min_coverage"):
+            _client_search(engine, cols, topic_route=bad, where={"a": 1})
+        with pytest.raises(ValueError, match="min_coverage"):
+            _client_search(engine, code, topic_route=bad)
+        with pytest.raises(ValueError, match="min_coverage"):
+            _search(engine, cols, topic_route=bad)
+        assert engine.calls == []
 
 
 # ── the envelope ─────────────────────────────────────────────────────────────
@@ -292,6 +339,18 @@ class TestEnvelope:
         assert entries[cols[0]]["topic_route_coverage"] == 0.97 and entries[cols[0]]["topic_route_topics"] == 3
         assert entries[cols[1]]["topic_route_status"] == "no_topics"
         assert entries[cols[1]]["topic_route_error"] == "coverage lookup: SQLSTATE 57014"
+
+    def test_the_min_coverage_echo_survives_the_validator_and_a_malformed_one_is_dropped(self, monkeypatch) -> None:
+        cols = _cols("docs", _BGE, 3)
+        engine = _engine(monkeypatch, cols)
+        engine.extras = {cols[0]: {"topic_route_min_coverage": 0.5},
+                         cols[1]: {"topic_route_min_coverage": 2},       # out of range: dropped
+                         cols[2]: {"topic_route_min_coverage": "0.5"}}   # not a number: dropped
+        entries = {e["collection"]: e for e in _client_search(engine, cols, topic_route=_TOP1)["per_collection"]}
+        assert entries[cols[0]]["topic_route_min_coverage"] == 0.5
+        assert "topic_route_min_coverage" not in entries[cols[1]]
+        assert "topic_route_min_coverage" not in entries[cols[2]]
+        assert all(e["topic_route_status"] == "routed" for e in entries.values())  # none refused the envelope
 
     def test_an_unrouted_envelope_is_exactly_what_it_was(self, monkeypatch) -> None:
         cols = _cols("docs", _BGE, 1)
@@ -330,6 +389,51 @@ class TestEvent:
         assert e["errors"] == {bge[1]: "centroid ranking cut by its bound"}
         assert e["coverage"] == {bge[0]: 0.95} and e["topics"] == {bge[0]: 2}
         assert e["unrouted_reason"] is None
+
+    def test_the_event_carries_raw_counts_and_dropped_per_collection_for_the_entries_with_a_status(
+        self, monkeypatch,
+    ) -> None:
+        # S1: a routed collection whose rows all fell to the client's threshold (raw 5, dropped 5) reads routed, and
+        # only these two maps tell it from a short page (raw 4, dropped 0)
+        cols = _cols("docs", _BGE, 3)
+        code = _cols("code", _BGE, 1)
+        engine = _engine(monkeypatch, cols + code)
+        engine.extras = {cols[0]: {"raw_count": 5, "dropped": 5}, cols[1]: {"raw_count": 4, "dropped": 1}}
+        (e,), _ = _events(lambda: _search(engine, cols + code, topic_route=_TOP1))
+        assert e["raw_counts"] == {cols[0]: 5, cols[1]: 4, cols[2]: 4}
+        assert e["dropped"] == {cols[0]: 5, cols[1]: 1, cols[2]: 0}
+        assert code[0] not in e["raw_counts"] and code[0] not in e["dropped"]  # ineligible: no status, not listed
+
+    def test_the_maps_cover_a_collection_only_when_the_engine_sent_it_a_status(self, monkeypatch) -> None:
+        cols = _cols("docs", _BGE, 2)
+        engine = _engine(monkeypatch, cols)
+        engine.errors = {cols[1]: ("statement_timeout", "slow")}
+        (e,), _ = _events(lambda: _search(engine, cols, topic_route=_TOP1))
+        assert e["raw_counts"] == {cols[0]: 4} and e["dropped"] == {cols[0]: 0}
+        assert e["unreported"] == 1
+
+    def test_a_request_the_client_leaves_unrouted_has_no_counts_to_report(self, monkeypatch) -> None:
+        # chash_allow/where: the client counts every prose collection skipped itself and no engine entry exists
+        cols = _cols("docs", _BGE, 1)
+        engine = _engine(monkeypatch, cols)
+        (e,), _ = _events(lambda: _search(engine, cols, topic_route=_TOP1, where={"a": 1}))
+        assert e["statuses"] == {cols[0]: "skipped"}
+        assert "raw_counts" not in e and "dropped" not in e
+
+    def test_the_event_records_the_min_coverage_asked_for_and_the_one_the_engine_echoed(self, monkeypatch) -> None:
+        cols = _cols("docs", _BGE, 2)
+        engine = _engine(monkeypatch, cols)
+        (asked,), _ = _events(lambda: _search(engine, cols, topic_route={"mode": "top1", "min_coverage": 0.5}))
+        assert asked["min_coverage"] == 0.5                      # asked for, engine echoed nothing
+        engine.extras = {c: {"topic_route_min_coverage": 0.5} for c in cols}
+        (echoed,), _ = _events(lambda: _search(engine, cols, topic_route={"mode": "top1", "min_coverage": 0.5}))
+        assert echoed["min_coverage"] == 0.5
+        engine.extras = {c: {"topic_route_min_coverage": 0.9} for c in cols}
+        (default,), _ = _events(lambda: _search(engine, cols, topic_route=_TOP1))
+        assert default["min_coverage"] == 0.9, "no value asked for: the engine's echoed default is what was in force"
+        engine.extras = {}
+        (none,), _ = _events(lambda: _search(engine, cols, topic_route=_TOP1))
+        assert none["min_coverage"] is None, "nothing asked for and nothing echoed: the engine's default, unreported"
 
     def test_the_counts_are_named_by_the_status_table(self, monkeypatch) -> None:
         cols = _cols("docs", _BGE, 1)

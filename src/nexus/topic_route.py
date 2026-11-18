@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-134 Step 5a-i (nexus-7fku2.1.5): the client half of ``topic_route`` on search-per-collection.
 
-The engine's ``POST /v1/vectors/search-per-collection`` takes ``topic_route: {mode, width, collections}`` and
-answers each ``per_collection`` entry with a ``topic_route_status`` (RDR-134 Steps 3 and 4). This module holds what
+The engine's ``POST /v1/vectors/search-per-collection`` takes ``topic_route: {mode, width, min_coverage, collections}``
+and answers each ``per_collection`` entry with a ``topic_route_status`` (RDR-134 Steps 3 and 4). This module holds what
 the client does around it, apart from the two big modules that call it:
 
 * :func:`route_field` builds the request field. It is prose-only: ``collections`` is always an EXPLICIT list of the
@@ -11,7 +11,7 @@ the client does around it, apart from the two big modules that call it:
   collection of the request", code ones included, and on a local bge install code and docs share one model group
   and so one request. A request with nothing eligible, or with ``chash_allow`` or a metadata ``where`` (which the
   engine leaves unrouted anyway), gets no field at all.
-* :func:`carry_entry_fields` keeps the engine's four ``topic_route_*`` keys on a validated ``per_collection``
+* :func:`carry_entry_fields` keeps the engine's five ``topic_route_*`` keys on a validated ``per_collection``
   entry. They are optional diagnostics: a key of the wrong type is dropped, never a reason to refuse the envelope
   (a refusal switches the route off for a minute).
 * :class:`TopicRouteTally` collects one search's per-collection statuses and logs the ``search_topic_route`` event.
@@ -46,8 +46,9 @@ def is_prose(collection: str) -> bool:
     return collection.startswith(PROSE_PREFIXES)
 
 
-def _parse(topic_route: Mapping[str, Any]) -> tuple[str, float | None, list[str] | None]:
-    """``(mode, width, listed collections or None)``; ``ValueError`` for what the engine would 400."""
+def _parse(topic_route: Mapping[str, Any]) -> tuple[str, float | None, float | None, list[str] | None]:
+    """``(mode, width, min_coverage or None, listed collections or None)``; ``ValueError`` for what the engine
+    would 400. ``min_coverage`` is a number from 0 to 1; ``None`` (absent or null) means the engine's default."""
     mode = topic_route.get("mode")
     if mode not in MODES:
         raise ValueError(f"topic_route mode must be one of {MODES}, got {mode!r}")
@@ -57,12 +58,18 @@ def _parse(topic_route: Mapping[str, Any]) -> tuple[str, float | None, list[str]
         if isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or w < 0:
             raise ValueError(f"topic_route width must be a finite number >= 0 for band, got {w!r}")
         width = float(w)
+    min_coverage: float | None = None
+    m = topic_route.get("min_coverage")
+    if m is not None:
+        if isinstance(m, bool) or not isinstance(m, (int, float)) or not math.isfinite(m) or not 0 <= m <= 1:
+            raise ValueError(f"topic_route min_coverage must be a number from 0 to 1, got {m!r}")
+        min_coverage = float(m)
     listed = topic_route.get("collections")
     if listed is not None:
         if isinstance(listed, str) or not isinstance(listed, Iterable) or not all(isinstance(c, str) for c in listed):
             raise ValueError("topic_route collections must be a list of collection names")
         listed = list(listed)
-    return mode, width, listed
+    return mode, width, min_coverage, listed
 
 
 def validate(topic_route: Mapping[str, Any]) -> None:
@@ -90,9 +97,9 @@ def route_field(
 
     ``collections`` is the prose-prefix subset of *collection_names* (further narrowed by the caller's own
     ``collections``, which must name collections of the request), always a list. ``width`` is sent for ``band``
-    only.
+    only, ``min_coverage`` only when the caller gave one (the engine's default is 0.9).
     """
-    mode, width, listed = _parse(topic_route)
+    mode, width, min_coverage, listed = _parse(topic_route)
     names = list(collection_names)
     if listed is not None:
         unknown = [c for c in listed if c not in names]
@@ -103,9 +110,12 @@ def route_field(
     eligible = [c for c in names if is_prose(c) and (listed is None or c in listed)]
     if not eligible:
         return None
-    field: dict[str, Any] = {"mode": mode}
+    field: dict[str, Any] = {}
+    field["mode"] = mode
     if width is not None:
         field["width"] = width
+    if min_coverage is not None:
+        field["min_coverage"] = min_coverage
     field["collections"] = eligible
     return field
 
@@ -130,6 +140,9 @@ def carry_entry_fields(entry: Mapping[str, Any], out: dict[str, Any]) -> None:
     topics = entry.get("topic_route_topics")
     if _is_number(topics) and float(topics).is_integer() and topics >= 0:
         out["topic_route_topics"] = int(topics)
+    min_coverage = entry.get("topic_route_min_coverage")
+    if _is_number(min_coverage) and 0 <= min_coverage <= 1:
+        out["topic_route_min_coverage"] = min_coverage
 
 
 class TopicRouteTally:
@@ -151,7 +164,7 @@ class TopicRouteTally:
         chash_allow: Sequence[str] | None,
         per_collection_route: bool,
     ) -> None:
-        self._mode, self._width, _ = _parse(topic_route)
+        self._mode, self._width, self._min_coverage, _ = _parse(topic_route)
         names = list(dict.fromkeys(collections))
         self._eligible = [c for c in names if is_prose(c)]
         self._ineligible = len(names) - len(self._eligible)
@@ -197,9 +210,13 @@ class TopicRouteTally:
             except Exception:  # noqa: BLE001 — a diagnostic probe never fails the search
                 pass
         counts = {s: sum(1 for v in statuses.values() if v == s) for s in STATUSES}
+        # The threshold in force: what the engine echoed (it decided the statuses at that value), else what the caller
+        # asked for; None means the engine's default, which an engine that echoes would have reported.
+        echoed = [e["topic_route_min_coverage"] for e in self._entries.values() if "topic_route_min_coverage" in e]
         fields: dict[str, Any] = {
             "mode": self._mode,
             "width": self._width,
+            "min_coverage": echoed[0] if echoed else self._min_coverage,
             "eligible": len(self._eligible),
             "ineligible": self._ineligible,
             "statuses": statuses,
@@ -208,8 +225,10 @@ class TopicRouteTally:
             "unreported": len(unreported),
             "unrouted_reason": reason,
         }
+        # per collection, for the entries that carry a status: what the arm's top-k returned and what the client's
+        # threshold then removed (an all-dropped routed collection reads routed with dropped == raw_count)
         for key, field in (("errors", "topic_route_error"), ("coverage", "topic_route_coverage"),
-                           ("topics", "topic_route_topics")):
+                           ("topics", "topic_route_topics"), ("raw_counts", "raw_count"), ("dropped", "dropped")):
             held = {c: e[field] for c, e in self._entries.items() if field in e}
             if held:
                 fields[key] = held
