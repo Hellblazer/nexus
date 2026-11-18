@@ -121,6 +121,19 @@ def test_a_passing_run_records_a_new_pass_under_the_sanhell_tmpdir(box) -> None:
     assert not os.path.lexists(_state(box) / "sandbox-weekly.lock")
 
 
+def test_by_default_the_temp_dir_is_on_the_internal_disk_never_a_removable_volume(box) -> None:
+    """A launchd job's first write to /Volumes/SanHell raises a macOS privacy prompt nobody remote can
+    answer (2026-11-18: the first run sat in open() until its watchdog). With no override the run's
+    temp is ~/Library/Caches/nexus-restart-sandbox, made if missing."""
+    expected = box["home"] / "Library" / "Caches" / "nexus-restart-sandbox"
+    assert not expected.exists()
+    r = _run(box, NX_SANDBOX_TMPDIR="")
+    assert r.returncode == 0, r.stderr
+    (call,) = _calls(box, "harness-calls")
+    assert f"tempdir {expected} " in call
+    assert expected.is_dir()  # HOME-relative: on the real job, ~/Library/Caches on the internal disk
+
+
 def test_the_run_puts_claude_and_homebrew_on_path_for_launchd(box) -> None:
     """launchd starts a job with a bare PATH; claude, nx, uv and tmux are in these."""
     assert _run(box).returncode == 0

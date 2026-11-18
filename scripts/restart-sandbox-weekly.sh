@@ -41,10 +41,13 @@
 # nexus service (mail, T1 leases) as the operator. The run is killed after NX_SANDBOX_LIMIT_S
 # (default 5400 s): TERM to the harness, which cleans up, then KILL to its process group 120 s
 # later. A run while another holds the lock exits 0 at once; so does a run while a real
-# restart's log was written in the last 30 minutes. TMPDIR is NX_SANDBOX_TMPDIR, default
-# /Volumes/SanHell/tmp/nx.noindex (where every nexus test run on Sam's Mac keeps its temp); the
-# run waits up to NX_SANDBOX_VOLUME_WAIT_S (default 300 s) for it, then fails loudly instead of
-# falling back to the internal disk.
+# restart's log was written in the last 30 minutes. TMPDIR is ~/Library/Caches/nexus-restart-sandbox
+# on the internal disk, made if missing. Not the SanHell volume the hand-run tests use: a launchd
+# job's first write to a removable volume raises a macOS privacy (TCC) prompt on the laptop's
+# screen, and the write waits for an answer that nobody away from the laptop can give (the
+# 2026-11-18 first run sat in open() until its watchdog). NX_SANDBOX_TMPDIR overrides it with a
+# directory that must already exist; the run waits up to NX_SANDBOX_VOLUME_WAIT_S (default 300 s)
+# for an override to appear, then fails loudly instead of falling back.
 set -uo pipefail
 
 repo="${NX_REPO:-$HOME/git/nexus}"
@@ -164,13 +167,18 @@ for marker in "$state"/sandbox-weekly.timed-out.*; do
   [ -e "$marker" ] || continue
   kill -0 "${marker##*.}" 2>/dev/null || rm -f "$marker"
 done
-tmp="${NX_SANDBOX_TMPDIR:-/Volumes/SanHell/tmp/nx.noindex}"
+if [ -n "${NX_SANDBOX_TMPDIR:-}" ]; then
+  tmp="$NX_SANDBOX_TMPDIR"
+else
+  tmp="$HOME/Library/Caches/nexus-restart-sandbox"
+  mkdir -p "$tmp" 2>/dev/null || fail 2 not-run "could not make TMPDIR $tmp; not run"
+fi
 waited=0
 while [ ! -d "$tmp" ] && [ "$waited" -lt "${NX_SANDBOX_VOLUME_WAIT_S:-300}" ]; do
   sleep 5
   waited=$((waited + 5))
 done
-[ -d "$tmp" ] || fail 2 not-run "TMPDIR $tmp is missing (is the volume mounted?); not run"
+[ -d "$tmp" ] || fail 2 not-run "TMPDIR $tmp is missing (NX_SANDBOX_TMPDIR names a directory that does not exist); not run"
 export TMPDIR="$tmp"
 
 # The lock is a symlink whose target is the holder's pid, made by one atomic ln -s, so it never
