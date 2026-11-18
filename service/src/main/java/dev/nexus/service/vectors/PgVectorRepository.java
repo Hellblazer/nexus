@@ -582,6 +582,16 @@ public final class PgVectorRepository {
     }
 
     /**
+     * RDR-134 (code review I1): true when the registry says {@code collection} is a code collection, which a
+     * {@code topic_route} never routes (it is searched unscoped and reads {@code skipped}). Read from the registered
+     * content type, not the name: the engine does not parse collection names. The fan-out has already looked every
+     * runnable collection up ({@link #dimForCollection}), so this is a cache read there.
+     */
+    private boolean isCodeCollection(String tenant, String collection) {
+        return "code".equals(CollectionRegistry.lookup(tenantScope, tenant, collection).contentType());
+    }
+
+    /**
      * Server-side embed + upsert into the dispatched {@code chunks_<dim>} table.
      *
      * <p>Semantics pinned by the contract suite:
@@ -3337,7 +3347,7 @@ public final class PgVectorRepository {
                             try {
                                 List<Candidate> rows = null;
                                 if (topicArm != null) {
-                                    if (topicRoute.routes(col)) {
+                                    if (topicRoute.routes(col) && !isCodeCollection(tenant, col)) {
                                         var attempt = topicArm.attempt(tenant, model, col, dims[i], qv, queryVec,
                                             perCollectionK, excludeSensitive, topicRoute, requestDeadlineNanos,
                                             fanoutDeadlineNanos, searchBoundMs, armGate, run);

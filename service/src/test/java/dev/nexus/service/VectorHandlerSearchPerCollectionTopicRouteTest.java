@@ -54,6 +54,8 @@ class VectorHandlerSearchPerCollectionTopicRouteTest {
     private static final String DENSE = "knowledge__7fku213-http-dense__minilm-l6-v2-384__v1";
     private static final String SMALL = "knowledge__7fku213-http-small__minilm-l6-v2-384__v1";
     private static final String TAXO = "knowledge__7fku213-http-taxo__minilm-l6-v2-384__v1";
+    /** A real code collection with TAXO's taxonomy: it could be routed, which is what the engine's guard prevents. */
+    private static final String CODEC = "code__7fku213-http-codec__minilm-l6-v2-384__v1";
     private static final OffsetDateTime SEED_TS = OffsetDateTime.parse("2026-01-01T00:00:00+00:00");
 
     PostgreSQLContainer<?> pg;
@@ -88,6 +90,7 @@ class VectorHandlerSearchPerCollectionTopicRouteTest {
             PgContainerHelper.insertCollection(dsl, TENANT, DENSE);
             PgContainerHelper.insertCollection(dsl, TENANT, SMALL);
             PgContainerHelper.insertCollection(dsl, TENANT, TAXO);
+            PgContainerHelper.insertCollection(dsl, TENANT, CODEC);
         }
         seed(scope, repo, DENSE, "dense", 30, 0.0, 0.001);
         seed(scope, repo, SMALL, "small", 3, 1.0, 0.01);
@@ -97,7 +100,12 @@ class VectorHandlerSearchPerCollectionTopicRouteTest {
         List<String> tb = seed(scope, repo, TAXO, "tb", 6, 0.05, 0.01);
         taxonomy(TAXO, "TA", 0.10, ta);
         taxonomy(TAXO, "TB", 1.00, tb);
-        service = new NexusService(0, TOKEN, svcDs, null, repo);
+        // CODEC: the same layout in a code__ collection, every chunk assigned
+        List<String> cta = seed(scope, repo, CODEC, "ta", 6, 0.30, 0.01);
+        List<String> ctb = seed(scope, repo, CODEC, "tb", 6, 0.05, 0.01);
+        taxonomy(CODEC, "TA", 0.10, cta);
+        taxonomy(CODEC, "TB", 1.00, ctb);
+        service =new NexusService(0, TOKEN, svcDs, null, repo);
         service.start();
         http = TestHttp.client();
     }
@@ -264,7 +272,7 @@ class VectorHandlerSearchPerCollectionTopicRouteTest {
         JsonNode pc = body.get("per_collection");
         assertThat(pc.get(0).fieldNames()).toIterable().containsExactly(
             "collection", "raw_count", "dropped", "min_raw_distance", "min_dropped_distance", "error", "error_kind",
-            "topic_route_status");
+            "topic_route_status", "topic_route_min_coverage");
         assertThat(pc.get(0).get("collection").asText()).isEqualTo(DENSE);
         assertThat(pc.get(0).get("topic_route_status").asText())
             .as("DENSE has no taxonomy: searched unscoped, no_topics").isEqualTo("no_topics");
@@ -275,12 +283,21 @@ class VectorHandlerSearchPerCollectionTopicRouteTest {
 
     @Test
     void aMixedGroup_theCollectionNotListedReturnsWhatAnUnroutedRequestReturns() throws Exception {
-        JsonNode plain = json(post(ok()));
-        JsonNode mixed = json(post(routed(topicRoute("top1", null, List.of(DENSE)))));
-        assertThat(mixed.get("results")).as("neither collection has a taxonomy, so every row is the unscoped one")
+        // TAXO has a taxonomy and is NOT listed: routed by mistake, its rows would be TA's, not the nearer TB's
+        Map<String, Object> plainReq = ok();
+        plainReq.put("collections", List.of(DENSE, TAXO));
+        Map<String, Object> mixedReq = routed(topicRoute("top1", null, List.of(DENSE)));
+        mixedReq.put("collections", List.of(DENSE, TAXO));
+        JsonNode plain = json(post(plainReq));
+        JsonNode mixed = json(post(mixedReq));
+        assertThat(mixed.get("per_collection").get(1).get("topic_route_status").asText()).isEqualTo("skipped");
+        assertThat(idsOf(plain.get("results"))).as("non-vacuity: unrouted, TAXO's nearest rows are TB's")
+            .containsAll(hashes("tb", 0, 5));
+        assertThat(mixed.get("results")).as("TAXO is searched unscoped: the rows of an unrouted request")
             .isEqualTo(plain.get("results"));
         for (int i = 0; i < 2; i++) {
             ((ObjectNode) mixed.get("per_collection").get(i)).remove("topic_route_status");
+            ((ObjectNode) mixed.get("per_collection").get(i)).remove("topic_route_min_coverage");
         }
         assertThat(mixed.get("per_collection")).isEqualTo(plain.get("per_collection"));
     }
@@ -342,7 +359,8 @@ class VectorHandlerSearchPerCollectionTopicRouteTest {
             .isEqualTo("routed");
         assertThat(entry.fieldNames()).toIterable().containsExactly(
             "collection", "raw_count", "dropped", "min_raw_distance", "min_dropped_distance", "error", "error_kind",
-            "topic_route_status", "topic_route_coverage", "topic_route_topics");
+            "topic_route_status", "topic_route_min_coverage", "topic_route_coverage", "topic_route_topics");
+        assertThat(entry.get("topic_route_min_coverage").asDouble()).as("the default, echoed").isEqualTo(0.9);
         assertThat(entry.get("topic_route_coverage").asDouble()).isEqualTo(1.0);
         assertThat(entry.get("topic_route_topics").asInt()).isEqualTo(1);
         assertThat(idsOf(body.get("results"))).as("TA's chunks, though TB's are nearer the query")
@@ -361,6 +379,87 @@ class VectorHandlerSearchPerCollectionTopicRouteTest {
         assertThat(empty.body()).as("an empty collections list changes no byte, though TAXO could be routed")
             .isEqualTo(absent.body());
         assertThat(absent.body()).doesNotContain("topic_route_status").doesNotContain("topic_route_error")
-            .doesNotContain("topic_route_coverage").doesNotContain("topic_route_topics");
+            .doesNotContain("topic_route_coverage").doesNotContain("topic_route_topics")
+            .doesNotContain("topic_route_min_coverage");
+    }
+
+    @Test
+    void minCoverage_isEchoedOnEveryEntryThatReportsAStatus_andOnNoOther() throws Exception {
+        Map<String, Object> half = topicRoute("top1", null, List.of(TAXO));
+        half.put("min_coverage", 0.5);
+        JsonNode routedBody = json(post(taxoRequest(half)));
+        assertThat(routedBody.get("per_collection").get(0).get("topic_route_min_coverage").asDouble())
+            .as("the value the request set").isEqualTo(0.5);
+
+        // an unlisted collection reports skipped and carries the echo too: every entry with a status does
+        Map<String, Object> quarter = topicRoute("top1", null, List.of(DENSE));
+        quarter.put("min_coverage", 0.25);
+        for (JsonNode e : json(post(routed(quarter))).get("per_collection")) {
+            assertThat(e.get("topic_route_min_coverage").asDouble()).isEqualTo(0.25);
+        }
+
+        // no echo without a route, and none for an empty collections list (byte identity, key by key)
+        assertThat(post(taxoRequest(null)).body()).doesNotContain("topic_route_min_coverage");
+        Map<String, Object> empty = topicRoute("top1", null, List.of());
+        empty.put("min_coverage", 0.5);
+        assertThat(post(taxoRequest(empty)).body()).as("an empty list reports nothing").isEqualTo(post(taxoRequest(null)).body());
+    }
+
+    @Test
+    void minCoverage_outsideZeroToOne_orNotANumber_is400() throws Exception {
+        for (Object bad : new Object[] {-0.01, 1.01, 2, -1, "0.5", true, List.of(0.5), Map.of("a", 1)}) {
+            Map<String, Object> tr = topicRoute("top1", null, List.of(DENSE));
+            tr.put("min_coverage", bad);
+            assertBadRequest(routed(tr), "min_coverage");
+        }
+        // present is checked whether or not the list names anything
+        Map<String, Object> emptyList = topicRoute("top1", null, List.of());
+        emptyList.put("min_coverage", 7);
+        assertBadRequest(routed(emptyList), "min_coverage");
+        for (Object good : new Object[] {0, 0.0, 0.9, 1, 1.0}) {
+            Map<String, Object> tr = topicRoute("top1", null, List.of(DENSE));
+            tr.put("min_coverage", good);
+            assertThat(post(routed(tr)).statusCode()).as("min_coverage %s", good).isEqualTo(200);
+        }
+    }
+
+    @Test
+    void aCodeCollection_isNeverRouted_whetherOrNotTheListNamesIt() throws Exception {
+        Map<String, Object> req = taxoRequest(topicRoute("top1", null, null));
+        req.put("collections", List.of(TAXO, CODEC));
+        JsonNode body = json(post(req));
+        assertThat(body.get("per_collection").get(0).get("topic_route_status").asText()).isEqualTo("routed");
+        assertThat(body.get("per_collection").get(1).get("collection").asText()).isEqualTo(CODEC);
+        assertThat(body.get("per_collection").get(1).get("topic_route_status").asText())
+            .as("CODEC has a taxonomy with full coverage, and the route names no list").isEqualTo("skipped");
+
+        Map<String, Object> plainReq = taxoRequest(null);
+        plainReq.put("collections", List.of(TAXO, CODEC));
+        JsonNode plain = json(post(plainReq));
+        List<String> codeRows = new ArrayList<>();
+        for (JsonNode r : body.get("results")) {
+            if (CODEC.equals(r.get("collection").asText())) codeRows.add(r.get("id").asText());
+        }
+        assertThat(codeRows).as("CODEC's rows are the unscoped ones (TB's), not the routed TA's")
+            .containsExactlyElementsOf(codeRowsOf(plain));
+        assertThat(codeRows).isNotEmpty();
+
+        // named in the list: skipped as well, not a 400 (the registry decides, and parsing has none)
+        Map<String, Object> named = taxoRequest(topicRoute("top1", null, List.of(TAXO, CODEC)));
+        named.put("collections", List.of(TAXO, CODEC));
+        var namedResponse = post(named);
+        assertThat(namedResponse.statusCode()).as(namedResponse.body()).isEqualTo(200);
+        JsonNode namedBody = json(namedResponse);
+        assertThat(namedBody.get("per_collection").get(0).get("topic_route_status").asText()).isEqualTo("routed");
+        assertThat(namedBody.get("per_collection").get(1).get("topic_route_status").asText()).isEqualTo("skipped");
+        assertThat(codeRowsOf(namedBody)).isEqualTo(codeRows);
+    }
+
+    private static List<String> codeRowsOf(JsonNode plain) {
+        List<String> out = new ArrayList<>();
+        for (JsonNode r : plain.get("results")) {
+            if (CODEC.equals(r.get("collection").asText())) out.add(r.get("id").asText());
+        }
+        return out;
     }
 }

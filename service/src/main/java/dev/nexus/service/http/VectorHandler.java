@@ -803,6 +803,7 @@ public final class VectorHandler implements HttpHandler {
      *   "lexical": false,                       // optional (nexus-xd2rc); add each collection's text-gated rows, see below
      *   "topic_route": {"mode": "top1",         // optional (nexus-7fku2.1.3, RDR-134); route through topics, see below
      *                   "width": 0.1,           // "band" only, required there, >= 0: similarity within the nearest topic's
+     *                   "min_coverage": 0.9,    // optional, 0..1, default 0.9: the coverage a collection needs to be routed
      *                   "collections": [...]}   // optional; the collections to route, each also in collections
      * }
      * </pre>
@@ -813,8 +814,8 @@ public final class VectorHandler implements HttpHandler {
      *   "results": [ ...the /search row shape, at most limit rows... ],
      *   "per_collection": [{"collection", "raw_count", "dropped", "min_raw_distance",
      *                       "min_dropped_distance", "error", "error_kind",
-     *                       "topic_route_status", "topic_route_error", "topic_route_coverage",
-     *                       "topic_route_topics"}, ...],   // the last four keys only with topic_route, see below
+     *                       "topic_route_status", "topic_route_min_coverage", "topic_route_error",
+     *                       "topic_route_coverage", "topic_route_topics"}, ...],   // the last five keys only with topic_route, see below
      *   "per_collection_k": 40,   // echo
      *   "limit": 300,             // echo
      *   // when rerank: rerank_degraded / rerank_model / rerank_error, as on /search
@@ -848,17 +849,23 @@ public final class VectorHandler implements HttpHandler {
      * similarity of it ({@code band}), and searches the collection's chunks assigned to those topics, with the same
      * k, thresholds and sensitivity exclusion as the unscoped search. Merging is unchanged. A collection the route does
      * not name is searched unscoped. Each {@code per_collection} entry then carries {@code topic_route_status}:
-     * {@code routed}; {@code no_topics} (no centroids, no chunks, coverage below 0.9, or the coverage reading or the
-     * centroid ranking unavailable: searched unscoped); {@code fallback} (the kept topics returned no rows, or the topic
-     * search failed: searched unscoped); {@code skipped} (not named, or the request carries {@code chash_allow} or
-     * {@code where}, which are never routed). The status key is absent for a collection whose {@code error} is set: it
-     * is never {@code skipped} then. Three more keys are additive and each appears only when it has a value:
+     * {@code routed}; {@code no_topics} (no centroids, no chunks, coverage below {@code min_coverage} (0.9 unless the
+     * request sets it), or the coverage reading or the centroid ranking unavailable: searched unscoped);
+     * {@code fallback} (the kept topics returned no rows, or the topic search failed: searched unscoped);
+     * {@code skipped} (not named, a code collection (never routed, named or not), or the request carries
+     * {@code chash_allow} or {@code where}, which are never routed). The status key is absent for a collection whose
+     * {@code error} is set: it is never {@code skipped} then. {@code topic_route_min_coverage} echoes the
+     * {@code min_coverage} used on every entry that carries a status. Three more keys are additive, each only when it has a value:
      * {@code topic_route_error}, a short text (what failed, SQLSTATE, root cause class; no SQL) when the route degraded
      * the collection because the coverage reading, the centroid ranking or the topic search failed;
      * {@code topic_route_coverage}, the coverage ratio the route read, when the collection has centroids and chunks (so
      * for {@code routed}, {@code fallback} and a {@code no_topics} that had a taxonomy); and {@code topic_route_topics},
-     * the number of topics kept, when the centroid ranking ran. None of the four keys appears when {@code topic_route}
+     * the number of topics kept, when the centroid ranking ran. None of the five keys appears when {@code topic_route}
      * is absent or its {@code collections} list is empty: the response is byte-identical then.
+     *
+     * <p>The zero-row fallback is judged before the threshold: a routed search that returned rows is {@code routed} even
+     * when the {@code thresholds} then drop every one (no rows, {@code dropped == raw_count}, no unscoped retry); only
+     * a routed search with no rows at all is {@code fallback}.
      *
      * <p>A routed row is the row an unscoped search returns for the chunk. A routed collection's
      * {@code min_raw_distance} is the nearest distance within its routed subset, not the collection's nearest, and a
@@ -873,8 +880,9 @@ public final class VectorHandler implements HttpHandler {
      * request budget (before a stage, or a statement cut by the request bound), pool or admission exhaustion and any
      * other transient database failure (SQLSTATE class 08, 53, 57P, 40001, 40P01, 55P03) fail the whole request with 503,
      * except inside the coverage count, whose lookup treats any failure as no coverage ({@code no_topics}).
-     * A bad {@code mode}, a {@code band} without a numeric {@code width} {@code >= 0}, or a name not in
-     * {@code collections} is a 400. {@code GET /version} reports {@code vector_topic_route_supported} (nexus-7fku2.1.4).
+     * A bad {@code mode}, a {@code band} without a numeric {@code width} {@code >= 0}, a {@code min_coverage} not a
+     * number from 0 to 1, or a {@code collections} name that is not in the request is a 400.
+     * {@code GET /version} reports {@code vector_topic_route_supported} (nexus-7fku2.1.4).
      *
      * <p><strong>The other request fields</strong> (nexus-7fku2.1.4). {@code chash_allow} and a metadata {@code where}
      * leave the whole request unrouted (every collection {@code skipped}); {@code thresholds} drop routed rows as
@@ -983,6 +991,7 @@ public final class VectorHandler implements HttpHandler {
             // RDR-134 Step 3: each key only when the route has something to say about the collection
             if (stat.routeStatus() != null) {
                 m.put("topic_route_status", stat.routeStatus());
+                m.put("topic_route_min_coverage", topicRoute.minCoverage()); // the threshold the status was decided at
             }
             if (stat.routeError() != null) {
                 m.put("topic_route_error", stat.routeError());

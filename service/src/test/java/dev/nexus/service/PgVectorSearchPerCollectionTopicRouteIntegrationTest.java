@@ -84,6 +84,10 @@ class PgVectorSearchPerCollectionTopicRouteIntegrationTest {
     private static final String LOWCOV = "knowledge__7fku213-lowcov__minilm-l6-v2-384__v1";
     private static final String EMPTY = "knowledge__7fku213-empty__minilm-l6-v2-384__v1";
     private static final String FALLBACK = "knowledge__7fku213-fallback__minilm-l6-v2-384__v1";
+    /** A REAL code collection (the prefix the engine's guard reads), with PROSE's taxonomy and full coverage. */
+    private static final String CODEC = "code__7fku213-codec__minilm-l6-v2-384__v1";
+    /** Coverage 0.95: 19 of 20 chunks assigned. Routed at 0.9, not at 1.0. */
+    private static final String ALMOST = "knowledge__7fku213-almost__minilm-l6-v2-384__v1";
 
     /** Counts every embed call, to prove the request embeds its query once. */
     private static final class CountingEmbedder implements Embedder {
@@ -141,13 +145,13 @@ class PgVectorSearchPerCollectionTopicRouteIntegrationTest {
 
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            for (String c : List.of(PROSE, CODE, NOCENT, LOWCOV, EMPTY, FALLBACK)) {
+            for (String c : List.of(PROSE, CODE, NOCENT, LOWCOV, EMPTY, FALLBACK, CODEC, ALMOST)) {
                 PgContainerHelper.insertCollection(dsl, TENANT, c);
             }
         }
 
         // PROSE and CODE: two topics each. TA's centroid is the nearest to the query and its chunks the farthest.
-        for (String c : List.of(PROSE, CODE)) {
+        for (String c : List.of(PROSE, CODE, CODEC)) {
             List<String> ta = seed(c, "ta", 6, 0.30, 0.01);
             List<String> tb = seed(c, "tb", 6, 0.05, 0.01);
             taxonomy(c, List.of(new Topic("TA", 0.10, ta), new Topic("TB", 1.00, tb)));
@@ -157,6 +161,9 @@ class PgVectorSearchPerCollectionTopicRouteIntegrationTest {
         // LOWCOV: a topic and a centroid; only 5 of 10 chunks are assigned (coverage 0.5, below 0.9).
         List<String> low = seed(LOWCOV, "l", 10, 0.20, 0.01);
         taxonomy(LOWCOV, List.of(new Topic("TL", 0.10, low.subList(0, 5))));
+        // ALMOST: one topic, 19 of 20 chunks assigned (coverage 0.95).
+        List<String> almost = seed(ALMOST, "a", 20, 0.20, 0.01);
+        taxonomy(ALMOST, List.of(new Topic("TAL", 0.10, almost.subList(0, 19))));
         // EMPTY: an orphaned taxonomy, a topic and a centroid and no chunks.
         taxonomy(EMPTY, List.of(new Topic("TO", 0.10, List.of())));
         // FALLBACK: full coverage, but the nearest centroid (TE) has no chunk assigned; every chunk is TF's.
@@ -359,6 +366,139 @@ class PgVectorSearchPerCollectionTopicRouteIntegrationTest {
         assertThat(s.rawCount()).isEqualTo(K);
         assertThat(s.dropped()).as("ta0 is under 0.046, ta1..ta4 are over").isEqualTo(4);
         assertThat(idsOf(r.rows())).containsExactly(chash(textOf(PROSE, "ta0")));
+    }
+
+    @Test
+    void aThresholdThatDropsEveryRoutedRow_leavesTheCollectionRouted_withNoRows_andDroppedEqualsRawCount() {
+        // critique S2, kept: the zero-row fallback is judged on the arm's top-k BEFORE the client threshold. TA's rows
+        // sit at distances 0.0447 and up; TB's, the unscoped top-5, at 0.00125 and up. A threshold of 0.002 drops
+        // every routed row and passes TB's first two.
+        Map<String, Double> thresholds = Map.of(PROSE, 0.002);
+        PerCollectionResult r = run(List.of(PROSE), top1(PROSE), thresholds, null, null);
+        PerCollectionStat s = stat(r, PROSE);
+        assertThat(s.routeStatus()).as("rows came back before the threshold, so not a fallback").isEqualTo("routed");
+        assertThat(s.rawCount()).isEqualTo(K);
+        assertThat(s.dropped()).as("every routed row is over the threshold").isEqualTo(s.rawCount());
+        assertThat(s.minDroppedDistance()).isEqualTo(s.minRawDistance());
+        assertThat(r.rows()).as("the collection contributes nothing").isEmpty();
+
+        PerCollectionResult unrouted = run(List.of(PROSE), null, thresholds, null, null);
+        assertThat(rowsOf(unrouted, PROSE)).as("non-vacuity: the unscoped search WOULD have passed rows at this threshold")
+            .isNotEmpty();
+    }
+
+    // ── min_coverage (critique C1) ────────────────────────────────────────────
+
+    private TopicRoute routeMin(double minCoverage, String... collections) {
+        TaxonomyCoverage coverage = new TaxonomyCoverage(probeScope);
+        return new TopicRoute(TopicRoute.Mode.TOP1, 0.0, Set.of(collections), coverage::lookup, false, minCoverage);
+    }
+
+    @Test
+    void minCoverageZero_routesALowCoverageCollection_theDefaultDoesNot() {
+        // LOWCOV: 5 of 10 chunks assigned, coverage 0.5
+        assertThat(stat(run(List.of(LOWCOV), top1(LOWCOV)), LOWCOV).routeStatus())
+            .as("the default 0.9 refuses it").isEqualTo("no_topics");
+        PerCollectionResult zero = run(List.of(LOWCOV), routeMin(0.0, LOWCOV));
+        assertThat(stat(zero, LOWCOV).routeStatus()).as("0 routes any collection that has centroids and chunks")
+            .isEqualTo("routed");
+        assertThat(stat(zero, LOWCOV).routeCoverage()).isEqualTo(0.5);
+        assertThat(idsOf(rowsOf(zero, LOWCOV))).as("TL's assigned chunks, which are also the five nearest")
+            .containsExactlyElementsOf(hashes(LOWCOV, "l", 0, 5));
+        // the boundary is inclusive and is the value, not a constant
+        assertThat(stat(run(List.of(LOWCOV), routeMin(0.5, LOWCOV)), LOWCOV).routeStatus()).isEqualTo("routed");
+        assertThat(stat(run(List.of(LOWCOV), routeMin(0.51, LOWCOV)), LOWCOV).routeStatus()).isEqualTo("no_topics");
+        // zero does not make an empty or centroid-less collection routable
+        PerCollectionResult unroutable = run(List.of(NOCENT, EMPTY), routeMin(0.0, NOCENT, EMPTY));
+        assertThat(stat(unroutable, NOCENT).routeStatus()).isEqualTo("no_topics");
+        assertThat(stat(unroutable, EMPTY).routeStatus()).isEqualTo("no_topics");
+    }
+
+    @Test
+    void minCoverageNinetyPercent_isTheDefault_andOneNeedsFullCoverage() {
+        // ALMOST: 19 of 20 assigned, coverage 0.95
+        PerCollectionResult dflt = run(List.of(ALMOST), top1(ALMOST));
+        assertThat(stat(dflt, ALMOST).routeStatus()).as("0.95 clears the default 0.9").isEqualTo("routed");
+        assertThat(stat(run(List.of(ALMOST), routeMin(0.9, ALMOST)), ALMOST).routeStatus()).isEqualTo("routed");
+        assertThat(stat(run(List.of(ALMOST), routeMin(1.0, ALMOST)), ALMOST).routeStatus())
+            .as("1.0 needs every chunk assigned: 0.95 is refused").isEqualTo("no_topics");
+        assertThat(stat(run(List.of(PROSE), routeMin(1.0, PROSE)), PROSE).routeStatus())
+            .as("a fully covered collection clears 1.0").isEqualTo("routed");
+        assertThat(TopicRoute.DEFAULT_MIN_COVERAGE).isEqualTo(0.9);
+        assertThat(top1(PROSE).minCoverage()).as("a route built without the knob carries the default").isEqualTo(0.9);
+    }
+
+    @Test
+    void minCoverage_outsideZeroToOne_isRefusedWhenTheRouteIsBuilt() {
+        for (double bad : new double[] {-0.001, 1.001, Double.NaN, Double.POSITIVE_INFINITY}) {
+            assertThatThrownBy(() -> routeMin(bad, PROSE)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("min_coverage");
+        }
+    }
+
+    // ── code collections are never routed (code review I1) ────────────────────
+
+    @Test
+    void aCodeCollection_isNeverRouted_evenWhenItHasCentroidsAndFullCoverage_andNoListIsGiven() {
+        // non-vacuity: the coverage reading of CODEC says it is routable, and a knowledge__ collection of the same shape
+        // IS routed by the same route (withNoCollectionsListed_everyCollectionOfTheRequestIsRouted)
+        var counts = new TaxonomyCoverage(probeScope).lookup(TENANT, CODEC).orElseThrow();
+        assertThat(counts.routable()).as("CODEC has centroids and full coverage").isTrue();
+
+        List<String> cols = List.of(PROSE, CODEC);
+        PerCollectionResult r = run(cols, route(TopicRoute.Mode.TOP1, 0.0, null));
+        PerCollectionResult plain = run(cols, null);
+        assertThat(stat(r, PROSE).routeStatus()).isEqualTo("routed");
+        assertThat(stat(r, CODEC).routeStatus()).isEqualTo("skipped");
+        assertThat(stat(r, CODEC).routeCoverage()).as("a skipped collection reads nothing").isNull();
+        assertThat(stat(r, CODEC).routeTopics()).isNull();
+        assertThat(idsOf(rowsOf(plain, CODEC))).as("non-vacuity: unscoped, TB's chunks are the nearest")
+            .containsExactlyElementsOf(hashes(CODEC, "tb", 0, 5));
+        assertThat(idsOf(rowsOf(r, CODEC))).as("CODEC is searched unscoped: TB's chunks, not the routed TA's")
+            .containsExactlyElementsOf(hashes(CODEC, "tb", 0, 5));
+        assertThat(rowsOf(r, CODEC)).isEqualTo(rowsOf(plain, CODEC));
+    }
+
+    @Test
+    void aCodeCollectionNamedInTheRoutesList_isSkipped_notRouted_andNot400() {
+        // Decision (code review I1): a code collection named in topic_route.collections is SKIPPED, not a 400. The engine
+        // knows a collection is code from the registry's content type; parsing the request has no registry to ask.
+        List<String> cols = List.of(PROSE, CODEC);
+        PerCollectionResult r = run(cols, top1(PROSE, CODEC));
+        PerCollectionResult plain = run(cols, null);
+        assertThat(stat(r, PROSE).routeStatus()).isEqualTo("routed");
+        assertThat(stat(r, CODEC).routeStatus()).as("named, full coverage, centroids, and still skipped").isEqualTo("skipped");
+        assertThat(rowsOf(r, CODEC)).isEqualTo(rowsOf(plain, CODEC));
+        assertThat(idsOf(rowsOf(r, CODEC))).containsExactlyElementsOf(hashes(CODEC, "tb", 0, 5));
+
+        // the registry decides, not the name: a knowledge__ collection whose name says "code" is routed
+        PerCollectionResult byName = run(List.of(CODE), top1(CODE));
+        assertThat(stat(byName, CODE).routeStatus()).isEqualTo("routed");
+    }
+
+    @Test
+    void parse_stillTakesACodeLookingName_theGuardIsTheRepositorys() {
+        TopicRoute.CoverageLookup none = (t, c, ms) -> Optional.empty();
+        TopicRoute parsed = TopicRoute.parse(Map.of("mode", "top1", "collections", List.of(CODEC)), List.of(PROSE, CODEC), none);
+        assertThat(parsed.collections()).containsExactly(CODEC);
+    }
+
+    @Test
+    void parse_minCoverage_defaultsTo90Percent_andRefusesWhatIsNotANumberFromZeroToOne() {
+        List<String> request = List.of(PROSE);
+        TopicRoute.CoverageLookup none = (t, c, ms) -> Optional.empty();
+        assertThat(TopicRoute.parse(Map.of("mode", "top1"), request, none).minCoverage()).isEqualTo(0.9);
+        assertThat(TopicRoute.parse(Map.of("mode", "top1", "min_coverage", 0), request, none).minCoverage()).isEqualTo(0.0);
+        assertThat(TopicRoute.parse(Map.of("mode", "top1", "min_coverage", 1), request, none).minCoverage()).isEqualTo(1.0);
+        assertThat(TopicRoute.parse(Map.of("mode", "top1", "min_coverage", 0.25), request, none).minCoverage())
+            .isEqualTo(0.25);
+        for (Object bad : new Object[] {-0.1, 1.1, 2, "0.5", true, List.of(), Map.of()}) {
+            assertThatThrownBy(() -> TopicRoute.parse(Map.of("mode", "top1", "min_coverage", bad), request, none))
+                .as("min_coverage %s", bad).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("min_coverage");
+        }
+        assertThat(TopicRoute.parse(Map.of("mode", "top1", "min_coverage", 0.5), request, none).skipRequest().minCoverage())
+            .as("skipRequest keeps it").isEqualTo(0.5);
     }
 
     // ── no_topics ─────────────────────────────────────────────────────────────

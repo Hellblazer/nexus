@@ -22,8 +22,12 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_COVERAGE_COUNTS_768;
  *
  * <p><b>Coverage</b> is {@code 1 - unassigned / chunks} over the collection's live chunks. A collection is routed only
  * when {@link Counts#routable} holds: it has centroids, it has chunks, and its coverage is at least
- * {@link #ROUTE_MIN_COVERAGE}. A collection with no chunks has no coverage (never 1) and an orphaned taxonomy (topics,
- * no chunks) is therefore never routed.
+ * {@link #ROUTE_MIN_COVERAGE} (the default; a request may set another, {@code topic_route.min_coverage}). A collection
+ * with no chunks has no coverage (never 1) and an orphaned taxonomy (topics, no chunks) is therefore never routed.
+ *
+ * <p>The count ignores {@code embedding_model} and counts sensitive chunks, so its ratio can read lower than what the
+ * search sees (a sensitive chunk the search excludes, a chunk of another model that the search does not reach): a
+ * collection can be refused or fall back that a search-side ratio would have routed, never routed wrongly.
  *
  * <p><b>Invalidation: option (a), the engine invalidates on a store.</b> The engine cannot see which assignments
  * the client deferred or lost ({@code taxonomy_deferral()} and the lost-chunk tripwire are client state), so it does

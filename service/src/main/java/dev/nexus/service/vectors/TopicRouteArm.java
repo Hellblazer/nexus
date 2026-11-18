@@ -32,7 +32,8 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_768;
  * RDR-134 Step 3 (bead nexus-7fku2.1.3): the routed half of one fan-out arm of {@code searchPerCollection}.
  *
  * <p>For a collection the request routes: (1) the coverage reading ({@link TopicRoute#coverage}, the Step 2 cache) must
- * say the collection has centroids, chunks, and coverage of at least {@link TaxonomyCoverage#ROUTE_MIN_COVERAGE}, else
+ * say the collection has centroids, chunks, and coverage of at least the route's {@link TopicRoute#minCoverage()}
+ * ({@link TaxonomyCoverage#ROUTE_MIN_COVERAGE}, 0.9, unless the request sets {@code topic_route.min_coverage}), else
  * {@code no_topics}; (2) the centroid ANN ({@link TaxonomyCentroidRepository#annQuery}, the 10 nearest) ranks the
  * collection's topics against the request's ONE query vector, which is passed in and never re-embedded; (3) the nearest
  * topic ({@code top1}) or every topic within {@code width} of it ({@code band}) is kept, similarity compared within this
@@ -77,7 +78,13 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SET_768;
  *
  * <p><b>The threshold stays in Java.</b> The function takes none (vectors-062 decision 1); the fan-out merge applies the
  * client's to routed and unscoped candidates alike and counts {@code rawCount} and {@code dropped} on the arm's top-k.
- * A routed collection's {@code min_raw_distance} is therefore the nearest distance within its routed subset, not the
+ * <b>The zero-row fallback is judged BEFORE that threshold (critique S2, kept as it is).</b> A routed search that
+ * returns rows is {@code routed} even when the client's threshold then drops every one of them: the collection then
+ * contributes no rows, reports {@code routed} with {@code dropped == raw_count}, and is not retried unscoped (its
+ * unscoped rows might have passed). The alternative, deciding {@code fallback} on the rows that survive the threshold,
+ * would make the status depend on a client value and run a second search to learn it; a caller that needs the
+ * difference reads {@code raw_count} and {@code dropped}, which the {@code search_topic_route} event carries per
+ * collection. A routed collection's {@code min_raw_distance} is therefore the nearest distance within its routed subset, not the
  * collection's nearest, and a routed arm does not take part in choosing the recall canary's query-ring arm.
  */
 final class TopicRouteArm {
@@ -137,7 +144,7 @@ final class TopicRouteArm {
             TaxonomyCoverage.Counts read = counts.get();
             // chunks and unassigned are not measured without centroids, so no ratio is reported for such a collection
             Double coverage = read.hasTaxonomy() && read.chunks() > 0 ? read.coverage() : null;
-            if (!read.routable()) {
+            if (!read.routable(route.minCoverage())) {
                 return new Attempt(TopicRoute.Status.NO_TOPICS, null, null, coverage, null);
             }
             // 2. the collection's 10 nearest centroids, from the request's vector, clamped as the coverage read was
