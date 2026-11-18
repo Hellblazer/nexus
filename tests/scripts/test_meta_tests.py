@@ -574,13 +574,39 @@ def test_select_reads_changed_names_from_stdin_one_per_line_or_nul_separated(
         assert json.loads(capsys.readouterr().out)["changed"] == ["docs/a b.md", "docs/c.md"]
 
 
-def test_a_failure_in_a_changed_test_file_is_advisory_when_the_guard_passes(
+#: A stand-in for tests/conftest.py's NX_CENSUS_ONLY_JOB: skip-mark (never deselect) every item
+#: outside the guard module, so the census still sees them collected.
+CENSUS_ONLY_IN_CONFTEST = (
+    "import os, pytest\n"
+    "def pytest_collection_modifyitems(config, items):\n"
+    "    if os.environ.get('NX_CENSUS_ONLY_JOB') == '1':\n"
+    "        for item in items:\n"
+    "            if not item.nodeid.startswith('tests/test_guard.py::'):\n"
+    "                item.add_marker(pytest.mark.skip(reason='census-only'))\n"
+)
+
+
+def test_the_changed_test_files_are_collected_for_the_guard_and_not_run(
     repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _built_and_committed(repo)
+    _built_and_committed(repo, CENSUS_ONLY_IN_CONFTEST)
     (repo / "tests/test_plain.py").write_text("def test_p():\n    assert False, 'needs the engine'\n")
     assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == 0
-    assert "the session-items guard passed; the other failures above" in capsys.readouterr().out
+    assert "FAILED tests/test_plain.py" not in capsys.readouterr().out
+
+
+def test_a_session_finish_guard_forcing_a_red_fails_the_run_when_the_census_passes(
+    repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # tests/conftest.py's sessionfinish guards set exitstatus 1 and name no node.
+    forced = ("def pytest_sessionfinish(session):\n"
+              "    print('FAIL: a sessionfinish guard')\n"
+              "    session.exitstatus = 1\n")
+    _built_and_committed(repo, CENSUS_ONLY_IN_CONFTEST)
+    (repo / "tests/conftest.py").write_text(CONFTEST + CENSUS_ONLY_IN_CONFTEST + forced)
+    (repo / "tests/test_plain.py").write_text("def test_p():\n    assert False\n")
+    assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == 1
+    assert "FAIL: a sessionfinish guard" in capsys.readouterr().out
 
 
 def test_a_scripts_module_imported_through_a_tests_helper_selects_the_test(repo: Path) -> None:
