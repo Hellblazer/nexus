@@ -871,7 +871,8 @@ public final class VectorHandler implements HttpHandler {
      * degrade: a spent fan-out budget (before a stage, or a topic-search statement cut by the fan-out bound) is isolated
      * to the collection as {@code fanout_budget_exhausted}, as for an unrouted arm, with no status; and an expired
      * request budget (before a stage, or a statement cut by the request bound), pool or admission exhaustion and any
-     * other transient database failure (SQLSTATE class 08, 53, 57P, 40001, 40P01, 55P03) fail the whole request with 503.
+     * other transient database failure (SQLSTATE class 08, 53, 57P, 40001, 40P01, 55P03) fail the whole request with 503,
+     * except inside the coverage count, whose lookup treats any failure as no coverage ({@code no_topics}).
      * A bad {@code mode}, a {@code band} without a numeric {@code width} {@code >= 0}, or a name not in
      * {@code collections} is a 400. {@code GET /version} reports {@code vector_topic_route_supported} (nexus-7fku2.1.4).
      *
