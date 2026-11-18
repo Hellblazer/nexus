@@ -75,6 +75,8 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
     private static final String S_ROUTED = coll("s-routed");
     private static final String S_FALLBACK = coll("s-fallback");
     private static final String S_PLAIN = coll("s-plain");
+    /** Read by the all-sensitive-topic test only: its nearest topic holds sensitive chunks and nothing else. */
+    private static final String S_ALLSENS = coll("s-allsens");
 
     private static String coll(String name) {
         return "knowledge__7fku214-" + name + "__minilm-l6-v2-384__v1";
@@ -150,7 +152,7 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
         var repo = new PgVectorRepository(scope, embedder, embedder);
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            for (String c : List.of(ROUTED, FALLBACK, PLAIN, S_ROUTED, S_FALLBACK, S_PLAIN)) {
+            for (String c : List.of(ROUTED, FALLBACK, PLAIN, S_ROUTED, S_FALLBACK, S_PLAIN, S_ALLSENS)) {
                 PgContainerHelper.insertCollection(dsl, TENANT, c);
             }
         }
@@ -164,11 +166,20 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
         markSensitive(S_ROUTED, text(S_ROUTED, "ta", 0));
         markSensitive(S_FALLBACK, text(S_FALLBACK, "f", 0));
         markSensitive(S_PLAIN, text(S_PLAIN, "p", 0));
+        // S_ALLSENS: topic SA's centroid is the nearest the query (0.10 rad) and holds two chunks, both sensitive and the
+        // nearest of the collection (0.05 and 0.06 rad); topic SB's centroid is far (1.0 rad) and holds eight clean
+        // chunks (0.30 rad and up). Routed top1 reads SA, which the exclusion empties: the status is fallback.
+        List<String> sa = seed(scope, repo, S_ALLSENS, "sa", 2, 0.05, 0.01);
+        List<String> sb = seed(scope, repo, S_ALLSENS, "sb", 8, 0.30, 0.01);
+        taxonomy(S_ALLSENS, "SA", 0.10, sa);
+        taxonomy(S_ALLSENS, "SB", 1.00, sb);
+        markSensitive(S_ALLSENS, text(S_ALLSENS, "sa", 0));
+        markSensitive(S_ALLSENS, text(S_ALLSENS, "sa", 1));
         // every collection of the two sets has an owner document; give each a source_uri of its own
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext dsl = DSL.using(su, SQLDialect.POSTGRES);
-            for (String c : List.of(ROUTED, FALLBACK, PLAIN, S_ROUTED, S_FALLBACK, S_PLAIN)) {
+            for (String c : List.of(ROUTED, FALLBACK, PLAIN, S_ROUTED, S_FALLBACK, S_PLAIN, S_ALLSENS)) {
                 dsl.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + c)
                     .where(CATALOG_DOCUMENTS.TENANT_ID.eq(TENANT).and(CATALOG_DOCUMENTS.TUMBLER.eq("own-" + c)))
                     .execute();
@@ -629,6 +640,31 @@ class VectorHandlerSearchPerCollectionTopicRouteFieldsTest {
         assertThat(contents(body.get("results"))).as("the next rows of each collection, from the kept topic or unscoped")
             .containsExactlyInAnyOrderElementsOf(concat(texts(S_ROUTED, "ta", 1, 6), texts(S_FALLBACK, "f", 1, 6),
                                                        texts(S_PLAIN, "p", 1, 6)));
+        for (JsonNode row : body.get("results")) {
+            assertThat(row.get("sensitive").asBoolean()).isFalse();
+        }
+    }
+
+    @Test
+    void sensitivityExclude_onAKeptTopicOfOnlySensitiveChunks_fallsBackAndTheFallbackExcludesToo() throws Exception {
+        List<String> cols = List.of(S_ALLSENS);
+        List<String> sensitive = texts(S_ALLSENS, "sa", 0, 2);
+
+        JsonNode open = ok(request(cols, true));
+        assertThat(statuses(open)).as("non-vacuity: without the flag the kept topic answers").containsExactly("routed");
+        assertThat(contents(open.get("results"))).as("non-vacuity: and its rows are the two sensitive chunks")
+            .containsExactlyElementsOf(sensitive);
+
+        Map<String, Object> req = request(cols, true);
+        req.put("sensitivity", "exclude");
+        JsonNode body = ok(req);
+        assertThat(statuses(body)).as("the routed search found no row once the sensitive ones were excluded")
+            .containsExactly("fallback");
+        assertThat(contents(body.get("results"))).as("the unscoped fallback excludes them too")
+            .doesNotContainAnyElementsOf(sensitive);
+        assertThat(contents(body.get("results"))).as("and fills k from the clean chunks of the other topic")
+            .containsExactlyElementsOf(texts(S_ALLSENS, "sb", 0, 5));
+        assertThat(body.get("per_collection").get(0).get("raw_count").asInt()).isEqualTo(5);
         for (JsonNode row : body.get("results")) {
             assertThat(row.get("sensitive").asBoolean()).isFalse();
         }
