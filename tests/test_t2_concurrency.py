@@ -327,340 +327,164 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
     )
 
 
-def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
-    """memory.get() must not be starved by concurrent write load.
+#: Rounds of the interleaved measurement: each round reads first with the writers paused, then with them writing, so
+#: a change in the runner's own load during the test lands on both samples alike.
+_LOAD_ROUNDS = 4
+_READS_PER_PHASE = 25
+#: A starved read waits behind a writer, which puts the under-load tail well above the same run's write-free tail.
+#: The ceiling is this many times the baseline p95, and never below the test's floor: on a fast box the floor binds
+#: (it is the old absolute ceiling), on a slow one the run's own tail sets the bar. Develop run 44337073652 on a
+#: lab-6c18g pool runner measured baseline_p95=56.15ms with no writers at all and load_p95=60.36ms (median ratio
+#: 1.26x): every read was slow and none was starved, and the fixed 50ms ceiling failed it.
+_TAIL_RATIO_MAX = 5.0
 
-    TWO gates, neither of them a tail-vs-tail ratio (nexus-c7l4n):
 
-    * relative, on the MEDIAN — the stable statistic at this timescale;
-    * absolute, on p95 — the starvation ceiling an operator cares about.
+def _reads_under_write_load(db: T2Database, read) -> tuple[list[float], list[float]]:
+    """(write-free latencies, under-write-load latencies) in ms of ``read(i)``, interleaved over ``_LOAD_ROUNDS``
+    rounds. Two writers (telemetry and plan library) run only while ``writing`` is set; a baseline phase starts
+    only once both have finished any write in flight."""
+    writing = threading.Event()
+    stop = threading.Event()
+    idle = [threading.Event(), threading.Event()]
+    errors: list[BaseException] = []
 
-    The ratio used to be ``load_p95 / baseline_p95`` at 3.0x, which is a
-    tail divided by a tail on sub-5ms samples. nexus-3m01p already caught
-    that shape once from the denominator side (a lucky-fast baseline
-    manufacturing a ratio) and floored the denominator at 1.0ms. GHA fired
-    it again from the NUMERATOR side on the 7.7.0 release PR (CI run
-    31773244689, py3.13 shard 4/4)::
+    def telemetry(i: int) -> None:
+        db.log_relevance(
+            query=f"q{i}", chunk_id=_cid(f"c{i}"), action="click", session_id="load", collection="knowledge__load"
+        )
 
-        baseline_p95=1.50ms (denom=1.50ms) load_p50=2.56ms
-        load_p95=4.54ms load_p99=5.95ms ratio=3.03x   FAILED (threshold 3.0x)
+    def plan(i: int) -> None:
+        db.save_plan(query=f"plan {i}", plan_json='{"step":"x"}', tags="load", verb="query")
 
-    Nothing was starved: load_p95 sat 11x under the 50ms ceiling. The
-    baseline landed at 1.50ms — BELOW the 1.70-2.18ms clean-box band the
-    1.0ms floor was calibrated against, so the floor did not bind — while
-    the load tail landed at 2.2x the highest previously observed load_p95
-    (2.08ms). Both tails moved, in opposite directions, on a shared-tenancy
-    2-vCPU runner where two spinning writer threads plus the measuring
-    thread genuinely oversubscribe the CPU. A tail ratio cannot tell CPU
-    oversubscription from lock contention; the median can (a lock
-    regression serializes EVERY read, not just the tail), and the absolute
-    ceiling can (starvation costs tens to hundreds of ms, not ~4ms).
+    def writer(slot: int, write) -> None:
+        i = 0
+        try:
+            while not stop.is_set():
+                if not writing.is_set():
+                    idle[slot].set()
+                    writing.wait(timeout=0.05)
+                    continue
+                idle[slot].clear()
+                write(i)
+                i += 1
+        except BaseException as exc:  # pragma: no cover
+            errors.append(exc)
+        finally:
+            idle[slot].set()
 
-    The 10.0x median threshold matches
-    ``test_memory_search_under_discover_topics_load`` in this file, which reached
-    the same conclusion for the same reason ("p95 of a ~1ms baseline can
-    swing +/-30% from a single OS scheduling event"), and matches what this
-    docstring always claimed the test was for: order-of-magnitude lock
-    regressions, not per-core scheduling variance.
-    """
-    db_path = tmp_path / "get_underload.db"
-    db = T2Database(db_path)
+    threads = [
+        threading.Thread(target=writer, args=(0, telemetry), daemon=True),
+        threading.Thread(target=writer, args=(1, plan), daemon=True),
+    ]
+    for th in threads:
+        th.start()
+    baseline: list[float] = []
+    under_load: list[float] = []
     try:
-        # Seed entries and remember the row ids so we can probe get(id=...)
-        # directly — cheaper than get(project, title) lookups and isolates
-        # the access-tracking write leg from the lookup cost.
-        row_ids: list[int] = []
-        for i in range(200):
-            row_ids.append(
-                db.put(project="load", title=f"entry{i}", content=f"content {i}")
-            )
+        n = 0
+        for _ in range(_LOAD_ROUNDS):
+            writing.clear()
+            for ev in idle:
+                assert ev.wait(timeout=30.0), "a writer did not finish its write in flight"
+            for _ in range(_READS_PER_PHASE):
+                start = time.perf_counter()
+                read(n)
+                baseline.append((time.perf_counter() - start) * 1000)
+                n += 1
+            writing.set()
+            # nexus-8g79.26: measure only once both writers have started a write, not after a fixed sleep.
+            deadline = time.monotonic() + 5.0
+            while any(ev.is_set() for ev in idle) and time.monotonic() < deadline:
+                time.sleep(0.001)
+            for _ in range(_READS_PER_PHASE):
+                start = time.perf_counter()
+                read(n)
+                under_load.append((time.perf_counter() - start) * 1000)
+                n += 1
+    finally:
+        stop.set()
+        writing.set()
+        for th in threads:
+            th.join(timeout=30)
+    assert not errors, f"Background writers raised: {errors}"
+    return sorted(baseline), sorted(under_load)
 
-        # --- Phase A: single-threaded baseline ---
-        baseline: list[float] = []
-        for i in range(100):
-            start = time.perf_counter()
-            db.memory.get(id=row_ids[i % len(row_ids)])
-            baseline.append((time.perf_counter() - start) * 1000)
-        baseline.sort()
-        baseline_p95 = baseline[94]
 
-        # --- Phase B: same measurement, under concurrent write load ---
-        stop_writers = threading.Event()
-        writers_started = threading.Barrier(3)  # 2 writers + main
-        writer_errors: list[BaseException] = []
+def _assert_not_starved(name: str, baseline: list[float], under_load: list[float], ceiling_floor_ms: float) -> None:
+    """Two gates (nexus-c7l4n), each relative to this run's own write-free reads: the median, which a lock regression
+    moves and scheduler jitter does not, and the p95 against ``_TAIL_RATIO_MAX`` times the baseline p95, floored at
+    ``ceiling_floor_ms``."""
+    assert len(baseline) == len(under_load) == _LOAD_ROUNDS * _READS_PER_PHASE
+    baseline_p95 = baseline[int(len(baseline) * 0.95) - 1]
+    baseline_median = statistics.median(baseline)
+    load_p50 = statistics.median(under_load)
+    load_p95 = under_load[int(len(under_load) * 0.95) - 1]
+    load_p99 = under_load[int(len(under_load) * 0.99) - 1]
+    # nexus-3m01p: the median denominator is floored, so a lucky-fast baseline cannot manufacture a ratio.
+    denom = max(baseline_median, 1.0)
+    ratio = load_p50 / denom
+    ceiling = max(ceiling_floor_ms, _TAIL_RATIO_MAX * baseline_p95)
+    print(
+        f"\n[rdr-063 under-load] {name} n={len(under_load)} rounds={_LOAD_ROUNDS} "
+        f"baseline_median={baseline_median:.2f}ms baseline_p95={baseline_p95:.2f}ms "
+        f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms load_p99={load_p99:.2f}ms "
+        f"median_ratio={ratio:.2f}x tail_ceiling={ceiling:.1f}ms"
+    )
+    # NON-VACUITY: a zeroed sample would satisfy both gates trivially.
+    assert load_p95 > 0.0 and load_p50 > 0.0, "under-load sample is degenerate; nothing was measured"
+    assert load_p50 < denom * 10.0, (
+        f"{name} median inflated under concurrent write load: baseline_median={baseline_median:.2f}ms "
+        f"(denom={denom:.2f}ms) load_p50={load_p50:.2f}ms ratio={ratio:.2f}x (threshold 10.0x)"
+    )
+    assert load_p95 < ceiling, (
+        f"{name} p95 under concurrent write load is {load_p95:.2f}ms, over the starvation ceiling {ceiling:.1f}ms "
+        f"(max of {ceiling_floor_ms:.0f}ms and {_TAIL_RATIO_MAX:.0f}x the write-free p95 {baseline_p95:.2f}ms): "
+        f"reads are being blocked by writers, not merely slowed (load_p99={load_p99:.2f}ms)"
+    )
 
-        def telemetry_writer() -> None:
-            i = 0
-            try:
-                writers_started.wait(timeout=5.0)
-                while not stop_writers.is_set():
-                    db.log_relevance(
-                        query=f"q{i}",
-                        chunk_id=_cid(f"c{i}"),
-                        action="click",
-                        session_id="load",
-                        collection="knowledge__load",
-                    )
-                    i += 1
-            except BaseException as exc:  # pragma: no cover
-                writer_errors.append(exc)
 
-        def plan_writer() -> None:
-            i = 0
-            try:
-                writers_started.wait(timeout=5.0)
-                while not stop_writers.is_set():
-                    db.save_plan(
-                        query=f"plan {i}",
-                        plan_json='{"step":"x"}',
-                        tags="load",
-                        verb="query",
-                    )
-                    i += 1
-            except BaseException as exc:  # pragma: no cover
-                writer_errors.append(exc)
-
-        writers = [
-            threading.Thread(target=telemetry_writer, daemon=True),
-            threading.Thread(target=plan_writer, daemon=True),
-        ]
-        for t in writers:
-            t.start()
-
-        # nexus-8g79.26: 3-way Barrier rendezvous so both writers start
-        # their first SQL call before we measure under-load latency.
-        # Replaces a 50ms time.sleep that was flaky on loaded CI runners.
-        writers_started.wait(timeout=5.0)
-
-        under_load: list[float] = []
-        for i in range(100):
-            start = time.perf_counter()
-            db.memory.get(id=row_ids[i % len(row_ids)])
-            under_load.append((time.perf_counter() - start) * 1000)
-
-        stop_writers.set()
-        for t in writers:
-            t.join(timeout=5)
+def test_memory_get_under_concurrent_write_load(tmp_path: Path) -> None:
+    """memory.get() must not be starved by concurrent write load (see ``_TAIL_RATIO_MAX``). The 50ms floor of the
+    tail ceiling is the old absolute ceiling: a point lookup's p95 under load on a GHA runner is about 4.5ms, and
+    starvation costs tens to hundreds of ms."""
+    db = T2Database(tmp_path / "get_underload.db")
+    try:
+        row_ids = [db.put(project="load", title=f"entry{i}", content=f"content {i}") for i in range(200)]
+        baseline, under_load = _reads_under_write_load(db, lambda i: db.memory.get(id=row_ids[i % len(row_ids)]))
     finally:
         db.close()
-
-    assert not writer_errors, f"Background writers raised: {writer_errors}"
-
-    under_load.sort()
-    load_p50 = statistics.median(under_load)
-    load_p95 = under_load[94]
-    load_p99 = under_load[98]
-    # nexus-3m01p: FLOOR the denominator. This was a bare
-    # `load_p95 / baseline_p95`, which made the assertion a function of how
-    # lucky the BASELINE sample was rather than of how the code behaves under
-    # load. Measured on one machine, same tree, minutes apart:
-    #
-    #   loaded box:  baseline_p95=0.58ms load_p95=1.85ms -> 3.22x  FAILED
-    #   quiet box:   baseline_p95=1.61ms load_p95=3.42ms -> 2.13x  passed
-    #   quiet box, 5 runs: baseline_p95 1.70-2.18ms, load_p95 1.77-2.08ms, ~1.0x
-    #
-    # Note the direction: the FAILING run's load_p95 (1.85ms) sits inside the
-    # normal band. Nothing was slow. The 0.58ms baseline — a third of every
-    # other observation — shrank the denominator and manufactured the ratio.
-    # baseline[94] is the 6th-slowest of 100 sub-millisecond samples, so it is
-    # dominated by scheduler noise, and the tighter it lands the more likely a
-    # spurious failure. That is backwards for a regression gate.
-    #
-    # The floor sits below every non-anomalous baseline observed (1.70ms was the
-    # lowest of five clean runs), so it does not weaken the ratio in the regime
-    # the ratio is for; it only stops a sub-millisecond denominator from
-    # inventing one.
-    #
-    # nexus-c7l4n keeps that floor and moves the ratio itself off the tail:
-    # the denominator is now the baseline MEDIAN (still floored, for the same
-    # reason), and the numerator is the under-load MEDIAN. See the docstring
-    # for the GHA observation that forced it.
-    _BASELINE_FLOOR_MS = 1.0
-    baseline_median = statistics.median(baseline)  # baseline already sorted
-    denom = max(baseline_median, _BASELINE_FLOOR_MS)
-    ratio = load_p50 / denom
-    _MEDIAN_RATIO_MAX = 10.0
-
-    print(
-        f"\n[rdr-063 under-load] memory_get n=100 entries=200 "
-        f"baseline_p95={baseline_p95:.2f}ms "
-        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
-        f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms "
-        f"load_p99={load_p99:.2f}ms median_ratio={ratio:.2f}x"
-    )
-
-    # NON-VACUITY: the measurement has to have happened at all. A zeroed or
-    # empty sample would satisfy both assertions below trivially.
-    assert load_p95 > 0.0, "under-load sample is degenerate; nothing was measured"
-    assert load_p50 > 0.0, "under-load median is degenerate; nothing was measured"
-
-    # (1) Relative: reads must not slow down against their OWN baseline on this
-    #     machine. Machine-independent, which is why it is worth keeping — but
-    #     measured on the median, which a lock regression moves and scheduler
-    #     jitter does not.
-    assert load_p50 < denom * _MEDIAN_RATIO_MAX, (
-        f"memory.get median inflated under concurrent write load: "
-        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
-        f"load_p50={load_p50:.2f}ms ratio={ratio:.2f}x "
-        f"(threshold {_MEDIAN_RATIO_MAX:.1f}x)"
-    )
-
-    # (2) Absolute: the thing an operator actually cares about. Starvation —
-    #     a read stuck behind a write transaction — costs tens to hundreds of
-    #     ms, not the ~2ms this measures; the ceiling is ~24x the highest
-    #     load_p95 observed (2.08ms) and ~11x the highest load_p99 (4.60ms), so
-    #     it cannot fire on ordinary noise and cannot be defeated by a lucky
-    #     baseline the way the ratio alone could.
-    _LOAD_P95_CEILING_MS = 50.0
-    assert load_p95 < _LOAD_P95_CEILING_MS, (
-        f"memory.get p95 under concurrent write load is {load_p95:.2f}ms, over "
-        f"the {_LOAD_P95_CEILING_MS:.0f}ms starvation ceiling — reads are being "
-        f"blocked by writers, not merely slowed (load_p99={load_p99:.2f}ms)"
-    )
+    _assert_not_starved("memory_get", baseline, under_load, ceiling_floor_ms=50.0)
 
 
 def test_memory_search_under_concurrent_write_load(tmp_path: Path) -> None:
-    """memory_search must not be starved by concurrent write load.
-
-    Same two-gate shape as ``test_memory_get_under_concurrent_write_load``
-    above — see that docstring for the measurement argument. This test
-    carried the ORIGINAL, un-floored ``load_p95 / baseline_p95`` at 3.0x:
-    the exact form that fired on a dev box (nexus-3m01p) and then on GHA
-    (nexus-c7l4n) in its sibling, and it had no absolute ceiling at all, so
-    the only thing standing between it and the same spurious red was which
-    of the two the shard scheduler happened to run on a busy runner.
-    Converted here in the same change rather than left as a known landmine:
-    the relative gate moves to the floored MEDIAN, and it GAINS the 50ms
-    absolute starvation ceiling plus a non-vacuity assert it never had.
-    """
-    db_path = tmp_path / "underload.db"
-    db = T2Database(db_path)
+    """memory_search must not be starved by concurrent write load. The 150ms floor (nexus-c7l4n round 2): an FTS
+    query's whole under-load distribution on a 2-vCPU GHA runner sits near 50ms with a flat tail, and starvation
+    shows as outliers of hundreds of ms to seconds."""
+    db = T2Database(tmp_path / "underload.db")
     try:
         for i in range(200):
-            db.put(
-                project="load",
-                title=f"entry{i}",
-                content=f"content {i} keyword lorem ipsum",
-            )
-
-        # --- Phase A: single-threaded baseline ---
-        baseline: list[float] = []
-        for _ in range(100):
-            start = time.perf_counter()
-            db.search(query="keyword", project="load")
-            baseline.append((time.perf_counter() - start) * 1000)
-        baseline.sort()
-        baseline_p95 = baseline[94]
-
-        # --- Phase B: same measurement, under concurrent write load ---
-        stop_writers = threading.Event()
-        writers_started = threading.Barrier(3)  # 2 writers + main
-        writer_errors: list[BaseException] = []
-
-        def telemetry_writer() -> None:
-            i = 0
-            try:
-                writers_started.wait(timeout=5.0)
-                while not stop_writers.is_set():
-                    db.log_relevance(
-                        query=f"q{i}",
-                        chunk_id=_cid(f"c{i}"),
-                        action="click",
-                        session_id="load",
-                        collection="knowledge__load",
-                    )
-                    i += 1
-            except BaseException as exc:  # pragma: no cover
-                writer_errors.append(exc)
-
-        def plan_writer() -> None:
-            i = 0
-            try:
-                writers_started.wait(timeout=5.0)
-                while not stop_writers.is_set():
-                    db.save_plan(
-                        query=f"plan {i}",
-                        plan_json='{"step":"x"}',
-                        tags="load",
-                        verb="query",
-                    )
-                    i += 1
-            except BaseException as exc:  # pragma: no cover
-                writer_errors.append(exc)
-
-        writers = [
-            threading.Thread(target=telemetry_writer, daemon=True),
-            threading.Thread(target=plan_writer, daemon=True),
-        ]
-        for t in writers:
-            t.start()
-
-        # nexus-8g79.26: 3-way Barrier rendezvous (see prior test).
-        writers_started.wait(timeout=5.0)
-
-        under_load: list[float] = []
-        for _ in range(100):
-            start = time.perf_counter()
-            db.search(query="keyword", project="load")
-            under_load.append((time.perf_counter() - start) * 1000)
-
-        stop_writers.set()
-        for t in writers:
-            t.join(timeout=5)
+            db.put(project="load", title=f"entry{i}", content=f"content {i} keyword lorem ipsum")
+        baseline, under_load = _reads_under_write_load(db, lambda i: db.search(query="keyword", project="load"))
     finally:
         db.close()
+    _assert_not_starved("memory_search", baseline, under_load, ceiling_floor_ms=150.0)
 
-    assert not writer_errors, f"Background writers raised: {writer_errors}"
 
-    under_load.sort()
-    load_p50 = statistics.median(under_load)
-    load_p95 = under_load[94]
-    load_p99 = under_load[98]
-    _BASELINE_FLOOR_MS = 1.0
-    baseline_median = statistics.median(baseline)  # baseline already sorted
-    denom = max(baseline_median, _BASELINE_FLOOR_MS)
-    ratio = load_p50 / denom
-    _MEDIAN_RATIO_MAX = 10.0
+def test_the_starvation_gate_reads_the_runs_own_tail() -> None:
+    """The gate's arithmetic on the observed numbers: develop run 44337073652's slow-box sample passes (nothing was
+    starved), and a read blocked behind a writer fails on a fast box and on a slow one."""
+    rows = _LOAD_ROUNDS * _READS_PER_PHASE
 
-    print(
-        f"\n[rdr-063 under-load] memory_search n=100 entries=200 "
-        f"baseline_p95={baseline_p95:.2f}ms "
-        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
-        f"load_p50={load_p50:.2f}ms load_p95={load_p95:.2f}ms "
-        f"load_p99={load_p99:.2f}ms median_ratio={ratio:.2f}x"
-    )
+    def sample(median: float, p95: float) -> list[float]:
+        return sorted([median] * (rows - rows // 10) + [p95] * (rows // 10))
 
-    # NON-VACUITY (new here): a zeroed or empty sample would satisfy both
-    # gates below trivially.
-    assert load_p95 > 0.0, "under-load sample is degenerate; nothing was measured"
-    assert load_p50 > 0.0, "under-load median is degenerate; nothing was measured"
-
-    # (1) Relative, on the median — a lock regression moves it, scheduler
-    #     jitter does not.
-    assert load_p50 < denom * _MEDIAN_RATIO_MAX, (
-        f"memory_search median inflated under concurrent write load: "
-        f"baseline_median={baseline_median:.2f}ms (denom={denom:.2f}ms) "
-        f"load_p50={load_p50:.2f}ms ratio={ratio:.2f}x "
-        f"(threshold {_MEDIAN_RATIO_MAX:.1f}x)"
-    )
-
-    # (2) Absolute (new here): the starvation ceiling. CALIBRATION (nexus-c7l4n
-    #     round 2): 50.0 was the memory_get sibling's constant (a point-lookup,
-    #     ~4.5ms p95 under load on GHA). memory_search is an FTS query and on a
-    #     2-vCPU GHA runner its whole under-load distribution sits ~50ms UNIFORM
-    #     (observed p95=51.26 / p99=52.02 — a FLAT tail, the opposite of the
-    #     starvation shape). Genuine reader-blocked-by-writer starvation
-    #     manifests as pathological outliers (hundreds of ms to seconds — the
-    #     lock-wedge class this assert exists for), so a 150ms ceiling still
-    #     catches every real event while tolerating slow-runner uniformity;
-    #     the floored-median relative gate above remains the sensitive detector.
-    _LOAD_P95_CEILING_MS = 150.0
-    assert load_p95 < _LOAD_P95_CEILING_MS, (
-        f"memory_search p95 under concurrent write load is {load_p95:.2f}ms, "
-        f"over the {_LOAD_P95_CEILING_MS:.0f}ms starvation ceiling — reads are "
-        f"being blocked by writers, not merely slowed "
-        f"(load_p99={load_p99:.2f}ms)"
-    )
+    _assert_not_starved("slow box, not starved", sample(19.79, 56.15), sample(24.86, 60.36), 50.0)
+    with pytest.raises(AssertionError, match="starvation ceiling"):
+        _assert_not_starved("fast box, starved tail", sample(1.5, 2.0), sample(1.6, 200.0), 50.0)
+    with pytest.raises(AssertionError, match="starvation ceiling"):
+        _assert_not_starved("slow box, starved tail", sample(19.79, 56.15), sample(24.86, 600.0), 50.0)
+    with pytest.raises(AssertionError, match="median inflated"):
+        _assert_not_starved("every read serialized", sample(1.5, 2.0), sample(40.0, 45.0), 50.0)
 
 
 # ── RDR-129 B1 (nexus-qi1zb): serving busy_timeout raised 5000 -> 30000 ──────
