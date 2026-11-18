@@ -317,3 +317,37 @@ def test_an_applied_line_with_zero_changesets_fails(line: str) -> None:
     text = GOOD_WITH.replace(original, zero)
     lib = "ddl_utils" if line == "L_DDL" else "dml_utils"
     assert failed(text, "with-pg-background") == [f"event=data_move_library_applied library={lib}"]
+
+
+_UNIQUE = "zq-not-in-any-fixture-7d1"
+
+
+@pytest.mark.parametrize(
+    ("mode", "line"),
+    [
+        ("with-pg-background", L_SKIP),
+        ("with-pg-background", _P.format(lvl="ERROR", cls=_INSTALLER) + "event=data_move_libraries_failed library=ddl_utils"),
+        ("without-pg-background", L_DDL),
+        ("without-pg-background", _P.format(lvl="ERROR", cls=_INSTALLER) + "event=data_move_libraries_failed library=ddl_utils"),
+        ("with-pg-background", _P.format(lvl="WARN", cls="d.nexus.service.log.LogMasking") + "event=log_masking_inactive appender=FILE"),
+    ],
+)
+def test_a_failure_cites_the_offending_line_by_number_and_never_quotes_it(mode: str, line: str) -> None:
+    """Nothing the checker prints is taken from a log line's text, so nothing it prints can carry a secret a
+    broken mask left in one (CodeQL alert 62: printed text must not flow from the secret values; the old
+    redact() pass is gone). The line number points into the smoke's redacted log tail."""
+    base = GOOD_WITH if mode == "with-pg-background" else GOOD_WITHOUT
+    marked = line + f" note={_UNIQUE}"
+    text = base.replace(L_NOISE + "\n", L_NOISE + "\n" + marked + "\n")
+    report = chk.run_checks(text, mode, SECRETS)
+    bad = [r for r in report.results if not r.ok]
+    assert bad, "fixture precondition: the inserted line must fail a check"
+    rendered = report.render()
+    assert _UNIQUE not in rendered, rendered
+    assert any(re.search(r"\bline 2\b", r.detail) for r in bad), [r.detail for r in bad]
+
+
+def test_the_checker_prints_its_report_without_a_secret_dependent_pass() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "def redact(" not in source and "redact(" not in source.split("def main(", 1)[1], (
+        "the printed report must not be computed from the secrets (CodeQL alert 62)")

@@ -48,7 +48,7 @@ import argparse
 import os
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -103,6 +103,12 @@ class Report:
         return "\n".join(out)
 
 
+def _first_line_no(lines: list[str], hits: list[str]) -> int:
+    """The 1-based number of the first hit, cited instead of its text: nothing printed is taken from a log line,
+    so a secret a broken mask left in one can never reach the report (CodeQL alert 62)."""
+    return lines.index(hits[0]) + 1
+
+
 def _lines(text: str) -> list[str]:
     return text.splitlines()
 
@@ -128,10 +134,10 @@ def check_libraries_applied(text: str) -> list[CheckResult]:
         results.append(CheckResult(f"event=data_move_library_applied library={lib}", ok, len(lines), detail))
     skipped = [ln for ln in lines if _SKIPPED.search(ln)]
     results.append(CheckResult("no event=data_move_libraries_skipped on a bundle with pg_background", not skipped,
-                               len(lines), "" if not skipped else f"the engine skipped the libraries: {skipped[0].strip()[-200:]}"))
+                               len(lines), "" if not skipped else f"the engine skipped the libraries (line {_first_line_no(lines, skipped)})"))
     failed = [ln for ln in lines if "event=data_move_libraries_failed" in ln]
     results.append(CheckResult("no event=data_move_libraries_failed", not failed, len(lines),
-                               "" if not failed else f"a library changelog failed: {failed[0].strip()[-300:]}"))
+                               "" if not failed else f"a library changelog failed (line {_first_line_no(lines, failed)})"))
     return results
 
 
@@ -155,10 +161,10 @@ def check_libraries_skipped_without_pg_background(text: str) -> list[CheckResult
                                "" if ready else "no such line"))
     applied = [ln for ln in lines if _APPLIED.search(ln)]
     results.append(CheckResult("no event=data_move_library_applied without pg_background", not applied, len(lines),
-                               "" if not applied else f"a library applied: {applied[0].strip()[-200:]}"))
+                               "" if not applied else f"a library applied (line {_first_line_no(lines, applied)})"))
     failed = [ln for ln in lines if "event=data_move_libraries_failed" in ln]
     results.append(CheckResult("no event=data_move_libraries_failed", not failed, len(lines),
-                               "" if not failed else f"a library changelog failed: {failed[0].strip()[-300:]}"))
+                               "" if not failed else f"a library changelog failed (line {_first_line_no(lines, failed)})"))
     return results
 
 
@@ -174,42 +180,45 @@ def check_log_masking_installed(text: str) -> CheckResult:
     inactive = [ln for ln in lines if "event=log_masking_inactive" in ln]
     if inactive:
         return CheckResult("event=log_masking_installed masking>=1", False, len(lines),
-                           f"the engine also logged log_masking_inactive: {inactive[0].strip()[-200:]}")
+                           f"the engine also logged log_masking_inactive (line {_first_line_no(lines, inactive)})")
     return CheckResult("event=log_masking_installed masking>=1", True, len(lines))
 
 
-def check_masked_lines(text: str, secrets: Mapping[str, str]) -> list[CheckResult]:
-    """Per secret: its probe line shows ``<redacted>`` in place of the secret, and the raw secret is nowhere in the log.
+def check_masked_lines(text: str, labels: Sequence[str], values: Sequence[str]) -> list[CheckResult]:
+    """Per probe: its line shows ``<redacted>`` in place of the value, and the raw value is in no line.
 
-    ``secrets`` maps a label to the secret. The probe line is the one the smoke provoked with
-    ``PROBE_PATH_PREFIX + label + "-" + secret``. An empty mapping, or an empty secret, is a failure.
+    ``labels[i]`` names the probe whose value is ``values[i]``; the smoke provoked its line with
+    ``PROBE_PATH_PREFIX + label + "-" + value``. No probe, or an empty value, is a failure. The report is built
+    from the labels and from line numbers only: a value is compared against lines and never copied into a
+    result, so nothing printed flows from one (CodeQL alert 62).
     """
     lines = _lines(text)
-    if not secrets or any(not s.strip() for s in secrets.values()):
+    if not labels or len(labels) != len(values) or any(not v.strip() for v in values):
         return [CheckResult("masked line", False, len(lines), "no secret to look for (an empty or missing secret is not a pass)")]
     results = []
-    for label, secret in secrets.items():
+    for i, label in enumerate(labels):
         expected = f"path={PROBE_PATH_PREFIX}{label}-{REDACTED}"
         results.append(CheckResult(
             f"masked line: {expected}", any(expected in ln for ln in lines), len(lines),
             "no logged line shows the probe with its secret masked"))
-        leaked = [i + 1 for i, ln in enumerate(lines) if secret in ln]
+        leaked = _lines_holding(lines, values[i])
         results.append(CheckResult(
             f"the {label} secret appears in no line", not leaked, len(lines),
             "" if not leaked else f"the raw secret is in line(s) {leaked[:5]} (a log line carries it unmasked)"))
     return results
 
 
-def redact(text: str, secrets: Mapping[str, str]) -> str:
-    """A failure's detail quotes engine log lines as they were written; if the masking under test is broken, one can
-    hold a secret, so every secret is replaced before anything is printed."""
-    for label, secret in secrets.items():
-        if secret:
-            text = text.replace(secret, f"<{label}-redacted>")
-    return text
+def _lines_holding(lines: list[str], value: str) -> list[int]:
+    """1-based numbers of the lines that contain *value*; only the numbers leave this function."""
+    return [n for n, ln in enumerate(lines, start=1) if value in ln]
 
 
 def run_checks(text: str, mode: str, secrets: Mapping[str, str]) -> Report:
+    """Every check for ``mode`` on the log ``text``, with ``secrets`` as ``{label: value}`` (the tests' form)."""
+    return run_checks_for(text, mode, list(secrets), list(secrets.values()))
+
+
+def run_checks_for(text: str, mode: str, labels: Sequence[str], values: Sequence[str]) -> Report:
     """Every check for ``mode`` on the log ``text``. An unknown mode or a log with no lines fails."""
     n = len(_lines(text))
     report = Report(mode=mode, lines=n)
@@ -224,36 +233,45 @@ def run_checks(text: str, mode: str, secrets: Mapping[str, str]) -> Report:
     else:
         report.results.extend(check_libraries_skipped_without_pg_background(text))
     report.results.append(check_log_masking_installed(text))
-    report.results.extend(check_masked_lines(text, secrets))
+    report.results.extend(check_masked_lines(text, labels, values))
     return report
 
 
-def _secrets_from_env(specs: list[str]) -> dict[str, str]:
-    """``label=ENV_NAME`` specs to ``{label: value}``; raises ``ValueError`` on a bad spec or an unset, empty variable."""
-    out: dict[str, str] = {}
+def _probe_specs(specs: list[str]) -> tuple[list[str], list[str]]:
+    """``label=ENV_NAME`` specs to (labels, variable names); raises ``ValueError`` on a bad spec."""
+    labels: list[str] = []
+    names: list[str] = []
     for spec in specs:
         label, sep, var = spec.partition("=")
         if not sep or not re.fullmatch(r"[a-z][a-z0-9]*", label) or not var:
             raise ValueError(f"--secret wants label=ENV_NAME with a lowercase alphanumeric label, got {spec!r}")
-        value = os.environ.get(var, "")
+        labels.append(label)
+        names.append(var)
+    return labels, names
+
+
+def _probe_values(labels: list[str], names: list[str]) -> list[str]:
+    """The value of each named environment variable; raises ``ValueError`` naming the label and variable, never the value."""
+    values = [os.environ.get(var, "") for var in names]
+    for label, var, value in zip(labels, names, values, strict=True):
         if not value.strip():
             raise ValueError(f"--secret {label}: the environment variable {var} is unset or empty")
-        out[label] = value
-    return out
+    return values
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--mode", required=True, choices=MODES)
     ap.add_argument("--log", required=True, type=Path)
-    ap.add_argument("--secret", action="append", default=[], metavar="LABEL=ENV_NAME",
+    ap.add_argument("--secret", dest="probes", action="append", default=[], metavar="LABEL=ENV_NAME",
                     help="a secret to look for, as label=NAME of the environment variable holding it (repeatable, at least one)")
     args = ap.parse_args(argv)
-    if not args.secret:
+    if not args.probes:
         print("check_native_data_move_boot: at least one --secret is required (the masking check is not optional)", file=sys.stderr)
         return 2
     try:
-        secrets = _secrets_from_env(args.secret)
+        labels, names = _probe_specs(args.probes)
+        values = _probe_values(labels, names)
         text = args.log.read_text(encoding="utf-8", errors="replace")
     except (ValueError, OSError) as e:
         print(f"check_native_data_move_boot: {e}", file=sys.stderr)
@@ -261,8 +279,8 @@ def main(argv: list[str] | None = None) -> int:
     if not text.strip():
         print(f"check_native_data_move_boot: {args.log} is empty", file=sys.stderr)
         return 2
-    report = run_checks(text, args.mode, secrets)
-    print(redact(report.render(), secrets))
+    report = run_checks_for(text, args.mode, labels, values)
+    print(report.render())
     return 0 if report.ok else 1
 
 
