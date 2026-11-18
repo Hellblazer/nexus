@@ -9,7 +9,6 @@ import org.jooq.DSLContext;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -97,7 +96,7 @@ public final class GroupRepository {
             OffsetDateTime now = OffsetDateTime.now(clock);
             return ctx.selectFrom(GROUP_RECORDS).where(GROUP_RECORDS.TENANT_ID.eq(tenant))
                 .and(GROUP_RECORDS.ENDED_AT.isNull()).orderBy(GROUP_RECORDS.NAME).fetch().stream()
-                .filter(r -> !GroupRules.disbanded(r, now) && Arrays.asList(r.getServes()).contains(baseTopic))
+                .filter(r -> !GroupRules.disbanded(r, now) && GroupInput.servesOf(r.getServes()).contains(baseTopic))
                 .findFirst().map(r -> view(r, now));
         });
     }
@@ -134,7 +133,7 @@ public final class GroupRepository {
                 .set(GROUP_RECORDS.PURPOSE, purpose).set(GROUP_RECORDS.REQUESTED_BY, requestedBy)
                 .set(GROUP_RECORDS.FORMED_AT, now).set(GROUP_RECORDS.ENDS, ends)
                 .set(GROUP_RECORDS.ACK_DEADLINE, ackDeadline).set(GROUP_RECORDS.ACK_DEADLINE_BY_TOPIC, json)
-                .set(GROUP_RECORDS.SERVES, serves.toArray(new String[0]))
+                .set(GROUP_RECORDS.SERVES, GroupInput.servesJson(serves))
                 .onConflict(GROUP_RECORDS.TENANT_ID, GROUP_RECORDS.NAME).doNothing().execute();
             Map<String, Object> reformed = null;
             if (inserted == 0) {
@@ -159,7 +158,7 @@ public final class GroupRepository {
                 old.setEndedAt(null);
                 old.setAckDeadline(ackDeadline);
                 old.setAckDeadlineByTopic(json);
-                old.setServes(serves.toArray(new String[0]));
+                old.setServes(GroupInput.servesJson(serves));
                 old.update();
                 // A re-form starts with the leader as the only member.
                 memberships.removeAll(ctx, tenant, name);
@@ -222,7 +221,7 @@ public final class GroupRepository {
             }
             GroupRecordsRecord rec = lockLive(ctx, tenant, name, expectedLeader);
             Map<String, Object> before = fields(rec);
-            List<String> newServes = serves != null ? serves : Arrays.asList(rec.getServes());
+            List<String> newServes = serves != null ? serves : GroupInput.servesOf(rec.getServes());
             Map<String, Integer> newByTopic = byTopic != null ? byTopic : currentByTopic(rec, newServes);
             requireKeysServed(newByTopic, newServes);
             if (serves != null || setEnds) {
@@ -241,7 +240,7 @@ public final class GroupRepository {
             if (ack != null) {
                 rec.setAckDeadline(ack);
             }
-            rec.setServes(newServes.toArray(new String[0]));
+            rec.setServes(GroupInput.servesJson(newServes));
             rec.setAckDeadlineByTopic(IdentityRows.json(new LinkedHashMap<String, Object>(newByTopic)));
             rec.update();
             if (handOver) {
@@ -405,7 +404,7 @@ public final class GroupRepository {
             if (GroupRules.disbanded(other, now)) {
                 continue;
             }
-            for (String topic : other.getServes()) {
+            for (String topic : GroupInput.servesOf(other.getServes())) {
                 if (serves.contains(topic)) {
                     throw new IdentityException(409, "topic_served",
                         "the topic " + topic + " is served by " + other.getName() + " already: one live group serves a topic",
@@ -460,7 +459,7 @@ public final class GroupRepository {
         m.put("ended_at", IdentityRows.str(r.getEndedAt()));
         m.put("ack_deadline", r.getAckDeadline());
         m.put("ack_deadline_by_topic", IdentityRows.parse(r.getAckDeadlineByTopic()));
-        m.put("serves", new ArrayList<>(Arrays.asList(r.getServes())));
+        m.put("serves", new ArrayList<>(GroupInput.servesOf(r.getServes())));
         return m;
     }
 

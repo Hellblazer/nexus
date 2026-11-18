@@ -508,8 +508,8 @@ public final class TenantExport {
         // RDR-252 Step 1: the permanent group record. DATA: a group is made by Sam's request and lives until it is disbanded.
         // leader is an identity id kept as a label (the override exists for a leader that is gone), not a reference.
         data("group_records").pk("tenant_id text", "name text")
-            // topic base names to minutes: text keys and small integers, not references.
-            .notRefs("ack_deadline_by_topic")
+            // serves is a JSON array of topic base names and ack_deadline_by_topic maps them to minutes: not references.
+            .notRefs("ack_deadline_by_topic", "serves")
             .build(),
         // ── excluded ──
         excluded("pdf_pipeline", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint")

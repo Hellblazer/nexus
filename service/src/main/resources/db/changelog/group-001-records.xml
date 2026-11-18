@@ -11,7 +11,7 @@
     exists for a leader whose identity is gone). ends is a UTC instant or NULL (open); ended_at is set once, by a
     disband, and cleared only by a re-form, which rewrites the row in place. ack_deadline and the values of
     ack_deadline_by_topic are whole minutes, 5 to 240 (the CHECK is the last line; the group route refuses first).
-    serves lists the base names of the board topics whose reds the group owns. "One live server per topic" is not a
+    serves is a JSON array of the base names of the board topics whose reds the group owns (jsonb, like ack_deadline_by_topic, so the tenant export carries no new column type). "One live server per topic" is not a
     constraint of the table: it is enforced by the per-(tenant, base topic) advisory lock of BoardTopicLock, taken by
     every write that can make a group serve a topic.
 
@@ -46,7 +46,7 @@ CREATE TABLE nexus.group_records (
     ended_at              TIMESTAMPTZ,
     ack_deadline          INTEGER     NOT NULL DEFAULT 20,
     ack_deadline_by_topic JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    serves                TEXT[]      NOT NULL DEFAULT '{}',
+    serves                JSONB       NOT NULL DEFAULT '[]'::jsonb,
     CONSTRAINT group_records_pk PRIMARY KEY (tenant_id, name),
     CONSTRAINT group_records_name_ck CHECK (name ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
     CONSTRAINT group_records_ack_deadline_ck CHECK (ack_deadline BETWEEN 5 AND 240)

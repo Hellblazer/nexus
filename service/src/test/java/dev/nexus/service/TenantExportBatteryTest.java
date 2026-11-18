@@ -224,7 +224,7 @@ class TenantExportBatteryTest {
             }
             assertThat(types).as("the column types of the exported tables").containsExactlyInAnyOrder(
                 "bigint", "bigint[]", "boolean", "bytea", "double precision", "integer", "integer[]", "jsonb",
-                "numeric", "text", "text[]", "timestamp with time zone", "vector(n)");
+                "numeric", "text", "timestamp with time zone", "vector(n)");
             assertThat(identityColumns).as("serial or identity columns of the exported tables").isGreaterThan(0);
             // the id the restore reassigns is a serial or identity column of the table, and it is in every page's rows
             for (ExportTable t : exported) {
@@ -906,7 +906,6 @@ class TenantExportBatteryTest {
                 case "jsonb" -> JSONB.valueOf("{\"k\": [1, 2, {\"n\": null}], \"s\": \"v\"}");
                 case "bigint[]" -> new Long[] {5L, Long.MAX_VALUE};
                 case "integer[]" -> new Integer[] {1, 2, 3};
-                case "text[]" -> new String[] {"first é", "second"};
                 case "uuid" -> UUID.nameUUIDFromBytes(where.getBytes(StandardCharsets.UTF_8));
                 default -> throw new IllegalStateException("the battery has no value for the column type " + type + " of " + where);
             };

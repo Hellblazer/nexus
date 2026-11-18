@@ -2,6 +2,10 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.jooq.JSONB;
+
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -23,7 +27,28 @@ final class GroupInput {
     static final int MAX_DEADLINE = 240;
     static final int DEFAULT_DEADLINE = 20;
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final TypeReference<List<String>> STRINGS = new TypeReference<>() { };
+
     private GroupInput() {
+    }
+
+    /** {@code serves} as stored: a JSON array of base topic names. */
+    static JSONB servesJson(List<String> serves) {
+        try {
+            return JSONB.valueOf(MAPPER.writeValueAsString(serves));
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /** The stored {@code serves}, in the order it was written. */
+    static List<String> servesOf(JSONB stored) {
+        try {
+            return stored == null ? List.of() : MAPPER.readValue(stored.data(), STRINGS);
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     static String text(Map<String, Object> body, String key) {
