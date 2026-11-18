@@ -625,7 +625,7 @@ def test_a_bare_name_present_in_two_roots_yields_both_files(repo: Path) -> None:
     assert mt.module_files(repo, "tests/test_twin.py") == {"scripts/twin.py", "tests/twin.py"}
 
 
-@pytest.mark.parametrize("where", ["guard-sibling", "unchanged-file"])
+@pytest.mark.parametrize("where", ["guard-sibling", "changed-guard-file"])
 def test_a_failure_outside_the_changed_test_files_stays_red_when_the_census_passes(
     repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str], where: str
 ) -> None:
@@ -637,7 +637,7 @@ def test_a_failure_outside_the_changed_test_files_stays_red_when_the_census_pass
         _git(repo, "commit", "-qm", "ratchet")
         _git(repo, "tag", "-f", "base")
     (repo / "tests/test_plain.py").write_text("def test_p():\n    assert True\n")
-    if where == "unchanged-file":
+    if where == "changed-guard-file":
         (repo / "tests/test_guard.py").write_text("def test_guard():\n    pass\n\ndef test_ratchet():\n    assert False\n")
     assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == 1
     assert "advisory" not in capsys.readouterr().out
@@ -648,3 +648,7 @@ def test_a_relative_import_resolves_from_the_test_package(repo: Path) -> None:
                   "tests/auras/test_a.py": "from ._support import S\nfrom . import _support\n"})
     assert mt.module_files(repo, "tests/auras/test_a.py") == {"tests/auras/_support.py"}
     assert "tests/auras/_support.py" in mt.tests_closure(repo, "tests/auras/test_a.py")
+    _write(repo, {"tests/auras/deep/__init__.py": "", "tests/auras/deep/test_b.py": "from .._support import S\nfrom ..pkg.mod import M\n",
+                  "tests/auras/pkg/__init__.py": "", "tests/auras/pkg/mod.py": "M = 1\n"})
+    assert mt.module_files(repo, "tests/auras/deep/test_b.py") == {
+        "tests/auras/_support.py", "tests/auras/pkg/__init__.py", "tests/auras/pkg/mod.py"}
