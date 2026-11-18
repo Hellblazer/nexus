@@ -5,6 +5,7 @@ package dev.nexus.service.http;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.sun.net.httpserver.HttpExchange;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CatalogSensitiveLocatorReads;
 import dev.nexus.service.db.CatalogSensitiveReads;
 import dev.nexus.service.db.ManifestFillableCount;
 import dev.nexus.service.db.ManifestForeignCollectionReads;
@@ -24,21 +25,24 @@ import java.util.Map;
  * {@code {"error":..., "reason":"statement_timeout"}} with none of the answer. A client that gets a 404 is on an
  * engine before the route and one that gets a 503 is on an engine that could not answer in time; both must read
  * "cannot say", never "none".
+ *
+ * <p>RDR-241 Phase 2 adds {@code GET /v1/catalog/sensitive/locators} (nexus-uwggq.2.5, the {@code /sensitive} envelope), a new
+ * path so an old engine answers 404; its {@code /version} flag is {@code catalog_sensitive_locators_supported}.
  */
 final class CatalogBoundedReadRoutes {
 
     private static final Logger log = LoggerFactory.getLogger(CatalogBoundedReadRoutes.class);
 
     private final CatalogSensitiveReads sensitiveReads;
+    private final CatalogSensitiveLocatorReads locatorReads;
     private final ManifestFillableCount fillableCount;
-
     private final ManifestForeignCollectionReads foreignReads;
 
-    CatalogBoundedReadRoutes(CatalogSensitiveReads sensitiveReads, ManifestFillableCount fillableCount,
-                             ManifestForeignCollectionReads foreignReads) {
-        this.sensitiveReads = sensitiveReads;
-        this.fillableCount = fillableCount;
-        this.foreignReads = foreignReads;
+    CatalogBoundedReadRoutes(CatalogRepository repo) {
+        this.sensitiveReads = new CatalogSensitiveReads(repo);
+        this.locatorReads = new CatalogSensitiveLocatorReads(repo);
+        this.fillableCount = new ManifestFillableCount(repo);
+        this.foreignReads = new ManifestForeignCollectionReads(repo);
     }
 
     /**
@@ -162,6 +166,45 @@ final class CatalogBoundedReadRoutes {
             m.put("physical_collection", d.physicalCollection());
             m.put("collections", d.collections());
             m.put("chunks", d.chunks());
+            docs.add(m);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("count", page.count());
+        body.put("limit", page.limit());
+        body.put("capped", page.capped());
+        body.put("documents", docs);
+        send(exchange, 200, body);
+    }
+
+    /**
+     * GET /v1/catalog/sensitive/locators?limit=N (nexus-uwggq.2.5): {@code {count, limit, capped, documents:[{tumbler,
+     * source_uri, file_path, alias_of, physical_collection}]}}, the envelope of {@code /sensitive}.
+     *
+     * <p>The tenant's live sensitive documents and the live documents whose {@code alias_of} names a live sensitive one
+     * ({@link CatalogSensitiveLocatorReads} has the statement), in tumbler order; {@code limit} is 1 to 10,000 (default
+     * 1,000), anything else a 400; {@code capped} is true when more than {@code limit} rows exist.
+     */
+    void sensitiveLocators(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Integer limit = limitParam(exchange, CatalogSensitiveLocatorReads.DEFAULT_LIMIT, CatalogSensitiveLocatorReads.MAX_LIMIT);
+        if (limit == null) return;
+        CatalogSensitiveLocatorReads.Page page;
+        try {
+            page = locatorReads.list(tenant, limit);
+        } catch (RuntimeException e) {
+            if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            log.warn("event=catalog_sensitive_locators_timeout tenant={} limit={}", tenant, limit);
+            timeout(exchange, "sensitive locators read exceeded its time bound");
+            return;
+        }
+        List<Map<String, Object>> docs = new ArrayList<>(page.documents().size());
+        for (var d : page.documents()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("tumbler", d.tumbler());
+            m.put("source_uri", d.sourceUri());
+            m.put("file_path", d.filePath());
+            m.put("alias_of", d.aliasOf());
+            m.put("physical_collection", d.physicalCollection());
             docs.add(m);
         }
         Map<String, Object> body = new LinkedHashMap<>();

@@ -314,6 +314,13 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_next_seq_drift_read_supported\":true");
     }
 
+    @Test
+    void versionAdvertisesTheRdr241Route_CatalogSensitiveLocators_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogSensitiveLocatorsCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_sensitive_locators_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test
