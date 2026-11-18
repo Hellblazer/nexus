@@ -19,8 +19,8 @@ Reading rules, so the filter says what the catalog says and no more:
 from __future__ import annotations
 
 import re
-from decimal import Decimal
 from collections.abc import Iterable, Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 #: A key whose absence has a stated meaning (``src/nexus/tables/chunk-metadata-keys.toml``).
