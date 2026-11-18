@@ -34,7 +34,7 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <version>42.7.4</version>
+            <version>42.7.12</version>
         </dependency>
 
         <!-- jOOQ runtime -->
@@ -97,7 +97,7 @@
                     <dependency>
                         <groupId>org.postgresql</groupId>
                         <artifactId>postgresql</artifactId>
-                        <version>42.7.4</version>
+                        <version>42.7.12</version>
                     </dependency>
                 </dependencies>
                 <executions>
@@ -120,7 +120,7 @@
                     <dependency>
                         <groupId>org.postgresql</groupId>
                         <artifactId>postgresql</artifactId>
-                        <version>42.7.4</version>
+                        <version>42.7.12</version>
                     </dependency>
                 </dependencies>
                 <executions>
