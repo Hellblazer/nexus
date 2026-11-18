@@ -52,11 +52,13 @@ def link_cmd(
     Spans (optional) identify the specific passage being referenced:
       --from-span "42-57"              lines 42-57 of the source document
       --to-span "3:100-250"            chars 100-250 of chunk 3 in T3
-      --from-span "chash:<sha256hex>"  content-addressed chunk (preferred)
+      --from-span "chash:<sha256hex>"  content-addressed chunk
       --from-span "chash:<sha256hex>:100-250"  character range within a chunk
-      --to-span "dchash:<sha256hex>:100-250"   character range in the document's text; make one with 'nx catalog span'
-    A dchash span survives re-chunking of unchanged text; a chash span does not, because
-    re-chunking changes the chunk's text and so its hash. A malformed dchash span is refused.
+      --to-span "dchash:<sha256hex>:100-250"   character range in the document's text (the durable form);
+                                       make one with 'nx catalog span'
+    A dchash span is the durable form: it survives re-chunking of unchanged text. A chash span
+    holds only while its chunk's text is unchanged, because re-chunking changes the chunk's text
+    and so its hash. A malformed dchash span is refused.
     Use 'nx catalog show' to see resolved span text.
     """
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible

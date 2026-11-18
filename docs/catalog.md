@@ -594,4 +594,4 @@ After upgrading to RDR-060, run `--fix-paths` once to migrate existing absolute 
 
 **Links point to deleted documents:** Run `nx catalog link-audit` to find orphans. Decide whether to keep them (historical record) or delete with `link-bulk-delete`.
 
-**Spans show wrong text after re-indexing:** Positional spans (`42-57`) become stale when file content changes. Run `link-audit` to identify stale `dchash:` spans. Prefer `dchash:` spans for durable references (`nx catalog span` makes one).
+**Spans show wrong text after re-indexing:** Positional spans (`42-57`) become stale when file content changes, and `link-audit` does not check them: it reports stale `dchash:` spans only. Run `link-audit` to identify stale `dchash:` spans. Prefer `dchash:` spans for durable references (`nx catalog span` makes one).
