@@ -112,6 +112,19 @@
 # notice for another sha is not to be ignored on that alone: in a push window the
 # beads close on the window tip's result, which is often a peer's sha.
 #
+# Push record (RDR-252 Step 2, nexus-igea9.2). After PUSH_OK on a push to develop,
+# on every path including --skip-lock, the script writes one tuple to
+# board/ci/nexus-develop--push (key topic=nexus-develop--push, nonce push-<tip>):
+# dims from=<identity id, or "unknown"> kind=push sha=<tip>, body {"base": <the
+# remote develop tip the push replaced>, "n": <commits>}. RDR-252's owner stamper
+# links base to tip to order develop's tips and maps the record's stamp (which
+# `nx tuple out` from a Bash child of a Claude session carries) to the pushing
+# identity; it never reads from. With --skip-lock the installed nx is resolved for
+# this write as the lock path does; if none resolves, no record is written
+# (PUSH_RECORD_SKIPPED). A failed write is one PUSH_RECORD_FAILED line on stderr.
+# The record never fails the push: stdout keeps its PUSH_OK line and the exit code
+# is the push's. A push to any other branch writes no record.
+#
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
 # and a careful session that keeps checking yields indefinitely to a
@@ -840,8 +853,46 @@ else:
   fi
 fi
 
+# The push record's base (RDR-252 Step 2): the remote tip this push replaces, as the fetch above left it.
+# Under the lock nothing else lands in between; without it, a fast-forward push still replaces exactly
+# this tip, or git refuses the push and no record is written.
+_record_base="$(git rev-parse -q --verify "refs/remotes/$remote/$branch^{commit}" 2>/dev/null || true)"
+
 git push -q "$remote" "$tip:refs/heads/$branch"
 echo "PUSH_OK n=${#range[@]} tip=$tip"
+
+# ── Push record (RDR-252 Step 2, nexus-igea9.2) ─────────────────────────
+# One tuple per push to develop, on every path that reaches PUSH_OK (--skip-lock included), read by
+# RDR-252's owner stamper, which links base to tip to order develop's tips and maps the record's stamp to
+# the pushing identity. `nx tuple out` from a Bash child of a Claude session carries that stamp itself;
+# the stamper never reads `from`, which is a label only. Nothing here can fail the push that just landed:
+# any error is one PUSH_RECORD_* line on stderr, and stdout and the exit code stay as they were.
+#
+# The identity id for `from` (RDR-253 Step 3 resolves it in Python; no shell verb exists yet). "unknown"
+# until one does, which the RDR also prescribes for a push from a plain shell with no Claude ancestor.
+_push_record_from() {
+  printf 'unknown'
+}
+
+_write_push_record() {
+  [[ "$branch" == "develop" ]] || return 0
+  local nxbin="${_nx_bin:-}" body out
+  # The lock path already resolved the installed nx; --skip-lock resolves it here, the same way.
+  [[ -n "$nxbin" ]] || nxbin="$(installed_nx_resolve || true)"
+  if [[ -z "$nxbin" ]]; then
+    echo "PUSH_RECORD_SKIPPED no installed nx resolved (see PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX); the push stands" >&2
+    return 0
+  fi
+  body="{\"base\": \"${_record_base}\", \"n\": ${#range[@]}}"
+  if ! out="$("$nxbin" tuple out "board/ci/nexus-develop--push" --key "topic=nexus-develop--push" \
+        --nonce "push-$tip" --dim "from=$(_push_record_from)" --dim "kind=push" --dim "sha=$tip" \
+        --body "$body" 2>&1)"; then
+    out="${out//$'\n'/ }"
+    echo "PUSH_RECORD_FAILED ${out:0:400} (the push stands)" >&2
+  fi
+  return 0
+}
+_write_push_record || true
 
 # nexus-1d6pz.11.4: the two ways to be woken when this push's CI completes, on
 # stderr (stdout keeps its PUSH_OK contract). A session with the channel subscribes
