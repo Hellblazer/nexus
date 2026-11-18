@@ -69,7 +69,7 @@ For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resourc
 
 ## Investigation Methodology
 
-The deep-analyst uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
+The deep-analyst's method:
 1. Form initial hypothesis about the problem
 2. Identify evidence needed to validate/refute
 3. Gather evidence systematically — use `query(question=..., subtree=..., follow_links="cites")` for citation-aware evidence gathering, or `query(question=..., content_type=...)` for type-scoped retrieval

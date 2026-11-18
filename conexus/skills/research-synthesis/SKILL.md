@@ -69,7 +69,7 @@ For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resourc
 
 ## Research Methodology
 
-The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
+The agent's method:
 1. Form hypothesis about what information is needed
 2. Search nx store for existing knowledge — for scoped evidence, prefer `query(question=..., author=..., content_type=...)` over `search()` + manual scoping
 3. Search web resources for current information

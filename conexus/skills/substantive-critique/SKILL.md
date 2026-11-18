@@ -69,7 +69,7 @@ For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resourc
 
 ## Critique Methodology
 
-The agent uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
+The agent's method:
 1. Establish context and purpose of artifact
 2. Identify criteria/specifications it should conform to
 3. Gather evidence from nx store (search tool: corpus="knowledge") and related artifacts

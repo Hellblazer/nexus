@@ -60,5 +60,11 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/agents/substantive-critic.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
 - `conexus/agents/test-validator.md` -- the sequential-thinking tool section, its Thought template and the visible-record wording are removed: they ask the model to make its reasoning visible, the lead for the API classifier's reasoning_extraction stops (GH #1661)
 - `conexus/skills/orchestration/reference.md` -- the Working Rules sequential-thinking bullet no longer calls the thought a visible record (GH #1661)
+- `conexus/skills/architecture/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
+- `conexus/skills/codebase-analysis/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
+- `conexus/skills/deep-analysis/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
+- `conexus/skills/research-synthesis/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
+- `conexus/skills/strategic-planning/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
+- `conexus/skills/substantive-critique/SKILL.md` -- no longer says the agent uses the sequential-thinking tool, which the agents no longer name; the method list stays (GH #1661)
 
 ## Deferred to the next client release

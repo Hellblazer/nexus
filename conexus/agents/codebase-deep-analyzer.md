@@ -131,7 +131,7 @@ This provides semantic search + git frecency, far more powerful than grep alone.
    - Performance characteristics and bottlenecks
    - Code quality metrics and technical debt
 
-3. **Sequential Thought Process**: For each analysis phase, think step-by-step:
+3. **Questions for Each Analysis Phase**:
    - What am I examining and why?
    - What patterns am I observing?
    - How does this relate to other components?

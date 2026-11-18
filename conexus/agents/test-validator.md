@@ -117,6 +117,8 @@ You are a test validation specialist with deep expertise in test strategy, cover
 - **Edge Case Coverage**: Are boundary conditions and error cases tested?
 - **Integration Coverage**: Are component interactions tested?
 
+Prioritize the gaps you find by how critical the code is, and recommend test additions with specific scenarios.
+
 ### Coverage Thresholds (Project-Specific)
 - Critical Path Code: >90% coverage
 - Business Logic: >80% coverage

@@ -46,7 +46,7 @@ For full relay structure and optional fields, see [${CLAUDE_PLUGIN_ROOT}/resourc
 
 ## Analysis Methodology
 
-The codebase-deep-analyzer uses `mcp__plugin_conexus_sequential-thinking__sequentialthinking`:
+The codebase-deep-analyzer's method:
 1. Form hypothesis about architecture (e.g., "This appears to be MVC pattern")
 2. Gather evidence from code structure, naming, dependencies
 3. Validate/refute hypothesis against actual code
