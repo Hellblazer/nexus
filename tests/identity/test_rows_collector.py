@@ -205,7 +205,7 @@ def test_a_failure_in_one_module_is_named_with_its_module_and_the_other_modules_
     assert tags == ["aa-r01", "aa-r02", "bb-r01"], "each module's rows carry its own prefix: no two rows share a tag"
 
 
-def test_a_module_that_cannot_run_is_skipped_and_reported_while_the_others_run_and_the_require_env_makes_it_a_failure(
+def test_a_module_that_cannot_run_is_a_failure_while_the_others_run_and_only_its_require_env_0_lets_it_skip(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NX_ROWS", raising=False)
     monkeypatch.delenv("NX_NEEDS", raising=False)
@@ -221,15 +221,19 @@ def test_a_module_that_cannot_run_is_skipped_and_reported_while_the_others_run_a
         return (_journey("tokens", "tk", row_needs_step2, precheck=lambda w: "the engine lacks the feature", require_env="NX_NEEDS"),
                 _journey("plain", "pl", row_anywhere))
 
-    report = run_journeys(_StandInWorld(), journeys())  # type: ignore[arg-type]
-    assert ran == ["anywhere"] and report.skipped == {"tokens": "the engine lacks the feature"}
-    assert report.ran == ["plain::row_anywhere"] and "SKIPPED module 'tokens': the engine lacks the feature" in report.text()
-    monkeypatch.setenv("NX_NEEDS", "1")
-    ran.clear()
     with pytest.raises(pytest.fail.Exception) as err:
         run_journeys(_StandInWorld(), journeys())  # type: ignore[arg-type]
     assert ran == ["anywhere"], "the other module still ran"
-    assert "ROW 'tokens' FAILED" in str(err.value) and "NX_NEEDS=1, so this is a failure" in str(err.value)
+    assert "ROW 'tokens' FAILED" in str(err.value) and "a module that cannot run is a failure; NX_NEEDS=0 lets it skip" in str(err.value)
+    monkeypatch.setenv("NX_NEEDS", "1")
+    ran.clear()
+    with pytest.raises(pytest.fail.Exception):
+        run_journeys(_StandInWorld(), journeys())  # type: ignore[arg-type]
+    monkeypatch.setenv("NX_NEEDS", "0")
+    ran.clear()
+    report = run_journeys(_StandInWorld(), journeys())  # type: ignore[arg-type]
+    assert ran == ["anywhere"] and report.skipped == {"tokens": "the engine lacks the feature (NX_NEEDS=0)"}
+    assert report.ran == ["plain::row_anywhere"] and "SKIPPED module 'tokens': the engine lacks the feature" in report.text()
 
 
 def test_a_skip_inside_a_row_skips_the_rest_of_its_module_only_and_a_run_of_skips_alone_fails(

@@ -8,8 +8,8 @@ Sam's ruling (2026-11-18, T2 nexus/sam-ruling-rdr253-step3-tenants-2026-11-18): 
 seat name or session id) and its own check that no ``row_*`` function was left out of its table.
 
 A failure is reported once, naming ``module::row`` with its traceback. A module that cannot run on the engine (the
-token rows, until the jar carries Step 2) is recorded as skipped in the report and the other modules run; under
-``NX_IDENTITY_REQUIRE_STEP2=1`` it is a failure. ``NX_ROWS=<substring>`` keeps the rows whose ``module::row`` name
+token rows, on a jar without Step 2) is a failure and the other modules still run; only
+``NX_IDENTITY_REQUIRE_STEP2=0`` records it as skipped instead. ``NX_ROWS=<substring>`` keeps the rows whose ``module::row`` name
 contains it (``NX_ROWS=session_start_bind::lapsed``, ``NX_ROWS=hook_leg``).
 
 To add engine-backed rows (RDR-253 Steps 4 to 6): write ``row_*`` functions taking a ``World`` and a ``ROWS`` tuple in a

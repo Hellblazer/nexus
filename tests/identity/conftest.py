@@ -245,8 +245,8 @@ class Rows:
 class Journey:
     """One module's rows in :func:`run_journeys`: its name in the report, a short unique tag prefix, its ``ROWS`` table
     and ``globals()``. *precheck* returns the reason the module cannot run on this engine, or None when it can (it
-    gets the shared world; use ``world.scoped`` for anything it stages). With *require_env* set to ``1`` in the
-    environment such a reason is a failure, not a skip, so a gate cannot pass vacuously. *cleanup* runs after the module's
+    gets the shared world; use ``world.scoped`` for anything it stages). Such a reason is a failure, so a gate cannot pass
+    vacuously (nexus-moht0); only *require_env* set to ``0`` in the environment lets it skip. *cleanup* runs after the module's
     rows, pass or fail, for state the rows leave process-global (a cache)."""
 
     module: str
@@ -277,8 +277,8 @@ def run_journeys(world: World, journeys: Sequence[Journey]) -> JourneyReport:
     """Run every module's rows on *world* (one tenant) and fail once, naming each failure as ``module::row``.
 
     Each module runs its own ``Rows`` with its own tag prefix, and its own missing-row check against its own
-    ``globals()``. A module that cannot run on this engine (``precheck``) is recorded as skipped and the others still
-    run; a run in which no row ran fails (a pass over nothing is not a pass). ``NX_ROWS=<substring>`` keeps the rows
+    ``globals()``. A module that cannot run on this engine (``precheck``) is a failure, unless its *require_env* is ``0``,
+    which records it as skipped; the others still run either way. A run in which no row ran fails (a pass over nothing is not a pass). ``NX_ROWS=<substring>`` keeps the rows
     whose ``module::row`` name contains it. A ``pytest.skip`` inside a row ends that module's remaining rows and is
     recorded the same way; ``KeyboardInterrupt`` and ``pytest.exit`` end the run, after the failures so far go to
     stderr. Returns the report of a run that did not fail."""
@@ -306,10 +306,11 @@ def run_journeys(world: World, journeys: Sequence[Journey]) -> JourneyReport:
                     report.failed[journey.module] = f"{journey.module}: precheck failed:\n{traceback.format_exc()}"
                     continue
             if reason:
-                if journey.require_env and os.environ.get(journey.require_env) == "1":
-                    report.failed[journey.module] = f"{journey.module}: {reason} ({journey.require_env}=1, so this is a failure, not a skip)"
+                if journey.require_env and os.environ.get(journey.require_env) == "0":
+                    report.skipped[journey.module] = f"{reason} ({journey.require_env}=0)"
                 else:
-                    report.skipped[journey.module] = reason
+                    allow = f"; {journey.require_env}=0 lets it skip" if journey.require_env else ""
+                    report.failed[journey.module] = f"{journey.module}: {reason} (a module that cannot run is a failure{allow})"
                 continue
             counted = None
             try:
