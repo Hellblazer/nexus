@@ -1390,7 +1390,7 @@ public final class MemoryRepository {
                 .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
                 .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
                 // RDR-207 (bead .4): a write naming an existing title is a decision to keep it, so the
-                // conflict branch clears both quarantine stamps; RDR-253: it also drops the identity stamp.
+                // conflict branch clears both quarantine stamps (and, RDR-253, the identity stamp).
                 .set(IdentityLine.overwriteClears())
                 .execute();
             log.debug("event=memory_import_batch tenant={} rows={}", tenant, rows.size());
@@ -1438,7 +1438,7 @@ public final class MemoryRepository {
                         .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
                         .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
                         // RDR-207 (bead .4): a write naming an existing title is a decision to keep it, so the
-                        // conflict branch clears both quarantine stamps; RDR-253: it also drops the identity stamp.
+                        // conflict branch clears both quarantine stamps (and, RDR-253, the identity stamp).
                         .set(IdentityLine.overwriteClears())
                         .returning(MEMORY.ID)
                         .fetchOne();
@@ -1488,7 +1488,7 @@ public final class MemoryRepository {
                         .set(MEMORY.TIMESTAMP,    now)
                         .set(MEMORY.TTL_DAYS,          ttlDays)
                         // RDR-207 (bead .4): a write naming an existing title is a decision to keep it, so the
-                        // conflict branch clears both quarantine stamps; RDR-253: it also drops the identity stamp.
+                        // conflict branch clears both quarantine stamps (and, RDR-253, the identity stamp).
                         .set(IdentityLine.overwriteClears())
                         .returning(MEMORY.ID)
                         .fetchOne();
