@@ -113,3 +113,74 @@ def test_missing_source_file_exits_1(tmp_path: Path) -> None:
     assert isinstance(result.exception, SystemExit)
     assert f"{TUMBLER}: cannot read the source file" in result.output
     assert "gone.md" in result.output
+
+
+# ── TUMBLER is a tumbler, a title or a source URI, as for `nx catalog link` ────
+
+
+class TitleCatalog(FakeCatalog):
+    """FakeCatalog plus the lookups `_resolve_tumbler` makes for a non-tumbler argument."""
+
+    def find_all(self, query: str, *, content_type: str = "") -> list:
+        return [e for e in self.entries.values() if e.title == query]
+
+    def by_source_uri(self, uri: str):
+        return next((e for e in self.entries.values() if e.source_uri == uri), None)
+
+
+@pytest.fixture
+def titled(tmp_path: Path) -> TitleCatalog:
+    f = tmp_path / "paper.md"
+    f.write_bytes(BODY.encode())
+    entry = make_entry(file_path=str(f), source_uri=f"file://{f}")
+    entry.title = "Paper A"
+    return TitleCatalog(entry)
+
+
+def test_title_resolves_to_the_same_span_as_the_tumbler(titled: TitleCatalog) -> None:
+    by_tumbler = run(titled, TUMBLER, "--passage", "the passage we quote")
+    by_title = run(titled, "Paper A", "--passage", "the passage we quote")
+    assert by_title.exit_code == 0, by_title.output
+    assert by_title.output == by_tumbler.output
+    assert BODY[slice(*parse_dchash_span(by_title.output.strip())[1:])] == "the passage we quote"
+
+
+def test_title_with_offsets(titled: TitleCatalog) -> None:
+    result = run(titled, "Paper A", "--start", "0", "--end", "5")
+    assert result.exit_code == 0, result.output
+    assert parse_dchash_span(result.output.strip())[1:] == (0, 5)
+
+
+def test_source_uri_resolves(titled: TitleCatalog) -> None:
+    uri = next(iter(titled.entries.values())).source_uri
+    result = run(titled, uri, "--start", "0", "--end", "5")
+    assert result.exit_code == 0, result.output
+    assert parse_dchash_span(result.output.strip())[1:] == (0, 5)
+
+
+def test_unknown_title_is_a_clean_error(titled: TitleCatalog) -> None:
+    result = run(titled, "No Such Paper", "--start", "0", "--end", "5")
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "Not found: 'No Such Paper'" in result.output
+
+
+class _OutageCatalog(TitleCatalog):
+    def resolve(self, tumbler, *, follow_alias: bool = True):
+        raise RuntimeError("engine too old: /v1/catalog/show is missing")
+
+
+def test_client_runtime_error_is_a_click_error_not_a_traceback(tmp_path: Path) -> None:
+    cat = _OutageCatalog(make_entry(file_path=str(tmp_path / "a.md")))
+    result = run(cat, TUMBLER, "--start", "0", "--end", "1")
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert f"{TUMBLER}: catalog lookup failed" in result.output
+    assert "engine too old" in result.output
+
+
+def test_link_help_names_dchash_the_durable_form_and_not_chash_preferred() -> None:
+    out = " ".join(CliRunner().invoke(catalog, ["link", "--help"]).output.split())
+    assert "(preferred)" not in out
+    assert "dchash span is the durable form" in out
+    assert "chash span holds only while its chunk's text is unchanged" in out

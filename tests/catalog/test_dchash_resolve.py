@@ -170,20 +170,52 @@ def test_crlf_bom_rewritten_as_lf_still_ok(tmp_path: Path) -> None:
     assert resolve_dchash_text(entry, span, None) == first == PASSAGE
 
 
+class ChunklessCatalog(FakeCatalog):
+    """A catalog that answers only what a source lookup needs (owner_for, resolve_path).
+
+    Every other read, the manifest and chunk readers by name and anything else by ``__getattr__``,
+    records the call and raises. The resolver catches every exception (RDR-171 S-A), so a raise
+    alone would be swallowed into None: ``reads`` is what proves no chunk or manifest read happened.
+    """
+
+    def __init__(self, owner: FakeOwner, entry: CatalogEntry) -> None:
+        super().__init__(owner, entry)
+        self.reads: list[str] = []
+        self.manifest: list[tuple[str, int]] = [("c0", 0)]
+
+    def _refuse(self, name: str) -> Any:
+        self.reads.append(name)
+        raise AssertionError(f"dchash path called catalog.{name}")
+
+    def get_manifest(self, *_a: Any, **_k: Any) -> Any:
+        self._refuse("get_manifest")
+
+    def resolve_chunk(self, *_a: Any, **_k: Any) -> Any:
+        self._refuse("resolve_chunk")
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return lambda *_a, **_k: self._refuse(name)
+
+
 def test_rechunk_survival_reads_no_chunks(tmp_path: Path) -> None:
-    """The span resolves the same whatever the manifest says: the resolver never reads chunks."""
+    """RDR-171 S-C/.6: after a re-chunk the span resolves the same text and no chunk or manifest read is made."""
     f = tmp_path / "a.md"
     f.write_text(BODY)
     entry = _entry(source_uri=f"file://{f}")
+    cat = ChunklessCatalog(FakeOwner("curator"), entry)
     span = _span(BODY)
-    before = catalog_spans.resolve_span_text_for_entry(entry, span, catalog=None)
+    before = catalog_spans.resolve_span_text_for_entry(entry, span, catalog=cat)
+    assert before == PASSAGE
+    # The re-chunk: a different chunk count, collection and manifest, same document text.
     entry.chunk_count = 7
     entry.physical_collection = "docs__1-2__bge-base-en-v15-768__v2"
-    assert (
-        catalog_spans.resolve_span_text_for_entry(entry, span, catalog=None)
-        == before
-        == PASSAGE
-    )
+    cat.manifest = [(f"c{i}", i * 5) for i in range(7)]
+    after = catalog_spans.resolve_span_text_for_entry(entry, span, catalog=cat)
+    assert after == before == PASSAGE
+    assert cat.reads == []
+    assert cat.calls == 2  # resolve_path, once per resolution: the only catalog read
 
 
 def test_status_changed(tmp_path: Path) -> None:
