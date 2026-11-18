@@ -845,6 +845,10 @@ class TenantExportBatteryTest {
                 new Object[] {t, "i1", "worktree", "/tmp/wt", "running", TS}));
             run(failures, "identity_memberships", () -> insert(ctx, "identity_memberships",
                 List.of("tenant_id", "identity_id", "group_name", "role", "created_at"), new Object[] {t, "i1", "crew", "leader", TS}));
+            // RDR-252 group record: a live one and a disbanded one (the array, jsonb and nullable columns take the defaults).
+            run(failures, "group_records", () -> insert(ctx, "group_records",
+                List.of("tenant_id", "name", "leader", "formed_at"),
+                new Object[] {t, "crew", "i1", TS}, new Object[] {t, "old-crew", "i1", TS}));
         }
 
         /** Per-column values for a nullable column the generic fill by type cannot choose (a CHECK or a reference). */

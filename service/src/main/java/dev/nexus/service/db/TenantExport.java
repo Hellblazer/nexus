@@ -505,6 +505,10 @@ public final class TenantExport {
         data("identity_memberships").pk("tenant_id text", "identity_id text", "group_name text")
             .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
             .build(),
+        // RDR-252 Step 1: the permanent group record. DATA: a group is made by Sam's request and lives until it is disbanded.
+        // leader is an identity id kept as a label (the override exists for a leader that is gone), not a reference.
+        data("group_records").pk("tenant_id text", "name text")
+            .build(),
         // ── excluded ──
         excluded("pdf_pipeline", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint")
             .reassigned("pipeline_id")

@@ -1096,6 +1096,7 @@ _ALL_TENANT_TABLES = [
     # ("nexus.frecency" removed — nexus-6pfgb.42: dropped table
     # (telemetry-019-drop-frecency.xml), mirrors health._RLS_TENANT_TABLES)
     "nexus.gc_audit",  # nexus-jqvzk: destructive-T3-op audit record (catalog-018)
+    "nexus.group_records",  # RDR-252 Step 1 (nexus-igea9.5, group-001-records.xml; mirrors health._RLS_TENANT_TABLES)
     "nexus.hook_failures",
     "nexus.identity_aliases",  # RDR-253 Step 1 (nexus-hczdo.1.1, identity-001/002; mirrors health._RLS_TENANT_TABLES)
     "nexus.identity_bindings",  # RDR-253 Step 1 (nexus-hczdo.1.1, identity-001/002; mirrors health._RLS_TENANT_TABLES)
