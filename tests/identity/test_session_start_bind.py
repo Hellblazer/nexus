@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""The SessionStart policy table (RDR-253), one test per row, against a real engine.
+"""The SessionStart policy table (RDR-253), one row per function, against a real engine.
 
 The engine's compare-and-set and policy are real (``tests/identity/conftest.py``); the machine is a process table
-under ``tmp_path``. Every test mints a tenant, so the module marks them all and each test carries a whole
-scenario. Row names follow the RDR's table; a docstring names the row it covers.
+under ``tmp_path``. The rows are independent journeys: each runs on its own scoped world (its own host, process
+table, seat names and session ids) inside ONE tenant, through ``rows`` (``test_the_session_start_policy_table``), so
+the module mints one tenant, not 22 (tests/storage_touch_ceiling.toml). A failing row names itself in the failure and
+does not stop the rows after it. A row's docstring names the row of the RDR's table it covers.
 """
 from __future__ import annotations
 
@@ -12,26 +14,23 @@ import pytest
 from nexus.identity.bind_client import IdentityApiError, evidence_body
 from nexus.identity.resolver import IdentityConflictError, resolve_identity
 from nexus.identity.token_file import TokenFile, read_token_file, token_path, write_token_file
-from tests.identity.conftest import T0, World
-from tests.identity.fakes import HOST
-
-pytestmark = pytest.mark.t2_tenant
+from tests.identity.conftest import T0, Rows, World
 
 T1 = "2026-11-17T09:00:00Z"
 T2 = "2026-11-17T10:00:00Z"
 
 
-def _held_by(world: World, seat: str, pid: int, *, host: str = HOST, sid: str | None = None, started_at: int | None = None) -> None:
+def _held_by(world: World, seat: str, pid: int, *, host: str, sid: str | None = None, started_at: int | None = None) -> None:
     """Stage *seat* held by a process with the engine, without a registry file (for a holder on another host)."""
     world.client.bind(seat, "start", 0, evidence_body(
-        session_id=sid or f"held-{pid}", host=host, pid=pid, started_at=started_at if started_at is not None else pid * 1000,
-        proc_start=T0, client_version="1", lease="leased"))
+        session_id=world.q(sid or f"held-{pid}"), host=host, pid=pid,
+        started_at=started_at if started_at is not None else pid * 1000, proc_start=T0, client_version="1", lease="leased"))
 
 
 # ── startup ─────────────────────────────────────────────────────────────────
 
 
-def test_startup_with_no_seat_named_binds_an_ephemeral_identity(world: World) -> None:
+def row_startup_with_no_seat_named_binds_an_ephemeral_identity(world: World) -> None:
     """Row: ``startup``, no seat named: ephemeral, event ``start``."""
     world.process(100)
     out = world.hook(100, "startup", "sid-a")
@@ -42,10 +41,10 @@ def test_startup_with_no_seat_named_binds_an_ephemeral_identity(world: World) ->
     assert world.indexed("sid-a")["identity"] == out.identity
     assert world.events(out.identity) == ["start"]
     on_disk = read_token_file(token_path(world.identity_dir, 100, 100_000))
-    assert (on_disk.identity, on_disk.generation, on_disk.session_id) == (out.identity, 1, "sid-a")
+    assert (on_disk.identity, on_disk.generation, on_disk.session_id) == (out.identity, 1, world.q("sid-a"))
 
 
-def test_a_dash_n_name_that_is_no_seat_is_ephemeral_with_a_display_name_and_takes_no_alias(world: World) -> None:
+def row_a_dash_n_name_that_is_no_seat_is_ephemeral_with_a_display_name_and_takes_no_alias(world: World) -> None:
     """Row: ``startup`` with a non-seat ``-n``: ephemeral, the name is its ``display_name``, no alias is consumed, so
     two launches under one display name never collide."""
     world.process(100, name="my-task")
@@ -53,13 +52,13 @@ def test_a_dash_n_name_that_is_no_seat_is_ephemeral_with_a_display_name_and_take
     first = world.hook(100, "startup", "sid-a")
     second = world.hook(101, "startup", "sid-b")
     assert first.identity != second.identity and {first.kind, second.kind} == {"ephemeral"}
-    assert world.identity(first.identity)["display_name"] == "my-task"
+    assert world.identity(first.identity)["display_name"] == world.q("my-task")
     with pytest.raises(IdentityApiError) as err:
-        world.client.alias("my-task")
+        world.client.alias(world.q("my-task"))
     assert err.value.status == 404
 
 
-def test_a_dash_n_that_matches_a_live_seat_binds_it_and_nx_seat_wins_over_it(world: World) -> None:
+def row_a_dash_n_that_matches_a_live_seat_binds_it_and_nx_seat_wins_over_it(world: World) -> None:
     """Row: ``startup``, a seat named, unheld: bound at a new generation, event ``start``. ``NX_SEAT`` beats ``-n``."""
     alpha, beta = world.seat("alpha"), world.seat("beta")
     world.process(100, name="alpha")
@@ -71,15 +70,15 @@ def test_a_dash_n_that_matches_a_live_seat_binds_it_and_nx_seat_wins_over_it(wor
     assert world.identity(alpha)["holder"]["pid"] == 100
 
 
-def test_nx_seat_naming_no_seat_is_ephemeral_and_says_so(world: World) -> None:
+def row_nx_seat_naming_no_seat_is_ephemeral_and_says_so(world: World) -> None:
     """Row: ``startup``, ``NX_SEAT`` naming no seat: ephemeral, and the hook says what it did."""
     world.process(100)
     out = world.hook(100, "startup", "sid-a", seat="nosuchseat")
     assert out.action == "ephemeral" and out.kind == "ephemeral"
-    assert any("NX_SEAT=nosuchseat names no seat" in n for n in out.notices)
+    assert any(f"NX_SEAT={world.q('nosuchseat')} names no seat" in n for n in out.notices)
 
 
-def test_startup_naming_a_seat_live_elsewhere_is_ephemeral_and_the_remedy_is_printed_only_interactively(world: World) -> None:
+def row_startup_naming_a_seat_live_elsewhere_is_ephemeral_and_the_remedy_is_printed_only_interactively(world: World) -> None:
     """Row: ``startup``, a seat live in another process: ephemeral; the hook prints the holder and, in an
     interactive session only, the remedy ``nx identity claim <seat> --take-over``."""
     alpha = world.seat("alpha")
@@ -92,12 +91,12 @@ def test_startup_naming_a_seat_live_elsewhere_is_ephemeral_and_the_remedy_is_pri
     for out in (interactive, child):
         assert out.action == "ephemeral" and out.identity != alpha
         assert any("held by pid 100" in n for n in out.notices)
-    assert any("nx identity claim alpha --take-over" in n for n in interactive.notices)
+    assert any(f"nx identity claim {world.q('alpha')} --take-over" in n for n in interactive.notices)
     assert not any("take-over" in n for n in child.notices)
     assert world.identity(alpha)["holder"]["pid"] == 100 and world.identity(alpha)["generation"] == 1
 
 
-def test_startup_naming_a_lapsed_seat_whose_holder_still_runs_is_ephemeral(world: World) -> None:
+def row_startup_naming_a_lapsed_seat_whose_holder_still_runs_is_ephemeral(world: World) -> None:
     """Row: ``startup``, a seat lapsed, holder still running on this host (a stuck process, a long sleep): ephemeral,
     however long the lapse."""
     alpha = world.seat("alpha")
@@ -111,7 +110,7 @@ def test_startup_naming_a_lapsed_seat_whose_holder_still_runs_is_ephemeral(world
     assert world.identity(alpha)["generation"] == 1 and world.identity(alpha)["holder"]["pid"] == 100
 
 
-def test_startup_naming_a_seat_whose_holder_is_gone_binds_the_next_generation_and_the_live_holder_needs_the_verdict(world: World) -> None:
+def row_startup_naming_a_seat_whose_holder_is_gone_binds_the_next_generation_and_the_live_holder_needs_the_verdict(world: World) -> None:
     """Row: ``startup``, a seat whose holder no longer exists: bound, new generation, event ``start``. The engine
     still shows the seat ``live`` (the holder never wrote ``end``): without ``holder_gone`` the bind is 409 ``held``
     (the live-holder variant); the client's verdict, sent from the holder check, is what lets it through."""
@@ -121,24 +120,25 @@ def test_startup_naming_a_seat_whose_holder_is_gone_binds_the_next_generation_an
     world.procs.stop(100, keep_registry=True)            # a crash: the registry file stays, the pid is gone
     assert world.identity(alpha)["state"] == "live"
     with pytest.raises(IdentityApiError) as held:
-        world.client.bind(alpha, "start", 1, evidence_body(session_id="x", host=HOST, pid=101, started_at=101_000, proc_start=T1))
+        world.client.bind(alpha, "start", 1, evidence_body(session_id=world.q("x"), host=world.host, pid=101, started_at=101_000, proc_start=T1))
     assert (held.value.status, held.value.code) == (409, "held")
     world.process(101, os_start=T1)
     out = world.hook(101, "startup", "sid-b", seat="alpha")
     assert (out.action, out.identity, out.generation, out.event) == ("bound", alpha, 2, "start")
     row = world.log(alpha)[-1]
-    assert row["event"] == "start" and row["holder_gone"]["pid"] == 100 and row["holder_gone"]["host"] == HOST
+    assert row["event"] == "start" and row["holder_gone"]["pid"] == 100 and row["holder_gone"]["host"] == world.host
 
 
-def test_a_seat_held_from_another_host_stays_reserved_for_ten_minutes_after_the_lapse(world: World) -> None:
+def row_a_seat_held_from_another_host_stays_reserved_for_ten_minutes_after_the_lapse(world: World) -> None:
     """Row: ``startup``, lapsed less than 10 minutes ago (another host): ephemeral; after it, bound. Judged by the
     lease alone: the check cannot read the other machine's files."""
     alpha = world.seat("alpha")
-    _held_by(world, alpha, 7, host="elsewhere")
+    elsewhere = world.q("elsewhere")
+    _held_by(world, alpha, 7, host=elsewhere)
     world.lapse(alpha, seconds_ago=400)                  # lapsed (due at 300) and reserved until 900
     world.process(100)
     inside = world.hook(100, "startup", "sid-a", seat="alpha")
-    assert inside.action == "ephemeral" and world.identity(alpha)["holder"]["host"] == "elsewhere"
+    assert inside.action == "ephemeral" and world.identity(alpha)["holder"]["host"] == elsewhere
     world.lapse(alpha, seconds_ago=1_000)
     world.process(101, os_start=T1)
     after = world.hook(101, "startup", "sid-b", seat="alpha")
@@ -148,7 +148,7 @@ def test_a_seat_held_from_another_host_stays_reserved_for_ten_minutes_after_the_
 # ── restart modes ───────────────────────────────────────────────────────────
 
 
-def test_each_restart_mode_finds_the_old_holder_gone_and_binds_the_next_generation_with_no_release_step(world: World) -> None:
+def row_each_restart_mode_finds_the_old_holder_gone_and_binds_the_next_generation_with_no_release_step(world: World) -> None:
     """The three ways a seat's process is replaced: exit and relaunch (a new pid), an in-place ``/restart`` (the same
     pid and OS start time with a new ``startedAt``; its hook fires ``source: resume``) and ``--revive`` after a reboot
     (no registry files at all). One rule covers them: the holder check finds the old holder gone and ``resume``
@@ -163,7 +163,7 @@ def test_each_restart_mode_finds_the_old_holder_gone_and_binds_the_next_generati
     world.process(101, os_start=T1)
     relaunch = world.hook(101, "resume", "relaunch-sid")
     # in-place /restart: same pid and OS start time, a new startedAt, source resume, same session id
-    world.procs.write_registry(200, 999_000, T0, session_id="inplace-sid", name="inplace")
+    world.registry(200, 999_000, T0, session_id="inplace-sid", name="inplace")
     inplace = world.hook(200, "resume", "inplace-sid")
     # --revive after a reboot: every process is gone, no registry file survives
     world.procs.stop(300, keep_registry=False)
@@ -180,7 +180,7 @@ def test_each_restart_mode_finds_the_old_holder_gone_and_binds_the_next_generati
 # ── resume ──────────────────────────────────────────────────────────────────
 
 
-def test_resume_of_an_unindexed_session_id_is_treated_as_startup_with_the_seat_the_launch_names(world: World) -> None:
+def row_resume_of_an_unindexed_session_id_is_treated_as_startup_with_the_seat_the_launch_names(world: World) -> None:
     """Row: ``resume``, the id is in no index (a session from before this RDR): treated as ``startup``."""
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
@@ -189,7 +189,7 @@ def test_resume_of_an_unindexed_session_id_is_treated_as_startup_with_the_seat_t
     assert world.indexed("from-before-the-rdr")["identity"] == alpha
 
 
-def test_resume_of_an_ended_ephemeral_identity_is_treated_as_startup(world: World) -> None:
+def row_resume_of_an_ended_ephemeral_identity_is_treated_as_startup(world: World) -> None:
     """Row: ``resume``, the id's identity is an ephemeral one that has ended: treated as ``startup``."""
     world.process(100)
     first = world.hook(100, "startup", "sid-a")
@@ -201,7 +201,7 @@ def test_resume_of_an_ended_ephemeral_identity_is_treated_as_startup(world: Worl
     assert world.indexed("sid-a")["identity"] == out.identity          # the index follows the new binding
 
 
-def test_resume_of_a_seat_live_in_this_same_process_is_unchanged(world: World) -> None:
+def row_resume_of_a_seat_live_in_this_same_process_is_unchanged(world: World) -> None:
     """Row: ``resume``, live in this same process: unchanged, no new generation."""
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
@@ -211,7 +211,7 @@ def test_resume_of_a_seat_live_in_this_same_process_is_unchanged(world: World) -
     assert world.identity(alpha)["generation"] == 1
 
 
-def test_resume_of_a_seat_live_in_another_process_is_ephemeral_with_the_holder(world: World) -> None:
+def row_resume_of_a_seat_live_in_another_process_is_ephemeral_with_the_holder(world: World) -> None:
     """Row: ``resume``, live in another process: ephemeral, with the holder (and, interactively, the remedy)."""
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
@@ -219,10 +219,10 @@ def test_resume_of_a_seat_live_in_another_process_is_ephemeral_with_the_holder(w
     world.process(101, os_start=T1)
     out = world.hook(101, "resume", "sid-a")
     assert out.action == "ephemeral" and out.identity != alpha
-    assert any("held by pid 100" in n and "nx identity claim alpha --take-over" in n for n in out.notices)
+    assert any("held by pid 100" in n and f"nx identity claim {world.q('alpha')} --take-over" in n for n in out.notices)
 
 
-def test_a_cross_seat_resume_switches_the_process_and_refuses_a_bash_child_from_before_the_switch(world: World) -> None:
+def row_a_cross_seat_resume_switches_the_process_and_refuses_a_bash_child_from_before_the_switch(world: World) -> None:
     """Row: ``resume`` in a process that already holds a different identity, the resumed seat unheld: the process
     switches (its seat is released, the resumed seat is bound at a new generation); the marker carries the new
     identity; a Bash child started before the switch still has the old session id and is refused by the resolver."""
@@ -242,12 +242,12 @@ def test_a_cross_seat_resume_switches_the_process_and_refuses_a_bash_child_from_
     assert out.handoff and out.token_file == token_path(world.identity_dir, 100, 100_000)
 
     with pytest.raises(IdentityConflictError) as err:
-        resolve_identity(client=world.client, env={"CLAUDE_CODE_SESSION_ID": "a-sid"}, claude_pid=100,
-                         sessions_dir=world.procs.sessions_dir, identity_dir=world.identity_dir, host=HOST)
+        resolve_identity(client=world.client, env={"CLAUDE_CODE_SESSION_ID": world.q("a-sid")}, claude_pid=100,
+                         sessions_dir=world.procs.sessions_dir, identity_dir=world.identity_dir, host=world.host)
     assert {a.identity for a in err.value.answers} == {alpha, gamma}
 
 
-def test_a_cross_seat_resume_of_a_seat_live_elsewhere_changes_nothing_and_prints_the_holder(world: World) -> None:
+def row_a_cross_seat_resume_of_a_seat_live_elsewhere_changes_nothing_and_prints_the_holder(world: World) -> None:
     """Row: ``resume`` in a process that already holds a different identity, the resumed seat live elsewhere:
     unchanged, the process keeps its identity, and the hook prints the holder."""
     alpha, delta = world.seat("alpha"), world.seat("delta")
@@ -264,7 +264,7 @@ def test_a_cross_seat_resume_of_a_seat_live_elsewhere_changes_nothing_and_prints
 # ── clear, fork, compact ────────────────────────────────────────────────────
 
 
-def test_clear_and_fork_keep_the_generation_and_a_lapsed_seat_is_revived(world: World) -> None:
+def row_clear_and_fork_keep_the_generation_and_a_lapsed_seat_is_revived(world: World) -> None:
     """Rows ``clear`` and ``fork``, live or lapsed in this process: the same generation, a new session id, event
     ``clear`` or ``fork``; a lapsed seat is revived. The index maps every id to the one generation."""
     alpha = world.seat("alpha")
@@ -280,11 +280,11 @@ def test_clear_and_fork_keep_the_generation_and_a_lapsed_seat_is_revived(world: 
     assert world.events(alpha) == ["start", "lapse", "clear", "fork"]      # the engine's lazy lapse row, then ours
     for sid in ("s1", "s2", "s3"):
         assert (world.indexed(sid)["identity"], world.indexed(sid)["generation"]) == (alpha, 1), sid
-    assert read_token_file(token_path(world.identity_dir, 100, 100_000)).session_id == "s3"
-    assert world.log(alpha)[2]["prior_session_id"] == "s1"
+    assert read_token_file(token_path(world.identity_dir, 100, 100_000)).session_id == world.q("s3")
+    assert world.log(alpha)[2]["prior_session_id"] == world.q("s1")
 
 
-def test_compact_changes_nothing_and_appends_no_row(world: World) -> None:
+def row_compact_changes_nothing_and_appends_no_row(world: World) -> None:
     """Row: ``compact``, any state: unchanged, no binding row."""
     world.process(100)
     first = world.hook(100, "startup", "sid-a")
@@ -296,7 +296,7 @@ def test_compact_changes_nothing_and_appends_no_row(world: World) -> None:
 # ── the in-place /restart rebind ────────────────────────────────────────────
 
 
-def test_an_empty_in_place_restart_rebinds_the_same_identity_ended_included_and_skips_delegated_rows(world: World) -> None:
+def row_an_empty_in_place_restart_rebinds_the_same_identity_ended_included_and_skips_delegated_rows(world: World) -> None:
     """Row 1: ``startup`` after an in-place ``/restart`` with no exchange. The process keeps its pid and OS start time
     and gets a new ``startedAt``, a new session id and no ``-n`` name. The identity is found through the history of
     the process, whatever its state: ``ended`` (the old MCP server exited cleanly) or still ``live`` under the old
@@ -310,10 +310,10 @@ def test_an_empty_in_place_restart_rebinds_the_same_identity_ended_included_and_
 
     # a delegated child of the ended seat that names the same pid and start time must not be rebound
     world.client._request("POST", "/delegated", json={"parent": ended, "bind": evidence_body(
-        session_id="child-sid", host=HOST, pid=500, started_at=500_000, proc_start=T0)})
+        session_id=world.q("child-sid"), host=world.host, pid=500, started_at=500_000, proc_start=T0)})
 
-    world.procs.write_registry(500, 888_000, T0, session_id="new-500")  # the in-place /restart: new startedAt, no name
-    world.procs.write_registry(501, 889_000, T0, session_id="new-501")
+    world.registry(500, 888_000, T0, session_id="new-500")  # the in-place /restart: new startedAt, no name
+    world.registry(501, 889_000, T0, session_id="new-501")
     rebound_ended = world.hook(500, "startup", "new-500")
     rebound_live = world.hook(501, "startup", "new-501")
     assert (rebound_ended.action, rebound_ended.identity, rebound_ended.generation, rebound_ended.row) == ("bound", ended, 2, "startup_rebind")
@@ -332,17 +332,17 @@ def test_an_empty_in_place_restart_rebinds_the_same_identity_ended_included_and_
     assert skipped.identity != taken and skipped.action == "ephemeral"
 
 
-def test_a_rebind_considers_only_the_most_recent_identity_of_the_process(world: World) -> None:
+def row_a_rebind_considers_only_the_most_recent_identity_of_the_process(world: World) -> None:
     """The newest identity of the process is held by another process now; an older, ended identity of the same pid must
     not be rebound in its place (it belongs to an earlier life of the pid)."""
     older, newer = world.seat("older"), world.seat("newer")
-    ev = lambda pid, started: evidence_body(session_id=f"p-{started}", host=HOST, pid=pid, started_at=started, proc_start=T1)  # noqa: E731
+    ev = lambda pid, started: evidence_body(session_id=world.q(f"p-{started}"), host=world.host, pid=pid, started_at=started, proc_start=T1)  # noqa: E731
     world.client.bind(older, "start", 0, ev(610, 610_000))
     world.client.bind(older, "end", 1)
     world.client.bind(newer, "start", 0, ev(610, 611_000))
     write_token_file(token_path(world.identity_dir, 610, 611_000), TokenFile(      # the file its hook would have written
-        identity=newer, generation=1, token=None, expires_at=None, session_id="p-611000", pid=610, started_at=611_000,
-        proc_start=T1, host=HOST, registry_dir=str(world.procs.sessions_dir)))
+        identity=newer, generation=1, token=None, expires_at=None, session_id=world.q("p-611000"), pid=610, started_at=611_000,
+        proc_start=T1, host=world.host, registry_dir=str(world.procs.sessions_dir)))
     world.process(620, os_start=T2, name="newer")
     assert world.hook(620, "startup", "q-sid").identity == newer                # another process takes `newer`
     world.process(610, os_start=T1, started_at=612_000, session_id="p3")
@@ -351,7 +351,7 @@ def test_a_rebind_considers_only_the_most_recent_identity_of_the_process(world: 
     assert world.identity(older)["state"] == "ended"
 
 
-def test_a_data_credential_hook_forks_for_a_clear_keeps_its_seat_on_a_forbidden_switch_and_sweeps_quietly(world: World) -> None:
+def row_a_data_credential_hook_forks_for_a_clear_keeps_its_seat_on_a_forbidden_switch_and_sweeps_quietly(world: World) -> None:
     """A mint-only install: the hook holds only the data credential, which may fork but not clear, release or report
     gone. /clear still moves the session id (as a fork row); a cross-seat /resume keeps the seat and says why; the sweep
     ends without raising."""
@@ -377,11 +377,11 @@ def test_a_data_credential_hook_forks_for_a_clear_keeps_its_seat_on_a_forbidden_
     assert any("may not release" in n for n in switched.notices)
     assert world.identity(alpha)["state"] == "live" and world.identity(gamma)["state"] == "ended"
 
-    report = sweep_host(world.data_client, world.procs, host=HOST, own=(100, 100_000), identity_dir=world.identity_dir)
+    report = sweep_host(world.data_client, world.procs, host=world.host, own=(100, 100_000), identity_dir=world.identity_dir)
     assert report.forbidden and world.identity(crashed)["state"] == "live"
 
 
-def test_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_it_or_closes_it_for_the_named_seat(world: World) -> None:
+def row_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_it_or_closes_it_for_the_named_seat(world: World) -> None:
     """No second ephemeral beside the first: with no seat named the process keeps its identity and adds the session id
     (a fork row); naming another seat ends the ephemeral and binds the seat."""
     beta = world.seat("beta")
@@ -390,7 +390,7 @@ def test_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_
     reused = world.hook(100, "resume", "never-indexed")
     assert (reused.action, reused.identity, reused.generation, reused.row) == ("unchanged", first.identity, 1, "resume_unindexed_reuse")
     assert world.events(first.identity) == ["start", "fork"] and world.indexed("never-indexed")["identity"] == first.identity
-    assert len(world.client.bindings_by_host(HOST, 100)) == 1
+    assert len(world.client.bindings_by_host(world.host, 100)) == 1
 
     world.process(101, os_start=T1, session_id="sid-b")
     second = world.hook(101, "startup", "sid-b")
@@ -399,11 +399,11 @@ def test_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_
     assert world.identity(second.identity)["state"] == "ended" and world.identity(beta)["holder"]["pid"] == 101
 
 
-def test_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start(world: World) -> None:
+def row_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start(world: World) -> None:
     """The resumed seat is held from another host and lapsed. Inside the 10-minute reservation the process keeps what it
     has; after it, the process switches."""
     alpha, gamma = world.seat("alpha"), world.seat("gamma")
-    _held_by(world, gamma, 7, host="elsewhere", sid="g-sid")
+    _held_by(world, gamma, 7, host=world.q("elsewhere"), sid="g-sid")
     world.process(100, name="alpha", session_id="a-sid")
     world.hook(100, "startup", "a-sid")
     world.lapse(gamma, seconds_ago=400)
@@ -413,3 +413,38 @@ def test_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start(wor
     after = world.hook(100, "resume", "g-sid")
     assert (after.action, after.identity, after.generation, after.switched_from) == ("bound", gamma, 2, alpha)
     assert world.identity(alpha)["state"] == "unheld"
+
+
+# ── the table ───────────────────────────────────────────────────────────────
+
+ROWS = (
+    row_startup_with_no_seat_named_binds_an_ephemeral_identity,
+    row_a_dash_n_name_that_is_no_seat_is_ephemeral_with_a_display_name_and_takes_no_alias,
+    row_a_dash_n_that_matches_a_live_seat_binds_it_and_nx_seat_wins_over_it,
+    row_nx_seat_naming_no_seat_is_ephemeral_and_says_so,
+    row_startup_naming_a_seat_live_elsewhere_is_ephemeral_and_the_remedy_is_printed_only_interactively,
+    row_startup_naming_a_lapsed_seat_whose_holder_still_runs_is_ephemeral,
+    row_startup_naming_a_seat_whose_holder_is_gone_binds_the_next_generation_and_the_live_holder_needs_the_verdict,
+    row_a_seat_held_from_another_host_stays_reserved_for_ten_minutes_after_the_lapse,
+    row_each_restart_mode_finds_the_old_holder_gone_and_binds_the_next_generation_with_no_release_step,
+    row_resume_of_an_unindexed_session_id_is_treated_as_startup_with_the_seat_the_launch_names,
+    row_resume_of_an_ended_ephemeral_identity_is_treated_as_startup,
+    row_resume_of_a_seat_live_in_this_same_process_is_unchanged,
+    row_resume_of_a_seat_live_in_another_process_is_ephemeral_with_the_holder,
+    row_a_cross_seat_resume_switches_the_process_and_refuses_a_bash_child_from_before_the_switch,
+    row_a_cross_seat_resume_of_a_seat_live_elsewhere_changes_nothing_and_prints_the_holder,
+    row_clear_and_fork_keep_the_generation_and_a_lapsed_seat_is_revived,
+    row_compact_changes_nothing_and_appends_no_row,
+    row_an_empty_in_place_restart_rebinds_the_same_identity_ended_included_and_skips_delegated_rows,
+    row_a_rebind_considers_only_the_most_recent_identity_of_the_process,
+    row_a_data_credential_hook_forks_for_a_clear_keeps_its_seat_on_a_forbidden_switch_and_sweeps_quietly,
+    row_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_it_or_closes_it_for_the_named_seat,
+    row_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start,
+)
+
+
+@pytest.mark.t2_tenant
+def test_the_session_start_policy_table(rows: Rows) -> None:
+    """Every row of the table against one engine tenant (one tenant for the module's 22 rows). Each runs on a scoped
+    world, so a failure names its row and the rows after it still run."""
+    rows.run(ROWS, globals())
