@@ -701,7 +701,8 @@ public final class VersionHandler implements HttpHandler {
     /**
      * nexus-7fku2.1.4 (RDR-134 Step 4) capability advertisement: does this engine accept {@code topic_route} on {@code
      * POST /v1/vectors/search-per-collection} and search each listed prose collection inside the topics whose centroid
-     * is nearest the query, reporting {@code topic_route_status} on every {@code per_collection} entry?
+     * is nearest the query, reporting {@code topic_route_status} on each {@code per_collection} entry the route has a status for (an entry
+     * whose arm errored carries {@code error} and no status)?
      *
      * <p>An independent flag, and the only evidence: an engine without the feature ignores the unknown key and answers
      * 200 with an UNROUTED search, with no status on any entry, so a client that wants routing must read this flag

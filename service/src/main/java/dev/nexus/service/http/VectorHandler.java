@@ -879,9 +879,10 @@ public final class VectorHandler implements HttpHandler {
      * <p><strong>The other request fields</strong> (nexus-7fku2.1.4). {@code chash_allow} and a metadata {@code where}
      * leave the whole request unrouted (every collection {@code skipped}); {@code thresholds} drop routed rows as
      * they drop unscoped ones; {@code lexical} is not routed (each collection's lexical arm runs as it always does and
-     * its rows merge as today); {@code rerank}, {@code rerank_top_k}, {@code rerank_max_candidates}, {@code limit},
-     * {@code include_embeddings}, {@code embeddings_limit}, {@code content_chars} and {@code include_source_uri} act on
-     * the merged and enriched rows, routed and unscoped alike; and {@code sensitivity: "exclude"} is applied inside the
+     * its rows merge as today); {@code limit} cuts the merged rows before enrichment, {@code rerank}, {@code rerank_top_k}
+     * and {@code rerank_max_candidates} act on the merged rows, and {@code include_embeddings}, {@code embeddings_limit},
+     * {@code content_chars} and {@code include_source_uri} act on the enriched rows, routed and unscoped alike; and
+     * {@code sensitivity: "exclude"} is applied inside the
      * routed search and inside its unscoped fallback.
      *
      * <p><strong>Rerank semantics.</strong> The rerank stage runs once over the merged rows (at
