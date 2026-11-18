@@ -365,6 +365,10 @@ class SessionBinder:
         try:
             found = self._client.alias(name)
         except IdentityApiError as exc:
+            renamed = exc.body.get("renamed_to") if exc.status == 410 else None
+            if renamed:                 # past the alias's grace the engine answers 410, still naming the new name
+                return None, (f"identity: NX_SEAT={name} was renamed to {renamed}; this session runs as an ephemeral identity"
+                              if from_env else None)
             if exc.status in (404, 410):
                 return None, (f"identity: NX_SEAT={name} names no seat; this session runs as an ephemeral identity"
                               if from_env else None)
