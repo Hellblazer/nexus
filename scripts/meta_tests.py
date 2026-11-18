@@ -244,16 +244,29 @@ def module_files(repo: Path, test: str) -> set[str]:
     except (SyntaxError, UnicodeDecodeError, FileNotFoundError):
         return set()
     names: set[str] = set()
+    relative: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             names.add(node.module)
             names.update(f"{node.module}.{a.name}" for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level > 0:
+            # Relative: from the package directory, `level` dots up.
+            pkg = (repo / test).parent
+            for _ in range(node.level - 1):
+                pkg = pkg.parent
+            for a in node.names:
+                parts = [*(node.module.split(".") if node.module else []), a.name]
+                for i in range(1, len(parts) + 1):
+                    stem = pkg.joinpath(*parts[:i])
+                    for cand in (stem.with_suffix(".py"), stem / "__init__.py"):
+                        if cand.is_file() and cand.resolve().is_relative_to(repo.resolve()):
+                            relative.add(cand.relative_to(repo).as_posix())
     # A bare name may resolve through scripts/ (pyproject pythonpath), the test's own directory
     # or tests/.
     bare_roots = [repo / "scripts", (repo / test).parent, repo / "tests"]
-    out: set[str] = set()
+    out: set[str] = set(relative)
     for name in names:
         top = name.split(".", 1)[0]
         if top == "nexus":
@@ -531,7 +544,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("$ " + shlex.join(argv), flush=True)
         t1 = time.monotonic()
         is_guard = label.startswith("session-items")
-        code, passed = _run_streaming(argv, repo)
+        code, passed, failed = _run_streaming(argv, repo)
         print(f"{label} ran in {time.monotonic() - t1:.1f}s (exit {code})")
         if not is_guard and code == 5:
             # Every meta-test in the picked files is integration- or slow-marked: nothing to judge here.
@@ -545,8 +558,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print("the session-items guard did not pass (it failed, or skipped because its invocation looked"
                       " partial): run the full-corpus census job (push-train rule 1) for this push")
                 code = 1
-            elif code:
-                # The changed test files ran only so the guard could see them, with the engine off.
+            elif code and failed and all(
+                (f := n.split("::", 1)[0]) in changed_tests and f not in guards for n in failed
+            ):
+                # The changed test files ran only so the guard could see them, with the engine off. A
+                # failure anywhere else (a ratchet beside the census in a guard file) stays a red.
                 print(f"the session-items guard passed; the other failures above (exit {code}) are in the changed"
                       " test files, run here without the engine: advisory, the full suite judges them")
                 code = 0
@@ -562,17 +578,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
-def _run_streaming(argv: list[str], repo: Path) -> tuple[int, set[str]]:
-    """Run pytest, echoing its output; also return the node ids its summary reports PASSED."""
+def _run_streaming(argv: list[str], repo: Path) -> tuple[int, set[str], set[str]]:
+    """Run pytest, echoing its output; also return the node ids its summary reports PASSED, and
+    those it reports FAILED or ERROR."""
     proc = subprocess.Popen(argv, cwd=repo, env={**os.environ, **ENV},
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     passed: set[str] = set()
+    failed: set[str] = set()
     assert proc.stdout is not None
     for line in proc.stdout:
         sys.stdout.write(line)
-        if line.startswith("PASSED "):
-            passed.add(line.split()[1])
-    return proc.wait(), passed
+        word, _, rest = line.partition(" ")
+        if word == "PASSED" and rest.split():
+            passed.add(rest.split()[0])
+        elif word in ("FAILED", "ERROR") and rest.split():
+            failed.add(rest.split()[0])
+    return proc.wait(), passed, failed
 
 
 def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict, str | None]:

@@ -597,3 +597,28 @@ def test_a_scripts_module_imported_through_a_tests_helper_selects_the_test(repo:
 def test_a_bare_name_present_in_two_roots_yields_both_files(repo: Path) -> None:
     _write(repo, {"scripts/twin.py": "", "tests/twin.py": "", "tests/test_twin.py": "import twin\n"})
     assert mt.module_files(repo, "tests/test_twin.py") == {"scripts/twin.py", "tests/twin.py"}
+
+
+@pytest.mark.parametrize("where", ["guard-sibling", "unchanged-file"])
+def test_a_failure_outside_the_changed_test_files_stays_red_when_the_census_passes(
+    repo: Path, uv_is_pytest: None, capsys: pytest.CaptureFixture[str], where: str
+) -> None:
+    _built_and_committed(repo)
+    if where == "guard-sibling":
+        # A ratchet beside the census in the guard file: not engine-bound, and run nowhere else.
+        (repo / "tests/test_guard.py").write_text("def test_guard():\n    pass\n\ndef test_ratchet():\n    assert False\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "ratchet")
+        _git(repo, "tag", "-f", "base")
+    (repo / "tests/test_plain.py").write_text("def test_p():\n    assert True\n")
+    if where == "unchanged-file":
+        (repo / "tests/test_guard.py").write_text("def test_guard():\n    pass\n\ndef test_ratchet():\n    assert False\n")
+    assert mt.main(["run", "--repo", str(repo), "--base", "base"]) == 1
+    assert "advisory" not in capsys.readouterr().out
+
+
+def test_a_relative_import_resolves_from_the_test_package(repo: Path) -> None:
+    _write(repo, {"tests/auras/__init__.py": "", "tests/auras/_support.py": "S = 1\n",
+                  "tests/auras/test_a.py": "from ._support import S\nfrom . import _support\n"})
+    assert mt.module_files(repo, "tests/auras/test_a.py") == {"tests/auras/_support.py"}
+    assert "tests/auras/_support.py" in mt.tests_closure(repo, "tests/auras/test_a.py")
