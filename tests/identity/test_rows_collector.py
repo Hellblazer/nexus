@@ -58,6 +58,25 @@ def test_a_failed_assert_and_a_raises_that_saw_nothing_do_not_stop_the_rows_afte
     assert "row_passes' FAILED" not in message
     assert "(row ran " in message, "a failed row's duration is in its body"
     assert set(rows.seconds) == set(rows.ran)
+    assert "row times: row_asserts " in message and "row_passes " in message, "every row's time is listed, passing rows too"
+
+
+def test_pytest_exit_inside_a_row_ends_the_run_and_is_not_kept_as_a_row_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NX_ROWS", raising=False)
+    ran: list[str] = []
+
+    def row_exits(world) -> None:
+        ran.append("exits")
+        pytest.exit("stop the session")
+
+    def row_after(world) -> None:
+        ran.append("after")
+
+    table, namespace = _table(row_exits, row_after)
+    rows = _rows()
+    with pytest.raises(pytest.exit.Exception):
+        rows.run(table, namespace)
+    assert ran == ["exits"] and not rows.failed, "Exit subclasses Exception, but it is not a row failure"
 
 
 def test_check_fails_for_a_failed_row_and_for_fewer_rows_than_expected() -> None:
