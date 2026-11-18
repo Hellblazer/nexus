@@ -785,7 +785,8 @@ class TenantImportRoutesTest {
         assertThat(end.get("state").asText()).isEqualTo("committed");
         ObjectNode report = (ObjectNode) end.get("report");
         assertThat(report.get("rows_inserted").asLong()).isPositive();
-        assertThat(report.get("tables").size()).isEqualTo(32);
+        // 32 -> 33: nexus-igea9.5 (RDR-252 Step 1) registered group_records.
+        assertThat(report.get("tables").size()).isEqualTo(33);
         String id = end.get("session_id").asText();
         assertThat(json(env.call("GET", IMPORT + "/" + id, token)).get("status").asText()).isEqualTo("committed");
         assertThat(env.call("DELETE", IMPORT + "/" + id, token).statusCode()).as("an ended session cannot be aborted").isEqualTo(404);
