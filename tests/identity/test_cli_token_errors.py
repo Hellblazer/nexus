@@ -12,6 +12,7 @@ import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -301,3 +302,44 @@ def test_the_server_that_owns_the_lease_is_not_refused_for_its_spawn_time_sessio
         assert len(server.seen) == 1
     finally:
         token_header.set_lease_owner(False)
+
+
+def test_request_with_identity_gates_before_auth_and_resends_once_on_a_401_with_the_refreshed_token(token_path: Path) -> None:
+    """The unit: one gate before each attempt, ``auth`` built only after the first gate (a held request must not refresh a
+    credential before it is admitted), and exactly one resend, carrying the token the file holds after the 401."""
+    _write(token_path, "tok-a")
+    events: list[str] = []
+    sent: list[dict[str, str]] = []
+
+    def gate() -> None:
+        events.append("gate")
+
+    def auth() -> dict[str, str]:
+        events.append("auth")
+        return {"Authorization": "Bearer b"}
+
+    def send(headers) -> SimpleNamespace:
+        sent.append(dict(headers))
+        events.append("send")
+        if len(sent) == 1:
+            _write(token_path, "tok-b")                 # the server refreshed the file while the request was in flight
+            return SimpleNamespace(status_code=401)
+        return SimpleNamespace(status_code=200)
+
+    resp = token_header.request_with_identity(send, gate, auth, "POST", "/v1/memory/put")
+    assert resp.status_code == 200
+    assert events == ["gate", "auth", "send", "gate", "send"], "auth after the first gate; one gate per attempt; one resend"
+    assert [h.get(HEADER) for h in sent] == ["tok-a", "tok-b"] and all(h["Authorization"] == "Bearer b" for h in sent)
+
+
+def test_request_with_identity_does_not_resend_a_401_that_has_no_newer_token(token_path: Path) -> None:
+    _write(token_path, "tok-a")
+    gates: list[int] = []
+    sent: list[dict[str, str]] = []
+
+    def send(headers) -> SimpleNamespace:
+        sent.append(dict(headers))
+        return SimpleNamespace(status_code=401)
+
+    resp = token_header.request_with_identity(send, lambda: gates.append(1), lambda: {}, "POST", "/v1/memory/put")
+    assert resp.status_code == 401 and len(sent) == 1 and len(gates) == 1

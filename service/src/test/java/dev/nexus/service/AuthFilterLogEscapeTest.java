@@ -221,12 +221,14 @@ class AuthFilterLogEscapeTest {
     /**
      * RDR-253 Step 2 merge review: an unknown or expired identity token on the bind route is ignored, not refused
      * (the route mints the replacement and never reads the token), and the one DEBUG line it writes goes through
-     * the same escape as the filter's other path lines. The route pattern admits only {@code i<digits>/bind|renew},
-     * so a hostile path cannot reach this line; the test pins the exact printed text and, beside it, that the same
-     * token on any other route is still a 401 (non-vacuity: the pass-through is the route's, not the filter's).
+     * the same escape as the filter's other path lines. The escape itself is defence in depth that no request can
+     * reach: the route pattern admits only {@code i<digits>/bind|renew}, so no control character gets to this line,
+     * and this test would pass with the escape reverted. What it pins is the bind-route pass-through (200), the 401
+     * the same token gets on any other route (non-vacuity: the pass-through is the route's, not the filter's), and
+     * the exact log text.
      */
     @Test
-    void anUnknownIdentityTokenOnTheBindRouteIsIgnoredAndOnAnyOtherRouteRefused() throws Exception {
+    void bindRoutePassesAnUnknownIdentityTokenThroughOtherRoutesGet401AndTheLogLineReadsExactly() throws Exception {
         var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
         HttpResponse<String> onBind;
         HttpResponse<String> elsewhere;
