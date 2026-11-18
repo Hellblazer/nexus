@@ -2,7 +2,8 @@
 title: "Fine-Grain Content-Stable Catalog Spans: A dchash Document-Offset Span Form That Survives Re-Chunking"
 id: RDR-171
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-18
 accepted_date: 2026-11-16
 priority: medium
 author: Hal Hildebrand
