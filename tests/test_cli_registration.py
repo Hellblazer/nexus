@@ -54,6 +54,7 @@ def test_all_command_modules_registered():
         "migration_audit_cmd": "migration-audit",
         "doctor": "doctor",
         "hook": "hook",
+        "identity_cmd": "identity",
         "mineru": "mineru",
         # `self.py` would be a confusing module name next to the keyword;
         # `self_cmd` -> `self` follows config_cmd/search_cmd/service_cmd.

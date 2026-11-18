@@ -54,9 +54,7 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "MADE_MARKERS", set())
     monkeypatch.setattr(crs, "UNWITHDRAWN", [])
     monkeypatch.setattr(crs, "ASK_MARKERS", tmp_path_factory.mktemp("ask-markers") / "restart-asks")
-    # RDR-253 Step 4: restart() makes or keeps a seat through `nx identity`, which reaches the engine. These tests drive
-    # restart() for other reasons; the seat behaviour is tested in test_claude_restart_sessions_seats.py.
-    monkeypatch.setattr(crs, "ensure_seat", lambda s: "")
+    monkeypatch.setattr(crs, "ensure_seat", lambda s: "")  # restart() reaches the engine through `nx identity`; seats: ..._seats.py
     # Never this machine's managed settings, user settings or flags (the channel-swap gate reads them).
     settings = tmp_path_factory.mktemp("claude-settings")
     monkeypatch.setattr(crs, "MANAGED_SETTINGS", (settings / "managed" / "managed-settings.json",))
@@ -67,8 +65,7 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "KEEP_DEV_CHANNEL", False)
     # The exit-and-resume path; /restart has its own tests (test_claude_restart_sessions_slash.py).
     monkeypatch.setattr(crs, "NO_SLASH", True)
-    # A roll under test must not prune this machine's real /tmp (nexus-2v7da); that prune is pinned in
-    # test_claude_restart_sessions_prune.py.
+    # A roll under test must not prune this machine's real /tmp (nexus-2v7da); pinned in test_claude_restart_sessions_prune.py.
     monkeypatch.setattr(crs, "_prune_handoffs_at_write", lambda: None)
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
 
