@@ -1438,7 +1438,7 @@ class RefreshableHttpStoreMixin:
         """
         url = self._base_url + path
         # nexus-ldf2s: every attempt passes the request gate; RDR-253 Step 3: the identity token, one resend on a 401
-        resp = request_with_identity(lambda h: self._client.request(method, url, headers=h, **kwargs), before_request, self._auth_headers(), method, path)
+        resp = request_with_identity(lambda h: self._client.request(method, url, headers=h, **kwargs), before_request, self._auth_headers, method, path)
         self._note_data_token_response(resp)
         self._raise_for_status(resp, path)
         if not resp.content:

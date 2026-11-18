@@ -284,13 +284,15 @@ def retry_headers_after_401(sent: Mapping[str, str], path: str = "") -> dict[str
 
 
 def request_with_identity(
-    send: Callable[[Mapping[str, str]], Any], gate: Callable[[], None], auth: Mapping[str, str], method: str, path: str
+    send: Callable[[Mapping[str, str]], Any], gate: Callable[[], None], auth: Callable[[], Mapping[str, str]], method: str,
+    path: str
 ) -> Any:
     """Send one request with the identity token when it is fenced, and on a 401 resend once with the headers
-    :func:`retry_headers_after_401` gives. *gate* runs before each attempt (the request gate); *send* takes the
-    complete headers and returns the response."""
+    :func:`retry_headers_after_401` gives. *gate* runs before each attempt (the request gate); *auth* builds the
+    ``Authorization`` headers and is called after the first gate (it may refresh a credential, which a request the gate
+    is holding must not have done before it was admitted); *send* takes the complete headers and returns the response."""
     gate()
-    resp = send(sent := {**auth, **fenced_identity_headers(method, path)})
+    resp = send(sent := {**auth(), **fenced_identity_headers(method, path)})
     if resp.status_code == 401 and (fresh := retry_headers_after_401(sent, path)):
         gate()
         resp = send(fresh)

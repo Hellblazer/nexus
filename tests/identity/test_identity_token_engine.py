@@ -136,4 +136,7 @@ def test_the_identity_token_journeys_against_the_step2_engine(step2: World, rows
     """``step2`` and ``rows`` are the same world: the engine is checked once, then each journey runs on a scoped slice
     of it (its clock starts from the real time ``step2`` set). A failure names its row and the rows after it run."""
     assert rows._base is step2
-    rows.run(ROWS, globals())
+    try:
+        rows.run(ROWS, globals())
+    finally:
+        token_header.reset_for_tests()    # the rows' token-file and ancestor caches are process-global: a failing row must not leave them

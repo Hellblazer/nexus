@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
+import time
 import traceback
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -52,7 +54,8 @@ class World:
         self.procs = FakeProcesses(self.tmp / "claude-sessions", host=self.host)
         self.identity_dir = self.tmp / "config" / "identity"
         self.config_dir = self.tmp / "config"
-        self.client = IdentityClient(base_url, tenant_token)
+        # a row's world shares its parent's client: it holds no per-row state (the host, pids and names go in each call)
+        self.client = parent.client if parent is not None else IdentityClient(base_url, tenant_token)
         self._tenant_token = tenant_token
         self._parent = parent
         self._data: IdentityClient | None = None
@@ -156,48 +159,77 @@ class World:
 
 class Rows:
     """The independent rows of one scenario test on one tenant. ``with rows.row("name") as world:`` runs a row on its
-    own scoped world; an exception in it is kept, not raised, so the rows after it still run. ``check`` fails once,
-    naming every failed row with its traceback, and also when fewer rows ran than the test expects (a row dropped from
-    the list must not read as a pass)."""
+    own scoped world; an assertion or other exception in it, and a ``pytest.fail`` or a ``pytest.raises`` that did not
+    raise, is kept, not raised, so the rows after it still run. A ``pytest.skip`` or ``KeyboardInterrupt`` is never
+    swallowed: it ends the run, and ``run`` reports the failures recorded so far first (a skip with failures behind it
+    fails the test, naming them). ``check`` fails once, naming every failed row with its traceback and duration, and
+    also when fewer rows ran than the test expects (a row dropped from the list must not read as a pass).
+
+    ``NX_ROWS=<substring>`` runs only the rows of a table whose function name contains the substring, to rerun one
+    row of a long table (``NX_ROWS=lapsed uv run pytest tests/identity/test_session_start_bind.py``); a value that
+    matches no row fails the test. Unset, every row runs."""
 
     def __init__(self, world: World) -> None:
         self._base = world
         self.ran: list[str] = []
         self.failed: dict[str, str] = {}
+        self.seconds: dict[str, float] = {}
 
     @contextlib.contextmanager
     def row(self, name: str) -> Iterator[World]:
         assert name not in self.ran, f"row {name!r} ran twice"
         self.ran.append(name)
+        started = time.perf_counter()
         try:
             yield self._base.scoped(f"r{len(self.ran):02d}")
-        except Exception:  # noqa: BLE001 - kept and reported by check(), so one row's failure does not hide the next
-            self.failed[name] = traceback.format_exc()
+        except (Exception, pytest.fail.Exception):  # noqa: BLE001 - kept and reported by check(), so one row's failure does not hide the next; Skipped and KeyboardInterrupt are not caught
+            self.failed[name] = f"{traceback.format_exc()}(row ran {time.perf_counter() - started:.2f}s)"
+        finally:
+            self.seconds[name] = time.perf_counter() - started
 
     def run(self, table: tuple[Callable[[World], None], ...], namespace: dict[str, Any]) -> None:
         """Run every row function of *table* and fail once with the rows that failed. *namespace* is the module's
         ``globals()``: a ``row_*`` function that is not in *table* never runs, so it fails here instead of passing."""
+        assert table, "the row table is empty: a test with no rows passes nothing"
         defined = sorted(n for n, o in namespace.items() if n.startswith("row_") and callable(o))
         listed = sorted(fn.__name__ for fn in table)
         assert defined == listed, f"row functions not in the table: {sorted(set(defined) - set(listed))}"
-        for fn in table:
-            with self.row(fn.__name__) as world:
-                fn(world)
-        self.check(expect=len(table))
+        only = os.environ.get("NX_ROWS", "")
+        selected = [fn for fn in table if only in fn.__name__]
+        assert selected, f"NX_ROWS={only!r} matches no row of {listed}"
+        try:
+            for fn in selected:
+                with self.row(fn.__name__) as world:
+                    fn(world)
+        except BaseException as stopped:  # a Skipped or KeyboardInterrupt ended the run; the failures so far still show
+            if self.failed:
+                report = self._report(len(selected)) + f"\n\nthen the run was stopped by {stopped!r}"
+                if isinstance(stopped, pytest.skip.Exception):
+                    pytest.fail(report, pytrace=False)
+                sys.stderr.write(report + "\n")
+            raise
+        self.check(expect=len(selected))
+
+    def _report(self, expect: int) -> str:
+        body = "\n\n".join(f"ROW {name!r} FAILED:\n{tb}" for name, tb in self.failed.items())
+        return f"{len(self.failed)} of {expect} rows failed: {sorted(self.failed)}\n\n{body}"
 
     def check(self, expect: int) -> None:
         if len(self.ran) != expect:
             pytest.fail(f"{len(self.ran)} rows ran, the test expects {expect}: ran {self.ran}", pytrace=False)
         if self.failed:
-            body = "\n\n".join(f"ROW {name!r} FAILED:\n{tb}" for name, tb in self.failed.items())
-            pytest.fail(f"{len(self.failed)} of {expect} rows failed: {sorted(self.failed)}\n\n{body}", pytrace=False)
+            pytest.fail(self._report(expect), pytrace=False)
 
 
 @pytest.fixture
-def world(tmp_path: Path, t2_tenant: str) -> World:
+def world(tmp_path: Path, t2_tenant: str) -> Iterator[World]:
     from tests._engine_substrate import ensure_engine
 
-    return World(tmp_path, t2_tenant, ensure_engine(), os.environ["NX_SERVICE_URL"], os.environ["NX_SERVICE_TOKEN"])
+    made = World(tmp_path, t2_tenant, ensure_engine(), os.environ["NX_SERVICE_URL"], os.environ["NX_SERVICE_TOKEN"])
+    yield made
+    made.client.close()
+    if made._data is not None:
+        made._data.close()
 
 
 @pytest.fixture
