@@ -3,8 +3,11 @@
 package dev.nexus.service.db;
 
 import org.jooq.Condition;
+import org.jooq.Field;
 
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -52,5 +55,17 @@ public final class IdentityLine {
     /** The negation of {@link #fenced()}: what {@code expire} and {@code reap} may touch. */
     public static Condition notFenced() {
         return not(fenced());
+    }
+
+    /**
+     * The columns an upsert's conflict branch resets when a write names an existing title: both quarantine stamps
+     * (RDR-207) and the identity stamp (RDR-253), which the handler sets again for a write made with a token.
+     */
+    public static Map<Field<?>, Object> overwriteClears() {
+        Map<Field<?>, Object> clears = new LinkedHashMap<>();
+        clears.put(MEMORY.QUARANTINED_AT, null);
+        clears.put(MEMORY.ROLLED_UP_AT, null);
+        clears.put(MEMORY.IDENTITY, null);
+        return clears;
     }
 }
