@@ -71,12 +71,16 @@ JAVA_SURFACE = "service/src/"
 META_RUN = "uv run pytest -q -rfEs -p no:randomly --color=no -o addopts= -m '(lint or census) and not integration and not slow'"
 #: -rp lists each pass, so a guard counts only when its PASSED line appears (a skip inside
 #: tests/conftest.py is reported at the conftest, not at the guard file).
-#: The session-items guard judges what its own invocation collected, so the changed test files run
-#: with it unfiltered (a -m that deselects some reads as a partial view, and the guard skips).
+#: The session-items guard judges what its own invocation collected, so the changed test files are
+#: collected with it unfiltered (a -m that deselects some reads as a partial view, and the guard skips).
 GUARD_RUN = "uv run pytest -q -rfEsp -p no:randomly --color=no -o addopts= -m 'not integration and not slow'"
 #: Meta-tests read files; none needs the engine, so no gate jar is built or checked for them, and
 #: no suite lease is taken (tests/conftest.py takes one only for a substrate that boots the engine).
 ENV = {"NX_TEST_T2_SUBSTRATE": "none"}
+#: The guard run, as CI's census-only job runs it (.github/workflows/ci.yml): tests/conftest.py
+#: skip-marks every item outside the census module, so the changed test files are collected (the
+#: census judges them) but none executes, and any non-zero exit is a real red.
+GUARD_ENV = {"NX_CENSUS_ONLY_JOB": "1", "NX_SCENARIO_SKIP_BUDGET": "999"}
 #: What a green run of this script does not cover, printed at the end of every run.
 NOT_COVERED = (
     "not covered here: the whole -m lint bucket and the full-corpus census job (push-train rule 1 still asks for"
@@ -544,7 +548,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("$ " + shlex.join(argv), flush=True)
         t1 = time.monotonic()
         is_guard = label.startswith("session-items")
-        code, passed, failed = _run_streaming(argv, repo)
+        code, passed = _run_streaming(argv, repo, GUARD_ENV if is_guard else {})
         print(f"{label} ran in {time.monotonic() - t1:.1f}s (exit {code})")
         if not is_guard and code == 5:
             # Every meta-test in the picked files is integration- or slow-marked: nothing to judge here.
@@ -558,14 +562,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                 print("the session-items guard did not pass (it failed, or skipped because its invocation looked"
                       " partial): run the full-corpus census job (push-train rule 1) for this push")
                 code = 1
-            elif code and failed and all(
-                (f := n.split("::", 1)[0]) in changed_tests and f not in guards for n in failed
-            ):
-                # The changed test files ran only so the guard could see them, with the engine off. A
-                # failure anywhere else (a ratchet beside the census in a guard file) stays a red.
-                print(f"the session-items guard passed; the other failures above (exit {code}) are in the changed"
-                      " test files, run here without the engine: advisory, the full suite judges them")
-                code = 0
         rc = rc or code
     cmd = java_command(sel)
     if cmd:
@@ -578,22 +574,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     return rc
 
 
-def _run_streaming(argv: list[str], repo: Path) -> tuple[int, set[str], set[str]]:
-    """Run pytest, echoing its output; also return the node ids its summary reports PASSED, and
-    those it reports FAILED or ERROR."""
-    proc = subprocess.Popen(argv, cwd=repo, env={**os.environ, **ENV},
+def _run_streaming(argv: list[str], repo: Path, extra_env: dict[str, str]) -> tuple[int, set[str]]:
+    """Run pytest, echoing its output; also return the node ids its summary reports PASSED."""
+    proc = subprocess.Popen(argv, cwd=repo, env={**os.environ, **ENV, **extra_env},
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
     passed: set[str] = set()
-    failed: set[str] = set()
     assert proc.stdout is not None
     for line in proc.stdout:
         sys.stdout.write(line)
         word, _, rest = line.partition(" ")
         if word == "PASSED" and rest.split():
             passed.add(rest.split()[0])
-        elif word in ("FAILED", "ERROR") and rest.split():
-            failed.add(rest.split()[0])
-    return proc.wait(), passed, failed
+    return proc.wait(), passed
 
 
 def _trace_one(repo: Path, test: str, out: Path, extra: list[str]) -> tuple[dict, str | None]:
