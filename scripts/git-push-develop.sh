@@ -915,7 +915,7 @@ _write_push_record() {
   # The lock path already resolved the installed nx; --skip-lock resolves it here, the same way.
   [[ -n "$nxbin" ]] || nxbin="$(installed_nx_resolve || true)"
   if [[ -z "$nxbin" ]]; then
-    echo "PUSH_RECORD_SKIPPED no installed nx on PATH (only a dev-checkout or venv nx, or none); the push stands" >&2
+    echo "PUSH_RECORD_SKIPPED: nx is not installed on PATH (only a dev-checkout or venv copy, or none); the push stands" >&2
     return 0
   fi
   body="{\"base\": \"${_record_base}\", \"n\": ${#range[@]}}"
