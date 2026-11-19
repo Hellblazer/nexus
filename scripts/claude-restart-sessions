@@ -141,7 +141,8 @@ session's exit: a session whose reply has gone stale or turned not ready, or tha
 skipped and logged. With --fresh that last check is against the ready reply as of the start of the
 background run, not idle: a session writing its handoff is busy by design. --force restarts anyway
 after printing the same list (and also restarts a session in status 'shell'); --no-ready-check
-skips the check alone. --dry-run prints the verdict and what it would do and writes nothing to the log;
+skips the check alone. --dry-run prints the verdict and what it would do; its server and plan checks print instead of logging
+(the engine gate of --nx and the session reads may still log);
 it does not refuse for the ready round, but it refuses (exit 6) when no session is on the tmux server it reaches.
 
 Each restart run records its mode and options in ~/.claude/restart-last.json and prints the mode
@@ -871,7 +872,7 @@ def check_server(found: list[dict], quiet: bool = False) -> tuple[tuple[str, int
     A session the reached server does not host is left alone and reported as skipped; the run refuses (the third
     value) when that leaves none, or when no server answers. The refusal names the server reached and what each
     session records, so a run that fell to the default server (TMUX unset) is never silent about it. *quiet* prints
-    the skip lines instead of logging them (a dry run writes nothing to the log)."""
+    the skip lines instead of logging them (a dry run's server check logs nothing)."""
     server = tmux_server()
     if server is None:
         return None, [], "no tmux server answers, so no session can be tied to one"

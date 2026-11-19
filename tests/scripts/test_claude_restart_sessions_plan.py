@@ -12,7 +12,7 @@ back to the default server silently.
 
 Round 1: `--ask-ready` and `--status` check the server too; the plan is refreshed from each session's own file after the
 slow phase; skipped sessions are counted on the closing lines; a plan is checked, deleted on every exit path and pruned;
-`--dry-run` writes nothing to the log.
+`--dry-run`'s server and plan checks print instead of logging.
 """
 
 from __future__ import annotations
@@ -626,7 +626,7 @@ def test_an_oversized_plan_is_refused_unread(crs, world) -> None:
         crs.load_plan(str(path))
 
 
-# -- round 1 (6): a dry run says what it would do and writes nothing to the log ------------------------------------
+# -- round 1 (6): a dry run's server check prints instead of logging ------------------------------------
 
 def test_a_dry_run_writes_nothing_to_the_log_even_when_it_skips_or_refuses(crs, monkeypatch, world, capsys) -> None:
     _install(crs, monkeypatch, DEFAULT_SERVER, {"%5": ("vibes:@1.%5", 900)}, parents={4242: 900, 4343: 4000})
