@@ -421,11 +421,16 @@ def read_memberships(identity: str) -> list[str]:
             client.close()
 
 
-def state_writer(session_id: str) -> Callable[[int, LoadedState], None]:
+def state_writer(
+    session_id: str, *, register_exit: Callable[..., Any] | None = None
+) -> Callable[[int, LoadedState], None]:
     """The ``state_sink`` of the real loader: it names the holder (the Claude process the registry file records),
-    writes ``<config>/auras/loaded-<claude pid>.<startedAt>.json``, and removes it when the server exits."""
+    writes ``<config>/auras/loaded-<claude pid>.<startedAt>.json``, and removes it when the server exits.
+    *register_exit* registers the removal (``atexit.register``, or a stand-in in a test)."""
     import atexit  # noqa: PLC0415
     import os  # noqa: PLC0415
+
+    on_exit = register_exit if register_exit is not None else atexit.register
 
     from nexus import config as _config  # noqa: PLC0415 -- resolved at call time, so a redirected config dir is honoured
     from nexus.auras.loaded_state import remove_own, state_dir, state_path, write_state  # noqa: PLC0415
@@ -445,7 +450,7 @@ def state_writer(session_id: str) -> Callable[[int, LoadedState], None]:
         ))
         if path not in registered:
             registered.add(path)
-            atexit.register(remove_own, path, server_pid=os.getpid())
+            on_exit(remove_own, path, server_pid=os.getpid())
 
     return write
 
