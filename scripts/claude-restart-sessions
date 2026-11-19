@@ -2501,7 +2501,7 @@ def tasks_note(tasks: list[str] | None) -> str:
     to stop the session's shells with TaskStop before answering ready. A shell that is still alive, a finished one
     the session has not cleared included, leaves the session at status `shell`, and the restart skips such a session."""
     crons = "A session-only cron or reminder you set may be lost in a restart; count it as work in flight. "
-    stop = ("Stop your background shells with TaskStop, finished ones included, before you answer ready: a live shell "
+    stop = ("Stop your background shells and agents with TaskStop, finished ones included, before you answer ready: a live shell "
             "leaves your session at status `shell`, and the restart skips it. A task you must keep running means you "
             "answer not ready. ")
     if tasks is None:

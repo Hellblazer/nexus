@@ -1072,7 +1072,7 @@ def test_the_ready_ask_carries_the_task_list(crs, rd, monkeypatch) -> None:
     monkeypatch.setattr(crs, "session_tasks", lambda _s: ["pid 5000 since t: nx ci wait abc"])
     text = crs.ready_prompt(s, "/tmp/r.json")
     assert "sees 1 background task(s) running under your session, which a restart would cut off: " \
-           "pid 5000 since t: nx ci wait abc. Stop your background shells with TaskStop" in text
+           "pid 5000 since t: nx ci wait abc. Stop your background shells and agents with TaskStop" in text
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     assert "sees no background task running under your session" in crs.ready_prompt(s, "/tmp/r.json")
     assert "A session-only cron or reminder you set may be lost in a restart" in crs.ready_prompt(s, "/tmp/r.json")

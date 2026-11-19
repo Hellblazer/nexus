@@ -1154,7 +1154,16 @@ Sam the command:
   only the sessions whose last answer was not ready, missing, unreadable or
   stale, or who have since gone busy or opened a shell, and keeps the others'
   fresh ready answers; `--status` names the sessions it re-asked and the
-  answers it kept. Re-run it until `--status` shows every target ready.
+  answers it kept. Re-run it until `--status` shows every target ready. A
+  session `--status` lists as not asked (no channel, and not at its prompt)
+  never sees the ask: message it directly to stop its background shells and
+  agents with TaskStop, finished ones included, then re-run `--ask-ready`.
+  Start the restart soon after the round: a kept answer can be close to
+  `--ready-max-age` old, and the go gate and each session's guard refuse an
+  answer past it (nothing restarts; ask again). If the `--nx` install aborts
+  because the new version does not resolve yet (PyPI's index can lag a
+  publish by minutes), nothing was restarted: wait and run the same command
+  again.
 
 - Read the dry run's `-n` values against ListAgents. A restart keeps each
   session's CURRENT name (Sam, 2026-10-31); before the script dropped the launch
