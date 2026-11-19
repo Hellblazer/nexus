@@ -28,6 +28,7 @@ import pytest
 
 from nexus.identity import token_header
 from tests.identity import (
+    test_group_journeys,
     test_identity_step4,
     test_hook_leg,
     test_identity_token_engine,
@@ -59,6 +60,9 @@ JOURNEYS = (
     # fence row sends identity tokens, so the module needs Step 2 and resets the same caches.
     _journey(test_identity_step4, "st4", precheck=test_identity_step4.step2_skip_reason, require_env=test_identity_step4.REQUIRE_ENV,
              cleanup=token_header.reset_for_tests),
+    # RDR-252 Step 4 part B1 (nexus-igea9.7): `nx group` and nexus.groups. The rows send identity tokens and reset the same
+    # caches; they assert the engine issued one, so an engine without Step 2 fails them (no precheck is needed).
+    _journey(test_group_journeys, "grp", cleanup=token_header.reset_for_tests),
 )
 
 
