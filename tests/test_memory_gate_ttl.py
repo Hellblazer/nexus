@@ -23,6 +23,7 @@ import nexus.session as session_mod
 from nexus.db.t2 import T2Database
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.mcp.core import store_get
+from nexus import memory_curate as mc
 from nexus.memory_curate import gate_rollup as gr
 from nexus.memory_curate import gate_ttl as gt
 from tests._catalog_fixture_ops import documents_by_title
@@ -39,6 +40,7 @@ from tests._gate_rollup_support import (  # noqa: F401 — _closed_rdr is an aut
     _gate,
     _rows,
     _run,
+    _run_raw,
     _phase3,
     _pointer,
     _titles,
@@ -135,19 +137,23 @@ def test_the_loss_check_leaves_every_access_count_unchanged(db: T2Database) -> N
 def test_the_pointer_must_read_back_with_the_same_list(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
     _gate(db, "nexus-r1")
     _gate(db, "nexus-r1", sha="bbb2222")
-    real = gr.read_pointer
-    calls = []
+    real_read, real_write = gr.read_pointer, gr.write_pointer
+    written = []
 
     def lossy(t3, title):
-        got = real(t3, title)
-        calls.append(title)
-        if len(calls) > 1 and got is not None:       # the second read is the read-back
+        got = real_read(t3, title)
+        if written and got is not None:              # a read after the pointer was written is the read-back
             got.listed = got.listed[:1]
         return got
 
+    def mark_written(*a, **k):
+        written.append(1)
+        return real_write(*a, **k)
+
     monkeypatch.setattr(gr, "read_pointer", lossy)
+    monkeypatch.setattr(gr, "write_pointer", mark_written)
     out = _phase3("nexus-r1", expect=1)
-    assert "did not read back" in out and len(calls) == 2
+    assert "did not read back" in out and written
 
 
 def test_a_dry_run_refuses_an_open_phase_as_the_real_run_does(db: T2Database, tmp_path: Path) -> None:
@@ -615,3 +621,96 @@ def test_dry_run_does_not_count_an_unmapped_or_restored_record(db: T2Database) -
     out = _phase3("nexus-dn", "--dry-run")
     assert "quarantined by the next expire sweep: 0 of 0" in out and f"restored, left alone: {restored}" in out
     assert bare not in "".join(ln for ln in out.splitlines() if ln.startswith("  candidate")) and mapped
+
+
+# ── the count-first guard (nexus-1gdv0.2.13) ─────────────────────────────────────
+COUNT_P3 = "gate-rollup-count-rdr-209-phase-3"
+
+
+def test_guard_a_real_run_with_no_recorded_count_refuses_and_writes_nothing(db: T2Database) -> None:
+    name = _gate(db, "nexus-g1")
+    out = _run_raw("--phase", "3", "--beads", "nexus-g1", expect=1)
+    assert "no dry-run count is recorded for RDR-209 phase 3" in out and "--dry-run" in out
+    assert _rows(db)[name]["ttl"] is None and COUNT_P3 not in _rows(db, with_counts=True)
+    assert documents_by_title(POINTER_P3) == [] and documents_by_title(f"{REPO}/{name}") == []
+
+
+def test_guard_a_dry_run_records_one_count_row_in_repo_only_and_the_real_run_then_proceeds(db: T2Database) -> None:
+    _gate(db, "nexus-g2", age_days=40)
+    _gate(db, "nexus-g2", sha="bbb2222", age_days=5)
+    _put(db, "209-gate-latest", "gate flow row", tags="rdr", project=f"{REPO}_rdr")
+    before_rdr = _rows(db, f"{REPO}_rdr", with_counts=True)
+    out = _phase3("nexus-g2", "--dry-run")
+    assert "quarantined by the next expire sweep: 1 of 2" in out and f"count recorded: {REPO}/{COUNT_P3}" in out
+    counts = [t for t in _rows(db, with_counts=True) if t.startswith("gate-rollup-count-")]
+    assert counts == [COUNT_P3]
+    assert _rows(db, f"{REPO}_rdr", with_counts=True) == before_rdr
+    row = _rows(db, with_counts=True)[COUNT_P3]
+    assert row["ttl"] is None and "kind:gate" not in row["tags"].split(",") and "gate" not in row["tags"].split(",")
+    out = _run_raw("--phase", "3", "--beads", "nexus-g2", "--counted", "1")
+    assert "ttl: wrote 2" in out
+    assert all(r["ttl"] == 30 for r in _rows(db).values())
+
+
+def test_guard_the_counted_number_must_be_given_and_equal_the_recorded_count(db: T2Database) -> None:
+    name = _gate(db, "nexus-g3", age_days=40)
+    _phase3("nexus-g3", "--dry-run")                                  # records a count of 1
+    out = _run_raw("--phase", "3", "--beads", "nexus-g3", expect=1)
+    assert "--counted" in out and "the number the dry run reported" in out
+    out = _run_raw("--phase", "3", "--beads", "nexus-g3", "--counted", "0", expect=1)
+    assert "--counted 0" in out and "recorded count" in out
+    assert _rows(db)[name]["ttl"] is None and documents_by_title(POINTER_P3) == []
+    _run_raw("--phase", "3", "--beads", "nexus-g3", "--counted", "1")
+    assert _rows(db)[name]["ttl"] == 30
+
+
+def test_guard_a_count_recorded_for_another_phase_or_rdr_does_not_unlock_this_one(db: T2Database, tmp_path: Path) -> None:
+    _gate(db, "nexus-g4")
+    _write_rdr(tmp_path, RDR, "closed")
+    _run_raw("--phase", "4", "--beads", "nexus-g4", "--dry-run")      # phase 4's count
+    assert "gate-rollup-count-rdr-209-phase-4" in _rows(db, with_counts=True)
+    out = _run_raw("--phase", "3", "--beads", "nexus-g4", "--counted", "0", expect=1)
+    assert "no dry-run count is recorded for RDR-209 phase 3" in out
+    _run_raw("--all", "--dry-run")                                    # --all has its own count, not phase 3's
+    assert "gate-rollup-count-rdr-209-all" in _rows(db, with_counts=True)
+    out = _run_raw("--phase", "3", "--beads", "nexus-g4", "--counted", "0", expect=1)
+    assert "no dry-run count is recorded" in out
+
+
+def test_guard_a_record_the_dry_run_did_not_count_refuses_the_real_run(db: T2Database) -> None:
+    _gate(db, "nexus-g5")
+    _phase3("nexus-g5", "--dry-run")
+    new = _gate(db, "nexus-g5", sha="bbb2222")
+    out = _run_raw("--phase", "3", "--beads", "nexus-g5", "--counted", "0", expect=1)
+    assert new in out and "not in the dry run's count" in out
+    assert all(r["ttl"] is None for r in _rows(db).values())
+
+
+def test_guard_a_run_with_nothing_to_write_needs_no_count(db: T2Database) -> None:
+    _gate(db, "nexus-g6")
+    _phase3("nexus-g6")                                               # dry run, count, real run
+    for r in db.get_all(REPO):
+        if r["title"].startswith("gate-rollup-count-"):
+            db.delete(project=REPO, title=r["title"])
+    out = _run_raw("--phase", "3", "--beads", "nexus-g6")             # every record has its TTL: nothing to count
+    assert "ttl: wrote 0" in out
+
+
+def test_guard_the_count_row_is_never_listed_and_the_census_does_not_flag_it(db: T2Database) -> None:
+    _gate(db, "nexus-g7")
+    _phase3("nexus-g7", "--dry-run")
+    db_row = _rows(db, with_counts=True)[COUNT_P3]
+    backdate_memory(db, REPO, COUNT_P3, days=90)
+    sel = gr.select_records(db.get_all(REPO), project=REPO, rdr=RDR, beads=(COUNT_P3, "nexus-g7"), phase="3")
+    assert COUNT_P3 not in [e["title"] for e in sel.listed + sel.unmapped] and db_row
+    found = mc.t2_findings(db, REPO, closed_rdrs={"209"}, now=datetime.now(UTC))
+    assert COUNT_P3 not in [c.title for c in found.census]
+
+
+def test_guard_a_later_dry_run_replaces_the_count(db: T2Database) -> None:
+    _gate(db, "nexus-g8", age_days=40)
+    _phase3("nexus-g8", "--dry-run")
+    _gate(db, "nexus-g8", sha="bbb2222", age_days=50)
+    _phase3("nexus-g8", "--dry-run")
+    assert [t for t in _rows(db, with_counts=True) if t.startswith("gate-rollup-count-")] == [COUNT_P3]
+    _run_raw("--phase", "3", "--beads", "nexus-g8", "--counted", "2")

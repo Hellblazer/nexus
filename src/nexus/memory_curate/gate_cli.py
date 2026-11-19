@@ -9,6 +9,18 @@ import click
 from nexus.commands._helpers import t2_handle
 
 
+def _head(root: Path) -> str:
+    """The repository's current commit, recorded with a dry run's count; ``unknown`` when there is none."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: only a dry run records it
+    from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — deferred, as above
+
+    try:
+        proc = run_bounded(argv_off_cwd(["git", "-C", str(root), "rev-parse", "--short=12", "HEAD"]), timeout=5)
+    except Exception:  # noqa: BLE001 — no git, a timeout or no commit: the count is recorded without it
+        return "unknown"
+    return proc.stdout.strip() or "unknown" if proc.returncode == 0 else "unknown"
+
+
 @click.command("gate-rollup")
 @click.option("--rdr", type=click.IntRange(1, 9999), required=True, help="The RDR number")
 @click.option("--phase", default=None, help="The phase to roll up (3, 3a); needs --beads")
@@ -18,10 +30,13 @@ from nexus.commands._helpers import t2_handle
               help="Every phase of the RDR, by its rdr:<NNN> tag (the rdr-close step); alone")
 @click.option("--accept-open", "accept_open", multiple=True,
               help="Let a bead through whose newest record is not justified (repeatable); the pointer records it")
+@click.option("--counted", type=click.IntRange(min=0), default=None,
+              help="The count a --dry-run reported ('would be quarantined by the next expire sweep'); a real run that "
+                   "writes a TTL needs it, and refuses unless it equals the count that dry run recorded")
 @click.option("--project", "-p", default=None, help="The repository's T2 project (default: this repository)")
 @click.option("--dry-run", is_flag=True, default=False, help="Print the listing; write nothing")
 def gate_rollup_cmd(rdr: int, phase: str | None, beads: str | None, all_phases: bool, accept_open: tuple[str, ...],
-                    project: str | None, dry_run: bool) -> None:
+                    counted: int | None, project: str | None, dry_run: bool) -> None:
     """List a closed phase's gate records and keep them in T3 (RDR-209 Phase 3).
 
     Reads the repository's gate records (whole tag kind:gate, never <repo>_rdr). Before anything is written
@@ -43,10 +58,12 @@ def gate_rollup_cmd(rdr: int, phase: str | None, beads: str | None, all_phases: 
         from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred: only the default needs the repository name
 
         project = _repo_identity(Path.cwd())[0]
+    root = repo_toplevel(Path.cwd())
     try:
         with t2_handle() as db:
             result = gate_ttl.run(db.memory, project=project, scope=scope, dry_run=dry_run,
-                                  accept_open=tuple(accept_open), root=repo_toplevel(Path.cwd()), t3_factory=make_t3)
+                                  accept_open=tuple(accept_open), root=root, t3_factory=make_t3, counted=counted,
+                                  head=_head(root))
     except gr.GateRollupError as exc:
         raise click.ClickException(str(exc)) from exc
     for line in result.lines:

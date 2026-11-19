@@ -4,6 +4,7 @@
 working directory, and the command run through its CLI against the engine test substrate."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -60,14 +61,30 @@ def _gate(db: T2Database, bead: str, *, kind: str = "review", sha: str = "abc123
     return name
 
 
-def _rows(db: T2Database, project: str = REPO) -> dict[str, dict]:
-    return {r["title"]: r for r in db.get_all(project)}
+def _rows(db: T2Database, project: str = REPO, *, with_counts: bool = False) -> dict[str, dict]:
+    """The project's live rows by title, without the dry run's count rows (``gate-rollup-count-...``) unless asked."""
+    return {r["title"]: r for r in db.get_all(project) if with_counts or not r["title"].startswith("gate-rollup-count-")}
 
 
-def _run(*args: str, expect: int = 0) -> str:
+def _run_raw(*args: str, expect: int = 0) -> str:
+    """The command exactly as given: no dry run before it, no --counted added."""
     result = CliRunner().invoke(main, ["memory", "gate-rollup", "--rdr", str(RDR), "--project", REPO, *args])
     assert result.exit_code == expect, result.output
     return result.output
+
+
+def _run(*args: str, expect: int = 0) -> str:
+    """The command the way a person runs it: a dry run first (which records its count), then the real run with
+    ``--counted <that count>``. A dry run that refuses ends the call there, with the refusal as the output. A call that
+    is itself a dry run is made as given."""
+    if "--dry-run" not in args:
+        dry = CliRunner().invoke(main, ["memory", "gate-rollup", "--rdr", str(RDR), "--project", REPO, *args, "--dry-run"])
+        if dry.exit_code != 0:
+            assert expect != 0, dry.output
+            return dry.output
+        if m := re.search(r"quarantined by the next expire sweep: (\d+) of", dry.output):
+            args = (*args, "--counted", m.group(1))
+    return _run_raw(*args, expect=expect)
 
 
 def _phase3(beads: str, *extra: str, expect: int = 0) -> str:

@@ -434,7 +434,10 @@ def test_phase_two_digit_and_sub_phase_names_the_pointer_title(db: T2Database) -
 def test_default_project_is_the_repository_the_command_runs_in(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
     name = _gate(db, "nexus-dp")
     monkeypatch.setattr("nexus.repo_identity._repo_identity", lambda cwd: (REPO, "hash"))
-    result = CliRunner().invoke(main, ["memory", "gate-rollup", "--rdr", "209", "--phase", "3", "--beads", "nexus-dp"])
+    argv = ["memory", "gate-rollup", "--rdr", "209", "--phase", "3", "--beads", "nexus-dp"]      # no --project
+    dry = CliRunner().invoke(main, [*argv, "--dry-run"])
+    assert dry.exit_code == 0 and "gaterepo" in dry.output, dry.output
+    result = CliRunner().invoke(main, [*argv, "--counted", "0"])
     assert result.exit_code == 0, result.output
     assert _titles(_pointer().listed) == [name]
 

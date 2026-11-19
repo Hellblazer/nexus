@@ -994,6 +994,25 @@ each candidate as `candidate  <timestamp>  access_count=N  effective TTL X d
 past|within its effective TTL  <title>` and ends with `would be quarantined by
 the next expire sweep: N of K candidate record(s)`.
 
+The rule "the real run waits for his word" is a mechanism, not a process rule
+(nexus-1gdv0.2.13), and it is keyed per RDR and phase (Sam, 2026-11-16:
+"Per RDR and phase"): every batch, each `--rdr`/`--phase` or `--all`, reports
+its own count before its real run. The dry run records its count as one T2 row
+in `<repo>` (never `<repo>_rdr`, never SQLite), titled
+`gate-rollup-count-rdr-<NNN>-phase-<P>` or `-all` like the pointer, with the
+count, the candidate titles, the date and the commit; a later dry run replaces
+it. The row carries the tag `gate-rollup-count`, neither `kind:gate` nor `gate`,
+so the rollup never lists it and the census never flags it. A real run that
+would write a TTL refuses, writing nothing, unless (a) that row exists, (b) the
+run passes `--counted N` and N equals the recorded count, the number that was
+reported to Sam, and (c) every candidate is a title the row lists, so a record
+that appeared after the dry run needs a new one. The flag is evidence that the
+caller has the number, not that Sam said yes; his word stays outside the code,
+and the skills tell the session to wait for it. A run with no candidate writes
+no TTL and needs no count, so a rerun that finishes after everything has its TTL
+passes. This changes "the dry run writes nothing" to what is true: it writes no
+TTL and no T3 note, and one count row.
+
 As designed. Tests: the dry run writes nothing and reports the count, with one
 seeded record past its effective TTL and one not, counting exactly one; three seeded records each get `ttl=30` with content, tags,
 agent, session, timestamp, `access_count` and `last_accessed` unchanged; a
@@ -1015,7 +1034,14 @@ marked `quarantined`; a record a person restored (no TTL again, listed with
 `ttl_set` by an earlier run) is not given a TTL again, is named and stays marked
 `restored`, while a record no earlier pointer lists still gets one; a rerun
 after a TTL write that stopped part way finishes the rest and does not call them
-restored; the pointer still lists each timestamp after the TTL write.
+restored; the pointer still lists each timestamp after the TTL write. The guard:
+a real run with no recorded count refuses, writes nothing and names the dry run;
+a dry run writes exactly one count row in `<repo>` and none in `<repo>_rdr`, and
+the real run then proceeds with `--counted N`; a missing or different `--counted`
+refuses; a count recorded for another phase, or for `--all`, does not unlock
+this scope; a record the dry run did not count refuses; a run with nothing to
+write needs no count; the count row is never listed and never flagged by the
+census.
 
 #### Step 4 (shipped): the census flag
 
@@ -1286,3 +1312,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Fix check d021dc53c85b, defects B and C, A on cost (nexus-1gdv0.2.11): keeping the row's own timestamp means the expire sweep can quarantine an old record before it is read back, and `get_all` hides a quarantined row. The read-back now looks a missing row up in the quarantined listing before calling it missing and reports it as quarantined, restorable with `nx memory restore <id>`, still comparing its fields. A rerun carries a record an earlier pointer listed that the read no longer lists: `state: quarantined` when it is in the quarantined listing (whatever its archive, its row is restorable), `state: absent` when it is neither live nor quarantined and its archive reads back whole (the reaped-record rule of nexus-1gdv0.2.6), and stops naming it when that archive is gone. A run whose read lists nothing still refreshes an earlier pointer. The read cost per run is stated in Step 3: one `get_all` before and one after the writes, one quarantined listing and one pointer read, none per record. |
 | 2026-11-19 | Gate finding S6, second half (nexus-1gdv0.2.4): `nx memory restore` makes a row permanent again (`ttl` NULL) and clears the rollup mark, so a restored gate record looks exactly like one never given a TTL, and a rerun would have given it a TTL again, undoing a person's decision. The rule is written in Step 3 (Rerun) and built, in the form the bead recommended (skip and name): each listed record in the pointer carries `ttl_set`, written false before the TTL writes and true after them for each record a run gave a TTL (the pointer is written a second time for that), so a rerun that finds a listed record with `ttl_set` and no TTL leaves it alone, prints `restored, left alone: <title>` and keeps it marked `restored`. A record the earlier pointer lists unmarked, whose write stopped part way, stays a candidate, so a partial write is not mistaken for a restore. The Consequences bullet now says Step 4's census flags a restored record again and why that is left as the reminder. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect B and observations A and C (nexus-1gdv0.2.12): the RDR did not say which Step 2 checks the dry run applies, though it writes no pointer, nor which run is the loss check's first live run. Step 2 now says: `--dry-run` applies the closed-phase check, the verdict chain and the earlier-pointer half of check 2 (reading the earlier pointer and the quarantined listing), refuses exactly as the real run does, skips the archives, the pointer write and its read-back and says so, and counts the listed records that pass and have no TTL, minus unmapped and restored ones. The Testing Strategy defines the first live run as the first run without `--dry-run` that passes the loss check, with its counts (examined, skipped by cause, given a TTL) recorded in its bead. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect A and observations B and C (nexus-1gdv0.2.13), with Sam's 2026-11-16 ruling "Per RDR and phase": "the real run waits for his word" had no mechanism, and the `phase-review-gate` and `rdr-close` skills name the command at close, so a session could run the real thing first. The dry run now records its count as one T2 row in `<repo>` (`gate-rollup-count-rdr-<NNN>-phase-<P>` or `-all`, tag `gate-rollup-count`, never `kind:gate` or `gate`), and a real run that would write a TTL refuses, writing nothing, unless the row exists, `--counted N` equals its count and every candidate is a title it lists; a run with no candidate needs none. The scope of "first run" is per RDR and phase, keyed like the pointer. The `--counted` flag was an open choice for Sam in the plan; the default taken here is that it is required, as evidence the caller has the number, and the RDR says it is not Sam's yes. "The dry run writes nothing" is corrected to no TTL, no T3 note and one count row. Both skills say to run `--dry-run` first, tell Sam its count and wait for his word. |

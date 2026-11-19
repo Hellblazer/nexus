@@ -216,6 +216,70 @@ def write_verified_pointer(t3: Any, project: str, scope: gr.Scope, sel: gr.Selec
     return text
 
 
+# ── the count-first guard ────────────────────────────────────────────────────────
+
+def count_title(scope: gr.Scope) -> str:
+    """The T2 title of a scope's dry-run count: ``gate-rollup-count-rdr-<NNN>-phase-<P>`` or ``-all``, in ``<repo>``."""
+    return f"gate-rollup-count-rdr-{scope.rdr:03d}-" + ("all" if scope.phase is None else f"phase-{scope.phase}")
+
+
+@dataclass
+class Count:
+    count: int
+    titles: tuple[str, ...]
+
+
+def render_count(scope: gr.Scope, project: str, candidates: list[dict[str, Any]], count: int, now: datetime,
+                 head: str) -> str:
+    lines = [f"gate-rollup dry-run count: {scope.label}", f"project: {project}", f"count: {count}",
+             f"candidates: {len(candidates)}", f"date: {now:%Y-%m-%dT%H:%M:%SZ}", f"head: {head}", "titles:"]
+    return "\n".join([*lines, *sorted(e["title"] for e in candidates)]) + "\n"
+
+
+def parse_count(text: str) -> Count | None:
+    m = re.search(r"^count: (\d+)$", text, re.MULTILINE)
+    if m is None or "\ntitles:\n" not in text:
+        return None
+    return Count(int(m.group(1)), tuple(t for t in text.split("\ntitles:\n", 1)[1].splitlines() if t))
+
+
+def record_count(mem: Any, project: str, scope: gr.Scope, candidates: list[dict[str, Any]], count: int,
+                 now: datetime, head: str) -> str:
+    """Write the dry run's count where the real run can read it: one T2 row in ``<repo>`` (never ``<repo>_rdr``, never
+    SQLite), through the engine, titled by the scope, replaced by a later dry run. It carries neither ``kind:gate``
+    nor ``gate``, so the rollup never lists it and the census never flags it."""
+    title = count_title(scope)
+    mem.put(project, title, render_count(scope, project, candidates, count, now, head), tags="gate-rollup-count")
+    return title
+
+
+def check_guard(rows: list[dict[str, Any]], scope: gr.Scope, candidates: list[dict[str, Any]], counted: int | None) -> None:
+    """Refuse a real run that would write a TTL unless this scope's dry-run count is recorded, the caller passes
+    ``--counted <that count>``, and every candidate is one the dry run counted. A run with no candidate writes no TTL
+    and needs none."""
+    if not candidates:
+        return
+    row = next((r for r in rows if r["title"] == count_title(scope)), None)
+    rec = parse_count(row["content"]) if row is not None else None
+    if rec is None:
+        raise gr.GateRollupError(
+            f"no dry-run count is recorded for {scope.label}: run it with --dry-run first and report the count it "
+            "prints to Sam, then run again with --counted <that count>. Nothing was written.")
+    if counted is None:
+        raise gr.GateRollupError(
+            f"{scope.label} has a dry-run count; pass --counted N, the number the dry run reported ('would be "
+            "quarantined by the next expire sweep'). Nothing was written.")
+    if counted != rec.count:
+        raise gr.GateRollupError(
+            f"--counted {counted} is not the recorded count for {scope.label}; run --dry-run again, or pass the "
+            "number it reported. Nothing was written.")
+    new = [e["title"] for e in candidates if e["title"] not in rec.titles]
+    if new:
+        raise gr.GateRollupError(
+            f"{', '.join(new)} is not in the dry run's count: records changed since it ran. Run --dry-run again. "
+            "Nothing was written.")
+
+
 # ── the TTL write ────────────────────────────────────────────────────────────────
 
 def write_ttl(mem: Any, project: str, candidates: list[dict[str, Any]], fresh: dict[str, dict[str, Any]],
@@ -272,9 +336,11 @@ def read_back(mem: Any, project: str, sent: dict[str, dict[str, Any]], res: Resu
 
 # ── the run ──────────────────────────────────────────────────────────────────────
 
-def dry_run_lines(candidates: list[dict[str, Any]], by_title: dict[str, dict[str, Any]], now: datetime) -> list[str]:
+def dry_run_lines(candidates: list[dict[str, Any]], by_title: dict[str, dict[str, Any]],
+                  now: datetime) -> tuple[list[str], int]:
     """The dry run's report: each candidate with its timestamp, ``access_count`` and whether the engine's rule has
-    it past its effective TTL, then the one number: how many the next expire sweep would quarantine."""
+    it past its effective TTL, then the one number: how many the next expire sweep would quarantine (also
+    returned)."""
     out: list[str] = []
     past = 0
     for e in candidates:
@@ -285,13 +351,16 @@ def dry_run_lines(candidates: list[dict[str, Any]], by_title: dict[str, dict[str
         out.append(f"  candidate  {row.get('timestamp') or 'no timestamp'}  access_count={count}  effective TTL "
                    f"{effective_ttl_days(count):.1f} d  {'past' if is_past else 'within'} its effective TTL  {e['title']}")
     out.append(f"would be quarantined by the next expire sweep: {past} of {len(candidates)} candidate record(s)")
-    return out
+    return out, past
 
 
 def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: tuple[str, ...],
-        root: Path, t3_factory: Any, now: datetime | None = None) -> Result:
+        root: Path, t3_factory: Any, now: datetime | None = None, counted: int | None = None,
+        head: str = "unknown") -> Result:
     """The command after option parsing. Every refusal is a :class:`~nexus.memory_curate.gate_rollup.GateRollupError`
-    raised before anything is written; *now* is the clock the dry run's expiry rule reads."""
+    raised before anything is written; *now* is the clock the dry run's expiry rule reads, and *counted* is the
+    number the caller was told by a dry run (the guard checks it before any TTL is written). *head* is the
+    repository's commit, recorded with the count."""
     now = now or datetime.now(UTC)
     reason = open_phase_reason(scope, root)
     if reason is not None:
@@ -329,9 +398,13 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
     candidates = classify(sel, prev, by_title, res)
     res.lines += [f"restored, left alone: {t}" for t in res.restored]
     if dry_run:
-        res.lines += dry_run_lines(candidates, by_title, now)
-        res.lines.append("dry run: archives, the pointer write and its read-back skipped; nothing written")
+        lines, past = dry_run_lines(candidates, by_title, now)
+        res.lines += lines
+        title = record_count(mem, project, scope, candidates, past, now, head)
+        res.lines.append(f"count recorded: {project}/{title}")
+        res.lines.append("dry run: archives, the pointer write and its read-back skipped; no TTL and no T3 note written")
         return res
+    check_guard(rows, scope, candidates, counted)
 
     res.archived, res.already_whole = gr.archive_records(t3, sel, scope)
     text = write_verified_pointer(t3, project, scope, sel, accept_open, res)
