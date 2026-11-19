@@ -81,8 +81,8 @@ plan_json:
         # the numbers, the scope of the measurement (local engine, one HERB
         # collection, retrieval reach r20, cloud untimed), the cost (search
         # ~5-10 s per call) and the failure mode (an error from the lexical
-        # leg gives the plan EMPTY step-1 evidence, nexus-vi9u4). Retire this
-        # line with the one there when nexus-wohh7 lands.
+        # leg gives the plan EMPTY step-1 evidence, GH #1667 follow-up B). Retire this
+        # line with the one there when GH #1667 follow-up A lands.
         lexical: true
     - tool: traverse
       args:

@@ -95,7 +95,7 @@ plan_json:
         # MCP search applies the cross-encoder rerank only when lexical=True
         # (core.py: lexical_rerank = lexical and t3.supports_server_rerank);
         # there is no rerank-only switch yet. Retire this line when
-        # nexus-wohh7 (a rerank parameter on MCP search) lands and use
+        # GH #1667 follow-up A (a rerank parameter on MCP search) lands and use
         # `rerank: true` instead.
         #
         # What was measured (local engine, one collection of HERB, local
@@ -125,7 +125,7 @@ plan_json:
         # fanout_budget_exhausted) comes back from core.search as an "Error:"
         # string. The runner then synthesizes an EMPTY step-1 result with a
         # warning, so the plan goes on with no evidence where it used to get
-        # vector rows. nexus-vi9u4 tracks the fix (fail or fall back).
+        # vector rows. GH #1667 follow-up B tracks the fix (fail or fall back).
         lexical: true
     - tool: traverse
       args:

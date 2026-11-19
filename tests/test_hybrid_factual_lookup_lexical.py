@@ -7,7 +7,7 @@ The flag is there for the cross-encoder rerank, which MCP ``search`` applies onl
 one HERB collection, 50 "affected by" lookup questions (T2 ``nexus/plan10-lexical-measure-2026-11-19``, and
 ``nexus_rdr/herb-full-pool-retrieval-variants-2026-11-19`` for the decline shapes): the share of gold companies in the
 top 20 went 0.795 to 0.968, and the lexical leg itself returned 0 rows on every question. Retrieval reach only: answer
-quality, cloud mode and the default limit of 40 are unmeasured. nexus-wohh7 retires the proxy with a rerank parameter.
+quality, cloud mode and the default limit of 40 are unmeasured. GH #1667 follow-up A retires the proxy with a rerank parameter.
 
 No substrate: YAML parses, a stubbed T3 and a stub runner dispatcher.
 """
@@ -66,8 +66,8 @@ def test_template_still_validates(name: str) -> None:
 @pytest.mark.parametrize("name", _PLANS)
 def test_the_comment_names_the_bead_that_retires_the_proxy_and_the_one_for_the_failure_mode(name: str) -> None:
     text = (_BUILTIN / name).read_text()
-    assert "nexus-wohh7" in text
-    assert "nexus-vi9u4" in text
+    assert "GH #1667 follow-up A" in text
+    assert "GH #1667 follow-up B" in text
 
 
 def test_search_tool_accepts_the_lexical_argument() -> None:
@@ -168,7 +168,7 @@ async def test_a_search_error_string_becomes_an_empty_step_result_with_the_error
     """The failure mode the plan comments state. A lexical-leg or rerank error is an ``Error:`` string from
     ``core.search``; the default dispatcher synthesizes an EMPTY retrieval result (a warning only, the error text
     kept under ``error``), so ``$step1.tumblers`` resolves to ``[]`` and the plan goes on with no seeds and no
-    vector rows. Pins the claim; nexus-vi9u4 is the fix (fail, retry or fall back)."""
+    vector rows. Pins the claim; GH #1667 follow-up B is the fix (fail, retry or fall back)."""
     err = "Error: the lexical leg failed for ['knowledge__x']: engine 503. Refusing rather than returning vector-only rows"
     seen: list[dict] = []
 
