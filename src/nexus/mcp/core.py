@@ -8411,6 +8411,12 @@ def scratch(
     persist: Annotated[bool, Field(
         description="For \"put\": flag the entry so it is copied to T2 at session end or session handoff.",
     )] = False,
+    scope: Annotated[str, Field(
+        description=(
+            "\"session\" (default): this session's scratch. \"identity\": the scratch of this session's identity, "
+            "which survives /clear and restart; a delegated child reads its parent's and cannot write it."
+        ),
+    )] = "session",
 ) -> str:
     """T1 session scratch pad: ephemeral, within-session-only notes.
 
@@ -8428,6 +8434,12 @@ def scratch(
     try:
         t1, isolated = _get_t1()
         prefix = "[T1 isolated] " if isolated else ""
+        if scope == "identity":
+            from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
+
+            t1, prefix = identity_scratch(t1), "[identity] "
+        elif scope != "session":
+            return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
 
         if action == "put":
             if not content:

@@ -53,6 +53,14 @@ _log = structlog.get_logger(__name__)
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
 
+#: Prefix of the T2 project a seat keeps its own notes in (RDR-253): ``identity/<id>``.
+IDENTITY_PROJECT_PREFIX: str = "identity/"
+
+
+def identity_project(identity_id: str) -> str:
+    """The T2 project of one identity's own notes. Keyed by the identity id, never by a name, so a rename moves nothing."""
+    return f"{IDENTITY_PROJECT_PREFIX}{identity_id}"
+
 #: Stopwords shared with MemoryStore for Jaccard overlap computation.
 _STOPWORDS: frozenset[str] = frozenset({
     "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
