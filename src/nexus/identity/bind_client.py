@@ -269,10 +269,6 @@ class IdentityClient:
         """Leave *group*; leaving one never joined removes nothing (``removed`` 0). Fenced."""
         return self._request("DELETE", f"/{identity}/memberships/{group}", fenced=True)
 
-    def groups_of(self, identity: str) -> list[dict[str, Any]]:
-        """The groups *identity* belongs to, in join order (``group``, ``role``, ``joined_at``)."""
-        return list(self._request("GET", f"/{identity}/memberships").get("memberships") or [])
-
     def roster(self, group: str) -> list[dict[str, Any]]:
         """The members of *group* in join order."""
         return list(self._request("GET", f"/groups/{group}").get("members") or [])

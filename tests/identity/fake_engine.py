@@ -38,7 +38,7 @@ class FakeEngine:
         self._minted = 0
         self.refuse: dict[str, IdentityApiError] = {}     # route name -> the refusal it answers with (a staged failure)
         self.work: dict[tuple[str, str, str], tuple[str, float]] = {}     # (identity, kind, ref) -> (state, updated_at)
-        self.memberships: dict[str, dict[str, str]] = {}                  # identity -> {group: role}, in join order
+        self.member_of: dict[str, dict[str, str]] = {}                  # identity -> {group: role}, in join order
         self.caller_token: str | None = None   # the identity the caller's token names; a membership write is fenced on it
 
     # ── staging (not routes) ────────────────────────────────────────────────
@@ -319,26 +319,26 @@ class FakeEngine:
         self._fence(identity, as_identity)
         if role not in ("leader", "member"):
             raise _refuse(400, "bad_role", "role must be leader or member")
-        self.memberships.setdefault(identity, {})[group] = role
+        self.member_of.setdefault(identity, {})[group] = role
         return {"identity": identity, "group": group, "role": role, "joined_at": "2026-11-18T00:00:00Z"}
 
     def leave_group(self, identity: str, group: str, *, as_identity: str | None = None) -> dict[str, Any]:
         self.calls.append(("leave_group", (identity, group, as_identity)))
         self._get(identity)
         self._fence(identity, as_identity)
-        removed = int(self.memberships.get(identity, {}).pop(group, None) is not None)
+        removed = int(self.member_of.get(identity, {}).pop(group, None) is not None)
         return {"identity": identity, "group": group, "removed": removed}
 
-    def groups_of(self, identity: str) -> list[dict[str, Any]]:
-        self.calls.append(("groups_of", (identity,)))
+    def memberships(self, identity: str) -> list[dict[str, Any]]:
+        self.calls.append(("memberships", (identity,)))
         self._get(identity)
         return [{"identity": identity, "group": g, "role": r, "joined_at": "2026-11-18T00:00:00Z"}
-                for g, r in self.memberships.get(identity, {}).items()]
+                for g, r in self.member_of.get(identity, {}).items()]
 
     def roster(self, group: str) -> list[dict[str, Any]]:
         self.calls.append(("roster", (group,)))
         return [{"identity": i, "group": group, "role": g[group], "joined_at": "2026-11-18T00:00:00Z"}
-                for i, g in self.memberships.items() if group in g]
+                for i, g in self.member_of.items() if group in g]
 
     def _fence(self, identity: str, as_identity: str | None) -> None:
         """The engine's ownership fence on memberships: the writer's token names the identity, or the write is refused."""

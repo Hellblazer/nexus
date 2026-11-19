@@ -46,7 +46,7 @@ def leave(client: Any, identity: str, group: str) -> bool:
 
 def groups(client: Any, identity: str) -> list[Membership]:
     """The groups *identity* belongs to, in join order."""
-    return [Membership.of({"identity": identity, **row}) for row in client.groups_of(identity)]
+    return [Membership.of({"identity": identity, **row}) for row in client.memberships(identity)]
 
 
 def roster(client: Any, group: str) -> list[Membership]:
