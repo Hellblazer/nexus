@@ -329,8 +329,10 @@ draft's claims point at.
 - [x] The engine's existing list routes return the same rows the walks read —
   **Status**: Verified (source), the Key Discovery on live rows above —
   **Method**: Source Search
-- [ ] Dropping documents with an unregistered `source_uri` scheme from
-  `nx doctor --check-references` is acceptable — **Status**: Assumed. Those rows
+- [x] Dropping documents with an unregistered `source_uri` scheme from
+  `nx doctor --check-references` is acceptable — **Status**: Verified (test,
+  nexus-uwggq.1.5): the golden diff dropped exactly the `chroma://` and `C:\`
+  rows, as predicted before the run, and kept the `HTTPS://` row. Those rows
   can only ever report "unknown", which never sets the check's exit code, and
   `nx catalog backfill source-uri` exists to rewrite the `chroma://` ones. A
   registered scheme spelled in capitals (`HTTPS://`) is counted under its
@@ -728,9 +730,9 @@ names the new call site and its `path:line`.
 
 ### Prerequisites
 
-- [ ] Critical Assumptions that gate Phase 2 verified: the engine spike
-  (statement time at 50,000 documents) and the equivalence test of the metadata
-  route. Phase 1 has no open assumption; the `--check-references` behaviour
+- [x] Critical Assumptions that gate Phase 2 verified: the engine spike
+  (statement time at 50,000 documents; nexus-uwggq.2.1, T2 `nexus_rdr/241-research-4`) and the equivalence test of
+  the metadata route (nexus-uwggq.2.7, `tests/integration/test_rdr241_meta_route_equivalence.py`). Phase 1 has no open assumption; the `--check-references` behaviour
   change moved to Phase 2 with nexus-uwggq.1.5 (option C).
 - [x] RDR-193 closed 2026-11-16: no prerequisite remains with it.
 - Not a prerequisite: nexus-f3yqd.2. This plan does not depend on its job
@@ -915,12 +917,13 @@ sensitive-path list) wherever it is cited. No contradiction found.
 
 Research records `nexus_rdr/241-research-1` to `-5`. Three are verified by
 source search: the call-site census, the two unattended walks, and the
-shipped pieces with the existing routes a walk can switch to. Two are
-assumed, each with a named check before the work it gates: the author and
-meta filter speed at 50,000 documents (a spike in Phase 2, before those
-routes ship) and the per-scheme switch in `nx doctor --check-references`
-(a before-and-after fixture diff, before that switch ships in Phase 2).
-Both gate Phase 2 only. The citation join in `link_generator._all_entries` is unverified
+shipped pieces with the existing routes a walk can switch to. Two more
+were assumed and are now verified by the check named before the work each
+gated: the author and meta filter speed at 50,000 documents, by the Phase 2
+spike (nexus-uwggq.2.1; the one exception, a broad author term paged deep at
+about 150 ms, is recorded in Critical Assumptions with Sam's no-index ruling),
+and the per-scheme switch in `nx doctor --check-references`, by the
+before-and-after fixture diff (nexus-uwggq.1.5). The citation join in `link_generator._all_entries` is unverified
 and outside the plan: that site stays in the ratchet table as AGGREGATE.
 
 ### Scope Verification
@@ -1006,3 +1009,4 @@ the next one without the ratchet.
 - 2026-11-18: The author route ships without the GIN `pg_trgm` index (Sam, ask author-index-deep-offset, option A); the deep-offset cost of about 150 ms is accepted and keyset paging is named as the fix if it ever matters (grant 3, linda).
 - 2026-11-19: The `--check-references` switch (nexus-uwggq.1.5, review T2 `nexus/review-3149265f7-nexus-uwggq.1.5-2026-11-19`, critique `nexus/critique-3149265f7-nexus-uwggq.1.5-2026-11-19-r1`): candidates come from one by-scheme read per registered non-`file` scheme, filtered last by the client's own scheme test; on an engine without the route the check reads "not checked" and exits 3, "could not check", as `nx catalog doctor --sensitive-with-aspects` does; a failed `/version` probe is an unreadable catalog, exit 1 (grant 3, linda).
 - 2026-11-19: The author route's fold also reads the final sigma as the medial one and drops U+0307 on both sides, so the route is a superset of the client's `str.lower()` answer, its count an upper bound, and nexus-uwggq.2.6's acceptance reads "superset, equal after `_keep`" (Sam's ruling on ask author-fold-five-pairs, T2 `nexus/sam-ruling-rdr241-author-fold-2026-11-19`; engine ff2884d21).
+- 2026-11-19: At close, the `--check-references` assumption and the Phase 2 prerequisites are ticked, and the Assumption Verification paragraph says both formerly assumed checks are verified: the golden fixture diff (nexus-uwggq.1.5, exactly the `chroma://` and `C:\` rows left, `HTTPS://` kept), the spike (nexus-uwggq.2.1) and the metadata equivalence test (nexus-uwggq.2.7, 8 of 8 executed in CI run 44514366264). The citation join in `link_generator._all_entries` stays unverified (grant 3, linda).
