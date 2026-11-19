@@ -160,5 +160,12 @@ def test_the_shipped_ci_develop_red_passes_every_check_against_the_real_registry
     assert resolve_tuple_template(templates, "board/ci/nexus-develop--done") is not None  # non-vacuity
     entries = [e for e in enumerate_auras(cwd=None) if e.name == "ci_develop_red"]
     assert [e.root for e in entries] == ["shipped"], entries
-    [check] = check_auras(entries, cwd=None, templates=templates)
-    assert not check.findings and not check.skipped, (check.findings, check.skipped)
+    # This test is about the registry dictionary. The serving-group rule has its own coverage in test_ci_develop_red.py;
+    # here a reader that returns the shipped group's record only keeps that check from being skipped.
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+
+    [check] = check_auras(
+        entries, cwd=None, templates=templates,
+        read_group=lambda name: GroupRecord(name, serves=("nexus-develop",)),
+    )
+    assert not check.findings and not check.skipped and not check.warnings, (check.findings, check.skipped, check.warnings)
