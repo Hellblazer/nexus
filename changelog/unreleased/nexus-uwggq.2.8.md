@@ -1,1 +1,0 @@
-- The cloud client-path gate's `/version` leg requires the three RDR-241 route flags (`catalog_docs_by_author_supported`, `catalog_docs_by_meta_supported`, `catalog_sensitive_locators_supported`) to read true through the public edge, so the engine deploy proves the edge allowlist lists them (nexus-uwggq.2.8).
