@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 E2E = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions"
 RUN_PY = E2E / "run.py"
 SIBLING = E2E / "identity_census.py"
@@ -334,7 +336,7 @@ def test_main_starts_no_session_and_exits_2_when_the_installed_nx_cannot_honour_
     started: list[str] = []
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
     monkeypatch.setattr(run.sys, "argv", ["run.py"])
-    monkeypatch.setattr(run.shutil, "which", lambda name, *a, **k: f"/fake/{name}")
+    setattr_in(monkeypatch, run, "shutil.which", lambda name, *a, **k: f"/fake/{name}")
     monkeypatch.setattr(run, "run_scenario", lambda *a, **k: started.append("scenario") or (True, [], []))
     monkeypatch.setattr(run, "load_script", lambda: started.append("load_script"))
     stub_census(run, monkeypatch, bind_gap="installed nx predates NX_IDENTITY_BIND; the sandbox would bind identities on the operator's endpoint")
@@ -347,7 +349,7 @@ def test_main_starts_no_session_and_exits_2_when_the_installed_nx_cannot_honour_
 def test_main_goes_on_when_the_installed_nx_honours_the_switch(run, monkeypatch) -> None:
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "x")
     monkeypatch.setattr(run.sys, "argv", ["run.py"])
-    monkeypatch.setattr(run.shutil, "which", lambda name, *a, **k: f"/fake/{name}")
+    setattr_in(monkeypatch, run, "shutil.which", lambda name, *a, **k: f"/fake/{name}")
     reached: list[str] = []
 
     class Stop(Exception):
@@ -513,7 +515,7 @@ def test_a_kept_scenario_is_still_checked_and_fails_on_a_new_sandbox_identity(ru
     """--keep skips cleanup but the census is read-only and runs with the sessions still up."""
     home = tmp_path / "kept"
     home.mkdir()
-    monkeypatch.setattr(run.tempfile, "mkdtemp", lambda prefix="": str(home))
+    setattr_in(monkeypatch, run, "tempfile.mkdtemp", lambda prefix="": str(home))
     stub_census(run, monkeypatch, BOB, {**BOB, "i24": row(24, "rs_alpha", 1, state="live")})
     keep = _Args()
     keep.keep = True
@@ -527,7 +529,7 @@ def test_a_scenario_whose_session_id_reads_as_bound_fails_even_when_the_list_sho
     """The ended identity: on no list, but its session id still resolves to it."""
     nx, log = sessions_nx(tmp_path, {SID_A: BOUND})
     real_which = run.shutil.which
-    monkeypatch.setattr(run.shutil, "which", lambda name, *a, **k: nx if name == "nx" else real_which(name, *a, **k))
+    setattr_in(monkeypatch, run, "shutil.which", lambda name, *a, **k: nx if name == "nx" else real_which(name, *a, **k))
     monkeypatch.setattr(run.Sandbox, "entries", lambda self: [{"sessionId": SID_A, "pid": 4242}])
     stub_census(run, monkeypatch, BOB, BOB, real_sessions=True)
     ok, failures, _ = run.run_scenario("gate", "claude", _Args(), None)
