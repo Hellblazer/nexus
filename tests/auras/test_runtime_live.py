@@ -389,6 +389,113 @@ def test_the_load_reads_the_git_top_levels_config_and_refuses_an_overlapping_cle
     assert subs.aura_topics() == [_TOPIC]
 
 
+_RED_SHA = "8b30c161bdb23adab27171f3185c2b52f158b736"
+
+
+def _mock_engine(monkeypatch: pytest.MonkeyPatch, memberships: list[str], calls: list[str]) -> None:
+    """The engine's membership and group routes behind the REAL clients (``IdentityClient.from_config`` and
+    ``GroupsClient.from_config`` are what the server's wiring builds), over an httpx mock transport."""
+    import httpx  # noqa: PLC0415
+
+    from nexus.groups import GroupsClient  # noqa: PLC0415
+    from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415
+
+    record = {"name": "push-train", "leader": "i3", "purpose": None, "requested_by": "i3", "formed_at": "2026-11-19T10:00:00Z",
+              "ends": None, "ended_at": None, "ack_deadline": 20, "ack_deadline_by_topic": {}, "serves": ["nexus-develop"],
+              "live": True}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        calls.append(f"{req.method} {req.url.path}")
+        if req.url.path == "/v1/identity/i7/memberships":
+            return httpx.Response(200, json={"identity": "i7", "memberships": [
+                {"identity": "i7", "group": g, "role": "member", "joined_at": "2026-11-19T09:00:00Z"} for g in memberships]})
+        if req.url.path == "/v1/group/push-train":
+            return httpx.Response(200, json=record)
+        return httpx.Response(404, json={"error": "not_found", "message": req.url.path})
+
+    def http() -> httpx.Client:
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(IdentityClient, "from_config", classmethod(lambda cls, **_k: IdentityClient("http://engine", "cred", http=http())))
+    monkeypatch.setattr(GroupsClient, "from_config", classmethod(lambda cls, **_k: GroupsClient("http://engine", "cred", http=http())))
+
+
+def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_filled(
+    repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-igea9.7 round 1: start_for_waiter with its real glue (the token file read by token_header, the membership
+    read and the group read over a mock engine, the state writer) loads the shipped ci_develop_red for a member of
+    push-train, fills ``me = self.identity`` from the token, and wakes through a row the waiter delivers. The same wiring
+    for an identity that is no member loads nothing, subscribes to nothing and runs nothing."""
+    import time  # noqa: PLC0415
+
+    from nexus.auras import load_aura  # noqa: PLC0415
+    from nexus.auras.loaded_state import read_state, state_dir  # noqa: PLC0415
+    from nexus.identity import token_header  # noqa: PLC0415
+    from nexus.identity.token_file import TokenFile, write_token_file  # noqa: PLC0415
+
+    (repo / ".nexus.yml").write_text("auras:\n  ci_develop_red: on\n", encoding="utf-8")
+    claude, cfg = tmp_path / "claude", tmp_path / "cfg"
+    (claude / "sessions").mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("NX_AURAS_OFF", raising=False)
+    parent = os.getppid()
+    token = tmp_path / "identity.token"
+    monkeypatch.setenv("NX_IDENTITY_TOKEN", str(token))
+    monkeypatch.setattr("nexus.daemon.service_registry.pid_alive", lambda _p: True)
+    aura = load_aura("ci_develop_red", cwd=None)
+    owner_subspace = aura.subspace
+
+    async def scenario(memberships: list[str], title: str, sid: str):
+        write_token_file(token, TokenFile(
+            identity="i7", generation=1, token="tok-7", expires_at=time.time() + 3600, session_id=sid, pid=parent,
+            started_at=1700, proc_start=None))
+        token_header.reset_for_tests()
+        (claude / "sessions" / f"{parent}.json").write_text(json.dumps(
+            {"sessionId": sid, "name": "tamsin", "kind": "interactive", "pid": parent, "startedAt": 1700, "updatedAt": 1}),
+            encoding="utf-8")
+        calls: list[str] = []
+        _mock_engine(monkeypatch, memberships, calls)
+        subs = SubscriptionSet(session_id=sid)
+        fake = _FakeTupleStore()
+        body = {"owner": "i7", "next": None, "reason": "earliest_suspect", "suspects": [_RED_SHA], "suspects_total": 1,
+                "episode_at": "2026-11-19T01:00:00Z", "refresh": False, "handoffs": 0}
+        fake.seed(owner_subspace, "o1", json.dumps(body), dims={"kind": "owner", "sha": _RED_SHA, "from": "engine"})
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(sid, _fake_store_factory(fake), subs, sender=sender)
+        loader = start_for_waiter(waiter, subs, store_ctx=_MemoryDb, cwd=repo)
+        loader.on_resolve("tamsin")
+        if waiter.aura_sink is not None:
+            waiter.aura_sink.__self__._run = _counting_run  # type: ignore[attr-defined]
+        await waiter.tick()
+        if waiter.aura_sink is not None:
+            assert await asyncio.to_thread(waiter.aura_sink.__self__.wait_idle, 120)  # type: ignore[attr-defined]
+        await asyncio.sleep(0.2)
+        return subs, loader, sender, calls
+
+    sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
+    _seed_entry(title, sid)
+    before = len(_REAL_RUNS)
+    subs, loader, sender, calls = asyncio.run(scenario(["push-train"], title, sid))
+    assert subs.aura_topics() == [owner_subspace] and loader.loaded_identity == "i7"
+    assert _ran(before) == 1
+    ack = f" Ack: post kind=ack sha={_RED_SHA} to {owner_subspace}."
+    assert f"state: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n" in _entry(title), "me was i7"
+    assert [text for text, _meta in sender.calls] == [channel_notice(aura, owner_subspace, "o1")]
+    assert sorted(set(calls)) == ["GET /v1/group/push-train", "GET /v1/identity/i7/memberships"], "one read of each"
+    written = read_state(state_dir(cfg) / f"loaded-{parent}.1700.json")
+    assert written is not None and written.identity == "i7" and written.auras["ci_develop_red"].loaded
+
+    sid2, title2 = _sid(), f"s-{uuid.uuid4().hex[:8]}"
+    _seed_entry(title2, sid2)
+    before = len(_REAL_RUNS)
+    subs, loader, sender, calls = asyncio.run(scenario(["some-other-group"], title2, sid2))
+    assert subs.aura_topics() == [] and _ran(before) == 0 and sender.calls == []
+    assert loader.decisions["ci_develop_red"].reason == "not_a_member"
+    assert "GET /v1/group/push-train" not in calls, "a non-member reads no group"
+
+
 def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(repo: Path) -> None:
     """nexus-mdbds.12.1, retargeted by nexus-igea9.7: the aura and procedure as they ship in the package root, not
     planted copies, through the real run path. The owner row's dims.sha and body fields and the session's identity
