@@ -178,8 +178,10 @@ lab-run -c lab-l -- bash -c 'uv sync && python3 scripts/watched_pytest.py --stal
   the one place that sees all of them, and a change to shared state (a runner, a
   class, a cache or worktree you do not own) is claimed through it, not made.
 - **Prune the others.** A worktree no session owns is dead weight (23 sat in
-  `~nxtest/src/nexus-wt` at 13 GB on 2026-10-19): `git worktree remove` it, then
-  `git worktree prune`.
+  `~nxtest/src/nexus-wt` at 13 GB on 2026-10-19). Ask first whether a live
+  identity still owns it: `nx identity may-stop --kind worktree --ref <path>`
+  (any nonzero exit is a stop; exit 3 names the owner). Only on exit 0,
+  `git worktree remove` it, then `git worktree prune`.
 
 `hellmini` is a bare custom label (registered with `--no-default-labels`), so a
 job has to name it. There are two persistent self-hosted registrations, `hellmini`

@@ -13,6 +13,9 @@ from pathlib import Path
 SKILLS = Path(__file__).resolve().parent.parent / "conexus" / "skills"
 FINISH = (SKILLS / "finishing-branch" / "SKILL.md").read_text(encoding="utf-8")
 CREATE = (SKILLS / "git-worktrees" / "SKILL.md").read_text(encoding="utf-8")
+DOCS = Path(__file__).resolve().parent.parent / "docs" / "agents"
+GUIDE = (DOCS / "worktrees.md").read_text(encoding="utf-8")
+RUNNERS = (DOCS / "self-hosted-runners.md").read_text(encoding="utf-8")
 
 
 def test_removal_asks_may_stop_first_with_the_real_path_and_stops_on_any_nonzero_exit() -> None:
@@ -36,3 +39,26 @@ def test_an_unowned_worktree_is_not_removed_on_the_checks_say_so_alone() -> None
 
 def test_creation_labels_the_worktree_by_its_real_path_and_the_label_never_blocks() -> None:
     assert 'nx identity work register --kind worktree --ref "$(pwd -P)" || true' in CREATE
+
+
+def test_the_worktree_guide_labels_creation_and_asks_before_removal() -> None:
+    """Agents make worktrees from the guide's rule 1 as often as from the skill (nexus-hczdo.1.10 r1 item 1)."""
+    rule1 = GUIDE[GUIDE.index("1. **Site worktrees as siblings**"):GUIDE.index("2. **The primary KEEPS")]
+    assert 'nx identity work register --kind worktree --ref "$(pwd -P)" || true' in rule1
+    ask = 'nx identity may-stop --kind worktree --ref "$(pwd -P)"'
+    assert ask in rule1 and rule1.index(ask) < rule1.index("git worktree remove")
+    assert re.search(r"git worktree remove \S+ && nx identity work done --kind worktree --ref \S+", rule1)
+
+
+def test_the_runner_prune_asks_may_stop_before_it_removes() -> None:
+    prune = RUNNERS[RUNNERS.index("**Prune the others.**"):]
+    prune = prune[:prune.index("\n\n")]
+    assert "nx identity may-stop --kind worktree --ref" in prune
+    assert prune.index("nx identity may-stop") < prune.index("git worktree remove") < prune.index("git worktree prune")
+
+
+def test_the_hand_run_guide_launches_labrun_and_watcher_through_work_run() -> None:
+    """r1 item 8 (critic S1): a labrun or watcher row exists only when the run is launched through the wrapper."""
+    guide = (DOCS / "test-running.md").read_text(encoding="utf-8")
+    assert "nx identity work run --kind labrun --ref <label> -- lab-remote" in guide
+    assert "nx identity work run --kind watcher --ref <label> --" in guide

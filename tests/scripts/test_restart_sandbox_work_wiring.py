@@ -60,3 +60,15 @@ def test_cleanup_stops_the_server_through_the_sibling_guard(run, tmp_path, monke
     dirty, _notes, _saw, _cfg = _cleanup(run, monkeypatch, tmp_path)
     assert seen == [("kill_server", "nx-rs-test-td")], "cleanup asks the guard, once, for the sandbox's own socket"
     assert dirty == []
+
+
+def test_no_call_in_run_py_sends_kill_server_except_through_the_guard() -> None:
+    """Every ``tmux kill-server`` in run.py goes through ``sandbox_work.kill_server`` (nexus-hczdo.1.10 r1 item 2): the
+    hangup probe's two stops did not, and a bare ``tmux("kill-server")`` anywhere fails this."""
+    tree = ast.parse(RUN_PY.read_text(encoding="utf-8"))
+    bare = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
+            and any(isinstance(a, ast.Constant) and a.value == "kill-server" for a in node.args)]
+    assert bare == [], f"run.py sends kill-server outside sandbox_work.kill_server at lines {bare}"
+    guarded = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "kill_server"]
+    assert len(guarded) >= 3, f"the cleanup and the probe's two stops call kill_server: found {guarded}"

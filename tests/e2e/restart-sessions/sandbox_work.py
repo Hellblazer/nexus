@@ -12,6 +12,9 @@ holder check, never from the socket's name pattern. After the kill the row is ma
 session, whose token file the process finds through its Claude ancestor. A process with no identity, or no ``nx`` on PATH,
 registers nothing and is never refused (exit 0 from the verbs); a check that cannot run is a note, not a refusal: the run
 must not leave a credential-bearing server behind because an engine was down. Nothing here raises.
+
+The guard is advisory for a server this run owns: its own rows never refuse it (``may-stop`` ignores the caller's own
+work), so it stops only a run that would kill a server another live session registered under the same socket name.
 """
 from __future__ import annotations
 

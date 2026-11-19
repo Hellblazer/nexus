@@ -188,6 +188,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import urllib.parse
 import uuid
 import zlib
@@ -2707,6 +2708,11 @@ def tmux_hangup_probe(workdir: Path, shape: str, *, wait_s: float = 10.0,
                               env=env, timeout=timeout)
 
     cmd = f"sh -c 'sh {shlex.quote(str(child))} {shlex.quote(str(ready))} {shlex.quote(str(marker))} & wait'"
+    # Every kill-server here goes through sandbox_work.kill_server, which asks `nx identity may-stop` first (RDR-253
+    # Step 6): no stop of a tmux server bypasses the ownership check, even this probe's own pid-named one.
+    guard = _load_slash("sandbox_work")
+    server = types.SimpleNamespace(sock=sock, real_nx=shutil.which("nx") or "", tmux=tmux)
+    notes: list[str] = []
     findings: list[str] = []
     pid = 0
     try:
@@ -2731,7 +2737,8 @@ def tmux_hangup_probe(workdir: Path, shape: str, *, wait_s: float = 10.0,
         time.sleep(1)
         if marker.exists():
             findings.append(f"{shape}: the marker was written before kill-server: the probe proves nothing")
-        tmux("kill-server")
+        guard.kill_server(server, notes)
+        findings += [f"{shape}: {n}" for n in notes if "NOT sent" in n]
         deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline and not marker.exists():
             time.sleep(0.1)
@@ -2742,8 +2749,8 @@ def tmux_hangup_probe(workdir: Path, shape: str, *, wait_s: float = 10.0,
         findings.append(f"{shape}: probe failed to run: {type(exc).__name__}: {exc}")
     finally:
         try:
-            tmux("kill-server", timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
+            guard.kill_server(server, [])
+        except OSError:
             pass
         if pid > 1 and str(child) in _args_of(pid):  # still the child, not a reused pid
             with contextlib.suppress(ProcessLookupError, PermissionError):
