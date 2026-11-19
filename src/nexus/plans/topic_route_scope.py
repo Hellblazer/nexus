@@ -40,6 +40,8 @@ SETTING_DEFAULT: Final = "off"
 ROUTED_TOOLS: Final[tuple[str, ...]] = ("search", "query")
 #: The structlog event for a setting value that is not ``off``, ``top1`` or ``band:<width>``.
 INVALID_EVENT: Final = "topic_route_setting_invalid"
+#: The structlog event for a config that could not be read for the setting (a malformed ``entity`` section).
+CONFIG_UNREADABLE_EVENT: Final = "topic_route_config_unreadable"
 
 _ROUTE: ContextVar[dict[str, Any] | None] = ContextVar("nexus_topic_route", default=None)
 
@@ -77,10 +79,20 @@ def setting_from_config(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 def configured_route() -> dict[str, Any] | None:
-    """The route the configured ``search.topic_route_nx_answer`` asks for, or ``None``. Read once per plan run."""
-    from nexus.config import load_config  # noqa: PLC0415 — keeps this module leaf; config is heavy
+    """The route the configured ``search.topic_route_nx_answer`` asks for, or ``None``. Read once per plan run.
 
-    return setting_from_config(load_config())
+    A config whose ``entity`` section is malformed raises :class:`~nexus.entity_keys.EntityConfigError` from
+    ``load_config``. The route is optional, and RDR-147's resolution boundary is where that error is judged, so here it
+    means no route and one warning, never the end of the plan run (develop red, nexus-7fku2.2.1)."""
+    from nexus.config import load_config  # noqa: PLC0415 — keeps this module leaf; config is heavy
+    from nexus.entity_keys import EntityConfigError  # noqa: PLC0415 — as above
+
+    try:
+        cfg = load_config()
+    except EntityConfigError as exc:
+        _log.warning(CONFIG_UNREADABLE_EVENT, setting=f"search.{SETTING_KEY}", error=str(exc), fallback="off")
+        return None
+    return setting_from_config(cfg)
 
 
 def route_for_step(

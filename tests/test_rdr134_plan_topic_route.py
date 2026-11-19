@@ -18,9 +18,12 @@ import structlog
 
 from bench.topic_route_nx_answer_ab import arm_setting
 from nexus import call_deadline
+from nexus import config as _config
 from nexus.config import _DEFAULTS  # type: ignore[attr-defined]
+from nexus.entity_keys import EntityConfigError
 from nexus.mcp import core
 from nexus.plans import runner
+from nexus.plans import topic_route_scope as trs
 from nexus.plans.runner import plan_run
 from nexus.plans.topic_route_scope import (
     INVALID_EVENT,
@@ -333,3 +336,18 @@ async def test_the_ab_drivers_arm_switch_reaches_the_runner(monkeypatch) -> None
         off = await _run(steps)
     assert on.of("search")[0]["topic_route"] == _TOP1
     assert "topic_route" not in off.of("search")[0]
+
+
+def test_a_config_that_cannot_load_gives_no_route_and_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The route is an optional setting read once per plan run (nexus-7fku2.2.1). A config that fails to load, such as
+    a malformed ``entity`` section (EntityConfigError), must not end the plan run here: RDR-147's resolution boundary
+    is where that error is judged. No route, and one warning naming the error."""
+
+    def broken(*a: Any, **k: Any) -> dict:
+        raise EntityConfigError("entity.collections[x]: not a regex")
+
+    monkeypatch.setattr(_config, "load_config", broken)
+    with structlog.testing.capture_logs() as logs:
+        assert trs.configured_route() is None
+    events = [e for e in logs if e.get("event") == trs.CONFIG_UNREADABLE_EVENT]
+    assert len(events) == 1 and "not a regex" in events[0]["error"]
