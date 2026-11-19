@@ -28,7 +28,7 @@ final class ChunkKeyStatusJson {
     private ChunkKeyStatusJson() {
     }
 
-    /** The two fields, each led by a comma, ready to append inside the status object. */
+    /** The fields above, each led by a comma, ready to append inside the status object. */
     static String fields() {
         StringBuilder b = new StringBuilder(256);
         b.append(",\"chunk_metadata_key_would_refuse_total\":").append(ChunkKeyAllowlistActivity.wouldRefuseTotal());

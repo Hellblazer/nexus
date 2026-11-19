@@ -293,12 +293,22 @@ class StatusHandlerTest {
         var check = new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
         var meta = java.util.Map.<String, Object>of("title", "t");
         int cap = dev.nexus.service.vectors.OwnerlessLogLimiter.MAX_KEYS;
-        for (int i = 0; i < cap; i++) {
-            check.observe("t", "knowledge-c" + i, "upsert-chunks", java.util.List.of(meta), 1, null, null);
-        }
-        assertThat(get().get("chunk_metadata_key_log_overflow_total").asLong()).as("every writer had a slot").isZero();
-        for (int i = 0; i < 3; i++) {
-            check.observe("t", "knowledge-late" + i, "upsert-chunks", java.util.List.of(meta), 1, null, null);
+        // Each of the cap distinct writers logs one WARN line; silence the check's logger so the loop stays well inside
+        // the limiter's one-minute window (past it, early slots expire and the late writers would find room).
+        var checkLogger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+            dev.nexus.service.vectors.ChunkKeyAllowlistCheck.class);
+        var before = checkLogger.getLevel();
+        checkLogger.setLevel(ch.qos.logback.classic.Level.OFF);
+        try {
+            for (int i = 0; i < cap; i++) {
+                check.observe("t", "knowledge-c" + i, "upsert-chunks", java.util.List.of(meta), 1, null, null);
+            }
+            assertThat(get().get("chunk_metadata_key_log_overflow_total").asLong()).as("every writer had a slot").isZero();
+            for (int i = 0; i < 3; i++) {
+                check.observe("t", "knowledge-late" + i, "upsert-chunks", java.util.List.of(meta), 1, null, null);
+            }
+        } finally {
+            checkLogger.setLevel(before);
         }
         var s = get();
         assertThat(s.get("chunk_metadata_key_log_overflow_total").asLong()).as("three writers had no slot").isEqualTo(3);

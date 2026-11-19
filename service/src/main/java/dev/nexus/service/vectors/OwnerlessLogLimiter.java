@@ -63,7 +63,7 @@ public final class OwnerlessLogLimiter {
      * @param onOverflow run once per request that lands in the shared overflow bucket (RDR-236 Phase 4 Step 2b prep,
      *                   nexus-6pfgb.66): the bucket's line names only its first key, so a caller that must know how
      *                   many writers the log could not name counts them here. It runs on the request thread and must
-     *                   not block.
+     *                   neither block nor throw.
      */
     public OwnerlessLogLimiter(LongSupplier clockMs, Runnable onOverflow) {
         this.clockMs = clockMs;
