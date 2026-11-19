@@ -343,8 +343,11 @@ unrouted).
 
 **Client and scope of the default.** `search_per_collection` and
 `search_cross_corpus` gain a `topic_route` argument, default off. The plan
-runner sets it on `search` and `query` steps whose scope is
-`taxonomy_domain: prose`, carried the way `chash_allow` is: popped from the
+runner sets it on `search` and `query` steps unless the step's scope names
+a `taxonomy_domain` other than `prose` or a `topic` (an unscoped step is
+routed: most plans carry no scope, and only three builtin templates declare
+`prose`, so a prose-only rule left routing almost unreachable; Step 9 probe,
+`134-research-17`), carried the way `chash_allow` is: popped from the
 step's args and held in a context variable that the `search` and `query`
 tools read when they call `search_cross_corpus` (`runner.py:3562-3567`,
 `-14`), so the dispatcher never drops it. Only collections of the prose
@@ -566,8 +569,9 @@ and rerun Step 5a. Record the cost of the extra embedding.
 #### Step 7: Plan runner wiring
 
 The runner carries `topic_route` from `search.topic_route_nx_answer` to
-`search` and `query` steps with `taxonomy_domain: prose`, through the context
-variable described above. Default `off`. Tests: an end-to-end plan run
+`search` and `query` steps whose scope names no other domain and no topic
+(amended 2026-11-19 from "with `taxonomy_domain: prose`" after the Step 9
+probe), through the context variable described above. Default `off`. Tests: an end-to-end plan run
 whose engine request carries the field; a code collection in a `corpus:
 all` step is not routed; a catalog-route `query` step is not routed.
 
@@ -708,3 +712,8 @@ The design reuses the RDR-156 routes rather than adding an index.
   develop red): with no planner statistics on the manifest, `taxonomy-022`'s
   per-chunk owner probe read the collection's whole manifest per chunk and
   ran past the 30 s bound; the new bodies count by one aggregation.
+- 2026-11-19: Step 7 routing no longer needs a prose-scoped plan (Sam,
+  option b after the Step 9 probe, `134-research-17`): the probe's question
+  matched `hybrid-factual-lookup`, which declares no scope, and its routed
+  arm sent no route. A step now routes unless its scope names another domain
+  or a topic; prose-only routing of collections stays in the search layer.

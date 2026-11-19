@@ -134,16 +134,20 @@ async def test_a_prose_search_and_query_step_carry_the_route(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_only_a_prose_scope_is_routed(monkeypatch) -> None:
+async def test_a_step_routes_unless_its_scope_names_another_domain_or_a_topic(monkeypatch) -> None:
+    # Sam 2026-11-19 (option b after the Step 9 probe): routing no longer needs a prose-scoped plan; only
+    # three builtin templates declare one, so most nx_answer plans could never route. The search layer
+    # sends the route to prose collections only, so an unscoped step that reaches code is unrouted there.
     _setting(monkeypatch, "top1")
     d = await _run([
         {"tool": "search", "args": {"query": "a"}, "scope": {"taxonomy_domain": "code"}},
         {"tool": "search", "args": {"query": "b"}},
         {"tool": "search", "args": {"query": "c", "corpus": "all"}, "scope": {"topic": "t"}},
         {"tool": "search", "args": {"query": "d"}, "scope": _PROSE},
+        {"tool": "search", "args": {"query": "e"}, "scope": {}},
     ])
     routed = {a["query"]: "topic_route" in a for a in d.of("search")}
-    assert routed == {"a": False, "b": False, "c": False, "d": True}
+    assert routed == {"a": False, "b": True, "c": False, "d": True, "e": True}
 
 
 @pytest.mark.asyncio

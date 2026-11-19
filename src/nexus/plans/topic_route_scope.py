@@ -104,10 +104,15 @@ def configured_route() -> dict[str, Any] | None:
 def route_for_step(
     tool: str, scope: Mapping[str, Any] | None, args: Mapping[str, Any], route: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """The ``topic_route`` a step carries, or ``None`` when it is not routed."""
-    if route is None or tool not in ROUTED_TOOLS or not scope:
+    """The ``topic_route`` a step carries, or ``None`` when it is not routed.
+
+    A step routes unless its plan scope names a domain other than prose or a topic. An unscoped step routes
+    too (most plans carry no scope): the search layer sends the route to prose collections only and leaves a
+    code-only call on the default path."""
+    if route is None or tool not in ROUTED_TOOLS:
         return None
-    if scope.get("taxonomy_domain") != "prose":
+    scope = scope or {}
+    if scope.get("taxonomy_domain", "prose") != "prose" or scope.get("topic"):
         return None
     if tool == "query" and any(args.get(k) for k in _QUERY_CATALOG_PARAMS):
         return None
