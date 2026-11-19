@@ -159,9 +159,9 @@ point at that key or at the RDR-225 composite `(tenant_id, name,
 embedding_model)`. The name also sits inside two primary keys, the chunks
 table's `(tenant_id, collection, chash, embedding_model)` and
 `taxonomy_centroids`', and three more foreign keys reach the name through the
-chunks key (the manifest, `topic_assignments`, `chunk_orphaned_at`). Sixteen
-further columns in thirteen tables hold a name with no foreign key at all
-(T2 `229-research-27`). The
+chunks key (the manifest, `topic_assignments`, `chunk_orphaned_at`). Fourteen
+further columns in eleven tables hold a name with no foreign key at all
+(T2 `229-research-27`, `229-research-48`, `229-research-54`). The
 RDR-227 per-collection index is built with the predicate `WHERE collection =
 '<name>'` and named from a hash that includes the name. So changing what a
 collection is called means rewriting every one of those rows and rebuilding
@@ -545,20 +545,23 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   limits. — **Status**: Verified — **Method**: Source Search (no object is
   named from a collection name; the per-collection index name is a hash).
 - [ ] Re-keying `nexus.chunks` and `nexus.taxonomy_centroids` on
-  `collection_id` (a new column backfilled on every row, a new primary key
-  per leaf, three child foreign keys re-pointed) and rebuilding every
-  per-collection index completes as background work (item 6, "How each
-  Phase 3 step runs") in a time the operator can see and accept, both on the
-  larger production tenant and on a large local store, and the key swap's
-  one `on_complete` transaction, the directly validated composite foreign
-  key included, holds its locks for a time the operator accepts. Until
+  `collection_id` (a new column backfilled on every row, a new id key per
+  leaf beside the name key, three child id keys, ten foreign-key
+  validation moves) and rebuilding every per-collection index completes as
+  background work (item 6, "How each Phase 3 step runs") in a time the
+  operator can see and accept, both on the larger production tenant and on
+  a large local store. Each move's `on_complete` (the key swap's, with the
+  directly validated composite foreign key; each validation's; P4.1's
+  chunk-family drop) holds its locks for a time the operator accepts, and
+  the P3.3b index pass finishes in such a time. Until
   this is measured, the RDR does not claim that no maintenance window is
   needed. — **Status**: Unverified — **Method**: Spike (P3.2, a timed run
   on a PITR fork of that tenant and a sizing on a local store). P3.2 runs
   before P3.1's changeset is final, because the registering INSERT carries
   each move's `chunk_size`, `sleep_ms` and `statement_timeout_ms`. A local
   measurement bounds the backfill and the index rebuild per 1M rows (T2
-  `229-research-30`); it does not time the key swap on that tenant.
+  `229-research-30`); it does not time the key swap, the validations, the
+  P3.3b pass or P4.1's drop on that tenant (T2 `229-research-54`).
 - [ ] No two live rows of one tenant share a label once renames stop
   tombstoning, so the partial UNIQUE on live labels (item 7) can be
   created without data repair. — **Status**: Unverified, expected true (the
@@ -703,8 +706,9 @@ UNIQUE `(tenant_id, collection_id)` that every reference targets, so
 pruning on tenant leaves are unchanged). The RDR-225 composite foreign key
 needs one more: it now references "UNIQUE (tenant_id, name,
 embedding_model)" (`vectors-030:126-127`, `:1062-1066`), and PostgreSQL
-requires the referenced columns to be "the columns of a non-deferrable
-unique or primary key constraint" (T2 `229-research-44`). So P3.1 also adds
+requires that "the refcolumn list must refer to the columns of a
+non-deferrable unique or primary key constraint or be the columns of a
+non-partial unique index" (T2 `229-research-44`). So P3.1 also adds
 UNIQUE `(tenant_id, collection_id, embedding_model)`, and it stays after
 Phase 4 as that key's target. At Phase 4 the primary key becomes
 `(tenant_id, collection_id)` and `(tenant_id, name)` stops being a key.
@@ -737,7 +741,8 @@ The key moves table by table in strangler order:
   UNIQUE today, vectors-054:90-93), `NOT VALID` first and validated after by a data move's
   `on_complete` (P3.3a). The exception is the RDR-225 composite from the
   partitioned `nexus.chunks`, which PostgreSQL validates directly (below).
-  Each validation is its own move, one per referencing table: the seven
+  Each validation is its own move, one per foreign key (so
+  `topic_assignments` has two): the seven
   registry foreign keys from tables that are not partitioned
   (`topic_assignments`, `document_aspects`, `topics`, `taxonomy_meta`,
   `document_highlights`, `canary_query_ring`, and `aspect_extraction_queue`
@@ -1464,8 +1469,8 @@ every script and note URI that names one.
   .2.23 waits for. A Phase 3 cut can still reach an install whose moves are
   blocked. There its readers stay on names (item 6, "A blocked move"). A
   BYO or `--no-pg-bundle` PostgreSQL "gets it from its DBA" (RDR-246 lines
-  801-802); until then that install is such a case (Cross-Cutting,
-  Deployment model).
+  801-802); until then that install is such a case (Cross-Cutting, "BYO
+  or `--no-pg-bundle` local PostgreSQL").
 
 ### Minimum Viable Validation
 
@@ -1604,11 +1609,15 @@ its acceptance is that test green plus the census pin it lowers.
   collection's `chunk_orphaned_at` rows, the new registry row's id.
 - P3.2 Spike, before P3.1's changeset is final: time the stamp, the chunks
   and centroid key swap (its `on_complete`, with the directly validated
-  composite foreign key) and the per-collection index rebuild on a PITR fork
-  of the larger production tenant, and size them on a local store of the
-  largest size class (Critical Assumption 5). Result in T2 and on the bead;
-  it sets each move's `chunk_size`, `sleep_ms` and `statement_timeout_ms`,
-  and says whether the swap needs a maintenance window.
+  composite foreign key), the ten foreign-key validation moves, the P3.3b
+  unique-index pass, the per-collection index rebuild and P4.1's
+  chunk-family drop on a PITR fork of the larger production tenant, and
+  size them on a local store of the largest size class (Critical
+  Assumption 5), including the extra id-key index from P3.3c to P4.1.
+  Result in T2 and on the bead; it sets each move's `chunk_size`,
+  `sleep_ms` and `statement_timeout_ms` ("the bound on each verification
+  run and on `on_complete`", RDR-246 line 403), and says whether any
+  `on_complete` needs a maintenance window.
 - P3.3 Switch the keys, as three beads; "P3.3" elsewhere means all three.
   Walked on a PITR fork before the cloud deploy and on a local store.
   `TenantExport`'s key model changes in P3.3a's and P3.3c's cuts (P3.11).
@@ -2054,8 +2063,9 @@ label meets a file path beyond P3.6's Windows test.
 - **Windows**: RDR-246 verified pg_background on the Windows x64 bundle:
   "built for Linux x86_64 and arm64 (manylinux_2_28), macOS arm64 and
   Windows x64. On each, a relocated bundle ran `CREATE EXTENSION` and a
-  background worker" (RDR-246 lines 225-227). So a bundled Windows install
-  runs the moves. Where a label meets a file path is not audited yet, and
+  background worker" (RDR-246 lines 225-227). Inferred, not read: so a
+  bundled Windows install runs the moves; RDR-246 verified the extension
+  and a background worker there, not a data move. Where a label meets a file path is not audited yet, and
   the label alphabet is open (Contradiction Check). P3.6's tests exercise on Windows one
   label holding a space, `%`, `:` and a non-ASCII character.
 - **IDE compatibility**: N/A.
@@ -2156,6 +2166,7 @@ large, and moved under a ratchet.
   `superseded_by_id`. S-3: the Approach says "up to P3.6". S-4: BYO
   PostgreSQL and Windows lines. S-5: a disposition for all sixteen no-FK
   name columns, P3.12 for Day 2, the `taxonomy_centroids` writer in P3.1's
-  acceptance. Observations 3, 4 and 6 corrected. The three recorded
+  acceptance. Observations 3 and 4 corrected, and Observation 6's rule
+  written into P4.1. The three recorded
   residuals are listed for Sam, not resolved. Contradiction Check and
   Scope Verification regenerated. T2 `229-research-43` to `-49` added.
