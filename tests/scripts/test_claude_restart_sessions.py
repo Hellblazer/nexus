@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from tests._module_seam import setattr_in
+from tests._restart_fake_clock import fake_clock as _fake_clock
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
 
@@ -470,7 +471,7 @@ def test_restart_logs_and_types_the_plugin_channel_form_for_a_dev_channel_sessio
     monkeypatch.setattr(crs, "tmux", lambda *a: typed.append(a))
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
     monkeypatch.setattr(crs, "alive", lambda _pid: False)  # the old pid is already gone
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     s = {"sessionId": "old-sid", "name": "tamsin", "pid": 111, "pane": "%1", "cwd": "/w", "argv": DEV_ARGV}
     with pytest.raises(crs.RelaunchStalled):
         crs.restart(s, str(handoff))
@@ -492,7 +493,7 @@ def test_restart_hands_started_on_whether_the_dev_dialog_may_be_up(crs, monkeypa
     handoff = tmp_path / "h.md"
     handoff.write_text("# a\n# b\n", encoding="utf-8")
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     new = {"sessionId": "new-sid", "pid": 999, "kind": "interactive", "tmux": "x:@1.%1"}
 
     def fake_tmux(*a) -> None:
@@ -1924,7 +1925,7 @@ def _loop_with_mail(crs, monkeypatch, tmp_path, *, busy: bool) -> list[str]:
     monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: busy)
     monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
     monkeypatch.setattr(crs, "status", lambda _s: "idle")
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     assert crs._write_handoffs([s], {"idle"}, 60, 10_000, "x") == {}
     return order
 
@@ -2676,7 +2677,7 @@ def _fake_tmux(crs, monkeypatch, tmp_path: Path, panes: list[_Pane], **kw) -> Fa
     monkeypatch.setattr(crs, "LATE", [])
     monkeypatch.setattr(crs, "STUCK", [])
     setattr_in(monkeypatch, crs, "subprocess.run", fake)
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     setattr_in(monkeypatch, crs, "os.kill", fake.kill)
     return fake
 
@@ -2968,7 +2969,7 @@ def test_an_ordinary_shell_pane_settles_without_sleeping(crs, monkeypatch, tmp_p
     pane = _Pane("%1", 111, direct=False)
     fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
     sleeps: list[float] = []
-    setattr_in(monkeypatch, crs, "time.sleep", sleeps.append)
+    _fake_clock(crs, monkeypatch, record=sleeps)
     assert crs.settle_pane("%1", "wren", "$1", "/w") == "%1"
     assert sleeps == [] and fake.verbs("respawn-pane") == [] and fake.verbs("new-window") == []
 
@@ -2979,7 +2980,7 @@ def test_an_ordinary_shell_pane_settles_without_sleeping_on_a_real_tmux(crs, mon
     time.sleep(0.5)  # the shell is up
     setattr_in(monkeypatch, crs, "subprocess.run", _REAL_RUN)
     sleeps: list[float] = []
-    setattr_in(monkeypatch, crs, "time.sleep", sleeps.append)
+    _fake_clock(crs, monkeypatch, record=sleeps)
     assert crs.settle_pane(pane, "plain", tm.run("display-message", "-p", "-t", pane, "#{session_id}"), str(tmp_path)) == pane
     assert sleeps == [], f"settle_pane waited on a plain shell: {sleeps}"
 
@@ -3295,3 +3296,4 @@ def test_the_revive_window_keeps_a_shell_when_claude_exits_on_a_real_tmux(crs, m
     time.sleep(1.5)  # the stand-in has exited by now
     assert tm.panes().get(pane) == "0", "the window closed with claude"
     assert tm.run("display-message", "-p", "-t", pane, "#{pane_current_command}") in {"sh", "bash", "zsh"}
+
