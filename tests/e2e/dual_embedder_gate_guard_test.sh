@@ -188,12 +188,15 @@ key_uses="$(code_of "$GATE" | grep -n 'GATE_VOYAGE_KEY' | grep -vE '^[0-9]+:(GAT
   || bad "GATE_VOYAGE_KEY is used elsewhere: $key_uses"
 
 # The engine boots from a private copy of the jar under the scratch dir, not the shared service/target path a sibling
-# leg rebuilds between this gate's two boots (nexus-i5mbq).
-copy_line="$(line_of "$GATE" '^[[:space:]]*cp "\$DG_JAR" "\$SCRATCH/engine\.jar"')"
+# leg rebuilds between this gate's two boots (nexus-i5mbq). The copy is made by build-gate-jar.sh --copy-to, under
+# its build lease and checked for the build_ref (release/v8.5.1 battery, 2026-11-19): a cp after the lease is
+# released could catch local-service-gate.sh's rebuild.
+copy_line="$(line_of "$GATE" 'build-gate-jar\.sh".*--copy-to "\$SCRATCH/engine\.jar"')"
 repoint_line="$(line_of "$GATE" '^[[:space:]]*DG_JAR="\$SCRATCH/engine\.jar"')"
-[[ -n "$copy_line" && -n "$repoint_line" && "$copy_line" -lt "$repoint_line" ]] \
-  && ok "the jar is copied under the scratch dir (line $copy_line) and DG_JAR repointed (line $repoint_line)" \
-  || bad "the gate does not boot from a private copy of the jar (copy line '$copy_line', repoint line '$repoint_line')"
+late_cp="$(code_of "$GATE" | grep -nE '^[[:space:]]*cp "\$DG_JAR"' || true)"
+[[ -n "$copy_line" && -n "$repoint_line" && "$copy_line" -lt "$repoint_line" && -z "$late_cp" ]] \
+  && ok "build-gate-jar.sh makes the boot copy under its lease (line $copy_line) and DG_JAR is repointed (line $repoint_line)" \
+  || bad "the gate does not boot from a copy made under the lease (copy line '$copy_line', repoint line '$repoint_line', late cp '$late_cp')"
 export_jar="$(code_of "$GATE" | grep -c 'NEXUS_SERVICE_JAR="\$DG_JAR"' || true)"
 [[ "$export_jar" -eq 1 ]] && ok "NEXUS_SERVICE_JAR is set from DG_JAR in exactly one place" \
   || bad "NEXUS_SERVICE_JAR is set from DG_JAR $export_jar times"

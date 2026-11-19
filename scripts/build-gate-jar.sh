@@ -100,7 +100,12 @@
 # until a later run or a hand restore). A signal ends the script with exit 130
 # (TERM used to give 143). See scripts/lib/leased-build.sh.
 #
-#   usage: scripts/build-gate-jar.sh [--lab-run <class>] [extra mvn args...]
+#   usage: scripts/build-gate-jar.sh [--lab-run <class>] [--copy-to <path>] [extra mvn args...]
+#
+# --copy-to <path>: also copy the jar to <path> before the lease is released, and fail unless the copy
+# carries the printed build_ref ("copied <path>" on success). A caller that LAUNCHES the jar uses it:
+# service/target/ is shared by every build in the worktree, and the release battery's legs run there in
+# parallel, so the shared path launched after the lease is released can hold another leg's jar.
 
 set -euo pipefail
 
@@ -126,11 +131,17 @@ source "$repo_root/scripts/lib/gate-jar-cache.sh"
 source "$repo_root/scripts/lib/leased-build.sh"
 
 lab_class=""
-if [[ "${1:-}" == "--lab-run" ]]; then
-    leased_build_check_lab_run build-gate-jar.sh "${2:-}"
-    lab_class="$2"
+copy_to=""
+while [[ "${1:-}" == "--lab-run" || "${1:-}" == "--copy-to" ]]; do
+    if [[ "$1" == "--lab-run" ]]; then
+        leased_build_check_lab_run build-gate-jar.sh "${2:-}"
+        lab_class="$2"
+    else
+        [[ -n "${2:-}" ]] || { echo "build-gate-jar.sh: --copy-to needs a path" >&2; exit 2; }
+        copy_to="$2"
+    fi
     shift 2
-fi
+done
 
 # Inside a lab-run grant a hand run refuses at once instead of waiting
 # (build_lease_caller_wait, nexus-dfg0q).
@@ -204,6 +215,13 @@ if [[ -n "$cache_key" ]] && cached="$(gate_jar_cache_lookup "$repo_root" "$cache
         echo "stamped build_ref=$hit_ref"
         echo "gate jar cache HIT key=$cache_key (build inputs unchanged since that build; $cached; jar $_GATE_JAR_PLACED)"
         echo "built $target_jar"
+        if [[ -n "$copy_to" ]]; then
+            if ! gate_jar_private_copy "$target_jar" "$copy_to" "$hit_ref"; then
+                build_lease_release service
+                exit 1
+            fi
+            echo "copied $copy_to"
+        fi
         build_lease_release service
         exit 0
     fi
@@ -261,3 +279,8 @@ fi
 # (service/pom.xml, nexus-fkhd3); keep it bounded.
 gate_jar_cache_prune_jooq "$repo_root"
 echo "built $built_jar"
+if [[ -n "$copy_to" ]]; then
+    # Still under the lease: the EXIT trap (leased-build.sh) releases it after this.
+    gate_jar_private_copy "$built_jar" "$copy_to" "$build_ref" || exit 1
+    echo "copied $copy_to"
+fi

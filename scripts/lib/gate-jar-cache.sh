@@ -193,6 +193,34 @@ with zipfile.ZipFile(sys.argv[1]) as zf:
 PY
 }
 
+# gate_jar_private_copy <jar> <dest> <build_ref> -- copies <jar> to <dest>, a path only the caller owns, and
+# refuses (rc 1, <dest> removed) unless the copy carries exactly build_ref=<build_ref>. A caller that will launch
+# the jar takes this copy while it still holds the service lease: service/target/ is shared by every build in
+# the worktree, and the release battery's legs run in parallel there, so a jar launched by its shared path after
+# the lease is released can be another leg's (release/v8.5.1 battery, 2026-11-19: the dual-gate leg's cache
+# restore landed between local-service-gate.sh's build and its launch). A copy, never a link: a restore that
+# rewrites the shared jar in place would reach a link.
+gate_jar_private_copy() {
+    local jar="${1:?gate_jar_private_copy: usage: gate_jar_private_copy <jar> <dest> <build_ref>}"
+    local dest="${2:?gate_jar_private_copy: usage: gate_jar_private_copy <jar> <dest> <build_ref>}"
+    local ref="${3:?gate_jar_private_copy: usage: gate_jar_private_copy <jar> <dest> <build_ref>}"
+    local tmp="$dest.tmp.$$" actual
+    rm -f "$dest" "$tmp" 2>/dev/null
+    if ! cp "$jar" "$tmp" 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null
+        echo "gate_jar_private_copy: could not copy $jar to $tmp" >&2
+        return 1
+    fi
+    if ! _gate_jar_cache_jar_ok "$tmp" "$ref"; then
+        actual="$(unzip -p "$tmp" META-INF/nexus/release.properties 2>/dev/null || true)"
+        rm -f "$tmp"
+        echo "gate_jar_private_copy: the jar copied from $jar does not carry build_ref=$ref; its release.properties:" >&2
+        printf '%s\n' "${actual:-  (entry missing)}" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$dest"
+}
+
 _gate_jar_cache_entry_ok() {
     local entry="$1" ref=""
     [[ -f "$entry/jar" && -f "$entry/build_ref" ]] || return 1
