@@ -2,7 +2,8 @@
 title: "No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs"
 id: RDR-241
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-19
 priority: high
 author: Sam
 reviewed-by: self
