@@ -330,7 +330,7 @@ def test_list_shows_the_leader_and_the_members_by_alias_each_with_its_rdr_253_st
 
 def test_list_json_is_the_record_and_the_members_with_their_state() -> None:
     result = _run(_env(_roster_wire()), "list", "push-train", "--json")
-    data = json.loads(result.output)
+    data = json.loads(result.stdout)
     assert data["group"]["leader"] == "i3"
     assert [(m["name"], m["role"], m["state"]) for m in data["members"]][:2] == [("halcyon", "leader", "live"), ("folio", "member", "unheld")]
 
@@ -381,7 +381,7 @@ def test_ack_times_reports_per_red_the_sha_episode_ack_time_and_minutes() -> Non
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
     result = _run(_env(wire, tuples=tuples), "ack-times", "push-train", "--json")
     assert result.exit_code == 0, result.output
-    reds = json.loads(result.output)["reds"]
+    reds = json.loads(result.stdout)["reds"]
     assert [(r["sha"], r["episode_at"], r["acked_at"], r["minutes"], r["acked_by"]) for r in reds] == [
         (SHA1, "2026-11-19T10:00:00Z", "2026-11-19T10:07:00Z", 7.0, "i4"),
         (SHA2, "2026-11-19T12:00:00Z", "2026-11-19T12:41:00Z", 41.0, "i5"),
@@ -408,7 +408,7 @@ def test_ack_times_with_no_reds_says_so_and_skips_a_refresh_row_as_a_new_red() -
         _row("owner", "2026-11-19T10:05:05Z", SHA2, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=True),
         _row("ack", "2026-11-19T10:09:00Z", SHA2, who="i4"),
     ]
-    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").output)["reds"]
+    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
     assert [(r["sha"], r["minutes"]) for r in reds] == [(SHA1, 9.0)], "a refresh row keeps its episode, and an ack of any red tip of it counts"
 
 
