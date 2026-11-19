@@ -485,6 +485,8 @@ _NOTE_PRODUCERS = (
     ("commands/store.py", "put_cmd"),
     ("commands/memory.py", "promote_cmd"),
     ("catalog/recovery_bundle.py", "_default_import_doc"),
+    # RDR-209 Phase 3 (nexus-1gdv0.2): gate-rollup's archives and pointer, written through nx store put's sequence.
+    ("memory_curate/gate_rollup.py", "store_note"),
 )
 
 

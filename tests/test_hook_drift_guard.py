@@ -536,6 +536,8 @@ T3_WRITE_PARITY_FILES: list[str] = [
     # like ``nx store put`` and ``nx memory promote`` do.
     "src/nexus/mcp/core.py",
     "src/nexus/catalog/recovery_bundle.py",
+    # RDR-209 Phase 3 (nexus-1gdv0.2): gate-rollup writes its archives and pointer through put_note.
+    "src/nexus/memory_curate/gate_rollup.py",
 ]
 
 
@@ -723,4 +725,5 @@ def test_the_parity_guard_reaches_every_note_producer() -> None:
         "src/nexus/commands/store.py::put_cmd": True,
         "src/nexus/mcp/core.py::store_put": True,
         "src/nexus/catalog/recovery_bundle.py::_default_import_doc": True,
+        "src/nexus/memory_curate/gate_rollup.py::store_note": True,  # RDR-209 Phase 3 (nexus-1gdv0.2)
     }, seen
