@@ -26,7 +26,7 @@ from nexus.memory_curate import gate_rollup as gr
 from nexus.memory_curate import gate_ttl as gt
 from tests._catalog_fixture_ops import documents_by_title
 from tests._engine_substrate import ensure_engine, mint_test_tenant
-from tests._t2_fixture_ops import backdate_memory
+from tests._t2_fixture_ops import backdate_memory, rewrite_memory_row, set_memory_access_count
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -457,16 +457,6 @@ def test_dry_run_prints_the_listing_and_writes_nothing(db: T2Database) -> None:
     assert _rows(db) == before
 
 
-def test_the_command_writes_no_ttl_and_leaves_every_t2_field_as_it_was(db: T2Database) -> None:
-    _gate(db, "nexus-n1")
-    _gate(db, "nexus-n1", sha="bbb2222", age_days=40)
-    before = _rows(db)
-    _phase3("nexus-n1")
-    _run("--all")
-    assert _rows(db) == before
-    assert all(r["ttl"] is None for r in _rows(db).values())
-
-
 def test_usage_errors(db: T2Database) -> None:
     for args in (["--phase", "3"],                                    # --phase needs --beads
                  ["--beads", "nexus-a"],                              # --beads needs --phase
@@ -717,3 +707,127 @@ def test_order_a_terminal_partial_stops_the_run_like_not_justified(db: T2Databas
     out = _phase3("nexus-tp", expect=1)
     assert "nexus-tp" in out and name in out and "partial" in out
     assert "--accept-open" in out and documents_by_title(POINTER_P3) == []
+
+
+# ── Step 3: the 30-day TTL (nexus-1gdv0.2.8) ─────────────────────────────────────
+
+def _same_but_ttl(row: dict) -> dict:
+    return {k: v for k, v in row.items() if k != "ttl"}
+
+
+def test_ttl_three_records_get_ttl_30_with_every_other_field_unchanged(db: T2Database) -> None:
+    names = []
+    for i, (agent, session, count) in enumerate([("agent-a", "sess-a", 0), ("agent-b", "sess-b", 4), ("agent-c", "sess-c", 9)]):
+        name = _gate(db, f"nexus-t{i}", sha=f"{i}{i}{i}1111", age_days=3 + i)
+        names.append(name)
+        db.put(project=REPO, title=name, content=_rows(db)[name]["content"], tags=_rows(db)[name]["tags"],
+               agent=agent, session=session)
+        backdate_memory(db, REPO, name, days=3 + i)
+        set_memory_access_count(db, REPO, name, count)
+        rewrite_memory_row(db, REPO, name, last_accessed="2026-11-01T12:00:00Z")
+    before = _rows(db)
+    assert {before[n]["agent"] for n in names} == {"agent-a", "agent-b", "agent-c"}
+    out = _phase3("nexus-t0,nexus-t1,nexus-t2")
+    after = _rows(db)
+    assert "ttl: wrote 3" in out
+    for n in names:
+        assert after[n]["ttl"] == 30
+        assert _same_but_ttl(after[n]) == _same_but_ttl(before[n]), n      # content, tags, agent, session, timestamp,
+    # access_count and last_accessed included: the import wrote them as they were
+
+
+def test_ttl_a_never_accessed_record_stays_never_accessed(db: T2Database) -> None:
+    name = _gate(db, "nexus-la")
+    assert _rows(db)[name]["last_accessed"] == ""
+    _phase3("nexus-la")
+    assert _rows(db)[name]["last_accessed"] == "" and _rows(db)[name]["access_count"] == 0
+
+
+def test_ttl_a_rerun_changes_nothing(db: T2Database) -> None:
+    _gate(db, "nexus-rr")
+    _gate(db, "nexus-rr", sha="bbb2222")
+    first = _phase3("nexus-rr")
+    after_first = _rows(db)
+    again = _phase3("nexus-rr")
+    assert "ttl: wrote 2" in first and "ttl: wrote 0" in again and "2 already have a TTL" in again
+    assert _rows(db) == after_first
+
+
+def test_ttl_a_forced_pointer_write_failure_leaves_no_ttl(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _gate(db, "nexus-pf")
+
+    def refuse(*_a, **_k):
+        raise gr.GateRollupError("the pointer was not stored (forced)")
+
+    monkeypatch.setattr(gr, "write_pointer", refuse)
+    out = _phase3("nexus-pf", expect=1)
+    assert "forced" in out
+    assert _rows(db)[name]["ttl"] is None
+
+
+def test_ttl_a_pointer_that_does_not_read_back_leaves_no_ttl(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _gate(db, "nexus-pg")
+    monkeypatch.setattr(gr, "read_pointer", lambda t3, title: None)
+    _phase3("nexus-pg", expect=1)
+    assert _rows(db)[name]["ttl"] is None
+
+
+def test_ttl_an_unmapped_record_keeps_no_ttl(db: T2Database) -> None:
+    mapped = _gate(db, "nexus-um")
+    bad = "review-abc1234-nexus-um-bad-2026-11-10"
+    _put(db, bad, "kind: review\nbead: nexus-um\noutcome: PASSED-ish\n\nbody", tags="kind:gate,bead:nexus-um,rdr:209")
+    bare = "review-abc1234-no-bead-p3-2026-11-10"
+    _put(db, bare, "kind: review\n\nbody", tags="kind:gate,rdr:209")
+    _phase3("nexus-um")
+    rows = _rows(db)
+    assert rows[mapped]["ttl"] == 30 and rows[bad]["ttl"] is None and rows[bare]["ttl"] is None
+
+
+def test_ttl_the_rdr_project_rows_get_none(db: T2Database) -> None:
+    _gate(db, "nexus-rd")
+    for title in ("209-gate-latest", "209-gate-critique-2026-11-16-r1", "209-fix-check-abc"):
+        _put(db, title, "gate flow row", tags="rdr,gate,kind:gate,bead:nexus-rd,rdr:209", project=f"{REPO}_rdr", age_days=40)
+    _phase3("nexus-rd")
+    _run("--all")
+    assert all(r["ttl"] is None for r in _rows(db, f"{REPO}_rdr").values()) and len(_rows(db, f"{REPO}_rdr")) == 3
+
+
+def test_ttl_an_access_between_the_listing_and_the_import_keeps_its_count(
+        db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _gate(db, "nexus-ac")
+    real = gr.write_pointer
+
+    def write_then_read(*a, **k):
+        done = real(*a, **k)
+        db.get(project=REPO, title=name)       # a reader's access lands after the listing, before the import
+        return done
+
+    monkeypatch.setattr(gr, "write_pointer", write_then_read)
+    _phase3("nexus-ac")
+    assert _rows(db)[name]["access_count"] == 1 and _rows(db)[name]["ttl"] == 30
+
+
+def test_dry_run_counts_exactly_the_record_past_its_effective_ttl_and_writes_nothing(db: T2Database) -> None:
+    old = _gate(db, "nexus-dr", sha="aaa1111", age_days=40)
+    fresh = _gate(db, "nexus-dr", sha="bbb2222", age_days=10)
+    before = _rows(db)
+    out = _phase3("nexus-dr", "--dry-run")
+    assert "quarantined by the next expire sweep: 1 of 2" in out
+    line = {t: next(ln for ln in out.splitlines() if t in ln and ln.startswith("  candidate")) for t in (old, fresh)}
+    assert "past its effective TTL" in line[old] and "within its effective TTL" in line[fresh]
+    assert _rows(db) == before and documents_by_title(POINTER_P3) == []
+
+
+def test_ttl_a_field_that_does_not_read_back_is_named_with_the_original_row(
+        db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.db.t2.http_memory_store import HttpMemoryStore
+
+    name = _gate(db, "nexus-mm")
+    real = HttpMemoryStore.import_entry
+
+    def altered(self, **kw):
+        return real(self, **{**kw, "tags": kw["tags"] + ",tampered"})
+
+    monkeypatch.setattr(HttpMemoryStore, "import_entry", altered)
+    out = _phase3("nexus-mm", expect=1)
+    assert f"mismatch: {name!r} field tags" in out and "tampered" in out and "original row" in out

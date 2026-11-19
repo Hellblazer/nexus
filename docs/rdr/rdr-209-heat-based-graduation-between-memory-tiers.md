@@ -574,9 +574,14 @@ write it through the verbatim import route (`HttpMemoryStore.import_entry`,
 `get_all` returned it: project, title, content, tags, agent, session,
 `access_count`, `last_accessed` and timestamp. A null agent or session is sent
 as absent, so it stays NULL, and a `last_accessed` of `""` is sent as `None`.
-Then read the row back through `get_all` and compare every field. A mismatch is
-reported with the title and the field, and the original row's values are
-printed so a person can write them back; the command does not undo it.
+The values come from one `get_all` taken right before the writes, after the
+pointer is written and read back, so a reader's access that landed after the
+listing keeps its count (a per-row `get` would stamp access, A8); a row that now
+has a TTL, or is gone, is skipped. Then read the rows back through one
+`get_all` and compare every field. A mismatch is reported with the title and
+the field, and the original row's values are printed so a person can write them
+back; the command does not undo it, and exits nonzero. The read cost is one
+`get_all` before the writes and one after, on top of the listing's.
 
 - *Why import and not put.* A `put` fills a missing agent or session from the
   writer's environment and the engine stores that, so it would give a record
@@ -616,7 +621,10 @@ printed so a person can write them back; the command does not undo it.
   a row quarantined in that moment would be restored, because the import clears
   both quarantine stamps (research-10). The phase is closed and its reviewers
   are done, and the engine offers no compare-and-set, so this is accepted and
-  stated.
+  stated. The fresh read narrows the same race for `access_count`: a read that
+  lands between that read and a record's import loses its count, a window the
+  length of the write loop; closing it needs a compare-and-set, which the
+  engine does not have.
 
 ### Existing Infrastructure Audit
 
@@ -935,7 +943,10 @@ nothing and reports one number: how many of those records the next expire
 sweep would quarantine. That number goes to Sam (through the session that
 coordinates the work) before any TTL is written, and the real run waits for
 his word. The dry run is the command with `--dry-run`; it reads with the same
-`get_all` as Step 1 and computes the same effective TTL as the engine.
+`get_all` as Step 1 and computes the same effective TTL as the engine. It prints
+each candidate as `candidate  <timestamp>  access_count=N  effective TTL X d
+past|within its effective TTL  <title>` and ends with `would be quarantined by
+the next expire sweep: N of K candidate record(s)`.
 
 As designed. Tests: the dry run writes nothing and reports the count, with one
 seeded record past its effective TTL and one not, counting exactly one; three seeded records each get `ttl=30` with content, tags,
@@ -946,7 +957,10 @@ step is switched to `put`); a seeded record with a never-accessed
 `last_accessed` stays never-accessed; a rerun changes nothing; a forced
 pointer-write failure leaves no TTL; the `<repo>_rdr` rows (gate-latest,
 critique, fix-check) get no TTL and `_census` no longer flags them; a planted
-record without a readable verdict is unmapped and keeps no TTL.
+record without a readable verdict is unmapped and keeps no TTL; a pointer that
+does not read back leaves no TTL; an access that lands between the listing and
+the import keeps its count; a field that does not read back is named with the
+original row and the run exits nonzero.
 
 #### Step 4 (shipped): the census flag
 
@@ -1206,3 +1220,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Gate finding S7 and Sam's ruling "Keep findings in full" (nexus-1gdv0.2.5): the claim that Steps 1 to 3 retire the gate records "without losing them", and the line "it keeps its sources by title and copies no body", overstated what survives, because after the TTL, quarantine, rollup and reap only the pointer and RDR-207's summary were left. The one-line excerpt default is withdrawn. Step 1 now writes each listed record's full text to T3 as a note of its own (subject `nexus-rdr-research`, `category=gate_record`, titled `<project>/<T2 title>`, split into titled parts when over 16,384 bytes), reads it back and compares it before the pointer is written, and the pointer names each archive and its part count; unmapped records are not archived. Step 2 reads every archive back before any TTL. Wording amended in Gap 6, the Approach, Step 1, Step 2, the test lists and the Day 2 table. The loss check's own read of the archive is Step 2 and is not built here. |
 | 2026-11-19 | Phase 3 Step 2, the loss check (nexus-1gdv0.2.6), built before any write. The run refuses an open phase before it writes anything, the archives and the pointer included, by the census flag's own rule (closed status, or the phase heading's close marker; `--all` needs the RDR closed). Check 2 gains a meaning the earlier text lacked, because a title taken from the read that listed it is present by construction: a record an earlier pointer listed that the read no longer lists is carried into the new pointer (`state: absent`) when its archive reads back whole, and an archive that does not stops the run naming the title; so a record the reap deleted never drops out of the listing. The pointer is read back with the same list. A not-justified or partial newest record stops the run unless `--accept-open <bead>` (repeatable, recorded in the pointer, refused when it names no listed bead). The command moved out of `commands/memory.py` (now back under its 800-line cap) into `memory_curate/gate_cli.py`, registered in `cli.py`; the loss check lives in `memory_curate/gate_ttl.py`. |
 | 2026-11-19 | Gate finding S5 (nexus-1gdv0.2.7): Step 2.3 said "newest record (by header date, then round)", but the round is optional, dates are day-granular and an older record has no header. The order is now written and built: header date, then round, then title; a headerless record is dated from the first date in its title, else its timestamp's day; the round is the title's `-r<N>` as a number, 0 when absent; when records tie on date and round the worse verdict decides. A terminal `partial` keeps the blocking rule as designed and says so; letting a partial that states no ship-blocker pass would change the design and is left to Sam. |
+| 2026-11-19 | Phase 3 Step 3, the TTL write (nexus-1gdv0.2.8), built. A real run writes `ttl=30` through `import_entry` on each record that passed Step 2 and has no TTL, after the pointer is written and read back; every other field goes as `get_all` returned it, and a read-back compares each field and names a mismatch with the original row (exit nonzero, no undo). The values come from one `get_all` taken right before the writes, not one per record: a per-row `get` stamps access (A8) and a filtered `get_all` does not exist, so audit residual (2) is narrowed to the length of the write loop and stated beside the residual race rather than closed. `--dry-run` prints each candidate with its timestamp, `access_count` and whether the engine rule has it past its effective TTL, and one count. The census change is nexus-1gdv0.2.9. |

@@ -51,3 +51,5 @@ def gate_rollup_cmd(rdr: int, phase: str | None, beads: str | None, all_phases: 
         raise click.ClickException(str(exc)) from exc
     for line in result.lines:
         click.echo(line)
+    if result.mismatches:
+        raise click.ClickException(f"{len(result.mismatches)} field(s) did not read back as written; nothing was undone")

@@ -12,7 +12,8 @@ uses (``put_note``):
   every record (project, title, kind, bead, reviewed sha, verdict, timestamp, archive title and part count) and,
   under ``unmapped``, the records that map to no bead or have no readable verdict. A rerun replaces it.
 
-The module writes nothing to T2: no TTL, no tag, no content change (Step 3 owns the TTL).
+This module writes nothing to T2. The loss check and the TTL write that follow the archive and the pointer are
+:mod:`nexus.memory_curate.gate_ttl`.
 """
 from __future__ import annotations
 

@@ -14,14 +14,19 @@ names the cause, if any check of Step 2 fails:
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from nexus.memory_curate import _all_closed, closed_phase_numbers, closed_rdr_numbers
+from nexus.memory_curate import _all_closed, _parse_ts, closed_phase_numbers, closed_rdr_numbers
 from nexus.memory_curate import gate_rollup as gr
 
 SEVERITY = {"justified": 0, "partial": 1, "not-justified": 2}
+TTL_DAYS = 30
+#: The fields the TTL write must leave as they were; ``ttl`` itself must read 30.
+KEPT_FIELDS = ("content", "tags", "agent", "session", "timestamp", "access_count", "last_accessed")
 
 
 @dataclass
@@ -35,6 +40,9 @@ class Result:
     pointer_parts: int = 0
     stale: list[str] = field(default_factory=list)
     carried: list[dict[str, Any]] = field(default_factory=list)
+    ttl_written: list[str] = field(default_factory=list)
+    ttl_skipped: list[str] = field(default_factory=list)
+    mismatches: list[str] = field(default_factory=list)
 
 
 # ── check 1: the phase is closed ─────────────────────────────────────────────────
@@ -122,12 +130,93 @@ def merge_previous(t3: Any, scope: gr.Scope, sel: gr.Selection) -> tuple[list[di
     return carried, bad
 
 
+# ── the engine's expiry rule ─────────────────────────────────────────────────────
+
+def effective_ttl_days(access_count: int, ttl_days: int = TTL_DAYS) -> float:
+    """``MemoryRepository.java:697``: ``ttl * (1 + ln(accessCount + 1))``, the natural log."""
+    return ttl_days * (1.0 + math.log(access_count + 1))
+
+
+def would_expire(row: dict[str, Any], *, now: datetime, ttl_days: int = TTL_DAYS) -> bool:
+    """True when the engine's expire sweep would quarantine *row* if it carried *ttl_days* (``MemoryRepository.java:686-701``).
+
+    A row with no timestamp is skipped (``:695``); the age is whole seconds over 86,400 (``:698``, the engine
+    truncates to seconds before dividing); the comparison is strict (``:699``)."""
+    stamp = _parse_ts(row.get("timestamp") or "")
+    if stamp is None:
+        return False
+    age_days = int((now - stamp).total_seconds()) / 86400.0
+    return age_days > effective_ttl_days(int(row.get("access_count") or 0), ttl_days)
+
+
+# ── the TTL write ────────────────────────────────────────────────────────────────
+
+def write_ttl(mem: Any, project: str, candidates: list[dict[str, Any]], fresh: dict[str, dict[str, Any]],
+              res: Result) -> dict[str, dict[str, Any]]:
+    """Write ``ttl=30`` on each candidate through the verbatim import route; return ``{title: row sent}``.
+
+    *fresh* is a read of the project taken just before this call, so a reader's access that landed after the listing
+    keeps its count. A row that now has a TTL, or is gone, is skipped. Every other field goes as that read returned
+    it: a null agent or session is sent as absent so it stays NULL, and an empty ``last_accessed`` as ``None``. Never
+    ``put``: it fills a missing agent or session from the writer's environment."""
+    sent: dict[str, dict[str, Any]] = {}
+    for e in candidates:
+        row = fresh.get(e["title"])
+        if row is None or row.get("ttl") is not None:
+            res.ttl_skipped.append(e["title"])
+            continue
+        try:
+            mem.import_entry(
+                project=project, title=row["title"], content=row["content"], timestamp=row["timestamp"],
+                tags=row.get("tags") or "", ttl=TTL_DAYS, agent=row.get("agent"), session=row.get("session"),
+                access_count=int(row.get("access_count") or 0), last_accessed=row.get("last_accessed") or None)
+        except Exception as exc:  # noqa: BLE001 — name the record; the ones already written keep their TTL and a rerun finishes
+            raise gr.GateRollupError(
+                f"the TTL write stopped at {row['title']!r}: {type(exc).__name__}: {exc}; "
+                f"{len(sent)} earlier record(s) have the TTL, and a rerun writes the rest") from exc
+        sent[row["title"]] = row
+    return sent
+
+
+def read_back(mem: Any, project: str, sent: dict[str, dict[str, Any]], res: Result) -> None:
+    """Compare every field of each row written with what it was sent as; a mismatch names the title and the field and
+    prints the original row so a person can write it back. The command does not undo."""
+    after = {r["title"]: r for r in mem.get_all(project)}
+    for title, was in sent.items():
+        row = after.get(title)
+        if row is None:
+            res.mismatches.append(f"mismatch: {title!r} is not in the read after the write; it was {was}")
+            continue
+        wrong = [f for f in KEPT_FIELDS if (row.get(f) or None) != (was.get(f) or None)]
+        if row.get("ttl") != TTL_DAYS:
+            wrong.append("ttl")
+        for f in wrong:
+            res.mismatches.append(f"mismatch: {title!r} field {f}: now {row.get(f)!r}, was {was.get(f)!r}; original row {was}")
+
+
 # ── the run ──────────────────────────────────────────────────────────────────────
 
+def dry_run_lines(candidates: list[dict[str, Any]], by_title: dict[str, dict[str, Any]], now: datetime) -> list[str]:
+    """The dry run's report: each candidate with its timestamp, ``access_count`` and whether the engine's rule has
+    it past its effective TTL, then the one number: how many the next expire sweep would quarantine."""
+    out: list[str] = []
+    past = 0
+    for e in candidates:
+        row = by_title[e["title"]]
+        is_past = would_expire(row, now=now)
+        past += is_past
+        count = int(row.get("access_count") or 0)
+        out.append(f"  candidate  {row.get('timestamp') or 'no timestamp'}  access_count={count}  effective TTL "
+                   f"{effective_ttl_days(count):.1f} d  {'past' if is_past else 'within'} its effective TTL  {e['title']}")
+    out.append(f"would be quarantined by the next expire sweep: {past} of {len(candidates)} candidate record(s)")
+    return out
+
+
 def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: tuple[str, ...],
-        root: Path, t3_factory: Any) -> Result:
+        root: Path, t3_factory: Any, now: datetime | None = None) -> Result:
     """The command after option parsing. Every refusal is a :class:`~nexus.memory_curate.gate_rollup.GateRollupError`
-    raised before anything is written."""
+    raised before anything is written; *now* is the clock the dry run's expiry rule reads."""
+    now = now or datetime.now(UTC)
     reason = open_phase_reason(scope, root)
     if reason is not None:
         raise gr.GateRollupError(reason)
@@ -158,7 +247,11 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
         raise gr.GateRollupError(
             f"the earlier pointer lists {', '.join(bad)}, which is neither in this read nor archived in T3 any more; "
             "nothing was written")
+    by_title = {r["title"]: r for r in rows}
+    candidates = [e for e in sel.listed if by_title[e["title"]].get("ttl") is None]
+    res.ttl_skipped = [e["title"] for e in sel.listed if by_title[e["title"]].get("ttl") is not None]
     if dry_run:
+        res.lines += dry_run_lines(candidates, by_title, now)
         res.lines.append("dry run: archives, the pointer write and its read-back skipped; nothing written")
         return res
 
@@ -169,11 +262,17 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
     want = {(e["project"], e["title"]) for e in [*sel.listed, *res.carried]}
     if back is None or {(e["project"], e["title"]) for e in back.listed} != want:
         raise gr.GateRollupError(f"the pointer {res.pointer_title!r} did not read back from T3 with the same list")
+    fresh = {r["title"]: r for r in mem.get_all(project)}        # one read, right before the writes
+    sent = write_ttl(mem, project, candidates, fresh, res)
+    res.ttl_written = list(sent)
+    read_back(mem, project, sent, res)
     res.lines += [
         f"archived {res.archived} record(s), {res.already_whole} already whole",
+        f"ttl: wrote {len(sent)} record(s) with ttl={TTL_DAYS}, {len(res.ttl_skipped)} already have a TTL",
         f"pointer: {res.pointer_title} ({len(text.encode())} bytes), pointer parts: {res.pointer_parts}",
     ]
     if res.carried:
         res.lines.append(f"carried: {len(res.carried)} record(s) an earlier pointer listed that this read does not")
     res.lines += [f"stale: {t!r} is left from an earlier, longer pointer; nothing here deletes it" for t in res.stale]
+    res.lines += res.mismatches
     return res
