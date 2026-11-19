@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The first consumer as shipped: ``ci_red_notice.lua`` and ``ci_develop_red.aura.toml``
-(RDR-249 Phase 3 Step 1, Technical Design 7, bead nexus-mdbds.12.1).
+(RDR-249 Phase 3 Step 1, Technical Design 7, bead nexus-mdbds.12.1), retargeted by RDR-252 Step 4 part B
+(bead nexus-igea9.7) onto the owner post ``board/ci/nexus-develop--owner``: one display per state of an owner row.
 
 The procedure runs in the test-local harness ``tests/test_procedure_gate_record.py`` uses: the
 environment the runtime builds from the static check's own allowlists, loaded in mode "t". The
@@ -17,14 +18,13 @@ import lupa.lua54 as lua54
 import pytest
 
 from nexus.auras import enumerate_auras, load_aura, parse_aura
-from nexus.auras.check import check_auras
+from nexus.auras.check import check_auras, check_serving_group
 from nexus.auras.enable import resolve
+from nexus.auras.load_gate import GroupRecord
 from nexus.auras.threads_block import MAX_STATE_CHARS, sanitize_state
 from nexus.lua_runtime import header as hd
 from nexus.lua_runtime import library
 from nexus.lua_runtime import static_check as sc
-
-from ._support import TD1_EXAMPLE
 
 ROOT = library.shipped_root()
 SOURCE = (ROOT / "ci_red_notice.lua").read_bytes()
@@ -59,44 +59,223 @@ def _run(**args: object) -> dict:
 
 # -- the procedure ----------------------------------------------------------------
 
+ME = "i7"
+OTHER = "i9"
+THIRD = "i12"
+SHORT = SHA[:7]
+OWNER_SUBSPACE = "board/ci/nexus-develop--owner"
+#: What the owner displays append so the owner can acknowledge. The 200-character state line has no room for the
+#: whole command, so it names the subspace, the row kind and the sha; docs/auras.md has the full command.
+ACK = f" Ack: nx tuple out {OWNER_SUBSPACE} kind=ack sha={SHA}"
 
-def test_the_header_declares_sha_and_outcome_and_grants_nothing() -> None:
+
+def _row(
+    owner: str | None,
+    next_: str | None = None,
+    reason: str = "earliest_suspect",
+    refresh: bool = False,
+    me: str = ME,
+    sha: str = SHA,
+) -> dict:
+    """The arguments the aura maps from an owner row (body.owner, body.next, body.reason, body.refresh, dims.sha) and
+    from the session (self.identity). A null owner or next is an absent optional argument, as the runtime passes it."""
+    out: dict = {"sha": sha, "reason": reason, "refresh": refresh, "me": me}
+    if owner is not None:
+        out["owner"] = owner
+    if next_ is not None:
+        out["next"] = next_
+    return out
+
+
+def test_the_header_declares_the_owner_row_fields_and_me_and_grants_nothing() -> None:
     h = hd.parse(SOURCE, name="ci_red_notice")
-    assert [(a.name, a.type, a.optional) for a in h.args] == [("sha", "string", False), ("outcome", "string", False)]
+    assert [(a.name, a.type, a.optional) for a in h.args] == [
+        ("sha", "string", False),
+        ("owner", "string", True),
+        ("next", "string", True),
+        ("refresh", "boolean", False),
+        ("reason", "string", False),
+        ("me", "string", False),
+    ]
     assert h.grants == frozenset()
     assert sc.check(SOURCE, h.grants) == frozenset()
 
 
-def test_a_full_sha_shows_the_td7_text_with_its_short_form() -> None:
-    out = _run(sha=SHA, outcome="failure")
+# The displays, one per state of an owner row (bead nexus-igea9.7 item 11), each from a fixture row.
+DISPLAYS = [
+    pytest.param(
+        _row(ME), f"Develop is red at {SHORT}, first red in your push. Diagnose it." + ACK, id="owner-earliest-suspect"
+    ),
+    pytest.param(
+        _row(ME, reason="no_record"),
+        f"Develop is red at {SHORT}; the leader takes it (no_record). Diagnose it." + ACK,
+        id="owner-leader-takes-no-record",
+    ),
+    pytest.param(
+        _row(ME, reason="handoff"),
+        f"Develop is red at {SHORT}; it was handed to you after no acknowledgement. Diagnose it." + ACK,
+        id="owner-after-handoff",
+    ),
+    pytest.param(
+        _row(ME, reason="escalated"),
+        f"Develop is red at {SHORT}; no one acknowledged. Raise an ask to Sam.",
+        id="escalated-names-me",
+    ),
+    pytest.param(
+        _row(None, reason="escalated"),
+        f"Develop is red at {SHORT}; no one acknowledged. Raise an ask to Sam.",
+        id="escalated-no-owner",
+    ),
+    pytest.param(_row(OTHER, ME), f"Develop is red at {SHORT}; {OTHER} owns it. You are next up.", id="next-up"),
+    pytest.param(
+        _row(OTHER, THIRD), f"Develop is red at {SHORT}; {OTHER} owns it. Hold your pushes.", id="everyone-else"
+    ),
+    pytest.param(
+        _row(OTHER), f"Develop is red at {SHORT}; {OTHER} owns it. Hold your pushes.", id="everyone-else-no-next"
+    ),
+    pytest.param(
+        _row(OTHER, reason="escalated"),
+        f"Develop is red at {SHORT}; {OTHER} owns it. Hold your pushes.",
+        id="escalated-names-someone-else",
+    ),
+]
+
+
+@pytest.mark.parametrize(("args", "text"), DISPLAYS)
+def test_each_state_of_an_owner_row_shows_its_own_text(args: dict, text: str) -> None:
+    out = _run(**args)
     assert out["show"] is True
-    assert out["text"] == "develop red at 8b30c16: diagnose before the next push (worktrees rule 7)"
+    assert out["text"] == text
 
 
-def test_the_text_passes_the_threads_sanitiser_intact() -> None:
-    text = _run(sha=SHA, outcome="failure")["text"]
+@pytest.mark.parametrize(
+    "reason", ["owner_unleased", "owner_not_live", "owner_not_member", "no_record", "chain_gap", "stamper_error"]
+)
+def test_every_reason_the_leader_takes_is_named_in_the_owner_text(reason: str) -> None:
+    text = _run(**_row(ME, reason=reason))["text"]
+    assert text == f"Develop is red at {SHORT}; the leader takes it ({reason}). Diagnose it." + ACK
+
+
+def test_a_hand_off_text_is_not_the_first_red_in_your_push_text() -> None:
+    """Bead note 4: a handed-off owner did not push the red, so "first red in your push" is wrong for that row."""
+    text = _run(**_row(ME, reason="handoff"))["text"]
+    assert "first red in your push" not in text and "handed to you after no acknowledgement" in text
+
+
+def test_a_next_up_that_is_also_the_owner_is_shown_as_the_owner() -> None:
+    assert _run(**_row(ME, ME))["text"].startswith(f"Develop is red at {SHORT}, first red in your push.")
+
+
+def test_a_row_naming_no_owner_that_is_not_escalated_holds_everyone() -> None:
+    out = _run(**_row(None, reason="stamper_error"))
+    assert out["text"] == f"Develop is red at {SHORT}; no one is named as owner. Hold your pushes."
+    assert out["wake"] is False
+
+
+# wake: true only on refresh false, for the owner, for next up, and on an escalated row that names me or has no owner.
+WAKES = [
+    pytest.param(_row(ME), True, id="owner"),
+    pytest.param(_row(ME, refresh=True), False, id="owner-refresh"),
+    pytest.param(_row(ME, reason="handoff"), True, id="handoff-owner"),
+    pytest.param(_row(ME, reason="no_record"), True, id="leader-takes-owner"),
+    pytest.param(_row(OTHER, ME), True, id="next-up"),
+    pytest.param(_row(OTHER, ME, refresh=True), False, id="next-up-refresh"),
+    pytest.param(_row(OTHER, THIRD), False, id="everyone-else"),
+    pytest.param(_row(OTHER), False, id="everyone-else-no-next"),
+    pytest.param(_row(OTHER, THIRD, refresh=True), False, id="everyone-else-refresh"),
+    pytest.param(_row(ME, reason="escalated"), True, id="escalated-names-me"),
+    pytest.param(_row(ME, reason="escalated", refresh=True), False, id="escalated-names-me-refresh"),
+    pytest.param(_row(None, reason="escalated"), True, id="escalated-no-owner-wakes-a-member"),
+    pytest.param(_row(None, reason="escalated", refresh=True), False, id="escalated-no-owner-refresh"),
+    pytest.param(_row(OTHER, reason="escalated"), False, id="escalated-names-someone-else"),
+]
+
+
+@pytest.mark.parametrize(("args", "wake"), WAKES)
+def test_wake_is_true_only_where_the_row_asks_this_session_to_act(args: dict, wake: bool) -> None:
+    assert _run(**args)["wake"] is wake
+
+
+@pytest.mark.parametrize("args", [pytest.param(p.values[0], id=p.id) for p in DISPLAYS])
+def test_every_text_passes_the_threads_sanitiser_intact(args: dict) -> None:
+    text = _run(**args)["text"]
     assert sanitize_state(text) == text
     assert len(text) <= MAX_STATE_CHARS
 
 
+def test_the_longest_owner_text_with_a_full_sha_keeps_its_ack_hint_inside_the_state_line() -> None:
+    text = _run(**_row(ME, reason="owner_not_member"))["text"]
+    assert text.endswith(f"sha={SHA}") and len(text) <= MAX_STATE_CHARS, len(text)
+
+
+def test_a_sha_too_long_for_the_ack_hint_drops_the_hint_rather_than_cut_it() -> None:
+    text = _run(**_row(ME, reason="handoff", sha="a" * 64))["text"]
+    assert text == "Develop is red at aaaaaaa; it was handed to you after no acknowledgement. Diagnose it."
+
+
 @pytest.mark.parametrize("sha", ["a" * 7, "a" * 64])
 def test_a_sha_of_exactly_7_or_64_hex_digits_is_accepted(sha: str) -> None:
-    assert _run(sha=sha, outcome="failure")["text"].startswith("develop red at aaaaaaa:")
+    assert _run(**_row(ME, sha=sha))["text"].startswith("Develop is red at aaaaaaa, first red")
 
 
 @pytest.mark.parametrize("bad", ["8B30C161", "8b30c1", "x" * 7, "8b30c161 ", "a" * 65])
 def test_a_sha_that_is_not_7_to_64_lower_case_hex_is_refused(bad: str) -> None:
     with pytest.raises(lua54.LuaError, match="sha must be 7 to 64 lower-case hex digits"):
-        _run(sha=bad, outcome="failure")
+        _run(**_row(ME, sha=bad))
+
+
+@pytest.mark.parametrize("field", ["owner", "next", "me"])
+def test_an_identity_that_is_not_an_address_segment_is_refused_without_echoing_it(field: str) -> None:
+    args = _row(OTHER, THIRD)
+    args[field] = "evil\nneeds_sam: yes"
+    with pytest.raises(lua54.LuaError, match=f"{field} must be") as err:
+        _run(**args)
+    assert "evil" not in str(err.value) and "needs_sam" not in str(err.value)
+
+
+def test_a_reason_that_is_not_a_lower_case_word_is_refused_without_echoing_it() -> None:
+    with pytest.raises(lua54.LuaError, match="reason must be") as err:
+        _run(**_row(ME, reason="no record\n## injected"))
+    assert "injected" not in str(err.value)
+
+
+def test_a_reason_the_engine_adds_later_is_shown_as_a_leader_take() -> None:
+    text = _run(**_row(ME, reason="new_reason"))["text"]
+    assert text == f"Develop is red at {SHORT}; the leader takes it (new_reason). Diagnose it." + ACK
 
 
 # -- the aura ---------------------------------------------------------------------
 
 
-def test_the_shipped_aura_is_the_td1_example() -> None:
+def _shipped():
+    return load_aura("ci_develop_red", cwd=None)
+
+
+def test_the_shipped_aura_is_gated_on_push_train_and_triggers_on_the_owner_post() -> None:
+    aura = _shipped()
+    assert aura.load_group == "push-train"
+    assert aura.subspace == OWNER_SUBSPACE
+    assert dict(aura.match) == {"kind": "owner"}
+    assert dict(aura.clear_match or ()) == {"kind": "clear"}
+    assert aura.procedure == "ci_red_notice"
+    assert aura.channel == "wake"
+
+
+def test_the_shipped_aura_maps_the_owner_row_and_the_session_identity() -> None:
+    aura = _shipped()
+    assert {name: (spec.kind, spec.value) for name, spec in aura.args} == {
+        "sha": ("dims", "sha"),
+        "owner": ("body", "owner"),
+        "next": ("body", "next"),
+        "refresh": ("body", "refresh"),
+        "reason": ("body", "reason"),
+        "me": ("self", "identity"),
+    }
+
+
+def test_the_shipped_aura_file_is_the_parse_of_its_own_text() -> None:
     shipped = (ROOT / "ci_develop_red.aura.toml").read_text(encoding="utf-8")
-    assert shipped == TD1_EXAMPLE
-    assert load_aura("ci_develop_red", cwd=None) == parse_aura(TD1_EXAMPLE.encode(), name="ci_develop_red")
+    assert load_aura("ci_develop_red", cwd=None) == parse_aura(shipped.encode(), name="ci_develop_red")
 
 
 def test_the_shipped_aura_passes_every_check_that_needs_no_engine(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -105,7 +284,65 @@ def test_the_shipped_aura_passes_every_check_that_needs_no_engine(monkeypatch: p
     assert [e.root for e in entries] == ["shipped"], entries  # non-vacuity: the real package root
     [check] = check_auras(entries, cwd=None, templates=None)
     assert not check.findings, check.findings
+    assert not check.warnings, check.warnings
+    assert {s.check for s in check.skipped} == {"dictionary", "serving_group"}
+
+
+def test_the_shipped_aura_is_not_warned_about_when_push_train_serves_nexus_develop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(library.REPO_ROOT_ENV, raising=False)
+    entries = [e for e in enumerate_auras(cwd=None) if e.name == "ci_develop_red"]
+    asked: list[str] = []
+
+    def read(name: str) -> GroupRecord | None:
+        asked.append(name)
+        return GroupRecord(name=name, serves=("nexus-develop",))
+
+    [check] = check_auras(entries, cwd=None, templates=None, read_group=read)
+    assert asked == ["push-train"]  # non-vacuity: the serving-group check ran against the shipped aura
+    assert not check.findings and not check.warnings, (check.findings, check.warnings)
     assert {s.check for s in check.skipped} == {"dictionary"}
+
+
+def test_the_shipped_aura_is_warned_about_when_the_group_serves_another_topic() -> None:
+    [warning], skipped = check_serving_group(_shipped(), lambda name: GroupRecord(name=name, serves=("other-main",)))
+    assert (warning.check, warning.key) == ("serving_group", "load.group") and not skipped
+
+
+#: The shape of board-ci.yaml as the engine carries it once RDR-252 Step 1 (nexus-igea9.1) is in: the dimensions
+#: and the names of the doc.body fields (only the names are checked here). ``tests/auras/test_registry_engine.py``
+#: reads the same from a live engine.
+OWNER_TEMPLATE = {
+    "name": "board/ci/<topic>",
+    "dimensions": {"from": {}, "kind": {}, "sha": {}, "outcome": {}},
+    "doc": {
+        "body": {
+            name: "..."
+            for name in (
+                "state", "conclusion", "workflow", "job", "sha", "run", "n", "base", "owner", "next", "reason",
+                "suspects", "episode_at", "refresh", "handoffs", "runs", "attempt", "url",
+            )
+        }
+    },
+}
+
+
+def test_the_shipped_aura_passes_the_dictionary_checks_of_a_template_with_the_owner_doc() -> None:
+    from nexus.auras.check import check_dictionary  # noqa: PLC0415
+
+    findings, skipped = check_dictionary(_shipped(), [OWNER_TEMPLATE])
+    assert (findings, skipped) == ([], [])
+
+
+def test_the_shipped_aura_is_refused_by_a_template_without_the_owner_fields() -> None:
+    """Bead note D: against an engine that predates the owner doc block the body sources are unknown, so the
+    conexus release that ships this aura pins the engine release that carries it."""
+    from nexus.auras.check import check_dictionary  # noqa: PLC0415
+
+    old_body = {k: "..." for k in ("state", "conclusion", "workflow", "job", "sha", "run", "n", "runs", "attempt", "url")}
+    findings, _ = check_dictionary(_shipped(), [{**OWNER_TEMPLATE, "doc": {"body": old_body}}])
+    assert {f.key for f in findings} == {"args.owner", "args.next", "args.refresh", "args.reason"}
 
 
 def test_with_no_config_the_aura_is_off_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
