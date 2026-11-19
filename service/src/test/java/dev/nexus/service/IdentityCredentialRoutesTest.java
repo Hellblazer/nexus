@@ -31,7 +31,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-253 Step 1 (nexus-hczdo.1.1): each {@code /v1/identity} route admits exactly the credential that needs it,
  * through the real {@link NexusService} (the auth filter and the real token scopes). The hook, {@code nx identity}
  * and the dispatcher hold the tenant credential; the MCP server holds the data credential and may renew, refresh,
- * end, send the fork row, make the pending bind and keep memberships, and nothing else. Purge, creation, promotion, rename and the
+ * end, send the fork row, make the pending bind and keep memberships, and (RDR-253 amendment, Sam 2026-11-19) create
+ * a seat, promote or delegate for the identity its own token names (IdentityDataSelfServiceTest). Purge, rename and the
  * {@code gone} verdict are tenant-only, a data credential may not send take-over, release or clear, and a mint or
  * board-ci credential reaches none of it.
  */
@@ -117,12 +118,14 @@ class IdentityCredentialRoutesTest {
     private static List<Probe> probes() {
         Map<String, Object> bind = evidence("probe", 7);
         List<Probe> p = new ArrayList<>();
-        p.add(new Probe("create seat", "POST", "", Map.of("kind", "seat", "name", "probe", "created_by", "sam"), false));
+        // RDR-253 amendment (Sam 2026-11-19): the data credential reaches seat create, delegated create and promote,
+        // fenced by its identity token; with none, the fence answers 403 identity_token_required (admitted, not forbidden).
+        p.add(new Probe("create seat", "POST", "", Map.of("kind", "seat", "name", "probe", "created_by", "sam"), true));
         // The MCP server's pending bind creates an ephemeral identity with its data credential.
         p.add(new Probe("create ephemeral", "POST", "", Map.of("kind", "ephemeral", "created_by", "session", "bind", bind), true));
-        p.add(new Probe("delegated", "POST", "/delegated", Map.of("parent", "i999999", "bind", bind), false));
+        p.add(new Probe("delegated", "POST", "/delegated", Map.of("parent", "i999999", "bind", bind), true));
         p.add(new Probe("rename", "POST", "/rename", Map.of("old", "nobody", "new", "somebody"), false));
-        p.add(new Probe("promote", "POST", "/i999999/promote", Map.of("name", "x"), false));
+        p.add(new Probe("promote", "POST", "/i999999/promote", Map.of("name", "x"), true));
         p.add(new Probe("gone", "POST", "/i999999/gone", Map.of("expected_generation", 1,
             "holder_gone", Map.of("host", "h1", "pid", 1, "started_at", 1)), false));
         p.add(new Probe("purge", "POST", "/i999999/purge", Map.of("operator", true), false));
