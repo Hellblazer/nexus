@@ -495,7 +495,6 @@ class T2Findings:
 _NAMES_REPLACED = re.compile(r"\b(?:replaces|supersedes)\b\s*:?\s*(.+)", re.IGNORECASE)
 _STRIP = " \t\"'`()[]{}.:;,"
 _RDR_TAG = re.compile(r"^rdr:0*(\d+)$")
-_RDR_TITLE = re.compile(r"^(?:rdr-)?0*(\d+)(?!\d)", re.IGNORECASE)
 #: A row titled "100" or "RDR-107" is never a replaced candidate: an incidental number after "supersedes"
 #: in a research finding names an RDR, not a row (measured on the first live run: 2 of 6 candidates).
 _BARE_NUMBER_TITLE = re.compile(r"^(?:rdr-)?[0-9]+$", re.IGNORECASE)
@@ -555,7 +554,7 @@ def t2_findings(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime,
     maps an RDR number to its closed phases (:func:`closed_phase_numbers`)."""
     result = T2Findings(projects=_repo_projects(db, repo))
     cutoff = now - timedelta(days=CENSUS_DAYS)
-    census_projects = {repo, f"{repo}_rdr"}
+    census_projects = {repo}  # <repo>_rdr is read for replaced candidates only: gate-rollup never touches it (RDR-209 Step 3)
     for project in result.projects:
         rows = list(db.get_all(project))  # live rows only: the engine's getAll hides quarantined ones
         result.rows_read += len(rows)
@@ -589,8 +588,10 @@ def _census(
 ) -> None:
     """RDR-209 Phase 3 Step 4: gate records older than 30 days, no TTL, phase closed.
 
-    A gate record is a row whose whole tags include ``gate`` or ``kind:gate``. Its RDR comes from the
-    ``rdr:<NNN>`` tag or, in ``<repo>_rdr``, the leading number of its title. It is flagged when that
+    A gate record is a row whose whole tags include ``kind:gate``, the tag ``nx memory gate-rollup`` lists (a row
+    with only the bare ``gate`` tag is neither listed nor flagged). Its RDR comes from the ``rdr:<NNN>`` tag.
+    Only ``<repo>`` is read: the RDR gate flow's rows in ``<repo>_rdr`` are never given a TTL, so flagging them
+    would flag them for ever. It is flagged when that
     RDR's frontmatter ``status`` is ``closed``, or (nexus-qo7ie.28) when every phase its title names
     (``-p<N>``, ``-phase-<N>``) is a closed phase of that RDR (:func:`closed_phase_numbers`). A record
     that maps to no RDR is counted as unmapped and never flagged; one of an open RDR whose title names
@@ -598,15 +599,12 @@ def _census(
     """
     for r in rows:
         tags = split_tags(r.get("tags"))
-        if "gate" not in tags and "kind:gate" not in tags:
+        if "kind:gate" not in tags:
             continue
         stamp = _parse_ts(r.get("timestamp") or "")
         if stamp is None or stamp >= cutoff or r.get("ttl") is not None:
             continue
         number = next((m.group(1) for t in tags if (m := _RDR_TAG.match(t))), None)
-        if number is None and project == f"{repo}_rdr":
-            m = _RDR_TITLE.match(r["title"])
-            number = m.group(1) if m else None
         if number is None:
             result.census_unmapped += 1
         elif number in closed:
