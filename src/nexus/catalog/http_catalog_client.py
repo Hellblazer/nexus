@@ -81,6 +81,7 @@ from __future__ import annotations
 import contextlib
 import os
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -286,6 +287,7 @@ STUB_METADATA_TIMED_OUT = object()
 #: roughly 30 s cut.
 STUB_METADATA_TIMEOUT_S = 28.0
 from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
+from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators
 from nexus.catalog.doctor_route_wire import (  # noqa: F401 — the constants are re-exported: callers import them here
     INDEX_RUN_CENSUS_MAX_LIMIT,
     INDEX_RUN_CENSUS_RULES_DIFFER,
@@ -1309,6 +1311,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for d in rows:
             first.setdefault(d["tumbler"], d)
         return [_to_entry(d) for d in first.values()]
+
+    def documents_by_author(self, author: str, *, limit: int = 1000, offset: int = 0) -> tuple[list[CatalogEntry], int]:
+        """One page of ``GET /docs/by-author`` as ``(entries, count)`` (nexus-uwggq.2.6): see ``engine_reads.by_author``."""
+        rows, count = _by_author.read_docs_by_author(self, author, limit=limit, offset=offset)
+        return [_to_entry(d) for d in rows], count
+
+    def documents_by_meta(self, *, content_type: str | None = None, meta: Sequence[tuple[str, str]] = (), meta_min: Sequence[tuple[str, int]] = (), sensitive: bool = False, limit: int = 1000, offset: int = 0) -> tuple[list[CatalogEntry], int]:
+        """One page of ``GET /docs/by-meta`` as ``(entries, count)`` (nexus-uwggq.2.7): see ``engine_reads.by_meta``."""
+        rows, count = _by_meta.read_docs_by_meta(self, content_type=content_type, meta=meta, meta_min=meta_min, sensitive=sensitive, limit=limit, offset=offset)
+        return [_to_entry(d) for d in rows], count
+
+    def sensitive_locators(self, limit: int = 10_000) -> dict:
+        """``GET /sensitive/locators`` (nexus-uwggq.2.13): see ``engine_reads.sensitive_locators``."""
+        return _locators.read_sensitive_locators(self, limit)
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead

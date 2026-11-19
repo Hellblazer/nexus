@@ -429,19 +429,22 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "entry if a FakeCatalogHandler branch for it is ever added"
     ),
     "/docs/by-author": (
-        "nexus-uwggq.2.3 (RDR-241 Phase 2), an engine read route with no client "
-        "caller yet; its engine tests cover it. REMOVE THIS ENTRY when the client "
-        "switch that calls it lands"
+        "nexus-uwggq.2.3 (RDR-241 Phase 2): the client reader HttpCatalogClient.documents_by_author "
+        "is tested against a stubbed transport (tests/catalog/test_engine_reads_phase2_clients.py) "
+        "and the route by its engine tests; no start_fake_server test reaches it. "
+        "REMOVE THIS ENTRY when a FakeCatalogHandler branch is added"
     ),
     "/docs/by-meta": (
-        "nexus-uwggq.2.4 (RDR-241 Phase 2), an engine read route with no client "
-        "caller yet; its engine tests cover it. REMOVE THIS ENTRY when the client "
-        "switch that calls it lands"
+        "nexus-uwggq.2.4 (RDR-241 Phase 2): the client reader HttpCatalogClient.documents_by_meta "
+        "is tested against a stubbed transport (tests/catalog/test_engine_reads_phase2_clients.py) "
+        "and the route by its engine tests; no start_fake_server test reaches it. "
+        "REMOVE THIS ENTRY when a FakeCatalogHandler branch is added"
     ),
     "/sensitive/locators": (
-        "nexus-uwggq.2.5 (RDR-241 Phase 2), an engine read route with no client "
-        "caller yet; its engine tests cover it. REMOVE THIS ENTRY when the client "
-        "switch that calls it lands"
+        "nexus-uwggq.2.5 (RDR-241 Phase 2): the client reader HttpCatalogClient.sensitive_locators "
+        "is tested against a stubbed transport (tests/catalog/test_engine_reads_phase2_clients.py) "
+        "and the route by its engine tests; no start_fake_server test reaches it. "
+        "REMOVE THIS ENTRY when a FakeCatalogHandler branch is added"
     ),
     "/gc_audit/record": (
         "nexus-jqvzk, an engine surface with no client caller. `nx t3 gc` "
