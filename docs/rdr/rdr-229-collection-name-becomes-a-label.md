@@ -770,9 +770,9 @@ The key moves table by table in strangler order:
   per-collection index is rebuilt with `WHERE collection_id = <id>` and a
   name hashed from model, tenant and id, so a label change never strands
   one. Readers (engine repositories, SQL functions, client caches) key on
-  the id, on each install only once every stamp move there has
-  `completed_at` set ("Readers during the stamp", below; T2
-  `229-research-43`). Every engine route that takes a collection accepts
+  the id, on each install only once the completion check's gates pass
+  ("Readers during the stamp", below; T2 `229-research-43`,
+  `229-research-52`). Every engine route that takes a collection accepts
   `collection_id`; a label is still accepted at the route boundary and
   resolved to the id once, by `CollectionRegistry`, which is keyed by id
   with a label index beside it. Responses carry both.
@@ -911,9 +911,11 @@ while the engine serves:
   move's RDR or bead states how readers behave while it runs: read both
   shapes, or keep the feature off until `completed_at` is set" (RDR-246
   lines 895-897). The rule: on each install, readers keep the name path
-  until every stamp move on that install has `completed_at` set. A move's
+  until every stamp move on that install has `completed_at` set, and the
+  engine's id readers and the one-row rename also wait for the gates of
+  the completion check below. A move's
   `completed_at` is "set when the move verified and on_complete ran", one
-  row per move (`datamoves-001-registry.xml:30`), and a stamp move counts as
+  row per move (`datamoves-001-registry.xml:30`), and a move counts as
   complete when it, or the move that supersedes it, has it set. Bead order
   is not this guard, because an install can boot a release that holds
   P3.1 to P3.5 at once. T2 `229-research-43`.
@@ -949,15 +951,39 @@ while the engine serves:
     (`MoveBootWork.java:277-299`), so a missing entry does not tell a
     completed move from an unregistered or superseded one. P3.1 adds the
     read: after `SchemaMigrator.migrate` (`Main.java:285`), on the admin
-    connection resolved at `Main.java:277`, the engine reads `completed_at`
-    for every stamp label and its replacement, and keeps the answer for the
-    process. Until the answer is yes, `CollectionRegistry` hands readers the
-    name, the jOOQ readers read the name columns, the PCI reconciler builds
-    no index on the id (for P3.4 the same read also covers every
-    foreign-key validation move), and `renameCollectionTxn` keeps rewriting the
-    fourteen `COLLECTION_SCOPED_TABLES`. Inferred, not read: the switch
-    takes effect at the first boot after the last stamp move completes,
-    the same boot at which a CONTINUE changeset "applies at the first boot
+    connection resolved at `Main.java:277`, the engine reads the rows of
+    its read set and keeps the answers for the process. Each release adds
+    its own labels to the set: the stamp labels (P3.1), P3.3a's seven
+    validation labels, and P3.3c's two swap labels and three child
+    validation labels. A label with no row counts as incomplete, because
+    the swap and child rows are registered at run time. A move whose row
+    has `failed_at` set and whose driving table no longer exists
+    (`to_regclass` of its `driving_schema` and `driving_table` is NULL)
+    counts as complete. That is how `aspect_extraction_queue` ends: once
+    emptied, "the next boot's guard drops the emptied table"
+    (`Main.java:674-676`), and a move on a missing table fails with 42P01
+    as "permanent" (`MovePreflight.java:67-71`,
+    `DataMoveFailureClassifier.java:153-154`); nx doctor still shows its
+    `failed:` row. Inferred, not read: the check decides it from those two
+    columns (T2 `229-research-52`). The gates, in order:
+    1. Every stamp move and every P3.3a move complete: P3.3b's pass
+       starts.
+    2. Also both swap moves and the three child validation moves complete:
+       P3.4's builds start.
+    3. Also P3.4 complete on the install, read from `PciCatalog`, whose
+       index records carry `valid`, "`pg_index.indisvalid`", and the
+       collection "its predicate selects" (`PciCatalog.java:349-350`).
+       Inferred, not read: P3.4 is complete when every collection with a
+       valid name-predicate index also has a valid id-predicate one. Then
+       `CollectionRegistry` and the jOOQ readers move to the id (P3.5a,
+       P3.5c), the rename becomes one row (P3.7), and the check registers
+       P4.1's drop move once P4.1's release is installed.
+    Until gate 3, `CollectionRegistry` hands readers the name, the jOOQ
+    readers read the name columns, and `renameCollectionTxn` keeps
+    rewriting the fourteen `COLLECTION_SCOPED_TABLES`. So no search reads
+    by the id before that collection's index on the id exists. Inferred,
+    not read: each gate takes effect at the first boot after it holds,
+    the boot at which a CONTINUE changeset "applies at the first boot
     after the move completes" (RDR-246 lines 942-944). Inferred, not read:
     client caches keyed by id are safe from P3.1, because P3.1's changeset
     fills the registry's identity column.
@@ -1531,8 +1557,8 @@ its acceptance is that test green plus the census pin it lowers.
   a null-`collection_id` verification query, the CHECK's VALIDATE as its
   `on_complete`, and the `chunk_size`, `sleep_ms` and `statement_timeout_ms`
   P3.2 set; a census test that counts null ids per table; the boot-time
-  completion check of the stamp moves (item 6, "Readers during the
-  stamp"). Test: an upgrade
+  completion check, with the read set and gates later releases extend
+  (item 6, "Readers during the stamp"). Test: an upgrade
   boot registers the move and rewrites no row of a large table; a killed run
   resumes from its last committed batch; an insert and an update without the
   id are refused.
@@ -1551,7 +1577,7 @@ its acceptance is that test green plus the census pin it lowers.
     one validation move per referencing table registered in the same
     changeset (driving table that table, template a re-stamp of rows still
     null, the VALIDATE as its `on_complete`; item 6, Switch). Test: each
-    move completes and leaves its constraint validated.
+    move completes and leaves its constraint validated. After P3.1.
   - P3.3b Per-leaf unique-index pass: new engine code in the reconciler's
     pattern builds, per leaf, the unique indexes for the new chunks and
     centroid keys (item 6). It starts once the completion check reports
@@ -1572,16 +1598,19 @@ its acceptance is that test green plus the census pin it lowers.
   `boot_work` and rebuilds a killed build from the start; each collection's
   index is built only once none of its rows has a null id
   (stamp-before-build, Scope boundary with RDR-247), and no build starts
-  until every P3.3 validation move has completed, so a chunk-family
-  `on_complete` cannot end it (item 6); `PciCatalog` reads the
-  id back from the predicate. Test: a collection with a row whose
-  `collection_id` is null gets no index on the id. The bounded drop of the
+  until gate 2 of the completion check (both swaps and every validation
+  move complete), so a chunk-family `on_complete` cannot end it (item 6);
+  `PciCatalog` reads the id back from the predicate, and its records are
+  what gate 3 reads to tell that P3.4 is complete on the install. Test: a
+  collection with a row whose `collection_id` is null gets no index on the
+  id; readers and the rename stay on the name path while any collection
+  with a name-predicate index lacks a valid id-predicate one. The bounded drop of the
   shared leaf graph that follows is RDR-247's.
 - P3.5 Readers switch to the id, as three beads; "P3.5" elsewhere means
-  all three. On each install the switch waits for every stamp move there to
-  complete (item 6, "Readers during the stamp"): P3.5b by the CONTINUE
-  precondition or, on the chunk family, by reading both shapes; P3.5a and
-  P3.5c by the boot-time completion check. Test: a store with only half its
+  all three. On each install the switch waits for the completion check
+  (item 6, "Readers during the stamp"): P3.5b for every stamp move, by the
+  CONTINUE precondition or, on the chunk family, by reading both shapes;
+  P3.5a and P3.5c for gate 3, which includes P3.4 on that install. Test: a store with only half its
   chunks stamped (the stamp move paused part-way) still searches, lists and
   renames correctly after the P3.5 cut, and reads by the id from the first
   boot after the move completes.
@@ -1606,9 +1635,9 @@ its acceptance is that test green plus the census pin it lowers.
 - P3.7 After P3.4 and P3.5: rename becomes a one-row registry update plus the
   note-URI rewrite; history tables and the referencing tables' dead name
   columns stop being rewritten (item 7); queued aspect tasks are still
-  rewritten. On each install the one-row rename waits for the boot-time
-  completion check, and until it passes the rename keeps its fourteen-table
-  rewrite (item 6, "Readers during the stamp"). The rename rewrites only `nx-note://` URIs, never `chroma://`
+  rewritten. On each install the one-row rename waits for gate 3 of the
+  completion check, which includes P3.4's index builds there, and until it
+  passes the rename keeps its fourteen-table rewrite (item 6, "Readers during the stamp"). The rename rewrites only `nx-note://` URIs, never `chroma://`
   residue, a rule in force from P3.6's cut (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
   in place, and a task queued before the rename names the new label; and
@@ -1662,8 +1691,9 @@ its acceptance is that test green plus the census pin it lowers.
   `superseded_by` (replaced by `superseded_by_id`). UNIQUE `(tenant_id,
   collection_id, embedding_model)` stays: the RDR-225 composite depends on
   it, and PostgreSQL drops such a constraint only with CASCADE (item 6; T2
-  `229-research-44`). Each drop waits for
-  this install's stamp moves (item 6, "Readers during the stamp"). On the
+  `229-research-44`). Each drop waits for this install's stamp, swap and
+  validation moves and for P3.4 (gate 3 of the completion check, item 6,
+  "Readers during the stamp"). On the
   chunk family (`nexus.chunks`, the manifest, `topic_assignments`,
   `chunk_orphaned_at`) a drop is a move's `on_complete`: a destructive
   statement on a table a move drives "must carry a precondition on that
@@ -1671,11 +1701,12 @@ its acceptance is that test green plus the census pin it lowers.
   table it is refused outright, by the CONTINUE-precondition lint, and the
   step belongs in a move's `on_complete`" (RDR-246 lines 986-992). That
   `on_complete` also removes the name arm of P3.5b's both-shapes readers.
-  Inferred, not read: that move's verification, run as the admin role,
-  also returns a row for each stamp move without `completed_at`, so it
-  fails visibly instead of dropping early. On every other table the
-  dropping changeset carries the CONTINUE precondition on every stamp
-  label. The changeset that swaps the registry's primary key and drops
+  The boot-time completion check registers that move once gate 3 holds,
+  so the move never exists before the moves it depends on have
+  completed, and its verification only checks its own table (T2
+  `229-research-52`). On every other table the dropping changeset carries
+  the CONTINUE precondition on that drop move's `completed_at`, so it
+  waits for the same gate. The changeset that swaps the registry's primary key and drops
   `superseded_by` also re-creates the partial UNIQUE on live labels over
   `superseded_by_id IS NULL` (item 7), which holds because the CHECK
   `(superseded_by = '') = (superseded_by_id IS NULL)` keeps that column NULL
@@ -1696,16 +1727,18 @@ its acceptance is that test green plus the census pin it lowers.
 P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
 2 and for P3.2; the first cloud run of its move waits for nexus-f3yqd.2.23
 (Prerequisites). P3.2 blocks P3.1, P3.3 and P3.4. P3.4 waits for P3.3. Within P3.3, P3.3c waits for P3.3b, whose
-indexes its verification requires. P3.12 waits for P3.5a and P3.6. P3.3 blocks P3.5 and P3.7. P3.7 also waits
+indexes its verification requires. P3.12 waits for P3.5a and P3.6. P3.3a waits for P3.1. P3.3 blocks P3.5 and P3.7. P3.7 also waits
 for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P3.6 (which
 enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
 item 8); P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
 production tenants; P4.4 waits for its release count. These are bead
-orders. At run time each install also waits for its own stamp moves:
-P3.3b's pass, P3.3c's swap (which that pass registers only once every leaf
-has a valid unique index), readers, P3.4's builds, P3.7's rename and P4.1's
-drops move only once every stamp move there has `completed_at` set (item 6,
-"Readers during the stamp").
+orders. At run time each install also passes the completion check's gates
+(item 6, "Readers during the stamp"): P3.3b's pass waits for the stamp and
+P3.3a's moves; P3.3c's swap is registered by that pass only once every leaf
+has a valid unique index; P3.4's builds wait for the swaps and every
+validation move; the engine's id readers, P3.7's one-row rename and P4.1's
+drop move wait also for P3.4 on that install. P3.5b's SQL readers wait for
+the stamp moves.
 
 ### Day 2 Operations
 
@@ -1939,9 +1972,9 @@ label meets a file path beyond P3.6's Windows test.
   the client floor bumps in the release that first depends on each, engine
   deployed first. Routes accept both a label and an id from P3.5, so an
   older client keeps working until the floor bump. An install that skips
-  releases is guarded by its own stamp moves, not by the cut order: its
-  readers switch at the first boot after every stamp move there has
-  completed (item 6, "Readers during the stamp").
+  releases is guarded by its own moves, not by the cut order: its readers
+  switch at the first boot after the completion check's gates pass there
+  (item 6, "Readers during the stamp").
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: every changeset is walked on a PITR fork rehearsal
