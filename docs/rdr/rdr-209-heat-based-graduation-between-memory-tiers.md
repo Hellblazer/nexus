@@ -599,9 +599,10 @@ quarantined listing before it is called missing, reported as `quarantined
 mismatch is reported with the title and the field, and the original row's
 values are printed so a person can write them back; the command does not undo
 it, and exits nonzero. The read cost per run is one `get_all` before the writes
-and one after, on top of the listing's, plus one quarantined listing and one
-read of the earlier pointer from T3, each made once and only when needed; it
-does not grow with the number of records.
+and one after, on top of the listing's, plus up to two quarantined listings
+(one for the carry, one made afresh for the read-back, because the carry's
+predates the writes) and one read of the earlier pointer from T3, each made
+once and only when needed; it does not grow with the number of records.
 
 - *Why import and not put.* A `put` fills a missing agent or session from the
   writer's environment and the engine stores that, so it would give a record
@@ -1352,3 +1353,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Fix check 78cc9b0e4776, defect C and observations A and B (nexus-1gdv0.2.14): the dry-run test seeded "one past and one not", which pinned neither the heat term nor the boundary, so a dry run that dropped `ln(access_count + 1)` or used `>=` would pass. Step 3 now states the engine rule the dry run computes (null timestamp skipped, age in whole seconds over 86,400, `ttl * (1 + ln(access_count + 1))`, strict comparison) and the test list pins it with a fixed clock: a heat record inside its effective TTL is not counted, a record exactly at it is not and one second older is, truncation to seconds, a null timestamp, and a mixed set. Each fails when its term is removed. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect B (nexus-1gdv0.2.15), doc only: the dry-run test appeared only in the Implementation Plan, not in the Test Plan or the Testing Strategy. The Test Plan gains the dry-run and count-first-guard scenario and extends the TTL and loss-check scenarios to what was built (the real put control, the census narrowing, the quarantine read-back, the restored record); the Testing Strategy names the two legs that must fail when their code is changed (the dry-run count against the engine rule, the guard when deleted); and the reference "(Step 3, Count first)" in the timestamp bullet, which read as Technical Design's own Step 3, now points at the Implementation Plan, Phase 3 Step 3. The wording was copied from the merged code and tests of nexus-1gdv0.2.12 to .14, not from the beads. |
 | 2026-11-19 | Review round 1 (nexus-1gdv0.2.16), blocker 1: the TTL write imported the fresh read's content while the archive and the pointer held the listing's, so a record rewritten between them got a TTL with no archive of its new text. A candidate whose fresh content or timestamp differs from the listing's is now skipped, named and left without a TTL, and a rerun archives its new text first; the residual-race paragraph says so. |
+| 2026-11-19 | Review round 1, blocker 2: the quarantined listing the carry reads before the writes was reused by the read-back, so a row the sweep quarantined after its import (not in that older listing) read as "not in the read after the write". The read-back now makes its own listing; Step 3's read cost says up to two. |

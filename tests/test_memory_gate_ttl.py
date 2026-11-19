@@ -795,3 +795,18 @@ def test_a_record_edited_after_it_was_archived_gets_no_ttl_is_named_and_a_rerun_
     out = _phase3("nexus-ed")                                            # a rerun archives the new text, then writes it
     assert gr.read_archive(make_t3(), REPO, edited, 1) == _rows(db)[edited]["content"]
     assert _rows(db)[edited]["ttl"] == 30 and "changed since" not in out
+
+
+def test_readback_after_a_carry_looks_the_quarantined_listing_up_afresh(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The carry reads the quarantined listing before the writes (and finds nothing). A row the sweep quarantines after
+    its import is not in that listing, so the read-back must list again, or it reports a false mismatch."""
+    _gate(db, "nexus-qa", sha="aaa1111")
+    reaped = _gate(db, "nexus-qa", sha="bbb2222")
+    _phase3("nexus-qa")
+    db.delete(project=REPO, title=reaped)                              # the carry now has a record to look up
+    old = _gate(db, "nexus-qa", sha="ccc3333", age_days=40)            # new, and already past its effective TTL
+    with monkeypatch.context() as m:
+        _sweep_after_each_import(m)
+        out = _phase3("nexus-qa")
+    assert "mismatch" not in out and f"quarantined (restorable: nx memory restore" in out and old in out
+    assert old not in _rows(db)

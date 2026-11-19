@@ -324,7 +324,7 @@ def read_back(mem: Any, project: str, sent: dict[str, dict[str, Any]], res: Resu
     prints the original row so a person can write it back. The command does not undo.
 
     ``get_all`` hides a row the expire sweep has already quarantined, and the row keeps its own timestamp, so an old
-    one can be quarantined at once. Such a row is looked up in the quarantined listing (one listing for the run) before
+    one can be quarantined at once. Such a row is looked up in the quarantined listing (a fresh one: the carry's predates the writes) before
     it is called missing, reported as quarantined with the command that restores it, and still compared field by field."""
     after = {r["title"]: r for r in mem.get_all(project)}
     for title, was in sent.items():
@@ -420,7 +420,7 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
     fresh = {r["title"]: r for r in mem.get_all(project)}        # one read, right before the writes
     sent = write_ttl(mem, project, candidates, fresh, sel.contents, res)
     res.ttl_written = list(sent)
-    read_back(mem, project, sent, res, quarantined)
+    read_back(mem, project, sent, res, quarantine_lookup(mem, project))      # a fresh listing: the carry's predates the writes
     if sent:                    # the pointer now says which records a run gave a TTL, so a rerun can tell a restore
         for e in candidates:
             e["ttl_set"] = e["ttl_set"] or e["title"] in sent
