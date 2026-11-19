@@ -573,8 +573,11 @@ they change no schema key and rename nothing. Phase 3 adds the surrogate key
 and moves every reference onto it in the strangler order (expand, switch,
 contract): new id columns are added and backfilled beside the name columns,
 writers fill both, readers and constraints switch to the id, and only then
-does Phase 4 drop the name columns and the parsers. At every step the old
-path still works, so each step ships on its own and can stop.
+does Phase 4 drop the name columns and the parsers. Up to P3.6 the old
+path still works, so each of those steps ships on its own and can stop.
+From P3.7 the referencing tables' name columns are dead until P4.1 drops
+them (item 7). On each install, readers leave the name path only once every
+stamp move there has completed (item 6, "Readers during the stamp").
 
 Nothing is renamed by any phase. An existing collection's name becomes its
 label unchanged. Only collections created after Phase 3 get a minted label.
@@ -727,7 +730,9 @@ The key moves table by table in strangler order:
   per-collection index is rebuilt with `WHERE collection_id = <id>` and a
   name hashed from model, tenant and id, so a label change never strands
   one. Readers (engine repositories, SQL functions, client caches) key on
-  the id. Every engine route that takes a collection accepts
+  the id, on each install only once every stamp move there has
+  `completed_at` set ("Readers during the stamp", below; T2
+  `229-research-43`). Every engine route that takes a collection accepts
   `collection_id`; a label is still accepted at the route boundary and
   resolved to the id once, by `CollectionRegistry`, which is keyed by id
   with a label index beside it. Responses carry both.
@@ -820,6 +825,66 @@ while the engine serves:
   A lock it cannot get "fails fast as a transient `blocked:` (55P03)", and
   a kill before the commit leaves the old keys in place (RDR-246 lines
   545-547, 914-916).
+- *Readers during the stamp.* RDR-246 requires this RDR to say it: "Each
+  move's RDR or bead states how readers behave while it runs: read both
+  shapes, or keep the feature off until `completed_at` is set" (RDR-246
+  lines 895-897). The rule: on each install, readers keep the name path
+  until every stamp move on that install has `completed_at` set. A move's
+  `completed_at` is "set when the move verified and on_complete ran", one
+  row per move (`datamoves-001-registry.xml:30`), and a stamp move counts as
+  complete when it, or the move that supersedes it, has it set. Bead order
+  is not this guard, because an install can boot a release that holds
+  P3.1 to P3.5 at once. T2 `229-research-43`.
+  - *SQL readers (P3.5b).* A redefining changeset whose body names no
+    chunk-family table carries, for each stamp label, "a Liquibase
+    precondition on `nexus.data_moves.completed_at` for that label with
+    `onFail="CONTINUE"`, so it is skipped and retried on each boot until the
+    move completes" (RDR-246 lines 937-940), and joins the lint's CONTINUE
+    allowlist. That form is refused for a body that names `nexus.chunks`, a
+    leaf, `catalog_document_chunks`, `topic_assignments` or
+    `chunk_orphaned_at`: "a later-release changeset that waits with
+    `onFail="CONTINUE"` is refused there" (RDR-246 lines 902-906). Both
+    named views read `nexus.chunks` and the manifest (vectors-032:65-67,
+    vectors-019:1153-1155). A move cannot do the waiting instead, because a
+    verification that still finds old-shape rows is a permanent failure
+    (`DataMoveFailureClassifier.java:160`). So a SQL reader that names a
+    chunk-family table takes the rule's other option, read both shapes:
+    P3.5b redefines it to match a row by `collection_id` where both sides
+    carry one and by the name where either does not, and P4.1 removes the
+    name arm with the name columns. Inferred, not read: that match is right
+    at every point of the stamp, because a rename keeps rewriting the name
+    columns until the check below passes (P3.7). Inferred, not read: a
+    two-key match can lose an index, so P3.5b measures each such reader's
+    plan on a large store.
+  - *Java readers (P3.5c), the registry (P3.5a), P3.4's builds and P3.7's
+    rename.* These wait on a completion check that the engine makes at
+    boot. Only the admin connection may read the registry: "on the admin
+    connection only: `nexus_svc` holds no grant on it"
+    (`DataMoveRegistry.java:17-18`). No read answers the question today.
+    `DataMoveRegistry` reads open moves (`:39-46`) and failed moves
+    (`:66-79`). `MoveBootWork` publishes a `data-move:<label>` entry only
+    for an open or failed move and finishes it when the move leaves both
+    (`MoveBootWork.java:277-299`), so a missing entry does not tell a
+    completed move from an unregistered or superseded one. P3.1 adds the
+    read: after `SchemaMigrator.migrate` (`Main.java:285`), on the admin
+    connection resolved at `Main.java:277`, the engine reads `completed_at`
+    for every stamp label and its replacement, and keeps the answer for the
+    process. Until the answer is yes, `CollectionRegistry` hands readers the
+    name, the jOOQ readers read the name columns, the PCI reconciler builds
+    no index on the id, and `renameCollectionTxn` keeps rewriting the
+    fourteen `COLLECTION_SCOPED_TABLES`. Inferred, not read: the switch
+    takes effect at the first boot after the last stamp move completes,
+    the same boot at which a CONTINUE changeset "applies at the first boot
+    after the move completes" (RDR-246 lines 942-944). Inferred, not read:
+    client caches keyed by id are safe from P3.1, because P3.1's changeset
+    fills the registry's identity column.
+  - *A blocked move.* A BYO or `--no-pg-bundle` PostgreSQL "gets it from
+    its DBA ... Until the step has run, moves report `blocked:`" (RDR-246
+    lines 801-805), and nx doctor "shows one red row per `blocked:` or
+    `failed:` move" (RDR-246 lines 891-892). On such an install the stamp
+    never completes. Readers stay on names, no index is built on the id, a
+    rename keeps its fourteen-table rewrite, and Phase 4's drops never apply
+    (P4.1).
 
 Whether any step needs a maintenance window is unverified (Critical
 Assumption 5). Inferred, not read: the swap's DDL holds ACCESS EXCLUSIVE on
@@ -1154,7 +1219,10 @@ every script and note URI that names one.
   missed writer is a write failure after P3.1's cut, not a null found at the
   switch. **Mitigation**: P3.1 works from the writer census (109 Java write
   sites, 26 SQL functions; T2 `229-research-41`) and tests each path, and a
-  census test counts null ids per table before each switch.
+  census test counts null ids per table before each switch. That census
+  test runs on fixtures. The guard on a user's install is that its readers
+  switch only once its own stamp moves have `completed_at` set (item 6,
+  "Readers during the stamp").
 - **Risk**: The engine change to registration lifecycle reaches a client
   that still relies on the prefix inference. **Mitigation**: the client
   never registers quarantine siblings since nexus-syfes (the engine does,
@@ -1202,7 +1270,8 @@ every script and note URI that names one.
   on Sam's go: cloud pg_background install and the first registered move")
   open (T2 `229-research-32`). It gates the first cloud run of P3.1's move,
   not P3.1's registration, so P3.1 can be the first registered move that
-  .2.23 waits for.
+  .2.23 waits for. A Phase 3 cut can still reach an install whose moves are
+  blocked. There its readers stay on names (item 6, "A blocked move").
 
 ### Minimum Viable Validation
 
@@ -1319,7 +1388,9 @@ its acceptance is that test green plus the census pin it lowers.
   registered in `nexus.data_moves` per table, run per tenant and leaf, with
   a null-`collection_id` verification query, the CHECK's VALIDATE as its
   `on_complete`, and the `chunk_size`, `sleep_ms` and `statement_timeout_ms`
-  P3.2 set; a census test that counts null ids per table. Test: an upgrade
+  P3.2 set; a census test that counts null ids per table; the boot-time
+  completion check of the stamp moves (item 6, "Readers during the
+  stamp"). Test: an upgrade
   boot registers the move and rewrites no row of a large table; a killed run
   resumes from its last committed batch; an insert and an update without the
   id are refused.
@@ -1350,7 +1421,13 @@ its acceptance is that test green plus the census pin it lowers.
   `collection_id` is null gets no index on the id. The bounded drop of the
   shared leaf graph that follows is RDR-247's.
 - P3.5 Readers switch to the id, as three beads; "P3.5" elsewhere means
-  all three.
+  all three. On each install the switch waits for every stamp move there to
+  complete (item 6, "Readers during the stamp"): P3.5b by the CONTINUE
+  precondition or, on the chunk family, by reading both shapes; P3.5a and
+  P3.5c by the boot-time completion check. Test: a store with only half its
+  chunks stamped (the stamp move paused part-way) still searches, lists and
+  renames correctly after the P3.5 cut, and reads by the id from the first
+  boot after the move completes.
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route accepts `collection_id` and
     a label; responses carry both. Client caches keyed by id.
@@ -1369,7 +1446,9 @@ its acceptance is that test green plus the census pin it lowers.
 - P3.7 After P3.4 and P3.5: rename becomes a one-row registry update plus the
   note-URI rewrite; history tables and the referencing tables' dead name
   columns stop being rewritten (item 7); queued aspect tasks are still
-  rewritten. The rename rewrites only `nx-note://` URIs, never `chroma://`
+  rewritten. On each install the one-row rename waits for the boot-time
+  completion check, and until it passes the rename keeps its fourteen-table
+  rewrite (item 6, "Readers during the stamp"). The rename rewrites only `nx-note://` URIs, never `chroma://`
   residue, a rule in force from P3.6's cut (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
   in place, and a task queued before the rename names the new label; and
@@ -1402,7 +1481,10 @@ its acceptance is that test green plus the census pin it lowers.
   id; RDR-248's committed fixture, taken before P3.1, still loads with every
   id filled.
 - P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.5 and P3.11; client
-  floor bumps in the release that first depends on each.
+  floor bumps in the release that first depends on each. One release may
+  hold several of these cuts, and an install may skip releases, so the
+  cut order does not decide when an install's readers switch; its own
+  stamp moves' `completed_at` does (item 6, "Readers during the stamp").
 
 **Phase 4: contract and retire**
 
@@ -1410,7 +1492,20 @@ its acceptance is that test green plus the census pin it lowers.
   and a stated effect on backups taken before P3.1 (item 10). Primary key
   to `(tenant_id, collection_id)`; drop the name columns on
   referencing tables, the `(tenant_id, name, embedding_model)` UNIQUE and
-  `superseded_by` (replaced by `superseded_by_id`). Test: a superseded
+  `superseded_by` (replaced by `superseded_by_id`). Each drop waits for
+  this install's stamp moves (item 6, "Readers during the stamp"). On the
+  chunk family (`nexus.chunks`, the manifest, `topic_assignments`,
+  `chunk_orphaned_at`) a drop is a move's `on_complete`: a destructive
+  statement on a table a move drives "must carry a precondition on that
+  move's `completed_at` with `onFail="CONTINUE"` ...; on a chunk-family
+  table it is refused outright, by the CONTINUE-precondition lint, and the
+  step belongs in a move's `on_complete`" (RDR-246 lines 986-992). That
+  `on_complete` also removes the name arm of P3.5b's both-shapes readers.
+  Inferred, not read: that move's verification, run as the admin role,
+  also returns a row for each stamp move without `completed_at`, so it
+  fails visibly instead of dropping early. On every other table the
+  dropping changeset carries the CONTINUE precondition on every stamp
+  label. Test: a superseded
   row's label can be reused by a new live collection.
 - P4.2 Drop `legacy_grandfathered` and `idx_catalog_collections_legacy`.
 - P4.3 Delete every parser outside `legacy_names`; both census gates fall to
@@ -1429,7 +1524,11 @@ P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
 for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P3.6 (which
 enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
 item 8); P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
-production tenants; P4.4 waits for its release count.
+production tenants; P4.4 waits for its release count. These are bead
+orders. At run time each install also waits for its own stamp moves:
+readers, P3.4's builds, P3.7's rename and P4.1's drops move only once every
+stamp move there has `completed_at` set (item 6, "Readers during the
+stamp").
 
 ### Day 2 Operations
 
@@ -1468,6 +1567,10 @@ None.
   file — **Verify**: the client census fails, naming the shape.
 - **Scenario**: `chash_conformance_report` before and after the rewrite on
   the same seeded data — **Verify**: identical rows.
+- **Scenario**: an engine with the P3.5 cut boots on a store with only half
+  its chunks stamped (the stamp move paused part-way) — **Verify**: search,
+  listings and a rename return what they returned before the cut, and the
+  engine reads by the id from the first boot after the move completes.
 - **Scenario**: rename a collection after P3.7 — **Verify**: one registry
   row changes; chunk, manifest, taxonomy and history rows and the
   per-collection index are untouched; search by the new label returns the
@@ -1610,7 +1713,10 @@ The history tables' nullable `collection_id` (item 6) names no consumer.
 - **Versioning**: P2.5, P2.6, P2.9 and the Phase 3 engine beads ride engine cuts;
   the client floor bumps in the release that first depends on each, engine
   deployed first. Routes accept both a label and an id from P3.5, so an
-  older client keeps working until the floor bump.
+  older client keeps working until the floor bump. An install that skips
+  releases is guarded by its own stamp moves, not by the cut order: its
+  readers switch at the first boot after every stamp move there has
+  completed (item 6, "Readers during the stamp").
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: every changeset is walked on a PITR fork rehearsal
@@ -1624,7 +1730,10 @@ The history tables' nullable `collection_id` (item 6) names no consumer.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
   Each Phase 3 step up to P3.6 leaves the name path working. From P3.7 a
   rename leaves the referencing tables' name columns on the old label, so
-  the name path is dead from there until P4.1 drops it (item 7).
+  the name path is dead from there until P4.1 drops it (item 7). On each
+  install that happens only after its stamp moves have completed, because
+  the one-row rename waits for the same check (item 6, "Readers during the
+  stamp").
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: N/A.
 
