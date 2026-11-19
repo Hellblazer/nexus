@@ -694,7 +694,8 @@ def test_sh_refuses_the_operators_ambient_token(tmp_path: Path) -> None:
 
 
 def test_sh_refuses_a_missing_wheel_after_the_credential_checks(tmp_path: Path) -> None:
-    _refused(_leg(tmp_path, "--window", "w1", op=GOOD), "--wheel")
+    # --core-only: the local plan runs before the wheel check, so a full run would refuse on an empty live ledger instead
+    _refused(_leg(tmp_path, "--window", "w1", "--core-only", op=GOOD), "--wheel")
 
 
 def test_sh_checks_the_items_own_title_not_the_argument(tmp_path: Path) -> None:
