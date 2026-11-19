@@ -171,7 +171,19 @@ def test_a_dropped_row_for_the_latest_attempt_settles_after_two_finished_reads()
     github = _GitHub(clock, {0: [R(10, 2, "CI", "success")]})
     got = _wait(board, clock, github, timeout_s=3600)
     assert got.row is None and got.settled and got.listed == [R(10, 2, "CI", "success")]
-    assert clock.now <= 2 * ci_wait.GITHUB_POLL_S
+    assert ci_wait.GITHUB_POLL_S <= clock.now <= 2 * ci_wait.GITHUB_POLL_S, "settles on the second finished read, not the first"
+    assert len(github.reads) == 2
+
+
+def test_a_lagging_read_does_not_bring_back_the_replaced_row() -> None:
+    """Confirmation O1: a read that shows attempt 2, then one that lags back to attempt 1, must not
+    accept the attempt-1 row: the highest attempt seen per run is kept."""
+    clock = _Clock()
+    board = _Board(clock)
+    board.post(SHA, [[10, 1, "CI", "success"]])
+    github = _GitHub(clock, {0: [R(10, 2, "CI", None)], 60: [R(10, 1, "CI", "success")]})
+    got = _wait(board, clock, github, timeout_s=300)
+    assert got.row is None and got.stale is not None
 
 
 class TestCli:
@@ -212,6 +224,18 @@ class TestCli:
         assert result.exit_code == 2, result.output
         line = result.stdout.strip().splitlines()[-1]
         assert "only a replaced attempt's row" in line and "1 of 1 runs still running" in line and "no row on" not in line
+
+    def test_a_finished_listing_followed_by_failed_reads_is_never_reported_green(self, monkeypatch) -> None:
+        """Confirmation B1: the last good listing showed the re-run green, every read since failed. The
+        deadline must read GitHub fresh (here unreadable: a timeout), never report the old listing."""
+        clock = _Clock()
+        board = _Board(clock)
+        board.post(SHA, [[10, 1, "CI", "failure"]])
+        github = _GitHub(clock, {0: [R(10, 2, "CI", "success")], 1: None})
+        result = self._cli(monkeypatch, board, clock, github, "--timeout", "5")
+        assert result.exit_code == 2, result.output
+        line = result.stdout.strip().splitlines()[-1]
+        assert "GitHub could not be read" in line and "only a replaced attempt's row" in line
 
     def test_a_red_newer_attempt_is_never_reported_green(self, monkeypatch) -> None:
         clock = _Clock()

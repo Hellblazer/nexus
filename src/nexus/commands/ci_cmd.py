@@ -172,13 +172,12 @@ def _latest_without_row(latest: ci_wait.LatestAttempt, gh_repo: str, branch: str
     is the row's, so a prefix given on the command line works here too."""
     stale = latest.stale
     assert stale is not None
-    head = f"{stale.sha[:12]} timeout: only a replaced attempt's row on {subspace}"
     runs = latest.listed
-    if runs is None:
-        return _at_deadline(stale.sha, gh_repo, branch, subspace, timeout_min)
-    unfinished = [r for r in runs if r.conclusion is None]
-    if unfinished and not latest.settled:
-        return f"{head} after {timeout_min:g} min; {len(unfinished)} of {len(runs)} runs still running", ci_wait.EXIT_TIMEOUT
+    if runs is None or not latest.settled:
+        # Not settled: the last listing may be older than reads that failed since, so it never decides a
+        # result. A fresh deadline read does, as without the flag (unreadable or unfinished: a timeout).
+        line, code = _at_deadline(stale.sha, gh_repo, branch, subspace, timeout_min)
+        return line.replace(f"no row on {subspace}", f"only a replaced attempt's row on {subspace}", 1), code
     line, code = ci_wait.summarize(
         ci_wait.DoneRow("", stale.sha, tuple(runs), f"https://github.com/{gh_repo}/commit/{stale.sha}"),
     )

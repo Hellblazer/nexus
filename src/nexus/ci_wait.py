@@ -417,7 +417,8 @@ def wait_latest_attempt(
       result is ``settled`` (the caller reports from GitHub). At the deadline it is unsettled;
     - GitHub unreadable: retried at the next poll; a failed read never accepts a row. If no read
       worked by the deadline, the row comes back ``unchecked`` (the caller never reports it green);
-      if a read already showed a newer attempt, the row is never returned.
+      if a read already showed a newer attempt, the row is never returned (and a later read that lags
+      back to an earlier attempt does not undo it: the highest attempt seen per run is kept).
 
     A GitHub listing that lags a re-run requested a moment ago still shows the earlier attempt, and
     its row is accepted: start the wait once GitHub shows the re-run (``gh run view``)."""
@@ -426,6 +427,7 @@ def wait_latest_attempt(
     listed: list[Run] | None = None
     stale: DoneRow | None = None
     finished_reads = 0
+    seen: dict[int, Run] = {}    # the highest attempt any read showed per run id: a lagging read cannot undo it
     while True:
         row = find_done_row(store, subspace, sha, timeout_s=max(0.0, deadline - clock()), park_s=park_s,
                             clock=clock, sleep=sleep)
@@ -433,6 +435,10 @@ def wait_latest_attempt(
             return LatestAttempt(None, listed, stale)
         got = fetch(gh_repo, row.sha, branch)
         if got is not None:
+            for r in got:
+                if r.run_id not in seen or r.attempt >= seen[r.run_id].attempt:
+                    seen[r.run_id] = r
+            got = list(seen.values()) if seen else got
             listed = got
             if not behind_latest(row, got):
                 return LatestAttempt(row, got)
