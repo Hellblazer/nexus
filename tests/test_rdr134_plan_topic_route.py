@@ -145,9 +145,11 @@ async def test_a_step_routes_unless_its_scope_names_another_domain_or_a_topic(mo
         {"tool": "search", "args": {"query": "c", "corpus": "all"}, "scope": {"topic": "t"}},
         {"tool": "search", "args": {"query": "d"}, "scope": _PROSE},
         {"tool": "search", "args": {"query": "e"}, "scope": {}},
+        {"tool": "search", "args": {"query": "f"}, "scope": {"taxonomy_domain": None}},
     ])
     routed = {a["query"]: "topic_route" in a for a in d.of("search")}
-    assert routed == {"a": False, "b": True, "c": False, "d": True, "e": True}
+    # a null domain is unscoped, as the runner's own domain check reads it
+    assert routed == {"a": False, "b": True, "c": False, "d": True, "e": True, "f": True}
 
 
 @pytest.mark.asyncio

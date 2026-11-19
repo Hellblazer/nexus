@@ -281,8 +281,9 @@ field. For each collection in the request that has enough topic coverage, the
 engine ranks that collection's topic centroids against the query vector it
 already computed, keeps the nearest topic (or an own band), searches only
 inside the kept topics, and falls back to the collection's unscoped search
-when they return nothing. Results merge exactly as today. `nx_answer`'s prose
-plans send the field; nothing else does until it is measured.
+when they return nothing. Results merge exactly as today. `nx_answer`'s
+`search` and `query` steps send the field, except steps scoped to another
+domain or a topic; nothing else does until it is measured.
 
 ### Technical Design
 
@@ -384,7 +385,9 @@ both measurements support; ranking across collections is refuted. The
 coverage check and the zero-row fallback make a missing, orphaned or partly
 assigned taxonomy below 0.9 coverage fall back to today's search for that
 collection. Scoping
-the default to `nx_answer`'s prose plans keeps unmeasured paths unchanged.
+the default to `nx_answer` keeps unmeasured paths (`nx search`, the MCP
+`search` tool) unchanged; inside `nx_answer` the search layer routes prose
+collections only, and Step 9 measures the plans the questions match.
 
 ## Alternatives Considered
 
@@ -655,8 +658,8 @@ deferred.
   sends the field only to an engine that reports it, through the edge
   allowlist (Step 5).
 - **IDE compatibility**: none.
-- **Incremental adoption**: off by default; on only for `nx_answer` prose
-  plans after Step 9.
+- **Incremental adoption**: off by default; on only for `nx_answer` steps
+  not scoped to another domain or a topic, after Step 9.
 - **Secret/credential lifecycle**: none.
 - **Memory management**: one cached coverage ratio per collection.
 

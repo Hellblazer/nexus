@@ -78,8 +78,9 @@ EARLY_VACUITY_QUESTIONS = 3
 BOOTSTRAP_SEED = 1340
 BOOTSTRAP_N = 2000
 SCOPE_NOTES = (
-    "A pass licenses the default for nx_answer's prose-scoped plan steps, on this corpus, judged on retrieved "
-    "chunks; it says nothing about answer quality.",
+    "A pass licenses the default for nx_answer's search and query steps whose scope names no other domain and no "
+    "topic, on this corpus, over the plans the questions matched (plan_id per arm), judged on retrieved chunks; "
+    "it says nothing about answer quality.",
     "The 25 RDR questions are in-sample (all among leg 1's 26). 'Out-of-sample' (title + generic) means not used to "
     "choose the design; the title questions were measured before (134-research-13), so they are not unseen.",
     "The off arm can grow a plan that the top1 arm then matches (nx_answer saves ad-hoc plans); pairs that ran "
