@@ -215,3 +215,80 @@ def test_the_alias_lookup_builds_no_client_for_a_session_or_agent_id_and_closes_
     with pytest.raises(DirectoryResolutionError):
         resolve_send("gone", _Tuples(), lookup)  # 404 falls to the directory, which has no holder
     assert log == ["build", "alias gone", "close"], "closed on the failing path too"
+
+
+# ── an ephemeral is reached by id only (RDR-253 "Ephemeral identities", Step 5 open item) ──────────────────────────
+
+
+def _holders(table: dict[str, tuple[str, str]]):
+    return lambda session: table.get(session)
+
+
+def test_a_display_name_never_reaches_an_ephemeral_through_the_directory_fallback() -> None:
+    """``-n scratch42`` makes an ephemeral that arms ``directory/scratch42`` but takes no alias. The alias route
+    answers 404, the directory has one holder, and that holder is an ephemeral: refused, naming the id to send to."""
+    engine = _Engine(NOW)  # no seat named scratch42
+    tuples = _Tuples({"scratch42": [OLD_SESSION]})
+    holder = _holders({OLD_SESSION: ("i31", "ephemeral")})
+    with pytest.raises(DirectoryResolutionError, match=r"display name of the ephemeral identity i31.*send to i31"):
+        resolve_send("scratch42", tuples, engine.alias, holder)
+    assert resolve_send("i31", tuples, engine.alias, holder) == SendTarget("i31", "identity"), "by id it is reached"
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [("i4", "seat"), ("i5", "delegated"), None],
+    ids=["a seat's session", "a delegated identity's", "no binding (an old client)"],
+)
+def test_a_directory_holder_that_is_not_an_ephemeral_is_reached_as_before(bound: tuple[str, str] | None) -> None:
+    engine = _Engine(NOW)
+    tuples = _Tuples({"bob": [OLD_SESSION]})
+    holder = _holders({OLD_SESSION: bound} if bound else {})
+    assert resolve_send("bob", tuples, engine.alias, holder) == SendTarget(OLD_SESSION, "session")
+
+
+def test_a_holder_lookup_that_fails_never_fails_the_send() -> None:
+    def boom(_session: str) -> tuple[str, str]:
+        raise ConnectionError("engine down")
+
+    tuples = _Tuples({"bob": [OLD_SESSION]})
+    assert resolve_send("bob", tuples, _Engine(NOW).alias, boom) == SendTarget(OLD_SESSION, "session")
+
+
+def test_a_seats_name_is_not_subject_to_the_ephemeral_check() -> None:
+    """A name with an alias is the seat's: its holder (a bound session) is reached through the directory even
+    when the holder lookup would call it an ephemeral, which is a different identity's session."""
+    engine = _Engine(NOW, {"wren": ("i4", "live", None, "")})
+    tuples = _Tuples({"wren": [OLD_SESSION]})
+    assert resolve_send("wren", tuples, engine.alias, _holders({OLD_SESSION: ("i4", "seat")})) == SendTarget(
+        OLD_SESSION, "session")
+
+
+def test_the_holder_lookup_reads_the_session_index_then_the_identity_and_closes_its_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415
+    from nexus.tuple_directory import identity_holder_lookup  # noqa: PLC0415
+
+    log: list[str] = []
+
+    class _Client:
+        def session(self, sid: str) -> dict[str, Any]:
+            log.append(f"session {sid}")
+            if sid == "unindexed":
+                raise IdentityApiError(404, "unknown_session", "no such session")
+            return {"identity": "i31"}
+
+        def show(self, identity: str) -> dict[str, Any]:
+            log.append(f"show {identity}")
+            return {"kind": "ephemeral"}
+
+        def close(self) -> None:
+            log.append("close")
+
+    monkeypatch.setattr(IdentityClient, "from_config", staticmethod(lambda: _Client()))
+    lookup = identity_holder_lookup()
+    assert lookup(OLD_SESSION) == ("i31", "ephemeral")
+    assert log == [f"session {OLD_SESSION}", "show i31", "close"]
+    log.clear()
+    assert lookup("unindexed") is None and log == ["session unindexed", "close"]

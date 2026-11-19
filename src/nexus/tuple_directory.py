@@ -113,6 +113,9 @@ class SendTarget:
 
 #: ``alias(name)`` is ``IdentityClient.alias``: GET /v1/identity/alias/<name>.
 AliasLookup = Callable[[str], Mapping[str, Any]]
+#: ``holder(session id)`` is the ``(identity id, kind)`` the session is bound to, or None when it is bound to none
+#: (an old client) or the answer cannot be had; ``kind`` is ``seat``, ``ephemeral`` or ``delegated``.
+HolderLookup = Callable[[str], "tuple[str, str] | None"]
 
 
 def list_directory_entries(name: str, tuples: Any) -> list[Any]:
@@ -199,7 +202,9 @@ def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
     return classify_directory_holders(to, list_directory_entries(to, tuples))
 
 
-def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> SendTarget:
+def resolve_send(
+    to: str, tuples: Any, alias: AliasLookup | None = None, holder: HolderLookup | None = None,
+) -> SendTarget:
     """RDR-253 Step 5: resolve ``to`` for a mixed fleet of old and new clients.
 
     An identity id goes straight to ``mailbox/<id>``. A name resolves through ``alias/<name>`` first, to learn the
@@ -208,7 +213,10 @@ def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> Send
     mailbox. So the mail goes to the one live holder of ``directory/<name>``, in that holder's session mailbox
     (every new client drains ``mailbox/<session>`` as well, by dual subscription), as :func:`resolve_send_address`
     resolves it; two holders are refused. Only when nobody holds the name does the mail wait in ``mailbox/<id>``
-    for the seat to bind. A retired alias inside its grace resolves with the engine's notice naming the new
+    for the seat to bind. A name that is no seat's alias falls to the directory, but never reaches an ephemeral
+    identity by its display name: the RDR reaches an ephemeral "by id only", and two launches with one display name
+    would collide. When *holder* names the one holder as an ephemeral, the send is refused with its id; a holder it
+    cannot place (an old client, an engine that does not answer) is reached as before. A retired alias inside its grace resolves with the engine's notice naming the new
     name; past it the engine answers 410 and the send is refused with "renamed to <new> on <date>". An unknown name,
     or an alias lookup that cannot be made (an engine without identity routes), is the directory's alone.
     """
@@ -223,6 +231,8 @@ def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> Send
     except IdentityApiError as exc:
         if exc.status == 410:
             raise DirectoryResolutionError(str(exc.message or f"{to!r} was renamed")) from None
+        if exc.status == 404:  # no seat has the name: the directory's, unless its holder is an ephemeral's display name
+            return _directory_target(to, tuples, holder)
         return SendTarget(*resolve_send_address(to, tuples))
     except Exception:  # noqa: BLE001 -- no identity routes (an older engine) or unreachable: the directory decides
         return SendTarget(*resolve_send_address(to, tuples))
@@ -235,6 +245,42 @@ def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> Send
         return SendTarget(identity, "identity", notice)  # nobody holds the name: the seat reads it when it binds
     address, kind = classify_directory_holders(to, entries)  # two holders is still refused, naming both
     return SendTarget(address, kind, notice)
+
+
+def _directory_target(to: str, tuples: Any, holder: HolderLookup | None) -> SendTarget:
+    """``directory/<to>``'s one holder, refused when it is an ephemeral identity reached by its display name."""
+    address, kind = resolve_send_address(to, tuples)
+    if kind == "session" and holder is not None:
+        try:
+            bound = holder(address)
+        except Exception:  # noqa: BLE001 -- a holder the engine cannot place is reached as before, never a failed send
+            bound = None
+        if bound is not None and bound[1] == "ephemeral":
+            raise DirectoryResolutionError(
+                f"{to!r} is the display name of the ephemeral identity {bound[0]}, which is reached by id only "
+                f"(an ephemeral has no alias, and two launches can share a display name): send to {bound[0]}"
+            )
+    return SendTarget(address, kind)
+
+
+def identity_holder_lookup() -> HolderLookup:
+    """The identity a session is bound to, from the session index and the identity's record. The client is built,
+    used and closed inside each lookup (as :func:`identity_alias_lookup`'s is); a session in no index, an engine
+    without identity routes and a failed call all answer None."""
+
+    def lookup(session_id: str) -> tuple[str, str] | None:
+        from nexus.identity.bind_client import IdentityApiError, IdentityClient  # noqa: PLC0415 -- deferred: startup cost
+
+        client = IdentityClient.from_config()
+        try:
+            identity = str(client.session(session_id).get("identity") or "")
+            return (identity, str(client.show(identity).get("kind") or "")) if identity else None
+        except IdentityApiError:
+            return None
+        finally:
+            client.close()
+
+    return lookup
 
 
 def identity_alias_lookup() -> AliasLookup:

@@ -131,6 +131,7 @@ from nexus.tuple_directory import (
     resolve_default_from,
     resolve_env_session_id,
     identity_alias_lookup,
+    identity_holder_lookup,
     resolve_send,
     resolve_send_address,
 )
@@ -9709,10 +9710,10 @@ def mailbox_send(
             else resolve_default_from()
         )
 
-        alias = identity_alias_lookup()
+        alias, holder = identity_alias_lookup(), identity_holder_lookup()
 
         def _send(db: Any) -> tuple[str, str, str, str]:
-            target = resolve_send(to, db.tuples, alias)
+            target = resolve_send(to, db.tuples, alias, holder)
             address, address_kind = target.address, target.address_kind
             dims: dict[str, str] = {"from": from_id, "address_kind": address_kind}
             if kind:
