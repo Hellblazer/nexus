@@ -831,3 +831,18 @@ def test_the_deny_message_names_foreach_and_output_and_no_longer_lists_foreach_a
     assert "shares this config" not in out, out
     assert "git's own file writer" in out and "redirection" in out, out
     assert "redirect the output" not in out and "`>` into your scratch" not in out, out
+
+
+def test_a_named_fetch_passes_and_a_variable_fetch_says_to_write_the_name_out(sandbox):
+    """A literal named fetch (no `src:dst`) stays allowed in the shared tree; only an unexpanded word after the
+    remote denies, and its message tells the agent the passing shape (halcyon, 2026-11-19: the guard must not
+    cost ordinary fetches)."""
+    for cmd in ("git fetch origin develop", "git fetch -q origin main", "git fetch origin feature/nexus-abc-x",
+                "git fetch origin refs/heads/develop", "git fetch origin develop main"):
+        assert _verdict(cmd, sandbox.main).get("permissionDecision") != "deny", cmd
+    for cmd in ('git fetch origin "$BRANCH"', "git fetch origin $B", "git fetch origin ${B}"):
+        reason = _verdict(cmd, sandbox.main)["permissionDecisionReason"]
+        assert "write the branch name out" in reason, (cmd, reason)
+        assert "git fetch origin develop" in reason, reason
+    plain = _verdict("git fetch origin a:b", sandbox.main)["permissionDecisionReason"]
+    assert "write the branch name out" not in plain, plain

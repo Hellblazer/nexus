@@ -4133,6 +4133,14 @@ def _deny_message(agent_type: str, verb_names: str, *,
             "(`git ch{e..e}ckout`), which builds the verb at run time. Need the "
             "change? Hand it back to the orchestrator."
         )
+        if re.search(r"\bfetch [^,)]*[$`]|\bfetch [^,)]*" + _MASK_OPAQUE + r"\b", verb_names):
+            head += (
+                "\nA `git fetch` whose branch is a shell variable or substitution "
+                "(`git fetch origin \"$BRANCH\"`) is denied because the guard cannot "
+                "see whether it expands to a `src:dst` refspec that writes a local "
+                "ref, so write the branch name out: a literal named fetch such as "
+                "`git fetch origin develop` passes."
+            )
         runs_or_writes = any(w in verb_names for w in ("foreach", "--output"))
         if runs_or_writes:
             head += (
