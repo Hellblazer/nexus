@@ -2,12 +2,12 @@
 title: "The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name"
 id: RDR-229
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-10-17
-accepted_date:
+accepted_date: 2026-11-19
 related_issues: ["nexus-j4gl6", "nexus-zvcou"]
 related_rdrs: [RDR-101, RDR-103, RDR-155, RDR-156, RDR-176, RDR-204, RDR-210, RDR-225, RDR-227, RDR-231, RDR-236, RDR-246, RDR-247, RDR-248]
 ---
@@ -2677,3 +2677,4 @@ large, and moved under a ratchet.
 - 2026-11-19: Round 3 residuals dispositioned (Sam, ask `baton/rdr229-accept-route`, option 1). Fixed: residual 1 `f0d64bc6a`, residual 2 `a59ef5325`, residual 3 `4ce3d0def` and `e9684ddca`, residual 4 `1d2e07f8d`, S-1 `bed7b07a7`, sweep `0947955d2`; S-2 to S-8 to beads at accept. Contradiction Check and Scope Verification regenerated. T2 `229-research-55` to `-60` added.
 - 2026-11-19: Accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL) re-fix. P4.1 ordering `107b5dd67`; reconcile path `e2ad1c74b`; gate 3 window `3933d47df`; P4.0 liveness `7ee538cbf`; backfill verb `7341f2511`; P2.10 sizing `25bb765b8`; named single-critic rows `e3a1aebf1`. Contradiction Check and Scope Verification regenerated. T2 `229-research-61` to `-68` added.
 - 2026-11-19: Last residual of `nexus_rdr/229-gate-latest` (the gate-3 rename refusal had no owner before P3.7; accept fix check `3c7aa425d443`) fixed in the text (Sam, ask `baton/rdr229-refusal-owner`, option 1): P3.5 and P3.7 ship in one engine cut with the refusal and the name-key drop move's registration, and the refusal holds until every P3.5b changeset has applied, `9ea4521a4`. Contradiction Check regenerated. T2 `229-research-69` added.
+- 2026-11-19: Accepted (Sam, "accept RDR-229", T2 `nexus/sam-ruling-rdr229-accept-2026-11-19`); epic nexus-p2m1x. Residual dispositions: the five BLOCKS-PLANNING residuals of `229-gate-latest` fixed in 00f6de8fe..55f50376b; the rename-refusal-owner residual fixed in 9ea4521a4 (confirming check `229-fix-check-50164fafab10`); S-2 to S-8 to beads nexus-p2m1x.40 to .46; the accept-check DISCOVER rows to nexus-p2m1x.47 (P3.5 and P3.7 close together) and .48 (fresh-install rename refusal until a second boot).
