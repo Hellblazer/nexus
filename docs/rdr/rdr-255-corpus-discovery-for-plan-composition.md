@@ -201,7 +201,9 @@ aspects, taxonomy, entity keys, coverage boundary and HERB.
 
 Sam's framing, in session on 2026-11-19: nexus has both curated and grown
 plans. The AgenticScholar plans that nexus's operator set was modelled on were
-curated, not grown. The question is whether nexus needs a learning, tuning or
+curated, not grown: built from an offline analysis of query patterns and the
+data model, with an automatically built corpus taxonomy as planning context
+(research finding 18). The question is whether nexus needs a learning, tuning or
 discovery phase around a new dataset, meaning utility routines that gather,
 examine and describe the corpus before questions arrive, and whether the
 framework is sound regardless.
@@ -311,7 +313,7 @@ provenance tag from callers, so only the grow path can mark a plan grown.
   filter-and-scan or filter-and-count plan. The pre-registered experiment
   (below) tests this.
 
-Research records (T2 `nexus_rdr/255-research-1` to `-15`, 2026-11-19):
+Research records (T2 `nexus_rdr/255-research-1` to `-18`, 2026-11-19):
 
 - **✅ Verified** (spike) — All 55 HERB declines are aggregate (max-bugs, 46 of 60) or prev-release (9 of 20) questions; the 50 "affected" questions never declined and score mean F1 58.7.
   *Source: T2 `nexus_rdr/herb-full-pool-decline-shapes-2026-11-19` (255-research-1)*
@@ -319,7 +321,7 @@ Research records (T2 `nexus_rdr/255-research-1` to `-15`, 2026-11-19):
   *Source: T2 `nexus_rdr/herb-full-pool-decline-recheck-2026-11-19` (255-research-2)*
 - **✅ Verified** (source search) — The stock run executed plan 10 on 51 of 55 declines; no inline plan was composed.
   *Source: plan ids in the run's non-answer texts (255-research-3)*
-- **⚠️ Documented** (docs only) — AgenticScholar pairs a predefined plan library with dynamic DAG generation and a validator; per-dataset adaptation and aggregation handling are not described in what was read.
+- **⚠️ Documented** (docs only) — AgenticScholar pairs a predefined plan library with dynamic DAG generation and a validator; per-dataset adaptation and aggregation handling are not described in what was read. *Superseded by 255-research-17 and -18, which read the full text.*
   *Source: arXiv 2603.13774, abstract and secondary sources (255-research-4)*
 - **⚠️ Documented** (docs only) — LangChain's SelfQueryRetriever gives the model per-field descriptions and has it write the metadata filter: shipped precedent for Gap 1.
   *Source: LangChain docs (255-research-5)*
@@ -345,6 +347,13 @@ Research records (T2 `nexus_rdr/255-research-1` to `-15`, 2026-11-19):
 
 - **✅ Verified** (spike) — Why plan 10 ran: extraction classified max-bugs questions as `lookup`; enforced RDR-232 eligibility dropped plan 8 (above the floor, kind `discovery/listing`); the category route returned plan 10 with `confidence=None`, an unconditional hit. All 103 plan-10 runs show it.
   *Source: sandbox `nx_answer_runs` 1-130, scratchpad `rdr255-plan10-runs.json` (255-research-15)*
+
+- **✅ Verified** (spike) — Record-shaped lexical retrieval: depth, product filters and prose rewrites leave max-count argmax near random; a short lexical query shaped like the answer record reaches 35 of the 37 zero-reach declines (argmax 35/60; full product scan 39/60 before the status join).
+  *Source: T2 `nexus_rdr/herb-full-pool-retrieval-variants-2026-11-19` (255-research-16)*
+- **✅ Verified** (source search) — AgenticScholar splits each query into a Scope (what to analyze) and a Task (how), resolves the scope separately, and matches only the task against its plan library: semantic candidate filtering, then an LLM rerank with a confidence score, reusing a predefined plan only above a high threshold (about 90%), otherwise generating a plan with validation and self-correction (at least 60% right first time, at most 3 repairs). nexus matches the whole question at a 0.40 cosine floor and can force a plan with no confidence.
+  *Source: arXiv 2603.13774, full text in T3 (255-research-17)*
+- **✅ Verified** (source search) — AgenticScholar's curation came from offline human analysis of query patterns and the knowledge representation, plus a corpus taxonomy built automatically and refined as the corpus grows; it is evaluated on computer-science papers only, and its authors say other domains may need domain-aware planning. Its discovery phase is the human version of the routine this RDR proposes to automate.
+  *Source: arXiv 2603.13774, full text in T3 (255-research-18)*
 
 ### Critical Assumptions
 
@@ -414,6 +423,13 @@ already exists as RDR-232 eligibility. Two changes instead:
 2. When eligibility removes every above-floor candidate, fall through to the
    inline planner instead of letting the category route force a plan that never
    cleared the floor; or require a routed plan to carry a real confidence.
+
+3. Follow AgenticScholar's selection (research finding 17): split each question
+   into a scope and a task, resolve the scope separately (it is a filter or a
+   seed, not a plan choice), and match only the task against the library,
+   reusing a plan only at high confidence and otherwise generating one. This
+   is the one published precedent found for plan routing, and it is stricter
+   than nexus's current whole-question match.
 
 Generic. The risk is the reverse failure: questions that the category route
 currently answers well would go to the inline planner, at one model call each.
@@ -669,6 +685,7 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-19: research findings 16-18 added (record-shaped lexical retrieval; AgenticScholar full text: scope/task split, conservative reuse, offline curation); finding 4 marked superseded; Option B gains the scope/task step.
 - 2026-11-19: research finding 15: Gap 2 rewritten from the stock run's telemetry (aggregate questions classified as lookup; category route after eligibility); Option B rewritten.
 - 2026-11-19: research findings 1-14 added; Gap 2 flagged under review; Gap 5 added; open question 7 (RDR-251 split).
 - 2026-11-19: Option E added (tuple space for discovery and lifecycle state; execution path excluded unless measured value justifies it, per Sam).
