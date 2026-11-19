@@ -1765,7 +1765,17 @@ its acceptance is that test green plus the census pin it lowers.
   item 12's rule as the template and, as the verification, the rows that
   still match it with a free new value; never a boot rewrite (RDR-246).
   The first cloud run of those moves waits for nexus-f3yqd.2.23, as
-  P3.1's does (Prerequisites). On the client, `nx catalog
+  P3.1's does (Prerequisites). RDR-246 sets no default to borrow: a
+  move's chunk size and `sleep_ms` are "the value measured in the Minimum
+  Viable Validation, written into the registering INSERT before the
+  release" (RDR-246 lines 395-398), and P3.2 times Phase 3 only. So P2.10
+  carries its own sizing step before its changeset is final: it times the
+  three moves on a PITR fork of the larger production tenant and sizes
+  them on a local store, starting from the cloud `sleep_ms` RDR-246's
+  validation set, and writes `chunk_size`, `sleep_ms` and
+  `statement_timeout_ms` into the INSERT. Inferred, not read: dml_utils
+  walks every row of the driving table, so the cost follows the table's
+  size, not the residue count (T2 `229-research-66`). On the client, `nx catalog
   backfill-source-uri` today refuses residue that does not start
   `chroma://<physical_collection>/` as "malformed" (`backfill.py:109-111`),
   which after P2.10 is all moved and repaired residue. P2.10 relaxes the
