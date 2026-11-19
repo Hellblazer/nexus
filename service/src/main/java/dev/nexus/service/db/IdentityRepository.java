@@ -759,6 +759,38 @@ public final class IdentityRepository {
             .fetchOne(r -> new SessionIdentity(r.getIdentityId(), r.getGeneration()))));
     }
 
+    /**
+     * An identity's current generation, state and lease for another engine component (RDR-252's stamper and group
+     * rules), with the 300-second rule applied to the last renewal: {@code state} is {@code lapsed} when a leased
+     * holder is more than 300 seconds past its last renewal, though no lapse row has been written. {@code kind} is
+     * {@code seat}, {@code ephemeral} or {@code delegated}; {@code parent} is a delegated identity's seat.
+     * {@code lease} is {@code leased}, {@code unleased} or null (an identity with no holder). Live means
+     * {@code state} is {@code live} and the lease is not {@code unleased}.
+     */
+    public record Liveness(String id, String kind, String parent, int generation, String state, String lease) { }
+
+    /**
+     * Reads {@link Liveness} of these identities, read-only: it takes no row lock and writes no lapse row, so a
+     * caller may use it freely under another lock. An id with no record is absent from the result.
+     */
+    public Map<String, Liveness> liveness(String tenant, java.util.Collection<String> ids) {
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        return scope.withTenant(tenant, ctx -> {
+            OffsetDateTime now = now();
+            Map<String, Liveness> out = new LinkedHashMap<>();
+            ctx.selectFrom(IDENTITY_RECORDS).where(IDENTITY_RECORDS.TENANT_ID.eq(tenant))
+                .and(IDENTITY_RECORDS.ID.in(ids)).forEach(r -> out.put(r.getId(), new Liveness(r.getId(), r.getKind(),
+                    r.getParent(), r.getGeneration(), IdentityRows.lapseDue(r, now) ? "lapsed" : r.getState(), r.getLease())));
+            return out;
+        });
+    }
+
+    public java.util.Optional<Liveness> liveness(String tenant, String id) {
+        return java.util.Optional.ofNullable(liveness(tenant, List.of(id)).get(id));
+    }
+
     /** The live and lapsed holders on {@code host} (optionally one pid), unleased ones included. */
     public List<Map<String, Object>> bindingsByHost(String tenant, String host, Integer pid) {
         if (host == null || host.isBlank()) {
