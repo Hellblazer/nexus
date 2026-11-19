@@ -71,9 +71,7 @@ _TABLE: dict[str, PlanAnswerKind] = {
 _ADDED_AFTER_DECLARATION: frozenset[str] = frozenset({"entity-resolution.yml"})
 
 #: What the 12 pre-existing builtins were BEFORE this bead, captured from the tree at origin/develop 4898d437d (the
-#: entity-resolution row is a freeze pin of its own YAML, see its comment; the hybrid-factual-lookup and entity-resolution body
-#: hashes were re-pinned (together) when their search step gained ``lexical: true``, see
-#: tests/test_hybrid_factual_lookup_lexical.py):
+#: entity-resolution row is a freeze pin of its own YAML, see its comment):
 #: (canonical dimensions, sha256[:12] of the description, name, verb, scope, sha256[:12] of the
 #: canonical JSON of the YAML plan_json body). The declaration may add a key beside ``steps``; it must
 #: move none of these.
@@ -86,14 +84,14 @@ _BEFORE: dict[str, tuple[str, str, str, str, str, str]] = {
     "document-default.yml": ('{"scope":"global","strategy":"default","verb":"document"}', "afbb8e70a34e", "default", "document", "global", "3f302c09fa3c"),
     "document-discovery.yml": ('{"scope":"global","strategy":"document-discovery","verb":"research"}', "546d2e15c18a", "document-discovery", "research", "global", "84ea44981806"),
     "find-by-author.yml": ('{"scope":"global","strategy":"find-by-author","verb":"research"}', "5be70bc2a349", "find-by-author", "research", "global", "2d5217c1ce02"),
-    "hybrid-factual-lookup.yml": ('{"scope":"global","strategy":"hybrid-factual-lookup","verb":"lookup"}', "1e3502b55575", "hybrid-factual-lookup", "lookup", "global", "c701db143564"),
+    "hybrid-factual-lookup.yml": ('{"scope":"global","strategy":"hybrid-factual-lookup","verb":"lookup"}', "1e3502b55575", "hybrid-factual-lookup", "lookup", "global", "57af6c5e0bd4"),
     "research-default.yml": ('{"scope":"global","strategy":"default","verb":"research"}', "8d17c00f852f", "default", "research", "global", "d7bff227acdd"),
     "review-default.yml": ('{"scope":"global","strategy":"default","verb":"review"}', "62f68754c0cd", "default", "review", "global", "21c8428f4736"),
     "type-scoped-search.yml": ('{"scope":"global","strategy":"type-scoped","verb":"research"}', "7754909a23d4", "type-scoped-search", "research", "global", "77a84d788747"),
     # FREEZE PIN, not a develop capture (the file has no row on develop 4898d437d): the entity-resolution YAML
     # as of fix round 1 of the nexus-irndi review, whose steps are hybrid-factual-lookup's. A change to its
     # description, dimensions, tags or steps moves these hashes on purpose and the diff shows the edit.
-    "entity-resolution.yml": ('{"scope":"global","strategy":"entity-resolution","verb":"research"}', "ca44c80f5808", "entity-resolution", "research", "global", "c701db143564"),
+    "entity-resolution.yml": ('{"scope":"global","strategy":"entity-resolution","verb":"research"}', "ca44c80f5808", "entity-resolution", "research", "global", "57af6c5e0bd4"),
 }
 
 

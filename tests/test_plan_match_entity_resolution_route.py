@@ -143,8 +143,6 @@ def test_the_template_is_the_curated_discovery_listing_builtin_the_rdr_names() -
 
 def test_the_step_body_is_hybrid_factual_lookups() -> None:
     hybrid = yaml.safe_load((_BUILTIN_DIR / "hybrid-factual-lookup.yml").read_text())
-    # Byte-equal, on purpose: both plans carry ``lexical: true`` on the search step (the cross-encoder rerank, T2
-    # nexus/plan10-lexical-measure-2026-11-19), so the rerank does not depend on which plan the request kind picked.
     assert _template()["plan_json"] == hybrid["plan_json"]
     assert _template()["default_bindings"] == hybrid["default_bindings"]
 

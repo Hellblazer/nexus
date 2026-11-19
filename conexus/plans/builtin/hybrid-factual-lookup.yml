@@ -91,42 +91,6 @@ plan_json:
         # rank step downstream handles relevance. RF-9; tracked
         # systemically as nexus-h3e2.
         threshold: 2.0
-        # lexical: true is here for the RERANK, not for the lexical leg.
-        # MCP search applies the cross-encoder rerank only when lexical=True
-        # (core.py: lexical_rerank = lexical and t3.supports_server_rerank);
-        # there is no rerank-only switch yet. Retire this line when
-        # GH #1667 follow-up A (a rerank parameter on MCP search) lands and use
-        # `rerank: true` instead.
-        #
-        # What was measured (local engine, one collection of HERB, local
-        # cross-encoder; T2 nexus/plan10-lexical-measure-2026-11-19 and
-        # nexus_rdr/herb-full-pool-retrieval-variants-2026-11-19): on 50
-        # "affected by" lookup questions the share of gold companies in the
-        # top 20 went 0.795 -> 0.968 (paired +0.173, 95% CI [+0.123, +0.227];
-        # 27 of 50 up, none down). That is retrieval reach, not answer
-        # quality. The lexical leg itself returned 0 rows on all 50 (it ANDs
-        # every word of a whole question), and rerank-only matched
-        # lexical=true on every question. On the decline shapes (counts,
-        # previous release) a whole-question lexical query lifted r20 only
-        # 0.00 -> 0.07.
-        # Not measured: code, docs, rdr or knowledge corpora, corpus=all over
-        # many collections, this plan's default limit of 40, answer F1, and
-        # cloud mode (there the rerank is Voyage's, uncapped over every
-        # fetched row).
-        #
-        # Cost: the search call goes from ~0.2 s to a p50 of ~5 s at limit 20
-        # and ~10 s at limit 80 (p95 7-21 s). The plan's rank and generate
-        # steps are claude -p calls of 11 s or more each, so a local run is
-        # about 25-50% longer.
-        #
-        # Failure mode: a hybrid-search or rerank error (the lexical leg's
-        # VectorServiceError becomes LexicalLegUnavailableError in
-        # search_engine.py; retried only on statement_timeout or
-        # fanout_budget_exhausted) comes back from core.search as an "Error:"
-        # string. The runner then synthesizes an EMPTY step-1 result with a
-        # warning, so the plan goes on with no evidence where it used to get
-        # vector rows. GH #1667 follow-up B tracks the fix (fail or fall back).
-        lexical: true
     - tool: traverse
       args:
         seeds: $step1.tumblers

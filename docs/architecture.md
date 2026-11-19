@@ -1385,7 +1385,7 @@ Grouped by verb:
   - `corpus-coverage-check`: "Does the corpus have anything on X" — the sibling yes-or-no fast path to `document-discovery`, kept as a separate template so the matcher has two distinct description vectors to rank against.
   - `entity-resolution`: "Which companies were affected by issues in X" — a `discovery/listing` template with `hybrid-factual-lookup`'s steps (search, graph traversal, rank, generate), so an entity-listing request reaches a plan with a coverage boundary instead of the single-query `document-discovery`. Tagged `cosine-only`: matched on similarity at or above the floor, never by the below-floor category route (RDR-147 branch (c)).
 - **verb=lookup**
-  - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval; its search step sets `lexical: true`, which also turns on the server cross-encoder rerank (the lexical leg itself returns nothing on a whole question).
+  - `hybrid-factual-lookup`: Factual claim, named entity, or specific data point. Fuses vector recall with FTS lexical match for narrow-target retrieval.
 - **verb=document**
   - `document-default`: Documentation authoring or audit. Gathers prose and code touching the area, walks documentation-for edges, hydrates both corpora.
 - **verb=review**
