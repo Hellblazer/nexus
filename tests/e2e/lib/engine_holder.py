@@ -12,7 +12,7 @@ import json
 import os
 import signal
 import sys
-import time
+import threading
 from pathlib import Path
 
 sys.path.insert(0, os.getcwd())
@@ -34,17 +34,9 @@ with os.fdopen(fd, "w") as f:
     json.dump(doc, f)
 os.replace(tmp, out)
 print(f"engine up {state['base_url']} tenants={[t['tenant'] for t in tenants]} holder_pid={os.getpid()}", flush=True)
-stop = False
-
-
-def _stop(*_a):
-    global stop
-    stop = True
-
-
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while not stop:
-    time.sleep(1)
+stop = threading.Event()
+signal.signal(signal.SIGTERM, lambda *_a: stop.set())
+signal.signal(signal.SIGINT, lambda *_a: stop.set())
+stop.wait()  # a handler runs while the main thread waits; no polling loop
 print("holder stopping", flush=True)
 sys.exit(0)  # atexit runs the substrate teardown

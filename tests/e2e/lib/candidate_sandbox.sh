@@ -65,8 +65,9 @@ cand_sandbox_create() {
     root="$(cd "$root" && pwd -P)" || return 1
     case "$root" in /|"$HOME"|"$HOME"/) _cand_die "refusing to use $root as a sandbox"; return 1 ;; esac
     umask 077
-    mkdir -p "$root/home/.config/nexus" "$root/home/.local/bin" "$root/home/.local/share/uv/tools" \
-             "$root/tmp" "$root/secrets" "$root/home/.claude" || return 1
+    local h="$root/home"
+    mkdir -p "$h/.config/nexus" "$h/.local/bin" "$h/.local/share/uv/tools" \
+             "$root/tmp" "$root/secrets" "$h/.claude" || return 1
     chmod 700 "$root" "$root/secrets" || return 1
     local uvcache="${CAND_UV_CACHE_DIR:-}"
     if [ -z "$uvcache" ]; then
@@ -89,9 +90,10 @@ cand_sandbox_create() {
     cat >"$root/run" <<'RUNNER'
 #!/usr/bin/env bash
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+h="$here/home"
 exec /usr/bin/env -i \
     HOME="$here/home" USER="${USER:-sandbox}" LANG="${LANG:-en_US.UTF-8}" TERM="${TERM:-xterm-256color}" \
-    NEXUS_CONFIG_DIR="$here/home/.config/nexus" CLAUDE_CONFIG_DIR="$here/home/.claude" NX_NO_TELEMETRY=1 \
+    NEXUS_CONFIG_DIR="$here/home/.config/nexus" CLAUDE_CONFIG_DIR="$h/.claude" NX_NO_TELEMETRY=1 \
     TMPDIR="$here/tmp" UV_TOOL_DIR="$here/home/.local/share/uv/tools" UV_TOOL_BIN_DIR="$here/home/.local/bin" \
     PATH="$here/home/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
     SBX_SECRETS="$here/secrets" \

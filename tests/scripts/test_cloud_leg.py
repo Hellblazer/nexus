@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 E2E = REPO_ROOT / "tests" / "e2e"
 LEG_SH = E2E / "cloud-leg.sh"
@@ -87,7 +89,7 @@ def test_window_marker_must_be_0600_and_the_users_own(tmp_path: Path, monkeypatc
         cl.check_window("w1", tmp_path)
     m.chmod(0o600)
     cl.check_window("w1", tmp_path)
-    monkeypatch.setattr(os, "getuid", lambda: os.stat(m).st_uid + 1)
+    setattr_in(monkeypatch, cl, "os.getuid", lambda: os.stat(m).st_uid + 1)
     with pytest.raises(cl.Refusal, match="owned by the current user"):
         cl.check_window("w1", tmp_path)
 
@@ -936,19 +938,21 @@ def test_a_real_local_vs_local_keep_run_leaves_no_token_shaped_string(tmp_path: 
 
 def test_sandbox_scrub_removes_secrets_identity_and_token_files(tmp_path: Path) -> None:
     root = tmp_path / "sbx"
+    home = root / "home"
+    stray = home / "stray"  # a directory the client might create under HOME
     cp = _sh(f'cand_sandbox_create "{root}" >/dev/null\nprintf "%s\\n" {SECRET} > "{root}/secrets/NX_MINT_TOKEN"\n'
-             f'mkdir -p "{root}/home/.config/nexus/identity/delegated" "{root}/home/stray"\n'
-             f'echo {SECRET} > "{root}/home/.config/nexus/identity/delegated/i1.token"\necho {SECRET} > "{root}/home/stray/x.token"\n'
-             f'echo keep > "{root}/home/stray/other.txt"\necho lease > "{root}/home/.config/nexus/t1_session_lease.abc"\n'
-             f'mkdir -p "{root}/home/.local/share/uv/tools/conexus/bin" "{root}/home/.local/state"\n'
-             f'echo tool > "{root}/home/.local/share/uv/tools/conexus/bin/python"\necho x > "{root}/tmp/scratch"\ncand_sandbox_scrub "{root}"',
+             f'mkdir -p "{home}/.config/nexus/identity/delegated" "{stray}"\n'
+             f'echo {SECRET} > "{home}/.config/nexus/identity/delegated/i1.token"\necho {SECRET} > "{stray}/x.token"\n'
+             f'echo keep > "{stray}/other.txt"\necho lease > "{home}/.config/nexus/t1_session_lease.abc"\n'
+             f'mkdir -p "{home}/.local/share/uv/tools/conexus/bin" "{home}/.local/state"\n'
+             f'echo tool > "{home}/.local/share/uv/tools/conexus/bin/python"\necho x > "{root}/tmp/scratch"\ncand_sandbox_scrub "{root}"',
              {"PATH": os.environ["PATH"]})
     assert cp.returncode == 0, cp.stderr
     assert not (root / "secrets").exists() and not list(root.rglob("*.token"))
     # everything the client wrote under HOME is gone (the T1 lease included); only the installed tools survive
-    assert sorted(p.name for p in (root / "home/.config/nexus").iterdir()) == []
-    assert not (root / "home/stray").exists() and not (root / "home/.local/state").exists() and not list((root / "tmp").iterdir())
-    assert (root / "home/.local/share/uv/tools/conexus/bin/python").is_file()
+    assert sorted(p.name for p in (home / ".config/nexus").iterdir()) == []
+    assert not stray.exists() and not (home / ".local/state").exists() and not list((root / "tmp").iterdir())
+    assert (home / ".local/share/uv/tools/conexus/bin/python").is_file()
 
 
 # ── the gate scripts' own conventions ───────────────────────────────────────
