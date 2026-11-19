@@ -898,8 +898,9 @@ if steps_supported is not True:
         f"(got {steps_supported!r}) — the .p1d per-step cost/quality "
         "telemetry capability probe is inert for every cloud client"
     )
-# RDR-241 Phase 2 (nexus-uwggq.2.8, gate Significant S5): the three route flags must read true through the
-# edge, which trims /version to an allowlist; a flag it does not list reads as absent to every cloud client.
+# RDR-241 (nexus-uwggq.2.8, gate Significant S5; by-scheme from nexus-uwggq.1.5): the four route flags must read
+# true through the edge, which trims /version to an allowlist; a flag it does not list reads as absent to every
+# cloud client.
 for flag, inert in (
     ("catalog_docs_by_author_supported",
      "catalog_search by author alone answers an error for every cloud client (nexus-uwggq.2.12)"),
@@ -908,6 +909,8 @@ for flag, inert in (
     ("catalog_sensitive_locators_supported",
      "operator dispatch drops its file tools for every cloud client, logged as operator_dispatch_file_tools_dropped "
      "(nexus-uwggq.2.13)"),
+    ("catalog_docs_by_scheme_supported",
+     "nx doctor --check-references reads 'not checked' and exits 3 for every cloud client (nexus-uwggq.1.5)"),
 ):
     if body.get(flag) is not True:
         errs.append(f"{flag} missing/false through the edge (got {body.get(flag)!r}) — {inert}")
@@ -919,7 +922,8 @@ if errs:
 print(f"  ok: release_version={body['release_version']} "
       f"embedding_mode={mode} models={models} "
       f"nx_answer_steps_supported={steps_supported} catalog_docs_by_author_supported=True "
-      f"catalog_docs_by_meta_supported=True catalog_sensitive_locators_supported=True")
+      f"catalog_docs_by_meta_supported=True catalog_sensitive_locators_supported=True "
+      f"catalog_docs_by_scheme_supported=True")
 PY
 }
 

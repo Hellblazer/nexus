@@ -914,7 +914,7 @@ neg_case "a client write call added to leg N" "a client write call in leg N" \
 uv run python -c '"'store.put(1)'"'
 '
 
-# ── Leg A's /version contract (nexus-uwggq.2.8): the three RDR-241 route flags must read true through the edge ──
+# ── Leg A's /version contract (nexus-uwggq.2.8): the four RDR-241 route flags must read true through the edge ──
 sed -n '/^_version_contract_verdict() {/,/^}/p' "$GATE" > "$TMP/vfn.sh"
 if [ "$(head -n 1 "$TMP/vfn.sh")" = '_version_contract_verdict() {' ] && [ "$(tail -n 1 "$TMP/vfn.sh")" = '}' ]; then
   PASS=$((PASS+1))
@@ -930,7 +930,8 @@ _vbody() {  # <python dict updates>
   "$E2E_PYTHON" -c 'import json,sys
 b={"release_version":"0.1.250","embedding_mode":"voyage","embedding_models":["voyage-context-3"],
    "nx_answer_steps_supported":True,"catalog_docs_by_author_supported":True,
-   "catalog_docs_by_meta_supported":True,"catalog_sensitive_locators_supported":True}
+   "catalog_docs_by_meta_supported":True,"catalog_sensitive_locators_supported":True,
+   "catalog_docs_by_scheme_supported":True}
 exec(sys.argv[1]); print(json.dumps(b))' "$1"
 }
 vcase() {  # <label> <want-rc> <want-text> <python update>
@@ -943,8 +944,9 @@ vcase() {  # <label> <want-rc> <want-text> <python update>
     echo "[FAIL] version contract: $1 (rc $rc, want $2 with '$3'): $out"; FAIL=$((FAIL+1))
   fi
 }
-vcase "all flags true" 0 "catalog_sensitive_locators_supported=True" "pass"
-for f in catalog_docs_by_author_supported catalog_docs_by_meta_supported catalog_sensitive_locators_supported; do
+vcase "all flags true" 0 "catalog_sensitive_locators_supported=True catalog_docs_by_scheme_supported=True" "pass"
+for f in catalog_docs_by_author_supported catalog_docs_by_meta_supported catalog_sensitive_locators_supported \
+         catalog_docs_by_scheme_supported; do
   vcase "$f absent" 1 "VIOLATION: $f missing/false" "del b['$f']"
   vcase "$f false" 1 "VIOLATION: $f missing/false" "b['$f']=False"
   vcase "$f the string true" 1 "VIOLATION: $f missing/false" "b['$f']='true'"

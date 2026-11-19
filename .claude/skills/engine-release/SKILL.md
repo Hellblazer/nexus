@@ -475,7 +475,7 @@ For cross-repo gate / deploy status, **read the authoritative bead + the conexus
 
 ### 6.1. Post-deploy client-visibility gate (MANDATORY, run from a cloud-mode box)
 
-Leg A asserts the three RDR-241 route flags (`catalog_docs_by_author_supported`, `catalog_docs_by_meta_supported`, `catalog_sensitive_locators_supported`) read true through the edge (nexus-uwggq.2.8), so from the cut that carries the routes this gate proves the conexus edge allowlist lists them; before that deploy and allowlist change, Leg A is red against production by design.
+Leg A asserts the four RDR-241 route flags (`catalog_docs_by_author_supported`, `catalog_docs_by_meta_supported`, `catalog_sensitive_locators_supported`, `catalog_docs_by_scheme_supported`) read true through the edge (nexus-uwggq.2.8), so from the cut that carries the routes this gate proves the conexus edge allowlist lists them; before that deploy and allowlist change, Leg A is red against production by design.
 
 The flip from `log-only` to `enforce` is its own bead, nexus-z0o2p.40, and it FOLLOWS the cut: it needs the soak, a written disposition for every writer the log names, and Sam's confirmation (`docs/operations/ownerless-write-cutover.md`, Order of operations 3 to 4). So the `=enforce` form below is that bead's check after the flip redeploy; it is NOT a Step 6.1 or Step 7 precondition for this cut, and a cut's sign-off never waits on it. This cut's sign-off asserts `log-only`.
 
