@@ -229,7 +229,13 @@ lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/
 ```
 
 Start each leg as a background command (`run_in_background`) with its output
-redirected to a file, as every `lab-remote` run is. `output/` is git-ignored, so
+redirected to a file, as every `lab-remote` run is. To run the three legs together
+(Step 2b), give each its own worktree at `TAG_SHA` (`git worktree add --detach
+../nexus-wt/engine-cut-<sha>-A "$TAG_SHA"`, and `-B`, `-C`) and start each leg from
+its own: a second `lab-remote` from the same worktree exits 98 while the first holds
+that worktree's copy. The three legs then share chas's build lease for
+`scripts/build-gate-jar.sh`, so their jar builds take turns; the legs themselves run
+together. `output/` is git-ignored, so
 the fetched reports leave the tag tree clean. The jar must come from
 `scripts/build-gate-jar.sh`, which stamps the build commit the engine serves on
 `/version`. The script reuses a cached jar while `service/` is unchanged, so the
