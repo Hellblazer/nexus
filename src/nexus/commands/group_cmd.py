@@ -287,7 +287,8 @@ def list_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
         click.echo(json.dumps({"group": raw, "members": members}, indent=2, sort_keys=True))
         return
     per_topic = ", ".join(f"{t} {m} min" for t, m in sorted(record.ack_deadline_by_topic.items()))
-    if record.live:
+    live = record.live if record.live is not None else not record.ended_at   # no verdict from the engine: ended_at alone
+    if live:
         status = "live"
     elif record.ended_at:
         status = f"disbanded (ended_at {record.ended_at})"

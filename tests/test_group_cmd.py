@@ -394,6 +394,7 @@ _MALFORMED_ROWS = {
     "a_row_that_is_not_a_map": ["i4"],
     "a_row_with_no_identity": [{"group": "push-train", "role": "member"}],
     "an_identity_that_is_not_text": [{"identity": 4, "group": "push-train", "role": "member"}],
+    "a_row_with_no_role": [{"identity": "i4", "group": "push-train"}],    # list formats the role: None would be a TypeError
 }
 
 
@@ -413,6 +414,18 @@ def test_a_malformed_membership_row_is_one_line_and_exit_one_in_join() -> None:
     result = _run(_env(wire), "join", "push-train")
     assert isinstance(result.exception, SystemExit) and result.exit_code == 1, (result.exception, result.output)
     assert "bad_response" in result.output and not wire.sent("POST", "/v1/identity/i3/memberships")
+
+
+def test_a_record_with_no_live_field_is_not_read_as_disbanded() -> None:
+    """The engine always sends ``live`` today, but an absent key is no verdict: ``live`` is None (the aura gate then uses its
+    local rule) and ``list`` shows the group live while ``ended_at`` is unset, never "disbanded"."""
+    bare = {k: v for k, v in RECORD.items() if k != "live"}
+    assert GroupRecord.from_wire(bare).live is None
+    assert GroupRecord.from_wire({**bare, "live": None}).live is None
+    assert GroupRecord.from_wire({**bare, "live": False}).live is False
+    wire = Wire().on("GET", "/v1/group/push-train", 200, bare).on("GET", "/v1/identity/groups/push-train", 200, {"members": []})
+    result = _run(_env(wire), "list", "push-train")
+    assert result.exit_code == 0 and "push-train: live;" in result.output and "disbanded" not in result.output, result.output
 
 
 _UNREADABLE = {
