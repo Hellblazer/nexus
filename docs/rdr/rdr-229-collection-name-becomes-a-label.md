@@ -746,9 +746,12 @@ partition holds it. It keeps one uniqueness rule, for addressing only: **a
 label is unique among a tenant's live collections**, enforced by a partial
 UNIQUE index on `(tenant_id, name)` over rows that are not superseded. Two
 collections of one tenant can no longer answer to the same label, so a
-label in a command names one collection without ambiguity. A superseded
-(tombstoned) row keeps its label for history and releases it, so the label
-can be reused. Model siblings no longer collide, because each sibling gets
+label in a command names one collection without ambiguity. From P4.1, a
+superseded (tombstoned) row keeps its label for history and releases it, so
+the label can be reused. Until P4.1 the name is still the primary key
+(`PRIMARY KEY (tenant_id, name)`, `catalog-001-baseline.xml:211`; T2
+`229-research-36`), so a superseded row, including one a past rename left,
+keeps its name taken. Model siblings no longer collide, because each sibling gets
 its own minted label. Labels in different tenants are independent, as
 names are today.
 
@@ -763,7 +766,11 @@ A rename becomes `UPDATE catalog_collections SET name = <new>` on one row.
 `renameCollectionTxn` stops inserting, rewriting fourteen tables and
 tombstoning. It still rewrites the `nx-note://<label>/` source URIs of the
 collection's notes, as it does today; moving note identity off the label is
-a catalog-identity change outside this RDR.
+a catalog-identity change outside this RDR. The one-row rename needs every
+reader off the referencing tables' name columns (P3.5) and every
+per-collection index off the name (P3.4). From P3.7 those columns are dead:
+unread, and no longer rewritten by a rename, so they hold the label each row
+was written under until P4.1 drops them.
 
 **8. Minting (D2).** When a collection is registered with no label, the
 engine takes the next `collection_id` and sets the label to `c` followed by
@@ -999,9 +1006,9 @@ every script and note URI that names one.
   rewrites, so an empty scan fails rather than passing.
 - A label clash on a recovery-bundle import: that collection is refused
   with both labels named; the rest of the bundle imports.
-- A route receives a label that two live rows hold: impossible once the
-  partial UNIQUE exists; before it exists (Phases 1 and 2) the name is
-  still the primary key.
+- A route receives a label that two live rows hold: impossible in every
+  phase. Until P4.1 the name is the primary key. From P4.1 the partial
+  UNIQUE on live labels, added in P3.6, holds it.
 
 ## Implementation Plan
 
@@ -1132,13 +1139,14 @@ its acceptance is that test green plus the census pin it lowers.
 - P3.6 Label rule, after P2.9: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
   100-character label and a non-conformant label are accepted, a control
-  character is refused, a second live row with one label is refused, a
-  superseded row's label can be reused.
-- P3.7 Rename becomes a one-row label update plus the note-URI rewrite;
-  history tables stop being rewritten. Test: a rename leaves chunk,
+  character is refused, and a second live row with one label is refused.
+  Label reuse after supersession waits for P4.1.
+- P3.7 After P3.4 and P3.5: rename becomes a one-row label update plus the
+  note-URI rewrite; history tables and the referencing tables' dead name
+  columns stop being rewritten (item 7). Test: a rename leaves chunk,
   manifest and taxonomy rows untouched and the per-collection index in
   place.
-- P3.8 Minting (item 8), after P2.9: the engine mints `c<id>` when no label is given;
+- P3.8 Minting (item 8), after P2.9 and P3.6: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
   indexer reroute are removed. Registration requires explicit attributes
@@ -1163,7 +1171,8 @@ its acceptance is that test green plus the census pin it lowers.
   and a stated effect on backups taken before P3.1 (item 10). Primary key
   to `(tenant_id, collection_id)`; drop the name columns on
   referencing tables, the `(tenant_id, name, embedding_model)` UNIQUE and
-  `superseded_by` (replaced by `superseded_by_id`).
+  `superseded_by` (replaced by `superseded_by_id`). Test: a superseded
+  row's label can be reused by a new live collection.
 - P4.2 Drop `legacy_grandfathered` and `idx_catalog_collections_legacy`.
 - P4.3 Delete every parser outside `legacy_names`; both census gates fall to
   the migration-source and diagnostic floor (the routing class is already
@@ -1176,8 +1185,9 @@ its acceptance is that test green plus the census pin it lowers.
 ### Phase dependencies
 
 P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
-2 and for RDR-246's activation (Prerequisites). P3.2 blocks P3.3 and P3.4. P3.3 blocks P3.5 and P3.7. P3.8 waits for
-P2.8 and P2.9; P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
+2 and for RDR-246's activation (Prerequisites). P3.2 blocks P3.3 and P3.4. P3.3 blocks P3.5 and P3.7. P3.7 also waits
+for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9 and P3.6, which
+enforces the reserved minted form; P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
 production tenants; P4.4 waits for its release count.
 
 ### Day 2 Operations
@@ -1324,7 +1334,9 @@ and again after Phase 3, and is not deferred.
   is needed.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
-  Each Phase 3 step leaves the name path working until Phase 4.
+  Each Phase 3 step up to P3.6 leaves the name path working. From P3.7 a
+  rename leaves the referencing tables' name columns on the old label, so
+  the name path is dead from there until P4.1 drops it (item 7).
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: N/A.
 
