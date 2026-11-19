@@ -25,6 +25,7 @@ import pytest
 
 from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
 from tests._child_process import kill_group, popen_in_group
+from test_restart_sandbox_identity_census import stub_census
 from tests._module_seam import setattr_in
 
 RUN_PY = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "run.py"
@@ -649,6 +650,7 @@ def test_a_keep_run_is_unverified_not_a_pass(run, tmp_path, monkeypatch) -> None
     monkeypatch.setattr(run.Sandbox, "entries", lambda self: [])
     monkeypatch.setattr(run, "RUNNERS", {"gate": lambda sb, crs, a, failures, notes: None})
     monkeypatch.setattr(run, "footprint_before", lambda: {})
+    stub_census(run, monkeypatch)  # no engine here: the census reads two empty lists
     run.UNVERIFIED.clear()
     args = types.SimpleNamespace(keep=True, model="sonnet")
     ok, failures, _ = run.run_scenario("gate", "claude", args, None)

@@ -1,0 +1,3 @@
+### Fixed
+
+- **The restart sandbox no longer binds RDR-253 identities in the operator's tenant.** The sandbox copies the operator's `config.yml` so its Claude sessions reach the operator's engine, and since 8.5.0 each session's SessionStart hook and MCP identity lease bound an identity with that credential (twelve `rs_*` rows). The SessionStart identity hook now binds nothing and makes no engine call when `NX_IDENTITY_BIND=0` is in its environment, saying so in one line; the sandbox sets that and `NX_IDENTITY_LEASE=0` for its sessions. The sandbox also reads the operator's identity list (`nx identity show --all`, read only) before the sessions start and after cleanup, and fails the scenario for any new id or for a list it cannot read.
