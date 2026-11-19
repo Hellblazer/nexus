@@ -27,7 +27,9 @@ gate was busy: retry or fix the credential, it says nothing about the edge).
 
 RDR-167 Phase 2 (nexus-dngtz.2) rides the same POST: the probe binds a known ``X-Correlation-ID`` P (32
 hex, never the engine's ``nxe-`` marker) for that one request and names one of four outcomes from the id
-the engine echoes (:func:`classify_correlation_echo`), read only from an answer the engine itself sent.
+the engine echoes (:func:`classify_correlation_echo`). An echo is read from any answer (only the engine
+sets the header); a missing echo is a response strip only on the engine's parsed 200, since an error answer
+may come from the edge, a sidecar or a gateway that never reached the engine.
 "Response strip" (no echo) cannot tell a stripped header from an engine without Phase 1, and its row says
 so. The outcome is a second row, not part of the
 verdict: a lost correlation id costs log joining across tiers, not a duplicate execution, so it never
@@ -113,7 +115,8 @@ class EdgeProbeResult:
     quarantine_collection: str | None = None
     host: str | None = None
     inconclusive: bool = False
-    #: The RDR-167 Phase 2 outcome, or None when the engine's own answer did not come back to read it from.
+    #: The RDR-167 Phase 2 outcome, or None: no echo on an answer that may not be the engine's (an error), or
+    #: no answer at all. A response strip is read only from the engine's parsed 200.
     correlation: str | None = None
     correlation_sent: str | None = None
     correlation_echo: str | None = None
@@ -218,12 +221,12 @@ def run_edge_probe(*, expect_host: str | None = None) -> EdgeProbeResult:
     key = hvc.new_request_key()
     sent_cid = corr_ctx.new_correlation_id()
     identity: dict[str, str] = {}  # the POST's response headers, once one came back
-    answered = False  # an HTTP response came back, so a missing echo is a response strip, not "not read"
+    answered = False  # the engine's own 200 came back, so a missing echo is a response strip, not "not read"
 
     def corr_fields() -> dict[str, Any]:
-        if not identity and not answered:
-            return {}
         echo = identity.get(corr_ctx.HEADER)
+        if not echo and not answered:
+            return {}  # no echo, and no engine answer to say it was stripped from
         return {"correlation": classify_correlation_echo(sent_cid, echo), "correlation_sent": sent_cid,
                 "correlation_echo": echo}
 
@@ -254,11 +257,11 @@ def run_edge_probe(*, expect_host: str | None = None) -> EdgeProbeResult:
         return fail(f"REFUSED by the dev-checkout production-write guard: {_redact(exc)}", HOP_SETUP)
     except hvc.VectorServiceError as exc:
         code = getattr(exc, "code", None)
-        # Only the engine echoes the id (AuthFilter), so a missing echo is a response strip only on an answer
-        # the engine sent: its JSON error body, and no edge ``Server`` header. A WAF refusal or a gateway
-        # 502/504 never reached the engine and says nothing about the header (no row).
-        if code is not None and not exc.edge_refusal and isinstance(exc.engine_body, dict):
-            answered = True
+        # An error answer may not be the engine's (a WAF refusal, a sidecar or gateway 502/504, whatever its
+        # Server header), and nothing in its body proves it is: the engine's own auth errors are plain text.
+        # So an echo on it is read (only the engine sets the header), but a missing echo is no row, never a
+        # response strip: ``answered`` stays False here.
+        if code is not None:
             identity.update(hvc._pop_idempotency_response_headers())
         if code in (401, 403) and not exc.edge_refusal:
             return inconclusive(

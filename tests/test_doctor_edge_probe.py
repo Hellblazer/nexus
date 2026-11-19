@@ -71,7 +71,7 @@ class _Engine:
             def _correlation_echo(self) -> str | None:
                 """What the engine's AuthFilter echoes on every response, after the path's defect. The engine
                 keeps a valid inbound id and otherwise generates ``nxe-`` plus 32 hex (CorrelationId.java)."""
-                if outer.mode == "edge_waf_403":
+                if outer.mode in ("edge_waf_403", "gateway_504"):
                     return None  # the edge answered; the engine, which sets the echo, never saw the request
                 inbound = None if outer.corr == "strip_in" else self.headers.get(_CORRELATION)
                 valid = inbound is not None and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", inbound) is not None
@@ -95,6 +95,16 @@ class _Engine:
                     return self._send(404, {"error": "no route"})
                 if outer.mode == "unsupported":
                     return self._send(400, {"error": "idempotency_key_unsupported"})
+                if outer.mode == "gateway_504":
+                    # A TLS sidecar or other gateway timing out the engine: HTML, no awselb Server header.
+                    page = b"<html><body>504 Gateway Time-out</body></html>"
+                    self.send_response_only(504)
+                    self.send_header("Server", "nginx/1.25.3")
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(page)))
+                    self.end_headers()
+                    self.wfile.write(page)
+                    return None
                 if outer.mode == "edge_waf_403":
                     # An AWS WAF/ALB refusal: the edge answers, the application never sees the request.
                     return self._send(403, {"error": "forbidden"}, {"Server": "awselb/2.0"})
@@ -370,6 +380,21 @@ class TestCorrelationOutcome:
         assert result.hop == probe.HOP_EDGE
         assert result.correlation is None
         assert "correlation" not in probe.render(result)
+
+    def test_a_gateway_error_without_an_echo_reports_no_correlation_outcome(self, engine_for, monkeypatch) -> None:
+        """A sidecar 504 with an HTML body and no awselb Server header: not an edge refusal by that test, and the
+        client wraps its body in a dict, yet the engine never ran, so no response strip."""
+        monkeypatch.setattr(hvc, "_GATEWAY_RETRY_SLEEPS", ())
+        engine_for("gateway_504")
+        result = _run()
+        assert not result.ok
+        assert result.correlation is None
+        assert "correlation" not in probe.render(result)
+
+    def test_an_engine_error_without_an_echo_reports_no_outcome(self, engine_for) -> None:
+        """A missing echo on an error is never a response strip: the probe cannot prove the engine answered."""
+        engine_for("unsupported", "strip_out")
+        assert _run().correlation is None
 
     def test_a_response_strip_names_the_pre_phase_1_engine_too(self, engine_for) -> None:
         engine_for("echo", "strip_out")

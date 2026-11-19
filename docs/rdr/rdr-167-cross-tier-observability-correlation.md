@@ -847,8 +847,9 @@ distinguishable. The probe sends a valid id P without that prefix and reads the 
 received no valid header and made its own), **overwrite** (an echo that is present, is not P
 and has no `nxe-` prefix, so something on the path replaced the id) and **response strip** (no
 echo, so the response header was removed on the way back). The engine side is built
-(`CorrelationId.java`), and so is the probe (nexus-dngtz.2): it reads the echo only from an answer
-the engine sent, and its response-strip row also names an engine without Phase 1, which echoes nothing.
+(`CorrelationId.java`), and so is the probe (nexus-dngtz.2): it reads a missing echo as a response strip only
+on the engine's own 200 (an error answer may be the edge's), and that row also names an engine without
+Phase 1, which echoes nothing.
 This closes the assumption in research-8.
 
 ### Phase 3 (optional, later): JSON logs
