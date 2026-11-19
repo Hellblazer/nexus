@@ -176,6 +176,19 @@ def registered_owner(
     return None
 
 
+def _own_identity(session_id: str) -> str:
+    """This process's identity (RDR-253 Step 5): the leased token file first, then the one a token file binds the
+    session id to; ``""`` when neither resolves."""
+    from nexus.identity.board import identity_for_session  # noqa: PLC0415
+    from nexus.identity.token_header import current  # noqa: PLC0415
+
+    try:
+        record = current()
+        return str(record.identity) if record is not None else identity_for_session(session_id)
+    except Exception:  # noqa: BLE001 -- no identity is the Phase 1 fallback, never a failed load
+        return ""
+
+
 def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cwd: Path | None = None) -> AuraLoader:
     """An :class:`AuraLoader` for *waiter*'s session with the server's real dependencies: the library roots of
     *cwd*, the on/off resolver read at the repo's top level, the session registry, the process table, the run
@@ -217,7 +230,10 @@ def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cw
 
     def make_runtime(auras: list[Aura]) -> AuraRuntime:
         read, put = t2_threads_io(store_ctx)
-        return AuraRuntime(auras, writer=ThreadsBlockWriter(session_id, read_entries=read, put=put), notify=notify)
+        return AuraRuntime(
+            auras, writer=ThreadsBlockWriter(session_id, read_entries=read, put=put, identity=_own_identity(session_id)),
+            notify=notify,
+        )
 
     def attach(runtime: AuraRuntime) -> None:
         waiter.aura_sink = runtime.offer

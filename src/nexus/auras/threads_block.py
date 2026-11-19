@@ -80,16 +80,24 @@ class ThreadsBlockWriter:
     ``(title, content, tags)`` back to it. :func:`t2_threads_io` gives both over the CLI's T2 handle.
     """
 
-    def __init__(self, session_id: str, *, read_entries: ReadEntries, put: PutEntry) -> None:
+    def __init__(self, session_id: str, *, read_entries: ReadEntries, put: PutEntry, identity: str = "") -> None:
         self.session_id = session_id
+        self.identity = identity  #: RDR-253 Step 5: the seat's identity finds the entry first, across /clear
         self._read = read_entries
         self._put = put
 
+    def _mine(self, row: Mapping[str, Any]) -> bool:
+        session = parse_session(str(row.get("title", "")), str(row.get("content", "")))
+        if session.identity:
+            return session.identity == self.identity
+        return session.session_id == self.session_id  # an entry with no identity line (Phase 1)
+
     def _entry(self, aura: str) -> Mapping[str, Any] | None:
-        mine = [
-            row for row in self._read()
-            if parse_session(str(row.get("title", "")), str(row.get("content", ""))).session_id == self.session_id
-        ]
+        rows = list(self._read())
+        mine = [row for row in rows if self._mine(row)]
+        if self.identity and any(self.identity == parse_session("", str(r.get("content", ""))).identity for r in mine):
+            # the identity-lined entry is the seat's; a legacy entry still carrying the session line is not a second one
+            mine = [r for r in mine if parse_session("", str(r.get("content", ""))).identity == self.identity]
         if not mine:
             _log.warning("aura_threads_no_entry", aura=aura, session_id=self.session_id)
             return None
