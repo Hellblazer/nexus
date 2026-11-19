@@ -536,11 +536,15 @@ the cause if any of these fail:
    before anything is written, the archives and the pointer included.
 2. Every title the run lists resolves. A record of this read resolves by being
    in it. A record an earlier pointer (same title) listed that this read no
-   longer lists, because the reap deleted its row, is carried into the new
-   pointer marked `state: absent`, provided its archive still reads back whole;
-   if it does not, the run stops and names the title, because that record's
-   full text would be lost. So a record the reap deleted never drops out of
-   the listing. After the pointer is written it is read back from T3 by its
+   longer lists is carried into the new pointer, so no record an earlier run
+   listed drops out of it. One the expire sweep quarantined (found in the
+   quarantined listing, which `get_all` hides) is marked `state: quarantined`;
+   its row is restorable, so it is carried whatever its archive. One that is
+   neither live nor quarantined, because the reap deleted its row, is marked
+   `state: absent` provided its archive still reads back whole; if it does not,
+   the run stops and names the title, because that record's full text would be
+   lost. Carried records take no part in Step 2.3 or the TTL step: they
+   already have one. After the pointer is written it is read back from T3 by its
    title and must list the same records, and every listed record's archive
    reads back whole and equal to the record, so no record gets a TTL until its
    full text reads back from T3. These reads do not stamp access (A8).
@@ -578,10 +582,17 @@ The values come from one `get_all` taken right before the writes, after the
 pointer is written and read back, so a reader's access that landed after the
 listing keeps its count (a per-row `get` would stamp access, A8); a row that now
 has a TTL, or is gone, is skipped. Then read the rows back through one
-`get_all` and compare every field. A mismatch is reported with the title and
-the field, and the original row's values are printed so a person can write them
-back; the command does not undo it, and exits nonzero. The read cost is one
-`get_all` before the writes and one after, on top of the listing's.
+`get_all` and compare every field. The import keeps the row's own timestamp,
+so an old row can be quarantined by the sweep before it is read back, and
+`get_all` hides it: a row missing from that read is looked up in the
+quarantined listing before it is called missing, reported as `quarantined
+(restorable: nx memory restore <id>)`, and still compared field by field. A
+mismatch is reported with the title and the field, and the original row's
+values are printed so a person can write them back; the command does not undo
+it, and exits nonzero. The read cost per run is one `get_all` before the writes
+and one after, on top of the listing's, plus one quarantined listing and one
+read of the earlier pointer from T3, each made once and only when needed; it
+does not grow with the number of records.
 
 - *Why import and not put.* A `put` fills a missing agent or session from the
   writer's environment and the engine stores that, so it would give a record
@@ -1234,3 +1245,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Phase 3 Step 3, the TTL write (nexus-1gdv0.2.8), built. A real run writes `ttl=30` through `import_entry` on each record that passed Step 2 and has no TTL, after the pointer is written and read back; every other field goes as `get_all` returned it, and a read-back compares each field and names a mismatch with the original row (exit nonzero, no undo). The values come from one `get_all` taken right before the writes, not one per record: a per-row `get` stamps access (A8) and a filtered `get_all` does not exist, so audit residual (2) is narrowed to the length of the write loop and stated beside the residual race rather than closed. `--dry-run` prints each candidate with its timestamp, `access_count` and whether the engine rule has it past its effective TTL, and one count. The census change is nexus-1gdv0.2.9. |
 | 2026-11-19 | Fix check d021dc53c85b, defects B and C (nexus-1gdv0.2.9) and audit residual (4): the census change of Step 3 is built. `_census` reads only `<repo>`, its `<repo>_rdr` title-number branch and `_RDR_TITLE` are deleted, and its predicate is `kind:gate` only (a row tagged only `gate` is neither listed by the rollup nor flagged). The three census tests that pinned `<repo>_rdr` rows as flagged now seed them and assert they are not flagged; one is renamed; the sub-phase case moves to a `<repo>` row so its coverage is kept. Step 3 names the change. |
 | 2026-11-19 | Fix check d021dc53c85b, defects A and C (nexus-1gdv0.2.10): the null-attribution test of Step 3 could not tell `put` from import, because in a bare test process `NX_AGENT` and the session both resolve to None and a `put` would also leave them null. The test now sets `NX_AGENT` and `NX_SESSION_ID` (and stops the config file leaking in), asserts first that a `put` under those settings writes both non-null, then asserts the import keeps both null; it refuses to pass when the control writes nothing. |
+| 2026-11-19 | Fix check d021dc53c85b, defects B and C, A on cost (nexus-1gdv0.2.11): keeping the row's own timestamp means the expire sweep can quarantine an old record before it is read back, and `get_all` hides a quarantined row. The read-back now looks a missing row up in the quarantined listing before calling it missing and reports it as quarantined, restorable with `nx memory restore <id>`, still comparing its fields. A rerun carries a record an earlier pointer listed that the read no longer lists: `state: quarantined` when it is in the quarantined listing (whatever its archive, its row is restorable), `state: absent` when it is neither live nor quarantined and its archive reads back whole (the reaped-record rule of nexus-1gdv0.2.6), and stops naming it when that archive is gone. A run whose read lists nothing still refreshes an earlier pointer. The read cost per run is stated in Step 3: one `get_all` before and one after the writes, one quarantined listing and one pointer read, none per record. |

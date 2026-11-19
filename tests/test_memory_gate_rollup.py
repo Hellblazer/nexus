@@ -854,3 +854,78 @@ def test_ttl_null_attribution_stays_null_where_a_put_would_fill_it(db: T2Databas
     after = _rows(db)[name]
     assert after["ttl"] == 30
     assert after["agent"] is None and after["session"] is None
+
+
+# ── read-back and rerun against the expire sweep (nexus-1gdv0.2.11) ──────────────
+
+def _sweep_after_each_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session-end expire sweep landing between the write and the read-back: after each import it runs."""
+    real = HttpMemoryStore.import_entry
+
+    def import_then_sweep(self, **kw):
+        out = real(self, **kw)
+        self.expire()
+        return out
+
+    monkeypatch.setattr(HttpMemoryStore, "import_entry", import_then_sweep)
+
+
+def test_readback_reports_a_row_the_sweep_already_quarantined_as_quarantined_not_a_mismatch(
+        db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    old = _gate(db, "nexus-q1", age_days=40)                 # 40 days old, ttl 30: past its effective TTL
+    sent = dict(_rows(db)[old])
+    _sweep_after_each_import(monkeypatch)
+    out = _phase3("nexus-q1")                                 # exit 0: nothing was lost
+    assert old not in _rows(db)                               # the sweep hid it, so get_all cannot read it back
+    assert "mismatch" not in out
+    assert f"quarantined (restorable: nx memory restore" in out and old in out
+    (back,) = [r for r in db.memory.list_quarantined(project=REPO) if r["title"] == old]
+    assert back["ttl"] == 30 and {k: back[k] for k in gt.KEPT_FIELDS} == {k: sent[k] for k in gt.KEPT_FIELDS}
+
+
+def test_readback_a_row_that_is_neither_live_nor_quarantined_is_a_mismatch(
+        db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _gate(db, "nexus-q2")
+    real = HttpMemoryStore.import_entry
+
+    def import_then_lose(self, **kw):
+        out = real(self, **kw)
+        self.delete(kw["project"], kw["title"]) if hasattr(self, "delete") else None
+        return out
+
+    monkeypatch.setattr(HttpMemoryStore, "import_entry", import_then_lose)
+    out = _phase3("nexus-q2", expect=1)
+    assert f"mismatch: {name!r} is not in the read after the write" in out
+
+
+def test_rerun_carries_a_quarantined_title_marked_quarantined(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    old = _gate(db, "nexus-q3", age_days=40)
+    kept = _gate(db, "nexus-q3", sha="bbb2222", age_days=1)
+    with monkeypatch.context() as m:
+        _sweep_after_each_import(m)
+        _phase3("nexus-q3")
+    assert old not in _rows(db) and kept in _rows(db)         # the sweep quarantined only the old one
+    out = _phase3("nexus-q3")
+    got = {r["title"]: r for r in _pointer().listed}
+    assert sorted(got) == sorted([old, kept])
+    assert got[old]["state"] == "quarantined" and "state" not in got[kept]
+    assert "carried: 1" in out
+    # restoring it makes it live again, so the next run lists it as a record of the read
+    (q,) = [r for r in db.memory.list_quarantined(project=REPO) if r["title"] == old]
+    assert db.memory.restore(q["id"])
+    _phase3("nexus-q3")
+    assert "state" not in {r["title"]: r for r in _pointer().listed}[old]
+
+
+def test_rerun_a_quarantined_record_whose_archive_is_gone_is_still_carried(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    old = _gate(db, "nexus-q4", age_days=40)
+    with monkeypatch.context() as m:
+        _sweep_after_each_import(m)
+        _phase3("nexus-q4")
+    prev = _pointer()
+    prev.listed[0]["archive"] = "gaterepo/no-such-archive"       # the archive is gone, but the quarantined row is restorable
+    text, parts = gr.render_pointer(gr.parse_scope(rdr=RDR, phase="3", beads="nexus-q4", all_phases=False), REPO,
+                                    gr.Selection(listed=prev.listed))
+    gr.write_parts(make_t3(), title=POINTER_P3, text=text, tags="gate-pointer", category=gr.POINTER_CATEGORY)
+    _phase3("nexus-q4")
+    assert _pointer().listed[0]["title"] == old and _pointer().listed[0]["state"] == "quarantined"

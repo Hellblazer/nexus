@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import re
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from nexus.memory_curate import _all_closed, _parse_ts, closed_phase_numbers, closed_rdr_numbers
 from nexus.memory_curate import gate_rollup as gr
@@ -42,6 +45,7 @@ class Result:
     carried: list[dict[str, Any]] = field(default_factory=list)
     ttl_written: list[str] = field(default_factory=list)
     ttl_skipped: list[str] = field(default_factory=list)
+    quarantined: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
 
 
@@ -106,13 +110,37 @@ def verdict_chains(sel: gr.Selection) -> dict[str, tuple[str, list[dict[str, Any
     return {bead: chain(entries, sel.contents) for bead, entries in sorted(by_bead.items())}
 
 
+def quarantine_lookup(mem: Any, project: str) -> Callable[[], dict[str, dict[str, Any]]]:
+    """A cached read of the project's quarantined rows by title, made the first time it is called.
+
+    ``get_all`` hides a quarantined row, so this listing is the one place a row the expire sweep took can be found.
+    An engine older than RDR-207 has no such route (404), which reads as "nothing is quarantined"."""
+    cache: dict[str, dict[str, Any]] | None = None
+
+    def get() -> dict[str, dict[str, Any]]:
+        nonlocal cache
+        if cache is None:
+            try:
+                cache = {r["title"]: r for r in mem.list_quarantined(project=project)}
+            except httpx.HTTPStatusError as exc:
+                if exc.response is None or exc.response.status_code != 404:
+                    raise
+                cache = {}
+        return cache
+
+    return get
+
+
 # ── check 2: titles resolve ──────────────────────────────────────────────────────
 
-def merge_previous(t3: Any, scope: gr.Scope, sel: gr.Selection) -> tuple[list[dict[str, Any]], list[str]]:
+def merge_previous(t3: Any, scope: gr.Scope, sel: gr.Selection,
+                   quarantined: Callable[[], dict[str, dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[str]]:
     """``(carried, unresolvable)``: the earlier pointer's records this run's read no longer lists.
 
-    A carried record keeps its archive; one whose archive no longer reads back whole cannot be resolved, and the
-    run stops naming it."""
+    One the expire sweep quarantined is carried marked ``state: quarantined`` (its row is restorable, so it is
+    not lost, whatever its archive). One that is neither live nor quarantined (the reap deleted it) is carried marked
+    ``state: absent`` while its archive reads back whole; one whose archive does not cannot be resolved, and the run
+    stops naming it."""
     prev = gr.read_pointer(t3, gr.pointer_title(scope.rdr, scope.phase))
     if prev is None:
         return [], []
@@ -123,7 +151,9 @@ def merge_previous(t3: Any, scope: gr.Scope, sel: gr.Selection) -> tuple[list[di
     for rec in prev.listed:
         if rec["title"] in live:
             continue
-        if gr.read_parts(t3, col, rec["archive"], rec["parts"]) is None:
+        if rec["title"] in quarantined():
+            carried.append({**rec, "state": "quarantined"})
+        elif gr.read_parts(t3, col, rec["archive"], rec["parts"]) is None:
             bad.append(rec["title"])
         else:
             carried.append({**rec, "state": "absent"})
@@ -178,12 +208,21 @@ def write_ttl(mem: Any, project: str, candidates: list[dict[str, Any]], fresh: d
     return sent
 
 
-def read_back(mem: Any, project: str, sent: dict[str, dict[str, Any]], res: Result) -> None:
+def read_back(mem: Any, project: str, sent: dict[str, dict[str, Any]], res: Result,
+              quarantined: Callable[[], dict[str, dict[str, Any]]]) -> None:
     """Compare every field of each row written with what it was sent as; a mismatch names the title and the field and
-    prints the original row so a person can write it back. The command does not undo."""
+    prints the original row so a person can write it back. The command does not undo.
+
+    ``get_all`` hides a row the expire sweep has already quarantined, and the row keeps its own timestamp, so an old
+    one can be quarantined at once. Such a row is looked up in the quarantined listing (one listing for the run) before
+    it is called missing, reported as quarantined with the command that restores it, and still compared field by field."""
     after = {r["title"]: r for r in mem.get_all(project)}
     for title, was in sent.items():
         row = after.get(title)
+        if row is None and (q := quarantined().get(title)) is not None:
+            res.quarantined.append(title)
+            res.lines.append(f"quarantined (restorable: nx memory restore {q['id']}): {title}")
+            row = q
         if row is None:
             res.mismatches.append(f"mismatch: {title!r} is not in the read after the write; it was {was}")
             continue
@@ -238,15 +277,16 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
             "\n".join(res.lines) + "\nthe newest record of " + ", ".join(blocked) + " is not justified; read the "
             "records above, then fix it or name the bead with --accept-open <bead>. Nothing was written.")
 
-    if not sel.listed and not sel.unmapped:
-        res.lines.append("nothing to write: no pointer record")
-        return res
     t3 = t3_factory()
-    res.carried, bad = merge_previous(t3, scope, sel)
+    quarantined = quarantine_lookup(mem, project)
+    res.carried, bad = merge_previous(t3, scope, sel, quarantined)
     if bad:
         raise gr.GateRollupError(
             f"the earlier pointer lists {', '.join(bad)}, which is neither in this read nor archived in T3 any more; "
             "nothing was written")
+    if not sel.listed and not sel.unmapped and not res.carried:
+        res.lines.append("nothing to write: no pointer record")
+        return res
     by_title = {r["title"]: r for r in rows}
     candidates = [e for e in sel.listed if by_title[e["title"]].get("ttl") is None]
     res.ttl_skipped = [e["title"] for e in sel.listed if by_title[e["title"]].get("ttl") is not None]
@@ -265,7 +305,7 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
     fresh = {r["title"]: r for r in mem.get_all(project)}        # one read, right before the writes
     sent = write_ttl(mem, project, candidates, fresh, res)
     res.ttl_written = list(sent)
-    read_back(mem, project, sent, res)
+    read_back(mem, project, sent, res, quarantined)
     res.lines += [
         f"archived {res.archived} record(s), {res.already_whole} already whole",
         f"ttl: wrote {len(sent)} record(s) with ttl={TTL_DAYS}, {len(res.ttl_skipped)} already have a TTL",
