@@ -90,6 +90,17 @@ def part_titles(title: str, count: int) -> list[str]:
 
 # ── the selection ────────────────────────────────────────────────────────────────
 
+def title_names_bead(title: str, bead: str) -> bool:
+    """True when *title* contains *bead* as a whole token (nexus-1gdv0.2.3).
+
+    The id must not be preceded by an id character (``[A-Za-z0-9.]``) and must not be followed by one, nor by a
+    ``.`` that starts a child segment. So ``nexus-1`` is not found in ``nexus-12`` or ``nexus-1.2``, a parent id is not
+    found in its child's, and ``nexus-abc`` is not found in ``conexus-abc``. A hyphen is not an id character:
+    gate titles join words with it (``review-<sha>-<bead>-<date>``), and a trailing sentence period still matches.
+    Case matters; bead ids are lower case."""
+    return re.search(rf"(?<![A-Za-z0-9.]){re.escape(bead)}(?!\.?[A-Za-z0-9])", title) is not None
+
+
 def title_in_phase(title: str, phase: str) -> bool:
     """True when a ``-p<N>`` / ``-phase-<N>`` piece of *title* names *phase*; a sub-phase (3a) counts toward its phase (3)."""
     return any(p == phase or p.rstrip("abcdefghijklmnopqrstuvwxyz") == phase for p in _phases_of(title))
@@ -165,6 +176,15 @@ def select_records(rows: Iterable[dict[str, Any]], *, project: str, rdr: int, be
                     continue
                 sel.unmapped.append({**_entry(project, row, header, None, verdict_of(content, header)), "reason": "no bead tag"})
                 continue
+        elif not tags and run_beads is not None:
+            named = [b for b in run_beads if title_names_bead(title, b)]
+            if not named:
+                continue
+            if len(named) > 1:
+                sel.unmapped.append({**_entry(project, row, header, None, verdict_of(content, header)),
+                                     "reason": f"title names more than one listed bead ({', '.join(named)})"})
+                continue
+            bead = named[0]
         else:
             continue
         verdict = verdict_of(content, header)

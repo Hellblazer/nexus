@@ -116,6 +116,60 @@ def test_the_beads_option_lists_several_beads(db: T2Database) -> None:
 
 # ── the title predicate (nexus-1gdv0.2.3) ────────────────────────────────────────
 
+@pytest.mark.parametrize(("title", "bead", "expected"), [
+    ("review-abc1234-nexus-1-2026-11-10", "nexus-1", True),            # hyphen-joined, as gate titles are
+    ("nexus-1gdv0-gate-critique", "nexus-1gdv0", True),                # at the start of the title
+    ("critique-c218ddc93-nexus-1gdv0.1.3-2026-11-18", "nexus-1gdv0.1.3", True),
+    ("notes on nexus-1.", "nexus-1", True),                            # a sentence period after it
+    ("review-abc1234-nexus-12-2026-11-10", "nexus-1", False),          # nexus-1 is not nexus-12
+    ("review-abc1234-nexus-1gdv0.2.3-2026-11-10", "nexus-1gdv0.2", False),   # a parent is not its child
+    ("review-abc1234-conexus-abc-2026-11-10", "nexus-abc", False),     # nor the tail of another id
+    ("review-abc1234-nexus-1.2-2026-11-10", "nexus-1", False),
+    ("review-abc1234-NEXUS-1-2026-11-10", "nexus-1", False),           # bead ids are lower case: case matters
+    ("review-abc1234-2026-11-10", "nexus-1", False),
+])
+def test_title_names_bead_predicate(title: str, bead: str, expected: bool) -> None:
+    assert gr.title_names_bead(title, bead) is expected
+
+
+def test_title_match_lists_an_older_untagged_record(db: T2Database) -> None:
+    old = "review-59e45b852-nexus-rc4pz-2026-11-18"
+    _put(db, old, "older record, no header.\n- **outcome**: justified\n")
+    _put(db, "review-59e45b852-nexus-rc4pzz-2026-11-18", "another bead entirely\n- **outcome**: justified\n")
+    _phase3("nexus-rc4pz")
+    got = _pointer()
+    assert _titles(got.listed) == [old]
+    assert got.listed[0]["bead"] == "nexus-rc4pz"
+
+
+def test_title_match_does_not_cross_nexus_1_and_nexus_12(db: T2Database) -> None:
+    _put(db, "review-abc1234-nexus-12-2026-11-10", "x\n- **outcome**: justified\n")
+    out = _phase3("nexus-1")
+    assert "0 listed, 0 unmapped" in out
+    assert documents_by_title(POINTER_P3) == []
+
+
+def test_a_tagged_row_is_not_title_matched(db: T2Database) -> None:
+    # kind:gate but no bead tag: it is unmapped, never title-matched to the bead its title names
+    bare = "review-abc1234-nexus-t1-p3-2026-11-10"
+    _put(db, bare, "x\n- **outcome**: justified\n", tags="kind:gate,rdr:209")
+    # tagged, not a gate record: never read at all
+    _put(db, "review-abc1234-nexus-t1-2026-11-11", "x\n- **outcome**: justified\n", tags="notes")
+    _phase3("nexus-t1")
+    got = _pointer()
+    assert got.listed == []
+    assert _titles(got.unmapped) == [bare]
+
+
+def test_a_title_naming_two_listed_beads_is_unmapped(db: T2Database) -> None:
+    both = "review-abc1234-nexus-a-and-nexus-b-2026-11-10"
+    _put(db, both, "x\n- **outcome**: justified\n")
+    _phase3("nexus-a,nexus-b")
+    got = _pointer()
+    assert got.listed == [] and _titles(got.unmapped) == [both]
+    assert "more than one" in got.unmapped[0]["reason"]
+
+
 # ── the unmapped list (nexus-1gdv0.2.2) ──────────────────────────────────────────
 
 def test_unmapped_under_all_a_bead_less_gate_record_of_the_rdr(db: T2Database) -> None:

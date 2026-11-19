@@ -449,10 +449,22 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   `rdr:<NNN>`. That match is exact by construction (research-11), so the
   engine needs no tag filter and Phase 3 adds no wire change. An
   untagged record whose body mentions `kind:gate` is never matched, because
-  only the tags are read. Older records carry no tags; the same read lets the
-  command match them by a listed bead id in their title, the 72% the title
-  mapping reaches (research-2). Records that map to no listed bead are not
-  touched. The "unmapped" list in the pointer holds the records the run can
+  only the tags are read. Older records carry no tags; with `--phase` the same
+  read lets the command match them by a listed bead id in their title, the 72%
+  the title mapping reaches (research-2). The match is always on (the fix round
+  dropped `--include-titled`) and has one predicate. The row has no tags at all
+  (`split_tags` is empty: a tagged row that is not a gate record is never read,
+  and a `kind:gate` row with no bead is unmapped, never title-matched), and its
+  title holds the listed bead id as a whole token: not preceded by a character
+  of `[A-Za-z0-9.]`, and not followed by one of `[A-Za-z0-9]` or by a `.` and
+  one, that is `(?<![A-Za-z0-9.])<id>(?!\.?[A-Za-z0-9])`, case-sensitive because
+  bead ids are lower case. So `nexus-1` is not found in `nexus-12` or
+  `nexus-1.2`, a parent bead is not found in its child's id, and `nexus-abc` is
+  not found in `conexus-abc`; a trailing sentence period still matches. A
+  hyphen is not an id character, because gate titles join words with it
+  (`review-<sha>-<bead>-<date>`). A title that names two listed beads is
+  unmapped. `--all` has no bead list, so it matches no untagged row. Records
+  that map to no listed bead are not touched. The "unmapped" list in the pointer holds the records the run can
   select but cannot tie to a bead: a `kind:gate` record that carries
   `rdr:<NNN>` and has no `bead:` tag (with `--phase P` only when its title also
   names phase P by the `-p<N>` / `-phase-<N>` rule of Step 4, a sub-phase such
@@ -842,7 +854,10 @@ the pointer record in T3, and the one-line change to the two skills that name
 the command. Tests: only whole-tag matches are listed, and an untagged record
 that mentions `kind:gate` in its body is not; `bead:nexus-1` does not match
 `bead:nexus-12`; a stored value `kind:gate, bead:x` (a space after the comma)
-matches; an older untagged record whose title names a listed bead is listed; a
+matches; an older untagged record whose title names a listed bead is listed,
+`nexus-1` is not found in a title naming `nexus-12`, a parent id is not found in
+its child's, a hyphen-joined title and a trailing period match, a tagged row is
+never title-matched and a title naming two listed beads is unmapped; a
 `kind:gate` record with `rdr:<NNN>` and no `bead:` tag is listed as unmapped
 under `--all`, and under `--phase P` only when its title names phase P (`-p3-`
 and `-p3a-` for phase 3, not `-p2-` or `-p13-`); a record with neither tag is
@@ -1135,3 +1150,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-18 | Gate finding S3 closed with the engine search page (nexus-1gdv0.1.1, nexus-1gdv0.1.2): the total is one statement (a CTE, a one-row count and the page left-joined), not a window count, so a page past the end still carries it and the page and the total share one snapshot; `limit` is clamped to 10,000 as `/v1/memory/list` clamps it and a bad `offset` is a 400. Wording amended under standing grant 3 to match the code reviewed at the nexus-1gdv0.1.3 gate (`MemorySearchPage`, tests in `MemorySearchPageTest`, `MemorySearchPageStatementsTest` and `MemoryRepositoryQuarantineReadPathTest`). |
 | 2026-11-19 | Phase 3 Step 1, the command (nexus-1gdv0.2.1). `nx memory gate-rollup` is built with the pointer record as designed. The size question the gate left to the implementation (critique observation 4) is settled as split, not refuse: a pointer over 16,384 bytes is written in titled parts that the first part counts, and a rerun that needs fewer parts names the stale ones (a T3 delete is a catalog tombstone path, so none is deleted). A run that lists nothing writes no pointer. Wording only; the design is unchanged. |
 | 2026-11-19 | Gate finding d021dc53c85b, first half (nexus-1gdv0.2.2): the "unmapped" list was unreachable, because under `--phase` a record was selected by a bead and under `--all` by `rdr:<NNN>`, so a record with no bead was never selected. The rule is now written in Step 1 and built: a `kind:gate` record that carries `rdr:<NNN>` and has no `bead:` tag is unmapped under `--all`, and under `--phase P` when its title also names phase P by the `-p<N>` / `-phase-<N>` rule (sub-phase 3a counts toward 3); a listed record with no readable verdict is unmapped; a `kind:gate` record with neither tag is in no run's scope. An untagged record whose title names no listed bead is not unmapped, because it has no `rdr:` tag to put it in scope, so the earlier wording "or a title that names none" is narrowed to match. Unmapped records get no TTL. |
+| 2026-11-19 | Gate finding d021dc53c85b, second half (nexus-1gdv0.2.3): the fix round dropped `--include-titled`, so title matching became unconditional, and no predicate for "a title that names a listed bead" was written. It is now named in Step 1 and built (`title_names_bead`): the row has no tags at all, and its title holds the bead id as a whole token, `(?<![A-Za-z0-9.])<id>(?!\.?[A-Za-z0-9])`, case-sensitive, with a hyphen not counted as an id character because gate titles join words with it. It is on only under `--phase` (`--all` has no bead list), and a title naming two listed beads is unmapped. The Step 1 test list gains the negative cases. The predicate was checked on the live store: 628 of the 646 untagged gate-shaped titles that carry a bead-shaped id match each id they carry (the other 18 are an id cut short by the checking pattern, not by the predicate). |
