@@ -42,7 +42,7 @@ from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableErro
 from nexus.identity.holder import (
     GONE, Processes, RegistryEntry, check_holder, holder_process, read_registry_entry,
 )
-from nexus.identity.token_file import TokenFile, token_path, update_token_file
+from nexus.identity.token_file import TokenFile, read_token_file, token_path, update_token_file
 
 REGISTRY_WAIT_S: float = 5.0
 REGISTRY_POLL_S: float = 0.1
@@ -217,6 +217,17 @@ class SessionBinder:
                 return dict(view)
         return None
 
+    def _own_token(self, facts: LaunchFacts, own: Mapping[str, Any]) -> str | None:
+        """The live token a ``fork`` of *own* carries (engine 0.1.198): the one in this process's own token file
+        (``<claude pid>.<startedAt>``), when the file names *own* at its generation. None otherwise (no file, another
+        identity or generation, an expired token), and the engine's 403 then restarts the same identity. Never the
+        nearest Claude ancestor's file of the hook's own interpreter: the hook knows its process, and that file may be
+        another identity's."""
+        record = read_token_file(token_path(self._idir, facts.claude_pid, facts.started_at or 0))
+        if record is None or record.identity != own.get("id") or record.generation != int(own["generation"]):
+            return None
+        return record.token if token_contract.usable(record.token, record.expires_at, now=self._clock()) else None
+
     # ── rows ────────────────────────────────────────────────────────────────
 
     def _keep(self, facts: LaunchFacts, own: Mapping[str, Any]) -> BindOutcome | None:
@@ -228,14 +239,17 @@ class SessionBinder:
             return None
         prior = (own.get("holder") or {}).get("session_id")
         event = facts.source
+        token = self._own_token(facts, own)   # a fork carries it; a clear never does
         try:
             try:
-                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior),
+                                         token=token if event == "fork" else None)
             except IdentityApiError as exc:
                 if exc.status != 403 or event != "clear":
                     raise
                 event = "fork"
-                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior),
+                                         token=token)
         except IdentityApiError as exc:
             if _token_gone(exc):
                 return self._restart_own(facts, own, row=f"{facts.source}_restart_own")
@@ -337,7 +351,8 @@ class SessionBinder:
             return outcome
         prior = (own.get("holder") or {}).get("session_id")
         try:
-            view = self._client.bind(own["id"], "fork", int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+            view = self._client.bind(own["id"], "fork", int(own["generation"]), self._evidence(facts, prior_session_id=prior),
+                                     token=self._own_token(facts, own))
         except IdentityApiError as exc:
             if not _token_gone(exc):
                 raise

@@ -79,12 +79,15 @@ def test_every_other_bind_event_sends_no_token_even_when_one_is_given(engine: En
 
 
 @pytest.mark.parametrize("event", ["refresh", "fork"])
-def test_a_refresh_or_fork_given_no_token_sends_the_process_own_live_token(
+def test_a_refresh_or_fork_sends_exactly_the_token_given_and_never_an_ambient_one(
         engine: Engine, monkeypatch: pytest.MonkeyPatch, event: str) -> None:
-    """The hook's fork has no lease to hand it a token: it sends the nearest Claude ancestor's, as the fenced routes do."""
-    monkeypatch.setattr(token_header, "current", lambda **_: _record())
+    """Every caller names the token of the identity it binds (the lease its own, the hook its own file's, a delegated child
+    its own). The nearest Claude ancestor's file may be another identity's (a delegated child, a test under a live
+    session), so given none, none is sent and the engine's 403 is the answer."""
+    monkeypatch.setattr(token_header, "current", lambda **_: _record("tok-ambient"))
+    engine.client().bind("i7", event, 1, token="tok-a")
     engine.client().bind("i7", event, 1)
-    assert engine.headers == ["tok-own"]
+    assert engine.headers == ["tok-a", None]
 
 
 @pytest.mark.parametrize("event", ["refresh", "fork"])
@@ -744,6 +747,62 @@ def test_a_fork_refused_for_another_reason_still_ends_unbound_with_the_engines_w
     out = binder.bind(facts)
     assert out.action == "unbound" and "not_owner" in " ".join(out.notices)
     assert "start" not in _events(engine) and "create_ephemeral" not in _events(engine)
+
+
+class _NoClearEngine(FakeEngine):
+    """The data credential's engine: ``clear`` is refused 403 forbidden, so the hook sends the same change as ``fork``."""
+
+    def bind(self, identity: str, event: str, expected_generation: int, evidence: Any = None, *, token: Any = None) -> dict:
+        if event == "clear":
+            raise IdentityApiError(403, "forbidden", "a 'data' credential may not call clear", {"error": "forbidden"})
+        if event != "fork":
+            return super().bind(identity, event, expected_generation, evidence, token=token)
+        ev = dict(evidence or {})                      # the shared fake has no fork: same generation, new session id
+        self.calls.append(("bind", (identity, event, expected_generation, ev)))
+        if token is not None:
+            self.bind_tokens.append((event, token))
+        rec = self.records[identity]
+        rec["holder"] = {**(rec["holder"] or {}), "session_id": ev.get("session_id")}
+        self.sessions[ev["session_id"]] = (identity, rec["generation"])
+        return {**self._view(rec), "event": event, "noop": False}
+
+
+def _own_file(tmp_path: Path, identity: str, *, token: str = "tok-own", generation: int = 1,
+              expires_at: float = 9e9) -> None:
+    write_token_file(token_path(tmp_path / "identity", 100, 100_000), TokenFile(
+        identity=identity, generation=generation, token=token, expires_at=expires_at, session_id="s1", pid=100,
+        started_at=100_000, proc_start=T0, host=HOST))
+
+
+@pytest.mark.parametrize("source", ["clear", "fork", "resume"])
+def test_the_hooks_fork_sends_its_own_token_files_token_never_the_ambient_one(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str) -> None:
+    """The hook knows its process (``<claude pid>.<startedAt>``), so its fork carries that file's token. The nearest Claude
+    ancestor of the hook's own interpreter may hold another identity (a test under a live session, a nested launch), and
+    the engine refuses that token. ``resume`` here is an unindexed session id in a process that holds one (a fork row)."""
+    monkeypatch.setattr(token_header, "current", lambda **_: _record("tok-ambient"))
+    engine = _NoClearEngine()
+    own = _own(engine, kind="seat", name="alpha")
+    _own_file(tmp_path, own)
+    binder, facts = _binder_facts(tmp_path, engine, source, privileged=True)
+    out = binder.bind(facts)
+    assert (out.identity, out.event) == (own, "fork"), f"{out.row} {out.notices}"
+    assert engine.bind_tokens == [("fork", "tok-own")]
+
+
+@pytest.mark.parametrize("stale", ["another_identity", "another_generation", "expired"])
+def test_the_hooks_fork_sends_no_token_when_its_file_holds_none_for_this_identity(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: str) -> None:
+    """A file naming another identity or generation, or an expired token: none is sent (never the ambient one), and a
+    data engine's 403 then restarts the same identity (the existing fall-through)."""
+    monkeypatch.setattr(token_header, "current", lambda **_: _record("tok-ambient"))
+    engine = _NoClearEngine()
+    own = _own(engine, kind="seat", name="alpha")
+    _own_file(tmp_path, "i999" if stale == "another_identity" else own, generation=2 if stale == "another_generation" else 1,
+              expires_at=1.0 if stale == "expired" else 9e9)
+    binder, facts = _binder_facts(tmp_path, engine, "fork")
+    out = binder.bind(facts)
+    assert out.event == "fork" and engine.bind_tokens == []
 
 
 def test_no_token_value_reaches_a_binder_log_line(tmp_path: Path) -> None:

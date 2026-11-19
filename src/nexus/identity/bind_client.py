@@ -150,19 +150,6 @@ def evidence_body(
     return {k: v for k, v in fields.items() if v is not None}
 
 
-def _process_token() -> str | None:
-    """The live token in this process's nearest Claude ancestor's token file, or None (no ancestor, no file, a token past
-    its expiry). No engine call and no session check: the engine's fence is the check, and a bind runs at moments (a
-    hook, a ``/clear``) when the session id is not yet the file's."""
-    from nexus.identity import token_header  # noqa: PLC0415 — deferred: hook import cost
-
-    try:
-        record = token_header.current()
-    except Exception:  # noqa: BLE001 — a process that cannot find its file sends none; the engine says so
-        return None
-    return record.token if record is not None else None
-
-
 def _seg(value: str) -> str:
     """One URL path segment: a ``/``, space or ``?`` in an id or a group name stays inside its segment."""
     return quote(value, safe="")
@@ -354,17 +341,17 @@ class IdentityClient:
         """The compare-and-set. The answer is the identity view plus ``event``, ``generation_changed``, ``noop``,
         and, from Step 2, ``identity_token``.
 
-        A data credential's ``refresh`` and ``fork`` carry the identity's own live token (engine 0.1.198): *token*, the
-        one being refreshed, else the nearest Claude ancestor's file, as the fenced routes send. With none the engine
-        answers 403 ``identity_token_required``, the honest refusal. No other event sends one, and the tenant credential
-        never does: it is the trust boundary for a request that names no process, and an identity token the engine
-        cannot resolve is a 401 on every route it rides."""
+        A data credential's ``refresh`` and ``fork`` carry the identity's own live token (engine 0.1.198): exactly
+        *token*, which the caller reads for the identity it binds (the lease its own, the hook its process's token
+        file, a delegated child its own). Never the nearest Claude ancestor's file: that may be another identity's (a
+        delegated child, a nested launch, a test under a live session). With none the engine answers 403
+        ``identity_token_required``, the honest refusal. No other event sends one, and the tenant credential never
+        does: it is the trust boundary for a request that names no process, and an identity token the engine cannot
+        resolve is a 401 on every route it rides."""
         body: dict[str, Any] = {"event": event, "expected_generation": expected_generation}
         body.update(evidence or {})
         if event not in TOKEN_BIND_EVENTS or self._scope != SCOPE_DATA:
             token = None
-        elif token is None:
-            token = _process_token()
         return self._request("POST", f"/{identity}/bind", json=body, token=token)
 
     def gone(self, identity: str, expected_generation: int, holder_gone: Mapping[str, Any]) -> dict[str, Any]:
