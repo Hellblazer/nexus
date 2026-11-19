@@ -620,7 +620,9 @@ def test_dry_run_does_not_count_an_unmapped_or_restored_record(db: T2Database) -
     _restore_by_hand(db, restored)
     out = _phase3("nexus-dn", "--dry-run")
     assert "quarantined by the next expire sweep: 0 of 0" in out and f"restored, left alone: {restored}" in out
-    assert bare not in "".join(ln for ln in out.splitlines() if ln.startswith("  candidate")) and mapped
+    candidates = [ln for ln in out.splitlines() if ln.startswith("  candidate")]
+    assert candidates == []                       # the mapped record already has its TTL, the others are not candidates
+    assert _rows(db)[mapped]["ttl"] == 30 and _rows(db)[bare]["ttl"] is None
 
 
 # ── the count-first guard (nexus-1gdv0.2.13) ─────────────────────────────────────

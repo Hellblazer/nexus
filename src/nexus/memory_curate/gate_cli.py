@@ -34,12 +34,13 @@ def _head(root: Path) -> str:
               help="The count a --dry-run reported ('would be quarantined by the next expire sweep'); a real run that "
                    "writes a TTL needs it, and refuses unless it equals the count that dry run recorded")
 @click.option("--project", "-p", default=None, help="The repository's T2 project (default: this repository)")
-@click.option("--dry-run", is_flag=True, default=False, help="Print the listing; write nothing")
+@click.option("--dry-run", is_flag=True, default=False, help="Print the listing and the count a real run would need; writes one T2 count row, no TTL and no T3 note")
 def gate_rollup_cmd(rdr: int, phase: str | None, beads: str | None, all_phases: bool, accept_open: tuple[str, ...],
                     counted: int | None, project: str | None, dry_run: bool) -> None:
     """List a closed phase's gate records and keep them in T3 (RDR-209 Phase 3).
 
-    Reads the repository's gate records (whole tag kind:gate, never <repo>_rdr). Before anything is written
+    Reads the repository's gate records (whole tag kind:gate, never <repo>_rdr). --dry-run writes one T2 count
+    row (no TTL, no T3 note), which a real run that writes a TTL requires, with --counted N. Before anything is written
     it refuses an open phase and a bead whose newest record is not justified (unless named with
     --accept-open). It then archives each listed record's full text as a T3 note in nexus-rdr-research and writes one
     pointer record, gate-records-rdr-<NNN>-phase-<P> or -all, that lists them with their verdicts, shas and

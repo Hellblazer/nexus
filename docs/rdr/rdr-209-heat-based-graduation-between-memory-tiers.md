@@ -590,10 +590,13 @@ what the text says.
 
 **Step 3, the TTL.** For each listed record that passed Step 2 and has no TTL,
 write it through the verbatim import route (`HttpMemoryStore.import_entry`,
-`POST /v1/memory/import`; research-10) with `ttl=30` and every other field as
-`get_all` returned it: project, title, content, tags, agent, session,
-`access_count`, `last_accessed` and timestamp. A null agent or session is sent
-as absent, so it stays NULL, and a `last_accessed` of `""` is sent as `None`.
+`POST /v1/memory/import`; research-10) with `ttl=30` and the values `get_all`
+returned for project, title, content, tags, agent, session, `access_count`,
+`last_accessed` and timestamp. A null agent or session is sent as absent, so it
+stays NULL, and a `last_accessed` of `""` is sent as `None`. The route is not
+a pure copy: it also clears `quarantined_at` and `rolled_up_at`, re-stamps the
+row's identity with the caller, and truncates the timestamp to the second (which
+`get_all` already returns).
 The values come from one `get_all` taken right before the writes, after the
 pointer is written and read back, so a reader's access that landed after the
 listing keeps its count (a per-row `get` would stamp access, A8); a row that now
@@ -668,7 +671,12 @@ once and only when needed; it does not grow with the number of records.
   a restore: it is a candidate again. A missing or unreadable earlier pointer
   reads as a first run, which gives a record nobody listed before a TTL. If the
   second pointer write fails after the TTLs were written the run says so and a
-  rerun writes the marks.
+  rerun writes the marks. The limit: the marks live in one pointer, so they are
+  per scope. A record restored after a `--phase` run is not protected from a
+  later `--all` run of the same RDR, whose pointer has no mark for it, so that
+  run gives it a TTL again (the archive keeps its text either way, and a
+  restore is one command). The close step runs the phase rollup before the
+  `--all` one, so restore after the last run that lists the record.
 - *Residual race.* The write sends the content read a moment earlier. A
   reviewer who rewrote the same title in that moment would be overwritten, and
   a row quarantined in that moment would be restored, because the import clears
@@ -979,7 +987,9 @@ each listed record's full text is a T3 note of its own that reads back equal to
 the record (header and body), with a body over 16,384 bytes split into titled
 parts that join exactly, in the `gate_record` category, while an unmapped
 record is not archived; a rerun rewrites no archive that already reads back
-whole; `--dry-run` writes nothing, and no run writes anything to T2.
+whole; `--dry-run` writes no TTL and no T3 note, and its one T2 write is the
+count row (Step 3, Count first); no run changes a gate record's text, tags or
+timestamp, and the TTL write is the only run that changes a gate record's row.
 
 #### Step 2: The loss check
 
@@ -1015,8 +1025,9 @@ each candidate as `candidate  <timestamp>  access_count=N  effective TTL X d
 past|within its effective TTL  <title>` and ends with `would be quarantined by
 the next expire sweep: N of K candidate record(s)`.
 
-The rule "the real run waits for his word" is a mechanism, not a process rule
-(nexus-1gdv0.2.13), and it is keyed per RDR and phase (Sam, 2026-11-16:
+Sam's word before the real run is a process step, which the two skills state;
+the code cannot hear it. What the code requires (nexus-1gdv0.2.13) is a current,
+recorded count, and it is keyed per RDR and phase (Sam, 2026-11-16:
 "Per RDR and phase"): every batch, each `--rdr`/`--phase` or `--all`, reports
 its own count before its real run. The dry run records its count as one T2 row
 in `<repo>` (never `<repo>_rdr`, never SQLite), titled
@@ -1132,6 +1143,7 @@ kinds of row, tenant isolation) stay in the Test Plan, marked deferred.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | gate-record pointer (T3) | `nx store list` on `nexus-rdr-research`, `gate_pointer` | `nx store get` by title | a rerun replaces it; removal is a person's `nx store` call | the loss check reads it back at write time | T3 backup |
+| dry-run count (T2) | `nx memory list` in `<repo>`, titles `gate-rollup-count-rdr-<NNN>-...` | `nx memory get` | a later dry run replaces it; removal is `nx memory delete` | the real run reads it, `--counted` must equal it | PG backup |
 | gate-record archive (T3) | `nx store list` on `nexus-rdr-research`, `gate_record` | `nx store get` by `<project>/<T2 title>` | a rerun rewrites none that reads back whole; removal is a person's `nx store` call | the run and the loss check read each back and compare it with the record | T3 backup |
 | records given a 30-day TTL (T2) | `nx memory list` before expiry; `nx memory list --quarantined` after | `nx memory get` | RDR-207's reap, after an attended rollup | Step 4's census flag lists any still without a TTL | PG backup |
 | read counter | not a new resource | `nx memory get` shows the count | not applicable | the MVV test | PG backup |
@@ -1373,3 +1385,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Review round 1, blocker 5: `--project` accepted `<repo>_rdr` and any other project, so the open-phase check could read one repository's RDR files for another repository's records. A project ending `_rdr` is refused, and so is a project that is not the working directory's repository (the check reads that checkout's RDR files and nothing maps a project name to another checkout; refusing was chosen over a lookup because the command runs from the checkout it rolls up). |
 | 2026-11-19 | Review round 1, blocker 6: the pointer read-back compared only (project, title), so a pointer that came back with different `ttl_set`, `restored` or `state` marks, the ones the next run decides from, passed. It now compares those too. |
 | 2026-11-19 | Review round 1, blocker 7: a wrong `--beads` or `--project` printed "0 listed", which read as a pass. The output now starts with the rows examined and the `kind:gate` rows seen, and says so when none of the gate rows is in the run; the first live run's counts (nexus-1gdv0.2.17) come from these lines. |
+| 2026-11-19 | Review round 1, wording (nexus-1gdv0.2.16): the Step 1 test-list sentence "no run writes anything to T2" is corrected (the dry run writes one count row; no run changes a gate record's text, tags or timestamp); the count row is in the Day 2 table; "is a mechanism, not a process rule" now says what the code requires (a current, recorded count) and that Sam's word is a process step the skills state; "every other field" is narrowed, because the import route also clears the quarantine stamps, re-stamps the row's identity with the caller and truncates the timestamp to the second; and the cross-scope limit of the restore rule is stated (a restore after a `--phase` run is not protected from a later `--all` run). |
