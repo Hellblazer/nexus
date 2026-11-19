@@ -458,7 +458,9 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   inside the chunks and centroid primary keys (vectors-030:677, :690), and
   three ON UPDATE CASCADE foreign keys reach it through the chunks key
   (vectors-030:1018/1033/1048). Sixteen name columns in thirteen tables have
-  no foreign key (the one added since 2026-11-08 is
+  no foreign key to the registry, two of them reaching it only through the
+  chunks key (item 6 lists all sixteen with a disposition; T2
+  `229-research-48`) (the one added since 2026-11-08 is
   `catalog_reconcile_rows.physical_collection`, `catalog-048-reconcile.xml:103`,
   a staging table reaped after 24 hours); four more carriers are not columns
   (quarantine `origin_collection` metadata, quarantine sibling names,
@@ -723,7 +725,9 @@ The key moves table by table in strangler order:
   `chunk_orphaned_at` (which reach the name through the chunks key), and the
   operational name columns with no foreign key (`physical_collection`,
   `pdf_pipeline`, `chash_remap`, `reembed_jobs`, `superseded_by` as
-  `superseded_by_id`). The engine writes both columns on every insert; a
+  `superseded_by_id`; the table after the history tables, below, gives
+  every name column without a registry foreign key its disposition). The
+  engine writes both columns on every insert; a
   registered data move fills the old rows (below). The quarantine
   `origin_collection` metadata tag gains an `origin_collection_id` beside it.
 - **Switch.** Each foreign key is re-created on `(tenant_id, collection_id)`
@@ -819,7 +823,15 @@ while the engine serves:
   `gc_restore_rereferenced`, `quarantine_restore_chunks`,
   `reaper_quarantine_chunks`), rename and re-home, `catalog_reconcile_commit`
   and the taxonomy assigners (T2 `229-research-41`). The census found no
-  writer of `taxonomy_centroids`; P3.1 must find it before its CHECK lands.
+  writer of `taxonomy_centroids` because it matched named tables only. One
+  writes through a helper: `TaxonomyCentroidRepository.upsertCentroids`
+  runs `ctx.insertInto(ct.table())` with `ct = DimTables.CENTROIDS.get(dim)`
+  (`TaxonomyCentroidRepository.java:147-156`), the same shape that writes
+  chunks at `PgVectorRepository.java:1283`, and `TenantImportLoad.java:256`
+  inserts into any table by name (T2 `229-research-48`). Inferred, not
+  read: the 109 is a lower bound. P3.1's acceptance re-runs the writer
+  census over helper-routed and by-name writes and finds every writer of
+  `taxonomy_centroids` before its CHECK lands.
 - *Index builds follow the PCI reconciler's pattern.* RDR-246 keeps index
   builds out of a move: `on_complete` holds transactional DDL, "never CREATE
   INDEX CONCURRENTLY" (lines 546-550). The per-leaf unique indexes for the
@@ -941,6 +953,31 @@ column as a record of the label at the time of the event. A rename stops
 rewriting them; their old rows keep the old label, which is what a log
 should say.
 
+Every name column without a foreign key to the registry, from a census of
+the included changelogs (24 live name columns, 16 of them in 13 tables
+without such a key; T2 `229-research-48`). "Expand" means a `collection_id`
+beside the name (one per name column on a two-name table; inferred, not
+read) under P3.1's CHECK and stamp. "Rename" says whether
+`renameCollectionTxn` rewrites the column today; from P3.7 it rewrites none
+of them.
+
+| Column | Reaches the registry | Disposition | Rename today |
+| --- | --- | --- | --- |
+| `catalog_collections.superseded_by` | no | Expand as `superseded_by_id`; dropped at P4.1 | written on the tombstone |
+| `catalog_document_chunks.collection` | through the chunks key | Expand; child key switched in P3.3c | rewritten |
+| `chunk_orphaned_at.collection` | through the chunks key | Expand; child key switched in P3.3c | rewritten by its `ON UPDATE CASCADE` from the chunks key (vectors-030:1047-1051) |
+| `catalog_documents.physical_collection` | no | Expand | rewritten |
+| `catalog_documents.corpus` | no | History label: set at index time (`corpus=collection_name`, `indexer.py:2852`, or a user `--corpus`), kept as written | no |
+| `catalog_reconcile_rows.physical_collection` | no | Transient: a staging table reaped after 24 hours (`catalog-048-reconcile.xml:103`); no id | no |
+| `chash_remap.source_collection`, `.target_collection` | no | Expand | no |
+| `pdf_pipeline.collection` | no | Expand | no |
+| `reembed_jobs.source_collection`, `.target_collection` | no | Expand | no |
+| `taxonomy_centroids.collection` | no | Expand; primary key rebuilt in P3.3c | rewritten |
+| `relevance_log.collection` | no | History label with a nullable id | rewritten until P3.7 |
+| `search_telemetry.collection` | no | History label with a nullable id | rewritten until P3.7 |
+| `hook_failures.collection` | no | History label with a nullable id | rewritten until P3.7 |
+| `gc_audit.collection` | no | History label with a nullable id | rewritten until P3.7 |
+
 **7. The label and what uniqueness it keeps.** The `name` column becomes
 the label: the string a person types and reads, and what the 15 MCP tools,
 the 49 CLI options and the 30 positional CLI arguments accept (T2
@@ -1007,7 +1044,9 @@ before P3.7 would read them; where a downgrade is safe is still open
 engine takes the next `collection_id` and sets the label to `c` followed by
 that id in decimal (`c4812`), in the one insert. It is opaque: it carries
 no content type, owner, model or version. Listings show the attributes
-beside it (`nx collection list`, `collection_list`, `nx catalog show`). A
+beside it (`nx collection list`, `collection_list`, `nx catalog show`).
+`nx collection list` already shows content type, owner, model, dimension
+and state (`commands/collection.py:91-95`); the id column is new (P3.12). A
 user who wants a readable label sets one with `nx collection rename`; a subject or repo collection is found by its attributes
 either way (item 5), so a label is never needed to find one. Every client
 path that renders a conformant name for a new collection
@@ -1443,7 +1482,9 @@ its acceptance is that test green plus the census pin it lowers.
   list) and, `NOT VALID`, the CHECK `(<name column> IS NULL) =
   (collection_id IS NULL)` on each; every writer (item 6's census: 109 Java
   write sites, 26 SQL functions) sets the id on insert and update from this
-  cut; `TenantExport`'s table model in the same cut (P3.11); the stamp
+  cut, and its acceptance re-runs that census over helper-routed and
+  by-name writes and finds every writer of `taxonomy_centroids` before the
+  CHECK lands (item 6; `TaxonomyCentroidRepository.java:156` is one); `TenantExport`'s table model in the same cut (P3.11); the stamp
   registered in `nexus.data_moves` per table, run per tenant and leaf, with
   a null-`collection_id` verification query, the CHECK's VALIDATE as its
   `on_complete`, and the `chunk_size`, `sleep_ms` and `statement_timeout_ms`
@@ -1553,6 +1594,13 @@ its acceptance is that test green plus the census pin it lowers.
   backup taken after P3.1 restores with every chunk on its collection's new
   id; RDR-248's committed fixture, taken before P3.1, still loads with every
   id filled.
+- P3.12 Day 2 surfaces, after P3.5a and P3.6: an id column in `nx
+  collection list` (it already shows content type, owner, model, dimension
+  and state, `commands/collection.py:91-95`), an `nx doctor` census of null
+  ids per table and of live labels held by more than one row, and `nx
+  collection delete` by label or id (it takes a name today,
+  `commands/collection.py:547-550`). T2 `229-research-48`. Test: each
+  surface on a fixture with a null id and a minted label.
 - P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.5 and P3.11; client
   floor bumps in the release that first depends on each. One release may
   hold several of these cuts, and an install may skip releases, so the
@@ -1600,7 +1648,7 @@ its acceptance is that test green plus the census pin it lowers.
 P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
 2 and for P3.2; the first cloud run of its move waits for nexus-f3yqd.2.23
 (Prerequisites). P3.2 blocks P3.1, P3.3 and P3.4. P3.4 waits for P3.3. Within P3.3, P3.3c waits for P3.3b, whose
-indexes its verification requires. P3.3 blocks P3.5 and P3.7. P3.7 also waits
+indexes its verification requires. P3.12 waits for P3.5a and P3.6. P3.3 blocks P3.5 and P3.7. P3.7 also waits
 for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P3.6 (which
 enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
 item 8); P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
@@ -1616,7 +1664,7 @@ stamp").
 | --- | --- | --- | --- | --- | --- |
 | Census pins (client, engine, SQL) | In scope (the tests print their tables) | In scope | N/A | In scope (`-m lint` and the Java gate tests) | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
-| `collection_id` and label | `nx collection list` (id, label, attributes) | `nx catalog show` | `nx collection delete` (by label or id) | `nx doctor` null-id and label-clash census | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (carries the id from P3.1's cut, P3.11) |
+| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label or id, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (carries the id from P3.1's cut, P3.11) |
 
 ### New Dependencies
 
