@@ -2838,7 +2838,19 @@ def _exit_teardown() -> None:
     data-bearing T1 steps, and a failure to start it skips nothing."""
     release = _start_session_name_release()
     _t1_shutdown()
+    _remove_aura_state_files()
     _await_session_name_release(release)
+
+
+def _remove_aura_state_files() -> None:
+    """Remove this server's loaded-aura state files (RDR-252 Step 4). ``os._exit`` in :func:`_sigterm_handler` skips
+    the ``atexit`` removal the writer registers, so the teardown both paths share does it too. Never raises."""
+    try:
+        from nexus.auras import session as _aura_session  # noqa: PLC0415 -- deferred: exit path
+
+        _aura_session.remove_own_state_files()
+    except Exception as exc:  # noqa: BLE001 -- an exit path must not be stopped by a leftover file
+        _log.warning("aura_state_remove_on_exit_failed", error=str(exc))
 
 
 def _sigterm_handler(_signo: int, _frame: Any) -> None:

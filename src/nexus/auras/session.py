@@ -573,6 +573,26 @@ def read_memberships(identity: str) -> list[str]:
             client.close()
 
 
+#: Every state file this process wrote, by path, with the server pid that wrote it. ``atexit`` does not run when the
+#: server ends in ``os._exit`` (the SIGTERM path), so :func:`remove_own_state_files` is also called from the MCP
+#: server's exit teardown; both read this one record.
+_OWN_STATE_FILES: dict[Path, int] = {}
+
+
+def remove_own_state_files() -> int:
+    """Remove each state file this process wrote and still owns (a successor's file stays). Safe to call twice: a file
+    already gone removes nothing. Returns how many files were removed."""
+    from nexus.auras.loaded_state import remove_own  # noqa: PLC0415
+
+    removed = 0
+    for path, server_pid in list(_OWN_STATE_FILES.items()):
+        try:
+            removed += bool(remove_own(path, server_pid=server_pid))
+        except OSError as exc:
+            _log.warning("auras_state_remove_failed", path=str(path), error=str(exc))
+    return removed
+
+
 def state_writer(
     session_id: str, *, register_exit: Callable[..., Any] | None = None
 ) -> Callable[[int, LoadedState], None]:
@@ -602,6 +622,7 @@ def state_writer(
         ))
         if path not in registered:
             registered.add(path)
+            _OWN_STATE_FILES[path] = os.getpid()
             on_exit(remove_own, path, server_pid=os.getpid())
 
     return write
