@@ -135,6 +135,27 @@ def test_a_process_whose_start_time_cannot_be_read_is_not_removed(adir: Path, pr
     assert ls.clean_gone(adir, procs) == [] and path.exists()
 
 
+def test_a_holder_registered_under_another_config_dir_is_not_judged_gone_by_this_readers_registry(
+    adir: Path, procs: FakeProcesses, tmp_path: Path,
+) -> None:
+    """nexus-igea9.7 round 1 (S3): the reader's registry is one directory. A session registered under another
+    CLAUDE_CONFIG_DIR has no file here, which proves nothing, so its live state file must stay (sweep.py and
+    binder.py pass the identity dir for exactly this)."""
+    procs.procs[6000] = START                                      # alive, but its registry file is elsewhere
+    idir = tmp_path / "identity"
+    write_token_file(
+        token_path(idir, 6000, 6000000),
+        TokenFile(identity="id-x", generation=1, token="t", expires_at=None, session_id="s", pid=6000, started_at=6000000,
+                  proc_start=START, host=HOST, registry_dir=str(tmp_path / "other-claude" / "sessions")),
+    )
+    path = _put(adir, _state(pid=6000, started_at=6000000))
+    assert ls.clean_gone(adir, procs, identity_dir=idir) == [] and path.exists()
+    got = ls.view(adir, claude_pid=None, procs=procs, current_identity=None, identity_dir=idir)
+    assert [s.pid for s in got.listed] == [6000] and path.exists()
+    procs.stop(6000)                                               # the process itself exits: now it is gone
+    assert ls.clean_gone(adir, procs, identity_dir=idir) == [path]
+
+
 def test_a_file_from_another_host_is_left_alone(adir: Path, procs: FakeProcesses) -> None:
     other = _state(pid=7, started_at=7)
     other = ls.LoadedState(**{**other.__dict__, "host": "elsewhere"})
@@ -220,7 +241,7 @@ def shipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _inputs(monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses, *, pid: int | None, identity: str | None) -> None:
-    monkeypatch.setattr(aura_cmd, "_loaded_inputs", lambda: (adir, procs, pid, identity))
+    monkeypatch.setattr(aura_cmd, "_loaded_inputs", lambda: (adir, procs, pid, identity, None))
 
 
 def _list(*argv: str) -> Any:
@@ -301,8 +322,9 @@ def test_list_removes_the_state_file_of_a_dead_server(
 
 def test_the_real_inputs_name_the_config_dir_and_do_not_raise(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
-    directory, procs, pid, identity = aura_cmd._loaded_inputs()
+    directory, procs, pid, identity, idir = aura_cmd._loaded_inputs()
     assert directory == tmp_path / "cfg" / "auras"
+    assert idir == tmp_path / "cfg" / "identity", "the holder check reads the token files of the same config dir"
     assert pid is None or isinstance(pid, int)
     assert identity is None or isinstance(identity, str)
     assert callable(getattr(procs, "alive", None)), "the real process table"

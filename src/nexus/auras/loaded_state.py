@@ -156,10 +156,12 @@ def remove_own(path: Path, *, server_pid: int) -> bool:
     return True
 
 
-def clean_gone(directory: Path, procs: Any) -> list[Path]:
+def clean_gone(directory: Path, procs: Any, *, identity_dir: Path | None = None) -> list[Path]:
     """Remove every state file whose holder the holder check finds gone; return what was removed. *procs* is
     :class:`nexus.identity.holder.Processes` or a stand-in. A file written on another host, and a holder the check
-    cannot judge, stay."""
+    cannot judge, stay. *identity_dir* is the token-file directory (``token_file.identity_dir(config dir)``), passed as
+    ``sweep.py`` and ``binder.py`` pass it: the registry the check reads is one directory, so a holder whose token file
+    names another one is judged by its pid and start time alone, never by a registry file that is not here."""
     from nexus.identity.holder import check_holder  # noqa: PLC0415 -- deferred: the identity package is a leaf
 
     removed: list[Path] = []
@@ -174,7 +176,7 @@ def clean_gone(directory: Path, procs: Any) -> list[Path]:
         else:
             continue
         try:
-            verdict = check_holder(holder, procs=procs)
+            verdict = check_holder(holder, procs=procs, identity_dir=identity_dir)
         except Exception as exc:  # noqa: BLE001 -- a check that cannot run leaves the file
             _log.debug("aura_state_holder_check_failed", path=str(path), error=str(exc))
             continue
@@ -215,9 +217,11 @@ def identity_mismatch(state: LoadedState, current: str | None) -> str | None:
     )
 
 
-def view(directory: Path, *, claude_pid: int | None, procs: Any, current_identity: str | None) -> LoadedView:
+def view(
+    directory: Path, *, claude_pid: int | None, procs: Any, current_identity: str | None, identity_dir: Path | None = None,
+) -> LoadedView:
     """The state files for ``nx aura list`` (module docstring). Removes the files of holders that are gone first."""
-    removed = clean_gone(directory, procs)
+    removed = clean_gone(directory, procs, identity_dir=identity_dir)
     listed = tuple(s for s in (read_state(p) for p in state_files(directory)) if s is not None)
     if claude_pid is None:
         return LoadedView(None, False, listed, None, tuple(removed))
