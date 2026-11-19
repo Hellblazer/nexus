@@ -233,10 +233,12 @@ class SessionBinder:
     def _keep(self, facts: LaunchFacts, own: Mapping[str, Any]) -> BindOutcome | None:
         """``clear`` and ``fork``: same generation, new session id. None when the engine will not (the seat was
         taken or ended meanwhile): the caller then binds the process as a new start. A fork refused for want of a live token
-        (an expired one) starts the same identity again instead (:meth:`_restart_own`). A credential that may not send
-        ``clear`` (the data credential of a mint-only install) sends the same change as ``fork``, which it may."""
+        (an expired one) starts the same identity again instead (:meth:`_restart_own`). A binder that may not send ``clear``
+        at all (``allow_privileged=False``, the MCP server's pending bind) restarts the identity the process holds the same
+        way, before any 403: it never falls through to a new ephemeral beside the live binding. A credential that may send
+        only some events (the data credential of a mint-only install) sends a refused ``clear`` as ``fork``."""
         if not self._privileged and facts.source == "clear":
-            return None
+            return self._restart_own(facts, own, row="clear_restart_own")   # never a second identity beside the held one
         prior = (own.get("holder") or {}).get("session_id")
         event = facts.source
         token = self._own_token(facts, own)   # a fork carries it; a clear never does

@@ -732,6 +732,19 @@ def test_the_privileged_cloud_clear_falls_through_clear_403_then_fork_403_to_the
     assert [e for e in _events(engine) if e in ("clear", "fork", "start")] == ["clear", "fork", "start"]
 
 
+@pytest.mark.parametrize("kind", ["ephemeral", "seat"])
+def test_an_unprivileged_clear_restarts_the_same_identity_not_a_new_ephemeral(tmp_path: Path, kind: str) -> None:
+    """The pre-existing hole the 0.1.198 review named: a binder that may not send ``clear`` (``allow_privileged=False``)
+    returned None from ``_keep`` and ``_startup`` then made a NEW ephemeral beside the live binding, before any 403. It
+    restarts the identity the process holds, as the token-lapse fall-through does: one live binding for the pid."""
+    engine = FakeEngine()
+    own = _own(engine, kind=kind, name="alpha" if kind == "seat" else None)
+    binder, facts = _binder_facts(tmp_path, engine, "clear", privileged=False)
+    out = binder.bind(facts)
+    _assert_same_identity_one_binding(engine, out, own)
+    assert out.row == "clear_restart_own"
+
+
 def test_a_fork_refused_for_another_reason_still_ends_unbound_with_the_engines_words(tmp_path: Path) -> None:
     """Only a missing token falls through: another 403 is not a reason to start anything."""
 
