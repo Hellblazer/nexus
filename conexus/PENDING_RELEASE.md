@@ -51,6 +51,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/agents/deep-research-synthesizer.md` -- the catalog `resolve` example names the corpus content types and says an unknown `corpus` fails the call (GH #1668); the behaviour ships in the client's MCP server, so this line waits for the client release.
 - `conexus/hooks/scripts/_identity_lookup.py` -- new stdlib sibling that finds this session's identity (and its unexpired token) from the identity token files, for the hooks below (RDR-253 Step 5, nexus-hczdo.1.7); the identity binding ships in the client, so this waits for the client release.
-- `conexus/hooks/scripts/compact_checkpoint.py` -- the PreCompact checkpoint finds the threads entry by its `identity:` line first, and never takes an entry naming another seat (nexus-hczdo.1.7).
+- `conexus/hooks/scripts/compact_checkpoint.py` -- the PreCompact checkpoint finds the threads entry by its `identity:` line first, and never takes an entry naming another seat (nexus-hczdo.1.7). It also lists the identity's running work rows from `nx identity work list --running --json` (nexus-hczdo.1.9).
 - `conexus/hooks/scripts/mailbox_drain.py` -- the prompt drain also drains `mailbox/<identity>`, sending the identity token on every tuple request of that drain (nexus-hczdo.1.7).
 - `conexus/skills/mailbox/SKILL.md` -- documents identity mailboxes, alias resolution, the 7-day rename notice and the identity `from` rule (nexus-hczdo.1.7).
+- `conexus/skills/finishing-branch/SKILL.md` -- cleanup asks `nx identity may-stop worktree` first, stops on any nonzero exit, and chains `git worktree remove && nx identity work done` (RDR-253 Step 6, nexus-hczdo.1.9); the verbs ship in the client, so this waits for the client release.
+- `conexus/skills/git-worktrees/SKILL.md` -- a new worktree registers itself as the identity's `worktree` work row (RDR-253 Step 6, nexus-hczdo.1.9); the verb ships in the client, so this waits for the client release.
