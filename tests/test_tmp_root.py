@@ -1123,6 +1123,8 @@ class TestChildEnvWithTmpdir:
         assert not unexplained, _unexplained_tmpdir_message(unexplained)
         stale = sorted(set(_TMPDIR_OVERRIDE_EXEMPT) - set(found))
         assert not stale, f"_TMPDIR_OVERRIDE_EXEMPT names sites that no longer exist: {stale}"
+        unfilled = sorted(k for k, why in _TMPDIR_OVERRIDE_EXEMPT.items() if why.lstrip().startswith("<"))
+        assert not unfilled, f"_TMPDIR_OVERRIDE_EXEMPT entries whose pasted placeholder reason was never filled in: {unfilled}"
 
     def test_a_child_that_re_resolves_its_tempdir_sees_the_given_one_even_with_a_marker_outside(
         self, tmp_path, monkeypatch,

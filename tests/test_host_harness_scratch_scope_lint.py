@@ -594,6 +594,8 @@ def test_ledger_matches_live_count() -> None:
     for s in live_sites:
         live_counts[s.file] = live_counts.get(s.file, 0) + 1
 
+    unfilled = sorted(f for f, (_n, why) in ALLOWLIST.items() if why.lstrip().startswith("<"))
+    assert not unfilled, f"ALLOWLIST entries whose pasted placeholder reason was never filled in: {unfilled}"
     ledger_counts = {f: n for f, (n, _reason) in ALLOWLIST.items()}
     mismatches = sorted(
         f"{f}: live={live_counts.get(f, 0)} ledger={ledger_counts.get(f, 0)}"

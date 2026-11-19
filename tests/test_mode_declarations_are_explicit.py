@@ -11,6 +11,12 @@ to be explicit.
 Implementation: grep + ``request.fixturenames`` introspection. AST-shape
 analysis is out of scope (RDR-109 §Phase 1, step 4).
 
+A LINT-RUN COPY EXISTS (2026-11-19): ``test_the_mode_census_runs_in_a_lint_run_over_the_full_collection``
+is lint-marked and is NOT blind, because it reads conftest's ``full_collection`` fixture (every item stashed
+in ``pytest_itemcollected``, before any deselection) filtered by the default addopts expression, never
+``session.items``. The warning below still holds for anything that reads ``session.items``; the dedicated
+census job stays the enforcement of record.
+
 MUST STAY IN THE DEFAULT LOOP -- do not mark this file ``lint`` (nexus-8x4le,
 2026-08-05). Every OTHER repo-structure census reclassified to the ``lint``
 marker by 37a53f3c (``test_storage_boundary_lint.py``, ``test_no_new_sqlite.py``,
@@ -206,11 +212,6 @@ def _default_selection(items: list) -> list:
 
     expr = Expression.compile(_default_addopts_markexpr())
     return [i for i in items if expr.evaluate(MarkMatcher.from_markers(i.iter_markers()))]
-
-
-def test_the_lint_census_scans_what_the_census_job_selects() -> None:
-    """The lint-run census filters by the default addopts expression, read from pyproject."""
-    assert _default_addopts_markexpr() == "not integration and not slow and not lint"
 
 
 def _census_failure(offenders: list[str]) -> str:

@@ -201,6 +201,7 @@ def test_the_allowlist_has_no_stale_entries_and_every_reason_is_real() -> None:
     assert not stale, f"allowlisted files with no code reference left (remove the entry): {stale}"
     for path, reason in _ALLOWED.items():
         assert len(reason.strip()) > 20, f"{path}: reason too short to be a justification"
+        assert not reason.lstrip().startswith("<"), f"{path}: the pasted placeholder reason was never filled in"
 
 
 def test_the_scan_is_not_vacuous() -> None:
