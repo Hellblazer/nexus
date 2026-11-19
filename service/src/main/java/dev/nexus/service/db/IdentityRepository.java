@@ -746,13 +746,13 @@ public final class IdentityRepository {
         });
     }
 
-    /** The session index: a session id to its identity and generation. */
     /** Whether {@code sessionId} is in the session index (any identity, any generation). */
     public boolean sessionIndexed(String tenant, String sessionId) {
         return scope.withTenant(tenant, ctx -> ctx.fetchExists(ctx.selectFrom(IDENTITY_SESSIONS)
             .where(IDENTITY_SESSIONS.TENANT_ID.eq(tenant)).and(IDENTITY_SESSIONS.SESSION_ID.eq(sessionId))));
     }
 
+    /** The session index: a session id to its identity and generation. */
     public Map<String, Object> lookupSession(String tenant, String sessionId) {
         return scope.withTenant(tenant, ctx -> {
             var row = ctx.selectFrom(IDENTITY_SESSIONS)
