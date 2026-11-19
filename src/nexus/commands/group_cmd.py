@@ -22,7 +22,7 @@ from typing import Any
 import click
 
 from nexus import groups
-from nexus.groups import GROUP_NAME, GroupsClient, GroupsError, GroupsUnavailableError, NoIdentityError
+from nexus.groups import GROUP_NAME, GroupRecord, GroupsClient, GroupsError, GroupsUnavailableError, NoIdentityError
 
 _RECONNECT = ("The MCP server reads group membership once, when it starts: reconnect it (/mcp) or restart the session "
               "for the auras that load by group to take effect.")
@@ -146,10 +146,11 @@ def form_cmd(ctx: click.Context, name: str, serves: tuple[str, ...], purpose: st
     """
     env = _env(ctx)
     leader = _caller(env)
-    record = env.client.form(name, leader, serves=list(serves), purpose=purpose, ends=ends, ack_deadline=ack_deadline,
-                             ack_deadline_by_topic=deadline_for or None, requested_by=requested_by or leader)
-    click.echo(f"formed {record['name']}: leader {record['leader']}, serves {', '.join(record['serves']) or '(nothing)'}, "
-               f"ack deadline {record['ack_deadline']} min")
+    record = GroupRecord.from_wire(env.client.form(
+        name, leader, serves=list(serves), purpose=purpose, ends=ends, ack_deadline=ack_deadline,
+        ack_deadline_by_topic=deadline_for or None, requested_by=requested_by or leader))
+    click.echo(f"formed {record.name}: leader {record.leader}, serves {', '.join(record.serves) or '(nothing)'}, "
+               f"ack deadline {record.ack_deadline} min")
 
 
 @group_group.command("set")
@@ -178,15 +179,15 @@ def set_cmd(ctx: click.Context, name: str, leader: str | None, ack_deadline: int
     if ack_deadline is not None:
         fields["ack_deadline"] = ack_deadline
     if deadline_for:
-        stored = env.client.read(name).get("ack_deadline_by_topic") or {}
+        stored = GroupRecord.from_wire(env.client.read(name)).ack_deadline_by_topic
         fields["ack_deadline_by_topic"] = {**stored, **deadline_for}
     if ends is not None:
         fields["ends"] = ends
     if serves:
         fields["serves"] = list(serves)
-    record = env.client.set(name, **fields)
-    click.echo(f"set {name}: {', '.join(sorted(fields))}; leader {record['leader']}, serves "
-               f"{', '.join(record['serves']) or '(nothing)'}, ack deadline {record['ack_deadline']} min")
+    record = GroupRecord.from_wire(env.client.set(name, **fields))
+    click.echo(f"set {name}: {', '.join(sorted(fields))}; leader {record.leader}, serves "
+               f"{', '.join(record.serves) or '(nothing)'}, ack deadline {record.ack_deadline} min")
 
 
 @group_group.command("disband")
@@ -195,8 +196,8 @@ def set_cmd(ctx: click.Context, name: str, leader: str | None, ack_deadline: int
 @_guarded
 def disband_cmd(ctx: click.Context, name: str) -> None:
     """End the group NAME now: every membership goes, the record stays as history. Only the leader may."""
-    record = _env(ctx).client.disband(name)
-    click.echo(f"disbanded {record['name']} (ended_at {record['ended_at']})")
+    record = GroupRecord.from_wire(_env(ctx).client.disband(name))
+    click.echo(f"disbanded {record.name} (ended_at {record.ended_at})")
 
 
 @group_group.command("override")
@@ -215,8 +216,9 @@ def override_cmd(ctx: click.Context, name: str, leader: str | None, disband: boo
     if (leader is None) == (not disband):
         raise click.UsageError("give exactly one of --leader and --disband")
     env = _env(ctx)
-    record = env.client.override(name, disband=True) if disband else env.client.override(name, leader=env.client.resolve(leader or ""))
-    click.echo(f"overrode {record['name']}: " + (f"ended_at {record['ended_at']}" if disband else f"leader is now {record['leader']}"))
+    record = GroupRecord.from_wire(
+        env.client.override(name, disband=True) if disband else env.client.override(name, leader=env.client.resolve(leader or "")))
+    click.echo(f"overrode {record.name}: " + (f"ended_at {record.ended_at}" if disband else f"leader is now {record.leader}"))
 
 
 @group_group.command("join")
@@ -271,7 +273,8 @@ def list_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     cannot renew, so the engine cannot say whether its holder is alive).
     """
     client = _env(ctx).client
-    record = client.read(name)
+    raw = client.read(name)
+    record = GroupRecord.from_wire(raw)
     members = []
     for row in client.roster(name):
         try:
@@ -281,20 +284,20 @@ def list_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
         members.append({"identity": row["identity"], "name": view.get("name") or view.get("display_name"), "role": row.get("role"),
                         "state": groups.state_word(view) if view else "unknown", "joined_at": row.get("joined_at")})
     if as_json:
-        click.echo(json.dumps({"group": record, "members": members}, indent=2, sort_keys=True))
+        click.echo(json.dumps({"group": raw, "members": members}, indent=2, sort_keys=True))
         return
-    per_topic = ", ".join(f"{t} {m} min" for t, m in sorted((record.get("ack_deadline_by_topic") or {}).items()))
-    if record.get("live"):
+    per_topic = ", ".join(f"{t} {m} min" for t, m in sorted(record.ack_deadline_by_topic.items()))
+    if record.live:
         status = "live"
-    elif record.get("ended_at"):
-        status = f"disbanded (ended_at {record['ended_at']})"
+    elif record.ended_at:
+        status = f"disbanded (ended_at {record.ended_at})"
     else:
-        status = f"disbanded (its ends, {record.get('ends')}, has passed)"
-    click.echo(f"{record['name']}: {status}; serves {', '.join(record.get('serves') or []) or '(nothing)'}; "
-               f"ack deadline {record['ack_deadline']} min" + (f" ({per_topic})" if per_topic else ""))
-    click.echo(f"formed {record.get('formed_at')}, ends {record.get('ends') or 'open'}, requested by {record.get('requested_by') or 'unknown'}")
-    leader = next((m for m in members if m["identity"] == record["leader"]), None)
-    click.echo(f"leader: {(leader or {}).get('name') or record['leader']} ({record['leader']})")
+        status = f"disbanded (its ends, {record.ends}, has passed)"
+    click.echo(f"{record.name}: {status}; serves {', '.join(record.serves) or '(nothing)'}; "
+               f"ack deadline {record.ack_deadline} min" + (f" ({per_topic})" if per_topic else ""))
+    click.echo(f"formed {record.formed_at}, ends {record.ends or 'open'}, requested by {record.requested_by or 'unknown'}")
+    leader = next((m for m in members if m["identity"] == record.leader), None)
+    click.echo(f"leader: {(leader or {}).get('name') or record.leader} ({record.leader})")
     click.echo("members:" if members else "members: (none)")
     for m in members:
         click.echo(f"  {m['name'] or m['identity']:<16} {m['identity']:<6} {m['role']:<7} {m['state']}")
@@ -412,8 +415,8 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     and counts an ack the way the engine does: the ack of the identity that owned the red at that time, for a red tip.
     """
     env = _env(ctx)
-    record = env.client.read(name)
-    topics = record.get("serves") or []
+    record = GroupRecord.from_wire(env.client.read(name))
+    topics = list(record.serves)
     if not topics:
         raise click.ClickException(f"{name} serves no topic, so it has no owner post to read")
     store = env.tuples()
@@ -435,7 +438,7 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
         return
     acked = [r["minutes"] for r in reds if r["minutes"] is not None]
     summary = f"{len(reds)} reds, {len(acked)} acknowledged" + (f", median {statistics.median(acked):.1f} min, longest {max(acked):.1f} min" if acked else "")
-    click.echo(f"{name}: {summary} (deadline {record['ack_deadline']} min)")
+    click.echo(f"{name}: {summary} (deadline {record.ack_deadline} min)")
     for r in reds:
         ack = f"acked by {r['acked_by']} at {r['acked_at']}, {r['minutes']} min" if r["acked_at"] else "no ack"
         click.echo(f"  {str(r['sha'])[:12]}  episode {r['episode_at']}  {ack}" + (f"  ({r['handoffs']} hand-off)" if r["handoffs"] else ""))
