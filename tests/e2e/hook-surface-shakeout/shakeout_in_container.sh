@@ -148,6 +148,7 @@ if [ -n "${SHAKEOUT_MCP_OVERRIDE:-}" ]; then
     TOKEN_GUARD="[[ \${CLAUDE_CODE_OAUTH_TOKEN} =~ ^[A-Za-z0-9_-]+\$ ]] || { echo 'override: token has characters outside base64url; refusing'; exit 1; } && "
 fi
 CMD="${TOKEN_GUARD}export PATH=$HOME_DIR/nxenv/bin:$HOME_DIR/.local/bin:\$PATH && cd $WORK && exec claude --debug --debug-file $RUN/debug.log --dangerously-skip-permissions --plugin-dir $PLUGIN $EXTRA_CLAUDE_FLAGS"
+# kill-server exempt (RDR-253 Step 6): runs inside the throwaway container, whose tmux server nothing outside it can own
 T kill-server 2>/dev/null
 T new-session -d -s S -x 240 -y 50 || { echo "tmux failed"; exit 1; }
 T pipe-pane -t S -o "cat >> $RUN/pane.log"

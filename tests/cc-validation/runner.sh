@@ -45,13 +45,13 @@ _cred_tool() {
 }
 
 # Distinct from e2e harness — keeps state separate so concurrent runs don't collide.
-TEST_HOME="${TMPDIR%/}/nexus-cc-val-home"
+TEST_HOME="${TMPDIR%/}/nexus-cc-val-home-$$"
 TMUX_SESSION="cc-val"
 # Dedicated tmux socket: the harness runs on its OWN socket, invisible to the
 # user's default socket. This is a hard isolation boundary — a kill-session
 # (or even kill-server) here can never touch the interactive session the
 # developer is working in. lib.sh's _tmux wrapper honours NX_TMUX_SOCKET.
-NX_TMUX_SOCKET="cc-val-sock"
+NX_TMUX_SOCKET="cc-val-sock-$$"   # per run (pid): a concurrent run in another session keeps its own server and home
 STUB_LOG="$TEST_HOME/stub_calls.log"
 HOOK_LOG="$TEST_HOME/hook.log"
 export TEST_HOME REPO_ROOT TMUX_SESSION STUB_LOG HOOK_LOG NX_TMUX_SOCKET
@@ -374,6 +374,7 @@ cleanup() {
     # Tear down the whole private socket — safe precisely because it is ours
     # alone (NX_TMUX_SOCKET). Falls back to a scoped kill-session if the
     # server is already gone.
+    # kill-server exempt (RDR-253 Step 6): $NX_TMUX_SOCKET is this run's own pid-named socket, never registered work
     _tmux kill-server 2>/dev/null || _tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
     rm -rf "$TEST_HOME"
 }
@@ -1010,6 +1011,7 @@ echo "  (run 'tmux -L $NX_TMUX_SOCKET attach -t $TMUX_SESSION' to watch live)"
 # pane and session on this socket inherits; it is also this harness's
 # fail-loud credential gate (see the NOTE near the top of this file) and
 # runs before anything else in the harness, tmux included.
+# kill-server exempt (RDR-253 Step 6): $NX_TMUX_SOCKET is this run's own pid-named socket, never registered work
 _tmux kill-server 2>/dev/null || true
 _cred_tool run -- tmux -L "$NX_TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 220 -y 50
 

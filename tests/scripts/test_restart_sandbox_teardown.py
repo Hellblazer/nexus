@@ -721,3 +721,18 @@ def test_the_hangup_check_command_passes_without_claude_or_a_token() -> None:
                        env=env, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "TMUX HANGUP CHECK PASSED" in r.stdout
+
+
+@needs_tmux
+def test_the_hangup_probe_asks_no_nx(run, tmp_path, monkeypatch) -> None:
+    """The probe's socket is its own (pid-named, never registered), so its guarded stops ask no engine: an ``nx`` on PATH
+    is never run (nexus-hczdo.1.10 confirmation N1: the real nx tripped the storage-touch guard)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    called = tmp_path / "nx-called"
+    nx = bindir / "nx"
+    nx.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\nexit 0\n", encoding="utf-8")
+    nx.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    assert run.tmux_hangup_probe(tmp_path / "probe", "shell") == []
+    assert not called.exists(), f"the probe ran nx: {called.read_text()}"

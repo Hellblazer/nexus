@@ -9,6 +9,7 @@ fixtures of test_restart_sandbox_teardown.py: a real cleanup against a fake nx a
 from __future__ import annotations
 
 import ast
+import re
 import importlib.util
 import sys
 from pathlib import Path
@@ -62,15 +63,61 @@ def test_cleanup_stops_the_server_through_the_sibling_guard(run, tmp_path, monke
     assert dirty == []
 
 
-def test_no_call_in_run_py_sends_kill_server_except_through_the_guard() -> None:
-    """Every ``tmux kill-server`` in run.py and its hangup probe goes through ``sandbox_work.kill_server`` (nexus-hczdo.1.10 r1 item 2): the
-    hangup probe's two stops did not, and a bare ``tmux("kill-server")`` anywhere fails this."""
-    guarded = 0
-    for path in (RUN_PY, RUN_PY.with_name("hangup_probe.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        bare = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
-                and any(isinstance(a, ast.Constant) and a.value == "kill-server" for a in node.args)]
-        assert bare == [], f"{path.name} sends kill-server outside sandbox_work.kill_server at lines {bare}"
-        guarded += sum(1 for node in ast.walk(tree) if isinstance(node, ast.Call)
-                       and isinstance(node.func, ast.Attribute) and node.func.attr == "kill_server")
-    assert guarded >= 3, f"the cleanup and the probe's two stops call kill_server: found {guarded}"
+REPO = RUN_PY.parents[3]
+
+#: Every file under tests/ and scripts/ that sends ``tmux kill-server`` without the guard, with how many times. Each site
+#: carries a ``kill-server exempt`` comment within the three lines above it saying why (a private per-run socket, or a
+#: throwaway container); a new site, or a site without its reason, fails the test below.
+EXEMPT = {
+    "tests/cc-validation/runner.sh": 2,
+    "tests/cc-validation/connection-race-ladder/run_ladder.py": 5,
+    "tests/e2e/hook-surface-shakeout/shakeout_in_container.sh": 1,
+    "tests/e2e/run.sh": 1,
+}
+#: The guard itself: sandbox_work.kill_server sends the one guarded kill-server.
+GUARD = "tests/e2e/restart-sessions/sandbox_work.py"
+_SHELL_KILL = re.compile(r"(?:^\s*|[;&|]\s*)(?:_tmux|T|tmux(?:\s+-[LS]\s+\S+)?)\s+kill-server\b")
+
+
+def _kill_server_lines(path: Path) -> list[int]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix == ".py":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return []
+        return sorted(node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
+                      and any(isinstance(a, ast.Constant) and a.value == "kill-server" for a in node.args))
+    return [n for n, line in enumerate(text.splitlines(), 1)
+            if not line.lstrip().startswith("#") and _SHELL_KILL.search(line)]
+
+
+def test_every_kill_server_under_tests_and_scripts_is_guarded_or_a_named_exemption() -> None:
+    """RDR-253 Step 6 (nexus-hczdo.1.10 r1 item 2, confirmation C1): a tmux server is stopped through
+    ``sandbox_work.kill_server`` (``nx identity may-stop`` first), or the site says in a ``kill-server exempt`` comment
+    why no other identity can own it. Test files that only grep for the verb are not sites."""
+    found: dict[str, list[int]] = {}
+    for root in ("tests", "scripts"):
+        for path in (REPO / root).rglob("*"):
+            if not path.is_file() or path.suffix in (".md", ".txt", ".json", ".pyc") or path.name.startswith("test_") \
+                    or path.name.endswith("_test.sh") or "__pycache__" in path.parts:
+                continue
+            lines = _kill_server_lines(path)
+            if lines:
+                found[path.relative_to(REPO).as_posix()] = lines
+    assert found.pop(GUARD, None), "the guard's own kill-server was not found: the scan is blind"
+    assert {k: len(v) for k, v in found.items()} == EXEMPT, "a kill-server outside the guard that is not a named exemption"
+    for rel, lines in found.items():
+        text = (REPO / rel).read_text(encoding="utf-8").splitlines()
+        for n in lines:
+            assert any("kill-server exempt" in text[i] for i in range(max(0, n - 4), n - 1)), f"{rel}:{n} gives no reason"
+
+
+def test_the_cc_validation_and_ladder_sockets_are_per_run() -> None:
+    """A fixed socket name let one session's run kill another's server ("stale server" reset at start); both now carry
+    the run's pid (nexus-hczdo.1.10 confirmation C1)."""
+    runner = (REPO / "tests/cc-validation/runner.sh").read_text(encoding="utf-8")
+    assert re.search(r'^NX_TMUX_SOCKET="cc-val-sock-\$\$"', runner, re.M)
+    assert re.search(r'^TEST_HOME="\$\{TMPDIR%/\}/nexus-cc-val-home-\$\$"', runner, re.M), "and its home, which cleanup removes"
+    ladder = (REPO / "tests/cc-validation/connection-race-ladder/run_ladder.py").read_text(encoding="utf-8")
+    assert 'default=f"veh77-ladder-{os.getpid()}"' in ladder

@@ -54,7 +54,9 @@ def tmux_hangup_probe(workdir: Path, shape: str, *, args_of: Callable[[int], str
     cmd = f"sh -c 'sh {shlex.quote(str(child))} {shlex.quote(str(ready))} {shlex.quote(str(marker))} & wait'"
     # Every kill-server here goes through sandbox_work.kill_server, which asks `nx identity may-stop` first (RDR-253
     # Step 6): no stop of a tmux server bypasses the ownership check, even this probe's own pid-named one.
-    server = types.SimpleNamespace(sock=sock, real_nx=shutil.which("nx") or "", tmux=tmux)
+    # real_nx "": the socket is this probe's own, pid-named and never registered, so no identity can own it and asking
+    # an engine would only make the probe depend on one (and trip the storage-touch guard in a test run).
+    server = types.SimpleNamespace(sock=sock, real_nx="", tmux=tmux)
     notes: list[str] = []
     findings: list[str] = []
     pid = 0

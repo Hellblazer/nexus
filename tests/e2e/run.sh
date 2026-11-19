@@ -108,7 +108,7 @@ cleanup() {
     # unrelated reaper or reboot. Kill it too, via _tmux so this only ever
     # targets the private socket ($NX_TMUX_SOCKET is unconditionally
     # exported above) and never the shared default socket.
-    # Exempt from `nx identity may-stop` (RDR-253 Step 6): $NX_TMUX_SOCKET is this run's own private socket, named
+    # kill-server exempt (RDR-253 Step 6): $NX_TMUX_SOCKET is this run's own private socket, named
     # by its pid, started by this script a few lines up and never registered as anyone's work, so no other identity
     # can own it; and this cleanup must stop the server that holds the token whatever the engine says.
     _tmux kill-server 2>/dev/null || true
