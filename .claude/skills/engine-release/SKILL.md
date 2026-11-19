@@ -14,7 +14,7 @@ Follow in order. The releaser is **Sam**: AI preps + validates; Sam pushes the t
 **Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 3
 (the local-candidate `--shakeout` gate and the `--candidate-migration` populated-store
 rehearsal) and Step 3c (the published-client write leg) went with the scripts and
-harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 3f, 3g, 3h, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
+harness modes they ran. Steps that remain: 1, 1b, 2, 2b, 3b, 3e, 3f, 3g, 3h, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
 
 ### 1. Decide whether a cut is needed (drift check)
 
@@ -27,20 +27,37 @@ Cut a fresh engine when `service/` has accumulated **cloud-relevant** work: pool
 
 **Size every open engine bead before recommending a cut.** A cut is about two hours of wall clock and three premium native builds. List `bd ready` plus the in-progress engine beads, size each in minutes, fold everything under a few hours into the cut, and say the sizing out loud; only a bead that genuinely needs design or measurement waits. v0.1.97 was cut for one bead while a twenty-line sibling was already filed and rode a second cut (Sam, 2026-09-03: "wtf did we do that for when we know we had more to do?"). Source: memory `feedback_release_and_develop_ci` § engine_cut_discipline.
 
+### 1b. Freeze the tag commit when the cut starts (Sam, 2026-11-19)
+
+Pick the commit you will tag when the cut starts, record it on the cut bead as `TAG_SHA`, and make a clean worktree at it (`TAG_TREE`). Every gate below runs on that one tree. A fix that lands on develop after the freeze goes to the next cut: do not move the tag commit to chase develop. Only a red gate on the frozen tree moves it, and then you freeze a new commit and every gate starts again on it, because a gate's result is about the tree it ran on. On 0.1.196 the Step 3h legs ran three times because the tag commit moved twice while they ran.
+
+```bash
+TAG_SHA=$(git rev-parse origin/develop)      # or the develop commit the cut is sized for (Step 1)
+git worktree add --detach ../nexus-wt/engine-cut-"$TAG_SHA" "$TAG_SHA"
+TAG_TREE=$(cd ../nexus-wt/engine-cut-"$TAG_SHA" && pwd)
+```
+
 ### 2. Verify the engine is green on the exact commit you'll tag
 
 The version is **tag-stamped** — there is NO manifest to bump (`release.properties` `release_version` is blank in source, stamped at native-build time from the tag; the Maven pom stays `1.0-SNAPSHOT`).
 
-Confirm the full Java suite + native build passed on the exact `service/` tree:
+Confirm the full Java suite (main and integration group) and the native build passed on the frozen `service/` tree. Service CI's `Java tests + jOOQ codegen drift guard` job runs both suites; when it concluded success on a commit whose `service/` tree equals `TAG_SHA`'s, that run is the gate and no chas suite runs (a second run of the same tree finds nothing the first did not). The job must have RUN: Service CI skips it when it decides `service/` did not change, and a skipped, cancelled or timed-out job covers nothing. The native build is CI's `engine-service native build (PR trip-wire)` check on a commit with the same `service/` tree, or the Step 3f dispatch run, which builds every native platform.
 
 ```bash
-# fast path: if service/ at HEAD is byte-identical to a green service-ci commit, that CI covers it
-git diff --stat <green-service-ci-sha> HEAD -- service/    # empty = covered
-# else run locally (needs Docker for Testcontainers pgvector + the bge ONNX model):
-scripts/mvnw-leased.sh -q test
+# the run that covers the frozen tree: Java tests job concluded success, not skipped
+git diff --stat <service-ci-sha> "$TAG_SHA" -- service/    # empty = same engine tree
+gh api "repos/Hellblazer/nexus/commits/<service-ci-sha>/check-runs" \
+  -q '.check_runs[] | select(.name=="Java tests + jOOQ codegen drift guard") | .conclusion'   # success
+# only when no such run exists: one chas run of both suites on TAG_TREE (needs Docker for Testcontainers)
+scripts/mvnw-leased.sh --lab-run lab-m -B test
+scripts/mvnw-leased.sh --lab-run lab-m -B test -Dnexus.ddl.suite=integration -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=4
 ```
 
 The Java CI (`service-ci.yml`) is a required check on `main`, but nothing gates a push to `develop` on it, and a develop run can be cancelled or time out — so verify it actually passed on this tree rather than assuming.
+
+### 2b. Start the pre-tag gates together on the frozen tree
+
+The gates that take machine time start at the same time on `TAG_SHA`, not one after another: the chas suite of Step 2 when one is needed, the Windows dispatch run of Step 3f, the three legs of Step 3h, and the cloud leg once it is part of the cut. Steps 3e and 3g are reads of the tree and take seconds. None of these gates reads another's result, so running them together changes when each finishes, not what it checks. The cut waits for all of them; any red stops it (see Step 1b for what a red means for the tag commit). On 0.1.196 the gates were about two hours of machine time, and the wall clock went to serial waits for a green develop and to reruns after the tree moved.
 
 When the cut changes the cut or release machinery itself (the engine release workflow, the promote and floor scripts, the rehearsal harness), rehearse the whole flow end to end in isolation first, as the `release` skill's Step 0c paragraph describes; build the missing rehearsal when you find the gap, do not file it.
 
@@ -151,11 +168,14 @@ Two more things must hold, and neither can be read from the variable:
   switch on was GREEN on a commit whose Windows surface (the Windows jobs of that
   workflow and of `pg-bundle-cache-seed.yml`, `scripts/*windows*`,
   `scripts/windows_*.py`, `.github/actions/*windows*`, `service/pom.xml`) equals the
-  commit being tagged. A non-tag ref runs every Windows step except sign, upload and
+  commit being tagged. Start it on the frozen tree (Step 1b): dispatch on a branch
+  pushed at `TAG_SHA` (`git push origin "$TAG_SHA":refs/heads/engine-cut/vX.Y.Z`, then
+  `gh workflow run engine-service-release.yml --ref engine-cut/vX.Y.Z`), or on `develop`
+  while its Windows surface still equals `TAG_SHA`'s. A non-tag ref runs every Windows step except sign, upload and
   promote, so this is the only run that exercises the release workflow's own Windows
   jobs before the tag (the rehearsal cannot: it is not allowed to trigger release
   jobs). Read the run's conclusion once:
-  `gh run list --workflow=engine-service-release.yml --event=workflow_dispatch --branch=develop --limit 5 --json conclusion,headSha,createdAt`.
+  `gh run list --workflow=engine-service-release.yml --event=workflow_dispatch --branch=<the branch you dispatched on> --limit 5 --json conclusion,headSha,createdAt`.
   Record the run id in the cut's bead.
 
 After the cut publishes (Step 4), confirm it carries them:
@@ -181,7 +201,8 @@ writes at most 64 MiB over its migrate and ready phases; on the normal upgrade, 
 plain same-version reboot writes at most 64 MiB over the same phases; and an
 engine restart during a background index build never throws the build away. Run
 the three legs of `scripts/upgrade_boot_writes.py` from INSIDE a clean worktree
-at the exact commit you will tag (`TAG_TREE`, as in Step 3g). Each leg builds the
+at the exact commit you will tag (`TAG_TREE`, frozen in Step 1b), all three legs
+started together (Step 2b). Each leg builds the
 gate jar in that tree and the harness boots it (`--new-jar` left at its default,
 the service jar the same tree just built), so the jar under test is
 the tag commit's. Run on chas, whose disk is real (the harness's work dir is
