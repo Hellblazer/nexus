@@ -242,6 +242,21 @@ _FOREACH = [
     "git -c core.pager=cat submodule--helper foreach true",
     "git-submodule--helper foreach true",
 ]
+#: `git submodule--helper create-branch` creates or moves a branch ref (measured:
+#: `-f` resets `topic` to the given oid), so it is `branch -f`'s twin: denied in the
+#: shared tree in any form, passed from a linked worktree.
+_HELPER_CREATE_BRANCH = [
+    "git submodule--helper create-branch -f topic abc123 main",
+    "git submodule--helper create-branch --force topic abc123 main",
+    "git submodule--helper create-branch newb abc123 main",
+    "git submodule--helper create-branch --create-reflog newb abc123 main",
+    "git submodule--helper create-branch -n newb abc123 main",
+    "git submodule--helper create-branch -t newb abc123 main",
+    "git submodule--helper --quiet create-branch newb abc123 main",
+    "git submodule--helper 'create-branch' newb abc123 main",
+    "git -C sub submodule--helper create-branch newb abc123 main",
+    "git-submodule--helper create-branch newb abc123 main",
+]
 #: The helper gets the write set `git submodule` has (init, sync, add, deinit,
 #: set-url, set-branch, absorbgitdirs, update --init) plus its own `clone`. Denied
 #: in a linked worktree too, like `git submodule init`: they write the common config.
@@ -342,6 +357,9 @@ _FETCH_REFSPEC = [
     "git -c remote.origin.fetch=+refs/heads/*:refs/heads/* remote update",
     "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0=+refs/heads/o:refs/heads/z git fetch origin",
     "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push; git push origin",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0=+refs/heads/o:refs/heads/z git-fetch origin",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0=+refs/heads/o:refs/heads/z /usr/lib/git-core/git-fetch origin",
+    "git -c remote.origin.fetch=+refs/heads/o:refs/heads/z /usr/lib/git-core/git-fetch origin",
     "GIT_CONFIG_PARAMETERS=\"'remote.origin.fetch=+refs/heads/o:refs/heads/z'\" git fetch origin",
 ]
 #: Gap 7. Denied in a linked worktree too.
@@ -385,6 +403,38 @@ _OUTPUT = [
     "git log --format --output={out}",
     "git log --pretty --output {out}",
     "git log --format '--output'",
+    # N1: a `git grep` carries no --output of its own, but a substitution inside it
+    # runs a command of its own (measured: each writes the file)
+    "git grep -n 1 $(git diff --output={out})",
+    "git grep -n 1 `git diff --output={out}`",
+    'git grep -e "$(git diff --output={out})"',
+    "git grep x -- $(git log --output={out})",
+    "git grep x <(git diff --output={out})",
+    "echo $(git grep x) $(git diff --output={out})",
+    "git grep x $(git diff --output={out})",
+    "git grep x; git diff --output={out}",
+    "git grep x && git diff --output={out}",
+    "git grep x | git diff --output={out}",
+    "(git grep x; git diff --output={out})",
+    "{ git grep x; git diff --output={out}; }",
+    # N2: the value-skip table was measured on log and show only. These commands
+    # really write (git diff -L / --decorate-refs do not take the next word), so
+    # any --output word denies there, a value-taking option's value included
+    "git diff -L --output={out}",
+    "git diff --decorate-refs --output={out}",
+    "git diff --cached -L --output={out}",
+    "git diff --no-index f f --default --output={out}",
+    "git diff-tree HEAD -L --output={out}",
+    "git diff-tree HEAD --decorate-refs --output={out}",
+    "git diff-index HEAD -L --output={out}",
+    "git diff-index HEAD --decorate-refs --output={out}",
+    "git diff-files -L --output={out}",
+    "git difftool -L --output={out}",
+    "git difftool --decorate-refs --output={out}",
+    "git range-diff HEAD~1 HEAD HEAD --default --output={out}",
+    "git diff -S --output={out}",
+    "git diff -G '--output'",
+    "git stash show -S '--output'",
 ]
 
 #: Pass in the shared tree and in a worktree: nothing here writes a ref, a
@@ -447,7 +497,6 @@ _STAYS_ALLOWED = [
     "git log --author '--output'",
     "git log --grep \"--output x\" --oneline",
     "git show -S '--output' HEAD",
-    "git diff -G '--output'",
     'git log "--format=%h %s" -3',
     "git log --grep=--output --oneline",
     "git log --format='%h %s' --output-indicator-new=+",
@@ -495,6 +544,7 @@ _FAMILIES = {
     "5_pull": _PULL,
     "6_fetch_refspec": _FETCH_REFSPEC,
     "7_output": _OUTPUT,
+    "9_helper_create_branch": _HELPER_CREATE_BRANCH,
 }
 #: Denied in a linked worktree too.
 _EVERYWHERE = {
@@ -518,6 +568,7 @@ def test_each_gap_denies_in_the_shared_tree(family, sandbox):
 
 @pytest.mark.parametrize("family", [
     "1_branch_force", "2_tag_writes", "3_revert", "5_pull", "6_fetch_refspec",
+    "9_helper_create_branch",
 ])
 def test_gaps_that_are_the_worktrees_own_pass_in_a_linked_worktree(family, sandbox):
     cmds = list(_FAMILIES[family])
@@ -600,6 +651,8 @@ def test_the_dash_c_carve_out_admits_revert_continue_only_and_none_of_the_new_fo
         f"git -C {wt} submodule foreach 'echo hi'",
         f"git -C {wt} submodule--helper foreach true",
         f"git -C {wt} submodule--helper init",
+        f"git -C {wt} submodule--helper create-branch -f topic abc123 main",
+        f"git -C {wt} diff -L --output=/tmp/out.txt",
         f"git -C {wt} fetch --refmap=+a:b origin other",
         f"git -C {wt} fetch --stdin origin",
         f"git -C {wt} -c remote.origin.fetch=+a:b fetch origin",
@@ -645,6 +698,13 @@ _REAL_WRITES = [
     "git log --output {out}",
     "git log --format --output={out}",
     "git log --pretty --output {out}",
+    "git grep -n 1 $(git diff --output={out})",
+    "git grep -n 1 `git diff --output={out}`",
+    "git diff -L --output={out}",
+    "git diff --decorate-refs --output={out}",
+    "git diff-tree HEAD -L --output={out}",
+    "git submodule--helper create-branch -f topic $(git rev-parse HEAD~1) main",
+    "git submodule--helper create-branch newbr HEAD main",
     "git show --output={out} HEAD",
     "git show HEAD --output {out}",
 ]

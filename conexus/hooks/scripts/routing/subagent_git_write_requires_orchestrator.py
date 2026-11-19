@@ -588,7 +588,10 @@ bisect`` (``start``, ``run``, ``good``) moves HEAD in the shared tree and is not
 verb of the scan; (g) a whole-word variable that holds a verb or an option (``V=tag;
 git $V v1``) is not read (the fetch refspec word is the one exception, because the
 fetch walk can say so); (h) ``--output`` held in a variable or built by a
-substitution.
+substitution; (i) a COST, not a gap, of the fetch rule: a fetch word that holds an
+expansion denies, so ``git fetch origin "$BRANCH"`` and ``git fetch origin $(git
+rev-parse --abbrev-ref HEAD)`` are false denials in the shared tree, taken on
+purpose because the text cannot show whether the expansion is a refspec.
 
 ``run_hook(fail_closed=False)`` is unchanged: a crash in the hook ITSELF
 still allows, since a broken guard must not brick every agent's Bash.
@@ -2306,12 +2309,15 @@ def _config_hit(
 #:   also gets ``submodule``'s write set and ``clone``: ``_sx_submodule_helper``), and
 #:   ``--output=<path>`` / ``--output <path>`` on any git command (``_sx_output_flag``;
 #:   git takes only the exact name, ``--output-indicator-*`` is another option;
-#:   ``git grep`` is never read, and the word after a value-taking option such as
-#:   ``-S``, ``-G`` or ``--grep`` is its value; ``--output`` after ``--`` still
-#:   denies). The rule blocks git's own file writer; shell redirection is out of its
+#:   ``git grep`` is not read unless the command holds a substitution (``$(``,
+#:   backtick, ``<(``, ``>(``), and for ``log``, ``show`` and ``whatchanged`` only
+#:   (the commands the table was measured on) the word after a value-taking option
+#:   such as ``-S``, ``-G`` or ``--grep`` is its value; ``--output`` after ``--``
+#:   still denies, and every other command denies any ``--output`` word). The rule
+#:   blocks git's own file writer; shell redirection is out of its
 #:   scope. SHARED TREE ONLY, a linked worktree passes them as it passes ``branch
 #:   -d`` and every verb on the verb scan's list: ``git branch -f|--force`` (a ref
-#:   move); ``git tag`` that creates, signs, forces or deletes (``_sx_tag``; the
+#:   move) and its twin ``git submodule--helper create-branch`` (any form); ``git tag`` that creates, signs, forces or deletes (``_sx_tag``; the
 #:   listing forms pass); ``git fetch`` with a refspec that has a local destination,
 #:   ``tag <name>``, ``--prune-tags|-P``, ``--refmap`` or ``--stdin`` (unique
 #:   prefixes too), or a word after the repository that holds an expansion
@@ -2393,6 +2399,9 @@ _SX_BRACE_STRIP_RE = re.compile(r"\$\{[^{}]*\}")
 #: ``..``. It needs a ``}`` after it in the same word (``_sx_brace_word``).
 _SX_BRACE_RE = re.compile(r"\{[^{}]*(?:,|\.\.)")
 _SX_BLANKS = str.maketrans("()`", "   ")
+#: A command substitution or process substitution: its words run a command of their
+#: own, and `_SX_BLANKS` makes them read as the words of the command around it.
+_SX_SUBST_RE = re.compile(r"\$\(|`|<\(|>\(")
 #: ``help.autocorrect`` values that print a hint and run nothing (git 2.53:
 #: ``0``/``show``/``never`` and the boolean falses).
 _AUTOCORRECT_SAFE = frozenset({"0", "never", "false", "off", "no", "show"})
@@ -2573,6 +2582,12 @@ def _sx_submodule(words: list[str], k: int, worktree: int, branch_of: BranchOf) 
 def _sx_submodule_helper(
     words: list[str], k: int, worktree: int, branch_of: BranchOf,
 ) -> _Sidefx | None:
+    """``create-branch`` creates or moves a branch ref (measured: ``-f`` resets an
+    existing branch), so it is ``branch -f``'s twin: denied in the shared tree in
+    any form and passed from a linked worktree. The rest is ``submodule``'s write
+    set plus ``clone``, denied at every level."""
+    if not worktree and _sx_first_arg(words, k) == "create-branch":
+        return _sx_label("submodule--helper", "create-branch")
     return _sx_submodule_walk("submodule--helper", _SX_HELPER_WRITES, words, k)
 
 
@@ -2903,9 +2918,15 @@ _SX_OUTPUT_VALUED_LONG = frozenset({
     "ws-error-highlight", "diff-algorithm", "color-moved-ws",
 })
 _SX_OUTPUT_VALUED_SHORT = "SGIOLn"
+#: The commands the value table was measured on (``git <cmd> <opt> --output=<f>`` for
+#: every option above). ``git diff -L --output=<f>`` and ``--decorate-refs`` really
+#: write: the same options take no next word on ``diff``, ``diff-tree``,
+#: ``diff-index``, ``diff-files``, ``difftool`` and ``range-diff``, so only these
+#: three skip a value. ``whatchanged`` is ``log``'s own parser.
+_SX_OUTPUT_SKIP_CMDS = frozenset({"log", "show", "whatchanged"})
 
 
-def _sx_output_flag(words: list[str]) -> _Sidefx | None:
+def _sx_output_flag(words: list[str], subst: bool = False) -> _Sidefx | None:
     """``--output=<path>`` or ``--output <path>``: ``git diff``, ``log``, ``show`` and
     the other commands that take diff options write the file wherever the path says.
     The rule blocks git's own file writer; shell redirection is out of its scope.
@@ -2915,14 +2936,20 @@ def _sx_output_flag(words: list[str]) -> _Sidefx | None:
     ``git``, past ``--`` too (a reviewer counted a ``--output`` there as a hold).
 
     Two exemptions, each measured: ``git grep`` has no ``--output`` option (its words
-    are never read), and the word after a value-taking option (``-S``, ``-G``,
-    ``--grep``, ``--author``, ...: ``_SX_OUTPUT_VALUED_LONG``) is that option's
-    value, so ``git log -S '--output'`` passes. Values are skipped only before
-    ``--``, and only for the exact option; no substitution is parsed, so
-    ``git log -S $(x) --output=f`` still reads ``--output=f``."""
+    are never read, unless the command holds a substitution, *subst*: ``$(``,
+    backtick, ``<(`` or ``>(``, whose words join the grep's after the parentheses
+    are blanked, and which can run ``git diff --output=f`` of its own); and, for
+    ``log``, ``show`` and ``whatchanged`` only (``_SX_OUTPUT_SKIP_CMDS``), the word
+    after a value-taking option (``-S``, ``-G``, ``--grep``, ``--author``, ...:
+    ``_SX_OUTPUT_VALUED_LONG``) is that option's value, so ``git log -S '--output'``
+    passes. Values are skipped only before ``--``, and only for the exact option; no
+    substitution is parsed, so ``git log -S $(x) --output=f`` still reads
+    ``--output=f``. Any other command denies every ``--output`` word."""
     sub = _sx_subcommand_index(words)
-    if sub < len(words) and words[sub] == "grep":
+    cmd = words[sub] if sub < len(words) else ""
+    if cmd == "grep" and not subst:
         return None
+    skip_values = cmd in _SX_OUTPUT_SKIP_CMDS
     i, n = 0, len(words)
     options_ended = False
     while i < n:
@@ -2932,7 +2959,7 @@ def _sx_output_flag(words: list[str]) -> _Sidefx | None:
         # a quoted rest it could not read
         if w.startswith("--output") and (w[8:9] in ("", "=", _MASK_OPAQUE)):
             return _Sidefx("--output")
-        if options_ended:
+        if options_ended or not skip_values:
             continue
         if w == "--":
             options_ended = True
@@ -2953,10 +2980,11 @@ def _sx_output_quoted(normalized_text: str) -> _Sidefx | None:
     """``_sx_output_flag`` over the normalized text, where a whole quoted word the
     tokenizer could not read (``git diff "--output=/tmp/x"`` masks to ``-Q``) is
     spelled out. Used only when the masked text holds such a word."""
+    subst = _SX_SUBST_RE.search(normalized_text) is not None
     for seg in _SIDEFX_SEG_SPLIT_RE.split(normalized_text):
         words = _sx_segment_words(seg)
         if words:
-            hit = _sx_output_flag(words)
+            hit = _sx_output_flag(words, subst)
             if hit is not None:
                 return hit
     return None
@@ -2991,7 +3019,9 @@ _REMOTE_CFG_ENV_RE = re.compile(
     r"(?i)GIT_CONFIG_KEY_\d+\s*=\s*remote\.[^\s=]*\.(?:fetch|push)(?![\w-])"
 )
 _REMOTE_CFG_PARAM_RE = re.compile(r"(?i)remote\.[^\s='\"]*\.(?:fetch|push)(?=[=\s'\"]|\Z)")
-_REMOTE_CFG_RUNNER_RE = re.compile(r"(?<![\w./-])(?:fetch|pull|push|update)(?![\w-])")
+_REMOTE_CFG_RUNNER_RE = re.compile(
+    r"(?:(?<![\w./-])|(?<=git-))(?:fetch|pull|push|update)(?![\w-])"
+)
 
 
 def _sx_remote_config(text: str) -> _Sidefx | None:
@@ -3095,11 +3125,12 @@ def _sx_subcommand_index(words: list[str]) -> int:
 
 def _sx_words(
     words: list[str], worktree: int, brace: bool = True, branch_of: BranchOf = _no_branch,
+    subst: bool = False,
 ) -> _Sidefx | None:
     hit = _sx_brace(words) if brace else None
     if hit is not None:
         return hit
-    hit = _sx_output_flag(words)
+    hit = _sx_output_flag(words, subst)
     if hit is not None:
         return hit
     checked = 0
@@ -3127,6 +3158,7 @@ def _sidefx_loose(
     Parentheses and backticks become blanks first, so a word is never glued to
     the ``)`` that closes a subshell (``(cd /tmp; git submodule init)``) and a
     substitution's words are read in the command they sit in."""
+    subst = _SX_SUBST_RE.search(text) is not None
     if "(" in text or ")" in text or "`" in text:
         text = text.translate(_SX_BLANKS)
     for seg in _SIDEFX_SEG_SPLIT_RE.split(text):
@@ -3134,7 +3166,7 @@ def _sidefx_loose(
             continue
         words = _sx_segment_words(seg)
         if words:
-            hit = _sx_words(words, worktree, brace, branch_of)
+            hit = _sx_words(words, worktree, brace, branch_of, subst)
             if hit is not None:
                 return hit
     return None
