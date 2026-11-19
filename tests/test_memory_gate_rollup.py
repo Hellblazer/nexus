@@ -12,6 +12,7 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -20,6 +21,7 @@ from nexus.cli import main
 from nexus.db import make_t3
 from nexus.db.limits import QUOTAS
 from nexus.db.t2 import T2Database
+from nexus.mcp.core import store_get
 from nexus.memory_curate import gate_rollup as gr
 from tests._catalog_fixture_ops import documents_by_title
 from tests._engine_substrate import ensure_engine, mint_test_tenant
@@ -219,10 +221,11 @@ def test_unmapped_a_listed_record_whose_verdict_cannot_be_read(db: T2Database) -
     assert got.unmapped[0]["reason"] == "verdict unreadable"
 
 
-def test_unmapped_records_get_no_ttl(db: T2Database) -> None:
+def test_unmapped_records_are_not_archived_and_get_no_ttl(db: T2Database) -> None:
     bare = "review-abc1234-no-bead-p3-2026-11-10"
     _put(db, bare, "kind: review\n\nbody", tags="kind:gate,rdr:209")
     _phase3("nexus-z")
+    assert gr.read_archive(make_t3(), REPO, bare, 1) is None
     assert _rows(db)[bare]["ttl"] is None
 
 
@@ -291,14 +294,16 @@ def test_a_closed_phase_yields_one_pointer_listing_its_three_records(db: T2Datab
 
 
 def test_pointer_is_a_knowledge_note_in_the_research_subject_with_its_category(db: T2Database) -> None:
-    _gate(db, "nexus-c1")
+    name = _gate(db, "nexus-c1")
     _phase3("nexus-c1")
     col = gr.collection_name(make_t3())
     assert col.startswith("knowledge__nexus-rdr-research__")
     # a note's own keys live on its catalog document (RDR-236)
     (pointer,) = documents_by_title(POINTER_P3)
-    assert pointer.physical_collection == col
-    assert pointer.meta["category"] == "gate_pointer" and "gate-pointer" in pointer.meta["tags"]
+    (archive,) = documents_by_title(f"{REPO}/{name}")
+    assert pointer.physical_collection == archive.physical_collection == col
+    assert pointer.meta["category"] == "gate_pointer" and archive.meta["category"] == "gate_record"
+    assert "gate-pointer" in pointer.meta["tags"] and "gate-archive" in archive.meta["tags"]
 
 
 def test_pointer_lists_timestamp_per_record_as_get_all_returned_it(db: T2Database) -> None:
@@ -341,7 +346,49 @@ def test_a_rerun_replaces_the_pointer(db: T2Database) -> None:
     assert len(documents_by_title(POINTER_P3)) == 1
 
 
+def test_a_rerun_writes_no_archive_that_is_already_whole(db: T2Database) -> None:
+    _gate(db, "nexus-rr2")
+    first = _phase3("nexus-rr2")
+    again = _phase3("nexus-rr2")
+    assert "archived 1" in first
+    assert "archived 0" in again and "1 already whole" in again
+
+
 # ── the archive: the full text stays in T3 (nexus-1gdv0.2.5) ─────────────────────
+
+def test_the_archive_holds_each_records_full_text(db: T2Database) -> None:
+    a = _gate(db, "nexus-f1", body="Finding one.\nFinding two, with ünïcode and `code`.\n")
+    old = "review-abc1234-nexus-f2-2026-11-10"
+    _put(db, old, "headerless body\n- **outcome**: justified\n")
+    _phase3("nexus-f1,nexus-f2")
+    t3 = make_t3()
+    for title in (a, old):
+        stored = gr.read_archive(t3, REPO, title, 1)
+        assert stored == _rows(db)[title]["content"]
+    # and through the MCP read the user would make, not only through this module's reader
+    with patch("nexus.mcp.core._get_t3", return_value=t3):
+        got = store_get(f"{REPO}/{a}", collection="nexus-rdr-research")
+    assert "Finding two, with ünïcode and `code`." in got
+
+
+def test_a_body_over_the_store_put_cap_is_split_into_titled_parts_and_reads_back_whole(db: T2Database) -> None:
+    line = "A finding line that is long enough to matter, repeated until the body passes the cap. " * 4 + "\n"
+    body = line * (QUOTAS.MAX_DOCUMENT_BYTES // len(line.encode()) * 2 + 3)
+    big = _gate(db, "nexus-big", body=body)
+    full = _rows(db)[big]["content"]
+    assert len(full.encode()) > 2 * QUOTAS.MAX_DOCUMENT_BYTES
+    out = _phase3("nexus-big")
+    got = _pointer().listed[0]
+    assert got["parts"] >= 3
+    t3 = make_t3()
+    assert gr.read_archive(t3, REPO, big, got["parts"]) == full
+    # every part is a titled document of its own, each within the cap
+    col = gr.collection_name(t3)
+    assert t3.find_ids_by_title(col, f"{REPO}/{big}")
+    assert t3.find_ids_by_title(col, f"{REPO}/{big} (part 2)")
+    assert not t3.find_ids_by_title(col, f"{REPO}/{big} (part {got['parts'] + 1})")
+    assert "archived 1" in out
+
 
 def test_split_text_keeps_every_character_within_the_byte_cap() -> None:
     text = "é" * 9000 + "\n" + "x" * 30000 + "\nshort\n" + "日本語" * 4000
@@ -387,6 +434,7 @@ def test_dry_run_prints_the_listing_and_writes_nothing(db: T2Database) -> None:
     out = _phase3("nexus-d1", "--dry-run")
     assert name in out and "dry run" in out
     assert documents_by_title(POINTER_P3) == []
+    assert documents_by_title(f"{REPO}/{name}") == []
     assert _rows(db) == before
 
 
@@ -435,6 +483,10 @@ def test_default_project_is_the_repository_the_command_runs_in(db: T2Database, m
 
 def test_pointer_titles() -> None:
     assert gr.pointer_title(209, "3") == POINTER_P3 and gr.pointer_title(7, None) == "gate-records-rdr-007-all"
+
+
+def test_archive_titles_carry_the_project_so_repos_never_collide() -> None:
+    assert gr.archive_title("alpha", "review-abc-x-2026") != gr.archive_title("beta", "review-abc-x-2026")
 
 
 def test_selection_is_pure_over_the_rows_it_is_given() -> None:

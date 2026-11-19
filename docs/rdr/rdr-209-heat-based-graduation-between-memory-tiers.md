@@ -142,8 +142,9 @@ of the reads whose title carries a date, 91% came within two days and 27 came
 after a week (memory survey, 2026-10-31). The papers warn against rolling them
 up without a check: memory construction loses information (Memory Tax), and
 a compaction nobody checks can fall below the no-context baseline (Agentic
-Context Management). The fix delivers a phase-close rollup that keeps its
-sources, and a TTL on the records it covers.
+Context Management). The fix delivers a phase-close rollup that keeps each
+record's full text in T3 and lists the records in a pointer, and a TTL on the
+records it covers.
 
 ## Relationship to Prior RDRs
 
@@ -351,8 +352,8 @@ is what the heat-weighted TTL has been using, and the census records what it
 meant. A wire-ledger entry records the change.
 
 **Phase 3 Steps 1 to 3, retire the gate records without losing them.** At a
-phase close, `nx memory gate-rollup` lists the phase's gate records in a
-pointer record in T3, checks that nothing the records say is lost, and only
+phase close, `nx memory gate-rollup` keeps each of the phase's gate records in
+full in T3, lists them in a pointer record, checks that nothing the records say is lost, and only
 then gives the listed T2 records a 30-day TTL, so RDR-207's quarantine,
 rollup and reap retire them on the path it already built. A missing close step
 stays visible through Step 4's census.
@@ -496,9 +497,10 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   `outcome` line. The timestamp is the row's, exactly as `get_all` returned it
   (to the second): the creation date a record has, which Step 3's import keeps
   and which the pointer therefore still shows after the TTL write and the reap.
-  An unmapped record carries its timestamp too. It is a pointer: it keeps its sources
-  by title and copies no body. Records whose verdict or bead cannot be read
-  are listed under "unmapped" and keep no TTL. A pointer over the store_put cap
+  An unmapped record carries its timestamp too. The pointer also names each
+  listed record's archive and its part count (below). Records whose verdict or
+  bead cannot be read are listed under "unmapped" and keep no TTL. A pointer
+  over the store_put cap
   (`QUOTAS.MAX_DOCUMENT_BYTES`, 16,384 bytes) is written in parts, split at line
   boundaries: the first keeps the title, the rest are titled `<title> (part 2)`
   and so on, and a `parts: k` header line in the first names how many, so a
@@ -506,6 +508,20 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   ones as stale and does not delete them (a T3 delete is a catalog tombstone
   path, not part of this command). A run that lists nothing writes no pointer.
   `--project` defaults to the current repository.
+- *The archive.* Sam, 2026-11-16: "Keep findings in full". The pointer is a
+  pointer, and each listed record's full text is kept beside it as a T3 note of
+  its own in the same subject, `category=gate_record`, titled
+  `<project>/<T2 title>` (the project, because the subject is shared and two
+  repositories' titles can be equal), with the content exactly as `get_all`
+  returned it, header and body. A record over the store_put cap is split at
+  line boundaries into `<title>`, `<title> (part 2)` and so on, and the
+  pointer's `parts` field says how many. The run writes each archive through the
+  same writer, reads it back and compares it with the record, and writes the
+  pointer only after every archive reads back whole; an archive that already
+  reads back whole is not rewritten, so a rerun costs no embedding. Unmapped
+  records are not archived: they get no TTL, so nothing retires them. What
+  survives RDR-207's reap is therefore each record's full text, not a title that
+  points at nothing.
 - *The trigger.* The `phase-review-gate` skill's close step (`SKILL.md:24`) and
   the `rdr-close` skill name the command. Nothing blocks a close without it;
   Step 4's census is what shows a missed run.
@@ -517,9 +533,11 @@ the cause if any of these fail:
    phase heading it names carries the close marker (the rule Step 4 uses,
    `memory_curate/__init__.py:516-521`, `:646`). A record for an open phase is
    never touched.
-2. Every listed title is present in the read that listed it, and the pointer
-   record reads back from T3 by its title with the same list. These reads do
-   not stamp access (A8).
+2. Every listed title is present in the read that listed it, the pointer
+   record reads back from T3 by its title with the same list, and every listed
+   record's archive reads back whole and equal to the record, so no record gets
+   a TTL until its full text reads back from T3. These reads do not stamp
+   access (A8).
 3. For each listed bead, its newest record (by header date, then round) has
    the verdict `justified`. A bead whose newest record is `partial` or
    `not-justified` stops the TTL step and is named, unless the run names it
@@ -871,7 +889,11 @@ nor changed; a seeded closed phase yields one pointer listing its three
 records, each with its timestamp as `get_all` returned it; a pointer over the
 cap is split and still lists every record, and a
 rerun that needs fewer parts names the stale ones; a rerun replaces the pointer;
-`--dry-run` writes nothing, and no run writes anything to T2.
+each listed record's full text is a T3 note of its own that reads back equal to
+the record (header and body), with a body over 16,384 bytes split into titled
+parts that join exactly, in the `gate_record` category, while an unmapped
+record is not archived; a rerun rewrites no archive that already reads back
+whole; `--dry-run` writes nothing, and no run writes anything to T2.
 
 #### Step 2: The loss check
 
@@ -962,6 +984,7 @@ kinds of row, tenant isolation) stay in the Test Plan, marked deferred.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | gate-record pointer (T3) | `nx store list` on `nexus-rdr-research`, `gate_pointer` | `nx store get` by title | a rerun replaces it; removal is a person's `nx store` call | the loss check reads it back at write time | T3 backup |
+| gate-record archive (T3) | `nx store list` on `nexus-rdr-research`, `gate_record` | `nx store get` by `<project>/<T2 title>` | a rerun rewrites none that reads back whole; removal is a person's `nx store` call | the run and the loss check read each back and compare it with the record | T3 backup |
 | records given a 30-day TTL (T2) | `nx memory list` before expiry; `nx memory list --quarantined` after | `nx memory get` | RDR-207's reap, after an attended rollup | Step 4's census flag lists any still without a TTL | PG backup |
 | read counter | not a new resource | `nx memory get` shows the count | not applicable | the MVV test | PG backup |
 | promotion marks (deferred) | `nx memory list --promoted` | on the row | clearing a mark is `nx memory update`, in scope when built | count in `nx doctor` | PG backup |
@@ -997,7 +1020,8 @@ In scope:
   phase); quarantined rows are not listed; the `<repo>_rdr` rows are neither
   listed nor changed.
 - **Scenario**: pointer and loss check; **Verify**: closed phase with three
-  records gets one pointer; all three titles resolve from it; an open phase is
+  records gets one pointer; all three titles resolve from it and each record's
+  full text reads back from T3, a body over 16,384 bytes included; an open phase is
   refused; an unresolvable title stops the TTL step and names it; a
   not-justified newest record stops it; `--accept-open` passes and is recorded;
   a record with no bead takes no part in the chain and gets no TTL.
@@ -1157,3 +1181,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Gate finding d021dc53c85b, first half (nexus-1gdv0.2.2): the "unmapped" list was unreachable, because under `--phase` a record was selected by a bead and under `--all` by `rdr:<NNN>`, so a record with no bead was never selected. The rule is now written in Step 1 and built: a `kind:gate` record that carries `rdr:<NNN>` and has no `bead:` tag is unmapped under `--all`, and under `--phase P` when its title also names phase P by the `-p<N>` / `-phase-<N>` rule (sub-phase 3a counts toward 3); a listed record with no readable verdict is unmapped; a `kind:gate` record with neither tag is in no run's scope. An untagged record whose title names no listed bead is not unmapped, because it has no `rdr:` tag to put it in scope, so the earlier wording "or a title that names none" is narrowed to match. Unmapped records get no TTL. |
 | 2026-11-19 | Gate finding d021dc53c85b, second half (nexus-1gdv0.2.3): the fix round dropped `--include-titled`, so title matching became unconditional, and no predicate for "a title that names a listed bead" was written. It is now named in Step 1 and built (`title_names_bead`): the row has no tags at all, and its title holds the bead id as a whole token, `(?<![A-Za-z0-9.])<id>(?!\.?[A-Za-z0-9])`, case-sensitive, with a hyphen not counted as an id character because gate titles join words with it. It is on only under `--phase` (`--all` has no bead list), and a title naming two listed beads is unmapped. The Step 1 test list gains the negative cases. The predicate was checked on the live store: 628 of the 646 untagged gate-shaped titles that carry a bead-shaped id match each id they carry (the other 18 are an id cut short by the checking pattern, not by the predicate). |
 | 2026-11-19 | Gate finding S6, pointer half (nexus-1gdv0.2.4): the pointer now lists each record's timestamp exactly as `get_all` returned it, unmapped records included, because the pointer was the one place that would keep a record's date after the TTL write and the reap and did not carry it. The second half of S6, what a rerun does with a record a person restored (`nx memory restore` clears the TTL), belongs to Step 3 with the TTL write and is not settled here. |
+| 2026-11-19 | Gate finding S7 and Sam's ruling "Keep findings in full" (nexus-1gdv0.2.5): the claim that Steps 1 to 3 retire the gate records "without losing them", and the line "it keeps its sources by title and copies no body", overstated what survives, because after the TTL, quarantine, rollup and reap only the pointer and RDR-207's summary were left. The one-line excerpt default is withdrawn. Step 1 now writes each listed record's full text to T3 as a note of its own (subject `nexus-rdr-research`, `category=gate_record`, titled `<project>/<T2 title>`, split into titled parts when over 16,384 bytes), reads it back and compares it before the pointer is written, and the pointer names each archive and its part count; unmapped records are not archived. Step 2 reads every archive back before any TTL. Wording amended in Gap 6, the Approach, Step 1, Step 2, the test lists and the Day 2 table. The loss check's own read of the archive is Step 2 and is not built here. |
