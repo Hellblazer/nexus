@@ -1238,7 +1238,7 @@ the MVV as one live run with a test seat.
 
 One bind per session start, resume, release or take-over, one log row per
 `/clear`, `fork` or `/branch`, one renewal a minute per session on the identity lease's own
-thread, and one refresh every half hour; the resolver
+thread, and one refresh about every ten minutes (a token is refreshed once it has under 50 minutes of its hour left); the resolver
 is one indexed read.
 
 ## Finalization Gate
@@ -1335,3 +1335,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-19: 0.1.199 folded into 0.1.198 (Sam, T2 `nexus/sam-ruling-merge-0198-0199-2026-11-19`): the token rule's enforcement ships in 0.1.198 with the cap, deployed after the sessions restart onto 8.5.1.
 - 2026-11-19: wording matched to the reviewed 0.1.198 cap and token-rule code (grant 3; reviews T2 `nexus/review-rdr253-0198-cap-token-2026-11-19` and `nexus/critique-rdr253-0198-cap-token-2026-11-19`): the token rule narrows the takeover gap (refresh and fork), it does not close it (start, resume and end); the cap counts seats created directly, for the identity's life (no route deletes a seat), not promoted ephemerals; an expired token counts as none.
 - 2026-11-19: two accepted gaps recorded as Phase 2 open items (grant 3; Sam's acceptance, T2 `nexus/sam-ruling-rdr253-accepted-gaps-0198-2026-11-19`): data-credential takeover through `start`, `resume` and `end`; the seat cap's bypass through promoted ephemerals and delegated children.
+- 2026-11-19: wording matched to the reviewed client fix-later round (grant 3; reviews T2 `nexus/review-fix-later-client-2026-11-19-r1` and `nexus/critique-fix-later-client-2026-11-19-r1`): the Cost line said one refresh every half hour; the lease and the delegated child refresh once a token has under 50 minutes of its hour left, about every ten minutes.

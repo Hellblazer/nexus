@@ -139,7 +139,7 @@ def test_an_engine_that_refuses_the_create_leaves_the_dispatch_as_it_was(box: Ma
 # ── renewal, refresh, finish ────────────────────────────────────────────────
 
 
-def test_a_tick_renews_and_a_refresh_at_half_life_rewrites_the_file(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_tick_renews_and_a_refresh_under_50_minutes_left_rewrites_the_file(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
     box.as_child_of_claude_100(monkeypatch)
     now = {"t": 10_000.0}
     handle = DelegatedIdentity.begin(environ={}, clock=lambda: now["t"])
@@ -148,7 +148,7 @@ def test_a_tick_renews_and_a_refresh_at_half_life_rewrites_the_file(box: Machine
     assert handle.tick() is True
     assert box.engine.ids_called("renew") == [(handle.identity, 1)]
     assert read_token_file(handle.path).token == first.token, "a fresh token is not refreshed"
-    now["t"] += 1_801.0                                                      # past half of the hour
+    now["t"] += 1_801.0                                                      # well past the refresh line (10 minutes in)
     assert handle.tick() is True
     second = read_token_file(handle.path)
     assert second.token != first.token and second.generation == 1 and second.expires_at > first.expires_at
