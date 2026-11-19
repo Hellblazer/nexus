@@ -75,7 +75,10 @@ def measure(q: dict[str, Any], prod: list[str], t3: Any, catalog: Any, *, search
     row: dict[str, Any] = {"qid": q["qid"], "kind": q["kind"]}
     t0 = time.monotonic()
     p0 = _rows(search(q["text"], prod, N_RESULTS, t3, cluster_by=None, taxonomy=None, sensitivity="include"))
-    row["P0"] = {**score(p0, q["gt"], catalog, **grade), "s": time.monotonic() - t0}
+    p0_s = time.monotonic() - t0
+    # sorted by distance, as 134-research-13 scored P0 (its rows as returned scored 0.02); every collection here
+    # is prose, one embedding model, so raw distance is the calibrated order too
+    row["P0"] = {**score(merge(p0), q["gt"], catalog, **grade), "s": p0_s}
     plain = {c: plain_search(t3, q["text"], c) for c in prod}
     row["OFF"] = score(merge([r for rs in plain.values() for r in rs]), q["gt"], catalog, **grade)
     for name, route in ROUTES.items():
@@ -87,7 +90,8 @@ def measure(q: dict[str, Any], prod: list[str], t3: Any, catalog: Any, *, search
         events = [e for e in logs if e.get("event") == EVENT]
         if not events:
             raise Vacuous(f"{q['qid']} {name}: the routed call logged no {EVENT} event")
-        row[name] = {**score(_rows(hits), q["gt"], catalog, **grade), "s": elapsed, "route": _route(events[-1], plain)}
+        row[name] = {**score(merge(_rows(hits)), q["gt"], catalog, **grade), "s": elapsed,
+                     "route": _route(events[-1], plain)}
     return row
 
 

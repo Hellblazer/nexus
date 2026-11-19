@@ -91,6 +91,13 @@ def test_the_route_event_is_kept_per_arm_with_statuses_coverage_and_short_rows()
     assert r["short"] == [RDR]
 
 
+def test_every_arm_is_scored_in_distance_order_as_134_research_13_scored_it() -> None:
+    # research-13: search_cross_corpus "as returned, unordered, scores 0.02 ... the bench must sort"
+    unsorted = [_hit("bad", RDR, 0.4), _hit("good", RDR, 0.1)]
+    row = _measure({None: unsorted, "default": unsorted, 0.0: unsorted})
+    assert row["P0"]["top3"][0] == row["ENG"]["top3"][0] == row["ENG_gate_off"]["top3"][0] == "rdr-001-x.md"
+
+
 def test_a_routed_call_that_logs_no_event_is_vacuous_not_a_pass() -> None:
     def silent(query, collections, n, t3, **kw):
         return [_hit("good", RDR, 0.1)]
