@@ -390,30 +390,55 @@ def test_the_load_reads_the_git_top_levels_config_and_refuses_an_overlapping_cle
 
 
 def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(repo: Path) -> None:
-    """nexus-mdbds.12.1: the aura and procedure as they ship in the package root, not planted copies, through the
-    real run path: dims.sha reaches ci_red_notice, [when] show gates the display, the TD7 text lands as the
-    block's state line, the channel notice is the fixed template, and a green post removes the block."""
+    """nexus-mdbds.12.1, retargeted by nexus-igea9.7: the aura and procedure as they ship in the package root, not
+    planted copies, through the real run path. The owner row's dims.sha and body fields and the session's identity
+    (self.identity) reach ci_red_notice; [when] show gates the display; the owner's text lands as the block's state
+    line; the fixed channel notice goes out only when the result's wake field is true (a first row wakes, a refresh
+    of it does not, a row naming someone else does not); a clear row removes the block."""
     from nexus.auras import load_aura  # noqa: PLC0415 -- only this test reads the shipped root
 
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
     notices: list[str] = []
     aura = load_aura("ci_develop_red", cwd=None)
+    owner_subspace = aura.subspace
+    assert owner_subspace == "board/ci/nexus-develop--owner"
     rt = AuraRuntime(
         [aura], writer=ThreadsBlockWriter(sid, read_entries=_Threads.read, put=_Threads.put), run=_counting_run,
-        notify=lambda text, meta: notices.append(text),
+        notify=lambda text, meta: notices.append(text), identity="i7",
     )
     sha = "8b30c161bdb23adab27171f3185c2b52f158b736"
+
+    def owner_row(tid: str, owner: str | None, next_: str | None, reason: str, refresh: bool, kind: str = "owner"):
+        body = {
+            "owner": owner, "next": next_, "reason": reason, "suspects": [sha], "suspects_total": 1,
+            "episode_at": "2026-11-19T01:00:00Z", "refresh": refresh, "handoffs": 0,
+        }
+        return TupleRow(
+            id=tid, subspace=owner_subspace, template="", keys={}, dims={"kind": kind, "sha": sha, "from": "engine"},
+            body=json.dumps(body), claim_state=None, claimant=None, lease_until=None, attempts=0, consumed_at=None,
+            consumed_by=None, expires_at=None, created_at=None,
+        )
+
+    ack = f" Ack: nx tuple out {owner_subspace} kind=ack sha={sha}"
     before = len(_REAL_RUNS)
-    rt.offer(_TOPIC, [_row("t1", sha=sha)])
+    rt.offer(owner_subspace, [owner_row("t1", "i7", None, "earliest_suspect", False)])
     _settle(rt)
     assert _ran(before) == 1
     assert (
-        "## aura: develop CI red\nstate: develop red at 8b30c16: diagnose before the next push (worktrees rule 7)\n"
+        f"## aura: develop CI red\nstate: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n"
         in _entry(title)
     )
-    assert notices == [channel_notice(aura, _TOPIC, "t1")]
-    rt.offer(_TOPIC, [_row("t2", outcome="success", sha=sha)])
+    assert notices == [channel_notice(aura, owner_subspace, "t1")]
+    rt.offer(owner_subspace, [owner_row("t2", "i7", None, "earliest_suspect", True)])
     _settle(rt)
-    assert _ran(before) == 1, "the clear runs no procedure"
+    assert _ran(before) == 2
+    assert len(notices) == 1, "a refresh row rewrites the block and does not wake again"
+    rt.offer(owner_subspace, [owner_row("t3", "i9", "i3", "earliest_suspect", False)])
+    _settle(rt)
+    assert "state: Develop is red at 8b30c16; i9 owns it. Hold your pushes.\n" in _entry(title)
+    assert len(notices) == 1, "a row that names someone else wakes no one"
+    rt.offer(owner_subspace, [owner_row("t4", "i9", None, "handoff", False, kind="clear")])
+    _settle(rt)
+    assert _ran(before) == 3, "the clear runs no procedure"
     assert "aura:" not in _entry(title) and "## Work" in _entry(title)
