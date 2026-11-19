@@ -484,6 +484,22 @@ def test_single_query_conflict_envelope_is_a_no_evidence_non_answer_with_the_dia
     assert out["final_text"].startswith("[non-answer: no_evidence]")
 
 
+def test_single_query_fast_path_records_its_one_search_as_a_free_sql_step() -> None:
+    # The fast path bypasses plan_run, so it used to record no step and its cost read as unknown (None): the
+    # RDR-134 A/B's spend guard stopped on it (H03, 2026-11-19). Its one query is a T3-only call: a known zero.
+    out, calls = _drive_nx_answer(_single_query_match("knowledge,code,docs,rdr"), scope="", structured=True)
+    assert len(calls) == 1
+    (step,) = out["steps"]
+    assert (step["step_index"], step["operator"], step["source"], step["cost_usd"], step["ok"]) == (
+        0, "query", "sql", 0.0, True)
+    assert out["cost_usd"] == 0.0 and out["step_count"] == 1
+
+
+def test_a_single_query_conflict_ran_nothing_and_records_no_step() -> None:
+    out, calls = _drive_nx_answer(_single_query_match("code"), scope="rdr", structured=True)
+    assert calls == [] and out["steps"] == []
+
+
 def test_single_query_envelope_always_carries_scope_diagnostics() -> None:
     out, _ = _drive_nx_answer(_single_query_match("knowledge,code,docs,rdr"), scope="", structured=True)
     assert out["scope_diagnostics"] == []

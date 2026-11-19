@@ -1,0 +1,3 @@
+### Fixed
+
+- **An `nx_answer` run on the single-query fast path now reports its cost as 0.0, not unknown.** The fast path (a matched plan that is one search) bypasses the plan runner and recorded no step, so its `cost_usd` was `None` in the structured envelope and in `nx_answer_runs`, and a spend guard that refuses unknown costs stopped on it. It now records its one `query` as a `sql` step with the known zero cost the runner records for any step that runs no prompt, plus any out-of-step cost (request extraction). A fast-path run that fails records the step with `ok: false`; a scope conflict, which runs nothing, still records none.

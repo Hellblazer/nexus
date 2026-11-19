@@ -11602,6 +11602,15 @@ def _nx_answer_is_single_query(match: Any) -> bool:
     return _nx_answer_classify_plan(match) == "single_query"
 
 
+def _fast_path_step_record(elapsed_ms: int, *, ok: bool) -> Any:
+    """The single-query fast path's one ``query`` call as a ``sql`` StepRecord: no prompt ran, so its cost is the
+    known zero ``plan_run`` records for a ``sql`` step (0 tokens, 0.0 USD, no cache dimension)."""
+    from nexus.plans.runner import StepRecord  # noqa: PLC0415 — core imports the runner lazily
+
+    return StepRecord(step_index=0, operator="query", source="sql", model=None, input_tokens=0, output_tokens=0,
+                      cost_usd=0.0, elapsed_ms=elapsed_ms, ok=ok)
+
+
 def _nx_answer_needs_operators(match: Any) -> bool:
     """Does this plan contain a genuine operator (``claude -p``) step?
 
@@ -11767,14 +11776,12 @@ def _nx_answer_record_run(
     out-of-step cost trivially falls into the latter
     (sum of nothing is "unknown", never a fabricated zero). This is
     deliberately a BLANKET rule, not case-by-case: a call site with
-    genuinely zero steps (e.g. the single-step fast path, which bypasses
-    ``plan_run`` and therefore never produces a ``StepRecord`` at all,
-    even though it IS a real, free T3-only call) still gets ``None`` here
-    rather than an invented ``0.0`` — see this bead's dev-notes writeback
-    for the documented trade-off (a real but unmeasured cost reads
-    identically to "we don't know", which is honest, if not maximally
-    informative; a follow-up teaching the fast path to emit its own
-    ``sql``-source StepRecord is future work, not fabricated here).
+    genuinely zero steps still gets ``None`` here rather than an invented
+    ``0.0``. The single-step fast path, which bypasses ``plan_run``, used to
+    be one; it now records its one ``query`` as a ``sql``-source StepRecord
+    (:func:`_fast_path_step_record`, the known zero a ``sql`` step records),
+    so its run cost reads ``0.0`` plus any out-of-step cost (nexus-7fku2.2.3:
+    the unknown cost stopped the RDR-134 A/B's spend guard).
     """
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
@@ -15399,6 +15406,10 @@ async def nx_answer(
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            # The fast path bypasses plan_run, so it records its one query here: a T3-only "sql" step, a known
+            # zero cost (runner's convention), so the run's cost reads 0.0 rather than unknown. A scope conflict
+            # ran nothing and records no step.
+            _fast_steps = [] if _fast_conflict else [_fast_path_step_record(elapsed_ms, ok=True)]
             try:
                 with _t2_ctx() as db:
                     # nexus-yg49g: outcome must reflect whether the run
@@ -15409,7 +15420,7 @@ async def nx_answer(
                     _nx_answer_record_complete(
                         db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=str(result_text)[:2000], answer_text=str(result_text), step_records=[],
+                        final_text=str(result_text)[:2000], answer_text=str(result_text), step_records=_fast_steps,
                         duration_ms=elapsed_ms, trace=trace,
                         # a scope conflict is the caller's error: the run counts no outcome
                         success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
@@ -15449,6 +15460,7 @@ async def nx_answer(
                 plan_id=best.plan_id,
                 step_count=1,
                 chunks=chunks,
+                step_records=_fast_steps,
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -15457,7 +15469,7 @@ async def nx_answer(
                     _nx_answer_record_complete(
                         db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=f"Error: {exc}", step_records=[],
+                        final_text=f"Error: {exc}", step_records=[_fast_path_step_record(elapsed_ms, ok=False)],
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
