@@ -2136,10 +2136,11 @@ def _offline_read(config: Path, olds):
     )
 
 
-def _offline_rewrite(config: Path, pairs):
-    """The same, rewriting the saved run dir to this one in the path columns."""
+def _offline_rewrite(config: Path, pairs, shift_s: float = 0.0):
+    """The same, rewriting the saved run dir to this one in the path columns and moving the tuple space's
+    clock forward by the time since the save."""
     return seed_cache.rows_with_pg_up(
-        config, lambda: seed_cache.rewrite_store(_store_sql(config), pairs)
+        config, lambda: seed_cache.rewrite_store(_store_sql(config), pairs, shift_s)
     )
 
 

@@ -154,7 +154,7 @@ def read_fn(config: Path, olds) -> object:
     )
 
 
-def rewrite_fn(config: Path, pairs) -> object:
+def rewrite_fn(config: Path, pairs, shift_s: float = 0.0) -> object:
     path, data = _cols(config)
     olds = [p[0] for p in pairs]
     before = {k: sum(any(o in v for o in olds) for v in vs) for k, vs in data.items()}
@@ -707,7 +707,7 @@ def test_path_rows_that_differ_from_the_manifest_fall_back(tmp_path: Path) -> No
 def test_rows_that_still_name_the_saved_run_dir_after_the_rewrite_fall_back(
     tmp_path: Path,
 ) -> None:
-    def half(config: Path, pairs) -> object:
+    def half(config: Path, pairs, shift_s: float = 0.0) -> object:
         got = rewrite_fn(config, pairs)
         return sc.StoreRewrite(
             got.rows, got.before, {**got.after, "catalog_owners.repo_root": 1}
@@ -732,7 +732,7 @@ def test_a_restored_cluster_that_is_not_cleanly_shut_down_falls_back(
 def test_a_failing_pg_read_with_the_production_exception_type_falls_back_scrubs_and_evicts(
     tmp_path: Path,
 ) -> None:
-    def boom(_config: Path, _pairs) -> object:
+    def boom(_config: Path, _pairs, _shift_s: float = 0.0) -> object:
         raise ProbeError(
             "psql failed: invalid page in block 7 of relation base/16384/2619"
         )
@@ -751,7 +751,7 @@ def test_a_failing_pg_read_with_the_production_exception_type_falls_back_scrubs_
 def test_a_pg_read_that_raises_something_unforeseen_still_falls_back(
     tmp_path: Path,
 ) -> None:
-    def boom(_config: Path, _pairs) -> object:
+    def boom(_config: Path, _pairs, _shift_s: float = 0.0) -> object:
         raise RuntimeError("anything at all")
 
     c, k, _ = seeded_cache(tmp_path)
@@ -820,7 +820,7 @@ def test_a_file_the_run_already_has_must_be_what_the_entry_holds(
 def test_an_empty_dir_the_run_made_is_filled_and_emptied_again_by_a_failed_restore(
     tmp_path: Path,
 ) -> None:
-    def boom(_config: Path, _pairs) -> object:
+    def boom(_config: Path, _pairs, _shift_s: float = 0.0) -> object:
         raise ProbeError("x")
 
     c, k, _ = seeded_cache(tmp_path)
@@ -844,7 +844,7 @@ def test_an_identical_file_the_run_already_has_is_kept_by_a_good_restore_and_a_f
     assert (dst / "prepare.json").stat().st_mtime_ns == mtime, "not copied over"
     bad = new_run(tmp_path.parent / (tmp_path.name + "-b"))
     (bad / "prepare.json").write_bytes((src / "prepare.json").read_bytes())
-    c.rewrite_fn = lambda _c, _p: sc.StoreRewrite(1, {}, {})
+    c.rewrite_fn = lambda _c, _p, _s=0.0: sc.StoreRewrite(1, {}, {})
     assert not c.restore(k, bad, floor=FLOOR).ok
     assert (bad / "prepare.json").is_file(), "a file the run had is never scrubbed"
 
@@ -894,3 +894,49 @@ def test_a_disk_error_while_copying_falls_back_and_keeps_the_entry(
     res = c.restore(k, dst, floor=FLOOR)
     assert not res.ok and "No space left" in res.reason and res.transient
     assert _live(tmp_path) == [k.name] and list((dst / "config").iterdir()) == []
+
+
+# --- the clock shift on restore ---------------------------------------------------------------------
+
+
+def test_a_restore_shifts_the_store_clock_by_the_time_since_the_save(tmp_path: Path) -> None:
+    """The entry was saved at the clock's time; a restore 62 hours later passes a 62-hour shift to the store
+    rewrite and reports it, so doctor's clock rows read the seed's ages, not the cache's."""
+    clock = Clock()
+    seen: list[float] = []
+
+    def spy(config: Path, pairs, shift_s: float = 0.0) -> object:
+        seen.append(shift_s)
+        return rewrite_fn(config, pairs, shift_s)
+
+    c, k, _ = seeded_cache(tmp_path, clock=clock, rewrite_fn=spy)
+    clock.t += 62 * 3600
+    res = c.restore(k, new_run(tmp_path), floor=FLOOR)
+    assert res.ok, res.reason
+    assert seen == [62 * 3600.0]
+    assert res.shift_s == 62 * 3600.0
+
+
+def test_a_restore_right_after_the_save_shifts_nothing(tmp_path: Path) -> None:
+    seen: list[float] = []
+
+    def spy(config: Path, pairs, shift_s: float = 0.0) -> object:
+        seen.append(shift_s)
+        return rewrite_fn(config, pairs, shift_s)
+
+    c, k, _ = seeded_cache(tmp_path, clock=Clock(), rewrite_fn=spy)
+    assert c.restore(k, new_run(tmp_path), floor=FLOOR).ok
+    assert seen == [0.0]
+
+
+def test_an_entry_whose_saved_at_cannot_be_read_is_not_restored(tmp_path: Path) -> None:
+    """Without saved_at the shift is unknown, and a restore with the wrong clock fails doctor later, far from
+    the cause: refuse it here, naming the field, and keep the run dir untouched."""
+    c, k, _ = seeded_cache(tmp_path)
+    entry = _entry(tmp_path, k)
+    man_path = entry / sc.MANIFEST
+    man = json.loads(man_path.read_text())
+    man["saved_at"] = "not a time"
+    man_path.write_text(json.dumps(man))
+    res = c.restore(k, new_run(tmp_path), floor=FLOOR)
+    assert not res.ok and "saved_at" in res.reason

@@ -601,6 +601,8 @@ class StoreRewrite:
         str, int
     ]  # rows naming an old run dir, per path column, before the rewrite
     after: dict[str, int]  # the same afterwards: every value must be 0
+    shifted: dict[str, int] = dataclasses.field(default_factory=dict)  # tuple table -> rows clock-shifted
+    shift_s: int = 0  # whole seconds every tuple-space clock column moved forward
 
 
 def _lit(text: str) -> str:
@@ -642,9 +644,48 @@ def read_store(sql: SqlFn, olds: Sequence[str]) -> StoreRead:
     )
 
 
-def rewrite_store(sql: SqlFn, pairs: Sequence[tuple[str, str]]) -> StoreRewrite:
+def clock_columns(sql: SqlFn) -> dict[str, list[str]]:
+    """The tuple space's clock columns: every ``timestamptz`` column of a ``nexus.tuple*`` table, read from the
+    catalog so a column added later is shifted too."""
+    out = sql(
+        "select table_name, column_name from information_schema.columns where table_schema = 'nexus' "
+        "and table_name like 'tuple%' and data_type = 'timestamp with time zone' order by 1, 2"
+    )
+    cols: dict[str, list[str]] = {}
+    for table, column in out:
+        cols.setdefault(table, []).append(column)
+    return cols
+
+
+def shift_clock(sql: SqlFn, shift_s: float) -> tuple[int, dict[str, int]]:
+    """Move every tuple-space clock column forward by ``shift_s`` (whole seconds; NULL stays NULL), one update
+    per table, and return the seconds used and the rows each table holds.
+
+    A cached store is reused for 30 days, but doctor reads the tuple space against the wall clock: a saved
+    unclaimed tuple reads as that old (``tuples.oldest_unclaimed``, 60 minutes) and the saved sweep as that
+    stale (``tuples.sweep_freshness``, 18 hours). One shift for every column keeps each age, gap and expiry
+    the seed left, as if the store had been seeded just now. No shift under a second runs no update."""
+    secs = int(shift_s)
+    if secs <= 0:
+        return 0, {}
+    shifted: dict[str, int] = {}
+    for table, columns in clock_columns(sql).items():
+        sets = ", ".join(f"{_ident(c)} = {_ident(c)} + interval '{secs} seconds'" for c in columns)
+        # nexus.tuples and nexus.tuple_claim_log FORCE row-level security. A role it would filter (an install
+        # whose credentials name only the schema owner) must not shift a silent subset: with row_security
+        # off, PG refuses the update instead, the restore fails and the rehearsal seeds afresh.
+        out = sql(
+            f"set row_security = off; with u as (update nexus.{_ident(table)} set {sets} returning 1) "
+            "select count(*)::bigint from u"
+        )
+        shifted[table] = int(out[0][0])
+    return secs, shifted
+
+
+def rewrite_store(sql: SqlFn, pairs: Sequence[tuple[str, str]], shift_s: float = 0.0) -> StoreRewrite:
     """Replace each old run dir by the new one in every path column that names one, counting before and
-    after. Longest old string first, as the file rewrite does."""
+    after. Longest old string first, as the file rewrite does. Then shift the tuple space's clock forward by
+    ``shift_s``, the time since the entry was saved (:func:`shift_clock`)."""
     all_olds = sorted({p[0] for p in pairs})
     changing = sorted({p for p in pairs if p[0] != p[1]}, key=lambda p: -len(p[0]))
     olds = [p[0] for p in changing]
@@ -662,7 +703,8 @@ def rewrite_store(sql: SqlFn, pairs: Sequence[tuple[str, str]]) -> StoreRewrite:
             )
     # a reused run dir names itself: nothing to rewrite and nothing left that should not be there
     after = {f"{t}.{c}": (_naming(sql, t, c, olds) if olds else 0) for t, c in cols}
-    return StoreRewrite(_rows_of(sql), before, after)
+    secs, shifted = shift_clock(sql, shift_s)
+    return StoreRewrite(_rows_of(sql), before, after, shifted, secs)
 
 
 # --- the cache -----------------------------------------------------------------------------------
@@ -752,6 +794,7 @@ class Restore:
     rows: int | None = None
     relocated: Relocated | None = None
     saved_at: str = ""  # when the entry was saved, ISO UTC
+    shift_s: float = 0.0  # how far the store's tuple-space clock was moved forward (now - saved_at)
     path_rows: dict[str, int] = dataclasses.field(
         default_factory=dict
     )  # rows rewritten, per column
@@ -774,7 +817,7 @@ class Save:
 class SeedCache:
     """The entries under ``root``.
 
-    ``read_fn(config, olds)`` returns a ``StoreRead`` and ``rewrite_fn(config, pairs)`` a ``StoreRewrite``,
+    ``read_fn(config, olds)`` returns a ``StoreRead`` and ``rewrite_fn(config, pairs, shift_s)`` a ``StoreRewrite``,
     each with the store's PG started alone (``rows_with_pg_up`` around ``read_store`` / ``rewrite_store`` in
     production). ``pick_port()`` gives the restored store its PG port; ``clock`` is the time source for the
     manifest's ``saved_at`` and ``last_used_at`` and for the 30-day eviction.
@@ -785,7 +828,7 @@ class SeedCache:
         root: Path,
         *,
         read_fn: Callable[[Path, Sequence[str]], StoreRead],
-        rewrite_fn: Callable[[Path, Sequence[tuple[str, str]]], StoreRewrite],
+        rewrite_fn: Callable[[Path, Sequence[tuple[str, str]], float], StoreRewrite],
         log: Log = lambda _m: None,
         pick_port: Callable[[], int] = free_port,
         clean_check: Callable[[Path], str | None] = stopped_clean,
@@ -890,6 +933,14 @@ class SeedCache:
         old_port = man.get("pg_port")
         if not isinstance(old_port, int):
             return Restore(False, f"the manifest's PG port is {old_port!r}")
+        try:
+            shift_s = max(0.0, self.clock() - _parse_iso(str(man.get("saved_at", ""))))
+        except ValueError:
+            return Restore(
+                False,
+                f"the manifest's saved_at is {man.get('saved_at')!r}: without it the store's clock cannot be "
+                "moved to now, and doctor would read its tuple space as stale",
+            )
 
         # The destination must be what the seeder starts from: absent, or an empty dir, or a file that
         # is already what the payload holds (install-prev writes a few). Nothing else is merged into.
@@ -960,7 +1011,7 @@ class SeedCache:
                 False, f"the restored cluster is not cleanly shut down: {why}"
             )
         try:
-            got = self.rewrite_fn(config, pairs)
+            got = self.rewrite_fn(config, pairs, shift_s)
         except Exception as exc:  # noqa: BLE001 - psql, ProbeError, pg_ctl: the store could not be read
             return Restore(
                 False,
@@ -1001,6 +1052,7 @@ class SeedCache:
             rows=got.rows,
             relocated=relocated,
             saved_at=str(man.get("saved_at", "")),
+            shift_s=shift_s,
             path_rows=dict(got.before),
             port=new_port,
         )
