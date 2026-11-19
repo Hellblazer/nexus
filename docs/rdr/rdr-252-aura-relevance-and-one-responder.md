@@ -470,16 +470,24 @@ row) to
 
 ```
 red:    dims from=engine  kind=owner  sha=<red tip>
-        body {"owner": "<identity id or null>", "next": "<identity id or null>", "reason": "<why>",
+        body {"owner": "<identity id or null>", "owner_alias": "<alias>",
+              "next": "<identity id or null>", "next_alias": "<alias>", "reason": "<why>",
               "suspects": ["<sha>", ...], "suspects_total": <n>,
               "episode_at": "<UTC>", "refresh": <bool>, "handoffs": <n>}
 green:  dims from=engine  kind=clear  sha=<green tip>
 ```
 
-Rows name identities by id; a reader shows the alias. The template requires
+Rows name identities by id, and from engine 0.1.198 also by alias: the
+stamper reads the owner's and next up's live alias at stamp time, in the
+evaluation's own transaction, and writes it as `owner_alias` and `next_alias`.
+An identity with no live alias gets no field, and a failed alias read posts the
+row with ids alone. Who owns a red is always decided on the ids; a reader
+shows the alias when the row carries one, else the id. The template requires
 `from` and caps a body at 1024 bytes (`nexus_rdr/252-research-4` F8), so the
 stamper's rows carry `from=engine` and list at most the first ten suspects,
-with `suspects_total` giving the full count.
+with `suspects_total` giving the full count. The aliases count inside the
+1024 bytes: when they would push the body past it, suspects are dropped from
+the end, down to one, and `suspects_total` keeps the full count.
 
 - **Suspects**: every push after the last green tip up to and including the
   red tip, since a replaced run leaves a pushed tip untested.
@@ -545,7 +553,7 @@ each with its own urgency, in the manner of DBM's typed warnings:
 |---|---|---|---|
 | Owner | "Develop is red at <sha>, first red in your push. Diagnose it." (for a red the leader takes, the text names the `reason` instead) | Yes | Diagnose; acknowledge |
 | Escalated (the identity an `escalated` row names, or every member when `owner` is null) | "Develop is red at <sha>; no one acknowledged. Raise an ask to Sam." | Yes | Raise an RDR-245 ask (with `owner` null, the first member to act raises it; the ask is visible on the board, so the others see it) |
-| Next up | "Develop is red at <sha>; <owner> owns it. You are next up." | Yes | Stand by; take it if not acknowledged |
+| Next up | "Develop is red at <sha>; <owner> owns it. You are next up." (`<owner>` is the owner's alias, else its id) | Yes | Stand by; take it if not acknowledged |
 | Everyone else in the group | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | No (block only) | Hold its own pushes until green |
 
 **Two additions to the aura surface** (`nexus_rdr/252-research-1` F1, F2).
@@ -875,7 +883,8 @@ None.
 - Identity across `/clear`: a push before and an ack after `/clear` both map
   to the same identity; the owner is still woken.
 - Body cap: a red with more than ten suspects lists ten and the true
-  `suspects_total`, within 1024 bytes.
+  `suspects_total`, within 1024 bytes; with both aliases present, suspects are
+  cut first to stay within it.
 - Per-topic deadline: `ack_deadline_by_topic` overrides the group default.
 - Writer check: a membership written by another identity, a group write by a
   non-leader, a group write by a superseded process of the leader, and any
@@ -1077,3 +1086,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-17: accepted by Sam ("Accept and plan"); last fix check `252-fix-check-b460ee2181a5` PASS 3-0; its seven counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
 - 2026-11-18: wording matched to the reviewed Step 2 code (nexus-igea9.2, 5cf9ab46d): the push record's key and `push-<tip>` nonce, the lock released before the write, and the write's time bound.
 - 2026-11-19: wording matched to the reviewed Step 4 code (nexus-igea9.7): a server that loaded with no identity gates its group-gated auras once more when the identity lease adopts its first identity; every other change waits for a reconnect; Test Plan line added.
+- 2026-11-19: wording matched to the reviewed engine 0.1.198 code (nexus-igea9, b300a8550, 76bbd34d4; grant 3): the owner row carries `owner_alias` and `next_alias`, read at stamp time, absent for an identity with none or on a failed read; the notice shows the alias, else the id; the aliases count inside the 1024-byte cap, suspects cut first.

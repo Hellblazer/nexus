@@ -372,7 +372,11 @@ display name, and the session gets an ephemeral identity that records it as
 `display_name` and titles its board entry `<display name> (i<n>)`, but takes
 no alias, so mail reaches it by id only: aliases belong to seats, so two launches with one
 display name never collide and no name is consumed. `nx identity promote
-<id> <name>` makes it a seat with that alias (Sam, 2026-11-16). The
+<id> <name>` makes it a seat with that alias (Sam, 2026-11-16); from engine
+0.1.198 the engine also retitles the identity's threads entry to the alias in
+the same transaction, on both credential routes, and a title another entry
+already holds is never overwritten: the promote stands and the entry keeps its
+old title. The
 policy, with the result for the session in the last column:
 
 | Hook `source` | Seat state | Result |
@@ -792,13 +796,21 @@ permanent. Claude Code's `/rename` changes only the display name; the hook
 prints a notice at the next SessionStart when the display name and the
 seat's alias differ.
 
+`nx identity promote` retitles too (above), but the two differ on a taken
+title: rename refuses with `board_title_taken` and rolls the alias change
+back, while promote keeps the entry's title and answers
+`board_retitle: title_taken`, because a cosmetic title must not fail the
+restart script's promote.
+
 **State owned by the identity (Phase 1).**
 
 - **Threads entry.** The entry carries `identity: <id>` and, through Phase 1,
   the existing `session: <id>` line too, because `nx ask` answer routing, the
   console, the due-date hook and auras read it (`nexus_rdr/253-research-8`
   (f)); Step 5 moves each of those readers to the identity line, and Phase 2
-  drops the `session:` line. It is titled by the seat's live alias and
+  drops the `session:` line. It is titled by the seat's live alias (except
+  after a promote onto a title another entry holds, when it keeps its old
+  title) and
   written with `memory_put` under the fencing rule above. The compaction
   checkpoint and Desktop restore find it by identity.
 - **Mailbox and names.** Mail to an identity id goes to `mailbox/<id>`; a
@@ -1023,7 +1035,7 @@ routes; `proc_start` in the binding row and the bind evidence;
 renewal (which carries and stores the MCP server's client version), lazy
 `lapse` with its 10-minute reservation, and `revive`; the `gone` route with
 its holder-match guard and compare-and-set; the
-`unleased` lease; the rename call that retitles the threads entry; retention
+`unleased` lease; the rename and promote calls that retitle the threads entry; retention
 and tombstones, including threads entries of tombstoned identities, with
 tenant registration with the sweep (the sweep's identity-retention arm); the
 operator override.
@@ -1206,7 +1218,9 @@ None.
   reservation runs ephemeral and one after it binds.
 - Mixed fleet: an old-client receiver gets mail from a new-client sender
   through the session-mailbox fallback, and the reverse.
-- Aliases: rename retitles the board entry; mail to a retired alias within 7
+- Aliases: rename retitles the board entry, and refuses a taken title; promote
+  retitles it on both routes and keeps the old title when the new one is
+  taken; mail to a retired alias within 7
   days with a notice, refused after; a retired name is never reissued;
   `i<digits>` refused as an alias.
 - Retention: an ephemeral or delegated identity tombstoned 30 days after it
@@ -1336,3 +1350,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-19: wording matched to the reviewed 0.1.198 cap and token-rule code (grant 3; reviews T2 `nexus/review-rdr253-0198-cap-token-2026-11-19` and `nexus/critique-rdr253-0198-cap-token-2026-11-19`): the token rule narrows the takeover gap (refresh and fork), it does not close it (start, resume and end); the cap counts seats created directly, for the identity's life (no route deletes a seat), not promoted ephemerals; an expired token counts as none.
 - 2026-11-19: two accepted gaps recorded as Phase 2 open items (grant 3; Sam's acceptance, T2 `nexus/sam-ruling-rdr253-accepted-gaps-0198-2026-11-19`): data-credential takeover through `start`, `resume` and `end`; the seat cap's bypass through promoted ephemerals and delegated children.
 - 2026-11-19: wording matched to the reviewed client fix-later round (grant 3; reviews T2 `nexus/review-fix-later-client-2026-11-19-r1` and `nexus/critique-fix-later-client-2026-11-19-r1`): the Cost line said one refresh every half hour; the lease and the delegated child refresh once a token has under 50 minutes of its hour left, about every ten minutes.
+- 2026-11-19: wording matched to the reviewed engine 0.1.198 promote code (nexus-hczdo B4b, 71f0e972a, f85aa29eb; grant 3; reviews T2 `nexus/review-d288f22ec-rdr252-alias-b4b-2026-11-19` and `nexus/critique-d288f22ec-rdr252-alias-b4b-2026-11-19`): promote retitles the threads entry in the same transaction on both routes; on a taken title rename refuses and promote keeps the old title (`board_retitle: title_taken`).
