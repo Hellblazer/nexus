@@ -1797,18 +1797,56 @@ The round 1 fix check found these, now resolved in the text:
   unverified: item 6 and Deployment model now leave it to P3.2.
 - A `NOT VALID` composite foreign key on the partitioned `nexus.chunks`,
   which PostgreSQL refuses: item 6 validates it directly.
-- URI-string classifiers routed through the registry, against the
-  engine's recorded design that a URI's segment "can name a collection that
-  was renamed or never registered": they stay on RDR-231's frozen list as
-  the fifth class. The list stays complete because from P3.6 a rename no
-  longer moves `chroma://` residue (item 7, item 12, P3.7; T2
-  `229-research-42`).
+
+Gate round 2 (2026-11-19) found these, now addressed in the text:
+
+- Readers switched to `collection_id` with no guard that the install's
+  stamp had completed, against RDR-246's reader rule: item 6, "Readers
+  during the stamp", with P3.1's boot-time completion check, P3.5, P3.7,
+  P4.1 and the half-stamped store test (T2 `229-research-43`).
+- A composite foreign key with no UNIQUE on its new columns, validations
+  named but no moves, and the swap bead holding three kinds of work: P3.1's
+  UNIQUE `(tenant_id, collection_id, embedding_model)`, the named
+  validation moves, and P3.3 split into P3.3a to P3.3c (T2
+  `229-research-44`).
+- A label index whose predicate column P4.1 drops: P4.1 re-creates it on
+  `superseded_by_id` (item 7; T2 `229-research-45`).
+- "At every step the old path still works" against the dead name columns
+  from P3.7: the Approach now says "up to P3.6" and points at the open
+  downgrade point.
+- The RDR-246 prerequisite stated for every install while BYO PostgreSQL
+  blocks moves, and no Windows line: Prerequisites and Cross-Cutting (T2
+  `229-research-47`).
+- Name columns with no disposition, and Day 2 promises with no bead: the
+  table in item 6 and P3.12 (T2 `229-research-48`).
+
+Recorded residuals, for Sam at acceptance (gate record
+`nexus_rdr/229-gate-latest`; not resolved here):
+
+- "[BLOCKS-PLANNING] chroma:// residue rule covers rename only;
+  NoteUri.moveTo's re-home, re-embed and collection-update callers still
+  move residue onto prefix-free labels (fix check c1a9d815e8cc) (carried
+  from round 1)"
+- "[BLOCKS-PLANNING] residue rule stated in force from P3.6 but owned by
+  P3.7; P3.6 and P3.8 do not wait for P3.7 (fix check c1a9d815e8cc)
+  (carried from round 1)"
+- "[BLOCKS-PLANNING] prefix-free labels already possible via
+  rename-collection --allow-legacy; "names before P3.6 are prefixed" and
+  CA3's Verified rest on it; P1.2 lacks a census of prefix-free chroma://
+  segments (fix check c1a9d815e8cc) (carried from round 1)"
+
+The URI-string classifier rule (item 7, item 12, P3.7; T2
+`229-research-42`), the P3.7 test that renames a file-routed collection
+with `chroma://` residue, and the Test Plan's prefix-free-label row rest on
+the rule these residuals question, and are regenerated when Sam
+dispositions them.
 
 Still open, for a design call: whether the label alphabet excludes `/`,
 which `NoteUri.collectionOf` treats as the end of the collection; what
 makes a live `(content_type, owner_id, embedding_model)` tuple unique once
 minting removes the name from that job; and the safe engine downgrade
-point after P3.3.
+point after P3.3, which matters most from P3.7, when the name columns go
+dead (Approach, item 7).
 
 ### Assumption Verification
 
@@ -1834,11 +1872,21 @@ with no plan step now have one: routing by content type, 23 sites plus the
 sites (migration sources, P3.9 before P3.8), the tenant backup (P3.11, in
 P3.1's and P3.3's cuts), every writer of the dual write (P3.1), queued
 aspect tasks on rename (P3.7), and name-keyed views and triggers (P3.5b).
-Still without one: a writer of `taxonomy_centroids`, which the writer
-census did not find; and a disposition for
-`catalog_documents.corpus` and `catalog_reconcile_rows.physical_collection`,
-which carry names with no foreign key and are not in item 6's Expand list.
-The history tables' nullable `collection_id` (item 6) names no consumer.
+Items that gate round 2 found with no plan step now have one: the
+per-install reader guard (P3.1's completion check, P3.5, P3.7, P4.1), the
+foreign-key validation moves (P3.3a, P3.3c), the per-leaf unique-index
+pass as new code (P3.3b), the label index after P4.1 (P4.1), blocked moves
+on BYO PostgreSQL and the Windows label test (Cross-Cutting, P3.6), the
+disposition of all sixteen name columns without a registry foreign key
+(item 6's table: `catalog_documents.corpus` is a history label,
+`catalog_reconcile_rows.physical_collection` transient), the Day 2
+surfaces (P3.12), and the `taxonomy_centroids` writer (P3.1's acceptance;
+one is `TaxonomyCentroidRepository.java:156`).
+Still without one: the history tables' nullable `collection_id` (item 6)
+names no consumer; P1.2 measures the two production tenants, not local
+stores; no rule says what a mint does when a live label already has the
+minted form (P1.2 only counts such labels); and no audit covers where a
+label meets a file path beyond P3.6's Windows test.
 
 ### Cross-Cutting Concerns
 
@@ -1915,7 +1963,7 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
 - `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-42`, and
+- T2 `nexus_rdr/229-research-1` to `-49`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
   superseded).
 - T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
@@ -1965,3 +2013,16 @@ large, and moved under a ratchet.
   unchanged. `isFileRoutedCollection`, which tests a live collection, stays
   in the routing class. T2 `229-research-42` added.
 - 2026-11-19: Gate round 2 — BLOCKED (1 Critical, 5 Significant, 1 ship-blocker(s)); blob `c1a9d815e8cc`; critique `nexus_rdr/229-gate-critique-2026-11-19-r2`.
+- 2026-11-19: Gate round 2 fixes. C-A: readers keep the name path on each
+  install until every stamp move there has `completed_at` set (RDR-246's
+  reader rule), by a CONTINUE precondition, a both-shapes read on the chunk
+  family, or a boot-time completion check; blocked moves keep readers on
+  names and Phase 4's drops unapplied. S-1: UNIQUE `(tenant_id,
+  collection_id, embedding_model)` in P3.1, named validation moves, P3.3
+  split into P3.3a to P3.3c. S-2: P4.1 re-creates the live-label index on
+  `superseded_by_id`. S-3: the Approach says "up to P3.6". S-4: BYO
+  PostgreSQL and Windows lines. S-5: a disposition for all sixteen no-FK
+  name columns, P3.12 for Day 2, the `taxonomy_centroids` writer in P3.1's
+  acceptance. Observations 3, 4 and 6 corrected. The three recorded
+  residuals are listed for Sam, not resolved. Contradiction Check and
+  Scope Verification regenerated. T2 `229-research-43` to `-49` added.
