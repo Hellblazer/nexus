@@ -11,6 +11,7 @@ the server must reconnect. A refusal prints the engine's code and reason and exi
 """
 from __future__ import annotations
 
+import functools
 import json
 import statistics
 from collections.abc import Callable
@@ -70,13 +71,12 @@ def _caller(env: GroupEnv) -> str:
 
 def _guarded(fn: Callable[..., None]) -> Callable[..., None]:
     """Turn every refusal of the engine, and of the identity layer, into one line and exit status 1."""
-    import functools  # noqa: PLC0415
-
-    from nexus.identity.resolver import IdentityConflictError  # noqa: PLC0415
-    from nexus.identity.token_header import GenerationSupersededError, IdentityNotHeldError  # noqa: PLC0415
-
     @functools.wraps(fn)
     def run(*args: Any, **kwargs: Any) -> None:
+        # Imported when a verb runs, not when the module loads: the resolver is only needed to name its refusals.
+        from nexus.identity.resolver import IdentityConflictError  # noqa: PLC0415
+        from nexus.identity.token_header import GenerationSupersededError, IdentityNotHeldError  # noqa: PLC0415
+
         try:
             fn(*args, **kwargs)
         except GroupsUnavailableError as exc:
@@ -105,7 +105,8 @@ def _deadlines(ctx: click.Context, param: click.Parameter, values: tuple[str, ..
     out: dict[str, int] = {}
     for pair in values:
         topic, sep, minutes = pair.partition("=")
-        if not sep or not topic or not minutes.strip().isdigit():
+        minutes = minutes.strip()
+        if not sep or not topic or not (minutes.isascii() and minutes.isdigit()):
             raise click.BadParameter(f"expected TOPIC=MINUTES with whole minutes, got {pair!r}")
         out[topic] = int(minutes)
     return out

@@ -63,12 +63,13 @@ def _templates() -> tuple[list[dict[str, Any]] | None, str]:
             store.close()
 
 
-def _group_reader() -> tuple[Any, str]:
-    """The group read for the serving-group check, or ``(None, why)`` when there is none: the check is then skipped by
-    name. The one group seam of the command (RDR-252)."""
+def _group_reader() -> Any:
+    """The group read for the serving-group check. It builds its client on the first read, so an engine that cannot be
+    reached is a read that raises ``GroupUnreadable`` and the check is skipped by name. The one group seam of the
+    command (RDR-252)."""
     from nexus.auras.load_gate import default_group_reader  # noqa: PLC0415 -- deferred: CLI startup cost
 
-    return default_group_reader(), ""
+    return default_group_reader()
 
 
 def _loaded_inputs() -> tuple[Path, Any, int | None, str | None, Path | None]:
@@ -195,11 +196,10 @@ def check_cmd(name: str | None) -> None:
     why = ""
     if any(isinstance(e.result, Aura) for e in selected):
         templates, why = _templates()
-    reader, reader_why = _group_reader()
     try:
         results = check_auras(
             entries, cwd=scope.cwd, templates=templates, unavailable=why, only=name, probe=scope.probe,
-            read_group=reader,
+            read_group=_group_reader(),
         )
     except RepoProbeError as exc:
         raise _fail(f"cannot tell where the repository is: {exc}") from exc
@@ -221,8 +221,7 @@ def check_cmd(name: str | None) -> None:
         for w in c.warnings:
             click.echo(f"  warning {w.check} {w.key}: {w.detail}")
         for s in c.skipped:
-            reason = reader_why if s.check == "serving_group" and reader is None and reader_why else s.reason
-            click.echo(f"  skipped {s.check}: {reason}")
+            click.echo(f"  skipped {s.check}: {s.reason}")
     skipped_total = sum(1 for c in results if c.skipped) + (1 if unscanned else 0)
     warned_total = sum(1 for c in results if c.warnings)
     click.echo(
@@ -234,12 +233,20 @@ def check_cmd(name: str | None) -> None:
         raise SystemExit(1)
 
 
+#: Load reasons that come from a read the server made once at start and does not repeat: only a reconnect tries again.
+_RETRY_ON_RECONNECT = frozenset({"memberships_unreadable", "group_unreadable"})
+_RECONNECT_HINT = "; the engine could not be read at start: reconnect the MCP server (/mcp) once it is up"
+
+
 def _loaded_text(load: dict[str, Any] | None) -> str:
     """``  loaded`` or ``  not loaded: <reason> (group <g>)`` for an aura the server's state file speaks of."""
     if load is None:
         return ""
     group = f" (group {load['group']})" if load["group"] else ""
-    return f"  loaded{group}" if load["loaded"] else f"  not loaded: {load['reason']}{group}"
+    if load["loaded"]:
+        return f"  loaded{group}"
+    hint = _RECONNECT_HINT if load["reason"] in _RETRY_ON_RECONNECT else ""
+    return f"  not loaded: {load['reason']}{group}{hint}"
 
 
 def _unclaimed_files_text(listed: tuple[loaded_state.LoadedState, ...]) -> list[str]:
