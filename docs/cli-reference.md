@@ -2922,6 +2922,8 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 - `nx doctor` reports a `memory.quarantine` row: quarantined entries without a mark, entries marked and waiting for `reap`, and the summary count. It is informational: it warns only when it cannot read the memory store at all, and shows "not applicable" on a box with no engine-backed T2.
 - Against an engine older than RDR-207 these verbs exit with "the engine predates RDR-207 quarantine".
 
+**`--mine` (put, get, search, list; RDR-253 Step 6):** work in this identity's own T2 project, `identity/<id>`, instead of `--project`. The project is keyed by the identity's id, never its name, so renaming a seat moves nothing. Giving both `--mine` and `--project` is a usage error, and `--mine` from a process that holds no identity is an error that says so. `put` takes `--project` or `--mine`.
+
 **`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
 **`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name), `--quarantined` (list quarantined entries instead, expired and replaced)
@@ -2986,6 +2988,8 @@ nx scratch put "hypothesis: cache invalidation is stale"
 | `unflag ID` | Remove flush mark (accepts the 8-char ID prefix) |
 | `promote ID --project NAME --title NAME` | Promote to T2, report `action=new` or `overlap_detected` |
 | `clear` | Delete all scratch notes — prompts with an entry/flagged count unless `-y`/`--yes` (scripts must pass `-y`) |
+
+**`--scope session|identity` (before the subcommand, default `session`; RDR-253 Step 6):** `nx scratch --scope identity list` works in the scratch of this session's identity, the T1 scope `identity:<id>`. It survives `/clear` and a restart and lasts as long as the identity; a session's end never closes it. Writes are fenced: only the identity's own process may write (the engine checks the identity token and its generation). Reads are open. A `claude -p` child with a delegated identity reads its **parent's** identity scratch and cannot write it. A process with no identity gets an error naming that, never the session scope. `put --persist` is refused with this scope (nothing flushes at a session's end that never ends); use `promote` to copy an entry to T2. The `scratch` MCP tool takes the same choice as its `scope` argument.
 
 **`put` flags:** `--tags` (comma-separated), `--persist` (auto-flush to T2), `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
 
@@ -5984,6 +5988,34 @@ nx identity promote IDENTITY NAME
 ```
 
 Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch and board entry stay. `NAME` may not look like an id (`i<digits>`).
+
+### nx identity may-stop
+
+```
+nx identity may-stop --kind worktree|tmux|watcher|wait|labrun --ref REF
+```
+
+The check before removing a worktree or killing a tmux server (RDR-253 Step 6). Exit 0 when no live identity other than the caller owns the resource; otherwise exit 1, naming the owner. Ownership is read from the work rows (`nx identity work register`) and liveness from the same holder check `nx identity alive` runs; a name pattern, a process listing or the directory's contents decide nothing. An owner whose holder is gone, ended, released or unknown to the engine is not alive: its `running` row is stale and ignored. A holder that cannot be judged counts as alive. A `done` row never blocks, and a resource no row names is unowned (said so, exit 0). An engine that does not answer is an error (exit 1): the check fails closed.
+
+### nx identity work
+
+```
+nx identity work register --kind KIND --ref REF
+nx identity work done --kind KIND --ref REF
+nx identity work forget --kind KIND --ref REF
+nx identity work list [SEAT] [--session ID] [--running] [--json]
+nx identity work owners --kind KIND --ref REF
+nx identity work run --kind KIND --ref REF -- COMMAND [ARGS...]
+```
+
+Background work this session's identity owns (RDR-253 Step 6): `worktree` (the absolute path), `tmux` (the `-L` socket name), `watcher`, `wait` and `labrun`. A work row is a label, not a fenced write: a lab run on another host has no token file. An identity holds at most 200 rows (`409 work_limit`; registering first forgets the identity's own `done` rows once and retries).
+
+- `register` writes the caller's row in state `running`; `done` marks it finished; `forget` drops it. A process with no identity registers nothing and exits 0, so a skill or script that labels its work never fails over the label. The creator registers and the same party marks `done`: the `git-worktrees` skill for a worktree (the `finishing-branch` skill marks it done after removing it), the restart sandbox for its private tmux server, `nx tuple wait` for its wait, and `run` for a command.
+- `run` registers the work, runs `COMMAND` with this process's streams, marks it `done` when it exits and exits with the command's status (128 plus the signal for a signalled child). A refused registration is logged and the command still runs. A lab run from a session is `nx identity work run --kind labrun --ref LABEL -- lab-remote ...`.
+- `list` shows one identity's rows: `SEAT` (a name or an id), `--session ID`, or the caller's own. **A `running` row of an identity that is not alive is stale**: it is marked so, and `--running` drops it. `--json` prints `{identity, alive, work: [{kind, ref, state, updated_at, stale}]}`.
+- `owners` lists every identity that registered a resource and whether each owner's holder is alive.
+
+The restart script's `--status` table and the readiness ask list each target's running work (never a stale row, and not the session's own standing mail wait). The report decides nothing: the restart's refusal criteria do not read it.
 
 ### nx identity purge
 
