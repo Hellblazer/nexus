@@ -48,6 +48,7 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` -- the subagent git-write guard denies `branch -f`, tag writes, `revert`, `pull` and `fetch` with a local destination in the primary checkout, and `submodule foreach` and `--output=` everywhere (8.4.1 review follow-up; remaining classes in nexus-nl41q).
+- `conexus/hooks/scripts/_session_facts.py` -- the compaction checkpoint reads a board `worktree:` line's path without a trailing `(...)` note such as `(branch feature/x)`, so it no longer reports a live worktree as "no such path" and picks the worktree by its path.
 
 ## Deferred to the next client release
 

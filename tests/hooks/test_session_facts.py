@@ -164,6 +164,14 @@ class TestCheckpointShowsEachSlip:
         world["board"] = f"## Lost\nworktree: {gone}\n"
         assert f"worktree {gone}: no such path" in world["write"]()
 
+    def test_a_worktree_line_with_a_branch_note_checks_the_path_alone(self, world, tmp_path) -> None:
+        # Sessions write `worktree: <path> (branch ...)`; the note is not part of the path (a false "no such path"
+        # told a session coming back from compaction that its live worktree was gone; folio 2026-11-19).
+        here = tmp_path / "a live worktree"
+        here.mkdir()
+        world["board"] = f"## Live\nworktree: {here} (branch feature/x, engine only)\n"
+        assert "no such path" not in world["write"]()
+
     def test_open_work_with_no_board_block(self, world, mod, env, monkeypatch, tmp_path) -> None:
         primary = _repo(tmp_path, {NAME: False, f"{NAME}-forgotten": True})
         monkeypatch.setattr(mod, "_git_worktrees", env.real_git_worktrees)
@@ -338,6 +346,12 @@ class TestParsing:
         assert got == [("One", [("ref", "nexus-aaaaa"), ("waiting_on", "nexus-bbbbb")]),
                        ("Two", [("worktree", spaced), ("due", "2026-11-20")])]
         assert sf.board_worktree(board) == [spaced]
+
+    def test_a_branch_note_after_a_worktree_path_is_not_part_of_it(self, sf, tmp_path) -> None:
+        spaced = str(tmp_path / "a path" / "with spaces")
+        unspaced = str(tmp_path / "q(r)")  # a "(" with no space before it is part of the path
+        board = f"## One\nworktree: {spaced} (feature/rdr253-0198-seat-cap)\n## Two\nworktree: {unspaced}\n"
+        assert sf.board_worktree(board) == [spaced, unspaced]
 
     @pytest.mark.parametrize(("text", "beads", "engine", "client", "runs", "prs"), [
         ("nexus-f3yqd.2 and nexus-ct74m.", {"nexus-f3yqd.2", "nexus-ct74m"}, set(), set(), set(), set()),
