@@ -1432,6 +1432,9 @@ _DEFAULTS: dict[str, Any] = {
         "rerank_max_candidates": None,
         "contradiction_check": False,
         "query_sanitizer": True,
+        # RDR-134 Step 7: route nx_answer's prose search/query steps to the
+        # nearest topic(s). off | top1 | band:<width>; a bad value is off.
+        "topic_route_nx_answer": "off",
     },
     "voyageai": {
         "read_timeout_seconds": 120,

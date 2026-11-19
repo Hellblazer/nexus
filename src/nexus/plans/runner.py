@@ -68,6 +68,7 @@ from nexus.plans.document_confinement import (
     confinement_scope,
     empty_confined_output,
 )
+from nexus.plans import topic_route_scope as _topic_route  # the module, so Step 9's A/B driver can switch the setting
 from nexus.plans.match import Match
 from nexus.sensitivity import ReadSensitivity
 from nexus.plans.owner_narrowing import OWNERS_BINDING
@@ -3565,6 +3566,11 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     if resolved_tool in ("search", "query") and "chash_allow" in args:
         args = dict(args)
         _chash_allow = list(args.pop("chash_allow") or ())
+    # RDR-134 Step 7 (nexus-7fku2.2.1): the step's topic route rides a context value the same way.
+    _step_topic_route: dict[str, Any] | None = None
+    if resolved_tool in _topic_route.ROUTED_TOOLS and "topic_route" in args:
+        args = dict(args)
+        _step_topic_route = args.pop("topic_route")
 
     # RDR-243 review r1 F1: dispatch ONLY a registered MCP tool or an operator. ``nexus.mcp.core`` also holds
     # private helpers that take ``sensitivity=`` (``_store_get_many_impl``, ``_search_render``, ...); a plan step
@@ -3673,7 +3679,7 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     _witness_verb = "verify" if resolved_tool == "operator_verify" else "check" if resolved_tool == "operator_check" else None
     _bind_here = _witness_records is not None and _witness_verb is not None
     # A verify step's ``evidence`` is the runner's rendering of its records: the prompt shows it as such.
-    with chash_allow_scope(_chash_allow), (
+    with chash_allow_scope(_chash_allow), _topic_route.topic_route_scope(_step_topic_route), (
         _defer_binding(evidence_prerendered=_witness_verb == "verify") if _bind_here else contextlib.nullcontext()
     ):
         if inspect.iscoroutinefunction(fn):
@@ -3969,6 +3975,8 @@ async def _plan_run_impl(
     # docstring for why.
     merged: dict[str, Any] = merge_bindings(match.default_bindings, caller)
     _validate_bindings(match, merged)
+    # RDR-134 Step 7 (nexus-7fku2.2.1): ``search.topic_route_nx_answer``, read once for the whole run.
+    _run_topic_route = _topic_route.configured_route()
 
     plan = json.loads(match.plan_json)
     steps = plan.get("steps", []) or []
@@ -5067,6 +5075,13 @@ async def _plan_run_impl(
             # threshold drops 100% of candidates. Runs last so an explicit
             # ``threshold`` set by the plan author always wins.
             resolved = _apply_mode_to_args(tool, resolved)
+            # RDR-134 Step 7: a prose search/query step carries the run's topic route. The setting is its only
+            # source, so a ``topic_route`` the plan author wrote is dropped first.
+            if tool in _topic_route.ROUTED_TOOLS:
+                resolved.pop("topic_route", None)
+                _step_route = _topic_route.route_for_step(tool, scope, resolved, _run_topic_route)
+                if _step_route is not None:
+                    resolved["topic_route"] = _step_route
 
             # nexus-ivv4d code-review follow-up (T2 [24198]): capture the
             # FULLY RESOLVED corpus/query — after every fall-through above

@@ -3553,9 +3553,15 @@ def _search_render(
 
         _allow = active_chash_allow()
         allow_key = None if _allow is None else hashlib.sha256("\n".join(sorted(_allow)).encode()).hexdigest()
+        # RDR-134 Step 7: a plan step's topic route changes which rows come back too, so a routed call and an
+        # unrouted one never share a page.
+        from nexus.plans.topic_route_scope import active_topic_route  # noqa: PLC0415 — leaf module, deferred like the one above
+
+        _route = active_topic_route()
+        route_key = None if _route is None else json.dumps(_route, sort_keys=True)
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical, boost_window, allow_key, sensitivity,
+            topic or "", threshold, lexical, boost_window, allow_key, route_key, sensitivity,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).

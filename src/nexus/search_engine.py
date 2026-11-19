@@ -1597,14 +1597,19 @@ def search_cross_corpus(
     ``search_topic_route`` event (:class:`nexus.topic_route.TopicRouteTally`): per-collection statuses, the counts
     of ``routed``, ``no_topics``, ``fallback`` and ``skipped``, and ``unreported`` for a collection with no status.
     A request left unrouted by ``chash_allow`` or ``where`` counts every prose collection ``skipped``. The batched
-    fallback path ignores the argument. A ``subtree`` or catalog-route query never reaches this function.
+    fallback path ignores the argument. A ``subtree`` or catalog-route query never reaches this function. When
+    the caller passes none, the plan runner's route for the step in progress is used
+    (:func:`nexus.plans.topic_route_scope.active_topic_route`, RDR-134 Step 7); outside a plan run it is ``None``.
     """
     from nexus.plans.document_confinement import active_chash_allow  # noqa: PLC0415 — leaf stdlib module; deferred like this function's other imports
+    from nexus.plans.topic_route_scope import active_topic_route  # noqa: PLC0415 — leaf module, deferred likewise
 
     _allow = active_chash_allow()
     chash_kw: dict[str, Any] = {"chash_allow": list(_allow)} if _allow is not None else {}
     _allow_set: frozenset[str] | None = frozenset(h.lower() for h in _allow) if _allow is not None else None
     chash_allow_dropped = 0
+    if topic_route is None:
+        topic_route = active_topic_route()
     if topic_route is not None:
         validate_topic_route(topic_route)  # a bad value raises here, before any request
     cfg = load_config()
