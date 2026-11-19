@@ -562,8 +562,8 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   background work (item 6, "How each Phase 3 step runs") in a time the
   operator can see and accept, both on the larger production tenant and on
   a large local store. Each move's `on_complete` (the key swap's, with the
-  directly validated composite foreign key; each validation's; P4.1's
-  chunk-family drop) holds its locks for a time the operator accepts, and
+  directly validated composite foreign key; each validation's; P3.7's
+  name-key drop; P4.1's chunk-family drop) holds its locks for a time the operator accepts, and
   the P3.3b index pass finishes in such a time. Until
   this is measured, the RDR does not claim that no maintenance window is
   needed. — **Status**: Unverified — **Method**: Spike (P3.2, a timed run
@@ -746,10 +746,10 @@ The key moves table by table in strangler order:
   engine writes both columns on every insert; a
   registered data move fills the old rows (below). The quarantine
   `origin_collection` metadata tag gains an `origin_collection_id` beside it.
-- **Switch.** Each foreign key is re-created on `(tenant_id, collection_id)`
+- **Switch.** Each foreign key gets an id twin on `(tenant_id, collection_id)`
   (or `(tenant_id, collection_id, embedding_model)` for the RDR-225
   composite and for `canary_query_ring`'s, which also references the name
-  UNIQUE today, vectors-054:90-93), `NOT VALID` first and validated after by a data move's
+  UNIQUE today, vectors-054:90-93) beside its name key, `NOT VALID` first and validated after by a data move's
   `on_complete` (P3.3a). The exception is the RDR-225 composite from the
   partitioned `nexus.chunks`, which PostgreSQL validates directly (below).
   Each validation is its own move, one per foreign key (so
@@ -785,7 +785,38 @@ The key moves table by table in strangler order:
   collection_id, chash, embedding_model)` and `(tenant_id, collection_id,
   topic_id, embedding_model)`, beside their name primary keys, which stay
   until P4.1, and the three child foreign keys gain id twins (P3.3c,
-  below). Every
+  below).
+
+  Not every name key to the registry can stay until P4.1. P3.7's one-row
+  rename updates `catalog_collections.name`, and PostgreSQL's default `ON
+  UPDATE` action, NO ACTION, is to "Produce an error if the deletion or
+  update would create a foreign key constraint violation" (sql-createtable;
+  T2 `229-research-58`). Of the eight name keys:
+  - `chunks_collection_fk` (vectors-030:1062-1066),
+    `canary_query_ring_collection_fk` (vectors-054:90-93), and
+    `document_aspects`', `topics`', `taxonomy_meta`' and
+    `document_highlights`' keys (fk-003:114-119, :152-157, :171-176,
+    :192-197) have no `ON UPDATE`, so each refuses the rename of a
+    collection that has a row in its table;
+  - `topic_assignments_collection_fk` is `ON UPDATE CASCADE`
+    (fk-002:240-246). Inferred, not read: the label it copies into
+    `source_collection` then fails `topic_assignments_chunk_fk`, which
+    references the chunks' name key (vectors-030:1032-1036), because the
+    chunks keep the old name; so it refuses the rename too;
+  - `aspect_extraction_queue_collection_fk` is `ON DELETE CASCADE ON
+    UPDATE CASCADE` (aspects-005:103-107), and the queue's only other key
+    references `catalog_documents`, so it refuses nothing.
+
+  So P3.3a drops none of the name keys, and the seven that refuse the
+  rename are dropped before P3.7's one-row rename by one move, the name-key
+  drop move. Its driving table is `nexus.chunks`, because two of the seven
+  sit on chunk-family tables, where "A later finishing step ... is
+  therefore a new move whose on_complete does it" (RDR-246 lines 911-913).
+  The completion check registers it once gate 3 holds on the install, as
+  it registers P4.1's drop move (below). Its template is the no-op
+  re-stamp, its verification returns the table's null ids, and its
+  `on_complete` drops the seven keys. P3.7's one-row rename waits for its
+  `completed_at`. The queue's key goes with its column at P4.1. Every
   per-collection index is rebuilt with `WHERE collection_id = <id>` and a
   name hashed from model, tenant and id, so a label change never strands
   one. Readers (engine repositories, SQL functions, client caches) key on
@@ -795,11 +826,14 @@ The key moves table by table in strangler order:
   `collection_id`; a label is still accepted at the route boundary and
   resolved to the id once, by `CollectionRegistry`, which is keyed by id
   with a label index beside it. Responses carry both.
-- **Contract (Phase 4).** The name columns on referencing tables are
-  dropped, and with them the chunks and centroid name primary keys and the
-  three name child keys; the old composites `chunks_collection_fk` and
-  `canary_query_ring_collection_fk` are dropped first, then the
-  `(tenant_id, name, embedding_model)` UNIQUE they reference, and
+- **Contract (Phase 4).** The old composites `chunks_collection_fk` and
+  `canary_query_ring_collection_fk`, and five of the six plain name keys,
+  are already gone, dropped before P3.7's one-row rename by the name-key
+  drop move (Switch). The name columns on referencing tables are
+  dropped, and with them the chunks and centroid name primary keys, the
+  three name child keys and `aspect_extraction_queue`'s cascading name key;
+  then the `(tenant_id, name, embedding_model)` UNIQUE, which no key
+  references any more, and
   the name-based arms of `COLLECTION_SCOPED_TABLES` go with them. Dropping
   `superseded_by` drops the label index whose predicate reads it, so P4.1
   re-creates that index on `superseded_by_id` (item 7).
@@ -929,7 +963,7 @@ while the engine serves:
   `NOT VALID`, "because PostgreSQL does not take NOT VALID for a partitioned
   referencing table", so it is validated directly in the same `on_complete`
   (vectors-030 lines 1013-1016); the old `chunks_collection_fk` stays until
-  P4.1. The `on_complete` runs as one transaction.
+  the name-key drop move (Switch, P3.7). The `on_complete` runs as one transaction.
   A lock it cannot get "fails fast as a transient `blocked:` (55P03)", and
   a kill before the commit leaves the table as it was (RDR-246 lines
   545-547, 914-916).
@@ -1003,9 +1037,10 @@ while the engine serves:
     connection resolved at `Main.java:277`, the engine reads the rows of
     its read set and keeps the answers for the process. Each release adds
     its own labels to the set: the stamp labels (P3.1), P3.3a's seven
-    validation labels, and P3.3c's two swap labels and three child
-    validation labels. A label with no row counts as incomplete, because
-    the swap and child rows are registered at run time. A move whose row
+    validation labels, P3.3c's two swap labels and three child
+    validation labels, and P3.7's name-key drop label. A label with no row
+    counts as incomplete, because the swap, child and drop rows are
+    registered at run time. A move whose row
     has `failed_at` set and whose driving table no longer exists
     (`to_regclass` of its `driving_schema` and `driving_table` is NULL)
     counts as complete. That is how `aspect_extraction_queue` ends: once
@@ -1025,8 +1060,10 @@ while the engine serves:
        Inferred, not read: P3.4 is complete when every collection with a
        valid name-predicate index also has a valid id-predicate one. Then
        `CollectionRegistry` and the jOOQ readers move to the id (P3.5a,
-       P3.5c), the rename becomes one row (P3.7), and the check registers
-       P4.1's drop move once P4.1's release is installed.
+       P3.5c), the check registers P3.7's name-key drop move (Switch), the
+       rename becomes one row (P3.7) once that move also has `completed_at`
+       set, and the check registers P4.1's drop move once P4.1's release
+       is installed.
     Until gate 3, `CollectionRegistry` hands readers the name, the jOOQ
     readers read the name columns, and `renameCollectionTxn` keeps
     rewriting the fourteen `COLLECTION_SCOPED_TABLES`. So no search reads
@@ -1706,7 +1743,8 @@ its acceptance is that test green plus the census pin it lowers.
 - P3.2 Spike, before P3.1's changeset is final: time the stamp, the chunks
   and centroid key swap (its `on_complete`, with the directly validated
   composite foreign key), the ten foreign-key validation moves, the P3.3b
-  unique-index pass, the per-collection index rebuild and P4.1's
+  unique-index pass, the per-collection index rebuild, P3.7's name-key drop
+  move and P4.1's
   chunk-family drop on a PITR fork of the larger production tenant, and
   size them on a local store of the largest size class (Critical
   Assumption 5), including the extra id-key index from P3.3c to P4.1.
@@ -1718,7 +1756,9 @@ its acceptance is that test green plus the census pin it lowers.
   Walked on a PITR fork before the cloud deploy and on a local store.
   `TenantExport`'s key model changes in P3.3a's and P3.3c's cuts (P3.11).
   - P3.3a Foreign-key repoint: the seven registry foreign keys from tables
-    that are not partitioned re-created on `collection_id`, `NOT VALID`, and
+    that are not partitioned gain an id twin on `collection_id`, `NOT VALID`,
+    beside the name key, which P3.3a does not drop (the name-key drop move
+    of P3.7 drops five of them, P4.1 the queue's; item 6, Switch), and
     one validation move per referencing table registered in the same
     changeset (driving table that table, template a re-stamp of rows still
     null, the VALIDATE as its `on_complete`; item 6, Switch). Test: each
@@ -1738,7 +1778,9 @@ its acceptance is that test green plus the census pin it lowers.
     PARTITION`, adds the three child id keys `NOT VALID` with `ON UPDATE
     CASCADE`, registers the three moves that validate them (the chunks
     swap only), and validates the RDR-225 composite on the id directly
-    (item 6). It drops nothing; the name keys stay until P4.1. Test: no
+    (item 6). It drops nothing; the name primary key and the three name
+    child keys stay until P4.1, and `chunks_collection_fk` until P3.7's
+    name-key drop move. Test: no
     child validation move exists before its constraint does; after the
     swap, a chunk and a centroid upsert on the name target still succeed,
     and a name-path rename leaves every child row with the new id.
@@ -1791,12 +1833,19 @@ its acceptance is that test green plus the census pin it lowers.
   columns stop being rewritten (item 7); queued aspect tasks are still
   rewritten. On each install the one-row rename waits for gate 3 of the
   completion check, which includes P3.4's index builds there, and until it
-  passes the rename keeps its fourteen-table rewrite (item 6, "Readers during the stamp"). The rename, like every other `NoteUri.moveTo` caller, rewrites only
+  passes the rename keeps its fourteen-table rewrite (item 6, "Readers during the stamp"). P3.7 also ships the name-key drop move: the
+  completion check registers it once gate 3 holds, its `on_complete` drops
+  the seven name foreign keys that refuse a one-row rename, and the
+  one-row rename waits for its `completed_at` as well (item 6, Switch; T2
+  `229-research-58`). The rename, like every other `NoteUri.moveTo` caller, rewrites only
   `nx-note://` URIs that `isNote` classes as notes, never `chroma://`
   residue, the rule P2.10 ships (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
-  in place, and a task queued before the rename names the new label; and
-  the one-row rename of a file-routed collection that has `chroma://`
+  in place, and a task queued before the rename names the new label; a
+  one-row rename of a collection that has chunk rows and
+  `canary_query_ring` rows succeeds, and so does one of a collection with
+  topic assignments, aspects, topics, `taxonomy_meta` and highlights rows;
+  and the one-row rename of a file-routed collection that has `chroma://`
   residue to a prefix-free label leaves the residue on its old segment
   (P2.10's test covers the other three operations).
 - P3.8 Minting (item 8), after P2.9, P2.10, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
@@ -1840,13 +1889,16 @@ its acceptance is that test green plus the census pin it lowers.
 
 - P4.1 After P3.11; its acceptance includes RDR-248's committed fixture
   and a stated effect on backups taken before P3.1 (item 10). Primary key
-  to `(tenant_id, collection_id)`; drop the old composites
-  `chunks_collection_fk` (vectors-030:1062-1066) and
-  `canary_query_ring_collection_fk` (vectors-054:90-93), which reference
-  the name UNIQUE, and the three name child keys; then the name columns on
-  referencing tables, which takes the chunks and centroid name primary
-  keys with them, the `(tenant_id, name, embedding_model)` UNIQUE and
-  `superseded_by` (replaced by `superseded_by_id`) (T2 `229-research-53`). UNIQUE `(tenant_id,
+  to `(tenant_id, collection_id)`; drop the three name child keys; then
+  the name columns on referencing tables, which takes the chunks and
+  centroid name primary keys with them, and `aspect_extraction_queue`'s
+  cascading name key where that table still exists; the `(tenant_id, name,
+  embedding_model)` UNIQUE and
+  `superseded_by` (replaced by `superseded_by_id`) (T2 `229-research-53`).
+  The old composites `chunks_collection_fk` and
+  `canary_query_ring_collection_fk`, and five of the six plain name keys,
+  are not P4.1's: P3.7's name-key drop move has dropped them (item 6,
+  Switch; T2 `229-research-58`). UNIQUE `(tenant_id,
   collection_id, embedding_model)` stays: the RDR-225 composite depends on
   it, and PostgreSQL drops such a constraint only with CASCADE (item 6; T2
   `229-research-44`). Each drop waits for this install's stamp, swap and
@@ -1895,8 +1947,10 @@ orders. At run time each install also passes the completion check's gates
 (item 6, "Readers during the stamp"): P3.3b's pass waits for the stamp and
 P3.3a's moves; P3.3c's swap is registered by that pass only once every leaf
 has a valid unique index; P3.4's builds wait for the swaps and every
-validation move; the engine's id readers, P3.7's one-row rename and P4.1's
-drop move wait also for P3.4 on that install. P3.5b's SQL readers wait for
+validation move; the engine's id readers, P3.7's name-key drop move and
+one-row rename and P4.1's
+drop move wait also for P3.4 on that install; the one-row rename waits
+also for the name-key drop move's `completed_at`. P3.5b's SQL readers wait for
 the stamp moves.
 
 ### Day 2 Operations
@@ -1940,7 +1994,8 @@ None.
   its chunks stamped (the stamp move paused part-way) — **Verify**: search,
   listings and a rename return what they returned before the cut, and the
   engine reads by the id from the first boot after the move completes.
-- **Scenario**: rename a collection after P3.7 — **Verify**: one registry
+- **Scenario**: rename a collection that has chunk and `canary_query_ring`
+  rows after P3.7 — **Verify**: one registry
   row changes; chunk, manifest, taxonomy and history rows and the
   per-collection index are untouched; search by the new label returns the
   same results.
