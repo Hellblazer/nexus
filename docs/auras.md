@@ -16,7 +16,7 @@ One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (
 
 ```text
 ## aura: develop CI red
-state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: nx tuple out board/ci/nexus-develop--owner kind=ack sha=8b30c161bdb23adab27171f3185c2b52f158b736
+state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: post kind=ack sha=8b30c161bdb23adab27171f3185c2b52f158b736 to board/ci/nexus-develop--owner.
 ```
 
 There are six displays. `<owner>` is the owner's identity id: the row carries ids, not aliases, and the procedure has no read grant to resolve one.
@@ -30,7 +30,7 @@ There are six displays. `<owner>` is the owner's identity id: the row carries id
 | You are next up | `Develop is red at <sha>; <owner> owns it. You are next up.` | yes |
 | Someone else owns it | `Develop is red at <sha>; <owner> owns it. Hold your pushes.` | no |
 
-The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when it comes from the owner's identity. The state line holds 200 characters, so the hint names the subspace, the kind and the sha and leaves out the flags the template needs (`--key`, `--nonce`; see `nx tuple out --help`); it is left off when the sha is too long to fit whole. An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
+The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when it comes from the owner's identity. The state line holds 200 characters, so the hint names the post rather than the command, and is left off when it would not fit whole. The command is `nx tuple out board/ci/nexus-develop--owner --dim from=<your identity> --dim kind=ack --dim sha=<the red sha> --nonce <a fresh uuid>` (`from` is the template's one required dimension; `kind` and `sha` are dimensions, `topic` is the key the subspace carries). An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
 
 A session wakes (the channel notice below) only on a post that starts something: a row with `refresh: false` that makes it the owner or next up, or an escalated row that names it or names no one. A refresh row, where a newer red keeps the same owner, rewrites the block and does not wake it again. A `kind=clear` post (develop is green again) removes the block.
 

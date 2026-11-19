@@ -66,7 +66,7 @@ SHORT = SHA[:7]
 OWNER_SUBSPACE = "board/ci/nexus-develop--owner"
 #: What the owner displays append so the owner can acknowledge. The 200-character state line has no room for the
 #: whole command, so it names the subspace, the row kind and the sha; docs/auras.md has the full command.
-ACK = f" Ack: nx tuple out {OWNER_SUBSPACE} kind=ack sha={SHA}"
+ACK = f" Ack: post kind=ack sha={SHA} to {OWNER_SUBSPACE}."
 
 
 def _row(
@@ -205,7 +205,7 @@ def test_every_text_passes_the_threads_sanitiser_intact(args: dict) -> None:
 
 def test_the_longest_owner_text_with_a_full_sha_keeps_its_ack_hint_inside_the_state_line() -> None:
     text = _run(**_row(ME, reason="owner_not_member"))["text"]
-    assert text.endswith(f"sha={SHA}") and len(text) <= MAX_STATE_CHARS, len(text)
+    assert text.endswith(ACK) and len(text) <= MAX_STATE_CHARS, len(text)
 
 
 def test_a_sha_too_long_for_the_ack_hint_drops_the_hint_rather_than_cut_it() -> None:

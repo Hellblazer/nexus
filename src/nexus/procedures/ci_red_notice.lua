@@ -48,7 +48,7 @@ if not string.match(reason, "^[a-z][a-z_]*$") or #reason > 32 then
 end
 
 local head = "Develop is red at " .. string.sub(sha, 1, 7)
-local acknowledge = " Ack: nx tuple out board/ci/nexus-develop--owner kind=ack sha=" .. sha
+local acknowledge = " Ack: post kind=ack sha=" .. sha .. " to board/ci/nexus-develop--owner."
 local escalated = reason == "escalated"
 
 local text
