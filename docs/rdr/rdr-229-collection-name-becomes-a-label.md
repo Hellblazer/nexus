@@ -750,8 +750,9 @@ The key moves table by table in strangler order:
   contain <driving_table> exactly once" and the same for
   `<chunking_clause>` (`assert_chunking_template.sql:28-40`; T2
   `229-research-44`). The P3.3a changeset registers the seven registry
-  moves. The three child moves are registered by the swap's `on_complete`
-  in its own transaction, because their constraints exist only after it,
+  moves. The three child moves are registered by the `nexus.chunks` swap's
+  `on_complete` in its own transaction (the `taxonomy_centroids` swap
+  registers none), because their constraints exist only after it,
   and a move worked before its constraint exists would fail for good: the
   worker "goes on to the next open move" past a blocked one
   (`DataMoveWorker.java:49`), and an `on_complete` error that is not
@@ -857,7 +858,21 @@ while the engine serves:
   entry is `pci-reconcile`, "building search indexes"). A build ended by a
   database stop, or by a restart that applies a schema change, "is left
   INVALID, and a later pass drops it and rebuilds it from the start"
-  (`PciBootWork.java`; T2 `229-research-33`). The per-collection indexes on
+  (`PciBootWork.java`; T2 `229-research-33`). The per-leaf pass (P3.3b)
+  starts only once the boot-time completion check (below) reports every
+  stamp move and every P3.3a move complete, because those moves'
+  chunk-family `on_complete` ends builds in flight
+  (`VerifyingFinisher.java:40-41`). The pass is engine code, not a move,
+  and it records its completion by registering the swap. Inferred, not
+  read: on each boot it reads every leaf, builds any id unique index that
+  is missing or INVALID (`PciCatalog` reads `pg_index.indisvalid`,
+  `PciCatalog.java:349`), and once every leaf of a table has a valid one
+  and no row carries that table's swap label, its last step inserts the
+  swap move's row on the admin connection, as the chunks swap registers
+  its child moves. So the swap's verification never runs before the
+  indexes exist. Inferred, not read: from P3.3b's cut the helper that
+  creates a leaf (`nexus.partition_ensure_leaf`) also creates its id unique
+  index, so a leaf added later never lacks one (T2 `229-research-51`). The per-collection indexes on
   the id (P3.4) are built after P3.3c's swap and after every foreign-key
   validation move has completed (Switch, above), and a collection's index
   only once none of its rows has a null `collection_id`. That is the
@@ -872,13 +887,15 @@ while the engine serves:
   constraints", `ddl-partitioning.html`; T2 `229-research-41`). Each leaf's
   key takes the unique index built concurrently above, through `ADD ...
   USING INDEX`, which "is not currently supported on partitioned tables"
-  but is on a leaf. So P3.3c registers, per table whose key it swaps
-  (`nexus.chunks`, `nexus.taxonomy_centroids`), a move whose driving table
+  but is on a leaf. So P3.3c has, per table whose key it swaps
+  (`nexus.chunks`, `nexus.taxonomy_centroids`), a move that P3.3b's pass
+  registers when that table's indexes are all valid (above), whose driving table
   is that table, run per tenant and leaf. Its template re-stamps rows whose
   id is still null, which is a no-op after P3.1. Inferred, not read:
   dml_utils still walks every chunk of the leaf, one chunked pass. Its
   verification query returns any leaf without a valid unique index on the
-  new key, and any row with a null id. Its `on_complete` drops the old key
+  new key, and any row with a null id; neither can be found once the pass
+  has registered it after the stamp completed. Its `on_complete` drops the old key
   and the three child foreign keys, adds the new key by that route, and
   re-adds the three child foreign keys `NOT VALID` (their referencing
   tables are not partitioned), and registers the three moves that validate
@@ -1537,14 +1554,18 @@ its acceptance is that test green plus the census pin it lowers.
     move completes and leaves its constraint validated.
   - P3.3b Per-leaf unique-index pass: new engine code in the reconciler's
     pattern builds, per leaf, the unique indexes for the new chunks and
-    centroid keys (item 6). Test: a pass ended mid-build leaves an INVALID
-    index that the next pass drops and rebuilds.
-  - P3.3c Swap: per table, a registered move (driving table that table,
-    template a re-stamp of rows still null) whose `on_complete` swaps the
+    centroid keys (item 6). It starts once the completion check reports
+    every stamp move and every P3.3a move complete, and its last step
+    registers each table's P3.3c swap move; the leaf-creating helper
+    creates the index on a new leaf. Test: a pass ended mid-build leaves an
+    INVALID index that the next pass drops and rebuilds; the swap is never
+    registered while a leaf's unique index is missing or INVALID.
+  - P3.3c Swap: per table, a move registered by P3.3b's pass (driving table
+    that table, template a re-stamp of rows still null) whose `on_complete` swaps the
     primary key by `ALTER TABLE ONLY ... ADD PRIMARY KEY`, per-leaf `ADD ...
     USING INDEX` and `ALTER INDEX ... ATTACH PARTITION`, re-adds the three
     child foreign keys `NOT VALID`, registers the three moves that validate
-    them, and validates the RDR-225 composite directly (item 6). Test: no
+    them (the chunks swap only), and validates the RDR-225 composite directly (item 6). Test: no
     child validation move exists before its constraint does.
 - P3.4 After P3.3: rebuild every per-collection index on `collection_id`
   (predicate and name hash) through the PCI reconciler, which reports in
@@ -1681,9 +1702,10 @@ enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
 item 8); P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
 production tenants; P4.4 waits for its release count. These are bead
 orders. At run time each install also waits for its own stamp moves:
-readers, P3.4's builds, P3.7's rename and P4.1's drops move only once every
-stamp move there has `completed_at` set (item 6, "Readers during the
-stamp").
+P3.3b's pass, P3.3c's swap (which that pass registers only once every leaf
+has a valid unique index), readers, P3.4's builds, P3.7's rename and P4.1's
+drops move only once every stamp move there has `completed_at` set (item 6,
+"Readers during the stamp").
 
 ### Day 2 Operations
 
