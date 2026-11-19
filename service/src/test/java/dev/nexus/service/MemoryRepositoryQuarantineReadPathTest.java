@@ -56,7 +56,7 @@ class MemoryRepositoryQuarantineReadPathTest {
     private static final String SVC_PASS = "svc_readpath_test_pass";
 
     /** Measured by RDR-207 research finding 4 (both search overloads count). */
-    private static final int MEASURED_READ_PATHS = 12;
+    private static final int MEASURED_READ_PATHS = 12;   // searchPage is a thirteenth; the floor stays the measured twelve
 
     /** Public instance methods that are NOT read paths over nexus.memory rows. */
     private static final Set<String> NOT_READ_PATHS = Set.of(
@@ -120,6 +120,7 @@ class MemoryRepositoryQuarantineReadPathTest {
     private static boolean isRead(Method m) {
         Type rt = m.getGenericReturnType();
         if (rt == MemoryRepository.ResolveResult.class) return true;
+        if (rt == dev.nexus.service.db.MemorySearchPage.Page.class) return true;   // nexus-1gdv0.1.1: searchPage
         if (rt instanceof ParameterizedType pt) {
             Type raw = pt.getRawType();
             Type arg = pt.getActualTypeArguments()[0];
@@ -181,6 +182,10 @@ class MemoryRepositoryQuarantineReadPathTest {
                 calls(new Object[] {T, Q, QP, true}, new Object[] {T, Q, null, true})),
             Map.entry("search[class java.lang.String, class java.lang.String, class java.lang.String]",
                 calls(new Object[] {T, Q, QP})),
+            // nexus-1gdv0.1.1: the paged search, both project branches. returnsProbe also checks the page's
+            // matchingTotal against its rows, so a total that counts a quarantined row fails the walk.
+            Map.entry("searchPage[class java.lang.String, class java.lang.String, class java.lang.String, boolean, int, int]",
+                calls(new Object[] {T, Q, QP, false, 10, 0}, new Object[] {T, Q, null, false, 10, 0})),
             Map.entry("listEntries[class java.lang.String, class java.lang.String, class java.lang.String]",
                 calls(new Object[] {T, QP, null})),
             // nexus-xn9ut: both the unbounded and the bounded branch.
@@ -214,6 +219,15 @@ class MemoryRepositoryQuarantineReadPathTest {
         if (result instanceof MemoryRepository.ResolveResult rr) {
             if (rr.entry() != null && rr.entry().getId() == qid) return true;
             return rr.candidates().stream().anyMatch(r -> r.getId() == qid);
+        }
+        if (result instanceof dev.nexus.service.db.MemorySearchPage.Page page) {
+            boolean inRows = page.rows().stream().anyMatch(r -> r.getId() == qid);
+            // The probe is the only row in tenant T, so its total is 1 while live and 0 once quarantined.
+            if (inRows != (page.matchingTotal() == 1) || page.matchingTotal() > 1) {
+                throw new AssertionError("searchPage total " + page.matchingTotal()
+                    + " disagrees with its rows (probe in rows: " + inRows + ")");
+            }
+            return inRows;
         }
         if (result instanceof List<?> list) {
             for (Object o : list) {

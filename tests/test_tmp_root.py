@@ -1082,6 +1082,7 @@ class TestChildEnvWithTmpdir:
     def test_the_scanner_ignores_reads_and_prose(self, source) -> None:
         assert _tmpdir_override_sites(source) == [], source
 
+    @pytest.mark.census
     def test_every_tmpdir_override_in_the_tests_goes_through_the_helper_or_is_exempt_with_a_reason(self) -> None:
         """A test that gives a child pytest (or a substrate-importing script) its own
         ``TMPDIR`` must drop ``NX_TEST_TMP_ORIG`` or, inside a lab-run grant, the child

@@ -628,6 +628,24 @@ def _transport_error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+#: RDR-253 Step 5: this session's identity token (see the plugin script's ``_IDENTITY_TOKEN``): sent only on a
+#: request whose subspace is ``mailbox/<identity>``, which the engine fences.
+_IDENTITY_TOKEN = ""
+
+
+#: The address being drained now; the token is chosen per address, never per body (see the plugin script).
+_DRAIN_ADDRESS = ""
+
+
+def _identity_headers(route: str = "/v1/tuples/") -> dict[str, str]:
+    if not route.startswith("/v1/tuples/"):
+        return {}  # only the tuple routes are fenced on mailbox/<id>; a memory read never carries the token
+    a = _DRAIN_ADDRESS
+    if _IDENTITY_TOKEN and a.startswith("i") and a[1:].isdigit():
+        return {"X-Nexus-Identity-Token": _IDENTITY_TOKEN}
+    return {}
+
+
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
           *, is_local: bool, budget_s: float | None = None) -> dict[str, Any] | None:
     """POST and return the decoded body, or None on a 404. Raises :class:`_Skip`
@@ -653,7 +671,8 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     url = f"{base_url}{route}"
     req = urllib.request.Request(
         url, data=payload, method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 **_identity_headers(route)},
     )
     # Never spend longer than the drain has left: a sequence of calls each
     # just under the per-call cap would otherwise blow the whole budget while
@@ -827,8 +846,10 @@ def _sender_tag(row: dict[str, Any], dims: dict[str, Any]) -> str:
     key (an engine that predates the stamp) is different from a null one.
     NO LABEL IS NOT VERIFICATION: any data-token holder can mint a session
     token for any session id."""
-    label = sender_label(dims.get("from"), row.get("sender_session"),
-                         stamp_known="sender_session" in row)
+    from nexus.identity.board import identity_for_session  # noqa: PLC0415 -- hook import cost, only for an identity-shaped from
+
+    label = sender_label(dims.get("from"), row.get("sender_session"), stamp_known="sender_session" in row,
+                         identity_of=lambda session: identity_for_session(session, _config_dir()))
     return f" [{label}]" if label else ""
 
 
@@ -917,7 +938,17 @@ def _drain_claimant(address: str) -> str:
     return f"mailbox-drain-{digest}-{pid_str}-{secrets.token_hex(4)}"
 
 
-def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
+def _drain_address(base_url: str, token: str, address: str, **kw: Any) -> str:
+    """:func:`_drain_address_inner` with :data:`_DRAIN_ADDRESS` set for every request it makes (RDR-253 Step 5)."""
+    global _DRAIN_ADDRESS
+    _DRAIN_ADDRESS = address
+    try:
+        return _drain_address_inner(base_url, token, address, **kw)
+    finally:
+        _DRAIN_ADDRESS = ""
+
+
+def _drain_address_inner(base_url: str, token: str, address: str, *, is_local: bool,
                    config_dir: Path, deadline: float, out: _Out) -> str:
     """Probe one address and deliver what it can, writing each row as it goes.
 
@@ -1346,6 +1377,17 @@ def _drain_all(payload: dict[str, Any], out: _Out) -> None:
     # longer read here at all -- see the module docstring's "WHERE THE
     # FLOOR DOES NOT REACH" section.
     addresses: list[str] = [session_id] if _valid_address(session_id) else []
+    # RDR-253 Step 5, Phase 1: both the session mailbox and mailbox/<identity> (the plugin script does the same).
+    global _IDENTITY_TOKEN
+    if addresses:
+        from nexus.identity.board import binding_for_session  # noqa: PLC0415 -- hook import cost
+
+        try:
+            identity, _IDENTITY_TOKEN = binding_for_session(session_id, config_dir)
+        except Exception:  # noqa: BLE001 -- no identity: the session mailbox alone, as before Step 5
+            identity, _IDENTITY_TOKEN = "", ""
+        if identity and _valid_address(identity):
+            addresses.append(identity)
     if not addresses:
         _log_skip("no address to drain: the payload carried no usable session id")
         return

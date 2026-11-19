@@ -227,7 +227,13 @@ migration_wal_bytes_per_worker = 12143000
 # Counted from the changeset's statements (9) and measured: chas lab-m via lab-remote, 2026-11-16, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the nexus-7fku2.1.2 tree (base 8d1afc15a, no service/ or ceiling change on origin/develop since; gate jar rebuilt), ddl: migration=2599. Commit: the nexus-7fku2.1.2 commit that adds taxonomy-022.
 # 2599 -> 2602 (2026-11-17, nexus-7fku2.1.2 develop red fix): taxonomy-023-1 replaces the bodies of nexus.taxonomy_coverage_counts_384, _768 and _1024 with a set-based count: 3 CREATE OR REPLACE FUNCTION, ACL kept, no table.
 # Counted from the changeset's statements (3) and measured: chas lab-m via lab-remote, 2026-11-17, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the fix tree 2413db499 (base origin/develop ea8a47528; gate jar rebuilt), ddl: migration=2602. Commit: the nexus-7fku2.1.2 commit that bumps this ceiling for taxonomy-023.
-migration_ddl_per_worker = 2602
+# 2602 -> 2646 (2026-11-18, nexus-hczdo.1.1, RDR-253 Step 1): identity-001, -002 and -003 add the session identity tables (identity_counters, _records, _aliases, _bindings, _sessions, _memberships, _work) with their indexes, RLS policies and grants: DDL only, nothing backfilled.
+# Measured: chas lab-m via lab-remote, 2026-11-18, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on 3715b562d (base origin/develop 85182f0c4; gate jar rebuilt), ddl: migration=2646. Commit: the nexus-hczdo.1.1 commit that bumps this ceiling for identity-001..003.
+# 2646 -> 2651 (2026-11-18, nexus-hczdo.1.2, RDR-253 Step 2): memory-006 adds the memory.identity stamp column and service-tokens-007 adds the identity_tokens table and its two indexes (no RLS, like session_tokens): DDL only, nothing backfilled.
+# Measured: chas lab-m via lab-remote, 2026-11-18, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on 344d67535 (base origin/develop 8958f349a; gate jar rebuilt), ddl: migration=2651. Commit: the nexus-hczdo.1.2 commit that bumps this ceiling for memory-006 and service-tokens-007.
+# 2651 -> 2656 (2026-11-18, nexus-igea9.5, RDR-252 Step 1): group-001 adds nexus.group_records (the permanent group record) with its ENABLE and FORCE row level security and tenant_isolation policy, and the runAlways grants loop adds its table grant: DDL only, nothing backfilled.
+# Measured: chas lab-s via lab-run, 2026-11-18, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on 226c05298 (base 31c9d816a, the RDR-253 Step 2 tip; gate jar rebuilt), ddl: migration=2656. Commit: the nexus-igea9.5 commit that bumps this ceiling for group-001.
+migration_ddl_per_worker = 2656
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

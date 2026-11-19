@@ -2,7 +2,8 @@
 title: "Fine-Grain Content-Stable Catalog Spans: A dchash Document-Offset Span Form That Survives Re-Chunking"
 id: RDR-171
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-18
 accepted_date: 2026-11-16
 priority: medium
 author: Hal Hildebrand
@@ -259,7 +260,7 @@ def canonical_text(raw: bytes) -> str                      # UnicodeDecodeError 
 def text_hash(text: str) -> str                            # 64 lowercase hex
 def parse_dchash_span(span: str) -> tuple[str, int, int]   # ValueError when malformed
 def dchash_status(entry, span: str, catalog) -> str        # ok | malformed | missing | unreadable | changed | out_of_range
-def dchash_audit(links: list[dict], catalog) -> list[dict] # the stale_dchash rows, one read per document
+def dchash_audit(links: list[CatalogLink], catalog) -> list[dict] # the stale_dchash rows, one read per document
 ```
 
 ### Existing Infrastructure Audit
@@ -530,6 +531,8 @@ no schema.
 - `src/nexus/catalog/catalog_spans.py`, `http_catalog_client.py`, `types.py`, `recovery_bundle.py`,
   `src/nexus/aspect_readers.py`, `src/nexus/mcp/catalog.py`, `src/nexus/commands/catalog_cmds/links.py`,
   `scripts/file_size_ratchet.py`
+- `docs/catalog.md`, `docs/cli-reference.md`, `src/nexus/commands/catalog_cmds/span.py`,
+  `src/nexus/catalog/dchash/`
 - `src/nexus/doc_indexer.py`, `prose_indexer.py`, `code_indexer.py`, `indexer.py`, `pipeline_stages.py`,
   `catalog/store_hook.py`, `catalog/note_write.py`, `commands/catalog.py`
 - `service/src/main/java/dev/nexus/service/http/CatalogLinksHandler.java`,

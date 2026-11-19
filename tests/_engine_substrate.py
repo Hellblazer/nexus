@@ -1200,6 +1200,10 @@ _owner_records: dict[Path, dict] = {}
 _owner_record_lock_fds: dict[Path, int] = {}
 _integration_swept = False
 _owner_exit_registered = False
+#: How long :func:`record_integration_child` waits for a running child's command line to become readable,
+#: and how often it looks.
+_CMDLINE_WAIT_S = 2.0
+_CMDLINE_POLL_S = 0.02
 
 
 #: (pid, id) of this process's record name, see :func:`_owner_record_id`.
@@ -1303,13 +1307,23 @@ def record_integration_child(proc: subprocess.Popen) -> None:
     In a process that recorded integration clusters the child joins their records. In any other (the
     substrate's own, and fixtures that boot against it) a children-only record is kept under the process's
     original tempdir, a root every sweep reads, so the JVM is never left to nobody (nexus-qsqc6). A child with
-    no readable command line is not recorded: the sweep identifies a child by it."""
+    no readable command line is not recorded: the sweep identifies a child by it.
+
+    A live child's command line can read empty for a moment after ``Popen`` returns: ``Popen`` returns when
+    the exec closes the child's CLOEXEC error pipe, and Linux sets the new image's argv range later, while it
+    loads the binary. Under load a reader lands in that window, so the record waits up to
+    :data:`_CMDLINE_WAIT_S` for the command line of a child that is still running, and gives up at once on
+    one that has exited."""
     global _owner_exit_registered
     from nexus.daemon.service_registry import pid_alive, process_command
 
     if not isinstance(getattr(proc, "pid", None), int):
         return  # a test double standing in for Popen
     cmdline = process_command(proc.pid)
+    deadline = time.monotonic() + _CMDLINE_WAIT_S
+    while not cmdline and proc.poll() is None and pid_alive(proc.pid) and time.monotonic() < deadline:
+        time.sleep(_CMDLINE_POLL_S)
+        cmdline = process_command(proc.pid)
     if not cmdline:
         return
     with _owner_lock:

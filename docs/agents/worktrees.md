@@ -15,7 +15,12 @@ reconcile while anyone's tree was dirty. In separate worktrees these are not
 things to avoid carefully; they are impossible.
 
 1. **Site worktrees as siblings**: `../nexus-wt/<session>`, branch
-   `feature/<bead-id>-<slug>`.
+   `feature/<bead-id>-<slug>`. Label it as your identity's work from inside
+   it, so another session's cleanup can see a live owner (RDR-253 Step 6):
+   `nx identity work register --kind worktree --ref "$(pwd -P)" || true`.
+   Before removing any worktree, ask from inside it first:
+   `nx identity may-stop --kind worktree --ref "$(pwd -P)"`. Any nonzero
+   exit is a stop; then `git worktree remove <path> && nx identity work done --kind worktree --ref <path>`.
 
 2. **The primary KEEPS `develop` checked out** and is the reference
    checkout. Not detached: git refuses to check out a branch that is

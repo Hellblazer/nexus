@@ -68,6 +68,12 @@ public final class ScratchRepository {
      */
     public static final String T1_TENANT_GUC = TenantScope.T1_TENANT_GUC;
 
+    /**
+     * RDR-253 Step 2: rows of the identity scope ({@code session_id = 'identity:<id>'}) live as long as the identity
+     * and are never swept by idleness; every sweep leaves them (retention removes them with a tombstoned identity).
+     */
+    static final String IDENTITY_SCOPE_LIKE = "identity:%";
+
     private final TenantScope tenantScope;
 
     public ScratchRepository(TenantScope tenantScope) {
@@ -334,7 +340,7 @@ public final class ScratchRepository {
         Scratch s = SCRATCH.as("s");
         Table<?> candidates = selectDistinct(old.TENANT_ID.as("t"), old.SESSION_ID.as("sid"))
             .from(old)
-            .where(old.TS.lt(cutoff))
+            .where(old.TS.lt(cutoff).and(old.SESSION_ID.notLike(IDENTITY_SCOPE_LIKE)))
             .asTable("c");
         Field<String> candidateTenant = candidates.field("t", String.class);
         Field<String> candidateSession = candidates.field("sid", String.class);
@@ -347,7 +353,7 @@ public final class ScratchRepository {
         Field<OffsetDateTime> newestPut = activity.field("newest_put", OffsetDateTime.class);
         Field<OffsetDateTime> newestRead = activity.field("newest_read", OffsetDateTime.class);
         // A never-read session has a NULL newest_read, which counts as idle.
-        return SCRATCH.TS.lt(cutoff).and(row(SCRATCH.TENANT_ID, SCRATCH.SESSION_ID).in(
+        return SCRATCH.TS.lt(cutoff).and(SCRATCH.SESSION_ID.notLike(IDENTITY_SCOPE_LIKE)).and(row(SCRATCH.TENANT_ID, SCRATCH.SESSION_ID).in(
             select(candidateTenant, candidateSession)
                 .from(candidates)
                 .crossJoin(activity)

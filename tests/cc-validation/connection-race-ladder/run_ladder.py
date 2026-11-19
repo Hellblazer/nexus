@@ -235,6 +235,7 @@ def run_one(args, label: str, server_delay: float, submit: str, kind: str, rep: 
     try:
         return _run_one(args, label, server_delay, submit, kind, rep, ss_sleep)
     finally:
+        # kill-server exempt (RDR-253 Step 6): args.sock is this run's private socket, pid-named by default, never registered work
         tmux(args.sock, "kill-server", check=False)
 
 
@@ -270,6 +271,7 @@ def _run_one(args, label: str, server_delay: float, submit: str, kind: str, rep:
     # because the server was never given anything beyond this allowlist in
     # the first place; a parent Claude Code session's CLAUDECODE/
     # CLAUDE_CODE_*/session markers simply never reach `keep`.
+    # kill-server exempt (RDR-253 Step 6): args.sock is this run's private socket, pid-named by default, never registered work
     tmux(args.sock, "kill-server", check=False)
     keep = {k: os.environ[k]
             for k in ("PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG")
@@ -312,6 +314,7 @@ def _run_one(args, label: str, server_delay: float, submit: str, kind: str, rep:
         # it, but a run that errors out and is also the LAST run in the
         # plan would otherwise leave the server (and the token in its
         # environment) running after this process exits.
+        # kill-server exempt (RDR-253 Step 6): args.sock is this run's private socket, pid-named by default, never registered work
         tmux(args.sock, "kill-server", check=False)
         return rec
     if submit != "ta":
@@ -337,6 +340,7 @@ def _run_one(args, label: str, server_delay: float, submit: str, kind: str, rep:
     # environment) is torn down here rather than left for the next run's
     # leading kill-server, so a plan whose LAST run is this one still exits
     # clean.
+    # kill-server exempt (RDR-253 Step 6): args.sock is this run's private socket, pid-named by default, never registered work
     tmux(args.sock, "kill-server", check=False)
     subprocess.run(["pkill", "-f", str(run_dir)], check=False)
     rec.update(analyse(p))
@@ -443,7 +447,7 @@ def main() -> int:
     ap.add_argument("--python", required=True, help="interpreter with mcp>=2.3,<3 for the probe")
     ap.add_argument("--hook-python", default="python3")
     ap.add_argument("--claude", default=shutil.which("claude") or "claude")
-    ap.add_argument("--sock", default="veh77-ladder")
+    ap.add_argument("--sock", default=f"veh77-ladder-{os.getpid()}")  # per run: a concurrent ladder has its own server
     ap.add_argument("--plan")
     ap.add_argument("--ready-regex", default=r"bypass permissions on")
     ap.add_argument("--turn-timeout", type=float, default=120)
@@ -487,6 +491,7 @@ def main() -> int:
     # os.environ holds. Reset it before the first run so every session this
     # invocation starts is born from a fresh server, using the `keep`
     # environment run_one() builds per launch.
+    # kill-server exempt (RDR-253 Step 6): args.sock is this run's private socket, pid-named by default, never registered work
     tmux(args.sock, "kill-server", check=False)
     plan_text = Path(args.plan or DEFAULT_PLAN).read_text()
     Path(args.out).mkdir(parents=True, exist_ok=True)

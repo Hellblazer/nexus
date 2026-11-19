@@ -77,6 +77,13 @@ public final class AuthFilter extends Filter {
     private static final String MDC_TENANT = "tenant";
     private static final String MDC_SESSION = "session";
 
+    /** RDR-253 Step 2: the header an identity token travels in, beside the session token's. */
+    public static final String IDENTITY_HEADER = "X-Nexus-Identity-Token";
+
+    /** The routes that mint or keep a binding: they do not read the identity token, so an expired one is ignored there. */
+    private static final java.util.regex.Pattern IDENTITY_BIND_ROUTE =
+        java.util.regex.Pattern.compile("^/v1/identity/i[0-9]+/(bind|renew)$");
+
     /**
      * Public alias of {@link RequestDeadline#REQUEST_DEADLINE_HEADER} (nexus-8hdg9
      * phase 5): {@code RequestDeadline} is package-private, and {@code
@@ -388,9 +395,38 @@ public final class AuthFilter extends Filter {
             }
         }
 
+        // 3b. RDR-253 Step 2: an identity token names an identity and the generation it was minted for. It is
+        // resolved here and published; whether that generation is still the identity's current one is the
+        // fence's question, not this filter's (a read is never checked, and a superseded generation's token stays
+        // resolvable until it expires so the fence can answer 409 generation_superseded). An unknown or expired
+        // token is a 401, which the client answers by re-reading its token file once.
+        String identity = null;
+        Integer identityGeneration = null;
+        String identityHeader = exchange.getRequestHeaders().getFirst(IDENTITY_HEADER);
+        if (identityHeader != null && !identityHeader.isBlank()) {
+            Optional<dev.nexus.service.db.IdentityTokenStore.Principal> ip =
+                tokenStore.identityTokens().resolve(TokenHashing.sha256Hex(identityHeader));
+            if (ip.isPresent() && !ip.get().tenantId().equals(tenant)) {
+                reject(exchange, "cross_tenant_identity_token");
+                return;
+            }
+            if (ip.isPresent()) {
+                identity = ip.get().identityId();
+                identityGeneration = ip.get().generation();
+            } else if (IDENTITY_BIND_ROUTE.matcher(exchange.getRequestURI().getPath()).matches()) {
+                // The route that mints the replacement does not use the token, so an expired one must not stand in
+                // its way: a client woken from a long sleep refreshes through bind with whatever header it holds.
+                log.debug("event=identity_token_ignored path={} reason=expired_on_bind_route",
+                          LogText.escapeControl(exchange.getRequestURI().getPath()));
+            } else {
+                reject(exchange, "identity_token_expired");
+                return;
+            }
+        }
+
         // 4. Publish the principal thread-confined; clear after dispatch.
         RequestContext.set(new RequestContext.Principal(
-            tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
+            tenant, sessionId, mintedSession, isOperator, scope, credentialHash, identity, identityGeneration));
         // Tenant (put at resolution) and session ids only: never the token or the credential hash.
         if (sessionId != null) {
             // A client chose this id (/v1/sessions/start takes any non-blank one): escape it for the prefix.

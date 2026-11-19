@@ -124,6 +124,7 @@ _RECOVERY_FUTILE_WINDOW_S: float = 60.0
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
 from nexus.db.client_identity import client_identity_headers
+from nexus.identity.token_header import identity_headers, superseded_from_response
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
@@ -328,6 +329,23 @@ class HttpScratchStore:
         if token is not None:
             return f"Bearer {token}"
         return static_headers.get("Authorization", "")
+
+    def _authorized_headers(self, payload: dict[str, Any]) -> dict[str, str]:
+        """The headers every request here carries: the bearer, resolved fresh, plus (RDR-253 Step 3) the identity
+        token of this process's Claude ancestor on a request for the IDENTITY scope (``session_id`` of
+        ``identity:<id>``), the only scratch scope the engine fences. A session-scope request never carries it: an
+        identity token the engine cannot resolve is a 401 on every call, and unfenced scratch must not depend on it.
+        Built once per attempt so a retry never drops the token: a fenced write is refused, never downgraded."""
+        headers = {"Authorization": self._current_authorization_header()}
+        if str(payload.get("session_id", "")).startswith("identity:"):
+            headers.update(identity_headers())
+        return headers
+
+    @staticmethod
+    def _raise_if_generation_superseded(resp: httpx.Response) -> None:
+        """RDR-253 Step 3: a ``409 generation_superseded`` is the stop-writing signal, typed and naming the holder."""
+        if (lost := superseded_from_response(resp)) is not None:
+            raise lost
 
     def _remint_data_token_and_rebuild(self, sent_bearer: str = "") -> bool:
         """On a 401 that the session-token refresh did not resolve, try
@@ -619,7 +637,7 @@ class HttpScratchStore:
         try:
             resp = self._client.post(
                 path, json=payload,
-                headers={"Authorization": self._current_authorization_header()},
+                headers=self._authorized_headers(payload),
             )
         except httpx.HTTPError as exc:
             raise RuntimeError(
@@ -920,7 +938,7 @@ class HttpScratchStore:
         # critic S4 (nexus-ssqk9): resolve the Authorization header FRESH
         # for this request rather than the client's construction-time
         # default -- see _current_authorization_header's docstring.
-        request_headers = {"Authorization": self._current_authorization_header()}
+        request_headers = self._authorized_headers(payload)
         try:
             resp = self._client.post(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
@@ -930,7 +948,7 @@ class HttpScratchStore:
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload, headers={"Authorization": self._current_authorization_header()})
+                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload))
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -973,7 +991,7 @@ class HttpScratchStore:
                     # request above.
                     resp = self._client.post(
                         path, json=payload,
-                        headers={"Authorization": self._current_authorization_header()},
+                        headers=self._authorized_headers(payload),
                     )
                 except httpx.HTTPError as exc:
                     raise RuntimeError(
@@ -986,6 +1004,7 @@ class HttpScratchStore:
             )
         self._note_bearer_accepted(resp)
         if not resp.is_success:
+            self._raise_if_generation_superseded(resp)
             edge = self._edge_refusal(path, resp)
             if edge is not None:
                 raise RuntimeError(edge)
@@ -1032,7 +1051,7 @@ class HttpScratchStore:
         """POST *payload* to *path* and return parsed JSON without raising on 404-class."""
         sent_token = getattr(self, "_session_token", "")
         # critic S4 (nexus-ssqk9): see _post's matching comment.
-        request_headers = {"Authorization": self._current_authorization_header()}
+        request_headers = self._authorized_headers(payload)
         try:
             resp = self._client.post(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
@@ -1041,7 +1060,7 @@ class HttpScratchStore:
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload, headers={"Authorization": self._current_authorization_header()})
+                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload))
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -1070,7 +1089,7 @@ class HttpScratchStore:
                     # the Authorization header FRESH on the retry too.
                     resp = self._client.post(
                         path, json=payload,
-                        headers={"Authorization": self._current_authorization_header()},
+                        headers=self._authorized_headers(payload),
                     )
                 except httpx.HTTPError as exc:
                     raise RuntimeError(
@@ -1085,6 +1104,7 @@ class HttpScratchStore:
         if resp.status_code == 404:
             return {"found": False}
         if not resp.is_success:
+            self._raise_if_generation_superseded(resp)
             edge = self._edge_refusal(path, resp)
             if edge is not None:
                 raise RuntimeError(edge)

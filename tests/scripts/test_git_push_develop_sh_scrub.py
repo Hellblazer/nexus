@@ -10,6 +10,11 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
+# Every push here would otherwise write its push record through the real installed nx (RDR-252 Step 2).
+pytestmark = pytest.mark.usefixtures("push_record_nx_stub")
+
 _spec = importlib.util.spec_from_file_location(
     "_git_push_develop_helpers", Path(__file__).with_name("test_git_push_develop_sh.py")
 )

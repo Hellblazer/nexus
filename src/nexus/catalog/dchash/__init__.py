@@ -12,6 +12,7 @@ from nexus.catalog.dchash.text import (
     parse_dchash_span,
     text_hash,
 )
+from nexus.catalog.dchash.audit import dchash_audit
 from nexus.catalog.dchash.mint import dchash_span, dchash_span_for_passage
 from nexus.catalog.dchash.source import (
     STATUSES,
@@ -28,6 +29,7 @@ __all__ = [
     "STATUSES",
     "canonical_text",
     "check_link_span",
+    "dchash_audit",
     "dchash_source",
     "dchash_span",
     "dchash_span_for_passage",

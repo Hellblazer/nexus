@@ -324,6 +324,11 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'put_replacing': ['project', 'title', 'content', 'replaces', 'tags', 'ttl', 'agent', 'session'],
         'reap': [],
         'restore': ['id'],
+        # RDR-209 Phase 0b (nexus-1gdv0.1.5): memory_search sends its page to the engine's
+        # search route and gets (rows, matching_total) back. Service-only by construction:
+        # the paged search with a matching total is an engine route no SQLite store had.
+        # Production caller: T2Database.search_page, behind the memory_search MCP tool.
+        'search_page': ['query', 'project', 'limit', 'offset', 'access', 'timeout'],
     },
     'scratch': {
         'close_session': [],

@@ -73,7 +73,7 @@ public final class MemoryRepository {
      * {@code MemoryRepositoryQuarantineReadPathTest} derives the read-path set by
      * reflection and fails when any single path drops this.
      */
-    private static final Condition NOT_QUARANTINED = MEMORY.QUARANTINED_AT.isNull();
+    static final Condition NOT_QUARANTINED = MEMORY.QUARANTINED_AT.isNull();
 
     private final TenantScope tenantScope;
 
@@ -257,7 +257,7 @@ public final class MemoryRepository {
      * narrower tsquery than the one that matched puts translated-only hits at
      * rank 0 and sorts them last.
      */
-    private static String ftsQuery(String query) {
+    static String ftsQuery(String query) {
         boolean hasSeparator = query != null && query.chars()
             .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
         String q = "nexus.fold_diacritics({0})";
@@ -330,7 +330,7 @@ public final class MemoryRepository {
      *         silently swallow, recreating the exact ambiguity class this
      *         bead exists to eliminate (critic finding, nexus-senub review).
      */
-    private static void guardAgainstDegenerateQuery(DSLContext ctx, String query) {
+    static void guardAgainstDegenerateQuery(DSLContext ctx, String query) {
         Integer numnode = ctx.select(field(
                     "numnode(plainto_tsquery('english', nexus.fold_diacritics({0})))",
                     Integer.class, val(query)))
@@ -427,6 +427,12 @@ public final class MemoryRepository {
             }
             return rows;
         });
+    }
+
+    /** nexus-1gdv0.1.1: one page of {@link #search}, stamping only its rows; see {@link MemorySearchPage}. */
+    public MemorySearchPage.Page searchPage(String tenant, String query, String project, boolean trackAccess,
+                                            int limit, int offset) {
+        return tenantScope.withTenant(tenant, ctx -> MemorySearchPage.run(ctx, query, project, trackAccess, limit, offset));
     }
 
     /**
@@ -681,7 +687,8 @@ public final class MemoryRepository {
             var candidates = ctx.select(MEMORY.ID, MEMORY.ACCESS_COUNT, MEMORY.TTL_DAYS, MEMORY.TIMESTAMP)
                                 .from(MEMORY)
                                 .where(MEMORY.TTL_DAYS.isNotNull()
-                                    .and(MEMORY.QUARANTINED_AT.isNull()))
+                                    .and(MEMORY.QUARANTINED_AT.isNull())
+                                    .and(IdentityLine.notFenced())) // RDR-253: a fenced threads entry is never swept
                                 .fetch();
 
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -726,7 +733,8 @@ public final class MemoryRepository {
                                         .and(MEMORY.ROLLED_UP_AT.isNotNull())
                                         // A replaced row (quarantined, ttl NULL) is never reaped, even
                                         // if a rollup raced the replace and marked it (nexus-ov3zi).
-                                        .and(MEMORY.TTL_DAYS.isNotNull()))
+                                        .and(MEMORY.TTL_DAYS.isNotNull())
+                                        .and(IdentityLine.notFenced())) // RDR-253: nor reaped
                                     .returning(MEMORY.ID)
                                     .fetch(MEMORY.ID);
             if (!deleted.isEmpty()) {
@@ -962,7 +970,7 @@ public final class MemoryRepository {
             OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
             int updated = ctx.update(MEMORY)
                              .set(MEMORY.CONTENT,   mergedContent)
-                             .set(MEMORY.TIMESTAMP, now)
+                             .set(MEMORY.TIMESTAMP, now).set(MEMORY.IDENTITY, (String) null) // handler re-stamps
                              .where(MEMORY.ID.eq(keepId))
                              .execute();
             if (updated == 0) {
@@ -1169,7 +1177,7 @@ public final class MemoryRepository {
                 var existing = ctx.selectFrom(MEMORY)
                                   .where(MEMORY.PROJECT.eq(project)
                                       .and(MEMORY.TITLE.ne(title))
-                                      .and(NOT_QUARANTINED))
+                                      .and(NOT_QUARANTINED).and(IdentityLine.notFenced())) // RDR-253: never a fenced entry
                                   .fetch();
                 long bestId = -1L;
                 double bestJaccard = 0.0;
@@ -1200,6 +1208,7 @@ public final class MemoryRepository {
                     ctx.update(MEMORY)
                        .set(MEMORY.CONTENT,   merged)
                        .set(MEMORY.TIMESTAMP, now)
+                       .set(MEMORY.IDENTITY,  (String) null) // RDR-253: the handler re-stamps for a token
                        .where(MEMORY.ID.eq(bestId))
                        .execute();
                     return new long[]{bestId, 1L}; // 1 = merged
@@ -1266,7 +1275,7 @@ public final class MemoryRepository {
      * Batch-increment access_count and set last_accessed for multiple rows.
      * Best-effort: does NOT throw on failure.
      */
-    private void batchTrackAccess(DSLContext ctx, List<Long> ids) {
+    static void batchTrackAccess(DSLContext ctx, List<Long> ids) {
         if (ids.isEmpty()) return;
         try {
             ctx.update(MEMORY)
@@ -1380,10 +1389,9 @@ public final class MemoryRepository {
                 .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
                 .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
                 .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
-                // RDR-207 (bead .4): a write naming an existing title is a decision to
-                // keep it, so the conflict branch clears both quarantine stamps.
-                .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
-                .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                // RDR-207 (bead .4): a write naming an existing title is a decision to keep it, so the
+                // conflict branch clears both quarantine stamps (and, RDR-253, the identity stamp).
+                .set(IdentityLine.overwriteClears())
                 .execute();
             log.debug("event=memory_import_batch tenant={} rows={}", tenant, rows.size());
             return rows.size();
@@ -1429,10 +1437,9 @@ public final class MemoryRepository {
                         .set(MEMORY.TIMESTAMP,     excluded(MEMORY.TIMESTAMP))
                         .set(MEMORY.ACCESS_COUNT,  excluded(MEMORY.ACCESS_COUNT))
                         .set(MEMORY.LAST_ACCESSED, excluded(MEMORY.LAST_ACCESSED))
-                        // RDR-207 (bead .4): a write naming an existing title is a decision to
-                        // keep it, so the conflict branch clears both quarantine stamps.
-                        .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
-                        .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                        // RDR-207 (bead .4): a write naming an existing title is a decision to keep it, so the
+                        // conflict branch clears both quarantine stamps (and, RDR-253, the identity stamp).
+                        .set(IdentityLine.overwriteClears())
                         .returning(MEMORY.ID)
                         .fetchOne();
 
@@ -1480,10 +1487,9 @@ public final class MemoryRepository {
                         .set(MEMORY.AGENT,        agent)
                         .set(MEMORY.TIMESTAMP,    now)
                         .set(MEMORY.TTL_DAYS,          ttlDays)
-                        // RDR-207 (bead .4): a write naming an existing title is a decision to
-                        // keep it, so the conflict branch clears both quarantine stamps.
-                        .set(MEMORY.QUARANTINED_AT, (OffsetDateTime) null)
-                        .set(MEMORY.ROLLED_UP_AT, (OffsetDateTime) null)
+                        // RDR-207 (bead .4): a write naming an existing title is a decision to keep it, so the
+                        // conflict branch clears both quarantine stamps (and, RDR-253, the identity stamp).
+                        .set(IdentityLine.overwriteClears())
                         .returning(MEMORY.ID)
                         .fetchOne();
 

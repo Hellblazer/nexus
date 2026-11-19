@@ -43,6 +43,14 @@ _REAL_ANCESTOR_ARGV = channel_launch._claude_ancestor_argv  # noqa: SLF001
 _HANG_S = 60.0
 
 
+@pytest.fixture(autouse=True)
+def _no_identity_for_the_work_label(monkeypatch) -> None:
+    """``nx tuple wait`` labels its wait as the caller's identity's work (RDR-253 Step 6). A test run from inside a
+    Claude session would find that session's token file and write to an engine: no test here is about that label
+    (tests/test_tuple_wait_work_label.py is), so the process holds no identity."""
+    monkeypatch.setattr("nexus.identity.work.caller_identity", lambda: None)
+
+
 # ── The launch-flag read ─────────────────────────────────────────────────────
 
 

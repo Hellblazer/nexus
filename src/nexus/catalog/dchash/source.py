@@ -8,8 +8,10 @@ is ``catalog.resolve_path``, which raises ``httpx.HTTPError`` subclasses or
 
 - :func:`resolve_dchash_text` is the read path behind ``nx catalog show``: every
   failure, engine errors included, becomes ``None`` and a log line.
-- :func:`dchash_status` is the audit path: an engine error propagates, so an
-  outage fails the audit instead of marking every span stale.
+- :func:`dchash_status` checks one span: an engine error propagates, so an
+  outage fails the check instead of marking the span stale. The audit
+  (``audit.dchash_audit``) uses the same :func:`span_status` rules, reading
+  each document once, and propagates engine errors the same way.
 """
 
 from __future__ import annotations

@@ -52,6 +52,8 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -89,6 +91,31 @@ def looks_like_session_id(value: str) -> bool:
 def looks_like_agent_id(value: str) -> bool:
     """True when *value* is "a" + 16 lowercase hex chars."""
     return bool(_AGENT_ID_RE.fullmatch(value))
+
+
+_IDENTITY_ID_RE = re.compile(r"^i[0-9]+$")
+
+
+def looks_like_identity_id(value: str) -> bool:
+    """True when *value* is an identity id, ``i`` and digits (RDR-253)."""
+    return bool(_IDENTITY_ID_RE.fullmatch(value or ""))
+
+
+@dataclass(frozen=True)
+class SendTarget:
+    """Where a ``mailbox_send`` goes: ``mailbox/<address>`` with ``address_kind``, and the engine's notice when the
+    name was a retired alias still inside its 7-day grace (RDR-253 Step 5)."""
+
+    address: str
+    address_kind: str
+    notice: str = ""
+
+
+#: ``alias(name)`` is ``IdentityClient.alias``: GET /v1/identity/alias/<name>.
+AliasLookup = Callable[[str], Mapping[str, Any]]
+#: ``holder(session id)`` is the ``(identity id, kind)`` the session is bound to, or None when it is bound to none
+#: (an old client) or the answer cannot be had; ``kind`` is ``seat``, ``ephemeral`` or ``delegated``.
+HolderLookup = Callable[[str], "tuple[str, str] | None"]
 
 
 def list_directory_entries(name: str, tuples: Any) -> list[Any]:
@@ -175,15 +202,125 @@ def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
     return classify_directory_holders(to, list_directory_entries(to, tuples))
 
 
+def resolve_send(
+    to: str, tuples: Any, alias: AliasLookup | None = None, holder: HolderLookup | None = None,
+) -> SendTarget:
+    """RDR-253 Step 5: resolve ``to`` for a mixed fleet of old and new clients.
+
+    An identity id goes straight to ``mailbox/<id>``. A name resolves through ``alias/<name>`` first, to learn the
+    seat and any retired-alias notice, but a live ``identity_state`` does not say the receiver drains
+    ``mailbox/<id>``: a Steps 3/4 client and an unleased Desktop binding are live too and read only their session
+    mailbox. So the mail goes to the one live holder of ``directory/<name>``, in that holder's session mailbox
+    (every new client drains ``mailbox/<session>`` as well, by dual subscription), as :func:`resolve_send_address`
+    resolves it; two holders are refused. Only when nobody holds the name does the mail wait in ``mailbox/<id>``
+    for the seat to bind. A name that is no seat's alias falls to the directory, but never reaches an ephemeral
+    identity by its display name: the RDR reaches an ephemeral "by id only", and two launches with one display name
+    would collide. When *holder* names the one holder as an ephemeral, the send is refused with its id; a holder it
+    cannot place (an old client, an engine that does not answer) is reached as before. A retired alias inside its grace resolves with the engine's notice naming the new
+    name; past it the engine answers 410 and the send is refused with "renamed to <new> on <date>". An unknown name,
+    or an alias lookup that cannot be made (an engine without identity routes), is the directory's alone.
+    """
+    if looks_like_identity_id(to):
+        return SendTarget(to, "identity")
+    if alias is None or looks_like_session_id(to) or looks_like_agent_id(to) or not SAFE_NAME_RE.fullmatch(to or ""):
+        return SendTarget(*resolve_send_address(to, tuples))
+    from nexus.identity.bind_client import IdentityApiError  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
+
+    try:
+        found = alias(to)
+    except IdentityApiError as exc:
+        if exc.status == 410:
+            raise DirectoryResolutionError(str(exc.message or f"{to!r} was renamed")) from None
+        if exc.status == 404:  # no seat has the name: the directory's, unless its holder is an ephemeral's display name
+            return _directory_target(to, tuples, holder)
+        return SendTarget(*resolve_send_address(to, tuples))
+    except Exception:  # noqa: BLE001 -- no identity routes (an older engine) or unreachable: the directory decides
+        return SendTarget(*resolve_send_address(to, tuples))
+    identity = str(found.get("identity") or "")
+    notice = str(found.get("notice") or "")
+    if not looks_like_identity_id(identity):
+        return SendTarget(*resolve_send_address(to, tuples))
+    entries = list_directory_entries(to, tuples)
+    if not any((row.dims or {}).get("session_id") for row in entries):
+        return SendTarget(identity, "identity", notice)  # nobody holds the name: the seat reads it when it binds
+    address, kind = classify_directory_holders(to, entries)  # two holders is still refused, naming both
+    return SendTarget(address, kind, notice)
+
+
+def _directory_target(to: str, tuples: Any, holder: HolderLookup | None) -> SendTarget:
+    """``directory/<to>``'s one holder, refused when it is an ephemeral identity reached by its display name."""
+    address, kind = resolve_send_address(to, tuples)
+    if kind == "session" and holder is not None:
+        try:
+            bound = holder(address)
+        except Exception:  # noqa: BLE001 -- a holder the engine cannot place is reached as before, never a failed send
+            bound = None
+        if bound is not None and bound[1] == "ephemeral":
+            raise DirectoryResolutionError(
+                f"{to!r} is the display name of the ephemeral identity {bound[0]}, which is reached by id only "
+                f"(an ephemeral has no alias, and two launches can share a display name): send to {bound[0]}"
+            )
+    return SendTarget(address, kind)
+
+
+def identity_holder_lookup() -> HolderLookup:
+    """The identity a session is bound to, from the session index and the identity's record. The client is built,
+    used and closed inside each lookup (as :func:`identity_alias_lookup`'s is); a session in no index, an engine
+    without identity routes and a failed call all answer None."""
+
+    def lookup(session_id: str) -> tuple[str, str] | None:
+        from nexus.identity.bind_client import IdentityApiError, IdentityClient  # noqa: PLC0415 -- deferred: startup cost
+
+        client = IdentityClient.from_config()
+        try:
+            identity = str(client.session(session_id).get("identity") or "")
+            return (identity, str(client.show(identity).get("kind") or "")) if identity else None
+        except IdentityApiError:
+            return None
+        finally:
+            client.close()
+
+    return lookup
+
+
+def identity_alias_lookup() -> AliasLookup:
+    """``IdentityClient.alias`` for this host's engine. The client is built, used and closed inside each lookup, so
+    a send to a session or agent id (which :func:`resolve_send` never looks up) builds none, and none is left
+    open. A host with no endpoint or credential raises from the lookup, which :func:`resolve_send` reads as "no
+    identity routes here": the send then resolves through the directory alone, as an old client does."""
+
+    def lookup(name: str) -> Mapping[str, Any]:
+        from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
+
+        client = IdentityClient.from_config()
+        try:
+            return client.alias(name)
+        finally:
+            client.close()
+
+    return lookup
+
+
+def identity_from_not_own_message(value: str, own: str) -> str:
+    """Refusal for an identity-shaped ``from_address`` that is not the sender's own identity (RDR-253 Step 5, the
+    identity counterpart of :func:`from_address_not_own_message`)."""
+    mine = own[:64] if own else "none resolved for this server"
+    return (
+        f"from_address {value[:64]!r} is an identity but not this server's own ({mine}): `from` names the sender, "
+        "so an identity there must be the sending seat's own. Put the recipient in `to`; omit from_address to send "
+        "as this session"
+    )
+
+
 def validate_from_address(value: str) -> str:
     """A caller-supplied `from_address` override must itself be a session
     id or an agent id -- a subagent sharing its parent's MCP server would
     otherwise stamp the parent's session id, so it passes its OWN agent
     id here instead."""
-    if looks_like_session_id(value) or looks_like_agent_id(value):
+    if looks_like_session_id(value) or looks_like_agent_id(value) or looks_like_identity_id(value):
         return value
     raise DirectoryResolutionError(
-        f"from_address {value!r} is neither a session id nor an agent id"
+        f"from_address {value!r} is neither a session id, an identity nor an agent id"
     )
 
 
@@ -225,6 +362,27 @@ def _own_session_ids(state_dir: Path | None, claude_pid: int | None) -> list[str
     return own
 
 
+def _own_identity(state_dir: Path | None, claude_pid: int | None) -> str:
+    """This server's identity: the leased token file, else the token file binding one of its session ids."""
+    from nexus.identity.board import identity_for_session  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
+    from nexus.identity.token_header import current  # noqa: PLC0415
+
+    try:
+        record = current()
+    except Exception:  # noqa: BLE001 -- an unreadable token file is no identity
+        record = None
+    if record is not None and looks_like_identity_id(str(record.identity)):
+        return str(record.identity)
+    try:
+        own = _own_session_ids(state_dir, claude_pid)
+    except DirectoryResolutionError:
+        own = []
+    for sid in own:
+        if found := identity_for_session(sid, state_dir):
+            return found
+    return ""
+
+
 def check_from_address_is_own(
     value: str, *, state_dir: Path | None = None, claude_pid: int | None = None,
 ) -> str:
@@ -243,6 +401,12 @@ def check_from_address_is_own(
     validate_from_address(value)
     if looks_like_agent_id(value):
         return value
+    if looks_like_identity_id(value):
+        # Fail closed: an identity names a seat, so with no own identity resolvable there is nothing it may claim.
+        mine = _own_identity(state_dir, claude_pid)
+        if value == mine:
+            return value
+        raise DirectoryResolutionError(identity_from_not_own_message(value, mine))
     own = _own_session_ids(state_dir, claude_pid)
     if not own:
         return str(uuid.UUID(value))

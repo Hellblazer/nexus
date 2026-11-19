@@ -1448,7 +1448,11 @@ class CliBackend:
         # nexus-xzorj: the group id recorded at spawn. asyncio's child watcher reaps the child on its
         # own schedule, so a kill after a timeout or cancel must not resolve the group from the pid.
         _dispatch_pgid: int | None = None
+        _delegated = None  # RDR-253 Step 4: this child's delegated identity, ended in the finally below
         try:
+            from nexus.operators.delegated_identity import start_delegation  # noqa: PLC0415 - deferred: only a Claude session with a bound identity pays for it
+
+            _delegated = await start_delegation(env, enabled=bool(mcp_servers or allowed_tools), label=operator)
             from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 - deferred to avoid circular import at module load
 
             prompt_path = _write_prompt_file(prompt)
@@ -1946,3 +1950,10 @@ class CliBackend:
                         path=str(prompt_path),
                         error=str(exc),
                     )
+            # RDR-253 Step 4: stop renewing, delete its token file, append `end`. Last, after the prompt file, because the
+            # bounded wait for `end` can be cancelled; a failure here never masks the dispatch outcome.
+            if _delegated is not None:
+                try:
+                    await _delegated.afinish()
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("operator_dispatch_delegated_end_failed", error=str(exc))

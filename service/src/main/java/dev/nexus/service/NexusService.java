@@ -226,6 +226,8 @@ public final class NexusService {
      * {@link #stop()} skips its shutdown signal.
      */
     private final TupleRepository tupleRepo;
+    /** RDR-253 Step 1 (nexus-hczdo.1.1): session identity records; the tuple sweep runs its retention. */
+    private final dev.nexus.service.db.IdentityRepository identityRepo;
 
     /**
      * RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, scheduled on {@link #sweepScheduler}.
@@ -706,6 +708,8 @@ public final class NexusService {
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
         this.catalogRepo  = new CatalogRepository(tenantScope);
+        this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
+        var identityFence = new dev.nexus.service.http.IdentityFence(new dev.nexus.service.db.IdentityFenceReads(tenantScope)); // RDR-253
 
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
@@ -790,52 +794,10 @@ public final class NexusService {
                 new dev.nexus.service.http.RequestHandler(requestLedger));
         requestsCtx.getFilters().addAll(authFilter);
 
-        // /v1/memory/* — memory endpoints
-        var memCtx = server.createContext("/v1/memory", new MemoryHandler(memoryRepo));
-        memCtx.getFilters().addAll(authFilter);
-
-        // /v1/plans/* — plan library endpoints (bead nexus-gmiaf.11)
-        var planCtx = server.createContext("/v1/plans", new PlanHandler(planRepo));
-        planCtx.getFilters().addAll(authFilter);
-
-        // /v1/telemetry/* — telemetry endpoints (bead nexus-gmiaf.12)
-        var telCtx = server.createContext("/v1/telemetry", new TelemetryHandler(telemetryRepo));
-        telCtx.getFilters().addAll(authFilter);
-
-        // /v1/t1/* — T1 scratch endpoints (bead nexus-gmiaf.13)
-        var t1Ctx = server.createContext("/v1/t1", new ScratchHandler(scratchRepo));
-        t1Ctx.getFilters().addAll(authFilter);
-
-        // /v1/taxonomy/* — taxonomy endpoints (bead nexus-gmiaf.14)
-        var taxonomyCtx = server.createContext("/v1/taxonomy", new TaxonomyHandler(taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage));
-        taxonomyCtx.getFilters().addAll(authFilter);
-
-        // /v1/aspects/* — aspects / highlights / queue / promotion-log (bead nexus-gmiaf.15)
-        var aspectCtx = server.createContext("/v1/aspects", new AspectHandler(aspectRepo));
-        aspectCtx.getFilters().addAll(authFilter);
-
-        // /v1/chash/* — chash_index endpoints (bead nexus-gmiaf.16)
-        var chashCtx = server.createContext("/v1/chash", new ChashHandler(chashRepo));
-        chashCtx.getFilters().addAll(authFilter);
-
-        // /v1/remap/* — chash_remap endpoints (RDR-186 nexus-146xx.4: wire re-id
-        // map write-through + per-leg clear + live membership counts). The
-        // RDR-180 per-tenant full-digest rekey (nexus-jxizy.6/nexus-b878d) was
-        // RETIRED with nexus.chash_alias (nexus-lgdel.l1) — see RemapHandler's
-        // class javadoc.
-        var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
-        remapCtx.getFilters().addAll(authFilter);
-
-        // /v1/ladder/* — upgrade-ladder completion bookkeeping (RDR-186
-        // nexus-146xx.12: the ladder.db retirement's PG write/read surface)
-        var ladderCtx = server.createContext("/v1/ladder", new LadderHandler(ladderRepo));
-        ladderCtx.getFilters().addAll(authFilter);
-
-        // /v1/pipeline/* — engine-hosted streaming-PDF buffer (RDR-186
-        // nexus-146xx.16: pipeline.db's PG twin; state hosts here, the
-        // extraction compute stays client-side)
-        var pipelineCtx = server.createContext("/v1/pipeline", new PipelineHandler(pipelineRepo));
-        pipelineCtx.getFilters().addAll(authFilter);
+        // /v1/memory, plans, telemetry, t1, taxonomy, aspects, chash, remap, ladder, pipeline, identity: one place.
+        dev.nexus.service.http.TenantDataRoutes.register(server, authFilter, memoryRepo, planRepo, telemetryRepo,
+                scratchRepo, taxonomyRepo, taxonomyCentroidRepo, taxonomyCoverage, aspectRepo, chashRepo, remapRepo,
+                ladderRepo, pipelineRepo, identityRepo, tokenStore.identityTokens(), identityFence, tenantScope);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18). The
         // combined-write orchestration seam (nexus-kl2z6 increment 1) rides
@@ -916,13 +878,13 @@ public final class NexusService {
                 new dev.nexus.service.http.ValidateConstraintsHandler(() -> chashConstraintValidator, validateConstraintsJobs));
         validateConstraintsCtx.getFilters().addAll(authFilter);
 
-        // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
-        // only when a boot-checked TemplateRegistry was supplied (see the constructor
-        // javadoc above) — a null registry means the feature was never loaded, so the
-        // route is simply absent (404) rather than a 503 stub.
+        // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered only when a boot-checked
+        // TemplateRegistry was supplied (see the constructor javadoc above): else the route is absent (404), no 503 stub.
+        dev.nexus.service.board.BoardOwnerWiring boardOwner = null;   // RDR-252 Step 3: the owner stamper, started with the sweeps below
         if (tupleTemplateRegistry != null) {
             this.tupleRepo = TupleRepository.fromEnv(tenantScope, tupleTemplateRegistry);
-            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo));
+            boardOwner = new dev.nexus.service.board.BoardOwnerWiring(tenantScope, tupleRepo, identityRepo, java.time.Clock.systemUTC());
+            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo, identityFence, boardOwner.hook()));
             tuplesCtx.getFilters().addAll(authFilter);
         } else {
             this.tupleRepo = null;
@@ -943,9 +905,9 @@ public final class NexusService {
                 t.setDaemon(true);
                 return t;
             });
-        // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple
-        // sweep's sibling): with a six-hour first delay an engine process that lives less than six hours never
-        // expires T1 rows.
+        if (boardOwner != null) { boardOwner.start(this.sweepScheduler, this::reaperTenants); }   // RDR-252 Step 3: deadline timer and its rebuild
+        // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple sweep's
+        // sibling): with a six-hour first delay an engine that lives less than six hours never expires T1 rows.
         this.t1SweepTask = surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC)));
         this.sweepScheduler.scheduleAtFixedRate(
             this.t1SweepTask, ChunkReaper.INITIAL_DELAY.toSeconds(),
@@ -1094,7 +1056,7 @@ public final class NexusService {
 
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
-        this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository));
+        this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository, boardOwner));
         if (tenantResetRoute) {
             var resetCtx = server.createContext(dev.nexus.service.http.TenantResetHandler.PATH,
                     new dev.nexus.service.http.TenantResetHandler(this.tenantKeyedState, pciEnabled));
@@ -1114,7 +1076,7 @@ public final class NexusService {
      * structure means adding it here AND to that table, or the gate fails.
      */
     private List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState(
-            dev.nexus.service.http.MintRateLimiter mintRateLimiter, PgVectorRepository pgVectorRepository) {
+            dev.nexus.service.http.MintRateLimiter mintRateLimiter, PgVectorRepository pgVectorRepository, dev.nexus.service.board.BoardOwnerWiring boardOwner) {
         // TokenCache FIRST (code review B3): it is the one that closes the dead test's bearer. Evicting it before the
         // tuple evictor, which may wait up to TENANT_RESET_TUPLE_BOUND, keeps the window in which the old token still
         // authenticates as short as the first call, instead of the length of that wait.
@@ -1139,8 +1101,8 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("TenantImportSessions", importWiring::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant), dev.nexus.service.db.TenantKeyedState.of("TaxonomyCoverage", t -> taxonomyCoverage().evictTenant(t)),
-            dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs",
-                t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
+            dev.nexus.service.db.TenantKeyedState.of("AckDeadlineTimer", t -> boardOwner == null ? 0 : boardOwner.timer().evictTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs", t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
     }
 
     public TenantImportWiring importWiring() { return importWiring; }   // nexus-csayy.6: the import sessions and the singleton-lock fact
@@ -2156,6 +2118,17 @@ public final class NexusService {
                         tenant, ex.getMessage(), ex);
             }
 
+            // Arm 4 (RDR-253 Step 1, nexus-hczdo.1.1): identity retention, tombstones and binding-row pruning. One bounded
+            // pass per visit (IdentityRetention.PASS_LIMIT); failure is contained like the arms above.
+            try {
+                identityRepo.runRetention(tenant, statementTimeout);
+            } catch (Exception ex) {
+                complete = false;
+                tenantCause = worseTupleSweepCause(tenantCause, TupleSweepIncompleteCause.TENANT_ERROR);
+                log.warn("event=tuple_sweep_arm_failed arm=identity_retention tenant={} error={}",
+                        tenant, ex.getMessage(), ex);
+            }
+
             tenantsVisited++;
             // RDR-205 Phase 1 review, Sam's ruling (nexus-em75s.7, superseding the prior
             // "stamp on any progress" fix): stamp ONLY on a clean finish, per RDR-205
@@ -2236,7 +2209,6 @@ public final class NexusService {
     int dataSweepFailuresForTenant(String tenant) {
         return dataSweepFailuresByTenant.getOrDefault(tenant, 0);
     }
-
 
     /** Stop the HTTP server, TTL sweep scheduler, and purge-trash VACUUM
      *  executor immediately. */

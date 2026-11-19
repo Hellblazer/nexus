@@ -456,6 +456,16 @@ local JAR = step("build the gate jar first, pytest refuses a stale one"
   .. " (a cache miss is a Maven build; in a pool-host shell add --lab-run <class>)",
   "scripts/build-gate-jar.sh", true)
 
+-- The census and lint meta-tests this diff can turn red (T2 nexus/observability-lookback-2026-11-17,
+-- item 1: 42% of develop's red CI runs from 10-19 failed only on these). The script selects them
+-- from the surface map scripts/meta_tests.py build writes (the traced record of what each one reads), and runs them here in
+-- seconds, not as the lab-run lint bucket; it lists every meta-test it runs whatever the diff
+-- (new, edited since the trace, or reading through a subprocess) and why. It needs no engine.
+local META = step("the census and lint meta-tests this diff reaches (scripts/meta_tests.py: selected from the traced"
+  .. " surface map, every pick and every unconditional run named with its reason; Java ones are printed, the engine"
+  .. " suite runs them)",
+  "uv run python scripts/meta_tests.py run --base " .. quote(base), false)
+
 local MARK = "'integration and not lived_in and not keyed_voyage and not mandatory_regression_pin and not pg_bundle_artifact'"
 
 local function standing(select_all)
@@ -677,6 +687,9 @@ end
 -- standing checks after the python class's quick ones.
 if code or #members.docs > 0 then
   add("code", {JAR})
+end
+if #names > 0 then
+  add("meta", {META})
 end
 for _, class in ipairs(CLASSES) do
   if #members[class.name] > 0 then

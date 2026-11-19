@@ -23,6 +23,10 @@ from pathlib import Path
 
 import pytest
 
+#: Roots this file's subprocesses read, which scripts/meta_tests.py's trace cannot see:
+#: the JVM it starts runs service/src/build/java against temporary stores.
+META_SCANS = ("service/src/build", "service/pom.xml")
+
 pytestmark = pytest.mark.lint
 
 _SERVICE = Path(__file__).resolve().parents[1] / "service"

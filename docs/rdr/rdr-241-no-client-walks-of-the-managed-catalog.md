@@ -338,8 +338,16 @@ draft's claims point at.
   to case. Checked before the switch ships by
   running the check on one fixture before and after and diffing the reports
   — **Method**: Test
-- [ ] An engine filter on `author` or on a `meta` key answers in one statement
-  fast enough without a new index at 50,000 documents — **Status**: Unverified.
+- [x] An engine filter on `author` or on a `meta` key answers in one statement
+  fast enough without a new index at 50,000 documents — **Status**: Verified by
+  the spike (nexus-uwggq.2.1, 2026-11-18; T2 `nexus_rdr/241-research-4`), with
+  one exception. Every metadata statement ran in at most 80.8 ms and the
+  sensitive-locator route with its `alias_of` leg in at most 20.4 ms, so neither
+  gets an index. The author statements ran in 29 to 94 ms, except a broad
+  term (about 44,000 matches) paged at offset 40,000, at 153.7 ms; by the rule
+  fixed before the run (over 100 ms ships the named index), the author route
+  ships a GIN `pg_trgm` index on `lower(author)` and measures that statement
+  again with the index in place, since its cost is a deep page in tumbler order.
   I found no index on `catalog_documents.metadata` or on `author` in the
   Liquibase changelogs (only the full-text vector and the collection and
   `source_uri` columns; a comment at
@@ -905,3 +913,4 @@ the next one without the ratchet.
 - 2026-11-17: The sensitive-document doctor rows (nexus-uwggq.1.8) read "not checked" with a reason that names the cause the engine's list reported and a next step; `nx catalog doctor --sensitive-with-aspects` exits 3 ("could not check") when its row reads "not checked", and `nx doctor` keeps the rows non-gating (standing grant 3).
 - 2026-11-17: Client rules and Phase 1 Step 2 record that scoped client reads and writes refuse a blank or whitespace value (nexus-uwggq.1.9, after nexus-uwggq.1.6). The engine-side 400 and the `descendants` LIKE escape are not yet planned in this RDR; they are recorded in the nexus-uwggq.1.9 notes.
 - 2026-11-17: Phase 1's expected count reads 22 calls in 21 sites, the live walk-site scan on e0d833c58, because the `--check-references` switch (nexus-uwggq.1.5) moved to Phase 2; Phase 2's 18 is unchanged. The site table row, the count forecast, Phase 1 Step 2, the Test Plan scenario and the Finalization Gate text say the same (standing grant 3).
+- 2026-11-18: The author-and-meta critical assumption is verified by the Phase 2 spike (nexus-uwggq.2.1): no index for the metadata or sensitive-locator routes; the author route ships the named GIN `pg_trgm` index on `lower(author)` (one deep-offset statement at 153.7 ms) and measures it again with the index in place (grant 3, linda).

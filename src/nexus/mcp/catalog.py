@@ -108,25 +108,14 @@ def _file_path_matches(entry_path: str, wanted: str) -> bool:
 
 
 def _parse_user_tumbler(raw: str, field: str):
-    """Parse a caller-supplied tumbler, or raise a ValueError that says why.
+    """Parse a caller-supplied tumbler, or raise a ValueError that says why (nexus-zdzm5).
 
-    ``Tumbler.parse`` leaks int()'s "invalid literal for int() with base 10"
-    for anything that is not dotted integers; every tool here that took a
-    tumbler from its caller returned that text (nexus-zdzm5; ``resolve`` had
-    its own fix, now shared). The dashed form ``nx doctor`` prints
-    ("1-2188") is a physical collection prefix, not a tumbler.
+    The text lives in ``nexus.catalog.lookup.resolve_collections.parse_user_tumbler``,
+    shared with ``nx catalog resolve``.
     """
-    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
+    from nexus.catalog.lookup.resolve_collections import parse_user_tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
-    try:
-        return Tumbler.parse(raw)
-    except (ValueError, TypeError) as exc:
-        raise ValueError(
-            f"{field}={raw!r}: not a dotted tumbler (e.g. '1.2.3'). "
-            f"If you have a physical collection prefix like "
-            f"'1-2188' from `nx doctor`, that is NOT a tumbler. "
-            f"underlying: {exc}"
-        ) from exc
+    return parse_user_tumbler(raw, field)
 
 
 def _file_path_candidates(cat, wanted: str) -> list:
@@ -829,9 +818,20 @@ def catalog_link_query(
 def catalog_resolve(
     tumbler: Annotated[str, Field(description="Document tumbler, dotted form (e.g. \"1.2.3\"), or a document's source URI.")] = "",
     owner: Annotated[str, Field(description="Owner tumbler or registered owner name, dotted form (e.g. \"1.2\").")] = "",
-    corpus: Annotated[str, Field(description="Corpus label.")] = "",
+    corpus: Annotated[str, Field(description=(
+        "A collection content type (code, docs, rdr, knowledge): its live collections. "
+        "Or a free-form document corpus label, matched exactly. Both are returned together. "
+        "A value that is neither is an error."
+    ))] = "",
 ) -> list[str]:
     """Resolve a tumbler, owner, or corpus to its physical T3 collection name(s).
+
+    `corpus` is a collection content type (`code`, `docs`, `rdr`, `knowledge`),
+    which returns the live collections of that type, and/or a free-form
+    document corpus label, matched exactly against each document's `corpus`
+    metadata. A value that is neither a content type nor a label any document
+    carries is an error that lists the valid content types; a content type with
+    no live collections returns `[]`.
 
     Use `search`/`query` (nexus server) with the returned collection names
     to search their content. Returns a sorted list of distinct physical
@@ -841,43 +841,12 @@ def catalog_resolve(
     if err:
         return _fail([f"Error: {err}"])
     try:
-        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
-
         # nexus-blk2 Part 2: dotted-tumbler form is required (e.g. "1.2.3"
-        # for a document, "1.2" for an owner). The dashed format produced
-        # by ``nx doctor`` (e.g. "1-2188", "Luciferase-f2d57dbc") is the
-        # physical-collection prefix shape, NOT a tumbler. Tumbler.parse
-        # used to leak its int() ValueError to the caller; catch and
-        # surface an actionable diagnostic instead.
-        collections: set[str] = set()
-        if tumbler:
-            from nexus.catalog import entry_for_source_uri, looks_like_source_uri  # noqa: PLC0415 — function-local import avoids catalog import at module load
+        # for a document, "1.2" for an owner); the shared function turns a
+        # dashed physical-collection prefix into an actionable diagnostic.
+        from nexus.catalog.lookup.resolve_collections import resolve_collections  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
-            if looks_like_source_uri(tumbler):
-                entry = entry_for_source_uri(cat, tumbler)
-            else:
-                entry = cat.resolve(_parse_user_tumbler(tumbler, "tumbler"))
-            if entry and entry.physical_collection:
-                collections.add(entry.physical_collection)
-        if owner:
-            # GH #1527 (nexus-qiah5): a registered owner NAME is accepted
-            # here too, the same way `nx catalog resolve --owner` already
-            # does; the owner table maps it to the tumbler.
-            from nexus.catalog.owner_scope import OwnerScopeError, resolve_owner_scope  # noqa: PLC0415 — deferred, branch-local
-            try:
-                owner_tumbler = resolve_owner_scope(cat, owner)
-            except OwnerScopeError as exc:
-                raise ValueError(f"owner {exc}") from exc
-            entries = cat.by_owner(_parse_user_tumbler(owner_tumbler, "owner"))
-            for e in entries:
-                if e.physical_collection:
-                    collections.add(e.physical_collection)
-        if corpus:
-            # Route through catalog API — no direct ._db access (service-mode compatible).
-            for e in cat.by_corpus(corpus):
-                if e.physical_collection:
-                    collections.add(e.physical_collection)
-        return sorted(collections)
+        return resolve_collections(cat, tumbler=tumbler, owner=owner, corpus=corpus)
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error so the tool call never crashes the client
         return _fail([f"Error: {e}"])
 
@@ -952,11 +921,16 @@ def catalog_link_audit() -> dict:
     """Audit the link graph for health issues.
 
     Returns: total, by_type, by_creator, orphaned (+ count), duplicates (+ count),
-    stale_spans (+ count, positional spans on re-indexed docs),
-    stale_chash (+ count, content-hash spans that no longer resolve in T3).
+    stale_dchash (+ stale_dchash_count): one row per ``dchash:`` span that no longer
+    resolves, each with from_tumbler, to_tumbler, link_type, side ("from" or "to"),
+    span and status. The status is one of ``malformed``, ``missing`` (the document is
+    gone), ``unreadable`` (no source file, or it cannot be read or is not UTF-8),
+    ``changed`` (the source text differs from the one the span was minted on) or
+    ``out_of_range`` (the span reaches past the end of the text). Both keys are present
+    in every successful result. Positional and ``chash:`` spans are not checked.
 
-    Each stale_chash entry includes a ``reason`` field: ``"missing"`` (chunk deleted),
-    ``"document_deleted"``, or ``"error"`` (with ``error`` type name).
+    The stale_dchash report reads each document's source file, so it describes the
+    machine the tool runs on; an engine error fails the call: the result is an ``error`` object, with no stale_dchash keys.
     """
     cat, err = _require_catalog()
     if err:

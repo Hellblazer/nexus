@@ -513,8 +513,11 @@ def _row_case(row: TupleRow) -> str | None:
     sent the stamp (``sender_session_known`` False). NO LABEL IS NOT
     VERIFICATION: any data-token holder can mint a session token for any
     session id."""
+    from nexus.identity.board import identity_for_session  # noqa: PLC0415 -- deferred: read only for an identity-shaped from
+
     return sender_case(
         row.dims.get("from"), row.sender_session, stamp_known=row.sender_session_known,
+        identity_of=identity_for_session,
     )
 
 

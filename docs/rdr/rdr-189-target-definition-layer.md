@@ -529,7 +529,7 @@ across the 351 runs.
 have no shape parameter (Gap 2 stands). However `operator_extract(fields=…)`
 *is* an existing ad-hoc slot declaration, used in both grown and seeded
 plans — e.g. `fields: decision,rationale,rdr`
-(`conexus/plans/builtin/debug-default.yml` family),
+(`conexus/plans/builtin/review-default.yml`),
 `fields: verb,scope,strategy,object,domain`, and plan 353's
 `client_package_repo_owner,edge_auth_mechanism,token_type,tenant_data_path_flow`.
 P2 should build on `extract`'s field list as the seed of a declared slot

@@ -118,6 +118,52 @@ class BoardCiTokenScopeTest {
         }
     }
 
+    // ── RDR-252 Step 1: the --owner and --push topics are not the adapter's ───
+
+    private java.net.http.HttpResponse<String> ciOut(String token, String subspace, String keyTopic, String nonce)
+            throws Exception {
+        return sendAs(token, "POST", "/v1/tuples/out", Map.of(
+            "subspace", subspace,
+            "keys", Map.of("topic", keyTopic),
+            "dims", Map.of("from", "ci-board-writer"),
+            "body", "{\"state\":\"completed\"}",
+            "nonce", nonce));
+    }
+
+    @Test
+    void out_toOwnerAndPushTopics_is403_andToDoneStillSucceeds() throws Exception {
+        for (String suffix : new String[] {"--owner", "--push"}) {
+            String topic = "nexus-develop" + suffix;
+            var resp = ciOut(boardCiRaw, "board/ci/" + topic, topic, "board-ci-fenced-" + suffix);
+            assertThat(resp.statusCode()).as("%s: %s", topic, resp.body()).isEqualTo(403);
+            assertThat(resp.body()).contains("board-ci").contains(suffix);
+        }
+        var done = ciOut(boardCiRaw, "board/ci/nexus-develop--done", "nexus-develop--done", "board-ci-done-1");
+        assertThat(done.statusCode()).as("--done is the adapter's own wake: %s", done.body()).isEqualTo(200);
+        var plain = ciOut(boardCiRaw, "board/ci/nexus-develop", "nexus-develop", "board-ci-plain-1");
+        assertThat(plain.statusCode()).as(plain.body()).isEqualTo(200);
+        // A name that merely contains the words is not fenced: only the suffix is.
+        var near = ciOut(boardCiRaw, "board/ci/nexus-owner-push", "nexus-owner-push", "board-ci-near-1");
+        assertThat(near.statusCode()).as(near.body()).isEqualTo(200);
+    }
+
+    @Test
+    void out_judgesTheTopicActuallyWritten_subspaceAndKeyMustAgree() throws Exception {
+        // The template resolves from the subspace alone, so a writer could post to board/ci/nexus-develop with
+        // keys.topic naming the owner topic: both are judged, and a pair that disagrees is refused.
+        var keyOwner = ciOut(boardCiRaw, "board/ci/nexus-develop", "nexus-develop--owner", "board-ci-mismatch-1");
+        assertThat(keyOwner.statusCode()).as(keyOwner.body()).isEqualTo(403);
+        var keyPush = ciOut(boardCiRaw, "board/ci/nexus-develop--done", "nexus-develop--push", "board-ci-mismatch-2");
+        assertThat(keyPush.statusCode()).as(keyPush.body()).isEqualTo(403);
+        var subspaceOwner = ciOut(boardCiRaw, "board/ci/nexus-develop--owner", "nexus-develop", "board-ci-mismatch-3");
+        assertThat(subspaceOwner.statusCode()).as(subspaceOwner.body()).isEqualTo(403);
+        var disagree = ciOut(boardCiRaw, "board/ci/nexus-develop", "nexus-other", "board-ci-mismatch-4");
+        assertThat(disagree.statusCode()).as(disagree.body()).isEqualTo(403);
+        // The refusal is the credential's: the engine's own writers (the root token here) write those topics.
+        var root = ciOut(BOOT, "board/ci/nexus-develop--owner", "nexus-develop--owner", "board-ci-root-owner-1");
+        assertThat(root.statusCode()).as(root.body()).isEqualTo(200);
+    }
+
     // ── wrong template on the one route it can reach ────────────────────────
 
     @Test

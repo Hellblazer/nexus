@@ -24,6 +24,7 @@ import pytest
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database, VerifyResult
+from nexus.mcp.core import _t2_ctx
 from nexus.mcp_server import (
     _get_collection_names,
     _inject_t1,
@@ -2147,18 +2148,64 @@ def test_store_list_collection_not_found(t3):
 
 
 @pytest.mark.t2_tenant
-def test_memory_search_pagination(t2_path):
+def test_memory_search_pagination(t2_path, monkeypatch):
+    """Against the engine (RDR-209 Phase 0b, nexus-1gdv0.1.5): memory_search sends its page, the engine
+    answers the page and the total, and only the rows on the page are stamped. One tenant test carries
+    all of it, so the paged search adds none to tests/storage_touch_ceiling.toml."""
     for i in range(5):
         memory_put(content=f"finding about pagination topic {i}", project="testproj", title=f"page{i}.md")
+
+    def counts() -> dict[str, int]:
+        with _t2_ctx() as db:
+            return {r["title"]: r["access_count"]
+                    for r in db.search("pagination", project="testproj", access="silent")}
+
+    asked: list[tuple[int, int]] = []
+    real = T2Database.search_page
+
+    def spy(self, query, project=None, limit=20, offset=0, access="track"):
+        asked.append((limit, offset))
+        return real(self, query, project=project, limit=limit, offset=offset, access=access)
+
+    monkeypatch.setattr(T2Database, "search_page", spy)
+    before = counts()
     page1 = memory_search(query="pagination", limit=2, offset=0)
+    after = counts()
+    assert asked == [(2, 0)], "the page must reach the engine"
     assert "showing 1-2 of 5" in page1 and "next: offset=2" in page1
+    stamped = {t for t in after if after[t] == before[t] + 1}
+    assert len(stamped) == 2 and all(after[t] == before[t] for t in after if t not in stamped), (before, after)
     assert "showing 3-4 of 5" in memory_search(query="pagination", limit=2, offset=2)
+    assert "showing 5-5 of 5 (end)" in memory_search(query="pagination", limit=2, offset=4)
 
 
 @pytest.mark.t2_tenant
 def test_memory_search_pagination_offset_beyond_end(t2_path):
     memory_put(content="solitary finding about offsets", project="testproj", title="solo.md")
     assert "No results at offset 100" in memory_search(query="offsets", limit=10, offset=100)
+
+
+@pytest.mark.parametrize("limit", [0, -3])
+def test_memory_search_with_a_limit_below_one_is_a_usage_error_and_sends_nothing(monkeypatch, limit):
+    """RDR-209 Phase 0b (nexus-1gdv0.1.5): the page goes to the engine, so a page of no rows is refused
+    before the store is opened."""
+    def no_store():
+        raise AssertionError("memory_search opened T2 for a limit below 1")
+
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", no_store)
+    out = memory_search(query="anything", limit=limit)
+    assert "limit" in out.lower() and str(limit) in out
+    assert "opened T2" not in out
+
+
+def test_memory_search_with_a_negative_offset_is_a_usage_error_and_sends_nothing(monkeypatch):
+    def no_store():
+        raise AssertionError("memory_search opened T2 for a negative offset")
+
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", no_store)
+    out = memory_search(query="anything", limit=5, offset=-1)
+    assert "offset" in out and "-1" in out
+    assert "opened T2" not in out
 
 
 # ── Result size cap (nexus-2xjge) ───────────────────────────────────────────

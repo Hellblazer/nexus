@@ -12,14 +12,29 @@ Every aura ships off. Nexus never turns one on for you.
 
 ## What ships
 
-One aura ships: `ci_develop_red`. It watches `board/ci/nexus-develop--done`, the subspace where CI posts each finished develop run. When a run fails, it writes a block to your threads entry:
+One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/nexus-develop--owner`, where the engine's owner stamper posts who owns a red develop. The stamper names one owner for each red, and a next-up session behind it. The aura writes a block to your threads entry, worded for what this session has to do:
 
 ```text
 ## aura: develop CI red
-state: develop red at 8b30c16: diagnose before the next push (worktrees rule 7)
+state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: post kind=ack sha=8b30c161bdb23adab27171f3185c2b52f158b736 to board/ci/nexus-develop--owner.
 ```
 
-The next green develop run removes the block (any green, as [Clearing](#what-you-see-when-it-fires) says). It is meant for nexus developers: a red develop sha is a finding to diagnose before anyone pushes on top of it.
+There are six displays. `<owner>` is the owner's identity id: the row carries ids, not aliases, and the procedure has no read grant to resolve one.
+
+| The row says | The block says | Wakes you |
+|---|---|---|
+| You own it, the red is from your push (`earliest_suspect`) | `Develop is red at <sha>, first red in your push. Diagnose it.` | yes |
+| You own it, the leader takes it (`owner_unleased`, `owner_not_live`, `owner_not_member`, `no_record`, `chain_gap`, `stamper_error`) | `Develop is red at <sha>; the leader takes it (<reason>). Diagnose it.` | yes |
+| You own it after a hand-off (`handoff`) | `Develop is red at <sha>; it was handed to you after no acknowledgement. Diagnose it.` | yes |
+| Escalated, and it names you or no one (`escalated`) | `Develop is red at <sha>; no one acknowledged. Raise an ask to Sam.` | yes |
+| You are next up | `Develop is red at <sha>; <owner> owns it. You are next up.` | yes |
+| Someone else owns it | `Develop is red at <sha>; <owner> owns it. Hold your pushes.` | no |
+
+The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when it comes from the owner's identity. The state line holds 200 characters, so the hint names the post rather than the command, and is left off when it would not fit whole. The command is `nx tuple out board/ci/nexus-develop--owner --dim from=<your identity id> --dim kind=ack --dim sha=<the red sha> --nonce <a fresh uuid>` (`from` is the template's one required dimension, and on a board or CI post it is the identity id the engine records from your token, never an alias; `kind` and `sha` are dimensions, `topic` is the key the subspace carries). An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
+
+A session wakes (the channel notice below) only on a post that starts something: a row with `refresh: false` that makes it the owner or next up, or an escalated row that names it or names no one. A refresh row, where a newer red keeps the same owner, rewrites the block and does not wake it again. A `kind=clear` post (develop is green again) removes the block.
+
+Until the `push-train` group is formed and serves `nexus-develop`, no session loads the aura, so a session with `auras.ci_develop_red=on` sees no develop reds at all. The old `--done`-based aura is gone; `nx aura check` warns about an aura on an `--owner` subspace that is loaded by a group not serving its topic.
 
 ## Turning one on
 
@@ -47,21 +62,49 @@ Turning an aura on in the global config turns it on for every Claude session on 
 
 **The threads entry.** The block goes into your own entry in T2 project `threads`, the one whose first line is `session: <your session id>` (the [cross-session board](agents/threads-board.md), shown in `nx console`, Threads tab). The block is always two lines: the heading `## aura: <name>` and one `state:` line of at most 200 printable ASCII characters. A later fire replaces it. The aura never creates an entry: with no entry carrying your session line, or with two, nothing is written and the server logs why.
 
-**The channel.** When the aura's file sets `display.channel = true`, as `ci_develop_red` does, the session also gets a channel notice. It is a fixed template and never carries the procedure's text:
+**The channel.** When the aura's file sets `display.channel = true`, the session also gets a channel notice on every fire. It is a fixed template and never carries the procedure's text:
 
 ```text
-aura ci_develop_red fired on board/ci/nexus-develop--done tuple <id>; see the "aura: develop CI red" block in your threads entry
+aura ci_develop_red fired on board/ci/nexus-develop--owner tuple <id>; see the "aura: develop CI red" block in your threads entry
 ```
 
 That notice wakes an idle session the way any channel message does.
 
-**Clearing.** An aura with a `[clear]` table removes its block when a post matching that table arrives on the same subspace. For `ci_develop_red` that is the next develop run whose outcome is `success`, for any sha: a green that finishes late for an older sha also clears a newer red, so after a clear, check the newest develop run before you push. A clear does not run the procedure.
+`display.channel` may also be the name of a boolean field of the procedure's result (`channel = "wake"`, as `ci_develop_red` does). The notice is then sent only when that field is `true`, so one aura can wake some sessions and leave the block alone for the rest. The text is still the fixed template. A result with no such field, or one that is not a boolean, is a failure like a missing `when` field: the block shows `aura error: result on tuple <id>`, no notice goes out, and three in a row disable the aura.
+
+**Clearing.** An aura with a `[clear]` table removes its block when a post matching that table arrives on the same subspace. For `ci_develop_red` that is a `kind=clear` post, which the stamper writes when develop is green again. A clear does not run the procedure.
 
 Posts on the aura's subspace are not announced to the agent unless the session also subscribes that subspace itself; the aura's notice is the only one.
 
 ## When an aura fails
 
 A procedure error, a limit, a missing field or a display error replaces the block's line with `aura error: <kind> on tuple <id>`. It never stops the session's other mail. Three failures in a row disable the aura for the rest of the session, and the line becomes `aura disabled after 3 failures: <kind>`. A disabled aura neither fires nor clears until the server starts again.
+
+## Loading an aura for a group
+
+An aura file may say which group it is for:
+
+```toml
+[load]
+group = "push-train"      # one key; any other key refuses the file
+```
+
+A group-gated aura loads only in a session whose identity is a member of that group, and only while the group is live. Membership is RDR-253's: the server reads the identity's memberships once, when it starts, and then one group record for each group an aura names. The group is not live when its record has `ended_at` set, when its `ends` has passed, or when it has no record. A session that is not a member never subscribes to the aura's trigger. Joining or leaving a group does not change what is loaded: reconnect the MCP server (`/mcp`) afterwards.
+
+A server that started with no identity loads no group-gated aura, and an aura with no `[load]` table loads as before. A Claude Desktop server has an identity only when it made the bind itself from the pending file, so otherwise it loads none. The one case that is not left until a reconnect: a server that loaded with no identity and whose identity lease later adopts its first one (any move from no identity to an identity: the bind from the pending file, or a token file a hook wrote) gates its group-gated auras once more at that moment (the reads are the same two, once), and loads the ones that pass; an identity the heartbeat reported before the load counts even when the token read at load missed it. A server that was bound when it loaded never gates again. Membership and group state are read once, at load: a group disbanded (or a seat that leaves it) while the session runs leaves the auras it already loaded in place until the MCP server reconnects, and a load that could not read the engine (`memberships_unreadable`, `group_unreadable`) stays that way until a reconnect, which `nx aura list` says on that aura's line. When an aura that is on is group-gated and this session's server wrote no state file, `nx aura list` says `not loaded: no state file` on its line. A read that fails (the engine is down, the group client is missing) loads none and gives the reason `memberships_unreadable` or `group_unreadable`.
+
+`nx aura list` says, for each aura that is on, whether this session's server loaded it, and why: `loaded`, or `not loaded: not_a_member`, `unbound`, `group_disbanded`, `no_group_record`, `memberships_unreadable`, `group_unreadable`, with the group named. The server keeps this in `~/.config/nexus/auras/loaded-<claude pid>.<startedAt>.json`, written at load and rewritten when its heartbeat sees the identity change, and removed when it exits. `nx aura list` reads the file of its nearest Claude process and deletes a file whose process is gone (no registry file with that pid and `startedAt`, or a pid whose start time differs, which covers `/restart`). With no Claude ancestor (a shell outside any Claude session) it prints every file on standard error, none claimed: one line per file with its Claude pid, identity and server pid, then one line per aura with its load decision. The table and `--json` on standard output say nothing about loading then. After a cross-seat `/resume` or a take-over the loaded set and `self.identity` stay the old identity's until the server reconnects, and `nx aura list` prints the mismatch and says so on standard error.
+
+## The session's own identity as an argument
+
+An argument can come from the session itself:
+
+```toml
+[args]
+me = "self.identity"      # the session's identity id, filled when the server loads the aura
+```
+
+`self.identity` is an argument source, not a reserved argument name: the procedure declares `me:string` like any other argument, and `nx aura check` accepts the source for a declared string argument and refuses it for another type. A procedure can compare it with the owner a row names. It is the identity the server held at load; a session that has no identity cannot fire an aura that uses it (the block shows `aura error: args`).
 
 ## Turning one off
 
@@ -77,38 +120,47 @@ Auras never load in a `claude -p` child process, even one that inherited its par
 ## Checking aura files
 
 ```bash
-nx aura list          # name, summary, trigger, on or off, and the deciding level
+nx aura list          # name, summary, trigger, on or off, the deciding level, and whether it loaded
 nx aura check [NAME]  # grammar, procedure, argument mapping, subspace fields
 ```
 
 `nx aura check` parses each file against its closed set of keys, resolves the procedure and checks the argument mapping against the procedure's header, and checks the match and argument fields against the subspace's template. It refuses a `[clear]` that a post could meet together with the trigger, and two auras that write the same threads block. Checks that need the engine are skipped without it, and the output says which.
 
+`nx aura check` also warns, without refusing, about an aura triggered on a `board/ci/<base>--owner` subspace whose `[load]` group is not the group that serves `<base>`: no `[load]` table, a group with no record, a disbanded one, or one whose `serves` lacks `<base>`. No other aura is checked for this. When the group cannot be read the check is reported as skipped, never as passed.
+
 ## Writing your own
 
-An aura file sits beside its procedure in a library root: the shipped `src/nexus/procedures/`, or a repo's `.nexus/procedures/` (read only while `NX_PROCEDURES_REPO_ROOT=1`). The shipped pair is the example to copy:
+An aura file sits beside its procedure in a library root: the shipped `src/nexus/procedures/`, or a repo's `.nexus/procedures/` (read only while `NX_PROCEDURES_REPO_ROOT=1`). The shipped `ci_develop_red` is the shape to copy. This copy wraps the shipped `ci_red_notice` procedure, so it passes the arguments that procedure declares, and it takes the engine's owner and clear posts only:
 
 ```toml
-aura = "ci_develop_red"
-summary = "A red develop sha, posted to this session's threads entry."
+aura = "my_develop_red"
+summary = "A red develop sha and who owns it, posted to this session's threads entry."
 procedure = "ci_red_notice"
 
 [trigger]
-subspace = "board/ci/nexus-develop--done"   # one concrete board/<topic> or board/ci/<topic>; no wildcards
-match = { kind = "sha", outcome = "failure" } # equality on dimensions; absent means every post
+subspace = "board/ci/nexus-develop--owner"       # one concrete board/<topic> or board/ci/<topic>; no wildcards
+match = { kind = "owner", from = "engine" }      # equality on dimensions; absent means every post
 
-[args]                                       # each procedure argument from dims.<f>, body.<f>, id, subspace, or = "literal"
+[args]                                           # each procedure argument from dims.<f>, body.<f>, id, subspace, self.identity, or = "literal"
 sha = "dims.sha"
-outcome = "dims.outcome"
+owner = "body.owner"
+next = "body.next"
+refresh = "body.refresh"
+reason = "body.reason"
+me = "self.identity"
 
 [when]
-field = "show"                               # a boolean in the procedure's result; absent means always show
+field = "show"                                   # a boolean in the procedure's result; absent means always show
 
 [clear]
-match = { kind = "sha", outcome = "success" } # optional; must differ from the trigger on some key
+match = { kind = "clear", from = "engine" }      # optional; must differ from the trigger on some key
 
 [display]
-channel = true                               # optional fixed-template notice
-threads = "develop CI red"                   # required: the block title, one line, at most 80 characters
+channel = "wake"                                 # optional fixed-template notice: true, false, or a boolean field of the result
+threads = "my develop CI red"                    # required: the block title, one line, at most 80 characters
+
+# [load]                                         # optional: load only in a member of this group (see above)
+# group = "push-train"
 ```
 
 The procedure returns a table with a `text` field (and the `when` field, if named). An optional `[limits]` table can lower the procedure limits for this aura. Any other key, a missing required key or a wrong type refuses the file. Run `nx aura check <name>` before turning it on.

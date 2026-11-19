@@ -244,4 +244,133 @@ class TupleSenderSessionHttpTest {
         assertThat(tuples.size()).as(rd.body()).isEqualTo(1);
         assertThat(tuples.get(0).get("sender_session").isNull()).isTrue();
     }
+
+    // ── RDR-253 Step 2 (nexus-hczdo.1.2): the stamp of an identity token ─────────────────────────────────────
+
+    private HttpResponse<String> sendIdentity(String identityToken, String sessionToken, String method, String path,
+                                              Object body) throws Exception {
+        var b = TestHttp.request("http://127.0.0.1:" + port + path)
+                .header("Authorization", "Bearer " + TENANT_TOKEN)
+                .header("Content-Type", "application/json");
+        if (identityToken != null) {
+            b.header("X-Nexus-Identity-Token", identityToken);
+        }
+        if (sessionToken != null) {
+            b.header("X-Nexus-T1-Session", sessionToken);
+        }
+        var req = "GET".equals(method) ? b.GET().build()
+                : b.method(method, HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static Map<String, Object> process(String sid, int pid) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("session_id", sid);
+        m.put("host", "h1");
+        m.put("pid", pid);
+        m.put("started_at", 5000L + pid);
+        m.put("proc_start", "2026-11-17T10:00:00Z");
+        return m;
+    }
+
+    private JsonNode createSeatAndBind(String sid, int pid) throws Exception {
+        String name = "stamp-" + UUID.randomUUID().toString().substring(0, 8);
+        var created = sendIdentity(null, null, "POST", "/v1/identity", Map.of("kind", "seat", "name", name, "created_by", "sam"));
+        assertThat(created.statusCode()).as(created.body()).isEqualTo(200);
+        String id = MAPPER.readTree(created.body()).get("id").asText();
+        Map<String, Object> bind = new LinkedHashMap<>(process(sid, pid));
+        bind.put("event", "start");
+        bind.put("expected_generation", 0);
+        var bound = sendIdentity(null, null, "POST", "/v1/identity/" + id + "/bind", bind);
+        assertThat(bound.statusCode()).as(bound.body()).isEqualTo(200);
+        return MAPPER.readTree(bound.body());
+    }
+
+    private void bindClear(String id, String sid, int pid) throws Exception {
+        Map<String, Object> bind = new LinkedHashMap<>(process(sid, pid));
+        bind.put("event", "clear");
+        bind.put("expected_generation", 1);
+        var r = sendIdentity(null, null, "POST", "/v1/identity/" + id + "/bind", bind);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+    }
+
+    private String stampOfOut(String identityToken, String sessionToken) throws Exception {
+        String to = "http-" + UUID.randomUUID().toString().substring(0, 8);
+        var out = sendIdentity(identityToken, sessionToken, "POST", "/v1/tuples/out", mailboxOut(to, "n-1"));
+        assertThat(out.statusCode()).as(out.body()).isEqualTo(200);
+        JsonNode stamp = rdOnly(TENANT_TOKEN, "mailbox/" + to, to).get("sender_session");
+        return stamp.isNull() ? null : stamp.asText();
+    }
+
+    /** The open item of RDR-253 Step 2: the stamp of an identity token is the session id of the identity's newest
+     *  binding row under the token's generation, so a tuple written after /clear carries the NEW session id with
+     *  the token the MCP server already holds; and the stamp maps back to the writer's identity and generation
+     *  through the session index (RDR-252's owner stamper reads it that way). */
+    @Test
+    void outWithAnIdentityToken_isStampedWithTheIdentitysCurrentSession_acrossAClear() throws Exception {
+        String sid1 = "sess-" + UUID.randomUUID();
+        String sid2 = "sess-" + UUID.randomUUID();
+        JsonNode bound = createSeatAndBind(sid1, 31);
+        String id = bound.get("id").asText();
+        String token = bound.get("identity_token").asText();
+
+        assertThat(stampOfOut(token, null)).as("before the clear").isEqualTo(sid1);
+        bindClear(id, sid2, 31);
+        assertThat(stampOfOut(token, null)).as("the same token, after the clear").isEqualTo(sid2);
+
+        var lookup = sendIdentity(null, null, "GET", "/v1/identity/sessions/" + sid2, null);
+        assertThat(lookup.statusCode()).as(lookup.body()).isEqualTo(200);
+        JsonNode mapped = MAPPER.readTree(lookup.body());
+        assertThat(mapped.get("identity").asText()).as("the stamp maps to the writer's identity").isEqualTo(id);
+        assertThat(mapped.get("generation").asInt()).isEqualTo(1);
+    }
+
+    @Test
+    void anIdentityTokenWinsOverAMintedSessionAndASupersededGenerationStampsItsOwnLastSession() throws Exception {
+        String sid1 = "sess-" + UUID.randomUUID();
+        String minted = "sess-" + UUID.randomUUID();
+        JsonNode bound = createSeatAndBind(sid1, 32);
+        String id = bound.get("id").asText();
+        String token = bound.get("identity_token").asText();
+        assertThat(stampOfOut(token, mintSession(minted))).as("both on one request: the identity's session").isEqualTo(sid1);
+        assertThat(stampOfOut(null, mintSession(minted))).as("the minted session alone, as before").isEqualTo(minted);
+
+        // A new process takes the seat (the client found the old holder gone): generation 2.
+        String sid3 = "sess-" + UUID.randomUUID();
+        Map<String, Object> resume = new LinkedHashMap<>(process(sid3, 33));
+        resume.put("event", "resume");
+        resume.put("expected_generation", 1);
+        resume.put("holder_gone", process(sid1, 32).entrySet().stream().filter(e -> !e.getKey().equals("session_id"))
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)));
+        var second = sendIdentity(null, null, "POST", "/v1/identity/" + id + "/bind", resume);
+        assertThat(second.statusCode()).as(second.body()).isEqualTo(200);
+        String newToken = MAPPER.readTree(second.body()).get("identity_token").asText();
+        assertThat(stampOfOut(newToken, null)).as("the new process").isEqualTo(sid3);
+        assertThat(stampOfOut(token, null)).as("a send is open to a superseded token; its stamp is its own generation's session")
+                .isEqualTo(sid1);
+    }
+
+    @Test
+    void anAckReplyUnderAnIdentityToken_isStampedWithTheIdentitysCurrentSession() throws Exception {
+        String sid1 = "sess-" + UUID.randomUUID();
+        String sid2 = "sess-" + UUID.randomUUID();
+        JsonNode bound = createSeatAndBind(sid1, 34);
+        String id = bound.get("id").asText();
+        String token = bound.get("identity_token").asText();
+        String outbox = "http-" + UUID.randomUUID().toString().substring(0, 8);
+        assertThat(send(TENANT_TOKEN, null, "/v1/tuples/out", mailboxOut(id, "n-1")).statusCode()).isEqualTo(200);
+        var claim = sendIdentity(token, null, "POST", "/v1/tuples/inp", Map.of(
+                "subspace", "mailbox/" + id, "keys_pattern", Map.of("to", id), "claimant", "w", "lease_s", 60));
+        assertThat(claim.statusCode()).as(claim.body()).isEqualTo(200);
+        String claimId = MAPPER.readTree(claim.body()).get("claim_id").asText();
+        bindClear(id, sid2, 34);
+        Map<String, Object> reply = new LinkedHashMap<>();
+        reply.put("subspace", "mailbox/" + outbox);
+        reply.put("keys", Map.of("to", outbox));
+        reply.put("dims", Map.of("from", "someone"));
+        reply.put("body", "answer");
+        var ack = sendIdentity(token, null, "POST", "/v1/tuples/ack", Map.of("claim_id", claimId, "claimant", "w", "reply", reply));
+        assertThat(ack.statusCode()).as(ack.body()).isEqualTo(200);
+        assertThat(rdOnly(TENANT_TOKEN, "mailbox/" + outbox, outbox).get("sender_session").asText()).isEqualTo(sid2);
+    }
 }

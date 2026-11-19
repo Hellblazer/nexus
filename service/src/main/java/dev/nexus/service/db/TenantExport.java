@@ -479,6 +479,38 @@ public final class TenantExport {
             .build(),
         data("claude_assisted_remediation_consents").pk("id bigint").reassigned("id")
             .build(),
+        // ── session identity (RDR-253): seats, aliases, the binding log and the session index. DATA: a seat is a
+        // long-lived name the user created, and the counter must survive a restore or an id would be issued twice.
+        // A restored holder's process is gone, so lapse and the SessionStart sweep settle its state.
+        data("identity_counters").pk("tenant_id text")
+            .notRefs("last_n")
+            .build(),
+        data("identity_records").pk("tenant_id text", "id text")
+            // parent is a label naming an identity that retention may have tombstoned, not a reference.
+            .notRefs("holder_started_at")
+            .build(),
+        data("identity_aliases").pk("tenant_id text", "name text")
+            .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
+            .build(),
+        data("identity_bindings").pk("tenant_id text", "identity_id text", "seq integer")
+            .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
+            .notRefs("started_at", "holder_gone")
+            .build(),
+        data("identity_sessions").pk("tenant_id text", "session_id text")
+            .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
+            .build(),
+        data("identity_work").pk("tenant_id text", "identity_id text", "kind text", "ref text")
+            .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
+            .build(),
+        data("identity_memberships").pk("tenant_id text", "identity_id text", "group_name text")
+            .fk("tenant_id,identity_id", "identity_records", "tenant_id,id")
+            .build(),
+        // RDR-252 Step 1: the permanent group record. DATA: a group is made by Sam's request and lives until it is disbanded.
+        // leader is an identity id kept as a label (the override exists for a leader that is gone), not a reference.
+        data("group_records").pk("tenant_id text", "name text")
+            // serves is a JSON array of topic base names and ack_deadline_by_topic maps them to minutes: not references.
+            .notRefs("ack_deadline_by_topic", "serves")
+            .build(),
         // ── excluded ──
         excluded("pdf_pipeline", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint")
             .reassigned("pipeline_id")

@@ -544,6 +544,7 @@ class TenantExportRegistryParityTest {
     static final Map<String, String> GLOBAL_TENANT_KEYED = new TreeMap<>(Map.of(
         "session_tokens", "credentials: a session token, never in a tenant's export",
         "service_tokens", "credentials: a tenant's service token, never in a tenant's export",
+        "identity_tokens", "credentials: an identity token (RDR-253), never in a tenant's export",
         "tuple_tenants", "engine registry of tenants that hold tuples",
         "request_ledger_tenants", "engine registry of tenants with request-ledger rows"));
 

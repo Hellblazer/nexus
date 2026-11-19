@@ -336,10 +336,10 @@ once that code is reviewed. The repository lists
 memberships by identity and by group, in the order they were created.
 RDR-253 Step 1 builds the add, remove and list routes for these rows
 (`nexus_rdr/252-research-7` F1), and RDR-253 Step 2 puts its ownership and
-generation check on them. This RDR's Step 1 adds two group rules to the add
+generation check on them. This RDR's Step 1 adds three group rules to the add
 and remove routes: adding a membership in a group that has a record requires
-a seat, and removing the current leader's membership is refused; the leader
-hands the group on first. `nx group join` and `leave` call those routes. It needs no re-pointing across `/clear`: the identity stays and only its session
+a seat, adding one to a disbanded group is refused, and removing the current
+leader's membership is refused; the leader hands the group on first. `nx group join` and `leave` call those routes. It needs no re-pointing across `/clear`: the identity stays and only its session
 id changes (Sam's answer on gate finding S3, "re-point and liveness", met by
 the identity). Keying it by identity makes "which groups am I in" one read at
 server start. A group is disbanded by setting `ended_at`; the record stays
@@ -370,7 +370,9 @@ treats it as not live (`reason=owner_unleased`; `252-research-5` F4). A
 Desktop server knows its identity only when it made the bind itself from the
 pending file (`252-research-6` F5); RDR-253 otherwise gives it no token and
 no identity. It loads group-gated auras only in that case, and otherwise
-loads none and says so in `nx aura list`. A
+loads none and says so in `nx aura list`; when the identity lease later
+adopts its first identity, the server gates its group-gated auras once more
+(see Load by membership). A
 delegated identity is mapped to its `parent` before any of this, so a push by
 a `claude -p` child is owned by the seat that dispatched it
 (`252-research-5` F6). No other liveness source is added; the session
@@ -392,7 +394,7 @@ writes.
 | Level | What the engine checks | Guards against | Cost |
 |---|---|---|---|
 | 0 (today) | Nothing on these subspaces; readers see the stamp as a label | Nothing; a reader may notice a mismatch | None |
-| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, the writer is the `leader` it names, and the write adds its membership. A tokenless write is refused on both, except the audited operator override on a group; RDR-253's `unleased` exception applies to memberships only | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state | One check on `group/*` beside RDR-253's four fenced families |
+| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, and for a re-form of a disbanded name (a first write too), the writer is the `leader` it names, and the write adds its membership. A tokenless write is refused on both, except the audited operator override on a group; RDR-253's `unleased` exception applies to memberships only | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state | One check on `group/*` beside RDR-253's four fenced families |
 | 2 (met by level 1) | Only the current process of the leader identity may write | A session that is not the current leader, including a stale process of the leader; not a tenant-token holder who binds the leader's seat | Was "leadership as a claim with `claim_id`, needing a heartbeat"; RDR-253's binding renewal and generation check deliver it, so this RDR adds no separate mechanism for it (`nexus_rdr/252-research-4` F10) |
 | 3 (later) | Per-principal identity, host-attested Desktop sessions (JDR-002's own revisit list) | A second human principal or an agent class the tenant does not trust | Engine and auth work beyond this RDR |
 
@@ -419,9 +421,15 @@ identity token the script reads as a Bash child of its session
 (`nexus_rdr/252-research-4` F3):
 
 ```
+key:   topic=nexus-develop--push   nonce: push-<tip>
 dims:  from=<identity id>  kind=push  sha=<tip>
 body:  {"base": "<develop sha before the push>", "n": <commits>}
 ```
+
+The nonce is required by the template's `keys+nonce` identity, and a retry of
+one push lands on the same tuple. The script releases the push lock before it
+writes the record and stops the write after 20 seconds
+(`NX_PUSH_RECORD_TIMEOUT_S`), so a slow tuple space never holds a push.
 
 The stamper trusts the record's stamp, never `from` (Sam's answer on gate
 finding S4): it maps the stamped session id to an identity through the
@@ -521,8 +529,12 @@ Load is evaluated when the session's MCP server starts, the only time auras
 and config are read today (Sam's answer 3). A server start is not a new
 session: the session survives an MCP reconnect (`/mcp`) and a restart, as the
 8.3.0 restart round on 2026-11-16 showed. To join or leave a group, a session
-writes or removes its membership and reconnects its MCP server. Unknown keys
-are refused by `nx aura check`.
+writes or removes its membership and reconnects its MCP server. One case is
+not left to a reconnect: a server that loaded with no identity gates its
+group-gated auras once more when the identity lease adopts its first identity
+(from the pending file, or from a token file a hook wrote), and loads the ones
+that pass. Every other change waits for a reconnect. Unknown keys are refused
+by `nx aura check`.
 
 **Typed displays and noise.** `ci_develop_red` triggers on
 `board/ci/nexus-develop--owner` and clears on its `kind=clear` rows, so the
@@ -549,7 +561,9 @@ and today an argument can come only from the tuple or a literal. So:
   3; `252-research-6` F6), so after a switch the loaded auras and
   `self.identity` are the old identity's until the MCP server reconnects;
   `nx aura list` shows the mismatch and says to reconnect. A server that
-  starts unbound loads no group-gated aura and says so the same way. The
+  starts unbound loads no group-gated aura and says so the same way, and
+  gates them once more when the lease adopts its first identity; every
+  other change waits for a reconnect. The
   MCP server writes its bound identity and loaded aura set to a state file
   keyed like RDR-253's token files by its Claude process's pid and start
   time (`~/.config/nexus/auras/loaded-<claude pid>.<startedAt>.json`),
@@ -918,6 +932,10 @@ None.
   refresh after it carries `reason=escalated`.
 - Identity switch: after a cross-seat `/resume`, `nx aura list` reports the
   mismatch until a reconnect; an unbound start loads no group-gated aura.
+- Late bind: a server that loaded with no identity gates its group-gated
+  auras once when the lease adopts its first identity (also when that lands
+  while the load is still running), and the runtime fires with
+  `self.identity` filled; a later identity change gates nothing again.
 - `nx group join` refuses an ephemeral identity; `join`, `leave` and
   `list` round-trip.
 - Stamp mapping: the stamper maps a stamp to an identity through the
@@ -1057,3 +1075,5 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-17: fix check `252-fix-check-b01405db2a50` passed 3-0; its counted items fixed (`nexus_rdr/252-research-8`): back to `board/ci/<topic>` (its cap counts each subspace, so nothing was crowded out, and the aura grammar takes it); refreshed rows carry `episode_at`, `refresh` and `handoffs`, keep the current owner and do not wake; `serves` format, keys within `serves`, one live group per topic under an advisory lock; re-forming a disbanded name by the former leader or, when it is not live, another seat, starting with no other members; disband removes memberships; the override also for an `unleased` or purged leader; the escalated display with nobody live; clear rows only for a topic with an open owner row; the aura state file keyed and cleaned like RDR-253's token files; the serving group in place of `push-train` in the stamper rules; Activation forms with `--serves`.
 - 2026-11-17: fix check `252-fix-check-b03c30cf28aa` failed (2 counted BLOCKS-PLANNING: a start-time replay with no mechanism, and the `board-ci` token reaching owner rows); fixed once (`nexus_rdr/252-research-9`): the replay promise dropped (a late server shows the next row); the engine refuses a `board-ci`-scoped write to `--owner` and `--push`; the stamper runs on every `--done` write, owner rows only for a served topic and clear rows for any open red; refreshes carry their row's reason and hand-offs `reason=handoff`; the null-owner escalated display; re-form named in the leader-only rules, locked, every field the form call's, history kept in `gc_audit`; the disband cascade exempt from the membership checks, no join to a disbanded group, `ended_at` cleared only by re-form; one lock order shared with the stamper; the override for an `unleased` leader stated in RDR-253's terms; the state-file cleanup by RDR-253's holder check; the aura's group tied to the serving group.
 - 2026-11-17: accepted by Sam ("Accept and plan"); last fix check `252-fix-check-b460ee2181a5` PASS 3-0; its seven counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
+- 2026-11-18: wording matched to the reviewed Step 2 code (nexus-igea9.2, 5cf9ab46d): the push record's key and `push-<tip>` nonce, the lock released before the write, and the write's time bound.
+- 2026-11-19: wording matched to the reviewed Step 4 code (nexus-igea9.7): a server that loaded with no identity gates its group-gated auras once more when the identity lease adopts its first identity; every other change waits for a reconnect; Test Plan line added.

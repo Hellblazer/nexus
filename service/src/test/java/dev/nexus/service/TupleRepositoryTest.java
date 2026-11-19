@@ -592,7 +592,7 @@ class TupleRepositoryTest {
                 "body", "nonce-kind-instance", null))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("field 'address_kind'")
-                .hasMessageContaining("not in [agent, session]");
+                .hasMessageContaining("not in [agent, session, identity]");
 
         assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
     }
@@ -605,7 +605,7 @@ class TupleRepositoryTest {
                 "body", "nonce-kind-bogus", null))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("field 'address_kind'")
-                .hasMessageContaining("not in [agent, session]");
+                .hasMessageContaining("not in [agent, session, identity]");
 
         assertThat(repo.rdp(TENANT_A, "mailbox/" + to, null, 10, null)).isEmpty();
     }

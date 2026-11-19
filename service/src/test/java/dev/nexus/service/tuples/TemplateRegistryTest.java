@@ -81,7 +81,7 @@ class TemplateRegistryTest {
         assertEquals(TemplateSchema.IdFrom.KEYS_NONCE, mailbox.idFrom());
         assertEquals(List.of("from"), mailbox.idDims());
         assertTrue(mailbox.dimensions().get("from").required());
-        assertEquals(List.of("agent", "session"), mailbox.dimensions().get("address_kind").values());
+        assertEquals(List.of("agent", "session", "identity"), mailbox.dimensions().get("address_kind").values());
 
         TemplateSchema directory = registry.templates().stream()
                 .filter(t -> t.name().equals("directory/<name>")).findFirst().orElseThrow();

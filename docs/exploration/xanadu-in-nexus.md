@@ -30,7 +30,7 @@ The catalog is the connective tissue between Nexus's [storage tiers](../storage-
 
 **The [query planner](../querying-guide.md) uses the catalog to optimize search.** Instead of searching everything and hoping for relevance, the planner resolves matching documents in the catalog first, by author, content type, document subtree, or link relationships, then searches only their collections. For multi-step analytical queries, it composes graph traversal with search to maximize the quality of retrieved content: following citation chains, crossing collection boundaries, and scoping each step to the documents relevant to the question.
 
-**Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) verifies that content-hash spans resolve, detects orphaned links to deleted documents, and flags positional spans that may have gone stale (the command is hidden from `--help`). Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
+**Link audit maintains graph health.** [`nx catalog link-audit`](../catalog.md#link-health) detects orphaned links to deleted documents and duplicate links, and flags `dchash:` passage spans whose source text has changed or gone (the command is hidden from `--help`; positional and `chash:` spans are not checked). Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
 
 ## What we borrowed
 
@@ -60,9 +60,9 @@ Nexus doesn't implement full transclusion, but it does implement span-addressed 
 
 **Positional spans** (`42-57` for line ranges, `3:100-250` for chunk character ranges) are simple and human-readable, but they break when the document is re-indexed. If the content shifts, the line numbers point to the wrong text.
 
-**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. They survive re-indexing as long as the content doesn't change. Use these for any reference that needs to last. For sub-chunk precision, `chash:<sha256hex>:<start>-<end>` references a character range within the hashed chunk. The hash pins which chunk; the range pins where within it. Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
+**Content-addressed spans** (`chash:<sha256hex>`) identify a passage by the hash of its text. A chash span holds only while that chunk's text is unchanged: re-chunking the document changes the chunk's text and so its hash. For a durable passage pin, use a **document-offset span** (`dchash:<hash>:<start>-<end>`, made with `nx catalog span`), which names code-point offsets in the document's canonical text and survives re-chunking of unchanged text. For sub-chunk precision, `chash:<sha256hex>:<start>-<end>` references a character range within the hashed chunk. The hash pins which chunk; the range pins where within it. Every chunk's T3 id is already its content hash (RDR-108, RDR-180), so there is nothing to backfill.
 
-The [link audit](../catalog.md#link-health) system tracks both: positional spans that may have gone stale after re-indexing, and content-hash spans that no longer resolve. Content-addressed spans are validated when created. A hash that doesn't resolve in the collection is rejected immediately.
+The [link audit](../catalog.md#link-health) system reports `dchash:` spans that no longer resolve. It does not check positional or `chash:` spans. Content-addressed spans are validated when created. A hash that doesn't resolve in the collection is rejected immediately.
 
 ## What we left out
 

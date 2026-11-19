@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+import pytest
+
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILL = REPO_ROOT / ".claude" / "skills" / "release" / "SKILL.md"
@@ -92,9 +97,9 @@ def _flat(section: str) -> str:
 
 def test_section_states_the_decisions_of_record() -> None:
     flat = _flat(_section())
-    # the CHANGELOG engine pairing; the accepted risk of the skipped legs; the
-    # unit suite as a hand step.
-    for needle in ("Pairs with engine-service-v", "accepted risk", "unit suite"):
+    # the CHANGELOG engine pairing; the accepted risk of the skipped legs; no hand
+    # unit suite (Sam 2026-11-18: the release PR's CI is the full run).
+    for needle in ("Pairs with engine-service-v", "accepted risk", "There is no hand unit suite"):
         assert needle in flat or needle in flat.lower(), f"section lacks: {needle}"
 
 
@@ -131,8 +136,8 @@ def test_engine_floor_check_precedes_the_pr_and_closes_the_lane() -> None:
     flat = _flat(section)
     assert "newest published `engine-service-v*` tag is the one the base tag pins" in flat
     assert "closes the lane" in flat
-    # "before the PR": it sits in the gate block, which comes before the Publish item that opens the PR
-    assert section.index(floor) < section.index("**6. Publish.**")
+    # "before the PR": the floor check comes before the command that opens the PR
+    assert section.index(floor) < section.index("gh pr create --draft --base main")
 
 
 def test_base_tag_machinery_is_checked_not_named_by_version() -> None:
@@ -185,13 +190,24 @@ def test_back_merge_and_cherry_pick_mechanics_are_given() -> None:
     assert "deleted from it" in flat
 
 
-def test_unit_suite_goes_through_the_watched_runner_and_evidence_is_filed() -> None:
+def test_no_hand_unit_suite_and_the_pr_opens_before_the_battery() -> None:
+    """Sam 2026-11-18 (T2 nexus/sam-ruling-fast-lane-trim-2026-11-18): the release PR's CI is the full run on the
+    exact head, so the lane runs no hand unit suite; the PR opens as soon as the branch builds and the battery runs
+    beside its CI; eligibility runs again on the PR head; an engine-substrate hand run builds its jar outside a grant."""
     section = _section()
     commands = _fenced_lines(section)
+    assert not any("scripts/watched_pytest.py" in c or "pytest -n auto" in c for c in commands), (
+        "the lane still runs a hand unit suite"
+    )
+    pr = next((i for i, c in enumerate(commands) if c.startswith("gh pr create") and "--base main" in c), None)
+    battery = next((i for i, c in enumerate(commands) if "release-battery.sh --plugin-only" in c), None)
+    assert pr is not None and battery is not None and pr < battery, "the PR does not open before the battery runs"
     assert any(
-        c.startswith("lab-remote") and "scripts/watched_pytest.py" in c for c in commands
-    ), "the unit suite is not run through watched_pytest.py under lab-remote"
+        "check_plugin_only_eligibility.py" in c and "PR head" in c and i > pr for i, c in enumerate(commands)
+    ), "eligibility is not re-run on the PR head after the PR opens"
     flat = _flat(section)
+    assert "scripts/build-gate-jar.sh --lab-run" in flat
+    assert "The merge waits for both" in flat
     assert "Steps 0 (beyond the floor check" in flat and "6d do not apply" in flat
     assert "nexus-rbmja.13" in flat
     assert "in-session auto-update" in flat

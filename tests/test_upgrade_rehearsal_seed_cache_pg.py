@@ -148,14 +148,23 @@ class FakePg:
     """Answers the helpers' queries from tables of column -> values."""
 
     def __init__(
-        self, tables: dict[str, dict[str, list[str]]], rows: int = ROWS
+        self,
+        tables: dict[str, dict[str, list[str]]],
+        rows: int = ROWS,
+        times: dict[str, dict[str, list[int | None]]] | None = None,
     ) -> None:
         self.tables, self.rows, self.queries = tables, rows, []
+        #: tuple-space clock columns: table -> column -> epoch seconds (None = NULL)
+        self.times: dict[str, dict[str, list[int | None]]] = times or {}
+        self.shifted_with: list[tuple[str, int]] = []
+        self.vacuumed: list[str] = []
 
     def __call__(self, q: str) -> list[list[str]]:
         self.queries.append(q)
         if q.startswith("select count(*)::bigint from nexus.chunks"):
             return [[str(self.rows)]]
+        if q.startswith("select table_name, column_name from information_schema.columns where table_schema = 'nexus' and table_name like 'tuple%'"):
+            return [[t, c] for t, cols in sorted(self.times.items()) for c in sorted(cols)]
         if q.startswith(
             "select table_name, column_name from information_schema.columns"
         ):
@@ -185,6 +194,20 @@ class FakePg:
             t, col, old, new = m.groups()
             old, new = old.replace("''", "'"), new.replace("''", "'")
             self.tables[t][col] = [v.replace(old, new) for v in self.tables[t][col]]
+            return []
+        m = re.match(r'set row_security = off; with u as \(update nexus\."(\w+)" set (.*) returning 1\) select count\(\*\)::bigint from u$', q)
+        if m:
+            t, sets = m.groups()
+            secs = {int(s) for s in re.findall(r"interval '(-?\d+) seconds'", sets)}
+            assert len(secs) == 1, q
+            (d,) = secs
+            for col in re.findall(r'"(\w+)" = "\w+" \+', sets):
+                self.times[t][col] = [None if v is None else v + d for v in self.times[t][col]]
+            self.shifted_with.append((t, d))
+            return [[str(len(next(iter(self.times[t].values()))))]]
+        m = re.match(r'vacuum \(analyze\) nexus\."(\w+)"$', q)
+        if m:
+            self.vacuumed.append(m.group(1))
             return []
         raise AssertionError(f"unexpected query: {q}")
 
@@ -263,3 +286,76 @@ def test_an_identifier_that_cannot_be_quoted_is_refused() -> None:
         sc.rewrite_store(
             FakePg({'bad"table': {"repo_root": ["/w/a"]}}), [("/w/a", "/w/b")]
         )
+
+
+# --- the tuple-space clock shift (a restored store must not read as stale) --------------------------
+
+
+def _tuple_times() -> dict[str, dict[str, list[int | None]]]:
+    return {
+        "tuples": {"created_at": [1000, 2000], "expires_at": [9000, 9500], "lease_until": [None, 2100]},
+        "tuple_tenants": {"last_swept_at": [1500], "first_seen": [100]},
+    }
+
+
+def test_the_restore_shifts_every_tuple_space_clock_column_by_the_same_amount() -> None:
+    """A store saved 62 hours ago read as a sweep 62 hours stale and an unclaimed tuple 62 hours old
+    (doctor's tuples.sweep_freshness and tuples.oldest_unclaimed). Shifting every clock column of the tuple
+    tables by now - saved_at keeps each age, gap and expiry the seed left, and leaves NULL alone."""
+    pg = FakePg({}, times=_tuple_times())
+    got = sc.rewrite_store(pg, [("/w/a/x", "/w/b/x")], shift_s=223_200.4)
+    assert pg.times["tuples"]["created_at"] == [224_200, 225_200]
+    assert pg.times["tuples"]["expires_at"] == [232_200, 232_700]
+    assert pg.times["tuples"]["lease_until"] == [None, 225_300]
+    assert pg.times["tuple_tenants"]["last_swept_at"] == [224_700]
+    assert pg.times["tuple_tenants"]["first_seen"] == [223_300]
+    assert got.shifted == {"tuple_tenants": 1, "tuples": 2}
+    assert got.shift_s == 223_200
+
+
+def test_the_clock_columns_are_found_in_the_catalog_not_listed() -> None:
+    """A tuple column added later is shifted with no change here: the columns come from information_schema
+    (timestamptz columns of nexus.tuple* tables), one update per table."""
+    pg = FakePg({}, times=_tuple_times())
+    sc.rewrite_store(pg, [], shift_s=60)
+    asked = next(q for q in pg.queries if "table_name like 'tuple%'" in q)
+    assert "data_type = 'timestamp with time zone'" in asked
+    assert sorted(t for t, _ in pg.shifted_with) == ["tuple_tenants", "tuples"]
+
+
+def test_no_shift_runs_no_update() -> None:
+    """A store restored within a second of its save, or a caller that passes none, is left as it is."""
+    for shift in (0, 0.4, -5):
+        pg = FakePg({}, times=_tuple_times())
+        got = sc.rewrite_store(pg, [], shift_s=shift)
+        assert not pg.shifted_with and got.shifted == {} and got.shift_s == 0
+        assert pg.times == _tuple_times()
+
+
+def test_the_shift_turns_row_security_off_so_a_filtered_role_fails_loudly() -> None:
+    """nexus.tuples FORCEs row-level security: a role it filters would shift a silent subset. Each update runs
+    with row_security off, which PG refuses for such a role, so the restore fails instead of half-shifting."""
+    pg = FakePg({}, times=_tuple_times())
+    sc.rewrite_store(pg, [], shift_s=60)
+    updates = [q for q in pg.queries if "update nexus." in q]
+    assert updates and all(q.startswith("set row_security = off; ") for q in updates)
+
+
+def test_the_shift_vacuums_each_table_it_updated() -> None:
+    """The shift's UPDATE leaves one dead row version per tuple (created_at is indexed, so it is not HOT), and
+    tuples.dead_tuple_ratio is a hard-fail doctor row: each shifted table is vacuumed right after, not left to
+    autovacuum's timing."""
+    pg = FakePg({}, times=_tuple_times())
+    sc.rewrite_store(pg, [], shift_s=60)
+    assert sorted(pg.vacuumed) == ["tuple_tenants", "tuples"]
+    last_update = max(i for i, q in enumerate(pg.queries) if "update nexus." in q)
+    first_vacuum = min(i for i, q in enumerate(pg.queries) if q.startswith("vacuum"))
+    assert first_vacuum > last_update
+
+
+def test_only_base_tables_are_shifted() -> None:
+    """A tuple* view with a timestamptz column must not be updated: the catalog read keeps base tables only."""
+    pg = FakePg({}, times=_tuple_times())
+    sc.rewrite_store(pg, [], shift_s=60)
+    asked = next(q for q in pg.queries if "table_name like 'tuple%'" in q)
+    assert "table_type = 'BASE TABLE'" in asked

@@ -369,3 +369,58 @@ def test_many_due_threads_are_capped_with_a_count() -> None:
     lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
     assert len(lines) == 1 + 20 + 1 + 1
     assert lines[21] == "- … and 5 more; read the entry"
+
+
+# --- RDR-253 Step 5: the entry is found by its identity line ------------------------------------------
+
+
+def test_due_items_are_found_by_the_identity_line_when_the_session_line_is_stale() -> None:
+    """After /clear the payload's session id is new and the entry's session: line names the old one; the identity:
+    line still names the seat, so the reminder is printed with no name to fall back on."""
+    new_sid = "11111111-2222-3333-4444-555555555555"
+    search, calls = _search([{"title": "marlowe", "content": "identity: i12\n" + ENTRY}])
+    lines = due_lines(new_sid, datetime(2026, 11, 14, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="",
+                      identity="i12")
+    assert calls == ["identity: i12"]
+    assert lines[1].startswith("- RDR-230 readings: due 2026-11-14")
+
+
+def test_an_entry_owned_by_another_identity_is_not_ours_even_with_our_session_line() -> None:
+    search, _ = _search([{"title": "bob", "content": "identity: i7\n" + ENTRY}])
+    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="",
+                     identity="i12") == []
+    # with no identity of our own, the session line still finds an entry that has no identity line (Phase 1)
+    search, _ = _search([{"title": "marlowe", "content": ENTRY}])
+    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity="")
+
+
+def test_identity_for_session_reads_the_token_files_including_held_session_ids(tmp_path) -> None:
+    import os  # noqa: PLC0415
+
+    from nexus.identity.board import identity_for_session  # noqa: PLC0415
+    from nexus.identity.token_file import TokenFile, identity_dir, token_path, write_token_file  # noqa: PLC0415
+
+    old, new = "aaaaaaaa-0000-4000-8000-000000000001", "bbbbbbbb-0000-4000-8000-000000000002"
+    directory = identity_dir(tmp_path)
+    directory.mkdir(parents=True)
+    rec = TokenFile(identity="i12", generation=3, token=None, expires_at=None, session_id=new, pid=4242,
+                    started_at=1, proc_start=None, session_ids=(old, new))
+    write_token_file(token_path(directory, 4242, 1), rec)
+    assert identity_for_session(new, tmp_path) == "i12"
+    assert identity_for_session(old.upper(), tmp_path) == "i12", "a session id from before /clear still finds the seat"
+    assert identity_for_session("cccccccc-0000-4000-8000-000000000003", tmp_path) == ""
+    stale = TokenFile(identity="i9", generation=1, token=None, expires_at=None, session_id=new, pid=4243,
+                      started_at=1, proc_start=None)
+    path = token_path(directory, 4243, 1)
+    write_token_file(path, stale)
+    os.utime(path, (1, 1))  # older than the live file
+    assert identity_for_session(new, tmp_path) == "i12", "the newest file wins"
+
+
+def test_the_title_fallback_never_takes_an_entry_naming_another_identity() -> None:
+    search, _ = _search([])
+    theirs = {"title": "marlowe", "content": "identity: i7\n" + ENTRY}
+    now = datetime(2026, 11, 14, 9, 0, tzinfo=PST)
+    assert due_lines(SID, now, search=search, by_title=lambda t: theirs, name="marlowe", identity="i12") == []
+    # with no identity of our own the title still finds it (a Desktop session, Phase 1)
+    assert due_lines(SID, now, search=search, by_title=lambda t: theirs, name="marlowe", identity="")

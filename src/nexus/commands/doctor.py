@@ -3516,7 +3516,10 @@ def _engine_work_lines() -> list[str]:
          "GET /v1/requests/<key> answering committed; a failure names the hop that "
          "lost the key. OPT-IN and never part of the default sweep: it sends a "
          "mutating request (one request-ledger row per run, nothing deleted). "
-         "Exit 1 on any failure, so a scheduler can run it as a smoke step.",
+         "Exit 1 on any failure, so a scheduler can run it as a smoke step. A second "
+         "row names what the path does to X-Correlation-ID (RDR-167 Phase 2: "
+         "pass-through, inbound strip, overwrite or response strip, which an "
+         "engine without Phase 1 also produces); it never changes the exit code.",
 )
 @click.option(
     "--expect-host",

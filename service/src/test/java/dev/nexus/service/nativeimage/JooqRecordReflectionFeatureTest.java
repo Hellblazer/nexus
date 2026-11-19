@@ -316,7 +316,13 @@ class JooqRecordReflectionFeatureTest {
     // three RETURNS TABLE functions, three generated Record types (SearchTopicSet384Record, ...768Record, ...1024Record), +3.
     // 138 -> 141: nexus-7fku2.1.2 (RDR-134 Step 2), taxonomy-022-coverage-counts.xml added nexus.taxonomy_coverage_counts_384/768/1024,
     // three RETURNS TABLE functions, three generated Record types (TaxonomyCoverageCounts384Record, ...768Record, ...1024Record), +3.
-    private static final int EXPECTED_RECORD_TYPES = 141;
+    // 141 -> 148: nexus-hczdo.1.1 (RDR-253 Step 1), identity-001-records.xml added the tables nexus.identity_counters, identity_records,
+    // identity_aliases, identity_bindings, identity_sessions, identity_memberships and identity_work, one generated record type each.
+    // 148 -> 149: nexus-hczdo.1.2 (RDR-253 Step 2), service-tokens-007-identity-tokens.xml added the table nexus.identity_tokens,
+    // one generated record type (IdentityTokensRecord), +1. memory-006-identity-stamp.xml added a column, no record type.
+    // 149 -> 150: nexus-igea9.5 (RDR-252 Step 1), group-001-records.xml added the table nexus.group_records, one generated
+    // record type (GroupRecordsRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 150;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

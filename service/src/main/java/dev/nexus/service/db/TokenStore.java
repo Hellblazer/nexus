@@ -41,6 +41,8 @@ public final class TokenStore {
     private final DataSource dataSource;
     private final java.time.Clock clock;
     private final TenantCreationBound tenantCreationBound;
+    /** RDR-253 Step 2: the identity tokens, in a table of their own; same data source and clock as the other tokens. */
+    private final IdentityTokenStore identityTokens;
 
     public TokenStore(DataSource dataSource, java.time.Clock clock) {
         this(dataSource, clock, TenantCreationBound.DEFAULT);
@@ -50,6 +52,12 @@ public final class TokenStore {
         this.dataSource = dataSource;
         this.clock = clock;
         this.tenantCreationBound = tenantCreationBound;
+        this.identityTokens = new IdentityTokenStore(dataSource, clock);
+    }
+
+    /** The identity tokens (RDR-253 Step 2): minted by the identity routes, resolved by {@code AuthFilter}. */
+    public IdentityTokenStore identityTokens() {
+        return identityTokens;
     }
 
     /**
@@ -943,6 +951,8 @@ public final class TokenStore {
                 .execute();
         });
         log.info("event=session_token_sweep tenant={} cutoff={} deleted={}", tenant, cutoff, deleted);
+        // RDR-253 Step 2: the expired identity tokens ride the same sweep, the same loop and the same bound.
+        identityTokens.sweepExpired(tenant, now, statementTimeout);
         return deleted;
     }
 

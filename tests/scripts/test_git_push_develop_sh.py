@@ -24,6 +24,10 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "git-push-develop.sh"
 
+# Every push here would otherwise write its push record through the real installed nx (RDR-252 Step 2).
+pytestmark = pytest.mark.usefixtures("push_record_nx_stub")
+
+
 _GIT_ID = ["-c", "user.email=t@t", "-c", "user.name=t"]
 
 

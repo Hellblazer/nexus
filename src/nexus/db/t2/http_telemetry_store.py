@@ -149,6 +149,12 @@ from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
+def _capability_flags(body: Mapping[str, Any]) -> dict[str, Any]:
+    """The capability flags of a ``/version`` body: its ``*_supported`` keys. The rest (uptime, start time, build
+    ids, schema counts) is not what a capability refresh compares."""
+    return {k: v for k, v in body.items() if isinstance(k, str) and k.endswith("_supported")}
+
+
 class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """Telemetry drop-in that delegates to the RDR-152 Java HTTP service.
 
@@ -571,10 +577,15 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     def _refresh_version_capabilities(self) -> bool:
         """Re-read ``/version`` now and report whether the body differs from the cached one (RDR-232 Phase 3:
         a run-summary readback that disagrees with the flag calls this, so an engine rolled back under a
-        running client stops being believed). Logs the change. NEVER raises."""
+        running client stops being believed). Logs the change. NEVER raises.
+
+        Only the capability flags (the ``*_supported`` keys) are compared: the body also carries fields that
+        move on their own (``process_uptime_seconds`` every second, ``process_start_time`` on a restart of the
+        same build), and comparing those read an unchanged engine as changed whenever the refresh fell in a
+        later second than the probe."""
         before = self._version_capabilities_cache
         after = self._probe_version()
-        changed = before is not None and before != after
+        changed = before is not None and _capability_flags(before) != _capability_flags(after)
         if changed:
             _log.warning(
                 "nx_answer_version_capabilities_changed",

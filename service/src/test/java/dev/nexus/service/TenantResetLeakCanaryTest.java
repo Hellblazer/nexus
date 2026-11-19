@@ -213,6 +213,10 @@ class TenantResetLeakCanaryTest {
             + "vector backend and the combined write service this engine does not have, so the canary cannot feed "
             + "either; TenantKeyedEvictorsTest covers the limiter's evictor and TenantResetRouteTest drives a reset "
             + "through the allow-list check's own windows",
+        "AckDeadlineTimer", "its entries are armed by the owner stamper evaluating a red --done write for a group that "
+            + "serves the topic, which needs a formed group and bound identities this canary's workload does not create. "
+            + "AckDeadlineTimerTest.evictingATenant... covers the evictor and OwnerTimerStartTest drives it through the "
+            + "service's own evictor list after a live engine armed a deadline",
         "TenantImportSessions", "an import session and the export session the canary opens for the same tenant cannot "
             + "coexist (one session per tenant), so the canary's workload holds the tenant's place with its export and "
             + "cannot also open an import. TenantImportRoutesTest.aTenantResetEndsTheImportSessionAndFreesItsPlace drives "

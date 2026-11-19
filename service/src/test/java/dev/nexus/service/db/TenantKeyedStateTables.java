@@ -103,6 +103,8 @@ final class TenantKeyedStateTables {
         keyed.put("ChunkReaper.resumeTenant", REAPER);
         keyed.put("ChunkReaper.resumeCollection", REAPER);
         keyed.put("ChunkReaper.resumeExpiry", REAPER);
+        // RDR-252 Step 3 (nexus-igea9): the owner stamper's armed ack deadlines, one scheduled task per (tenant, base topic).
+        keyed.put("AckDeadlineTimer.armed", "AckDeadlineTimer");
         keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
         TenantKeyedStateCoverageEntries.fill(keyed, notKeyed);   // nexus-7fku2.1.2: TaxonomyCoverage and its invalidation helper
         keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
@@ -163,6 +165,7 @@ final class TenantKeyedStateTables {
         }
         notKeyed.put("CatalogSensitiveReads.Page.documents", RESULT);   // nexus-f3yqd: one sensitive-list call's documents
         notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
+        notKeyed.put("MemorySearchPage.Page.rows", RESULT);   // nexus-1gdv0.1.1: one memory-search call's page of rows
         // nexus-f3yqd.2.13 (RDR-246): the data-move worker. The registry it works is global, with no tenant column.
         notKeyed.put("MoveStates.byLabel", DATA_MOVE_STATES);
         notKeyed.put("MoveStates.calls", DATA_MOVE_STATES);   // nexus-f3yqd.2.17: the CALL in flight, by move label
@@ -603,9 +606,10 @@ final class TenantKeyedStateTables {
         )) {
             notKeyed.put(f, JOOQ_COLUMN);
         }
-        // PRINCIPAL (7)
+        // PRINCIPAL (9)
         for (String f : List.of(
             "NexusService.TupleTenantCursor.tenantId",
+            "IdentityTokenStore.Principal.tenantId",
             "ReembedRunner.Turn.tenant",
             "RequestContext.Principal.tenant",
             "RequestLedger.RetentionPass.tenant",
@@ -766,5 +770,20 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciReconciler.ringExpiry", PCI_OFF);
         notKeyed.put("PciIndexSet.NONE", PCI_OFF);
         notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
+        // RDR-252 Step 3 (nexus-igea9): the owner stamper. Everything below is a value read or built for one evaluation
+        // (a record's components, a holder of a function or of the timer); none outlives the call that built it
+        // except the timer's armed map, which is keyed above and cleared by the AckDeadlineTimer evictor.
+        String evaluation = "a component of a value record built for one owner evaluation and dropped with it; "
+            + "it is not stored";
+        for (String f : List.of(
+            "GroupView.members", "GroupView.deadlineByTopic", "OwnerDecision.Input.pushes", "OwnerDecision.Input.dones",
+            "OwnerDecision.Input.owners", "OwnerDecision.Post.body", "BoardRow.dims", "Identities.identityOfStamp",
+            "Identities.presence")) {
+            notKeyed.put(f, evaluation);
+        }
+        notKeyed.put("OwnerStamper.timer", "the stamper's reference to the one AckDeadlineTimer, bound once at boot; "
+            + "the per-tenant state is the timer's armed map, which has its own evictor");
+        notKeyed.put("AckDeadlineTimer.Key.tenant", "the tenant component of the key of the armed map, a record "
+            + "that exists only as that map's key; the map itself is listed as keyed");
     }
 }

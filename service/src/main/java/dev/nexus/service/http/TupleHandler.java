@@ -170,9 +170,19 @@ public final class TupleHandler implements HttpHandler {
     private static final String BOARD_CI_TEMPLATE_NAME = "board/ci/<topic>";
 
     private final TupleRepository repo;
+    /** RDR-253 Step 2: the ownership and generation checks of the owner's mailbox claims. */
+    private final IdentityFence fence;
+    private final dev.nexus.service.board.OwnerOutHook ownerHook;
 
-    public TupleHandler(TupleRepository repo) {
+    public TupleHandler(TupleRepository repo, IdentityFence fence) {
+        this(repo, fence, dev.nexus.service.board.OwnerOutHook.NONE);
+    }
+
+    /** {@code ownerHook} runs after a committed write has been answered (RDR-252's owner stamper); it never throws. */
+    public TupleHandler(TupleRepository repo, IdentityFence fence, dev.nexus.service.board.OwnerOutHook ownerHook) {
+        this.ownerHook = ownerHook;
         this.repo = repo;
+        this.fence = fence;
     }
 
     @Override
@@ -225,6 +235,8 @@ public final class TupleHandler implements HttpHandler {
             HttpUtil.send(exchange, e.httpStatus(),
                     "{\"error\":" + HttpUtil.jsonString(e.code())
                             + ",\"detail\":" + HttpUtil.jsonString(e.getMessage()) + "}");
+        } catch (dev.nexus.service.db.IdentityException e) {
+            IdentityFence.refuse(exchange, e);
         } catch (TupleException e) {
             log.warn("event=tuples_handler_typed_error op={} code={} detail={}", op, e.code(), e.getMessage());
             HttpUtil.send(exchange, e.httpStatus(),
@@ -264,6 +276,16 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, String> keys = stringMap((Map<String, Object>) body.get("keys"));
+        // RDR-252 Step 1: within board/ci/<topic>, the --owner and --push topics are not the adapter's. The topic
+        // judged is the one written, so the subspace's segment and keys.topic are both checked (BoardCiGuard).
+        String ciRefusal = TokenStore.SCOPE_BOARD_CI.equals(RequestContext.scope())
+                ? BoardCiGuard.refusal(subspace, keys) : null;
+        if (ciRefusal != null) {
+            log.debug("event=tuples_out_denied subspace={} reason=board_ci_scope_topic_forbidden", subspace);
+            HttpUtil.send(ex, 403, "{\"error\":" + HttpUtil.jsonString("forbidden: a 'board-ci'-scoped credential may "
+                    + "not write this board/ci topic: " + ciRefusal) + "}");
+            return;
+        }
         Map<String, String> dims = stringMap((Map<String, Object>) body.get("dims"));
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
@@ -277,19 +299,30 @@ public final class TupleHandler implements HttpHandler {
         }
 
         // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
-        // ONLY from the minted session AuthFilter resolved, never from the request body (a
-        // "sender_session" body field is not read), and its absence is not a refusal.
-        String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
+        // ONLY from what AuthFilter resolved, never from the request body (a "sender_session" body
+        // field is not read), and its absence is not a refusal. RDR-253 Step 2: with an identity
+        // token it is the session id of the identity's newest binding row under the token's
+        // generation (IdentityFence.senderSession); otherwise the minted session's, as before.
+        // A send is not a fenced operation: it is open to any caller, token or none.
+        String senderSession = fence.senderSession(tenant);
         if (modeRaw != null) {
             var res = repo.outReplace(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
                     delaySeconds);
-            HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(res.id()))
-                    + ",\"outcome\":" + HttpUtil.jsonString(res.outcome().wire()) + "}");
+            try {
+                HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(res.id()))
+                        + ",\"outcome\":" + HttpUtil.jsonString(res.outcome().wire()) + "}");
+            } finally {
+                ownerHook.afterOut(tenant, subspace, dims, tupleBody);   // committed row: stamp even if the answer fails
+            }
             return;
         }
         byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
                 delaySeconds);
-        HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
+        try {
+            HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
+        } finally {
+            ownerHook.afterOut(tenant, subspace, dims, tupleBody);   // RDR-252: after the answer attempt, even if it throws
+        }
     }
 
     // ── rd / rdp ─────────────────────────────────────────────────────────────
@@ -410,10 +443,26 @@ public final class TupleHandler implements HttpHandler {
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
         String claimant = requireString(body, "claimant");
+        fence.mailboxClaim(ex, tenant, subspace);
         Long leaseS = wholeSecondsOrNull("lease_s", body.get("lease_s"));
         long timeoutS = longOrDefault("timeout_s", body.get("timeout_s"), 0);
 
         Optional<TupleRepository.ClaimedTuple> result = repo.in(tenant, subspace, pattern, claimant, leaseS, timeoutS);
+        if (result.isPresent() && timeoutS > 0) {
+            // RDR-253: the claim may have waited minutes, and the seat may have changed hands meanwhile. Check the
+            // fence again; a refused claim is handed back (a release counts no attempt) and the refusal is the answer.
+            try {
+                fence.mailboxClaim(ex, tenant, subspace);
+            } catch (dev.nexus.service.db.IdentityException e) {
+                try {
+                    repo.release(tenant, result.get().claimId(), claimant);
+                } catch (RuntimeException re) {
+                    log.warn("event=identity_fence_release_failed tenant={} subspace={} error={}", tenant, subspace,
+                        re.getMessage());
+                }
+                throw e;
+            }
+        }
         HttpUtil.send(ex, 200, renderClaim(result));
     }
 
@@ -427,6 +476,7 @@ public final class TupleHandler implements HttpHandler {
         String subspace = requireString(body, "subspace");
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
         String claimant = requireString(body, "claimant");
+        fence.mailboxClaim(ex, tenant, subspace);
         // nexus-xapt8: optional, same as /in (below the handler layer both
         // route through TupleRepository.claimOnce, which resolves an absent
         // lease_s against the template's take.default_lease_seconds) --
@@ -448,10 +498,11 @@ public final class TupleHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String claimId = requireString(body, "claim_id");
         String claimant = requireString(body, "claimant");
+        fence.mailboxClaimById(ex, tenant, claimId);
         TupleRepository.ReplySpec reply = parseReply(body.get("reply"));
-        // nexus-g2ckl: a reply is stamped with the acker's minted session, as out stamps
-        // its rows; never read from the body.
-        String senderSession = RequestContext.isMintedSession() ? RequestContext.session() : null;
+        // nexus-g2ckl: a reply is stamped with the acker's session, as out stamps its rows (an identity
+        // token's current session, else the minted one); never read from the body.
+        String senderSession = fence.senderSession(tenant);
         byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply, senderSession);
         HttpUtil.send(ex, 200, "{\"acked\":true,\"reply_id\":"
                 + (replyId == null ? "null" : HttpUtil.jsonString(HEX.formatHex(replyId)))
@@ -501,6 +552,7 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, Object> body = readBody(ex);
+        fence.mailboxClaimById(ex, tenant, requireString(body, "claim_id"));
         // nexus-5r2sc.2.1 (RDR-235 E1): optional, whole seconds, read as lease_s is. Range checks
         // (negative, above retention) are the repository's SchemaViolation, answered 400 by the ladder.
         // nexus-5r2sc.2.3 (RDR-235 E4): dead is an optional JSON boolean; anything else is a 400, never
@@ -529,6 +581,7 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, Object> body = readBody(ex);
+        fence.mailboxClaimById(ex, tenant, requireString(body, "claim_id"));
         var leaseUntil = repo.renew(tenant, requireString(body, "claim_id"),
                 requireString(body, "claimant"), requireWholeSeconds(body, "lease_s"));
         HttpUtil.send(ex, 200, MAPPER.writeValueAsString(Map.of("lease_until", leaseUntil)));
@@ -548,6 +601,7 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, Object> body = readBody(ex);
+        fence.mailboxClaimById(ex, tenant, requireString(body, "claim_id"));
         repo.release(tenant, requireString(body, "claim_id"), requireString(body, "claimant"));
         HttpUtil.send(ex, 200, "{\"released\":true}");
     }

@@ -32,6 +32,9 @@ git worktree add "$path" -b "$BRANCH_NAME"
 cd "$path"
 ```
 
+Label it as your identity's, so `nx identity may-stop` (see `finishing-branch`) keeps others from removing it while you run:
+`nx identity work register --kind worktree --ref "$(pwd -P)" || true` (a label never blocks the work).
+
 ### Setup (auto-detect)
 
 ```bash

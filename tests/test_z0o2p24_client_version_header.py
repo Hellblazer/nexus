@@ -449,6 +449,12 @@ def test_the_identity_headers_carry_the_bound_id_and_the_version() -> None:
 _NOT_SENDERS: dict[str, str] = {
     # hooks: latency on every prompt / tool call
     "nexus/hooks/mailbox_drain.py": "hook",
+    # RDR-253 Step 3: the SessionStart hook's identity client; client_version rides in the bind and
+    # renew bodies, and importing nexus.db would put its package init on every hook call
+    "nexus/identity/bind_client.py": "identity bind: the version is in the request body",
+    # RDR-252 Step 4: the group and membership routes; the session's client version already reaches the
+    # engine on its identity bind and on every renewal (bind_client above), and nothing here writes a chunk
+    "nexus/groups.py": "group and membership routes: the version rides the identity bind and renewal",
     # probes and admin calls of the engine; none writes a chunk
     "nexus/commands/daemon.py": "engine probe: GET /health",
     "nexus/commands/doctor.py": "probes: health and the MinerU server",
@@ -735,6 +741,7 @@ def _placement_problems(calls: set[str], importers: set[str], not_senders: dict[
     return problems
 
 
+@pytest.mark.census
 def test_every_http_call_site_is_a_sender_or_a_named_non_sender() -> None:
     """A new engine-facing call site fails here until it sends the header (and the documents' scope stays
     true) or is named in ``_NOT_SENDERS`` with a reason, so the claim cannot widen or narrow unseen."""

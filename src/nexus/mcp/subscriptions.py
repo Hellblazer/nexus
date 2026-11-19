@@ -115,9 +115,11 @@ NAME_RESOLVE_INTERVAL_S: float = 60.0
 
 def _claude_sessions_dir() -> Path:
     """Claude Code's per-process session registry, ``<config>/sessions``.
-    ``CLAUDE_CONFIG_DIR`` is honoured the way Claude Code honours it."""
-    override = os.environ.get("CLAUDE_CONFIG_DIR")
-    return (Path(override).expanduser() if override else Path.home() / ".claude") / "sessions"
+    ``CLAUDE_CONFIG_DIR`` is honoured the way Claude Code honours it. One definition, shared with the identity
+    holder check (RDR-253 Step 3, :func:`nexus.identity.holder.claude_sessions_dir`)."""
+    from nexus.identity.holder import claude_sessions_dir  # noqa: PLC0415 — deferred; the identity package is a leaf
+
+    return claude_sessions_dir()
 
 
 def resolve_session_name(
@@ -419,6 +421,10 @@ class SubscriptionSet:
     #: session, or None. NOT a mailbox subspace and NOT listed by
     #: :meth:`entries` -- see the class docstring.
     leased_name: str | None = None
+    #: RDR-253 Step 5: this session's identity, or None. While set, ``mailbox/<identity>`` is delivered beside
+    #: ``mailbox/<session_id>`` (Phase 1 dual subscription: a new-client sender addresses the identity, an old one
+    #: the session). Not persisted: it is read from the token file at each load (:func:`load`).
+    identity: str | None = None
     _board: dict[str, str | None] = field(default_factory=dict)
     #: RDR-249 TD3 (S7, nexus-mdbds.11.1): aura-owned board topics, each
     #: mapped to its start position and the names of the auras holding it.
@@ -448,10 +454,24 @@ class SubscriptionSet:
     _lease_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     #: Times the lease thread's polls and resolve interval (nexus-3ceda.11).
     clock: Clock = field(default=SYSTEM, repr=False, compare=False)
+    #: The identity listener :func:`_follow_identity` registered for this set, so :func:`reset_cache` can remove it.
+    _identity_listener: Callable[[str | None], None] | None = field(default=None, repr=False, compare=False)
 
     @property
     def session_mailbox(self) -> str:
         return f"mailbox/{self.session_id}"
+
+    @property
+    def identity_mailbox(self) -> str | None:
+        return f"mailbox/{self.identity}" if self.identity else None
+
+    def set_identity(self, identity: str | None) -> None:
+        """Deliver ``mailbox/<identity>`` (or stop, with None); the waiter re-reads :meth:`entries` on the bump."""
+        identity = identity or None
+        if identity == self.identity:
+            return
+        self.identity = identity
+        self._bump()
 
     # ── Observer (Approach item 6, Technical Design "Waiting") ──────────────
 
@@ -737,6 +757,8 @@ class SubscriptionSet:
         wait on (:meth:`~nexus.mcp.channel.ChannelWaiter._build_specs`),
         so leaving it out here is what stops push delivery for it."""
         out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
+        if self.identity_mailbox:
+            out.append({"subspace": self.identity_mailbox})
         # Copies: a tool thread reads this while the loop can add an aura topic.
         for topic, since in list(self._board.items()):
             entry: dict[str, Any] = {"subspace": topic}
@@ -964,8 +986,20 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
             continue
         obj = SubscriptionSet.from_json(data)
         obj.leased_name = None  # see the docstring: the name is stale on resume
+        obj.identity = _token_identity()
         return obj
-    return SubscriptionSet(session_id=session_id)
+    return SubscriptionSet(session_id=session_id, identity=_token_identity())
+
+
+def _token_identity() -> str | None:
+    """This process's identity from its leased token file (RDR-253 Step 5), or None (no binding, an old engine)."""
+    try:
+        from nexus.identity.token_header import current  # noqa: PLC0415 -- deferred: MCP startup cost
+
+        record = current()
+    except Exception:  # noqa: BLE001 -- no identity: the session mailbox alone, as before Step 5
+        return None
+    return _valid_identity(str(record.identity) if record is not None else "")
 
 
 def persist(t1: Any, subs: "SubscriptionSet") -> None:
@@ -995,7 +1029,28 @@ def get_or_load(t1: Any, session_id: str, *, store_factory: Callable[[], Any]) -
         if obj is None:
             obj = load(t1, session_id, store_factory=store_factory)
             _CACHE[session_id] = obj
+            _follow_identity(obj)
         return obj
+
+
+def _follow_identity(subs: SubscriptionSet) -> None:
+    """RDR-253 Step 5: keep *subs*'s identity mailbox in step with this server's lease. The set usually loads before
+    the token file exists (the MCP server and the bind hook start together), so the lease tells it when it adopts
+    an identity, and again on a switch or take-over."""
+    try:
+        from nexus.mcp.identity_lease import add_identity_listener  # noqa: PLC0415 -- deferred: MCP import cost
+
+        def follow(identity: str | None) -> None:
+            subs.set_identity(_valid_identity(identity))
+
+        subs._identity_listener = follow  # noqa: SLF001 -- the set owns its listener, reset_cache removes it
+        add_identity_listener(follow)
+    except Exception as exc:  # noqa: BLE001 -- no lease module path: the session mailbox alone, as before Step 5
+        _log.debug("identity_follow_unavailable", error=str(exc))
+
+
+def _valid_identity(identity: str | None) -> str | None:
+    return identity if identity and re.fullmatch(r"i[0-9]+", identity) else None
 
 
 def reset_cache(session_id: str | None = None) -> None:
@@ -1011,3 +1066,11 @@ def reset_cache(session_id: str | None = None) -> None:
             targets = [obj] if obj is not None else []
     for obj in targets:
         obj.shutdown()
+        if obj._identity_listener is not None:  # noqa: SLF001
+            try:
+                from nexus.mcp.identity_lease import remove_identity_listener  # noqa: PLC0415 -- deferred: MCP import cost
+
+                remove_identity_listener(obj._identity_listener)  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001 -- teardown never fails on the lease module
+                _log.debug("identity_unfollow_unavailable", error=str(exc))
+            obj._identity_listener = None  # noqa: SLF001

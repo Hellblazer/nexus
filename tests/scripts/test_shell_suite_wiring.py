@@ -118,18 +118,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _SUMMARY_RE_TEMPLATE = r"{name}: (\d+) passed, (\d+) failed"
 
 
+#: Wall-clock limit for one suite run, after which ``run_suite`` kills it and the test fails with no
+#: summary line. A suite whose serial time is close to this gets its own ``timeout_s``.
+_DEFAULT_SUITE_TIMEOUT_S: float = 120
+
+
 class _Suite:
     """One unwired shell suite: where it lives, and the non-vacuity floor
     for its own reported ``passed`` count (see module docstring)."""
 
-    __slots__ = ("path", "min_passed", "skips_only_in_child_pid_namespace")
+    __slots__ = ("path", "min_passed", "skips_only_in_child_pid_namespace", "timeout_s")
 
     def __init__(
-        self, relpath: str, min_passed: int, *, skips_only_in_child_pid_namespace: bool = False
+        self,
+        relpath: str,
+        min_passed: int,
+        *,
+        skips_only_in_child_pid_namespace: bool = False,
+        timeout_s: float = _DEFAULT_SUITE_TIMEOUT_S,
     ) -> None:
         self.path = REPO_ROOT / relpath
         self.min_passed = min_passed
         self.skips_only_in_child_pid_namespace = skips_only_in_child_pid_namespace
+        self.timeout_s = timeout_s
 
     @property
     def id(self) -> str:
@@ -184,7 +195,10 @@ def _lock_suite_has_flock_tests() -> bool:
 SUITES = [
     # 130, not 24 (nexus-t6t9f): 139 pass in the foreground launch this file uses; a launch that ignores
     # HUP/QUIT at entry skips their cases (121), so the floor sits between and catches a silent skip.
-    _Suite("scripts/build-gate-jar_test.sh", 130),
+    # timeout_s 300: the suite takes 79 s serially on chas (its lease-holder and signal cases sleep on
+    # purpose), so under a 12-worker lab-l run it passed the 120 s default and was killed mid-run with
+    # no summary line, a flake rather than a regression.
+    _Suite("scripts/build-gate-jar_test.sh", 130, timeout_s=300),
     _Suite("scripts/lib/bare_mvnw_lint_test.sh", 2),
     _Suite("scripts/lib/gate-jar-cache_test.sh", 24),
     _Suite("scripts/lib/release-props-lease_test.sh", 28),
@@ -272,6 +286,7 @@ _LEASE_ENV_PREFIXES = ("NX_BUILD_LEASE_ROOT", "NX_SUITE_LEASE_")
 #: sensitive ones" went stale exactly this way, so a new suite is covered by being
 #: in SUITES.
 _LEASE_SENSITIVE = tuple(str(s.path.relative_to(REPO_ROOT)) for s in SUITES)
+_TIMEOUT_BY_RELPATH = {str(s.path.relative_to(REPO_ROOT)): s.timeout_s for s in SUITES}
 
 
 def _env_without_lease_vars() -> dict[str, str]:
@@ -312,7 +327,7 @@ class TestSuitesAreGreen:
     @pytest.mark.parametrize("suite", SUITES, ids=lambda s: s.id)
     def test_suite_runs_clean(self, suite: _Suite) -> None:
         start = time.monotonic()
-        result = run_suite(suite.path, cwd=REPO_ROOT, env=_env_without_lease_vars())
+        result = run_suite(suite.path, cwd=REPO_ROOT, env=_env_without_lease_vars(), timeout=suite.timeout_s)
         elapsed = time.monotonic() - start
 
         summary_re = re.compile(_SUMMARY_RE_TEMPLATE.format(name=re.escape(suite.id)))
@@ -399,7 +414,7 @@ class TestSuitesIgnoreAnInheritedLeaseRoot:
         env["NX_BUILD_LEASE_ROOT"] = str(shared)
         env["NX_SUITE_LEASE_WAIT"] = "1"
         path = REPO_ROOT / relpath
-        result = run_suite(path, cwd=REPO_ROOT, env=env)
+        result = run_suite(path, cwd=REPO_ROOT, env=env, timeout=_TIMEOUT_BY_RELPATH[relpath])
         assert result.returncode == 0, (
             f"{path.name} failed with NX_BUILD_LEASE_ROOT exported\n"
             f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"

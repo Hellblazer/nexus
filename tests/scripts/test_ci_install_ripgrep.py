@@ -17,6 +17,11 @@ import tarfile
 from pathlib import Path
 
 import yaml
+import pytest
+
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ci_install_ripgrep.sh"

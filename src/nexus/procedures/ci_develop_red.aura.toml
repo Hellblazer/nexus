@@ -1,21 +1,28 @@
 aura = "ci_develop_red"
-summary = "A red develop sha, posted to this session's threads entry."
+summary = "A red develop sha and who owns it, posted to this session's threads entry; wakes the owner and next up."
 procedure = "ci_red_notice"
 
+[load]
+group = "push-train"
+
 [trigger]
-subspace = "board/ci/nexus-develop--done"
-match = { kind = "sha", outcome = "failure" }
+subspace = "board/ci/nexus-develop--owner"
+match = { kind = "owner", from = "engine" }
 
 [args]
 sha = "dims.sha"
-outcome = "dims.outcome"
+owner = "body.owner"
+next = "body.next"
+refresh = "body.refresh"
+reason = "body.reason"
+me = "self.identity"
 
 [when]
 field = "show"
 
 [clear]
-match = { kind = "sha", outcome = "success" }
+match = { kind = "clear", from = "engine" }
 
 [display]
-channel = true
+channel = "wake"
 threads = "develop CI red"

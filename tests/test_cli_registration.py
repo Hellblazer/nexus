@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+# A repo-structure census in the default loop: scripts/meta_tests.py runs it before a push
+# when the diff reaches what it scans.
+pytestmark = pytest.mark.census
+
 COMMANDS_DIR = Path(__file__).parent.parent / "src" / "nexus" / "commands"
 
 # Files that are NOT top-level click command groups (helpers, hidden internals, and subcommand modules that
@@ -49,7 +53,9 @@ def test_all_command_modules_registered():
         "migration_cmd": "migration",
         "migration_audit_cmd": "migration-audit",
         "doctor": "doctor",
+        "group_cmd": "group",
         "hook": "hook",
+        "identity_cmd": "identity",
         "mineru": "mineru",
         # `self.py` would be a confusing module name next to the keyword;
         # `self_cmd` -> `self` follows config_cmd/search_cmd/service_cmd.

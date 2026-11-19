@@ -153,6 +153,7 @@ def _bare_hits(path: Path, rel: str, used: set[tuple[str, str]] | None = None) -
     return hits
 
 
+@pytest.mark.census
 def test_no_host_side_e2e_script_calls_a_bare_python3() -> None:
     offenders: list[str] = []
     used: set[tuple[str, str]] = set()

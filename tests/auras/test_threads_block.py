@@ -159,3 +159,36 @@ def test_a_clear_keeps_text_an_agent_wrote_after_the_block() -> None:
     content = io.rows["tamsin"]["content"]
     assert "aura:" not in content and "state: red" not in content
     assert "an agent's own note under the block" in content and "## Some work\nref: nexus-x" in content
+
+
+# --- RDR-253 Step 5: the aura threads block reads the identity line ----------------------------------
+
+
+def test_the_block_goes_to_the_entry_whose_identity_line_names_the_seat_after_clear() -> None:
+    stale = "99999999-8888-4777-8666-555555555555"  # the session id the entry was written under, before /clear
+    io = _Io([{"title": "tamsin", "content": _ENTRY.replace(_SID, stale).replace("\n", "\nidentity: i12\n", 1), "tags": "board"}])
+    writer = ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity="i12")
+    assert writer.set_block("ci_develop_red", "develop CI red", "develop red at abc1234")
+    assert io.puts and io.puts[0][0] == "tamsin"
+
+
+def test_an_entry_owned_by_another_identity_is_never_written_and_a_legacy_twin_does_not_make_it_ambiguous() -> None:
+    io = _Io([{"title": "other", "content": "identity: i7\n" + _ENTRY, "tags": "board"}])
+    assert not ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity="i12").set_block("a", "A", "x")
+    assert io.puts == []
+    io = _Io([
+        {"title": "tamsin", "content": "identity: i12\n" + _ENTRY, "tags": "board"},
+        {"title": "tamsin-old", "content": _ENTRY, "tags": "board"},
+    ])
+    assert ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity="i12").set_block("a", "A", "x")
+    assert [p[0] for p in io.puts] == ["tamsin"]
+
+
+def test_a_writer_built_before_the_binding_asks_for_the_identity_at_write_time() -> None:
+    stale = "99999999-8888-4777-8666-555555555555"
+    io = _Io([{"title": "tamsin", "content": f"identity: i12\nsession: {stale}\n## W\nstate: x\n", "tags": "board"}])
+    known: list[str] = [""]
+    writer = ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity_source=lambda: known[0])
+    assert not writer.set_block("a", "A", "x"), "no identity yet, and the entry is another seat's as far as we know"
+    known[0] = "i12"
+    assert writer.set_block("a", "A", "x") and io.puts[-1][0] == "tamsin"

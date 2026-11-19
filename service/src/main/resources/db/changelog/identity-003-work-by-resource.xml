@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-hczdo.1.1 (RDR-253 Step 1, review round 2): the reverse lookup of background work.
+
+    idx_identity_work_resource (tenant_id, kind, ref): GET /v1/identity/work?kind=&ref= finds the identities that own
+    a resource (a worktree, a tmux server, a lab run), which the worktree removal and the tmux cleanup helpers ask
+    before they stop or remove it. The primary key leads with identity_id, so it cannot serve that lookup.
+
+    DDL only: CREATE INDEX, no data mutation of any existing row, so no DATA EFFECT line applies per
+    scripts/data_effect_lint.py's own scope. A separate file because identity-002 may already have been applied
+    somewhere, and a changeset's content is never edited after that. Placed after identity-002 and before the
+    grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="identity-003-1" author="nexus-hczdo.1.1">
+        <comment>Index on nexus.identity_work (tenant_id, kind, ref) for the reverse lookup: which identities own this resource (RDR-253).</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE INDEX idx_identity_work_resource ON nexus.identity_work (tenant_id, kind, ref);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_identity_work_resource</rollback>
+    </changeSet>
+</databaseChangeLog>

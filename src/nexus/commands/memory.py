@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
+import os
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +37,40 @@ def _needs_quarantine_routes(verb: str) -> Generator[None, None, None]:
         raise
 
 
+def _mine(project: str | None, mine: bool, *, required: bool = False) -> str | None:
+    """The project a command works in: *project*, or with ``--mine`` the caller's own identity project (RDR-253:
+    ``identity/<id>``, keyed by id so a rename moves nothing). Both at once is a usage error, and so is ``--mine`` from a
+    process that holds no identity."""
+    if mine and project:
+        raise click.UsageError("give --project or --mine, not both")
+    if mine:
+        from nexus.db.t2.http_memory_store import identity_project  # noqa: PLC0415 — deferred: keeps CLI startup light
+        from nexus.identity import token_header  # noqa: PLC0415
+
+        record = token_header.current()
+        if record is None:
+            raise click.ClickException("--mine needs an identity, and no identity is bound to this process")
+        owner = record.identity
+        if os.environ.get("NX_IDENTITY_TOKEN", "").strip():
+            # A delegated child (``claude -p``) keeps its notes where identity scratch keeps them: under its parent, so
+            # they do not orphan when the child ends.
+            from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError  # noqa: PLC0415
+            from nexus.identity.scratch_scope import scope_owner  # noqa: PLC0415
+
+            try:
+                client = IdentityClient.from_config()
+                try:
+                    owner = scope_owner(client, identity=owner)
+                finally:
+                    client.close()
+            except (IdentityApiError, IdentityUnavailableError) as exc:
+                raise click.ClickException(f"--mine could not find this delegated identity's parent: {exc}") from exc
+        return identity_project(owner)
+    if required and not project:
+        raise click.UsageError("provide --project or --mine")
+    return project
+
+
 @click.group()
 def memory() -> None:
     """Persistent per-project memory (survives across sessions)."""
@@ -43,7 +78,9 @@ def memory() -> None:
 
 @memory.command("put")
 @click.argument("content")
-@click.option("--project", "-p", required=True, help="Project namespace (e.g. BFDB)")
+@click.option("--project", "-p", default=None, help="Project namespace (e.g. BFDB); required unless --mine")
+@click.option("--mine", is_flag=True, default=False,
+              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
 @click.option("--title", "-t", required=True, help="Entry title/filename")
 @click.option("--tags", default="", help="Comma-separated tags")
 @click.option("--ttl", default="permanent", show_default=True,
@@ -64,7 +101,8 @@ def memory() -> None:
 )
 def put_cmd(
     content: str,
-    project: str,
+    project: str | None,
+    mine: bool,
     title: str,
     tags: str,
     ttl: str,
@@ -88,6 +126,7 @@ def put_cmd(
     is nothing for the caller to start by hand. ``--help`` advertised
     a deleted T2 daemon start verb until that sub-stage's review.
     """
+    project = _mine(project, mine, required=True)
     if content == "-":
         content = read_stdin_utf8()
     try:
@@ -113,16 +152,19 @@ def put_cmd(
 @memory.command("get")
 @click.argument("entry_id", metavar="ID", required=False, type=int)
 @click.option("--project", "-p", default=None, help="Project namespace")
+@click.option("--mine", is_flag=True, default=False,
+              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
 @click.option("--title", "-t", default=None, help="Entry title (exact match, or unique prefix)")
-def get_cmd(entry_id: int | None, project: str | None, title: str | None) -> None:
+def get_cmd(entry_id: int | None, project: str | None, mine: bool, title: str | None) -> None:
     """Retrieve a memory entry by ID or by --project + --title.
 
     Title resolution is exact-then-prefix (nexus-e59o): if no entry matches
     --title exactly, a unique prefix match is returned. Ambiguous prefixes
     list the candidates and fail rather than picking silently.
     """
+    project = _mine(project, mine)
     if entry_id is None and not (project and title):
-        raise click.UsageError("provide an ID or --project and --title")
+        raise click.UsageError("provide an ID or --project (or --mine) and --title")
     with t2_handle() as db:
         if entry_id is not None:
             result = db.memory.get(id=entry_id)
@@ -169,9 +211,12 @@ def _quarantined_hint(db: T2Database, project: str | None, title: str | None) ->
 @memory.command("search")
 @click.argument("query")
 @click.option("--project", "-p", default=None, help="Scope search to a project")
-def search_cmd(query: str, project: str | None) -> None:
+@click.option("--mine", is_flag=True, default=False,
+              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
+def search_cmd(query: str, project: str | None, mine: bool) -> None:
     """Full-text keyword search across T2 memory entries (engine-side
     PostgreSQL full-text search)."""
+    project = _mine(project, mine)
     with t2_handle() as db:
         try:
             results = db.memory.search(query=query, project=project)
@@ -194,6 +239,8 @@ def search_cmd(query: str, project: str | None) -> None:
 
 @memory.command("list")
 @click.option("--project", "-p", default=None, help="Filter by project")
+@click.option("--mine", is_flag=True, default=False,
+              help="Work in this identity's own project, identity/<id> (RDR-253): keyed by id, so a rename moves nothing.")
 @click.option("--agent", "-a", default=None, help="Filter by agent name")
 @click.option(
     "--quarantined",
@@ -204,7 +251,7 @@ def search_cmd(query: str, project: str | None) -> None:
         "expired ones, and ones a replace quarantined (never reaped)."
     ),
 )
-def list_cmd(project: str | None, agent: str | None, quarantined: bool) -> None:
+def list_cmd(project: str | None, mine: bool, agent: str | None, quarantined: bool) -> None:
     """List memory entries.
 
     With ``--quarantined``, list the quarantined entries, hidden from get,
@@ -215,6 +262,7 @@ def list_cmd(project: str | None, agent: str | None, quarantined: bool) -> None:
     restore`` brings either back. A "rolled up" stamp means reap will delete
     that entry.
     """
+    project = _mine(project, mine)
     if quarantined:
         with t2_handle() as db, _needs_quarantine_routes("list --quarantined"):
             entries = db.memory.list_quarantined(project=project)

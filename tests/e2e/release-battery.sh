@@ -58,8 +58,8 @@
 #   lockstep  tests/e2e/plugin-lockstep-tests.sh         the plugin/CLI lockstep tests
 # The closing line then names the mode, and a plugin-only run never prints a bare
 # "RELEASE BATTERY PASSED". The unit suite is not a leg here or in the full mode
-# (PR CI runs it on the release tree; the plugin-only lane also runs it by hand,
-# serial to the battery); the pin tests are inside the preflight and the lint
+# (PR CI runs it on the release tree, in both modes; the plugin-only lane no longer
+# runs it by hand, Sam 2026-11-18); the pin tests are inside the preflight and the lint
 # bucket runs in PR CI's test-lint (nexus-jh1f2 cut 3). --only and --plan compose.
 set -uo pipefail
 (( BASH_VERSINFO[0] >= 4 )) || { echo "bash >= 4 required (found $BASH_VERSION)" >&2; exit 2; }

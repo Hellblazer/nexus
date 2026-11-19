@@ -51,9 +51,22 @@ public final class RequestContext {
      * @param credentialHash {@code sha256Hex} of the presented bearer — the rate-limit
      *                      key for the data-token mint endpoint (nexus-x1h07). Never the
      *                      raw secret.
+     * @param identity      the identity named by a verified identity token (RDR-253 Step 2,
+     *                      {@code X-Nexus-Identity-Token}), or null when the request carries none.
+     *                      Server-resolved from the token's row, never client-asserted.
+     * @param identityGeneration the generation that token was minted for (null with no token). The
+     *                      fences compare it with the identity's current generation; a token of a
+     *                      superseded generation still resolves, so the fence can say so (409).
      */
     public record Principal(String tenant, String session, boolean mintedSession,
-                            boolean isOperator, String scope, String credentialHash) {
+                            boolean isOperator, String scope, String credentialHash,
+                            String identity, Integer identityGeneration) {
+
+        /** A principal with no identity token: every caller that predates RDR-253 Step 2. */
+        public Principal(String tenant, String session, boolean mintedSession,
+                         boolean isOperator, String scope, String credentialHash) {
+            this(tenant, session, mintedSession, isOperator, scope, credentialHash, null, null);
+        }
     }
 
     private static final ThreadLocal<Principal> CURRENT = new ThreadLocal<>();
@@ -103,6 +116,18 @@ public final class RequestContext {
     public static String session() {
         Principal p = CURRENT.get();
         return p == null ? null : p.session();
+    }
+
+    /** @return the identity named by the request's identity token (RDR-253 Step 2), or null when it has none. */
+    public static String identity() {
+        Principal p = CURRENT.get();
+        return p == null ? null : p.identity();
+    }
+
+    /** @return the generation of the request's identity token, or null when it has none. */
+    public static Integer identityGeneration() {
+        Principal p = CURRENT.get();
+        return p == null ? null : p.identityGeneration();
     }
 
     /** @return true iff the current session was resolved from a verified minted token. */

@@ -10,6 +10,14 @@ diff against the recorded literal, not against a re-derivation of itself.
 One deliberate change since the recording: every child env carries
 ``NX_SENSITIVITY_POSTURE=llm_bound`` (RDR-243 Phase 2 Step 2.5, nexus-rfvyy.7.10:
 ``_build_dispatch_env`` exports it in every mode), added to each env below by hand.
+
+A second deliberate change (RDR-253 Step 4, nexus-hczdo.1.5): every child env carries ``NX_IDENTITY_TOKEN`` naming the file
+that holds no identity (``<config>/identity/delegated/none``, ``nexus.identity.delegated.no_identity_path``). The dispatch
+(``claude_dispatch`` -> ``CliBackend.run``, which is this ``claude -p`` spawn) names a delegated identity's token file there
+when it makes one (a tool-granting dispatch under a bound identity), and this sentinel otherwise, so the child never falls
+back to the ancestor walk and acts as its parent; the parent's own ``NX_IDENTITY_TOKEN`` is stripped in
+``claude_child_env.apply_harness_oauth_grant``. The recording is hand-edited, as for the posture: ``_SENTINEL`` stands for the
+path (it depends on the config directory), which ``run_case`` normalises.
 """
 from __future__ import annotations
 
@@ -28,6 +36,7 @@ from nexus.sensitivity import llm_bound
 
 _SCHEMA = {"type": "object", "properties": {"result": {"type": "string"}}}
 _FIXED_UUID = "00000000-0000-4000-8000-000000000001"
+_SENTINEL = "<delegated/none sentinel>"
 
 _RESULT_EVENT = json.dumps({
     "type": "result",
@@ -140,9 +149,13 @@ def run_case(kwargs: dict, extra_env: dict[str, str], *, restriction=None, restr
         # taken from NX_SENSITIVITY_POSTURE (the golden env stays byte-identical).
         with llm_bound("nx_answer_operators"):
             returned = asyncio.run(claude_dispatch("the prompt", _SCHEMA, usage_sink=sink, **kwargs))
+    env = seen["env"]
+    token = env.get("NX_IDENTITY_TOKEN")
+    if token and Path(token).parts[-3:] == ("identity", "delegated", "none"):
+        env["NX_IDENTITY_TOKEN"] = _SENTINEL       # the config directory is the machine's; the name is the contract
     return {
         "argv": seen["argv"],
-        "env": seen["env"],
+        "env": env,
         "cwd": seen["cwd"],
         "stdin_text": seen["stdin_text"],
         "returned": returned,
@@ -179,7 +192,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                 'env': {'HOME': '/home/x',
                         'NX_DISPATCH_MAX_BUDGET_USD': '0.5',
                         'NX_SESSION_ID': 'parent-session-1',
-                        'NX_SENSITIVITY_POSTURE': 'llm_bound',
+                        'NX_IDENTITY_TOKEN': _SENTINEL, 'NX_SENSITIVITY_POSTURE': 'llm_bound',
                         'PATH': '/usr/bin'},
                 'returned': {'result': 'ok'},
                 'stdin_text': 'the prompt',
@@ -205,7 +218,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                   'cwd': '/proj',
                   'env': {'HOME': '/home/x',
                           'NX_SESSION_ID': 'parent-session-1',
-                          'NX_SENSITIVITY_POSTURE': 'llm_bound',
+                          'NX_IDENTITY_TOKEN': _SENTINEL, 'NX_SENSITIVITY_POSTURE': 'llm_bound',
                           'PATH': '/usr/bin'},
                   'returned': {'result': 'ok'},
                   'stdin_text': 'the prompt',
@@ -227,7 +240,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                       '--tools',
                       ''],
              'cwd': '/proj',
-             'env': {'HOME': '/home/x', 'NX_SENSITIVITY_POSTURE': 'llm_bound', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
+             'env': {'HOME': '/home/x', 'NX_IDENTITY_TOKEN': _SENTINEL, 'NX_SENSITIVITY_POSTURE': 'llm_bound', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
              'returned': {'result': 'ok'},
              'stdin_text': 'the prompt',
              'usage_cost': 0.0123,
@@ -250,7 +263,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                     '--tools',
                     ''],
            'cwd': '/proj',
-           'env': {'HOME': '/home/x', 'NX_SENSITIVITY_POSTURE': 'llm_bound', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
+           'env': {'HOME': '/home/x', 'NX_IDENTITY_TOKEN': _SENTINEL, 'NX_SENSITIVITY_POSTURE': 'llm_bound', 'NX_SESSION_ID': 'parent-session-1', 'PATH': '/usr/bin'},
            'returned': {'result': 'ok'},
            'stdin_text': 'the prompt',
            'usage_cost': 0.0123,
@@ -271,7 +284,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                   'cwd': '/proj',
                   'env': {'HOME': '/home/x',
                           'NX_SESSION_ID': 'parent-session-1',
-                          'NX_SENSITIVITY_POSTURE': 'llm_bound',
+                          'NX_IDENTITY_TOKEN': _SENTINEL, 'NX_SENSITIVITY_POSTURE': 'llm_bound',
                           'PATH': '/usr/bin', 'NX_STOP_WAKE_GUARD': '0'},
                   'returned': {'result': 'ok'},
                   'stdin_text': 'the prompt',
@@ -297,7 +310,7 @@ GOLDEN: dict[str, dict] = {'budget_env': {'argv': ['claude',
                 'cwd': '/proj',
                 'env': {'HOME': '/home/x',
                         'NX_SESSION_ID': 'parent-session-1',
-                        'NX_SENSITIVITY_POSTURE': 'llm_bound',
+                        'NX_IDENTITY_TOKEN': _SENTINEL, 'NX_SENSITIVITY_POSTURE': 'llm_bound',
                         'NX_T1_SESSION': 'tok-00000000-0000-4000-8000-000000000001',
                         'NX_T1_SESSION_ID': '00000000-0000-4000-8000-000000000001',
                         'PATH': '/usr/bin'},

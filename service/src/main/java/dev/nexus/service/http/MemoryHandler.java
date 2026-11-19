@@ -86,6 +86,54 @@ public final class MemoryHandler implements HttpHandler {
     }
 
     /**
+     * nexus-1gdv0.1.2: the {@code limit} of a {@code /search} body. Absent (or JSON null) is the unpaged
+     * contract; a non-integer or a value below 1 is a 400; a value above {@link #LIST_LIMIT_CEILING} is
+     * clamped to it, the rule {@link #parseListLimit} applies to {@code /list}.
+     */
+    public static Integer parseBodyLimit(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        long parsed = bodyInteger(raw, "limit");
+        if (parsed < 1) {
+            throw new IllegalArgumentException("field 'limit' must be a positive integer, got " + parsed);
+        }
+        return (int) Math.min(parsed, LIST_LIMIT_CEILING);
+    }
+
+    /**
+     * nexus-1gdv0.1.1: the {@code offset} of a paged {@code /search} body. Absent is 0; a non-integer or a
+     * negative value is a 400; a value past an int clamps (it is an empty page either way).
+     */
+    public static int parseBodyOffset(Object raw) {
+        if (raw == null) {
+            return 0;
+        }
+        long parsed = bodyInteger(raw, "offset");
+        if (parsed < 0) {
+            throw new IllegalArgumentException("field 'offset' must be a non-negative integer, got " + parsed);
+        }
+        return (int) Math.min(parsed, Integer.MAX_VALUE);
+    }
+
+    /** A JSON number with no fractional part, as a long saturated at the long range; anything else is a 400. */
+    private static long bodyInteger(Object raw, String name) {
+        if (raw instanceof java.math.BigInteger big) {
+            return big.bitLength() < 64 ? big.longValue() : big.signum() < 0 ? Long.MIN_VALUE : Long.MAX_VALUE;
+        }
+        if (raw instanceof Integer || raw instanceof Long || raw instanceof Short || raw instanceof Byte) {
+            return ((Number) raw).longValue();
+        }
+        if (raw instanceof Number n) {
+            double d = n.doubleValue();
+            if (!Double.isNaN(d) && !Double.isInfinite(d) && d == Math.rint(d)) {
+                return (long) d;
+            }
+        }
+        throw new IllegalArgumentException("field '" + name + "' must be an integer");
+    }
+
+    /**
      * nexus-pxp44: the {@code /all} title filter. Absent or blank is the empty
      * set (every row); an unknown or empty element is a 400.
      */
@@ -114,9 +162,12 @@ public final class MemoryHandler implements HttpHandler {
         java.util.regex.Pattern.compile("^/([^/]+)/restore$");
 
     private final MemoryRepository repo;
+    /** RDR-253 Step 2: the ownership and generation checks of threads entries, and the T2 identity stamp. */
+    private final IdentityFence fence;
 
-    public MemoryHandler(MemoryRepository repo) {
+    public MemoryHandler(MemoryRepository repo, IdentityFence fence) {
         this.repo = repo;
+        this.fence = fence;
     }
 
     @Override
@@ -164,6 +215,8 @@ public final class MemoryHandler implements HttpHandler {
                 case "/summaries"      -> handleSummaries(exchange, tenant, method);
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
+        } catch (dev.nexus.service.db.IdentityException e) {
+            IdentityFence.refuse(exchange, e);
         } catch (IllegalArgumentException e) {
             log.debug("event=memory_bad_request tenant={} op={} error={}", tenant, op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
@@ -220,8 +273,10 @@ public final class MemoryHandler implements HttpHandler {
             throw new IllegalArgumentException("replaces is blank (nothing written)");
         }
         String replaces = optStringOrNull(body, "replaces");
+        fence.threadsWrite(ex, tenant, project, title, content, replaces);
         if (replaces != null) {
             var res = repo.replaceMemory(tenant, project, title, content, tags, session, agent, ttl, replaces);
+            fence.stamp(tenant, res.id());
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("id", res.id());
             resp.put("replaced_id", res.replacedId());
@@ -232,6 +287,7 @@ public final class MemoryHandler implements HttpHandler {
         }
 
         long id = repo.upsert(tenant, project, title, content, tags, session, agent, ttl);
+        fence.stamp(tenant, id);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
     }
 
@@ -258,7 +314,9 @@ public final class MemoryHandler implements HttpHandler {
         Integer ttl    = requirePositiveOrNullTtl(optInt(body, "ttl"));
         double minSim  = optDouble(body, "min_similarity", 0.5);
 
+        fence.threadsWrite(ex, tenant, project, title, content, null);
         long[] result = repo.putOrMerge(tenant, project, title, content, tags, session, agent, ttl, minSim);
+        fence.stamp(tenant, result[0]);
         String action = result[1] == 1L ? "merged" : "inserted";
         HttpUtil.send(ex, 200, json(Map.of("id", result[0], "action", action)));
     }
@@ -307,12 +365,19 @@ public final class MemoryHandler implements HttpHandler {
 
     /**
      * POST /v1/memory/search
-     * Request: {"query","project"(opt),"access"(opt,"track"|"silent")}
-     * Response 200: [entries]
+     * Request: {"query","project"(opt),"access"(opt,"track"|"silent"),"limit"(opt),"offset"(opt)}
+     * Response 200: [entries] without {@code limit}; {"rows":[entries],"matching_total":N} with it
      *
      * <p>The {@code access} field mirrors Python's {@code search(access="track"|"silent")}:
      * {@code "track"} (default) increments access_count on returned rows;
      * {@code "silent"} skips it (for internal consolidation scans).
+     *
+     * <p>RDR-209 Phase 0b: without {@code limit} every match is returned and stamped, as before (an older
+     * client). With it the engine returns rows {@code [offset, offset+limit)} in the same order, stamps only
+     * those, and reports how many rows matched in total, even for a page past the end (see
+     * {@code MemorySearchPage}). {@code limit} below 1 or not an integer is a 400, above
+     * {@link #LIST_LIMIT_CEILING} is clamped; {@code offset} (default 0, negative is a 400) is read only with
+     * {@code limit}.
      */
     private void handleSearch(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -321,10 +386,20 @@ public final class MemoryHandler implements HttpHandler {
         String project = optStringOrNull(body, "project");
         String access  = optStringOrNull(body, "access");
         boolean trackAccess = !"silent".equals(access);
+        Integer limit = parseBodyLimit(body.get("limit"));
+        int offset = limit == null ? 0 : parseBodyOffset(body.get("offset"));
 
         try {
-            var rows = repo.search(tenant, query, project, trackAccess);
-            HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+            if (limit == null) {
+                var rows = repo.search(tenant, query, project, trackAccess);
+                HttpUtil.send(ex, 200, json(rows.stream().map(this::recordToMap).toList()));
+                return;
+            }
+            var page = repo.searchPage(tenant, query, project, trackAccess, limit, offset);
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("rows", page.rows().stream().map(this::recordToMap).toList());
+            resp.put("matching_total", page.matchingTotal());
+            HttpUtil.send(ex, 200, json(resp));
         } catch (MemoryRepository.DegenerateQueryException e) {
             sendDegenerateQueryError(ex, tenant, e);
         }
@@ -472,10 +547,12 @@ public final class MemoryHandler implements HttpHandler {
         boolean deleted;
         if (params.containsKey("id")) {
             long id = parseLong(params.get("id"), "id");
+            fence.threadsRows(ex, tenant, List.of(id), null, null);
             deleted = repo.deleteById(tenant, id);
         } else {
             String project = requireParam(params, "project");
             String title   = requireParam(params, "title");
+            fence.threadsWrite(ex, tenant, project, title, null, null);
             deleted = repo.delete(tenant, project, title);
         }
         HttpUtil.send(ex, 200, json(Map.of("deleted", deleted)));
@@ -519,6 +596,7 @@ public final class MemoryHandler implements HttpHandler {
             throws IOException {
         requireMethod(ex, method, "POST");
         long id = parseLong(rawId, "id");
+        fence.threadsRows(ex, tenant, List.of(id), null, null);
         HttpUtil.send(ex, 200, json(Map.of("restored", repo.restore(tenant, id))));
     }
 
@@ -571,6 +649,7 @@ public final class MemoryHandler implements HttpHandler {
                 List<Long> sourceIds = requireLongList(body, "source_ids");
                 String model = requireString(body, "model");
                 String producedBy = optStringOrNull(body, "produced_by");
+                fence.threadsRows(ex, tenant, sourceIds, null, null);
                 try {
                     long id = repo.insertSummary(tenant, project, content, sourceIds, model, producedBy);
                     HttpUtil.send(ex, 200, json(Map.of("id", id)));
@@ -605,7 +684,11 @@ public final class MemoryHandler implements HttpHandler {
         List<Long> deleteIds = requireLongList(body, "delete_ids");
         String mergedContent = requireString(body, "merged_content");
 
+        List<Long> involved = new ArrayList<>(deleteIds);
+        involved.add(keepId);
+        fence.threadsRows(ex, tenant, involved, keepId, mergedContent);
         repo.mergeMemories(tenant, keepId, deleteIds, mergedContent);
+        fence.stamp(tenant, keepId);
         // 204 No Content
         ex.sendResponseHeaders(204, -1);
         ex.getResponseBody().close();
@@ -660,9 +743,11 @@ public final class MemoryHandler implements HttpHandler {
     private void handleImport(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
         MemoryRepository.ImportRow r = parseImportRow(readBody(ex));
+        fence.threadsWrite(ex, tenant, r.project(), r.title(), r.content(), null);
         long id = repo.importRow(tenant, r.project(), r.title(), r.content(), r.tags(),
                                  r.session(), r.agent(), r.ttlDays(), r.timestamp(),
                                  r.accessCount(), r.lastAccessed());
+        fence.stamp(tenant, id);
         HttpUtil.send(ex, 200, json(Map.of("id", id)));
     }
 
@@ -727,6 +812,8 @@ public final class MemoryHandler implements HttpHandler {
                 tenant, skipped.size(), skipped);
         }
 
+        fence.threadsBatch(ex, tenant, valid.stream()
+            .map(r -> new IdentityFence.Entry(r.project(), r.title(), r.content())).toList());
         int imported = repo.importBatch(tenant, valid);
         HttpUtil.send(ex, 200, json(Map.of(
             "imported", imported,

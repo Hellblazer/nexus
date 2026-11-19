@@ -11,6 +11,8 @@ import ast
 import asyncio
 import inspect
 import json
+import re
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -1179,14 +1181,55 @@ def test_the_active_project_seam_is_disclosure_only_and_points_at_the_wired_tier
 # ── F8. smaller items ─────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_the_format_constraint_pattern_is_not_quadratic() -> None:
-    import time
+#: Growth of the time when the input grows 8 times: about 8 for linear work, about 64 for quadratic. The bound
+#: sits between them (the real parse measured 4.5 to 6, the unbounded pattern 61 to 64), so load cannot fail it
+#: and a quadratic regression cannot pass it.
+_GROWTH = 8
+_QUADRATIC_RATIO = 24.0
 
-    text = "Answer " + "in " * 2600
-    started = time.perf_counter()
-    rc._constraint_kind(text)
-    derive_request_coverage(text)
-    assert time.perf_counter() - started < 0.25
+
+#: Each sample runs the call until it has used this much CPU time, so a coarse thread clock (about 15.6 ms on
+#: Windows) never reads a run as 0.
+_SAMPLE_CPU_S = 0.05
+
+
+def _cpu_per_call(fn, text: str) -> float:
+    calls = 0
+    started = time.thread_time()
+    while True:
+        fn(text)
+        calls += 1
+        spent = time.thread_time() - started
+        if spent >= _SAMPLE_CPU_S:
+            return spent / calls
+
+
+def _growth_ratio(fn, small: int = 400, rounds: int = 5) -> float:
+    """Best-of-``rounds`` CPU time per call on "Answer in in ..." at ``_GROWTH * small`` repeats over the same at
+    ``small``. It is this thread's CPU time, not wall time: a run preempted on a loaded runner is not charged for
+    the wait (wall time failed 4 of 40 runs under 16 busy loops per core). The two sizes alternate within each
+    round."""
+    short = "Answer " + "in " * small
+    long = "Answer " + "in " * (small * _GROWTH)
+    best = {short: float("inf"), long: float("inf")}
+    for _ in range(rounds):
+        for text in (short, long):
+            best[text] = min(best[text], _cpu_per_call(fn, text))
+    return best[long] / best[short]
+
+
+def test_the_format_constraint_pattern_is_not_quadratic() -> None:
+    def parse(text: str) -> None:
+        rc._constraint_kind(text)
+        derive_request_coverage(text)
+
+    assert _growth_ratio(parse) < _QUADRATIC_RATIO
+
+
+def test_the_growth_check_catches_a_quadratic_pattern() -> None:
+    # The unbounded form of _FORMAT's answer branch, which backtracks quadratically on "Answer in in in ...".
+    unbounded = re.compile(r"^(?:answer)\b[^.]*?\bin\b[^.]*?\b(?:sentences?)\b", re.IGNORECASE)
+    assert _growth_ratio(unbounded.match) > _QUADRATIC_RATIO
 
 
 def test_a_format_constraint_still_reads_as_one() -> None:

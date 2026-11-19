@@ -1,16 +1,16 @@
 ---
 id: JDR-001
-title: "T1 has three scopes; the MCP scope moves only on a consumed handoff marker"
+title: "T1 has four scopes; the MCP scope moves only on a consumed handoff marker"
 status: active
 owners: [RDR-105, RDR-149, RDR-184]
 created: 2026-09-04
 ---
 
-# JDR-001: T1 has three scopes; the MCP scope moves only on a consumed handoff marker
+# JDR-001: T1 has four scopes; the MCP scope moves only on a consumed handoff marker
 
 ## Decision
 
-T1 (session scratch) is one PG-backed store reached through three scopes
+T1 (session scratch) is one PG-backed store reached through four scopes
 that exist at the same time, and code that reads or writes T1 names which
 one it means:
 
@@ -34,6 +34,10 @@ one it means:
    concurrent session can own it; it is never a per-conversation value.
    An MCP server that Claude Code did not start never takes its T1 scope
    from it (nexus-xs7fp, below).
+4. **Identity scratch** is the scope `session_id = identity:<id>` in the same
+   store. It holds working state that must cross `/clear` and restart, lives
+   as long as its identity, and is written only by its owner (RDR-253
+   Step 2). Nothing about scopes 1 to 3 changes.
 
 Consequences every owner relies on: a `claude -p` subprocess defaults to
 its own leased scope (`owned`) and opts into the parent's with
@@ -249,3 +253,4 @@ gets T1 unavailable instead of borrowing one. Cowork is measured too (2026-10-21
   `resolve_active_session_id` and inherits the gate (a gated server's rows
   carry NULL); only operator dispatch keeps a raw file read, as its last
   tier. A bare CLI in a terminal still labels with the file's last writer.
+- 2026-11-18: RDR-253 Step 2 (nexus-hczdo.1.2) adds a fourth scope, identity scratch, and changes one check on scope 1 (drafted 2026-11-17; Sam approved it as drafted 2026-11-18, which also retitles this record from three scopes to four; the file name stays). (a) Scope: a request whose body `session_id` is `identity:<id>` (an `i<digits>` id; anything else after the prefix is 400 `bad_scope`) addresses the identity scope of that identity; it is the same table (`t1.scratch`), no new column. Its writes (`put`, `flag`, `unflag`, `delete`) need an identity token for that identity at its current generation (403 `not_owner`, 409 `generation_superseded`, 403 `identity_token_required`; an `unleased` owner accepts a tokenless write, marked `X-Nexus-Unattested`); its reads (`get`, `search`, `list`, `flagged`, `resolve_prefix`) are never checked, so a delegated child reads its parent's. (b) Lifetime: `session/close` on the scope deletes nothing and answers 0; the 24-hour idle sweep, the request sweep and the scheduled sweep exclude it (`session_id LIKE 'identity:%'`); the retention pass removes the scope of every identity that no longer exists (a tombstone's, or one a crash left), and an operator purge removes it right after the purge commits (it is in another schema under the `nexus.t1_tenant` setting, so it cannot share the identity's transaction; the audit row of a purge does not count it, the response does). (c) The session-scope check: ScratchHandler's refusal of a body `session_id` that differs from the minted session token is unchanged for a request with no identity token; for a request that carries an identity token it also accepts every session id that the session index (`identity_sessions`) maps to the token's identity and generation, so the first write after `/clear` (a new session id under the same generation) is not refused, and neither is a write from a Bash child that still holds the old id. A superseded generation's token does not pass this check for a session the new process has taken (the index maps it to the newer generation). (d) The extended handoff marker (client, Step 3): on `clear`, `resume` and `fork` the SessionStart hook also writes the identity, the generation, the session id and the token file's path (never the token) into `t1_handoff.<mcp pid>`; on `/clear` the generation is unchanged, so the MCP server keeps writing with the token it holds and the marker gives it the new session id; the engine side is what (c) provides. Scope 1 and the handoff mechanism otherwise stand.

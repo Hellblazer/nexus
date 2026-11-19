@@ -134,6 +134,11 @@ final class AuthFilterCorrelationFixture implements AutoCloseable {
         ctx.getFilters().add(new MdcProbeFilter());
         ctx.getFilters().add(new AuthFilter(cache, store));
         ctx.getFilters().add(new IdempotencyKeyGuard());
+        // RDR-253 Step 2: the identity routes, for the identity-token filter step (the handler is the same 200 probe).
+        var identityCtx = server.createContext("/v1/identity", handler);
+        identityCtx.getFilters().add(new MdcProbeFilter());
+        identityCtx.getFilters().add(new AuthFilter(cache, store));
+        identityCtx.getFilters().add(new IdempotencyKeyGuard());
         var failCtx = server.createContext(FAIL_PATH, new ShapeHandler());
         failCtx.getFilters().add(new MdcProbeFilter());
         failCtx.getFilters().add(new AuthFilter(cache, store));

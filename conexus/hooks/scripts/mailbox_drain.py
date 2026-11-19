@@ -113,6 +113,7 @@ import _interpreter  # noqa: E402 -- must follow the sys.path insert
 _interpreter.reexec_if_needed()
 
 import _endpoint_resolve as _ep  # noqa: E402
+import _identity_lookup  # noqa: E402 -- RDR-253 Step 5: the session's identity, stdlib only
 import _tuple_size_limits as _sz  # noqa: E402
 from _tuple_sender import canonical_session, sender_label  # noqa: E402
 
@@ -694,6 +695,27 @@ def _transport_error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+#: RDR-253 Step 5: this session's identity token, set by :func:`_drain_all` from the token files. The engine fences
+#: claims on ``mailbox/<identity>``, so a request on that subspace carries it (``X-Nexus-Identity-Token``, the
+#: header ``nexus.identity.token_contract`` names); a request on any other subspace never does.
+_IDENTITY_TOKEN = ""
+_IDENTITY_MAILBOX = re.compile(r"mailbox/i[0-9]+")
+
+
+#: The address :func:`_drain_address` is draining now. The token is chosen per drained ADDRESS, not per request
+#: body: ``ack``, ``nack``, ``renew`` and ``release`` name only a claim id, and the engine fences them by the claim's
+#: subspace (``IdentityFence.mailboxClaimById``), so a body-based choice would claim with the token and ack without.
+_DRAIN_ADDRESS = ""
+
+
+def _identity_headers(route: str = "/v1/tuples/") -> dict[str, str]:
+    if not route.startswith("/v1/tuples/"):
+        return {}  # only the tuple routes are fenced on mailbox/<id>; a memory read never carries the token
+    if _IDENTITY_TOKEN and _IDENTITY_MAILBOX.fullmatch(f"mailbox/{_DRAIN_ADDRESS}"):
+        return {"X-Nexus-Identity-Token": _IDENTITY_TOKEN}
+    return {}
+
+
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
           *, is_local: bool, budget_s: float | None = None) -> dict[str, Any] | None:
     """POST and return the decoded body, or None on a 404. Raises :class:`_Skip`
@@ -719,7 +741,8 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     url = f"{base_url}{route}"
     req = urllib.request.Request(
         url, data=payload, method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 **_identity_headers(route)},
     )
     # Never spend longer than the drain has left: a sequence of calls each
     # just under the per-call cap would otherwise blow the whole budget while
@@ -775,7 +798,9 @@ def _get(base_url: str, token: str, route: str, params: dict[str, str],
     if _ep.has_userinfo(base_url):
         raise _Skip(f"{route}: the service URL carries credentials (user:password@); not sent")
     url = f"{base_url}{route}?{urllib.parse.urlencode(params)}"
-    req = urllib.request.Request(url, method="GET", headers={"Authorization": f"Bearer {token}"})
+    req = urllib.request.Request(
+        url, method="GET", headers={"Authorization": f"Bearer {token}", **_identity_headers(route)},
+    )
     call_timeout = max(0.1, min(_ASK_GET_CAP_S, budget_s))
     outcome: dict[str, Any] = {}
 
@@ -859,8 +884,9 @@ def _ask_parse_body(corr: object, body: object) -> dict[str, str] | None:
 
 
 def _ask_title(address: str, ask: str, version: str) -> str:
-    """T2 title of the answer record: ``<asker session id>/<ask id>/<version>``, the address
-    lower-cased (threads.answer_title writes the same)."""
+    """T2 title of the answer record: ``<asker>/<ask id>/<version>``, the address lower-cased
+    (threads.answer_title writes the same): the identity for mail drained from ``mailbox/<identity>``,
+    the session id for the session mailbox (RDR-253 Step 5)."""
     return f"{address.lower()}/{ask}/{version}"
 
 
@@ -1123,8 +1149,8 @@ def _sender_tag(row: dict[str, Any], dims: dict[str, Any]) -> str:
     key (an engine that predates the stamp) is different from a null one.
     NO LABEL IS NOT VERIFICATION: any data-token holder can mint a session
     token for any session id."""
-    label = sender_label(dims.get("from"), row.get("sender_session"),
-                         stamp_known="sender_session" in row)
+    label = sender_label(dims.get("from"), row.get("sender_session"), stamp_known="sender_session" in row,
+                         identity_of=lambda session: _identity_lookup.lookup(session, _config_dir())[0])
     return f" [{label}]" if label else ""
 
 
@@ -1213,7 +1239,17 @@ def _drain_claimant(address: str) -> str:
     return f"mailbox-drain-{digest}-{pid_str}-{secrets.token_hex(4)}"
 
 
-def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
+def _drain_address(base_url: str, token: str, address: str, **kw: Any) -> str:
+    """:func:`_drain_address_inner` with :data:`_DRAIN_ADDRESS` set for every request it makes (RDR-253 Step 5)."""
+    global _DRAIN_ADDRESS
+    _DRAIN_ADDRESS = address
+    try:
+        return _drain_address_inner(base_url, token, address, **kw)
+    finally:
+        _DRAIN_ADDRESS = ""
+
+
+def _drain_address_inner(base_url: str, token: str, address: str, *, is_local: bool,
                    config_dir: Path, deadline: float, out: _Out) -> str:
     """Probe one address and deliver what it can, writing each row as it goes.
 
@@ -1537,6 +1573,13 @@ def _drain_all() -> int:
     # longer read here at all -- see the module docstring's "WHERE THE
     # FLOOR DOES NOT REACH" section.
     addresses: list[str] = [session_id] if _valid_address(session_id) else []
+    # RDR-253 Step 5, Phase 1: a new client is mailed at mailbox/<identity> by new-client senders and at its session
+    # mailbox by old ones, so both are drained. The identity comes from the token files (session_id and the held
+    # session_ids), never from the payload.
+    global _IDENTITY_TOKEN
+    identity, _IDENTITY_TOKEN = _identity_lookup.lookup(session_id, config_dir) if addresses else ("", "")
+    if identity and _valid_address(identity):
+        addresses.append(identity)
     if not addresses:
         _log_skip("no address to drain: the payload carried no usable session id")
         return 0

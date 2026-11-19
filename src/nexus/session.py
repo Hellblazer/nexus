@@ -696,7 +696,11 @@ _MAX_SERVER_DEPTH = 3
 #: scripts, so on a real box ``ps`` reports the interpreter as the executable
 #: and the script as argv[1]; without this the matcher would have to accept
 #: ANY argv[1] match and would then also match ``vim ~/.local/bin/nx-mcp``.
-_PYTHON_EXECUTABLE_RE = re.compile(r"^python[0-9.]*$")
+#: Case-insensitive: a macOS framework Python (Homebrew ``python@3.x``, the
+#: python.org installer) runs through its app stub, ``.../Python.app/Contents/
+#: MacOS/Python``, so the executable is ``Python``; a lowercase-only match found
+#: no server there and the /clear handoff marker was never written (nexus-hczdo.1.11).
+_PYTHON_EXECUTABLE_RE = re.compile(r"^python[0-9.]*$", re.IGNORECASE)
 
 
 def _list_processes(

@@ -8,6 +8,14 @@ from nexus.commands._helpers import read_stdin_utf8
 from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
 
 
+_SCOPE_META = "nx.scratch.scope"
+
+
+def _identity_scope() -> bool:
+    ctx = click.get_current_context(silent=True)
+    return ctx is not None and ctx.meta.get(_SCOPE_META) == "identity"
+
+
 def _clean_service_errors(fn):
     """Convert CALL-time T1 service errors into clean ClickExceptions.
 
@@ -76,7 +84,15 @@ def _t1():
     traceback (nexus-gff3g).
     """
     try:
-        return get_t1_database()
+        base = get_t1_database()
+        if _identity_scope():
+            from nexus.identity.scratch_scope import IdentityScopeError, identity_scratch  # noqa: PLC0415 — deferred: identity scope only
+
+            try:
+                return identity_scratch(base)
+            except IdentityScopeError as exc:
+                raise click.ClickException(str(exc)) from exc
+        return base
     except T1ServerNotFoundError as exc:
         raise click.ClickException(
             f"{exc}\n\n"
@@ -100,8 +116,13 @@ def _t1():
 
 
 @click.group()
-def scratch() -> None:
-    """Temporary in-session scratch space (cleared when the session ends)."""
+@click.option("--scope", type=click.Choice(["session", "identity"]), default="session", show_default=True,
+              help="session: this session's scratch, cleared when it ends. identity: the scratch of this session's "
+                   "identity (RDR-253), which survives /clear and restart; a delegated child reads its parent's.")
+@click.pass_context
+def scratch(ctx: click.Context, scope: str) -> None:
+    """Temporary scratch space: this session's (cleared when it ends) or, with --scope identity, the identity's."""
+    ctx.meta[_SCOPE_META] = scope
 
 
 @scratch.command("put")
@@ -116,6 +137,9 @@ def put_cmd(content: str, tags: str, persist: bool, project: str, title: str) ->
 
     Use '-' as CONTENT to read from stdin.
     """
+    if persist and _identity_scope():
+        raise click.UsageError("--persist flags an entry for the session-end flush, and identity scratch never ends with "
+                               "a session; promote an entry with `nx scratch --scope identity promote ID -p PROJECT -t TITLE`")
     if content == "-":
         content = read_stdin_utf8()
     t1 = _t1()
@@ -203,6 +227,9 @@ def flag_cmd(entry_id: str, project: str, title: str) -> None:
     via ``_resolve_entry_id``, the same helper ``get`` uses, before reaching
     the backend — neither backend's ``flag`` does prefix fallback itself.
     """
+    if _identity_scope():
+        raise click.UsageError("flag marks an entry for the session-end flush, and identity scratch never ends with a session; "
+                               "copy it to T2 with `nx scratch --scope identity promote ID -p PROJECT -t TITLE`")
     t1 = _t1()
     full_id = _resolve_entry_id(t1, entry_id)
     try:
@@ -289,6 +316,10 @@ def clear_cmd(yes: bool) -> None:
     family): a preview naming the count (and how many are flagged) then
     ``click.confirm(..., abort=True)``, skippable with ``--yes``/``-y``.
     """
+    if _identity_scope():
+        raise click.UsageError("clear closes a session's scope, and the engine never closes the identity scope, so it would "
+                               "report success and delete nothing; delete identity scratch entries one by one with "
+                               "`nx scratch --scope identity delete ID`")
     t1 = _t1()
     if not yes:
         entries = t1.list_entries()

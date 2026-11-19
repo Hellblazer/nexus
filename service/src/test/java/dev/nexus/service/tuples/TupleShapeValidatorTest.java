@@ -171,7 +171,7 @@ class TupleShapeValidatorTest {
                 TupleShapeValidator.validateOut(template("mailbox/<address>"), Map.of("to", "x"),
                         Map.of("from", "a", "address_kind", "bogus"), null, "n", false));
         assertEquals("address_kind", ex.field());
-        assertTrue(ex.getMessage().contains("not in [agent, session]"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("not in [agent, session, identity]"), ex.getMessage());
     }
 
     // ── nonce ────────────────────────────────────────────────────────────

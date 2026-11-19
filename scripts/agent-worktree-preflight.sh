@@ -56,6 +56,22 @@ set -euo pipefail
 
 required_sha_input="${1:-}"
 
+# RDR-253 Step 6: a worktree is work its creator's identity owns. Label it so nx identity may-stop keeps another
+# session from removing it while this one runs. Best effort in every part: skipped without nx, silent on any failure,
+# bounded in time where `timeout` exists, and never a reason to turn a PREFLIGHT_OK into a failure. Runs only after
+# the verdict line is printed.
+register_worktree() {
+  command -v nx >/dev/null 2>&1 || return 0
+  local wt
+  wt="$(pwd -P)" || return 0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 nx identity work register --kind worktree --ref "$wt" >/dev/null 2>&1 || true
+  else
+    nx identity work register --kind worktree --ref "$wt" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 git_dir="$(git rev-parse --git-dir)"
 case "$git_dir" in
   */.git/worktrees/*)
@@ -117,6 +133,7 @@ fi
 if git merge-base --is-ancestor "$required_sha" HEAD; then
   head_sha="$(git rev-parse HEAD)"
   echo "PREFLIGHT_OK head=${head_sha} recovered=no"
+  register_worktree
   exit 0
 fi
 
@@ -137,4 +154,5 @@ fi
 
 head_sha="$(git rev-parse HEAD)"
 echo "PREFLIGHT_OK head=${head_sha} recovered=yes"
+register_worktree
 exit 0

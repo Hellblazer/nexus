@@ -112,6 +112,22 @@
 # notice for another sha is not to be ignored on that alone: in a push window the
 # beads close on the window tip's result, which is often a peer's sha.
 #
+# Push record (RDR-252 Step 2, nexus-igea9.2). After PUSH_OK on a push to develop,
+# on every path including --skip-lock, the script writes one tuple to
+# board/ci/nexus-develop--push (key topic=nexus-develop--push, nonce push-<tip>):
+# dims from=<identity id, or "unknown"> kind=push sha=<tip>, body {"base": <the
+# remote develop tip the push replaced>, "n": <commits>}. RDR-252's owner stamper
+# links base to tip to order develop's tips and maps the record's session stamp to
+# the pushing identity; it never reads from. The stamp is added by `nx tuple out`
+# once RDR-253 Step 3's client resolver is installed; until then the record is
+# unstamped and serves the chain only. The push lock is released before the record
+# is written. With --skip-lock the installed nx is resolved for this write as the
+# lock path does; if none resolves, no record is written (PUSH_RECORD_SKIPPED). A
+# failed write, or one past NX_PUSH_RECORD_TIMEOUT_S (default 20 s), is one
+# PUSH_RECORD_FAILED line on stderr. The record never fails the push: stdout keeps
+# its PUSH_OK line and the exit code is the push's. A push to any other branch
+# writes no record.
+#
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
 # and a careful session that keeps checking yields indefinitely to a
@@ -310,7 +326,9 @@ _lock_describe_scope() {
 # no-op before the lock is ever claimed, since _lock_claim_id starts empty
 # (including when the lock was skipped, or when nx-resolution or the
 # reachability probe refused before any claim was attempted).
+_record_tmp=""   # the push record's temp file while its write runs; the EXIT trap removes it if the script dies mid-write
 _release_push_lock() {
+  [[ -n "$_record_tmp" ]] && rm -f "$_record_tmp"
   if [[ -n "$_lock_claim_id" ]]; then
     local out
     if ! out="$("$_nx_bin" tuple release "$_lock_claim_id" --claimant "$_lock_claimant" 2>&1)"; then
@@ -840,8 +858,86 @@ else:
   fi
 fi
 
+# The push record's base (RDR-252 Step 2): develop's remote tip as the fetch above left it, read just
+# before the push. Under the lock no other push lands in between, so it is the tip this push replaces. A
+# push that lands while the lock is skipped, or one whose range already holds a peer's newer tip, can make
+# it differ; the stamper then sees a gap in the chain, which the RDR handles ("Develop's state from commit
+# order").
+_record_base="$(git rev-parse -q --verify "refs/remotes/$remote/$branch^{commit}" 2>/dev/null || true)"
+
 git push -q "$remote" "$tip:refs/heads/$branch"
 echo "PUSH_OK n=${#range[@]} tip=$tip"
+
+# The lock is released now, before the push record, so a slow tuple space while the record is written
+# never keeps other sessions' pushes waiting. The EXIT trap then finds no claim and does nothing.
+_release_push_lock
+_lock_claim_id=""
+
+# ── Push record (RDR-252 Step 2, nexus-igea9.2) ─────────────────────────
+# One tuple per push to develop, on every path that reaches PUSH_OK (--skip-lock included). RDR-252's owner
+# stamper (Step 3) reads it: base linked to tip orders develop's tips, and the record's session stamp maps
+# the push to the pushing identity. The stamp comes from `nx tuple out` itself once RDR-253 Step 3's client
+# resolver is installed (a Bash child of a Claude session then carries its session's identity); until then
+# the record is unstamped, which the stamper counts as no record for ownership while still chaining its
+# base to its tip. The stamper never reads `from`, which is a label only. Nothing here can fail the push
+# that just landed: any error is one PUSH_RECORD_* line on stderr, stdout and the exit code stay as they
+# were, and the write is stopped after NX_PUSH_RECORD_TIMEOUT_S seconds (default 20).
+#
+# The identity id for `from` (RDR-253 Step 3 resolves it in Python; no shell verb exists yet). "unknown"
+# until one does, which the RDR also prescribes for a push from a plain shell with no Claude ancestor.
+_push_record_from() {
+  printf 'unknown'
+}
+
+# _bounded SECONDS OUTFILE CMD...: run CMD with its output in OUTFILE; its exit code, or 124 once it has
+# run SECONDS (TERM, then KILL a second later). macOS ships no timeout(1).
+_bounded() {
+  local limit="$1" outfile="$2" pid ticks=0
+  shift 2
+  "$@" >"$outfile" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( ticks >= limit * 10 )); then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+    ticks=$(( ticks + 1 ))
+  done
+  wait "$pid"
+}
+
+_write_push_record() {
+  [[ "$branch" == "develop" ]] || return 0
+  local nxbin="${_nx_bin:-}" body outfile code=0 limit="${NX_PUSH_RECORD_TIMEOUT_S:-20}" last
+  [[ "$limit" =~ ^[0-9]+$ ]] && limit=$(( 10#$limit )) || limit=20   # base 10: a leading zero (08) is not octal
+  (( limit > 0 )) || limit=20
+  # The lock path already resolved the installed nx; --skip-lock resolves it here, the same way.
+  [[ -n "$nxbin" ]] || nxbin="$(installed_nx_resolve || true)"
+  if [[ -z "$nxbin" ]]; then
+    echo "PUSH_RECORD_SKIPPED: nx is not installed on PATH (only a dev-checkout or venv copy, or none); the push stands" >&2
+    return 0
+  fi
+  body="{\"base\": \"${_record_base}\", \"n\": ${#range[@]}}"
+  outfile="$(mktemp "${TMPDIR:-/tmp}/push-record.XXXXXX")" || { echo "PUSH_RECORD_FAILED no temp file (the push stands)" >&2; return 0; }
+  _record_tmp="$outfile"
+  _bounded "$limit" "$outfile" "$nxbin" tuple out "board/ci/nexus-develop--push" --key "topic=nexus-develop--push" \
+    --nonce "push-$tip" --dim "from=$(_push_record_from)" --dim "kind=push" --dim "sha=$tip" --body "$body" || code=$?
+  if (( code == 124 )); then
+    echo "PUSH_RECORD_FAILED the write ran past ${limit}s and was stopped (the push stands)" >&2
+  elif (( code != 0 )); then
+    # The last non-empty line: nx prints its own log lines first and its error last.
+    last="$(grep -v '^[[:space:]]*$' "$outfile" | tail -n 1 || true)"
+    echo "PUSH_RECORD_FAILED exit $code: ${last:0:400} (the push stands)" >&2
+  fi
+  rm -f "$outfile"
+  _record_tmp=""
+  return 0
+}
+_write_push_record || true
 
 # nexus-1d6pz.11.4: the two ways to be woken when this push's CI completes, on
 # stderr (stdout keeps its PUSH_OK contract). A session with the channel subscribes

@@ -9,7 +9,7 @@ both.
 ```bash
 ./tests/cc-validation/runner.sh                 # full suite
 ./tests/cc-validation/runner.sh --scenario 03   # one scenario
-tmux -L cc-val-sock attach -t cc-val            # watch a run live
+tmux -L cc-val-sock-<pid> attach -t cc-val      # watch a run live (the runner prints the socket)
 ```
 
 ## READ THIS FIRST when a scenario "runs but observes nothing"
@@ -242,7 +242,7 @@ EOF
 
 ## tmux isolation
 
-The harness runs on a **private tmux socket** (`NX_TMUX_SOCKET=cc-val-sock`) via
+The harness runs on a **private tmux socket** (`NX_TMUX_SOCKET=cc-val-sock-<pid>`, one per run) via
 `lib.sh`'s `_tmux()` wrapper (`command tmux -L "$NX_TMUX_SOCKET" "$@"`). This is
 a hard isolation boundary: a kill-server here can never touch the developer's
 own tmux.

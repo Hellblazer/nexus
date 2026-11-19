@@ -10,7 +10,10 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
+from nexus.catalog.dchash.audit import dchash_audit, has_dchash_span
+
 if TYPE_CHECKING:
+    from nexus.catalog.types import CatalogLink
     from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 
@@ -32,11 +35,17 @@ def link_audit(client: HttpCatalogClient, *, t3: Any = None) -> dict:
     ``t3`` is accepted and ignored: the local implementation used it for a
     stale-chash cross-check against T3, which this substrate answers from
     the manifest instead. It stays in the signature for call-site parity.
+
+    RDR-171 Step 5: ``stale_dchash`` (rows) and ``stale_dchash_count`` are always
+    present, ``[]`` and 0 when no link carries a ``dchash:`` span. The rows come
+    from :func:`dchash_audit`, which reads source files on this machine; an engine
+    error from it propagates and fails the audit.
     """
     by_type: dict[str, int] = defaultdict(int)
     by_creator: dict[str, int] = defaultdict(int)
     seen: dict[tuple[str, str, str], int] = defaultdict(int)
     total = 0
+    dchash_links: list[CatalogLink] = []
 
     page = 200
     offset = 0
@@ -49,6 +58,8 @@ def link_audit(client: HttpCatalogClient, *, t3: Any = None) -> dict:
             by_type[lk.link_type] += 1
             by_creator[lk.created_by or ""] += 1
             seen[(str(lk.from_tumbler), str(lk.to_tumbler), lk.link_type)] += 1
+            if has_dchash_span(lk):
+                dchash_links.append(lk)
         if len(batch) < page:
             break
         offset += page
@@ -56,6 +67,7 @@ def link_audit(client: HttpCatalogClient, *, t3: Any = None) -> dict:
     duplicates = {k: n for k, n in seen.items() if n > 1}
     result = client._get("/links/orphaned")
     orphaned = result.get("links", []) if result else []
+    stale_dchash = dchash_audit(dchash_links, client)
 
     return {
         "total": total,
@@ -68,4 +80,6 @@ def link_audit(client: HttpCatalogClient, *, t3: Any = None) -> dict:
         ],
         "orphaned_count": len(orphaned),
         "orphaned": orphaned,
+        "stale_dchash": stale_dchash,
+        "stale_dchash_count": len(stale_dchash),
     }

@@ -38,6 +38,9 @@ def crs(tmp_path, monkeypatch):
     setattr_in(monkeypatch, module, "time.sleep", lambda _s: None)
     # The exit-and-resume path under test here; /restart has its own tests (test_claude_restart_sessions_slash.py).
     monkeypatch.setattr(module, "NO_SLASH", True)
+    # RDR-253 Step 4: restart() makes or keeps a seat through `nx identity`, which reaches the engine; the seat
+    # behaviour is tested in test_claude_restart_sessions_seats.py.
+    monkeypatch.setattr(module, "ensure_seat", lambda s: "")
     return module
 
 

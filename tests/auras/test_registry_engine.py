@@ -87,6 +87,23 @@ def test_the_td1_aura_passes_the_dictionary_checks_of_the_real_registry(
     assert _findings(shipped, TD1_EXAMPLE, templates) == set()
 
 
+def test_the_shipped_ci_develop_red_passes_the_dictionary_checks_of_the_real_registry(
+    shipped: Path, templates: list[dict[str, Any]]
+) -> None:
+    """The shipped aura and procedure as they are in the package, against the engine's own board/ci template. Its
+    body sources (owner, next, refresh, reason) are known only to an engine that carries RDR-252 Step 1's doc block
+    (nexus-igea9.1), so the conexus release that ships this aura pins that engine release (bead note D)."""
+    template = resolve_tuple_template(templates, "board/ci/nexus-develop--owner")
+    body = ((template or {}).get("doc") or {}).get("body") or {}
+    assert {"owner", "next", "refresh", "reason"} <= set(body), (
+        "the engine's board/ci template has no owner doc block: this test needs an engine built with nexus-igea9.1"
+    )  # non-vacuity
+    real = Path(__file__).resolve().parents[2] / "src" / "nexus" / "procedures"
+    (shipped / "ci_red_notice.lua").write_bytes((real / "ci_red_notice.lua").read_bytes())
+    text = (real / "ci_develop_red.aura.toml").read_text(encoding="utf-8")
+    assert _findings(shipped, text, templates) == set()
+
+
 def test_a_trigger_clear_or_args_field_the_real_template_lacks_is_refused(
     shipped: Path, templates: list[dict[str, Any]]
 ) -> None:
@@ -143,5 +160,12 @@ def test_the_shipped_ci_develop_red_passes_every_check_against_the_real_registry
     assert resolve_tuple_template(templates, "board/ci/nexus-develop--done") is not None  # non-vacuity
     entries = [e for e in enumerate_auras(cwd=None) if e.name == "ci_develop_red"]
     assert [e.root for e in entries] == ["shipped"], entries
-    [check] = check_auras(entries, cwd=None, templates=templates)
-    assert not check.findings and not check.skipped, (check.findings, check.skipped)
+    # This test is about the registry dictionary. The serving-group rule has its own coverage in test_ci_develop_red.py;
+    # here a reader that returns the shipped group's record only keeps that check from being skipped.
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+
+    [check] = check_auras(
+        entries, cwd=None, templates=templates,
+        read_group=lambda name: GroupRecord(name, serves=("nexus-develop",)),
+    )
+    assert not check.findings and not check.skipped and not check.warnings, (check.findings, check.skipped, check.warnings)

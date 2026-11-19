@@ -134,9 +134,19 @@ engine (the sandbox runs the installed nx, and keying on it would force a sandbo
 before every restart that follows a release, which is the restart that rolls sessions
 onto it), macOS (rare, and Claude Code's version stands in for the client side), and
 reinstall-tool.sh (the sandbox replaces it with a stand-in, so a pass says nothing about
-it). --dry-run reports whether the pass holds. --skip-sandbox-check REASON restarts
-anyway and logs the reason. The detached roll checks the pass too, so calling it
-directly does not get around the gate.
+it). A pass on another Claude Code version only warns (Sam, 2026-11-18): the restart goes on,
+and the log's WARN line names the last pass, the version now running and the weekly run's last
+result, since Claude Code updates every couple of days and the script has not changed. Another
+script, harness or tmux, no pass at all, or a Claude Code version that cannot be read, still
+refuses. --dry-run reports whether the pass holds. --skip-sandbox-check REASON restarts past a
+refusal and logs the reason; a version warning needs no flag. The
+detached roll checks the pass too, so calling it directly does not get around the gate.
+
+scripts/restart-sandbox-weekly.sh runs the sandbox once a week from a launchd job
+(`scripts/restart-sandbox-weekly.sh --install` sets it up), so a pass is kept current
+through Claude Code updates. A restart that misbehaves (a session not resumed, a pane
+closed, a missing wake, a busy session exited) should be followed by a sandbox run
+(tests/e2e/restart-sessions/run.sh) before the next restart, whatever the gate says.
 
 Install as a symlink to the primary checkout, which tracks develop, so the copy you
 run cannot drift from the one the sandbox tested:
@@ -251,6 +261,9 @@ def tmux_version() -> str:
 
 #: The sandbox harness, beside this script in its checkout (resolved through the install symlink).
 HARNESS = Path(__file__).resolve().parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py"
+#: The weekly scheduled sandbox run (a launchd job it installs with --install), beside this script.
+#: It records its last invocation in sandbox-weekly-last.json beside SANDBOX_PASS.
+WEEKLY_RUN = Path(__file__).resolve().parent / "restart-sandbox-weekly.sh"
 
 
 def harness_sha256(path: Path | None = None) -> str:
@@ -261,38 +274,75 @@ def harness_sha256(path: Path | None = None) -> str:
         return ""
 
 
-def sandbox_pass_problem(script: str, claude: str) -> str:
-    """Why the recorded sandbox pass does not cover this script, Claude Code, tmux and harness, or ""
-    when it does."""
+def sandbox_pass_check(script: str, claude: str) -> tuple[str, str]:
+    """(refusal, warning) for the recorded sandbox pass against this script, Claude Code, tmux and
+    harness. A refusal stops a restart (exit 3); a warning is logged and the restart goes on; both
+    empty means the pass covers all four.
+
+    Only a Claude Code version other than the pass's is a warning (Sam, 2026-11-18: it changes every
+    couple of days, and refusing on it made every restart need --skip-sandbox-check). A changed
+    script, harness or tmux, or no readable pass, still refuses. The Claude Code check runs last, so
+    a refusal is never hidden behind it."""
     if not claude:
-        return "could not read Claude Code's version"
+        return "could not read Claude Code's version", ""
     try:
         rec = json.loads(SANDBOX_PASS.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return f"no sandbox pass recorded ({SANDBOX_PASS})"
+        return f"no sandbox pass recorded ({SANDBOX_PASS})", ""
     except (OSError, ValueError) as e:
-        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})"
+        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})", ""
     if not isinstance(rec, dict):
-        return f"the sandbox pass record {SANDBOX_PASS} is not an object"
+        return f"the sandbox pass record {SANDBOX_PASS} is not an object", ""
+    passed = rec.get("passed_at", "?")
+    recorded_claude = rec.get("claude_version")
+    if not isinstance(recorded_claude, str) or not recorded_claude:
+        # A record that names no Claude Code version says nothing about it: refuse, as before,
+        # rather than warn as if it named an older one.
+        return f"the sandbox pass record {SANDBOX_PASS} names no Claude Code version", ""
     if rec.get("script_sha256") != script:
-        return f"the last sandbox pass ({rec.get('passed_at', '?')}) was on another copy of this script"
-    if rec.get("claude_version") != claude:
-        return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on Claude Code "
-                f"{rec.get('claude_version', '?')}, not {claude}")
+        return f"the last sandbox pass ({passed}) was on another copy of this script", ""
     if rec.get("tmux_version") != (tmux := tmux_version()):
-        return (f"the last sandbox pass ({rec.get('passed_at', '?')}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
-                f"not {tmux or 'an unreadable tmux'}")
+        return (f"the last sandbox pass ({passed}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
+                f"not {tmux or 'an unreadable tmux'}"), ""
     if rec.get("harness_sha256") != (harness := harness_sha256()):
         if not harness:
             return (f"this copy has no sandbox harness beside it ({HARNESS}); install the script as a symlink "
-                    "into a checkout, as the header says")
-        return f"the last sandbox pass ({rec.get('passed_at', '?')}) was on another copy of the sandbox harness"
-    return ""
+                    "into a checkout, as the header says"), ""
+        return f"the last sandbox pass ({passed}) was on another copy of the sandbox harness", ""
+    if recorded_claude != claude:
+        return "", (f"the last sandbox pass ({passed}) was on Claude Code {recorded_claude}, not {claude}; "
+                    f"{weekly_run_status()}; run tests/e2e/restart-sessions/run.sh to refresh it")
+    return "", ""
+
+
+def weekly_run_status() -> str:
+    """One clause on the weekly sandbox job, for the version warning: its last result, or how to
+    set it up when it has never run here."""
+    path = SANDBOX_PASS.parent / "sandbox-weekly-last.json"
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"no weekly sandbox run has happened here ({WEEKLY_RUN.name} --install sets one up)"
+    except (OSError, ValueError):
+        return f"the weekly sandbox run's record {path} is unreadable"
+    if not isinstance(rec, dict):
+        return f"the weekly sandbox run's record {path} is not an object"
+    status, ended = rec.get("status", "?"), rec.get("ended", "?")
+    on = f" on Claude Code {v}" if isinstance(v := rec.get("claude_version"), str) and v else ""
+    if status == "passed":
+        return f"the last weekly sandbox run ({ended}{on}) passed"
+    return f"the last weekly sandbox run ({ended}{on}) did not record a pass: {status}, {rec.get('reason', '?')}"
+
+
+def sandbox_pass_problem(script: str, claude: str) -> str:
+    """The refusal or warning from sandbox_pass_check, refusal first, or "" when the pass covers everything."""
+    refusal, warning = sandbox_pass_check(script, claude)
+    return refusal or warning
 
 
 def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float,
                         tmux: str | None = None, harness: str | None = None) -> None:
-    """Write the record sandbox_pass_problem reads (the sandbox harness calls this on a full pass).
+    """Write the record sandbox_pass_check reads (the sandbox harness calls this on a full pass).
     *tmux* and *harness* default to what is installed now; the harness passes the values it read
     before its first scenario, so a mid-run change is not recorded as tested."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -645,6 +695,35 @@ def uses_dev_channel(cmd: str) -> bool:
     return any(a.partition("=")[0] == DEV_CHANNEL_FLAG for a in args)
 
 
+#: The registry `nameSource` of a name the user set: `-n` at launch or `/rename` (RDR-253 Step 4, nexus-hczdo.1.5).
+USER_NAME_SOURCES = frozenset({"user"})
+
+
+def name_kind(s: dict) -> str:
+    """The one place the `nameSource` rule is stated.
+
+    "none": the session has no name. "user": its `nameSource` says the user set it. "derived": any other
+    `nameSource`, a name Claude Code generated. "unknown": no `nameSource` at all (an older Claude, or Desktop).
+
+    Seats are made only for "user": an unknown source is not taken for the user's. `-n` is passed back on relaunch
+    for "user" and for "unknown" (an older Claude relaunched with `-n` before this, and keeps doing so), never for
+    "derived": passed back, a derived name would become a user-set one and the next restart would make a seat of it."""
+    if not s.get("name"):
+        return "none"
+    source = s.get("nameSource")
+    if source is None:
+        return "unknown"
+    return "user" if source in USER_NAME_SOURCES else "derived"
+
+
+def user_named(s: dict) -> bool:
+    return name_kind(s) == "user"
+
+
+def passes_name(s: dict) -> bool:
+    return name_kind(s) in ("user", "unknown")
+
+
 def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> str:
     """The session's own flags, with --resume set to its CURRENT id (it changes after /clear).
 
@@ -674,7 +753,7 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
         if a.startswith("--name="):
             continue
         out.append(a)
-    if s.get("name"):
+    if passes_name(s):  # name_kind says when: a derived name is not passed back
         out += ["-n", s["name"]]
     if not fresh:
         out += ["--resume", s["sessionId"]]
@@ -686,7 +765,10 @@ def relaunch_command(s: dict, fresh: bool = False, first_prompt: str = "") -> st
             out += ["--permission-mode", mode]
     if first_prompt:
         out += ["--", first_prompt]
-    return f"cd {shlex.quote(s['cwd'])} && {shlex.quote(CLAUDE)} " + " ".join(shlex.quote(a) for a in out)
+    # A session that holds a seat under another display name relaunches onto the SAME seat: Step 3's hook binds a
+    # seat named by NX_SEAT (ensure_seat records it), where the `-n` display name would give it an ephemeral identity.
+    seat = f"NX_SEAT={shlex.quote(s['nx_seat'])} " if s.get("nx_seat") else ""
+    return f"cd {shlex.quote(s['cwd'])} && {seat}{shlex.quote(CLAUDE)} " + " ".join(shlex.quote(a) for a in out)
 
 
 def _vt(v: str) -> tuple[int, ...]:
@@ -1123,6 +1205,10 @@ def restart(s: dict, handoff: str = "") -> bool:
     if refused:
         log(f"SKIP {name}: {refused}; left running, not restarted")
         return False
+    # Before either path: an in-place /restart keeps the process and rebinds the same identity, so promoting its
+    # ephemeral first is what lets the seat survive it; the relaunch path binds the seat by name or NX_SEAT.
+    if seat := ensure_seat(s):
+        log(f"{name}: {seat}")
     if not handoff:
         done, why = slash_restart(s)
         if done:
@@ -1667,6 +1753,63 @@ def _nx_binary() -> str:
     if local.exists():
         return str(local)
     return shutil.which("nx") or "nx"
+
+
+def _nx_identity(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+    return subprocess.run([_nx_binary(), "identity", *args], capture_output=True, text=True, timeout=timeout)
+
+
+def _identity_error(done: subprocess.CompletedProcess) -> str:
+    return (done.stderr or done.stdout).strip()[:200]
+
+
+def ensure_seat(s: dict) -> str:
+    """Before a session is restarted: its seat, and a seat for a name the user set (RDR-253 Step 4).
+
+    A session that already holds a seat keeps it across the relaunch: its name goes in `s["nx_seat"]`, which
+    `relaunch_command` carries as NX_SEAT (Step 3 binds a seat named by NX_SEAT; a `-n` that names no seat gives an
+    ephemeral identity). Otherwise, only a name the user set counts (`user_named`): a seat with that name already:
+    nothing. The session holds an ephemeral identity: PROMOTE it to the seat, which keeps its identity scratch and
+    board entry (a new seat would orphan them). It holds no identity, or its ephemeral has ended: create the seat,
+    created_by=restart. The relaunch then finds the old holder gone and binds the seat, so no release step is needed.
+
+    Never raises and never blocks the restart, whatever goes wrong: returns what it did, or why it did not ("" when
+    there was nothing to do)."""
+    try:
+        return _ensure_seat(s)
+    except Exception as exc:  # noqa: BLE001 — a restart must never fail over a seat
+        return f"no seat made for {s.get('name') or s.get('sessionId')}: {type(exc).__name__}: {exc}"
+
+
+def _ensure_seat(s: dict) -> str:
+    named = user_named(s)
+    held = _nx_identity("show", "--session", s["sessionId"], "--json")
+    identity: dict = {}
+    if held.returncode == 0:
+        try:
+            identity = json.loads(held.stdout)
+        except ValueError:
+            identity = {}
+    elif "unknown_session" not in held.stdout + held.stderr:
+        return f"no seat made: {_identity_error(held)}" if named else ""
+    if identity.get("kind") == "seat" and identity.get("state") in ("live", "lapsed") and identity.get("name"):
+        s["nx_seat"] = identity["name"]
+        return (f"holds seat {identity['name']}; the relaunch carries NX_SEAT={identity['name']}"
+                + (f", and no seat is made for {s['name']}" if named and s["name"] != identity["name"] else ""))
+    if not named:
+        return ""
+    name = s["name"]
+    exists = _nx_identity("show", "--", name)   # `--`: a name that starts with "-" is not an option
+    if exists.returncode == 0:
+        return f"seat {name} exists"
+    if "unknown_name" not in exists.stdout + exists.stderr:
+        return f"no seat made for {name}: {_identity_error(exists)}"
+    if identity.get("kind") == "ephemeral" and identity.get("state") in ("live", "lapsed"):
+        done = _nx_identity("promote", "--", identity["id"], name)
+        return (f"promoted {identity['id']} to seat {name}" if done.returncode == 0
+                else f"could not promote {identity['id']} to {name}: {_identity_error(done)}")
+    made = _nx_identity("create", "--created-by", "restart", "--", name)
+    return f"created seat {name}" if made.returncode == 0 else f"could not create seat {name}: {_identity_error(made)}"
 
 
 def went_busy(s: dict, n0: int, seconds: int = 60) -> bool:
@@ -2225,6 +2368,71 @@ def session_tasks(s: dict) -> list[str] | None:
             if sf.SNAPSHOT_MARK in p.command and p.pid not in mine and not sf.standing(p.command)]
 
 
+#: Seconds ``session_work`` waits for ``nx identity work list``: --status asks every target, so a hung engine must not stall it.
+WORK_TIMEOUT_S = 5
+
+#: Work that runs under the session and ends with it: a restart cuts these off. A worktree or a tmux server outlives it.
+WORK_ENDS_WITH_SESSION = ("wait", "watcher", "labrun")
+
+
+def session_work(s: dict) -> list[str] | None:
+    """The background work the session's identity has registered and is still running (RDR-253 Step 6), one line each,
+    or None when it cannot be read. Read through ``nx identity work list --running``: a running row of an identity whose
+    holder is gone is stale there and never listed, so a crashed session's work does not read as busy. A session with no
+    identity has none. The session's own standing mail wait (kind wait, ref its session id) is meant to run, as with
+    ``session_tasks``, and is left out. The ready check blocks on the wait, watcher and labrun lines (``blocking_work``)."""
+    sid = s.get("sessionId") or ""
+    if not sid:
+        return None
+    try:
+        done = _nx_identity("work", "list", "--session", sid, "--running", "--json", timeout=WORK_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        said = done.stdout + done.stderr
+        if "unknown_session" in said:
+            return []
+        # An installed nx older than RDR-253 Step 6 has no `identity work` (click: exit 2, "No such command"). It cannot
+        # have registered any work, so it has none; reading it as unknown would block every session at the first restart
+        # onto a release that adds the verb, since the ready check runs before --nx installs the new client.
+        if done.returncode == 2 and "No such command" in said:
+            return []
+        return None
+    try:
+        rows = json.loads(done.stdout)["work"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return [f"{r['kind']} {r['ref']}" for r in rows if not (r.get("kind") == "wait" and r.get("ref") == sid)]
+
+
+def blocking_work(work: list[str] | None) -> list[str]:
+    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a labrun or a watcher (a wait
+    is in the set too, but none arrives: the session's standing wait is left out by ``session_work`` and a wait from an
+    earlier session is stale). A worktree or a tmux server outlives the session, so it never blocks ready."""
+    return [w for w in work or [] if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
+
+
+def work_note(work: list[str] | None) -> str:
+    if work is None:
+        return "This script could not read the work your identity has registered. "
+    if not work:
+        return "Your identity has no running work registered. "
+    cut = [w for w in work if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
+    kept = [w for w in work if w not in cut]
+
+    def shown(rows: list[str]) -> str:
+        return "; ".join(rows[:5]) + (f"; and {len(rows) - 5} more" if len(rows) > 5 else "")
+
+    out = f"Your identity has {len(work)} running work row(s) registered. "
+    if cut:
+        out += (f"A restart cuts off {len(cut)} of them, which run under your session and end with it (a wait, watcher or "
+                f"lab run): {shown(cut)}. Answer not ready unless you can lose them. ")
+    if kept:
+        out += (f"{len(kept)} outlive a restart and a restart leaves them alone (a worktree or tmux server): {shown(kept)}. "
+                f"Mark finished ones done or forget them (`nx identity work done|forget`). ")
+    return out
+
+
 def tasks_note(tasks: list[str] | None) -> str:
     crons = "A session-only cron or reminder you set may be lost in a restart; count it as work in flight. "
     if tasks is None:
@@ -2239,7 +2447,7 @@ def tasks_note(tasks: list[str] | None) -> str:
 def ready_prompt(s: dict, path: str, mailed: bool = False) -> str:
     origin = origin_note(s, path) if mailed else ""
     return (origin + f"Restart readiness check for {label(s)}: the operator is about to restart every Claude session. "
-            + tasks_note(session_tasks(s)) +
+            + tasks_note(session_tasks(s)) + work_note(session_work(s)) +
             f"Answer by writing the file {path} (create it; do not edit any other file) holding one JSON object: "
             f'{{"ready": true or false, "reason": "one short sentence", "eta_min": minutes until you could be ready, '
             f"or null}}. ready is true only when a restart now loses nothing: no turn or background job in flight "
@@ -2449,6 +2657,17 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                     elif tasks is None:
                         # Not knowing is not "none": the labrun case was exactly a task nobody saw.
                         row["blocker"] = "said ready, but its background tasks could not be listed; check it, or --force"
+                    elif s.get("pane") != caller_pane:
+                        # Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): ps AND the work rows. A
+                        # running labrun or watcher row of a live identity is work a restart would cut off (a wait row
+                        # never reaches here: session_work drops the standing one, and --running drops older ones).
+                        row["work"] = work = session_work(s)
+                        cut = blocking_work(work)
+                        if cut:
+                            row["blocker"] = (f"said ready, but {len(cut)} registered work row(s) still run: {cut[0]}"
+                                              + (f" (and {len(cut) - 1} more)" if len(cut) > 1 else ""))
+                        elif work is None:
+                            row["blocker"] = "said ready, but its registered work could not be read; check it, or --force"
         rows.append(row)
     return rows
 
@@ -2466,6 +2685,11 @@ def print_table(manifest: dict, rows: list[dict], max_age: int, now: float) -> N
         detail = r["blocker"] if r["blocker"] else ("" if r["state"] != "ready" else r["reason"])
         print(f"{r['name'][:24]:<24} {r['state']:<13} {_ago(r['age']) if r['age'] is not None else '-':>6}  "
               f"{r['live']:<6} {detail}")
+        work = r.get("work")
+        if work is None and "work" in r:
+            print(f"{'':<24} work: could not be read")
+        for line in work or []:
+            print(f"{'':<24} work: {line}")
     for e in manifest["excluded"]:
         print(f"{e['name'][:24]:<24} {'excluded':<13} {'-':>6}  {'-':<6} {e['why']}")
 
@@ -2553,6 +2777,9 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
             return 2
         now = time.time()
         rows = readiness(found, manifest, now, a.ready_max_age, os.environ.get("TMUX_PANE", ""))
+        for r, sess in zip(rows, found):  # the ready rows already read it; the others are reported here
+            if "work" not in r:
+                r["work"] = session_work(sess)
         print_table(manifest, rows, a.ready_max_age, now)
         # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
         withdraw_ready_asks(manifest, {t["sessionId"] for t in manifest["targets"]
@@ -2566,9 +2793,10 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
                 if t["sessionId"] not in {s["sessionId"] for s in found}]
         if gone:
             print("in the round but not live now: " + ", ".join(gone))
-        # The restart checks the sandbox pass too (exit 3), so "allowed" must include it.
-        sandbox = sandbox_pass_problem(script_sha256(), claude_version())
-        print(f"sandbox pass: {sandbox or 'holds for this script, Claude Code, tmux and the harness'}")
+        # The restart checks the sandbox pass too (exit 3 on a refusal), so "allowed" must include
+        # it; a warning (a newer Claude Code) does not block.
+        sandbox, sandbox_warn = sandbox_pass_check(script_sha256(), claude_version())
+        print(f"sandbox pass: {sandbox or (f'warning, {sandbox_warn}' if sandbox_warn else 'holds for this script, Claude Code, tmux and the harness')}")
         return 0 if rows and not problem and not sandbox and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
@@ -2685,7 +2913,8 @@ def main() -> int:
                     help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
                          "restart sessions in status 'shell'")
     ap.add_argument("--skip-sandbox-check", metavar="REASON", default=None,
-                    help="restart although no sandbox pass covers this script (see above); REASON is logged")
+                    help="restart past a sandbox refusal: another script, harness or tmux, or no pass (see "
+                         "above); REASON is logged. A newer Claude Code only warns and needs no flag")
     ap.add_argument("--no-slash-restart", action="store_true",
                     help="resume each session by exiting it and relaunching `claude ... --resume <id>`, "
                          "never through Claude Code's own /restart")
@@ -2730,20 +2959,24 @@ def main() -> int:
         # withdrawal and the footprint report. By default they end the process with neither.
         exit_on_stop_signals()
         # The gate holds here too: a direct --detached call must not get around it.
-        problem = sandbox_pass_problem(script_sha256(), claude_version())
+        problem, warning = sandbox_pass_check(script_sha256(), claude_version())
         if problem and not skip_reason:
             log(f"ABORT: sandbox pass: {problem} (detached). Nothing installed, nothing restarted.")
             return 3
         if problem:
             log(f"WARN: {problem}; restarting anyway (detached, --skip-sandbox-check: {skip_reason})")
+        elif warning:
+            log(f"WARN: sandbox pass: {warning} (detached)")
     if not a.detached:
         # The sandbox pass first: it needs no session's answer, and nothing else is worth asking
         # of a script the sandbox has not passed (nexus-8zdbu).
-        problem = sandbox_pass_problem(script_sha256(), claude_version())
+        problem, warning = sandbox_pass_check(script_sha256(), claude_version())
         if a.dry_run:
-            print(f"sandbox pass: {problem or 'holds for this script, Claude Code, tmux and the harness'}")
+            print(f"sandbox pass: {problem or (f'warning, {warning}' if warning else 'holds for this script, Claude Code, tmux and the harness')}")
         elif problem and skip_reason:
             log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check: {skip_reason})")
+        elif warning:
+            log(f"WARN: sandbox pass: {warning}")  # log() prints the line as well
         elif problem:
             log(f"ABORT: sandbox pass: {problem}. Run tests/e2e/restart-sessions/run.sh (all scenarios) first, "
                 f"or pass --skip-sandbox-check REASON. Nothing installed, nothing restarted.")

@@ -22,7 +22,8 @@ import click
 def span_cmd(tumbler: str, passage: str | None, start: int | None, end: int | None) -> None:
     """Print a dchash span for a passage of TUMBLER's source file.
 
-    The span pins the passage by its offsets in the document's canonical text
+    TUMBLER is a tumbler (1.1.5), a title or filename, or a source URI, as for
+    `nx catalog link`. The span pins the passage by its offsets in the document's canonical text
     and survives re-chunking of unchanged text. Give it to `nx catalog link`
     as --from-span or --to-span.
 
@@ -55,11 +56,13 @@ def span_cmd(tumbler: str, passage: str | None, start: int | None, end: int | No
 
     cat = _cat_cmd._get_catalog()
     try:
+        # A title or URI resolves as for `nx catalog link`; the engine's /show matches tumblers only.
+        resolved = str(_cat_cmd._resolve_tumbler(cat, tumbler))
         if passage is not None:
-            span = dchash_span_for_passage(cat, tumbler, passage)
+            span = dchash_span_for_passage(cat, resolved, passage)
         else:
             assert start is not None and end is not None
-            span = dchash_span(cat, tumbler, start, end)
+            span = dchash_span(cat, resolved, start, end)
     except UnicodeDecodeError as exc:
         raise click.ClickException(
             f"{tumbler}: the source file is not valid UTF-8 ({exc.reason} at byte {exc.start})"
@@ -68,7 +71,7 @@ def span_cmd(tumbler: str, passage: str | None, start: int | None, end: int | No
         raise click.ClickException(str(exc)) from exc
     except OSError as exc:
         raise click.ClickException(f"{tumbler}: cannot read the source file: {exc}") from exc
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, RuntimeError) as exc:
         raise click.ClickException(f"{tumbler}: catalog lookup failed: {exc}") from exc
     click.echo(span)
 

@@ -180,7 +180,8 @@ class TenantExportBatteryTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             List<String> problems = new ArrayList<>();
             List<ExportTable> exported = TenantExport.TABLES.stream().filter(ExportTable::exported).toList();
-            assertThat(exported).as("the registry's data and derived tables").hasSize(25);
+            // 32 -> 33: nexus-igea9.5 (RDR-252 Step 1) registered group_records as DATA.
+            assertThat(exported).as("the registry's data and derived tables").hasSize(33);
 
             // the seed is not vacuous: every exported column is non-NULL in some A row and NULL-or-default in the
             // others, and B has rows in every table
@@ -824,6 +825,31 @@ class TenantExportBatteryTest {
             run(failures, "claude_assisted_remediation_consents", () -> insert(ctx, "claude_assisted_remediation_consents",
                 List.of("tenant_id", "scope", "ts", "granted"),
                 new Object[] {t, "s", now, true}, new Object[] {t, "s2", now, false}));
+            // RDR-253 session identity: a seat and an ended ephemeral identity with their alias, binding rows, session
+            // index and a membership (parents before children).
+            run(failures, "identity_counters", () -> insert(ctx, "identity_counters", List.of("tenant_id", "last_n"),
+                new Object[] {t, 2L}));
+            run(failures, "identity_records", () -> insert(ctx, "identity_records",
+                List.of("tenant_id", "id", "kind", "generation", "state", "creator", "created_at", "last_binding_seq"),
+                new Object[] {t, "i1", "seat", 1, "live", "sam", TS, 2}, new Object[] {t, "i2", "ephemeral", 1, "ended", "session", TS, 1}));
+            run(failures, "identity_aliases", () -> insert(ctx, "identity_aliases",
+                List.of("tenant_id", "name", "identity_id", "state", "since"), new Object[] {t, "seat-one", "i1", "live", TS}));
+            run(failures, "identity_bindings", () -> insert(ctx, "identity_bindings",
+                List.of("tenant_id", "identity_id", "seq", "event", "generation", "session_id", "at"),
+                new Object[] {t, "i1", 1, "start", 1, "s1", TS}, new Object[] {t, "i1", 2, "clear", 1, "s1b", TS},
+                new Object[] {t, "i2", 1, "start", 1, "s2", TS}));
+            run(failures, "identity_sessions", () -> insert(ctx, "identity_sessions",
+                List.of("tenant_id", "session_id", "identity_id", "generation", "at"),
+                new Object[] {t, "s1", "i1", 1, TS}, new Object[] {t, "s1b", "i1", 1, TS}));
+            run(failures, "identity_work", () -> insert(ctx, "identity_work",
+                List.of("tenant_id", "identity_id", "kind", "ref", "state", "updated_at"),
+                new Object[] {t, "i1", "worktree", "/tmp/wt", "running", TS}));
+            run(failures, "identity_memberships", () -> insert(ctx, "identity_memberships",
+                List.of("tenant_id", "identity_id", "group_name", "role", "created_at"), new Object[] {t, "i1", "crew", "leader", TS}));
+            // RDR-252 group record: a live one and a disbanded one (the array, jsonb and nullable columns take the defaults).
+            run(failures, "group_records", () -> insert(ctx, "group_records",
+                List.of("tenant_id", "name", "leader", "formed_at"),
+                new Object[] {t, "crew", "i1", TS}, new Object[] {t, "old-crew", "i1", TS}));
         }
 
         /** Per-column values for a nullable column the generic fill by type cannot choose (a CHECK or a reference). */
@@ -832,6 +858,7 @@ class TenantExportBatteryTest {
             Field<Long> plan = DSL.field(DSL.select(DSL.min(id)).from(tbl("plans")).where(tenant(t)));
             return switch (column) {
                 case "catalog_documents.index_state" -> DSL.val("complete");
+                case "identity_records.lease", "identity_bindings.lease" -> DSL.val("leased");
                 case "nx_answer_runs.plan_id" -> plan;
                 case "nx_answer_runs.run_summary" -> DSL.jsonbObject(DSL.key("run").value(DSL.jsonbObject(DSL.key("plan_id").value(plan))));
                 case "topics.parent_id" -> DSL.field(DSL.select(DSL.max(id)).from(tbl("topics")).where(tenant(t)));

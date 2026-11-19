@@ -92,8 +92,21 @@ def _hook(root: Path, files, writer: _Writer, *, reader: _Reader | None = None, 
         return _catalog_hook(repo=root, repo_name="r", repo_hash="abcd1234", head_hash="h", indexed_files=files, **kw)
 
 
+@pytest.fixture
+def _repo_root_not_a_tempdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests are about the ``.claude/worktrees/`` marker, not where the repo lives.
+
+    ``should_skip_ephemeral_registration`` exempts an owner whose own root matches the temp-dir prefixes, so a repo
+    under ``/tmp`` registers its worktree files as present. pytest's ``tmp_path`` is under ``/tmp`` on GitHub-hosted
+    runners (``/tmp/pytest-of-runner``) but not on the pool hosts or macOS, so without this the result depends on the
+    host. Point the prefixes at a root no test uses, leaving the worktree marker as the only signal.
+    """
+    monkeypatch.setattr("nexus.repo_identity._TEMP_DIR_PREFIXES", ("/nonexistent-nexus-temp-root/",))
+
+
 # ── keep rows for files the walk saw but staged no present row for ──────────────────────────────────────────────
 
+@pytest.mark.usefixtures("_repo_root_not_a_tempdir")
 def test_an_ephemeral_path_is_staged_as_a_keep_row_so_its_existing_row_is_not_swept(tmp_path: Path) -> None:
     ok = tmp_path / "ok.py"
     ok.write_text("x = 1\n")
@@ -128,6 +141,7 @@ def test_a_file_whose_row_could_not_be_built_is_staged_as_a_keep_row(tmp_path: P
     assert {r["file_path"]: r["kind"] for r in writer.rows} == {"good.py": "present", "bad.py": "keep"}
 
 
+@pytest.mark.usefixtures("_repo_root_not_a_tempdir")
 def test_a_held_file_and_a_skipped_one_are_staged_once(tmp_path: Path) -> None:
     """A path in ``keep_paths`` that the walk also skipped is one keep row, not two (the engine takes one row a path)."""
     eph = tmp_path / ".claude" / "worktrees" / "agent" / "x.py"

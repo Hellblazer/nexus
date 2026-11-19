@@ -338,3 +338,101 @@ def test_failures_drops_and_busy_drops_are_logged_with_the_aura_and_tuple(monkey
     assert busy and busy[0]["tuple_id"] == "t2" and busy[0]["retries"] == 12
     dropped = [e for e in logs if e["event"] == "aura_queue_dropped"]
     assert dropped and dropped[0]["aura"] == "ci_develop_red" and dropped[0]["dropped"] == 1
+
+
+# -- RDR-252 Step 4 part A (nexus-igea9.7): self.identity and a result-driven channel ----------------------------------
+
+_WAKE = _RED.replace("channel = true", 'channel = "wake"').replace(
+    'tid = "id"', 'tid = "id"\nme = "self.identity"'
+)
+
+
+def _wake_runtime(run, writer, notices, **kw) -> AuraRuntime:
+    return _runtime(run, writer, auras=[_aura(_WAKE)], notices=notices, **kw)
+
+
+def test_the_self_identity_argument_is_the_identity_the_runtime_was_built_with() -> None:
+    run, writer = _Run({"show": True, "text": "x", "wake": False}), _Writer()
+    rt = _wake_runtime(run, writer, [], identity="identity-a")
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    assert run.calls[0][1]["me"] == "identity-a"
+
+
+def test_a_self_identity_argument_with_no_identity_is_a_strike_and_runs_nothing() -> None:
+    run, writer = _Run({"show": True, "text": "x", "wake": False}), _Writer()
+    rt = _wake_runtime(run, writer, [])
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    assert run.calls == []
+    assert writer.blocks["develop CI red"] == "aura error: args on tuple t1"
+
+
+def test_a_channel_field_that_is_true_sends_the_notice_and_false_sends_none() -> None:
+    run = _Run({"show": True, "text": "a", "wake": True}, {"show": True, "text": "b", "wake": False})
+    writer, notices = _Writer(), []
+    rt = _wake_runtime(run, writer, notices, identity="me")
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    assert len(notices) == 1 and "tuple t1" in notices[0]
+    rt.offer(_TOPIC, [_row("t2")])
+    _done(rt)
+    assert len(notices) == 1, "a false wake sends no notice"
+    assert writer.blocks["develop CI red"] == "b", "the block is written whether or not the notice goes"
+
+
+@pytest.mark.parametrize("wake", [None, "yes", 1, 0])
+def test_a_missing_or_non_boolean_channel_field_is_a_result_strike_and_sends_nothing(wake) -> None:
+    result = {"show": True, "text": "x"} if wake is None else {"show": True, "text": "x", "wake": wake}
+    run, writer, notices = _Run(result), _Writer(), []
+    rt = _wake_runtime(run, writer, notices, identity="me")
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    assert notices == []
+    assert writer.blocks["develop CI red"] == "aura error: result on tuple t1"
+    assert rt.strikes("ci_develop_red") == 1
+
+
+def test_three_bad_channel_fields_disable_the_aura() -> None:
+    run, writer, notices = _Run({"show": True, "text": "x"}), _Writer(), []
+    rt = _wake_runtime(run, writer, notices, identity="me")
+    rt.offer(_TOPIC, [_row(f"t{i}") for i in range(3)])
+    _done(rt)
+    assert rt.is_disabled("ci_develop_red") and notices == []
+
+
+def test_a_boolean_channel_still_sends_on_every_fire() -> None:
+    run, writer, notices = _Run({"show": True, "text": "x"}), _Writer(), []
+    rt = _runtime(run, writer, notices=notices)
+    rt.offer(_TOPIC, [_row("t1"), _row("t2")])
+    _done(rt)
+    assert len(notices) == 2
+
+
+def test_each_new_owner_row_rewrites_the_block_and_wakes_again() -> None:
+    """Re-surfacing: a hand-off row is a new fire, so the block is rewritten and the notice goes out when the result
+    says wake."""
+    run = _Run({"show": True, "text": "first", "wake": True}, {"show": True, "text": "handed", "wake": True})
+    writer, notices = _Writer(), []
+    rt = _wake_runtime(run, writer, notices, identity="me")
+    rt.offer(_TOPIC, [_row("t1")])
+    rt.offer(_TOPIC, [_row("t2")])
+    _done(rt)
+    assert writer.blocks["develop CI red"] == "handed" and len(notices) == 2
+
+
+def test_extend_takes_the_late_aura_and_the_identity_its_self_identity_argument_fills() -> None:
+    """nexus-igea9.7 round 2: the real AuraRuntime.extend, not a fake. A runtime built unbound for an ungated aura is
+    extended with a group-gated one and the identity the lease adopted; the gated aura fires with ``me`` filled."""
+    owner = _WAKE.replace('aura = "ci_develop_red"', 'aura = "owner"').replace("ci_red_notice", "owner_notice")
+    run, writer, notices = _Run({"show": True, "text": "x", "wake": True}), _Writer(), []
+    rt = _runtime(run, writer, notices=notices)                       # unbound: the plain aura only
+    assert rt.topics() == {"ci_develop_red": _TOPIC}
+    rt.extend([_aura(owner, name="owner")], "i7")
+    assert rt.topics() == {"ci_develop_red": _TOPIC, "owner": _TOPIC}
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    [fired] = [args for name, args, _limits in run.calls if name == "owner_notice"]
+    assert fired["me"] == "i7", "extend set the identity the argument fills"
+    assert [name for name, _a, _l in run.calls].count("ci_red_notice") == 1, "the first aura still fires"
+    assert len(notices) == 2 and not rt.is_disabled("owner")

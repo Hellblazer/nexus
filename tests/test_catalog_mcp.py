@@ -629,6 +629,7 @@ def test_link_audit(cat, monkeypatch) -> None:
     )
     assert result["by_type"]["cites"] == 1
     assert result["orphaned_count"] == len(result["orphaned"])
+    assert result["stale_dchash"] == [] and result["stale_dchash_count"] == 0
 
 
 @pytest.mark.parametrize("resolve_kw", [dict(tumbler="1.1.1"), dict(owner="1.1")])

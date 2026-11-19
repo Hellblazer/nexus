@@ -130,6 +130,9 @@ from nexus.tuple_directory import (
     no_session_id_message,
     resolve_default_from,
     resolve_env_session_id,
+    identity_alias_lookup,
+    identity_holder_lookup,
+    resolve_send,
     resolve_send_address,
 )
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): the session's subscription
@@ -1094,6 +1097,9 @@ def _start_t1_handoff_watch_task() -> None:
 
     global _T1_HANDOFF_WATCH_TASK
     _T1_HANDOFF_WATCH_TASK = asyncio.create_task(_t1_handoff_watch_loop())
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: server start cost (RDR-253 Step 3)
+
+    identity_lease.start_safely()
 
 
 async def _cancel_t1_handoff_watch_task() -> None:
@@ -1456,6 +1462,9 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # later to compare-then-delete its lease rather than blindly unlink
     # it -- see `clear_t1_session_lease_if_matches`'s docstring.
     old_session_token = _os.environ.get("NX_T1_SESSION", "").strip() or None
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: rare/branch-local path (RDR-253 Step 3)
+
+    await identity_lease.follow_marker(marker, log)
     if old_session_id == new_session_id:
         # Nothing to do (e.g. a re-tick that raced the previous one's own
         # consume, or a resume that lands back on the id already active).
@@ -1487,7 +1496,8 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         write_handoff_marker_if_absent(
             mcp_pid, new_session_id=marker.new_session_id,
             claude_pid=marker.claude_pid, config_dir=config_dir,
-            clock=lambda: marker.written_at,
+            clock=lambda: marker.written_at, identity=marker.identity, generation=marker.generation,
+            token_file=marker.token_file,
         )
         consume_claimed_marker(claimed_path)
         return
@@ -1579,7 +1589,8 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         reinstated = write_handoff_marker_if_absent(
             mcp_pid, new_session_id=marker.new_session_id,
             claude_pid=marker.claude_pid, config_dir=config_dir,
-            clock=lambda: marker.written_at,
+            clock=lambda: marker.written_at, identity=marker.identity, generation=marker.generation,
+            token_file=marker.token_file,
         )
         if not reinstated:
             log.warning(
@@ -2788,6 +2799,9 @@ def _start_session_name_release() -> threading.Thread | None:
     (resource exhaustion): the caller's exit goes on and the rows lapse
     by TTL."""
     global _NAME_RELEASE_THREAD, _NAME_RELEASE_DEADLINE
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
+
+    identity_lease.start_shutdown()
     running = _NAME_RELEASE_THREAD
     if running is not None and running.is_alive():
         return running
@@ -2805,7 +2819,10 @@ def _start_session_name_release() -> threading.Thread | None:
 
 
 def _await_session_name_release(thread: threading.Thread | None) -> None:
-    """Wait for *thread* until the release's shared deadline, then give up."""
+    """Wait for *thread* until the release's shared deadline, then give up; and for the identity shutdown until its own."""
+    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
+
+    identity_lease.await_shutdown()
     if thread is None:
         return
     thread.join(max(0.0, _NAME_RELEASE_DEADLINE - time.monotonic()))
@@ -2822,7 +2839,19 @@ def _exit_teardown() -> None:
     data-bearing T1 steps, and a failure to start it skips nothing."""
     release = _start_session_name_release()
     _t1_shutdown()
+    _remove_aura_state_files()
     _await_session_name_release(release)
+
+
+def _remove_aura_state_files() -> None:
+    """Remove this server's loaded-aura state files (RDR-252 Step 4). ``os._exit`` in :func:`_sigterm_handler` skips
+    the ``atexit`` removal the writer registers, so the teardown both paths share does it too. Never raises."""
+    try:
+        from nexus.auras import session as _aura_session  # noqa: PLC0415 -- deferred: exit path
+
+        _aura_session.remove_own_state_files()
+    except Exception as exc:  # noqa: BLE001 -- an exit path must not be stopped by a leftover file
+        _log.warning("aura_state_remove_on_exit_failed", error=str(exc))
 
 
 def _sigterm_handler(_signo: int, _frame: Any) -> None:
@@ -8249,13 +8278,15 @@ def memory_search(
     Returns a paged, human-readable list of matching entries with a
     200-char content snippet each; advance with `offset`.
     """
+    if limit < 1:
+        return _fail(f"Error: limit must be 1 or more, got {limit}.")
+    if offset < 0:
+        return _fail(f"Error: offset must be 0 or more, got {offset}.")
     try:
         with _t2_ctx() as db:
-            results = db.search(query, project=project or None)
-        if not results:
+            page, total = db.search_page(query, project=project or None, limit=limit, offset=offset)
+        if not total:
             return "No results."
-        total = len(results)
-        page = results[offset:offset + limit]
         if not page:
             return f"No results at offset {offset} (total {total})."
         lines: list[str] = []
@@ -8397,6 +8428,12 @@ def scratch(
     persist: Annotated[bool, Field(
         description="For \"put\": flag the entry so it is copied to T2 at session end or session handoff.",
     )] = False,
+    scope: Annotated[str, Field(
+        description=(
+            "\"session\" (default): this session's scratch. \"identity\": the scratch of this session's identity, "
+            "which survives /clear and restart; a delegated child reads its parent's and cannot write it."
+        ),
+    )] = "session",
 ) -> str:
     """T1 session scratch pad: ephemeral, within-session-only notes.
 
@@ -8411,9 +8448,20 @@ def scratch(
     with a footer when more entries exist; other actions return a single
     status or content line.
     """
+    opened = None
     try:
         t1, isolated = _get_t1()
         prefix = "[T1 isolated] " if isolated else ""
+        if scope == "identity":
+            if persist:
+                return _fail("Error: persist flags an entry for the session-end flush, which never runs for identity "
+                             "scratch; use scratch_manage(action=\"promote\", scope=\"identity\") to copy an entry to T2")
+            from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
+
+            t1 = opened = identity_scratch(t1)
+            prefix = "[identity] "
+        elif scope != "session":
+            return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
 
         if action == "put":
             if not content:
@@ -8497,6 +8545,9 @@ def scratch(
             return _fail(f"Error: unknown action {action!r}. Use: put, search, list, get, delete")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("scratch", e)
+    finally:
+        if opened is not None:
+            opened.close()
 
 
 @mcp.tool(
@@ -8509,6 +8560,9 @@ def scratch_manage(
     entry_id: Annotated[str, Field(description="Scratch entry id.")],
     project: Annotated[str, Field(description="Target T2 project namespace (required for \"promote\").")] = "",
     title: Annotated[str, Field(description="Target T2 entry title (required for \"promote\").")] = "",
+    scope: Annotated[str, Field(
+        description="\"session\" (default) or \"identity\" (the identity's scratch: promote only, never flag).",
+    )] = "session",
 ) -> str:
     """Flag a T1 scratch entry for persistence, or promote it to a T2 memory entry.
 
@@ -8517,9 +8571,20 @@ def scratch_manage(
 
     Returns a status line naming the flag or promotion outcome.
     """
+    opened = None
     try:
         t1, isolated = _get_t1()
         prefix = "[T1 isolated] " if isolated else ""
+        if scope == "identity":
+            if action == "flag":
+                return _fail("Error: flag marks an entry for the session-end flush, which never runs for identity scratch; "
+                             "use action=\"promote\" to copy it to T2")
+            from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
+
+            t1 = opened = identity_scratch(t1)
+            prefix = "[identity] "
+        elif scope != "session":
+            return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
 
         if action == "flag":
             # `scratch list` prints an 8-character prefix and the engine matches
@@ -8549,6 +8614,9 @@ def scratch_manage(
             return _fail(f"Error: unknown action {action!r}. Use: flag, promote")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("scratch_manage", e)
+    finally:
+        if opened is not None:
+            opened.close()
 
 
 @mcp.tool(
@@ -9582,8 +9650,9 @@ def mailbox_send(
     to: Annotated[str, Field(
         description=(
             "Destination: a session id, an agent id (\"a\" + 16 hex "
-            "chars), or a name. A name is resolved against the live "
-            "session directory at send time."
+            "chars), an identity id (\"i\" + digits), or a name. A name is "
+            "resolved at send time: a seat's name through its alias first, "
+            "then the live session directory."
         ),
     )],
     body: Annotated[str | None, Field(
@@ -9597,8 +9666,9 @@ def mailbox_send(
     )] = None,
     from_address: Annotated[str | None, Field(
         description=(
-            "Optional sender override -- this session's own id, or an agent "
-            "id. Defaults to this MCP server's own current session."
+            "Optional sender override -- this session's own id, its own "
+            "identity, or an agent id. Defaults to this MCP server's own "
+            "current session."
         ),
     )] = None,
 ) -> dict:
@@ -9610,13 +9680,18 @@ def mailbox_send(
     no resolution, while this tool resolves a name against the live
     session directory first (and still works as a `tuple_out` shorthand
     when `to` is already a session or agent id). Returns
-    `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "..."}`.
+    `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "...", "notice": "..."}`; `notice` is
+    present only when `to` was a renamed seat's old name, still delivering in its 7-day grace (RDR-253).
 
-    A name resolves through `directory/<name>`'s live rows: no live
-    holder is refused, naming the name; more than one distinct holding
-    session is refused, naming every holder -- resend to one of those
-    session ids directly instead. `from_address`, when given, must be an
-    agent id or this server's own session id (any other session id is
+    A name resolves through `alias/<name>` first (a seat's name), then
+    `directory/<name>`'s live rows: one live holder gets the mail in its
+    session mailbox; two or more distinct holding sessions are refused,
+    naming every holder -- resend to one of those session ids directly
+    instead; with no holder and a seat behind the name, the mail waits in
+    the seat's identity mailbox until it binds; with no holder and no
+    seat, the send is refused, naming the name. A retired alias past its
+    7-day grace is refused with "renamed to <new> on <date>". `from_address`, when given, must be an
+    agent id, this server's own session id or its own identity (any other session id or identity is
     refused; `from` is a claim, JDR-002). With no `from_address`, the sender
     defaults to this MCP server's own current session, and is refused
     when that cannot be resolved. A missing or blank `body` is refused too.
@@ -9635,8 +9710,11 @@ def mailbox_send(
             else resolve_default_from()
         )
 
-        def _send(db: Any) -> tuple[str, str, str]:
-            address, address_kind = resolve_send_address(to, db.tuples)
+        alias, holder = identity_alias_lookup(), identity_holder_lookup()
+
+        def _send(db: Any) -> tuple[str, str, str, str]:
+            target = resolve_send(to, db.tuples, alias, holder)
+            address, address_kind = target.address, target.address_kind
             dims: dict[str, str] = {"from": from_id, "address_kind": address_kind}
             if kind:
                 dims["kind"] = kind
@@ -9645,9 +9723,11 @@ def mailbox_send(
             tuple_id = db.tuples.out(
                 f"mailbox/{address}", {"to": address}, dims, body, nonce=str(uuid.uuid4()),
             )
-            return tuple_id, address, address_kind
+            return tuple_id, address, address_kind, target.notice
 
-        tuple_id, address, address_kind = _t2_index_write(_send, op="mailbox_send")
+        tuple_id, address, address_kind, notice = _t2_index_write(_send, op="mailbox_send")
+        if notice:  # RDR-253 Step 5: a retired alias inside its 7-day grace
+            return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id, "notice": notice}
         return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _fail({"error": _mcp_tool_error("mailbox_send", e).removeprefix("Error: ")})

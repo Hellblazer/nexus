@@ -1113,7 +1113,17 @@ nx catalog span TUMBLER (--passage TEXT | --start N --end N)
 
 Print a `dchash:<hash>:<start>-<end>` span for a passage of the document's source file, for `nx catalog link --from-span` or `--to-span`. Exactly one mode: `--passage` (recommended) quotes the passage, which must occur exactly once in the document (overlapping matches count, so `aa` in `aaa` is refused); line ends in the quote match LF or CRLF in the file. `--start`/`--end` give half-open offsets instead. Offsets are Unicode code points in the document's canonical text (strict UTF-8, one leading BOM removed, CRLF and lone CR turned into LF), not bytes. `--passage` with offsets, neither mode, or one offset alone is a usage error (exit 2). The span is printed alone on one line.
 
-Refused (exit 1, with the reason): a PDF (content type `paper` or `pdf`, or a `.pdf` suffix on the file path or the source URI path), a document with no file source (an `nx-note://` note, or a source `nx` cannot find), an offset range outside `0 <= start < end <= length`, a passage that is empty, absent or repeated, a source file that is missing or cannot be read, and a source file that is not valid UTF-8. An empty TUMBLER is a usage error (exit 2). The span is checked against the file on disk, so it is only as current as that file.
+Refused (exit 1, with the reason): a PDF (content type `paper` or `pdf`, or a `.pdf` suffix on the file path or the source URI path), a document with no file source (an `nx-note://` note, or a source `nx` cannot find), an offset range outside `0 <= start < end <= length`, a passage that is empty, absent or repeated, a source file that is missing or cannot be read, and a source file that is not valid UTF-8. TUMBLER is a tumbler, a title or filename, or a source URI, resolved as for `nx catalog link`: an exact title match wins, and a value that matches no document, or several documents with no exact match, is refused (exit 1). An empty TUMBLER is a usage error (exit 2). The span is checked against the file on disk, so it is only as current as that file.
+
+### nx catalog resolve
+
+```
+nx catalog resolve [TUMBLER | --tumbler T] [--owner OWNER] [--corpus CORPUS] [--json]
+```
+
+Resolve a document tumbler (or source URI), an owner (dotted tumbler or registered name) and/or a corpus to physical T3 collection names, for `nx search --corpus`. The same function as the MCP tool `resolve`. Prints one name per line, sorted and distinct; `--json` prints a JSON array instead. With several arguments the result is their union. No argument is a usage error (exit 2).
+
+`--corpus` takes a collection content type (`code`, `docs`, `rdr`, `knowledge`), which returns every live collection of that type, or a free-form document `corpus` label, matched exactly against each document's `corpus` metadata. A value that is both returns both sets. The indexers do not set a document's label to a content type by default, so `--corpus rdr` normally returns only the content-type form. A content type with no live collections prints nothing (exit 0, `[]` with `--json`); a collection that is quarantined, or registered with no chunks yet, is not listed or is listed but searches empty. A value that is neither a content type nor a label any document carries is refused (exit 1) with a message that names the value and lists the valid content types. A tumbler that is not dotted (the `1-2188` prefix `nx doctor` prints is not one) and an unknown or ambiguous owner name are refused the same way.
 
 ### nx catalog link-audit (hidden)
 
@@ -1124,7 +1134,15 @@ nx catalog link-audit [--json]
 Hidden from `--help` but fully functional. Reports link graph stats: total
 count, orphaned links (endpoint no longer resolves), duplicates, a
 by-type and by-creator breakdown, and the list of orphaned links
-themselves. `--json` emits the same fields as a machine-readable object.
+themselves. It also prints a `Stale dchash:` count and, when it is above zero,
+a `Stale dchash spans:` list with one line per span that no longer resolves:
+`<from> → <to> (<type>) <side>: <status>`, the status being `malformed`,
+`missing`, `unreadable`, `changed` or `out_of_range`. The stale dchash check
+reads each document's source file, so it describes the machine it runs on, and
+an engine error fails the command. `--json` emits the same fields as a
+machine-readable object, with `stale_dchash` (rows of `from_tumbler`,
+`to_tumbler`, `link_type`, `side`, `span`, `status`) and `stale_dchash_count`
+always present.
 
 ### nx catalog link-bulk-delete (hidden)
 
@@ -2904,6 +2922,8 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 - `nx doctor` reports a `memory.quarantine` row: quarantined entries without a mark, entries marked and waiting for `reap`, and the summary count. It is informational: it warns only when it cannot read the memory store at all, and shows "not applicable" on a box with no engine-backed T2.
 - Against an engine older than RDR-207 these verbs exit with "the engine predates RDR-207 quarantine".
 
+**`--mine` (put, get, search, list; RDR-253 Step 6):** work in this identity's own T2 project, `identity/<id>`, instead of `--project`. The project is keyed by the identity's id, never its name, so renaming a seat moves nothing. A delegated `claude -p` child uses its parent's project, as its identity scratch does. Giving both `--mine` and `--project` is a usage error, and `--mine` from a process that holds no identity is an error that says so. `put` takes `--project` or `--mine`.
+
 **`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
 **`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name), `--quarantined` (list quarantined entries instead, expired and replaced)
@@ -2968,6 +2988,8 @@ nx scratch put "hypothesis: cache invalidation is stale"
 | `unflag ID` | Remove flush mark (accepts the 8-char ID prefix) |
 | `promote ID --project NAME --title NAME` | Promote to T2, report `action=new` or `overlap_detected` |
 | `clear` | Delete all scratch notes — prompts with an entry/flagged count unless `-y`/`--yes` (scripts must pass `-y`) |
+
+**`--scope session|identity` (before the subcommand, default `session`; RDR-253 Step 6):** `nx scratch --scope identity list` works in the scratch of this session's identity, the T1 scope `identity:<id>`. It survives `/clear` and a restart and lasts as long as the identity; a session's end never closes it. Writes are fenced: only the identity's own process may write (the engine checks the identity token and its generation). Reads are open. A `claude -p` child with a delegated identity reads its **parent's** identity scratch and cannot write it. A process with no identity gets an error naming that, never the session scope. `put --persist`, `flag` and `clear` are refused with this scope (nothing flushes at a session's end that never ends, and the engine never closes the scope, so `clear` would report success and delete nothing: delete entries one by one); use `promote` to copy an entry to T2. The `scratch` MCP tool takes the same choice as its `scope` argument, refuses `persist` for it, and `scratch_manage` takes `scope` too (`promote` only; `flag` is refused).
 
 **`put` flags:** `--tags` (comma-separated), `--persist` (auto-flush to T2), `-p` / `--project` / `-t` / `--title` (explicit T2 destination)
 
@@ -4042,6 +4064,8 @@ nx doctor --probe-edge --expect-host <host>         # Same, and refuse any other
 The `--probe-edge` flag (nexus-t0ms7, RDR-222) checks the one hop failure that nothing else shows: the client resends a keyed sweep after an unknown outcome, which is safe only if the engine saw `Idempotency-Key`, and a gateway, CDN or proxy that drops the header (RDR-007 A5 did, conexus-c4i2) turns that resend into a second unkeyed run. It sends ONE keyed bounded expire-quarantine page that cannot do anything: it names a dedicated sibling, `quarantine-nx-doctor-edge-probe`, that nothing ever fills, with `row_limit` 1, `force` false, cutoff `2000-01-01` and a registered collection of the tenant as origin, so no real drain contends with it and no row can qualify. It then reads `GET /v1/requests/<key>` whatever the response header said, and requires a 200 with `expired` 0, the ledger answering `state: committed`, and the `Idempotency-Key` response header echoing the key.
 
 A failure prints `[✗] Edge idempotency probe (host <host>): FAIL: ...` and a `hop:` line naming where the key most likely stopped: the network, the edge, an engine without the keyed form, the request path (the ledger has no row and no echo: the engine never saw the key), the response path (the ledger committed under the key but the response header was stripped on the way back: the key reached the engine), a status route not served through the path, or a ledger with no committed row. Only the two key-loss hops point at the RDR-007 A5 origin request policy. Every row names the endpoint host it probed. A loopback or local-lease endpoint has no edge to lose the key, so it is `NOT PROBED: not a managed edge`; `--expect-host <host>` pins the host a scheduled step means to test (a different resolved host is `NOT PROBED`), and naming a loopback host there lets the probe run against a local engine. A tenant with no registered collection to name as the origin is `NOT PROBED` too: a pass over nothing is not a pass.
+
+The same POST also checks `X-Correlation-ID` (RDR-167 Phase 2). The probe sends a known id P for that request (32 hex characters, never the engine's `nxe-` prefix) and prints a second row, `[✓]` or `[✗] Edge correlation probe: correlation: <outcome> (sent X-Correlation-ID P, echo ...)`, naming one of four outcomes from the id the engine echoes: `pass-through` (the echo is P), `inbound strip` (the echo starts with `nxe-`: the engine received no valid header and generated its own), `overwrite` (any other echo: something on the path replaced the id) or `response strip` (no echo: a hop removed the response header, or the engine predates RDR-167 Phase 1 and echoes nothing; compare the engine's version with the release that carries Phase 1 before reading it as a strip). An echo is read from any answer, since only the engine sets the header; a missing echo is a response strip only on the engine's parsed 200. An error answer with no echo gives no row, because it may come from the edge, a sidecar or a gateway that never reached the engine (a WAF refusal, a 502/504 from CloudFront, the ALB or nginx), and the row is also absent when no HTTP response came back or a 200 body did not parse. It never changes the exit code: a lost correlation id breaks log joining across tiers, not the resend guarantee the exit code reports, and there is no flag that makes it fail the run.
 
 Exit codes:
 - `0` — passed.
@@ -5888,6 +5912,218 @@ reach you by name. It is not a second delivered mailbox (RDR-208 Phase 3, bead
 nexus-galkv.20). See
 [Tuple space § Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
+## nx identity
+
+Session identity (RDR-253, Step 4). A **seat** is a long-lived identity such as `marginalia`: created once, held by one Claude process at a time, and bound by a launch that names it (`NX_SEAT`, or a `-n` that exactly matches the seat). A launch that names no seat gets an **ephemeral** identity that can be promoted to a seat. A `claude -p` child started by the `nx` operator dispatcher gets a **delegated** identity of its own. Every subcommand calls the engine's `/v1/identity` routes with the tenant credential `nx` already resolves; a refusal prints the engine's code and reason and exits 1.
+
+### nx identity create
+
+```
+nx identity create NAME [--created-by sam|restart]
+```
+
+Create the seat `NAME`: unheld, generation 0, with a live alias. Names that look like identity ids (`i<digits>`) are reserved.
+
+| Flag | Description |
+|------|-------------|
+| `--created-by sam\|restart` | Who made the seat (default `sam`). `scripts/claude-restart-sessions` passes `restart` |
+
+### nx identity show
+
+```
+nx identity show [SEAT] [--session ID] [--json]
+nx identity show --all
+```
+
+Show an identity: its alias, kind, state, liveness, current generation, holder (pid and host), the holder's client version and the five most recent binding rows. `SEAT` is a seat name or an id (`i7`); with neither argument it is the identity of the Claude session the command runs under.
+
+`--all` lists every binding held on this host, each with its client version, and then the live Claude processes here that have no binding (read from the registry files and checked against the process table; a `claude -p` child, entrypoint `sdk-cli`, is left out because its binding is its dispatcher's, and so is a registry file whose pid now belongs to another process). RDR-253's Phase 2 gate reads this list. The engine has no route that lists unheld seats, so an identity with no holder on this host does not appear.
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Bindings on this host plus live Claude processes with none. Takes no other argument |
+| `--session ID` | Show the identity a Claude session id belongs to (the session index) |
+| `--json` | Print the engine's identity record as JSON instead of text |
+
+### nx identity alive
+
+```
+nx identity alive [TARGET]
+```
+
+Run the holder check and report gone holders to the engine's `gone` route, as the SessionStart sweep does. `TARGET` is a seat name, an id or a pid on this host. With no argument every binding on this host is checked, skipping the caller's own process; a delegated identity is judged by its dispatcher's pid and start time, since it has no registry file. A holder on another host is judged by its lease alone, never by this command.
+
+### nx identity claim
+
+```
+nx identity claim SEAT --take-over
+```
+
+Supersede `SEAT`'s current holder with the Claude session this command runs under: that process is bound as a new generation and its token file is written, and the identity it held before is closed (`end` for an ephemeral, `release` for a seat). Refused when the nearest Claude ancestor is not an interactive session (its registry `entrypoint` must be `cli` or `claude-desktop`; a `claude -p` child is `sdk-cli`), when the seat's holder is an ancestor of this process, and when there is no Claude ancestor with a registry file (a plain shell).
+
+| Flag | Description |
+|------|-------------|
+| `--take-over` | Required. Confirms superseding the holder |
+
+### nx identity release
+
+```
+nx identity release SEAT
+```
+
+Free `SEAT` whose holder is gone. It carries none of the take-over guards, binds nothing and runs from a plain shell. For a holder on this host it runs the holder check and is refused while the holder runs or cannot be judged; for a holder on another host it is refused while the lease is live, and allowed once a lapsed lease's 10-minute reservation has passed. A seat nobody holds is reported as such and left alone.
+
+### nx identity rename
+
+```
+nx identity rename OLD NEW
+```
+
+Rename the seat `OLD` (a name or an id) to `NEW`. The old name keeps resolving for 7 days with a notice naming the new one, then is refused; a retired name is never reissued. The seat's threads entry is retitled in the same call. Claude Code's `/rename` changes only the display name.
+
+### nx identity promote
+
+```
+nx identity promote IDENTITY NAME
+```
+
+Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch and board entry stay. `NAME` may not look like an id (`i<digits>`). The board entry is retitled to `NAME` only when promote runs inside the session that owns it, since the engine lets only that session write the entry; run anywhere else (a shell, the restart script), the promote still succeeds, the entry keeps its old title, and readers still find it by its `identity:` line. An engine-side retitle is planned for a later engine release.
+
+### nx identity may-stop
+
+```
+nx identity may-stop --kind worktree|tmux|watcher|wait|labrun --ref REF
+```
+
+The check before removing a worktree or killing a tmux server (RDR-253 Step 6). Exit 0 when no live identity other than the caller owns the resource; otherwise exit 3, naming the owner. Ownership is read from the work rows (`nx identity work register`) and liveness from the same holder check `nx identity alive` runs; a name pattern, a process listing or the directory's contents decide nothing. An owner whose holder is gone, ended, released or unknown to the engine is not alive: its `running` row is stale and ignored. A holder that cannot be judged counts as alive. A `done` row never blocks, and a resource no row names is unowned (said so, exit 0). An engine that does not answer is an error: the check fails closed. **Exit status:** 0 no live owner (or unowned); 3 a live identity owns it; 1 any other failure (the engine does not answer, nothing resolves). A script keys on the status, never the text, and treats any nonzero status as "do not stop it". A worktree's `REF` is resolved to its real path, on every `work` verb as well, so a trailing slash, a relative path or a symlinked prefix finds the same row. A caller with no readable identity (none bound, or its token expired) is told it cannot tell whether it is the owner.
+
+### nx identity work
+
+```
+nx identity work register --kind KIND --ref REF
+nx identity work done --kind KIND --ref REF
+nx identity work forget --kind KIND --ref REF
+nx identity work list [SEAT] [--session ID] [--running] [--json]
+nx identity work owners --kind KIND --ref REF
+nx identity work run --kind KIND --ref REF -- COMMAND [ARGS...]
+```
+
+Background work this session's identity owns (RDR-253 Step 6): `worktree` (the absolute path), `tmux` (the `-L` socket name), `watcher`, `wait` and `labrun`. A work row is a label, not a fenced write: a lab run on another host has no token file. An identity holds at most 200 rows (`409 work_limit`; registering first forgets the identity's own `done` rows once and retries).
+
+- `register` writes the caller's row in state `running`; `done` marks it finished (for work with no row it is a no-op that says so); `forget` drops it. A process with no identity registers nothing and exits 0, so a skill or script that labels its work never fails over the label. The creator registers and the same party marks `done`: the `git-worktrees` skill for a worktree (the `finishing-branch` skill marks it done after removing it), the restart sandbox for its private tmux server, `nx tuple wait` for its wait, and `run` for a command.
+- `run` registers the work, runs `COMMAND` with this process's streams, marks it `done` when it exits and exits with the command's status (128 plus the signal for a signalled child). SIGTERM and SIGHUP sent to `run` are forwarded to the command, and the row is then marked done. SIGINT is not forwarded: a terminal's Ctrl-C already reaches the command through its process group, and `run` ignores it so it can mark the row done after the command ends. Every part of the label is best effort: an engine that cannot be reached, a refusal or an unexpected answer is logged and the command still runs. A lab run from a session is `nx identity work run --kind labrun --ref LABEL -- lab-remote ...`.
+- `list` shows one identity's rows: `SEAT` (a name or an id), `--session ID`, or the caller's own. **A `running` row of an identity that is not alive is stale**: it is marked so, and `--running` drops it. `--json` prints `{identity, alive, work: [{kind, ref, state, updated_at, stale}]}`.
+- `owners` lists every identity that registered a resource and whether each owner's holder is alive.
+
+The restart script's `--status` table and the readiness ask list each target's running work (never a stale row, and not the session's own standing mail wait). A session that replies ready while a running `labrun` or `watcher` row of its live identity is listed is not counted ready, the same as one whose process table still shows a background task (Sam, 2026-11-19); a work list that cannot be read blocks the same way, until it is checked or `--force` is given. A `worktree` or `tmux` row outlives the session and never blocks, and neither does a `wait` row: the session's own standing mail wait is meant to run, and a wait from an earlier session is stale.
+
+### nx identity purge
+
+```
+nx identity purge IDENTITY --operator
+```
+
+Remove the fenced state of `IDENTITY` (board entry, mailbox, scratch, memberships). Refused for a live or unheld identity and for a lapsed one with no recorded `gone`; allowed when it has ended, or lapsed with its holder recorded gone. The engine audit-logs it with the caller.
+
+| Flag | Description |
+|------|-------------|
+| `--operator` | Required. Confirms the operator override |
+
+## nx group
+
+Groups (RDR-252): a named set of seats that answers a board topic, with one leader. A group is an engine record (`/v1/group`), not a tuple; its members are the memberships RDR-253 keeps on each identity. `form` makes the caller's identity the leader, and every write is fenced by an identity token (the leader's for the record, the member's for a membership), so the verbs run in a Claude session or a Bash child of one. Only `override` takes no token. A refusal prints the engine's code and reason and exits 1. Group names and topic names follow the engine's address pattern: a letter or digit, then letters, digits, `.`, `_` and `-`, at most 64; a topic name has no `--`.
+
+An MCP server reads the identity's memberships once, when it starts, to decide which group-gated auras to load. `join` and `leave` therefore say that the server must reconnect (`/mcp`, or restart the session).
+
+### nx group form
+
+```
+nx group form NAME --serves TOPIC [--serves TOPIC ...] [--purpose TEXT] [--ends UTC|open]
+              [--ack-deadline MINUTES] [--ack-deadline-for TOPIC=MINUTES ...] [--requested-by WHO]
+```
+
+Form `NAME` with the caller as leader, and write the leader's membership in the same call. The caller must hold a live, leased seat. A disbanded name is re-formed by the same call (by its former leader while that one is live, else by any live, leased seat). One live group serves a topic: a second is refused (`topic_served`).
+
+| Flag | Description |
+|------|-------------|
+| `--serves TOPIC` | Required, repeatable. A board topic base name the group answers, such as `nexus-develop` (it covers `--done`, `--push` and `--owner`) |
+| `--purpose TEXT` | What the group is for |
+| `--ends UTC\|open` | When the group ends: a UTC instant in the future, such as `2026-12-01T00:00:00Z`, or `open` |
+| `--ack-deadline MINUTES` | Default acknowledgement deadline, 5 to 240. The engine's default is 20 |
+| `--ack-deadline-for TOPIC=MINUTES` | Deadline for one served topic, 5 to 240; repeatable. The topic must be in `--serves` |
+| `--requested-by WHO` | Who asked for the group; default the caller's identity id |
+
+### nx group set
+
+```
+nx group set NAME [--leader SEAT] [--ack-deadline MINUTES] [--ack-deadline-for TOPIC=MINUTES ...]
+                  [--ends UTC|open] [--serves TOPIC ...]
+```
+
+Change `NAME` in place; only its leader may. Only the fields given are sent, and at least one is required. `--leader` takes a seat name or an identity id; the new leader must already be a member and a live, leased seat. `--ack-deadline-for` is merged into the stored per-topic deadlines (the engine replaces the whole map, so the command reads the record first). `--serves` replaces the list; removing a topic removes its deadline.
+
+### nx group disband
+
+```
+nx group disband NAME
+```
+
+End `NAME` now. `ended_at` is set once and every membership is removed, the leader's included; the record stays as history, and the name can be formed again. Only the leader may.
+
+### nx group override
+
+```
+nx group override NAME --leader SEAT
+nx group override NAME --disband
+```
+
+The operator override, for a leader that cannot write: it uses the tenant credential and sends no identity token. Exactly one of the two flags. The engine allows it only while the stored leader is `ended`, `unheld`, `lapsed` with its holder recorded gone, gone from the table, or `live` with an `unleased` binding, and refuses it while the leader is live (`leader_not_overridable`). A new leader must be a member and a live, leased seat. The change is written to the engine's audit log.
+
+| Flag | Description |
+|------|-------------|
+| `--leader SEAT` | A seat name or identity id to lead the group |
+| `--disband` | End the group |
+
+### nx group join
+
+```
+nx group join NAME
+```
+
+Join `NAME` as a member, as the caller's own identity. Only a seat joins: an ephemeral or delegated identity is refused. A group already held is left alone, so a leader keeps its role. The command prints that the MCP server must reconnect before group-gated auras load.
+
+### nx group leave
+
+```
+nx group leave NAME
+```
+
+Leave `NAME`. The current leader is refused (`leader_cannot_leave`): hand the group on with `nx group set --leader`, or disband it. Leaving a group never joined changes nothing and says so. The command prints that the MCP server must reconnect.
+
+### nx group list
+
+```
+nx group list NAME [--json]
+```
+
+The record of `NAME` (serves, deadlines, `ends`, whether it is live or disbanded), its leader, and its members in join order by alias, each with its role and its RDR-253 state: `unheld`, `live`, `lapsed`, `ended`, or `unleased` (a live binding whose MCP server cannot renew, so the engine cannot say whether its holder is alive).
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print the record and the members as JSON |
+
+### nx group ack-times
+
+```
+nx group ack-times NAME [--json]
+```
+
+The calibration read for `NAME`'s acknowledgement deadline: per red on the topics the group serves, the sha, when its first owner row's episode began (`episode_at`), the time of the counting acknowledgement and the minutes between, with the number of hand-ons (a hand-off or an escalation). A hand-off or an escalation row carries a new `episode_at` from the engine, but it continues the open red: it is one red, and the minutes run from the first row's `episode_at`. It reads `board/ci/<topic>--owner` and counts an ack the way the engine does, with one difference: it matches the `kind=ack` row's `from` dimension (the identity id the engine records from the token on a board or CI post) against the owner at that time, where the engine matches the row's sender-session stamp. For an honest owner they agree; the read is a calibration aid, not the engine's count. A red with no counting ack prints `no ack`. The read pages until the board has no more rows and stops at 10,000 rows per topic, saying so on standard error. The text form prints one summary line (reds, acknowledged reds, median and longest minutes) and then one line per red.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print the reds as JSON (`topic`, `sha`, `episode_at`, `reason`, `owner`, `handoffs`, `acked_at`, `acked_by`, `minutes`, `cleared_at`) |
+
 ## nx service
 
 Storage-service administration.
@@ -7143,9 +7379,9 @@ nx aura list [--json]
 
 Declarative auras (RDR-249): `<name>.aura.toml` files in the same two roots as procedures (`src/nexus/procedures/` and, only while `NX_PROCEDURES_REPO_ROOT=1`, the checkout's `.nexus/procedures/`). Nothing here runs an aura.
 
-`nx aura check` parses every aura file (or `NAME`) against the closed key set and checks what a file cannot check alone: the `procedure` resolves through the library and its header parses; every required argument of the header is mapped and no mapping names an argument it lacks; a `[clear]` that a post could meet together with `trigger.match` is refused (so is one beside an absent `trigger.match`); two auras that write the same `display.threads` block are both refused; and, from the engine's registry, `trigger.subspace` resolves to a template and every field of `trigger.match`, `clear.match` and each `dims.<field>` source is a dimension of it (a `body.<field>` source is checked against the template's `doc.body` where it serves one). Each refusal names the aura, the check and the key. A repo file that shadows a shipped aura, and a file whose name breaks the name rule, are listed as refused. When the registry cannot be read the dictionary checks are skipped, each skipped check is printed by name with the reason (`pass; skipped: dictionary`), and the rest still run; a skipped check is never shown as a plain pass. While `NX_PROCEDURES_REPO_ROOT` is off the checkout's own aura files are not checked: one line, `repo root not scanned (NX_PROCEDURES_REPO_ROOT unset): N aura file(s) not checked`, says how many, and it counts as a skipped check in the summary. A name under `auras:` in either config file, or in `NX_AURAS_OFF`, that matches no aura prints a warning on standard error naming where it came from (a misspelled name would otherwise fail open); `all` is exact and lowercase, so `ALL` is warned about as an unknown name. Exit status 1 when any aura is refused.
+`nx aura check` parses every aura file (or `NAME`) against the closed key set and checks what a file cannot check alone: the `procedure` resolves through the library and its header parses; every required argument of the header is mapped and no mapping names an argument it lacks; a `[clear]` that a post could meet together with `trigger.match` is refused (so is one beside an absent `trigger.match`); two auras that write the same `display.threads` block are both refused; and, from the engine's registry, `trigger.subspace` resolves to a template and every field of `trigger.match`, `clear.match` and each `dims.<field>` source is a dimension of it (a `body.<field>` source is checked against the template's `doc.body` where it serves one). Each refusal names the aura, the check and the key. A repo file that shadows a shipped aura, and a file whose name breaks the name rule, are listed as refused. When the registry cannot be read the dictionary checks are skipped, each skipped check is printed by name with the reason (`pass; skipped: dictionary`), and the rest still run; a skipped check is never shown as a plain pass. A **warning** does not refuse an aura (RDR-252): an aura triggered on a `board/ci/<base>--owner` subspace whose `[load]` group is missing, has no record, is disbanded, or does not serve `<base>` prints `warning serving_group <key>: <why>` (`pass; warning: serving_group`), and the summary adds `N with warnings`. An aura on any other subspace is not checked for this, and a group that cannot be read is skipped by name, never passed. The grammar also takes a `[load]` table with one key, `group`; the argument source `self.identity`, accepted for a declared string argument and refused for any other type; and `display.channel` as the name of a boolean field of the procedure's result. While `NX_PROCEDURES_REPO_ROOT` is off the checkout's own aura files are not checked: one line, `repo root not scanned (NX_PROCEDURES_REPO_ROOT unset): N aura file(s) not checked`, says how many, and it counts as a skipped check in the summary. A name under `auras:` in either config file, or in `NX_AURAS_OFF`, that matches no aura prints a warning on standard error naming where it came from (a misspelled name would otherwise fail open); `all` is exact and lowercase, so `ALL` is warned about as an unknown name. Exit status 1 when any aura is refused.
 
-`nx aura list` prints one line per aura: name, summary, trigger (subspace and match), `on` or `off`, and the level that decided it (`default`, `global`, `repo` or `env`). A file that breaks the grammar is listed with its refusal. `--json` prints a list of objects with `name`, `root`, `summary`, `trigger` (`subspace`, `match`), `state`, `level` and `error`. The same warnings go to standard error, so `--json` stays parseable. The aura files and `.nexus.yml` are both read from the repository top (the working directory outside a repository). A value under `auras:` that is not on or off is an error that names the file and the key (exit 1). See [Configuration](configuration.md#auras).
+`nx aura list` prints one line per aura: name, summary, trigger (subspace and match), `on` or `off`, and the level that decided it (`default`, `global`, `repo` or `env`). A file that breaks the grammar is listed with its refusal. For an aura that is on, the line ends `loaded` or `not loaded: <reason>`, with the group of its `[load]` table in parentheses (reasons: `not_a_member`, `unbound`, `group_disbanded`, `no_group_record`, `memberships_unreadable`, `group_unreadable`, and `refused_threads`, `refused_subscription`, `load_failed`). This is read from the state file of the MCP server of this process's nearest Claude ancestor (`~/.config/nexus/auras/loaded-<claude pid>.<startedAt>.json`); a file whose process is gone is deleted, and with no state file the line says nothing about loading, except that a group-gated aura that is on says `not loaded: no state file` and to reconnect (`/mcp`). A load that could not read the engine (`memberships_unreadable`, `group_unreadable`) also says to reconnect, since it is not repeated until the server restarts. With no Claude ancestor, standard error lists every state file (Claude pid, identity, server pid, and each aura's decision) and claims none, so the table and `--json` stay as they are. When the auras were loaded for another identity than this process now resolves to (a cross-seat `/resume`), standard error says to reconnect the MCP server. `--json` prints a list of objects with `name`, `root`, `summary`, `trigger` (`subspace`, `match`), `state`, `level`, `error` and `loaded` (`loaded`, `reason`, `group`, or `null`). The same warnings go to standard error, so `--json` stays parseable. The aura files and `.nexus.yml` are both read from the repository top (the working directory outside a repository). A value under `auras:` that is not on or off is an error that names the file and the key (exit 1). See [Configuration](configuration.md#auras).
 
 ---
 

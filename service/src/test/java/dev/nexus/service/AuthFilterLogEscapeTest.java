@@ -218,6 +218,36 @@ class AuthFilterLogEscapeTest {
             .doesNotContain("\t").doesNotContain("\n").doesNotContain("\r");
     }
 
+    /**
+     * RDR-253 Step 2 merge review: an unknown or expired identity token on the bind route is ignored, not refused
+     * (the route mints the replacement and never reads the token), and the one DEBUG line it writes goes through
+     * the same escape as the filter's other path lines. The escape itself is defence in depth that no request can
+     * reach: the route pattern admits only {@code i<digits>/bind|renew}, so no control character gets to this line,
+     * and this test would pass with the escape reverted. What it pins is the bind-route pass-through (200), the 401
+     * the same token gets on any other route (non-vacuity: the pass-through is the route's, not the filter's), and
+     * the exact log text.
+     */
+    @Test
+    void bindRoutePassesAnUnknownIdentityTokenThroughOtherRoutesGet401AndTheLogLineReadsExactly() throws Exception {
+        var capture = new Capture(AuthFilter.class.getName(), Level.DEBUG);
+        HttpResponse<String> onBind;
+        HttpResponse<String> elsewhere;
+        try (capture) {
+            onBind = fx.send(fx.shared.port(), "/v1/identity/i1/bind", TOK_A, null, "cid-id-bind",
+                java.util.Map.of(AuthFilter.IDENTITY_HEADER, "expired-or-unknown-identity-token"));
+            elsewhere = fx.send(fx.shared.port(), "/v1/corr/x", TOK_A, null, "cid-id-other",
+                java.util.Map.of(AuthFilter.IDENTITY_HEADER, "expired-or-unknown-identity-token"));
+            fx.awaitProbe();
+        }
+        assertThat(onBind.statusCode()).as("the bind route passes through, not 401").isEqualTo(200);
+        assertThat(elsewhere.statusCode()).as("any other route refuses the same token").isEqualTo(401);
+        var ignored = capture.appender.list.stream()
+            .filter(e -> e.getFormattedMessage().contains("event=identity_token_ignored")).toList();
+        assertThat(ignored).as("exactly one identity_token_ignored event").hasSize(1);
+        assertThat(ignored.get(0).getFormattedMessage())
+            .isEqualTo("event=identity_token_ignored path=/v1/identity/i1/bind reason=expired_on_bind_route");
+    }
+
     // ── nexus-dngtz.1.11: the session and tenant in the log prefix ─────────────
 
     /** A client-chosen session id as /v1/sessions/start would store it: a newline, a bracket, spaces, an equals. */

@@ -109,15 +109,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _cli_lookup = None
 _endpoint_resolve = None
 _session_facts = None
+_identity_lookup = None
 
 
 def _load_siblings() -> None:
-    global _cli_lookup, _endpoint_resolve, _session_facts
+    global _cli_lookup, _endpoint_resolve, _session_facts, _identity_lookup
     import _cli_lookup as cli_lookup  # noqa: PLC0415 -- must follow the sys.path insert
     import _endpoint_resolve as endpoint_resolve  # noqa: PLC0415
+    import _identity_lookup as identity_lookup  # noqa: PLC0415
     import _session_facts as session_facts  # noqa: PLC0415
 
     _cli_lookup, _endpoint_resolve, _session_facts = cli_lookup, endpoint_resolve, session_facts
+    _identity_lookup = identity_lookup
 
 
 #: Wall clock for ``nx command-context continuation`` (measured 5.4 s); hooks.json gives
@@ -338,6 +341,39 @@ def _run_nx(args: list[str], cwd: str | None, timeout: float) -> tuple[str, str 
     return result.stdout, None
 
 
+#: Seconds the running-work read may take. It is an addition to the checkpoint, never a reason to hold compaction.
+_WORK_TIMEOUT_S = 3.0
+
+
+def _running_work_section(cwd: str | None) -> list[str]:
+    """The background work this session's own identity still has running (RDR-253 "Background work": the checkpoint
+    lists it by identity after a ``/clear``), as checkpoint lines; ``[]`` on any failure, and when there is none.
+
+    ``nx identity work list --running --json`` with no argument is the caller's own identity, which ``nx`` resolves itself
+    through the token file of its nearest Claude ancestor, so this reads no token. A running row of an identity that is
+    not alive is stale and is not listed. Never raises; one try, no retry."""
+    try:
+        base = _nx_command()
+        if base is None:
+            return []
+        done = subprocess.run(
+            [*base, "identity", "work", "list", "--running", "--json"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=_WORK_TIMEOUT_S, cwd=cwd if cwd and os.path.isdir(cwd) else None, check=False)
+        if done.returncode != 0:
+            return []
+        rows = json.loads(done.stdout)["work"]
+        # A worktree row whose directory is gone (an agent's isolation worktree the harness removed) is not listed.
+        lines = [f"- {r['kind']} {r['ref']}" for r in rows if isinstance(r, dict) and r.get("kind") and r.get("ref")
+                 and not (r["kind"] == "worktree" and os.path.isabs(str(r["ref"])) and not os.path.isdir(str(r["ref"])))]
+    except Exception:  # noqa: BLE001 — an addition to the checkpoint: any failure leaves it out, silently
+        return []
+    if not lines:
+        return []
+    return ["## Background work this identity still has running\n",
+            "(registered with `nx identity work register`; each row is the session's own, and a restart ends the waits, "
+            "watchers and lab runs among them)\n", _cap("\n".join(lines)).rstrip() + "\n"]
+
+
 def _write_atomic(path: Path, text: str) -> None:
     """Write *text* to *path* through a temp file in the same directory. ``mkstemp`` creates it mode 0600."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -504,11 +540,21 @@ def _board_by_title(
     return _run_nx(["memory", "get", entry_id, "--project", _BOARD_PROJECT], cwd, left)
 
 
+def _identity_line(body: str) -> str:
+    """The entry's fenced ``identity:`` line value, or ``""`` (RDR-253 Step 5)."""
+    m = re.search(r"(?m)^identity:[ \t]*(i[0-9]+)[ \t\r]*$", body)
+    return m.group(1) if m else ""
+
+
 def _board_entry(
-    session_id: str, name: str | None, cwd: str | None, timeout: float,
+    session_id: str, name: str | None, cwd: str | None, timeout: float, identity: str = "",
 ) -> tuple[str, str, str, str | None]:
-    """The session's ``threads`` entry as ``(title, body, how, error)``; *how* is ``session id`` or
+    """The session's ``threads`` entry as ``(title, body, how, error)``; *how* is ``identity``, ``session id`` or
     ``exact title`` (empty when nothing was found).
+
+    RDR-253 Step 5: with *identity* (from the token files) the search is for the identity first, and an entry whose
+    ``identity:`` line names it wins whatever its ``session:`` line says, so the entry is found after ``/clear``. An
+    entry whose identity line names another seat is never this session's, even with a matching session line.
 
     A Desktop session's handle differs from its name, and the board entry is filed under the
     handle (nexus-3lcda), so the name cannot find it. Board entries carry a ``session: <id>``
@@ -528,9 +574,33 @@ def _board_entry(
         return min(left(), _SESSION_PHASE_S - (_mono() - started))
 
     error: str | None = None
+    # the identity phase searches for both words of the line (full-text: "identity" AND the id), which keeps most prose
+    # mentions out of the candidates; a hit is taken only when its body really has the line
+    for query, how in (((f"identity: {identity}", "identity"),) if identity else ()) + ((session_id, "session id"),):
+        found, error = _search_phase(query, how, session_id, identity, cwd, phase_left)
+        if found is not None:
+            return found
+    if not name:
+        return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
+    missing = "" if error else f"no {_BOARD_PROJECT} entry carries `session: {session_id}` and "
+    body, title_error = _board_by_title(name, cwd, left(), missing)
+    if body.strip() and identity and _identity_line(body) not in ("", identity):
+        # a same-named entry of another seat is not ours (two sessions with one display name)
+        return "", "", "", f"the entry titled {name!r} names another identity ({_identity_line(body)})"
+    if title_error and error:
+        title_error = f"{title_error} (the session-line search also failed: {error})"
+    return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
+
+
+def _search_phase(
+    query: str, how: str, session_id: str, identity: str, cwd: str | None, phase_left,
+) -> tuple[tuple[str, str, str, None] | None, str | None]:
+    """One full-text search of ``threads`` for *query*, its first hits fetched newest first; the first body that is
+    this session's wins. Returns ``(found, error)``."""
+    error: str | None = None
     if phase_left() >= _MIN_CALL_S:
         listing, error = _run_nx(
-            ["memory", "search", session_id, "--project", _BOARD_PROJECT], cwd,
+            ["memory", "search", query, "--project", _BOARD_PROJECT], cwd,
             min(_SEARCH_TIMEOUT_S, phase_left()),
         )
         if not error:
@@ -547,20 +617,20 @@ def _board_entry(
                 body, get_error = _run_nx(["memory", "get", row_id, "--project", _BOARD_PROJECT], cwd, phase_left())
                 if get_error:
                     unfetched.append(f"[{row_id}] {get_error}")
-                elif _has_session_line(body, session_id):
-                    return title, body, "session id", None
+                    continue
+                own = _identity_line(body)
+                if how == "identity" and own == identity:
+                    return (title, body, "identity", None), None
+                # identity known: an entry naming another seat is never ours; unknown (a Desktop session with no
+                # token file): our own session line is trusted whatever identity the entry names
+                if how == "session id" and _has_session_line(body, session_id) and (not identity or own in ("", identity)):
+                    return (title, body, "session id", None), None
             if unfetched:
                 # Hits that were never read cannot be called absent (review r2 L2).
                 error = "the session-line search found hits that could not be fetched: " + "; ".join(unfetched)
     else:
         error = "the board lookup's time budget left no room for the session-line search"
-    if not name:
-        return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
-    missing = "" if error else f"no {_BOARD_PROJECT} entry carries `session: {session_id}` and "
-    body, title_error = _board_by_title(name, cwd, left(), missing)
-    if title_error and error:
-        title_error = f"{title_error} (the session-line search also failed: {error})"
-    return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
+    return None, error
 
 
 def _git_worktrees(cwd: str | None, timeout: float) -> list[tuple[str, str]]:
@@ -953,7 +1023,8 @@ def run_pre(payload: dict) -> str:
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     name = _session_name(session_id)
     # The board is read first: its ref: lines choose between the session's worktrees.
-    board_title, board, board_how, board_error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S)
+    identity = _identity_lookup.lookup(session_id, _config_dir())[0] if _identity_lookup is not None else ""
+    board_title, board, board_how, board_error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S, identity)
     if board_error and name:
         _log("WARNING", f"pre: board entry for {name!r}: {board_error}")
     elif board_error:
@@ -1000,6 +1071,7 @@ def run_pre(payload: dict) -> str:
         else:
             parts.append(f"[no board entry: {board_error or 'empty'}]\n")
     parts.extend(checks)
+    parts.extend(_running_work_section(cwd))
     parts.append(f"## Working state\n\n(nx command-context continuation, run {state_stamp}; old tool output is "
                  "as of when it ran)\n")
     shaped = _filter_in_progress(_shape_state(state), board)
@@ -1126,8 +1198,9 @@ def _no_restore_notice(session_id: str) -> str:
     return (
         "The conexus PreCompact hook has no working-state checkpoint for this compaction (its pre step "
         "did not run or failed), so nothing is restored here and the compact summary is all you have. "
-        "Recover your state before acting on it: read your threads board entry (project threads, titled "
-        f"with your session name, or the entry whose first line is `session: {session_id}`), then check "
+        "Recover your state before acting on it: read your threads board entry (project threads: the entry "
+        "whose `identity:` line names your identity, `nx identity show` prints it; else the one titled "
+        f"with your session name, or whose `session:` line is `{session_id}`), then check "
         "git status, the branch and `bd list --status=in_progress`.\n"
     )
 

@@ -27,7 +27,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Non-vacuity: at least three branches ({@code doUpsert}, {@code doImport},
  * {@code importBatch}) must be found, and every {@code onConflict(} in the file
  * must be on the title key, so a future branch on another key is not missed.
- * Falsified before commit by deleting one clear and watching this go red.
+ * Falsified before commit by deleting one clear and watching this go red. A branch may
+ * instead set {@code IdentityLine.overwriteClears()} (RDR-253 Step 2), whose contents the
+ * second test pins.
  */
 class MemoryRepositoryConflictBranchTest {
 
@@ -42,6 +44,9 @@ class MemoryRepositoryConflictBranchTest {
         "\\.set\\(\\s*MEMORY\\.QUARANTINED_AT\\s*,\\s*\\(OffsetDateTime\\)\\s*null\\s*\\)");
     private static final Pattern CLEAR_ROLLED_UP = Pattern.compile(
         "\\.set\\(\\s*MEMORY\\.ROLLED_UP_AT\\s*,\\s*\\(OffsetDateTime\\)\\s*null\\s*\\)");
+    /** RDR-253 Step 2: the shared reset that clears both stamps and the identity stamp in one set. */
+    private static final Pattern OVERWRITE_CLEARS = Pattern.compile(
+        "\\.set\\(\\s*IdentityLine\\.overwriteClears\\(\\)\\s*\\)");
 
     @Test
     void everyTitleKeyConflictBranch_clearsBothStamps() throws IOException {
@@ -61,8 +66,9 @@ class MemoryRepositoryConflictBranchTest {
             String slice = src.substring(m.start(), end);
             String where = "line " + lineOf(src, m.start());
             branches.add(where);
-            if (!CLEAR_QUARANTINED.matcher(slice).find()) missing.add(where + ": quarantined_at not cleared");
-            if (!CLEAR_ROLLED_UP.matcher(slice).find()) missing.add(where + ": rolled_up_at not cleared");
+            boolean shared = OVERWRITE_CLEARS.matcher(slice).find();
+            if (!shared && !CLEAR_QUARANTINED.matcher(slice).find()) missing.add(where + ": quarantined_at not cleared");
+            if (!shared && !CLEAR_ROLLED_UP.matcher(slice).find()) missing.add(where + ": rolled_up_at not cleared");
         }
 
         assertThat(branches.size())
@@ -78,6 +84,17 @@ class MemoryRepositoryConflictBranchTest {
                 + "rolled_up_at to NULL in the same statement (RDR-207: a write that names "
                 + "an existing title is a decision to keep it)")
             .isEmpty();
+    }
+
+    /** The shared reset the branches use clears exactly the two quarantine stamps and the identity stamp. */
+    @Test
+    void overwriteClearsResetsBothQuarantineStampsAndTheIdentityStamp() {
+        java.util.Map<org.jooq.Field<?>, Object> clears = IdentityLine.overwriteClears();
+        assertThat(clears.keySet()).containsExactly(
+            dev.nexus.service.jooq.nexus.Tables.MEMORY.QUARANTINED_AT,
+            dev.nexus.service.jooq.nexus.Tables.MEMORY.ROLLED_UP_AT,
+            dev.nexus.service.jooq.nexus.Tables.MEMORY.IDENTITY);
+        assertThat(clears.values()).containsOnlyNulls();
     }
 
     private static int lineOf(String src, int offset) {

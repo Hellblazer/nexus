@@ -84,9 +84,11 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
             break
         offset += 200
 
+    from nexus.catalog.meta_filter import meta_at_least  # noqa: PLC0415 — deferred to avoid CLI startup cost
     from nexus.sensitive_output import CliDocumentLines, entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
-    orphan_entries = [e for e in all_docs if int(e.meta.get("miss_count", 0)) >= 2]
+    # nexus-uwggq.2.2: one integer-bound rule; a miss_count that is not an integer is skipped, not raised.
+    orphan_entries = [e for e in all_docs if meta_at_least(e.meta, "miss_count", 2)]
     orphans: list[tuple[str, str, str]] = [
         (str(e.tumbler), e.title or "", e.file_path or "") for e in orphan_entries
     ]

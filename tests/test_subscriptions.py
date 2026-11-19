@@ -1158,3 +1158,48 @@ class TestResolverLogsAMissOncePerRun:
             assert s.arm_session_name("has space", store_factory=_poison_store_factory()) is False
         [line] = [e for e in logs if e["event"] == "session_name_unsafe"]
         assert line["log_level"] == "debug" and line["session_id"] == "sess-unsafe"
+
+
+# --- RDR-253 Step 5: dual subscription ----------------------------------------------------------------
+
+
+def test_a_session_with_an_identity_is_delivered_both_mailboxes() -> None:
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    sid = "11111111-2222-4333-8444-555555555555"
+    subs = SubscriptionSet(session_id=sid, identity="i12")
+    assert [e["subspace"] for e in subs.entries()][:2] == [f"mailbox/{sid}", "mailbox/i12"]
+    assert [e["subspace"] for e in SubscriptionSet(session_id=sid).entries()] == [f"mailbox/{sid}"]
+
+
+def test_setting_the_identity_bumps_the_set_so_the_waiter_rereads_it() -> None:
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    subs = SubscriptionSet(session_id="11111111-2222-4333-8444-555555555555")
+    seen: list[int] = []
+    subs._listeners.append(lambda s: seen.append(s.version))  # noqa: SLF001 -- the observer hook the waiter uses
+    subs.set_identity("i12")
+    subs.set_identity("i12")  # no change, no bump
+    assert seen == [1] and subs.identity_mailbox == "mailbox/i12"
+    subs.set_identity(None)
+    assert seen == [1, 2] and [e["subspace"] for e in subs.entries()] == [subs.session_mailbox]
+
+
+def test_a_set_loaded_before_the_token_file_follows_the_lease_when_it_adopts_an_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP server and the bind hook start together, so the set usually loads with no identity; the lease
+    tells it when it adopts one (a late token file), and again on a switch."""
+    from nexus.mcp import identity_lease, subscriptions  # noqa: PLC0415
+
+    monkeypatch.setattr(identity_lease, "_IDENTITY_LISTENERS", [])
+    monkeypatch.setattr(identity_lease, "_LEASE", None)
+    subs = subscriptions.SubscriptionSet(session_id="11111111-2222-4333-8444-555555555555")
+    subscriptions._follow_identity(subs)  # noqa: SLF001 -- what get_or_load does on first load
+    assert subs.identity_mailbox is None
+    identity_lease._notify_identity("i12")  # noqa: SLF001 -- what IdentityLease._adopt does on a change
+    assert [e["subspace"] for e in subs.entries()][1] == "mailbox/i12"
+    identity_lease._notify_identity("i13")  # noqa: SLF001 -- a cross-seat switch
+    assert subs.identity_mailbox == "mailbox/i13"
+    identity_lease._notify_identity("not-an-id")  # noqa: SLF001
+    assert subs.identity_mailbox is None

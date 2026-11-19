@@ -41,6 +41,9 @@ def crs(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_ps_args", lambda pid: f"/x/claude --channels {P} -n w --resume sid-1 #{pid}")
     monkeypatch.setattr(module, "prompt_count", lambda _sid: 2)
     setattr_in(monkeypatch, module, "time.sleep", lambda _s: None)
+    # RDR-253 Step 4: restart() makes or keeps a seat through `nx identity`, which reaches the engine; the seat
+    # behaviour is tested in test_claude_restart_sessions_seats.py.
+    monkeypatch.setattr(module, "ensure_seat", lambda s: "")
     return module
 
 

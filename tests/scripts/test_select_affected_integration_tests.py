@@ -26,6 +26,10 @@ from tests.test_ci_release_ledger_gate import _pytest_gate_script, _run
 
 import select_affected_integration_tests as sel
 
+#: Roots this file's subprocesses read, which scripts/meta_tests.py's trace cannot see:
+#: its child pytest collects every integration test under tests/.
+META_SCANS = ("tests", "scripts/select_affected_integration_tests.py", ".github/workflows")
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "select_affected_integration_tests.py"
 CI_YML = REPO_ROOT / ".github" / "workflows" / "ci.yml"

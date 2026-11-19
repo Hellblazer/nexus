@@ -739,6 +739,7 @@ class Sandbox:
         self.tmux("new-session", "-d", "-s", "rs", "-x", "220", "-y", "50", "-n", "ctl", "-c", str(self.work),
                   "bash --noprofile --norc", check=True)
         self.watch.start()
+        _load_slash("sandbox_work").register(self.real_nx, self.sock)  # a label: this run's identity owns the private server
 
     def native_layout(self) -> None:
         """Give the scratch HOME a native install's layout, so the script's /restart path is the one tested.
@@ -1806,10 +1807,10 @@ RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario
            "pane": scenario_pane}
 
 
-def _load_slash():
-    """slash_restart.py beside this file, by path: run.py runs under ``python -I``, which leaves its own
+def _load_slash(name: str = "slash_restart"):
+    """<name>.py beside this file, by path: run.py runs under ``python -I``, which leaves its own
     directory off sys.path."""
-    loc = importlib.util.spec_from_file_location("restart_sandbox_slash", SANDBOX_PY.with_name("slash_restart.py"))
+    loc = importlib.util.spec_from_file_location(f"restart_sandbox_{name}", SANDBOX_PY.with_name(f"{name}.py"))
     mod = importlib.util.module_from_spec(loc)
     loc.loader.exec_module(mod)
     return mod
@@ -2289,10 +2290,7 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
         UNVERIFIED.append(f"{sb.spec.name}: {unverified}")
         notes.append(f"UNVERIFIED: nx-mcp's teardown is NOT judged in this run: {unverified}")
     base = Baseline() if unverified else read_baseline(sb, True)
-    try:
-        sb.tmux("kill-server", timeout=30)
-    except subprocess.TimeoutExpired:
-        notes.append("tmux kill-server timed out")
+    _load_slash("sandbox_work").kill_server(sb, notes)  # asks `nx identity may-stop` first (RDR-253 Step 6)
     # The hangup reaches nx-mcp now; its teardown reads config.yml, so the config stays until it is done.
     stragglers = wait_for_exit(nx_mcp, TEARDOWN_WAIT_S)
     teardown: list[str] = []
@@ -2677,96 +2675,14 @@ def record_full_pass(crs, claude: str, before: tuple[str, ...], chosen: list[str
     return f"recorded the pass in {crs.SANDBOX_PASS} (Claude Code {version})"
 
 
-#: The child of the hangup probe: reports its pid and process group, then waits with a SIGHUP trap that
-#: writes a marker (what nx-mcp's handler does, minus the teardown), and ends its own sleep.
-_HANGUP_CHILD = (
-    'echo "$$ $(ps -o pgid= -p $$ | tr -d " ")" > "$1"\n'
-    "trap 'echo hup > \"$2\"; kill $! 2>/dev/null; exit 0' HUP\n"
-    "sleep 60 &\n"
-    "wait\n"
-)
-
-
-def tmux_hangup_probe(workdir: Path, shape: str, *, wait_s: float = 10.0,
-                      child_script: str = _HANGUP_CHILD) -> list[str]:
-    """Does ``tmux kill-server`` hang up a child process group (nexus-iz8ub)? nx-mcp's SIGHUP teardown
-    (75e22da36) only matters if the sandbox's own kill-server delivers one, and that was verified only for
-    Desktop sessions' process groups. Runs on a private tmux server (``-L``, ``-f /dev/null``, never the
-    default one) with a child that is NOT the group leader (as nx-mcp is not: claude -> uv -> nx-mcp share
-    the session's foreground group), in the two pane shapes the sandbox uses: ``shell`` (a bash pane, the
-    command typed into it) and ``direct`` (``exec`` as the pane's own process, rs_direct). Needs only tmux
-    and sh. Returns the findings, empty when SIGHUP reached the child."""
-    if shape not in ("shell", "direct"):
-        raise ValueError(shape)
-    workdir.mkdir(parents=True, exist_ok=True)
-    child, ready, marker = workdir / "child.sh", workdir / "ready", workdir / "hup"
-    child.write_text(child_script, encoding="utf-8")
-    sock = f"nx-hup-{os.getpid()}-{shape}"
-    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-
-    def tmux(*args: str, timeout: float = 30) -> subprocess.CompletedProcess:
-        return subprocess.run(["tmux", "-L", sock, "-f", "/dev/null", *args], capture_output=True, text=True,
-                              env=env, timeout=timeout)
-
-    cmd = f"sh -c 'sh {shlex.quote(str(child))} {shlex.quote(str(ready))} {shlex.quote(str(marker))} & wait'"
-    findings: list[str] = []
-    pid = 0
-    try:
-        if shape == "direct":
-            started = tmux("new-session", "-d", "-s", "hup", "-x", "200", "-y", "50", f"exec {cmd}")
-        else:
-            started = tmux("new-session", "-d", "-s", "hup", "-x", "200", "-y", "50", "bash --noprofile --norc")
-            if started.returncode == 0:
-                started = tmux("send-keys", "-t", "hup", "-l", cmd)
-                tmux("send-keys", "-t", "hup", "Enter")
-        if started.returncode != 0:
-            return [f"{shape}: tmux did not start: {started.stderr.strip()[:200]}"]
-        deadline = time.monotonic() + wait_s
-        while time.monotonic() < deadline and not ready.exists():
-            time.sleep(0.1)
-        try:
-            pid, pgid = (int(x) for x in ready.read_text(encoding="utf-8").split())
-        except (OSError, ValueError):
-            return [f"{shape}: the child never reported its process group"]
-        if pid == pgid:
-            findings.append(f"{shape}: the child leads its own group (pid {pid}); it must be a member, as nx-mcp is")
-        time.sleep(1)
-        if marker.exists():
-            findings.append(f"{shape}: the marker was written before kill-server: the probe proves nothing")
-        tmux("kill-server")
-        deadline = time.monotonic() + wait_s
-        while time.monotonic() < deadline and not marker.exists():
-            time.sleep(0.1)
-        if not marker.exists():
-            findings.append(f"{shape}: kill-server sent no SIGHUP to the child (pid {pid}, group {pgid}) within "
-                            f"{wait_s:.0f} s")
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        findings.append(f"{shape}: probe failed to run: {type(exc).__name__}: {exc}")
-    finally:
-        try:
-            tmux("kill-server", timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        if pid > 1 and str(child) in _args_of(pid):  # still the child, not a reused pid
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
-        with contextlib.suppress(OSError):
-            Path(os.environ.get("TMUX_TMPDIR") or "/tmp", f"tmux-{os.getuid()}", sock).unlink()
-    return findings
+def tmux_hangup_probe(workdir: Path, shape: str, **kw) -> list[str]:
+    """The hangup probe (hangup_probe.py beside this file), with this file's pid reader and the kill-server guard."""
+    return _load_slash("hangup_probe").tmux_hangup_probe(workdir, shape, args_of=_args_of, guard=_load_slash("sandbox_work"), **kw)
 
 
 def hangup_check_main() -> int:
     """``run.py --hangup-check``: the probe in both pane shapes; needs no claude and no token."""
-    if not shutil.which("tmux"):
-        print("TMUX HANGUP CHECK UNVERIFIED: tmux not on PATH", flush=True)
-        return 2
-    with tempfile.TemporaryDirectory(prefix="nx-hangup-") as d:
-        found = [f for shape in ("shell", "direct") for f in tmux_hangup_probe(Path(d) / shape, shape)]
-    for f in found:
-        print(f"FAIL {f}", flush=True)
-    print(f"TMUX HANGUP CHECK {'FAILED' if found else 'PASSED'}: kill-server "
-          f"{'did not reach' if found else 'hung up'} the child process group in a bash pane and an exec pane", flush=True)
-    return 1 if found else 0
+    return _load_slash("hangup_probe").hangup_check_main(args_of=_args_of, guard=_load_slash("sandbox_work"))
 
 
 def main() -> int:

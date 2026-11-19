@@ -28,11 +28,13 @@ from typing import Any, ContextManager, Protocol
 
 import click
 
+from nexus.identity.board import identity_of
 from nexus.console.threads import (
     Ask,
     BeadsResult,
     ClassedAsk,
     answer_title,
+    answer_titles,
     build_board,
     classify,
     format_age,
@@ -311,6 +313,7 @@ def _ask_json(ask: Ask, group: str = "", mark: str = "") -> dict[str, Any]:
         "entry": ask.entry,
         "version": ask.version,
         "session_id": ask.session_id,
+        "identity": ask.identity,
         "thread": ask.thread,
         "refs": list(ask.refs),
         "asked": ask.asked,
@@ -655,8 +658,10 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
     now = s.now()
     ask, stamp = _resolve(_all_asks(_read_rows(s)), ref)
     age = "unknown" if stamp is None else format_age(now - stamp)
-    title = answer_title(ask)
-    row = s.t2.get(project=ASKS_PROJECT, title=title) if title else None
+    row = None
+    for title in answer_titles(ask):
+        if (row := s.t2.get(project=ASKS_PROJECT, title=title)) is not None:
+            break
     # The asker reads this for its freshness check, so only closed-pattern values of the record leave here.
     answer = None if row is None else (_closed_answer(_json_obj(row)) or {"unreadable": True})
     if as_json:
@@ -665,6 +670,7 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
     out = [
         _c(_ref(ask)),
         f"version: {_c(ask.version)}",
+        f"asker identity: {_c(ask.identity) or '(none: the entry has no identity: line)'}",
         f"asker session: {_c(ask.session_id) or '(none: the entry has no session: line)'}",
         f"entry: {_c(ask.entry)} (updated {age})",
         f"thread: {_c(ask.thread)}",
@@ -869,13 +875,19 @@ def answer_cmd(
         )
     if ask.conditional:
         raise _refuse(f"{_c(_ref(ask))} has after: {ask.after!r}: it is not answerable until the asker deletes that line")
-    if not ask.session_id:
-        raise _refuse(f"the entry {ask.entry!r} has no session: line, so the answer cannot be routed")
-    if not _CANONICAL_UUID.fullmatch(ask.session_id):
-        raise _refuse(f"session: {ask.session_id!r} is not a lower-case canonical UUID, so the answer cannot be routed")
-    carrying = sorted({str(r.get("title", "")) for r in rows if _session_of(r) == ask.session_id})
-    if len(carrying) > 1:
-        raise _refuse(f"session {ask.session_id} is carried by more than one entry ({', '.join(_c(t) for t in carrying)}); no answer is routed")
+    if ask.identity:
+        # RDR-253 Step 5: the identity line routes the answer; it outlives /clear, the session line does not.
+        carrying = sorted({str(r.get("title", "")) for r in rows if identity_of(str(r.get("content", ""))) == ask.identity})
+        if len(carrying) > 1:
+            raise _refuse(f"identity {ask.identity} is carried by more than one entry ({', '.join(_c(t) for t in carrying)}); no answer is routed")
+    else:
+        if not ask.session_id:
+            raise _refuse(f"the entry {ask.entry!r} has no identity: or session: line, so the answer cannot be routed")
+        if not _CANONICAL_UUID.fullmatch(ask.session_id):
+            raise _refuse(f"session: {ask.session_id!r} is not a lower-case canonical UUID, so the answer cannot be routed")
+        carrying = sorted({str(r.get("title", "")) for r in rows if _session_of(r) == ask.session_id})
+        if len(carrying) > 1:
+            raise _refuse(f"session {ask.session_id} is carried by more than one entry ({', '.join(_c(t) for t in carrying)}); no answer is routed")
 
     choice: int | None = None
     if _NUMBER.fullmatch(stripped):
@@ -917,7 +929,9 @@ def answer_cmd(
         words = sam_words
 
     title = answer_title(ask)
-    _gate_existing(s.t2.get(project=ASKS_PROJECT, title=title), now, replace, title)
+    for existing in answer_titles(ask):
+        # a pre-Step-5 nx ask keyed the record by session id: an answer there is an answer to this ask too
+        _gate_existing(s.t2.get(project=ASKS_PROJECT, title=existing), now, replace, existing)
 
     batch_title: str | None = None
     if batch_words:
@@ -972,12 +986,13 @@ def answer_cmd(
             click.echo(_out(f"warning: the batch record {batch_title} was not updated: {exc}"), err=True)
 
     try:
+        to = ask.identity or ask.session_id
         tuple_id = s.tuple_out(
-            f"mailbox/{ask.session_id}",
-            {"to": ask.session_id},
+            f"mailbox/{to}",
+            {"to": to},
             {
                 "from": sender,
-                "address_kind": "session",
+                "address_kind": "identity" if ask.identity else "session",
                 "kind": "reply",
                 "correlation_id": f"ask:{ask.id}@{ask.version}",
             },

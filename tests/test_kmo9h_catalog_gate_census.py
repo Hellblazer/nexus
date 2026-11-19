@@ -72,6 +72,7 @@ _ALLOWED: dict[str, int] = {}
 _PATTERN = re.compile(r"Catalog\.is_initialized")
 
 
+@pytest.mark.census
 def test_is_initialized_census_is_closed():
     found: dict[str, int] = {}
     for py in sorted(_SRC.rglob("*.py")):
@@ -114,6 +115,7 @@ _RAW_ALLOWED: dict[str, int] = {}
 _RAW_PATTERN = re.compile(r"Catalog\(\s*\w+,\s*\w+\s*/\s*\"\.catalog\.db\"")
 
 
+@pytest.mark.census
 def test_raw_catalog_construction_census_is_closed():
     found: dict[str, int] = {}
     for py in sorted(_SRC.rglob("*.py")):

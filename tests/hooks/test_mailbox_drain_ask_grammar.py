@@ -517,7 +517,7 @@ def test_pending_drops_a_matched_entry_with_bad_fields_and_keeps_the_rest(hook: 
 
 _BANNED_MODULES = {"subprocess", "pty", "termios", "resource", "pwd"}
 _ALLOWED_PLATFORM_MODULES = {"fcntl", "msvcrt"}
-_SIBLINGS = {"_interpreter", "_endpoint_resolve", "_tuple_size_limits", "_tuple_sender"}
+_SIBLINGS = {"_interpreter", "_endpoint_resolve", "_identity_lookup", "_tuple_size_limits", "_tuple_sender"}
 
 
 def _tree() -> ast.Module:

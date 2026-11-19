@@ -23,6 +23,10 @@ from pathlib import Path
 
 import pytest
 
+#: Roots this file's subprocesses read, which scripts/meta_tests.py's trace cannot see:
+#: its child pytest collects the whole suite, which imports src/.
+META_SCANS = ("tests", "src")
+
 pytestmark = pytest.mark.lint
 
 ROOT = Path(__file__).resolve().parent.parent

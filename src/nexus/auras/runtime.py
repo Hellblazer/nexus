@@ -10,7 +10,9 @@ than :data:`MAX_WAITING` items waiting the oldest fire is dropped and counted; a
 A fire builds the procedure's arguments from the row, runs it through ``run_script`` on the worker thread, tests
 ``when.field`` and writes ``text`` as the aura's threads block. ``display.channel`` then sends
 :func:`channel_notice`, a fixed template that carries nothing a tuple writer controls, whether or not the block
-could be written. A clear removes the block and runs nothing; a clear queued straight after another is dropped,
+could be written. When ``display.channel`` is the name of a result field (RDR-252) the notice goes out only when that
+field is ``True``; a missing or non-boolean field is a failure, like ``when.field``. A ``self.identity`` argument is the
+identity the runtime was built with. A clear removes the block and runs nothing; a clear queued straight after another is dropped,
 since it removes nothing more.
 
 A failure (a ``ScriptRunError`` other than busy, a missing argument source, a missing or mistyped result field,
@@ -78,7 +80,11 @@ def _matches(pairs: Sequence[tuple[str, str]] | None, dims: Mapping[str, str]) -
     return pairs is not None and all(dims.get(k) == v for k, v in pairs)
 
 
-def _arg(spec: ArgSource, row: Any, name: str) -> Any:
+def _arg(spec: ArgSource, row: Any, name: str, identity: str | None = None) -> Any:
+    if spec.kind == "self":
+        if identity is None:
+            raise _Failure("args", f"{name}: this session has no identity to fill self.{spec.value} with")
+        return identity
     if spec.kind == "id":
         return row.id
     if spec.kind == "subspace":
@@ -129,7 +135,9 @@ class AuraRuntime:
     """Evaluates the session's loaded auras against board rows (see the module docstring).
 
     *writer* writes and removes threads blocks; *run* is ``run_script``; *notify* sends a channel text, or is
-    ``None`` when there is no channel (its meta carries the same three values as the text); *sleep* waits between busy retries.
+    ``None`` when there is no channel (its meta carries the same three values as the text); *sleep* waits between busy retries;
+    *identity* is the session's identity id, which fills a ``self.identity`` argument (RDR-252) and is ``None`` for a
+    server that started unbound.
     """
 
     def __init__(
@@ -140,6 +148,7 @@ class AuraRuntime:
         run: RunScript | None = None,
         notify: Callable[[str, dict[str, str]], None] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        identity: str | None = None,
     ) -> None:
         if run is None:
             from nexus.lua_runtime import run_script as run  # noqa: PLC0415 -- the run path loads on first use
@@ -147,8 +156,18 @@ class AuraRuntime:
         self._writer = writer
         self._notify = notify
         self._sleep = sleep
+        self._identity = identity
         self._lanes = {a.name: _Lane(a) for a in auras}
         self._cond = threading.Condition()
+
+    def extend(self, auras: Sequence[Aura], identity: str | None) -> None:
+        """Take more auras after the first load, and the identity a ``self.identity`` argument now fills: a server that
+        loaded with no identity gates its group-gated auras again once it binds (RDR-252). Call it on the loop that
+        calls :meth:`offer`; a lane already present is kept."""
+        with self._cond:
+            self._identity = identity
+            for aura in auras:
+                self._lanes.setdefault(aura.name, _Lane(aura))
 
     # -- the waiter side: match and enqueue, never block ---------------------------------------------------------
 
@@ -221,7 +240,7 @@ class AuraRuntime:
     def _fire(self, lane: _Lane, item: _Item) -> None:
         aura, row = lane.aura, item.row
         try:
-            args = {name: _arg(spec, row, name) for name, spec in aura.args}
+            args = {name: _arg(spec, row, name, self._identity) for name, spec in aura.args}
             try:
                 result = self._run(aura.procedure, args, dataclasses.asdict(aura.limits))
             except ScriptBusyError:
@@ -240,6 +259,11 @@ class AuraRuntime:
             text = result.get("text")
             if not isinstance(text, str):
                 raise _Failure("result", "the result has no string field 'text'")
+            wake = aura.channel is True
+            if isinstance(aura.channel, str):
+                wake = result.get(aura.channel)
+                if not isinstance(wake, bool):
+                    raise _Failure("result", f"display.channel {aura.channel!r} is not a boolean in the result")
             try:
                 wrote = self._writer.set_block(aura.name, aura.threads, text)
             except Exception as exc:  # noqa: BLE001 -- a T2 failure is a display error
@@ -255,7 +279,7 @@ class AuraRuntime:
         lane.strikes = 0
         if not wrote:
             _log.warning("aura_block_not_written", aura=aura.name, tuple_id=row.id)
-        if aura.channel and self._notify is not None:
+        if wake and self._notify is not None:
             try:
                 meta = {"aura": aura.name, "subspace": row.subspace, "tuple_id": row.id}
                 self._notify(channel_notice(aura, row.subspace, row.id), meta)
