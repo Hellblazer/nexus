@@ -8,7 +8,6 @@ RDR-253's holder check finds gone. The process table is ``tests/identity/fakes.F
 """
 from __future__ import annotations
 
-import atexit
 import json
 import os
 import stat
@@ -364,8 +363,7 @@ def test_the_state_writer_names_the_holder_from_the_registry_and_removes_the_fil
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(procs.sessions_dir.parent))
     procs.start(4242, START, started_at=4242000)
     exits: list[tuple] = []
-    monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: exits.append((fn, a, k)))
-    write = state_writer("sid-1")
+    write = state_writer("sid-1", register_exit=lambda fn, *a, **k: exits.append((fn, a, k)))
     write(4242, ls.LoadedState(identity="id-a", loaded_identity="id-a", auras={"x": ls.AuraState(True, "loaded", None)}))
     path = tmp_path / "cfg" / "auras" / "loaded-4242.4242000.json"
     got = ls.read_state(path)
