@@ -2380,7 +2380,7 @@ def session_work(s: dict) -> list[str] | None:
     or None when it cannot be read. Read through ``nx identity work list --running``: a running row of an identity whose
     holder is gone is stale there and never listed, so a crashed session's work does not read as busy. A session with no
     identity has none. The session's own standing mail wait (kind wait, ref its session id) is meant to run, as with
-    ``session_tasks``, and is left out. Report only: the restart's refusal criteria do not read this."""
+    ``session_tasks``, and is left out. The ready check blocks on the wait, watcher and labrun lines (``blocking_work``)."""
     sid = s.get("sessionId") or ""
     if not sid:
         return None
@@ -2395,6 +2395,12 @@ def session_work(s: dict) -> list[str] | None:
     except (ValueError, KeyError, TypeError):
         return None
     return [f"{r['kind']} {r['ref']}" for r in rows if not (r.get("kind") == "wait" and r.get("ref") == sid)]
+
+
+def blocking_work(work: list[str] | None) -> list[str]:
+    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a wait, watcher or labrun.
+    A worktree or a tmux server outlives the session, so it never blocks ready."""
+    return [w for w in work or [] if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
 
 
 def work_note(work: list[str] | None) -> str:
@@ -2642,6 +2648,16 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                     elif tasks is None:
                         # Not knowing is not "none": the labrun case was exactly a task nobody saw.
                         row["blocker"] = "said ready, but its background tasks could not be listed; check it, or --force"
+                    elif s.get("pane") != caller_pane:
+                        # Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): ps AND the work rows. A
+                        # running wait, watcher or labrun row of a live identity is work a restart would cut off.
+                        row["work"] = work = session_work(s)
+                        cut = blocking_work(work)
+                        if cut:
+                            row["blocker"] = (f"said ready, but {len(cut)} registered work row(s) still run: {cut[0]}"
+                                              + (f" (and {len(cut) - 1} more)" if len(cut) > 1 else ""))
+                        elif work is None:
+                            row["blocker"] = "said ready, but its registered work could not be read; check it, or --force"
         rows.append(row)
     return rows
 
@@ -2751,8 +2767,9 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
             return 2
         now = time.time()
         rows = readiness(found, manifest, now, a.ready_max_age, os.environ.get("TMUX_PANE", ""))
-        for r, sess in zip(rows, found):  # report only (RDR-253 Step 6): no blocker reads it
-            r["work"] = session_work(sess)
+        for r, sess in zip(rows, found):  # the ready rows already read it; the others are reported here
+            if "work" not in r:
+                r["work"] = session_work(sess)
         print_table(manifest, rows, a.ready_max_age, now)
         # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
         withdraw_ready_asks(manifest, {t["sessionId"] for t in manifest["targets"]

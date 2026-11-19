@@ -151,36 +151,34 @@ def test_status_prints_each_targets_running_work_and_the_exit_code_ignores_it(cr
     assert "work: could not be read" in capsys.readouterr().out
 
 
-def test_the_go_gate_never_reads_the_work(crs, monkeypatch) -> None:
-    """The restart's refusal criteria are pre-declared. The gate gets a real manifest and reply, so it reaches
-    ``readiness()``; the answer is the same whether the work report is empty, full or raising, and the report is never
-    asked."""
+def test_a_running_row_a_restart_would_cut_off_blocks_ready(crs, monkeypatch) -> None:
+    """Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): the ready check keeps the process table AND reads
+    the work rows. The gate gets a real manifest and reply, so it reaches ``readiness()``. A running wait, watcher or
+    labrun row blocks; a worktree or tmux row (it outlives the session) and an empty list do not; an unreadable list
+    blocks as an unreadable task list does. Stale rows never arrive here: ``session_work`` reads ``--running``, which
+    leaves them out (tests/identity/test_work_registry.py pins that filter)."""
     now = time.time()
     found = [{"sessionId": "sid-1", "name": "alpha", "pane": "%1", "pid": 1}]
     manifest = {"stamp": "s", "at": now - 120, "targets": [{"sessionId": "sid-1", "path": "/reply", "name": "alpha", "how": "", "marker": ""}],
                 "excluded": []}
-    reads = {"n": 0}
     monkeypatch.setattr(crs, "load_manifest", lambda: (manifest, ""))
     monkeypatch.setattr(crs, "read_reply", lambda *a, **k: ("ok", {"ready": True, "reason": "", "eta": None, "mtime": now - 30}))
     monkeypatch.setattr(crs, "status", lambda s: "idle")
     monkeypatch.setattr(crs, "session_tasks", lambda s: [])
     monkeypatch.setattr(crs, "LOG", Path("/dev/null"))
-    reached = {"n": 0}
-    real_readiness = crs.readiness
-    monkeypatch.setattr(crs, "readiness", lambda *a, **k: (reached.__setitem__("n", reached["n"] + 1), real_readiness(*a, **k))[1])
 
-    def forbidden(*a, **k):
-        reads["n"] += 1
-        raise AssertionError("the go gate read the work report")
+    def gate(work):
+        monkeypatch.setattr(crs, "session_work", lambda s: work)
+        return crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9")
 
-    answers = []
-    for work in (lambda s: [], lambda s: ["labrun r", "worktree /w"], forbidden):
-        monkeypatch.setattr(crs, "session_work", work)
-        monkeypatch.setattr(crs, "_nx_identity", forbidden)
-        answers.append(crs.go_gate(found, force=False, max_age=300, now=now))
-    assert reached["n"] == 3, "the gate reached readiness(): the test can fail"
-    assert answers == [0, 0, 0] and reads["n"] == 0
-    # and the criteria still bite: a not-ready reply refuses whatever the work says
-    monkeypatch.setattr(crs, "read_reply", lambda *a, **k: ("ok", {"ready": False, "reason": "mid-review", "eta": None, "mtime": now - 30}))
-    monkeypatch.setattr(crs, "session_work", lambda s: [])
-    assert crs.go_gate(found, force=False, max_age=300, now=now) == 3
+    assert gate([]) == 0
+    assert gate(["worktree /w", "tmux sock"]) == 0, "a worktree or a tmux server outlives the session"
+    for kind in ("wait sid-other", "watcher ci", "labrun r1"):
+        assert gate(["worktree /w", kind]) == 3, f"{kind} is cut off by a restart: it blocks ready"
+    assert gate(None) == 3, "a work list that cannot be read is not 'no work'"
+    rows = crs.readiness(found, manifest, now, 300, "%9")
+    assert "registered work could not be read" in rows[0]["blocker"]
+    monkeypatch.setattr(crs, "session_work", lambda s: ["labrun r1"])
+    assert "1 registered work row(s) still run: labrun r1" in crs.readiness(found, manifest, now, 300, "%9")[0]["blocker"]
+    # the caller's own session is exempt, as it is from the task list
+    assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%1") == 0
