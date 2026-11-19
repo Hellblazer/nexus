@@ -97,8 +97,9 @@ engine's `NoteUri.isFileRoutedCollection` tests a live collection at one
 site (T2 `229-research-34`, `229-research-39`, `229-research-42`). Apart
 from these, `aspect_readers.is_note_uri` and the engine's `NoteUri.isNote`
 classify a URI string over a frozen list. They stay as they are once
-`NoteUri.moveTo` stops moving `chroma://` residue on every caller (item 7,
-item 12). A minted label carries no prefix. A
+`NoteUri.moveTo` stops moving `chroma://` residue on every caller and the
+rows it has already moved onto a prefix-free label are repaired (item 7,
+item 12, P2.10). A minted label carries no prefix. A
 minted collection would therefore lose its aspect extractor, its quality
 boost, its search threshold and over-fetch, its chunk content type and its
 file-routed identity.
@@ -528,10 +529,12 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   **Method**: Source Search of `get_collection_row`'s refresh path plus a
   test that counts HTTP calls per indexed document before and after, on an
   existing collection and a new one (P2.3).
-- [x] No code path needs a fact from the name that the row cannot carry,
+- [ ] No code path needs a fact from the name that the row cannot carry,
   except the migration sources in Gap 5 and the URI-string classifiers
   (item 1's fifth class), which read a URI's segment, not a live
-  collection. — **Status**: Verified —
+  collection. — **Status**: Verified for the parse sites; Unverified for
+  the URI-string classifiers until P1.2's count and P2.10's repair move
+  (below) —
   **Method**: Source Search (the parse-site census: every extracted value is
   content type, owner, model, version or the quarantine prefix, each a
   column). The census also holds sites that extract nothing and route by the
@@ -539,9 +542,16 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   need too (`content_type`), but they are not repointed by moving a parse
   (item 12, P2.9). The URI-string classifiers (the fifth class) take
   nothing from a row. They read a URI's segment against RDR-231's frozen
-  list, which stays complete because no `chroma://` URI carries a
-  prefix-free segment once `NoteUri.moveTo` stops moving residue on every
-  caller (item 7; T2 `229-research-42`, `229-research-55`).
+  list, which is complete only while no `chroma://` residue carries a
+  segment without a file-routed prefix. That does not hold today:
+  `nx catalog rename-collection --allow-legacy` already renames to a
+  prefix-free label (`collections.py:287-293`), and `moveTo` has moved
+  residue onto any such label (T2 `229-research-57`). It holds on an
+  install once P2.10's `moveTo` change ships and its repair move has
+  completed there, apart from the two shapes item 12 leaves unrepaired,
+  which P1.2 counts (item 7, item 12; T2 `229-research-42`,
+  `229-research-55`). **Method** for that half: Spike (P1.2's count on
+  every install) and P2.10's repair move.
 - [x] Nothing in Postgres requires a collection name to fit ChromaDB's
   limits. — **Status**: Verified — **Method**: Source Search (no object is
   named from a collection name; the per-collection index name is a hash).
@@ -1144,7 +1154,10 @@ shared corpus classes as no note (`"nx-note://docs__1-1__voyage-context-3__v1/do
 "is_note": false`, `note-uri-corpus.json:11`). Moving either onto a
 prefix-free label would turn it into a note, because `isNote` reads only
 the segment. That keeps the URI-string classifiers' frozen list complete
-(item 12). A legacy-spelled note that `moveTo` no longer moves becomes a
+(item 12). P2.10 does not come before every prefix-free label: `nx catalog
+rename-collection --allow-legacy` makes one today (`collections.py:287-293`;
+T2 `229-research-57`), so residue may already sit on such a segment, and
+P2.10 also repairs those rows (item 12). A legacy-spelled note that `moveTo` no longer moves becomes a
 stale note that the stale-note repair rewrites to `nx-note://<collection>/`
 (T2 `229-research-42`). It also still rewrites queued
 aspect tasks, which name their collection in the task body: "a collection
@@ -1288,12 +1301,40 @@ The engine's recorded design is that NoteUri "classifies a source_uri
 STRING, not a live collection: a note URI's collection segment can name a
 collection that was renamed or never registered, so a CollectionRegistry
 lookup cannot answer it" (`CollectionParseGateTest.java:239-247`). The
-list stays complete because of two facts and one rule:
+list stays complete because of one fact, one repair and one rule:
 - A new collection's file-routed documents get `file://` and its notes
   `nx-note://`, never `chroma://` (`aspect_readers.uri_for`; T2
   `229-research-40`).
-- `chroma://` residue exists only for names written before P3.6, which are
-  prefixed.
+- Residue that already sits on a prefix-free segment is repaired. Such
+  labels exist today: `nx catalog rename-collection --allow-legacy` skips
+  "the is_conformant_collection_name gate on the new name"
+  (`collections.py:236`, gate at `:287-293`), and `moveTo` has moved the
+  collection's residue onto the new label, and onto any such label a
+  re-home, re-embed move or collection update targets (T2
+  `229-research-57`). How many rows that touched is unmeasured; P1.2
+  counts them on every install. P2.10 registers one RDR-246 data move per
+  table that holds a source URI (`catalog_documents`, `document_aspects`,
+  `document_highlights`) that restores a file-routed segment: a
+  `chroma://S/rest` value whose segment `S` has no `rdr__`, `docs__` or
+  `code__` prefix, on a row filed under `S` whose registry row has content
+  type `code`, `docs` or `rdr`, becomes `chroma://<content_type>__S/rest`.
+  A content type's name prefix is `<content_type>__` (`CollectionName`
+  renders `f"{self.content_type}__{self.owner_id}..."`,
+  `collection_name.py:90-93`), so `isNote` classes the value as residue
+  again and the stale-note repair skips it. Inferred, not read: every
+  `moveTo` caller sets a row's collection and its URI in one UPDATE, so
+  moved residue names its own collection; a row whose new value a live
+  document already holds (catalog-016) is skipped, stays counted, and
+  leaves the move's verification empty. The `file://` identity is not
+  the target: `uri_for` returns `"file://" + os.path.normpath(source_path)`,
+  which a SQL template does not reproduce (inferred, not read), and a
+  `file://` value can collide with the document a later re-index made for
+  the same path. No safe rule covers two shapes, which P1.2 counts and
+  this RDR leaves unrepaired: residue whose segment no longer names its
+  collection, and residue that `note-uri-001` rewrote to `nx-note://<label>/`
+  because the rename came before that changeset (inferred, not read: it
+  rewrote every `chroma://` value whose segment is not file-routed,
+  `note-uri-001-backfill.xml:24`), which no string rule tells from a note.
 - From P2.10 `NoteUri.moveTo` moves no `chroma://` residue, and no
   `nx-note://` value with a file-routed segment, on any caller: rename,
   re-home, the re-embed move or the collection update (item 7; T2
@@ -1476,7 +1517,8 @@ every script and note URI that names one.
 
 - [x] Sam's rulings on the open questions (D1 to D5, 2026-10-18 and
   2026-11-08).
-- [ ] Critical Assumptions 1 and 6 measured (P1.2).
+- [ ] Critical Assumptions 1 and 6 measured (P1.2), and Critical
+  Assumption 3's residue rows counted there on every install.
 - [ ] Critical Assumption 5 measured (P3.2) before P3.1's changeset is
   final, and so before the Phase 3 switch changesets: it sets each move's
   `chunk_size`, `sleep_ms` and `statement_timeout_ms`.
@@ -1530,6 +1572,17 @@ its acceptance is that test green plus the census pin it lowers.
   minted form (T2 `229-research-38`); and tombstones whose `superseded_by`
   names no row of their tenant, which the stamp cannot give an id (item 6;
   T2 `229-research-50`). Bounded load, results in T2.
+  Also, on every install as a pre-flight and not only on the two tenants,
+  the rows of `catalog_documents`, `document_aspects` and
+  `document_highlights` whose `chroma://` segment has no content-type
+  prefix, split by whether the row's collection has content type `code`,
+  `docs` or `rdr`; among those, the rows whose segment is not their own
+  collection; and the `nx-note://` rows of such a collection whose segment
+  has no `rdr__`, `docs__` or `code__` prefix (Critical Assumption 3,
+  item 12; T2 `229-research-57`). Inferred, not read: it extends the
+  per-collection `chroma://` census that `nx catalog backfill-source-uri`
+  prints today (`backfill.py:74`, `:90`) and ships as an `nx doctor` row
+  before P2.10's repair move registers.
   Blocks P2.2 onward.
 - P1.3 Widen the engine Java gate to the `quarantine-` literal; add the SQL
   live-body gate. First live run pasted into the bead.
@@ -1602,7 +1655,18 @@ its acceptance is that test green plus the census pin it lowers.
   `isNote` classes as notes, and `namesCollection` selects only those, so
   no caller moves `chroma://` residue or an `nx-note://<file-routed>`
   value (item 7; T2 `229-research-55`, `229-research-56`). It changes no
-  schema and no caller. Test: moving the documents of a file-routed
+  schema and no caller. Its changeset also registers the repair of
+  residue already on a prefix-free segment, one data move per table
+  (`catalog_documents`, `document_aspects`, `document_highlights`), with
+  item 12's rule as the template and, as the verification, the rows that
+  still match it with a free new value; never a boot rewrite (RDR-246).
+  The first cloud run of those moves waits for nexus-f3yqd.2.23, as
+  P3.1's does (Prerequisites). Test, for the repair: on a fixture, a
+  docs collection renamed with `--allow-legacy` to a prefix-free label
+  before P2.10 has its residue rewritten to a `docs__` segment and classed
+  file-routed; a knowledge collection's `chroma://` note on a prefix-free
+  label is left alone; a row whose new value a live document holds is
+  skipped and counted. Test, for the rule: moving the documents of a file-routed
   collection that carry `chroma://` residue and an `nx-note://<file-routed>`
   value onto a prefix-free label, by a rename, a re-home, a re-embed move
   and a collection update, leaves both on their old segment, still classed
@@ -2048,9 +2112,9 @@ dead (Approach, item 7).
 
 ### Assumption Verification
 
-Four Critical Assumptions are unverified, and each has a bead that verifies
-it before the work that depends on it (P1.2 for 1 and 6, P2.3 for 2, P3.2
-for 5).
+Five Critical Assumptions are unverified, Critical Assumption 3 in part,
+and each has a bead that verifies it before the work that depends on it
+(P1.2 for 1 and 6, P1.2 and P2.10 for 3, P2.3 for 2, P3.2 for 5).
 
 #### API Verification
 
