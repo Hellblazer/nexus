@@ -12,9 +12,15 @@ Needles and authors are written as ``\\u`` escapes so an editor cannot normalize
 """
 from __future__ import annotations
 
+import pytest
+
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.tumbler import Tumbler
 from tests._catalog_fixture_ops import ActiveCatalog
+
+# Engine-backed: each test mints a tenant on the session engine, so it lives in the integration family, outside the
+# python_unit leg's tenant ratchet (tests/AGENTS.md, The tenant is opt-in).
+pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
 AUTHORS: list[str | None] = [
     "Leslie Lamport",

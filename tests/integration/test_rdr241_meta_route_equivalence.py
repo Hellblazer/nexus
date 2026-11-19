@@ -18,6 +18,10 @@ from nexus.catalog.meta_filter import documents_with_meta, meta_at_least
 from nexus.catalog.tumbler import Tumbler
 from tests._catalog_fixture_ops import ActiveCatalog
 
+# Engine-backed: each test mints a tenant on the session engine, so it lives in the integration family, outside the
+# python_unit leg's tenant ratchet (tests/AGENTS.md, The tenant is opt-in).
+pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
+
 _ABSENT = object()
 _MISS = [0, 1, 2, 3, "3", 3.0, 2.9, "2.9", "abc", True, None, _ABSENT, 1e20]
 _SOURCE = [_ABSENT, "", "mineru", "file"]
