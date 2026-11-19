@@ -321,7 +321,11 @@ def test_a_timeout_with_a_leading_zero_is_read_in_base_10(repos, fake_nx) -> Non
 
 
 def test_a_script_killed_mid_write_leaves_no_temp_file(repos, fake_nx, tmp_path: Path) -> None:
-    """TERM while the record write runs: the EXIT trap removes the record's temp file (nexus-igea9.3 L7)."""
+    """TERM while the record write runs: the EXIT trap removes the record's temp file (nexus-igea9.3 L7).
+
+    The TERM is sent once the fake nx has logged the record call, not when the temp file first appears: the script
+    creates the file with mktemp and records its name for the trap on the next line, so a TERM in between would leave
+    the file by design of the test, not of the script (develop flake, CI run 44531708407 shard 1)."""
     _origin, work = repos
     nx_dir, log = fake_nx
     tmpdir = tmp_path / "tmpdir"
@@ -332,9 +336,10 @@ def test_a_script_killed_mid_write_leaves_no_temp_file(repos, fake_nx, tmp_path:
     proc = subprocess.Popen([str(SCRIPT), a], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.monotonic() + 30
-        while not list(tmpdir.glob("push-record.*")):
+        while not _records(log):                         # the nx call runs only after the trap knows the file
             assert proc.poll() is None and time.monotonic() < deadline, "the record write never started"
             time.sleep(0.1)
+        assert list(tmpdir.glob("push-record.*")), "the write is under way, so its temp file exists"
         proc.terminate()
         proc.wait(timeout=10)
     finally:
