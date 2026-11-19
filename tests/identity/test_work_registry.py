@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._module_seam import setattr_in
 from tests.test_identity_cmd import Box
 
 #: The CLI resolves a worktree ref to its real path ("/p" is "C:\\p" on Windows), so rows seeded straight into the
@@ -573,7 +574,7 @@ def test_work_run_holds_a_signal_sent_before_the_child_exists_and_never_forwards
         os.kill(os.getpid(), signal.SIGINT)
         return Child()
 
-    monkeypatch.setattr(work.subprocess, "Popen", popen)
+    setattr_in(monkeypatch, "nexus.identity.work", "subprocess.Popen", popen)
     before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
     assert work._spawn(["true"]) == 0
     assert sent == [signal.SIGTERM], "TERM held and forwarded once the child existed; INT never forwarded"
@@ -587,6 +588,6 @@ def test_a_command_that_cannot_be_executed_is_a_clean_error(monkeypatch) -> None
     def popen(argv):
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr(work.subprocess, "Popen", popen)
+    setattr_in(monkeypatch, "nexus.identity.work", "subprocess.Popen", popen)
     with pytest.raises(IdentityCommandError, match="not executable"):
         work._spawn(["./not-x"])

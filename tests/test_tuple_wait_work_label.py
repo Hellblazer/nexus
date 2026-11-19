@@ -256,12 +256,11 @@ def test_a_handler_python_cannot_restore_falls_back_to_the_default(monkeypatch: 
     import signal
 
     before = signal.getsignal(signal.SIGTERM)
-    monkeypatch.setattr(signal, "getsignal", lambda n: None)
     try:
         label = _posix_label(monkeypatch, [])
+        setattr_in(monkeypatch, "nexus.identity.work", "signal.getsignal", lambda n: None)
         label.arm_sigterm()
         label.finish()
-        monkeypatch.undo()
         assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
     finally:
         signal.signal(signal.SIGTERM, before if before is not None else signal.SIG_DFL)
