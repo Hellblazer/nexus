@@ -342,6 +342,22 @@ def test_list_with_no_state_file_says_nothing_about_loading(
     assert all(r["loaded"] is None for r in rows.values())
 
 
+def test_list_says_so_when_an_on_group_gated_aura_has_no_state_file(
+    shipped: Path, monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses,
+) -> None:
+    """A Desktop server that never bound, or a server that never started, writes no file: the gated aura is on and
+    loads nowhere, and the line must say so (RDR "Load by membership", bead item 3)."""
+    procs.start(4242, START, started_at=4242000)
+    _inputs(monkeypatch, adir, procs, pid=4242, identity="id-a")
+    rows = {ln.split()[0]: ln for ln in _list().output.splitlines() if ln.split() and ln.split()[0] in {"gated", "plain", "idle"}}
+    assert "not loaded" in rows["gated"] and "no state file" in rows["gated"] and "/mcp" in rows["gated"]
+    assert "not loaded" not in rows["plain"] and "not loaded" not in rows["idle"], "only a group-gated aura that is on"
+    assert all(r["loaded"] is None for r in json.loads(_list("--json").stdout)), "--json keeps its shape"
+    _put(adir, _state(pid=4242, started_at=4242000, identity="id-a", loaded="id-a", gated=ls.AuraState(True, "loaded", "push-train")))
+    again = {ln.split()[0]: ln for ln in _list().output.splitlines() if ln.split() and ln.split()[0] == "gated"}
+    assert "no state file" not in again["gated"]
+
+
 def test_list_removes_the_state_file_of_a_dead_server(
     shipped: Path, monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses,
 ) -> None:

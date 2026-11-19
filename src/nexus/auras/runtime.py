@@ -160,6 +160,15 @@ class AuraRuntime:
         self._lanes = {a.name: _Lane(a) for a in auras}
         self._cond = threading.Condition()
 
+    def extend(self, auras: Sequence[Aura], identity: str | None) -> None:
+        """Take more auras after the first load, and the identity a ``self.identity`` argument now fills: a server that
+        loaded with no identity gates its group-gated auras again once it binds (RDR-252). Call it on the loop that
+        calls :meth:`offer`; a lane already present is kept."""
+        with self._cond:
+            self._identity = identity
+            for aura in auras:
+                self._lanes.setdefault(aura.name, _Lane(aura))
+
     # -- the waiter side: match and enqueue, never block ---------------------------------------------------------
 
     def topics(self) -> dict[str, str]:

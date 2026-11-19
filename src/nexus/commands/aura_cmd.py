@@ -292,11 +292,19 @@ def list_cmd(json_out: bool) -> None:
         for line in _unclaimed_files_text(view.listed):
             click.echo(line, err=True)
     loaded = view.state.auras if view.state is not None else {}
+    #: An aura that is on and group-gated, for a caller with a Claude ancestor whose server wrote no file: the server
+    #: never started, or it never bound an identity (a Desktop server whose bind did not come from the pending file).
+    unwritten: dict[str, str] = {}
     rows: list[dict[str, Any]] = []
     for e in entries:
         d = states[e.name]
         r = e.result
         seen = loaded.get(e.name) if d.on else None
+        if d.on and view.claimed and view.state is None and isinstance(r, Aura) and r.load_group:
+            unwritten[e.name] = (
+                f"  not loaded: no state file from this session's MCP server (group {r.load_group}); "
+                "it has not started or has no identity: reconnect it (/mcp) once the session is bound"
+            )
         load = None if seen is None else {"loaded": seen.loaded, "reason": seen.reason, "group": seen.group}
         if isinstance(r, Aura):
             rows.append({
@@ -318,4 +326,5 @@ def list_cmd(json_out: bool) -> None:
     for row in rows:
         trig = row["trigger"]
         trigger = "-" if trig is None else trig["subspace"] + _match_text(tuple(trig["match"].items()))
-        click.echo(f"{row['name']}  {row['summary']}  {trigger}  {row['state']}  {row['level']}{_loaded_text(row['loaded'])}")
+        shown = _loaded_text(row["loaded"]) or unwritten.get(row["name"], "")
+        click.echo(f"{row['name']}  {row['summary']}  {trigger}  {row['state']}  {row['level']}{shown}")
