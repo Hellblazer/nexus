@@ -1763,6 +1763,46 @@ def _identity_error(done: subprocess.CompletedProcess) -> str:
     return (done.stderr or done.stdout).strip()[:200]
 
 
+#: What `nx identity` says of an engine older than 0.1.197 (RDR-253 option 2: in cloud mode the data credential makes,
+#: promotes and delegates seats through an identity token), and the raw refusal an older `nx` passes through.
+SEATS_NEED_ENGINE = "seats need engine 0.1.197 in cloud mode"
+OLD_ENGINE_REFUSAL = "a 'data' credential may not call"
+#: Said once per run: every session would otherwise log the same refusal, and each would ask the engine again.
+SEATS_NEED_ENGINE_SAID = False
+
+
+def _target_token_file(s: dict) -> str | None:
+    """The identity token file of the TARGET session's Claude process (`<config>/identity/<pid>.<startedAt>.token`, the
+    name Step 3's hook writes; same user, so this script can read it), or None when it has none holding a token. In cloud
+    mode `nx identity promote --token-file` sends that token, which is what the engine admits a data credential's promote
+    on; under a tenant credential `nx` ignores the file."""
+    pid, started = s.get("pid"), s.get("startedAt")
+    if not pid or isinstance(started, bool) or not isinstance(started, int):
+        return None
+    override = os.environ.get("NEXUS_CONFIG_DIR", "").strip()
+    path = (Path(override) if override else Path.home() / ".config" / "nexus") / "identity" / f"{pid}.{started}.token"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return str(path) if isinstance(record, dict) and isinstance(record.get("token"), str) and record["token"] else None
+
+
+def _older_engine(done: subprocess.CompletedProcess) -> bool:
+    said = (done.stderr or "") + (done.stdout or "")
+    return SEATS_NEED_ENGINE in said or OLD_ENGINE_REFUSAL in said
+
+
+def _seat_call_failed(done: subprocess.CompletedProcess, what: str) -> str:
+    """The line for a failed promote or create: an engine older than 0.1.197 is said once per run, then silence."""
+    global SEATS_NEED_ENGINE_SAID
+    if _older_engine(done):
+        first = not SEATS_NEED_ENGINE_SAID
+        SEATS_NEED_ENGINE_SAID = True
+        return SEATS_NEED_ENGINE if first else ""
+    return f"{what}: {_identity_error(done)}"
+
+
 def ensure_seat(s: dict) -> str:
     """Before a session is restarted: its seat, and a seat for a name the user set (RDR-253 Step 4).
 
@@ -1772,6 +1812,10 @@ def ensure_seat(s: dict) -> str:
     nothing. The session holds an ephemeral identity: PROMOTE it to the seat, which keeps its identity scratch and
     board entry (a new seat would orphan them). It holds no identity, or its ephemeral has ended: create the seat,
     created_by=restart. The relaunch then finds the old holder gone and binds the seat, so no release step is needed.
+    In cloud mode the engine admits the data credential's promote only on the identity token of the ephemeral it names,
+    so the promote names the target's token file (:func:`_target_token_file`); a create is refused by `nx` without a live
+    identity of its own, which this script never has, so a session with no live ephemeral gets one line saying why. An
+    engine older than 0.1.197 is said once per run (SEATS_NEED_ENGINE), not once per session.
 
     Never raises and never blocks the restart, whatever goes wrong: returns what it did, or why it did not ("" when
     there was nothing to do)."""
@@ -1804,12 +1848,15 @@ def _ensure_seat(s: dict) -> str:
         return f"seat {name} exists"
     if "unknown_name" not in exists.stdout + exists.stderr:
         return f"no seat made for {name}: {_identity_error(exists)}"
+    if SEATS_NEED_ENGINE_SAID:   # the engine is older than 0.1.197 and this run has said so: no session asks it again
+        return ""
     if identity.get("kind") == "ephemeral" and identity.get("state") in ("live", "lapsed"):
-        done = _nx_identity("promote", "--", identity["id"], name)
+        token_file = _target_token_file(s)
+        done = _nx_identity("promote", *(("--token-file", token_file) if token_file else ()), "--", identity["id"], name)
         return (f"promoted {identity['id']} to seat {name}" if done.returncode == 0
-                else f"could not promote {identity['id']} to {name}: {_identity_error(done)}")
+                else _seat_call_failed(done, f"could not promote {identity['id']} to {name}"))
     made = _nx_identity("create", "--created-by", "restart", "--", name)
-    return f"created seat {name}" if made.returncode == 0 else f"could not create seat {name}: {_identity_error(made)}"
+    return f"created seat {name}" if made.returncode == 0 else _seat_call_failed(made, f"could not create seat {name}")
 
 
 def went_busy(s: dict, n0: int, seconds: int = 60) -> bool:

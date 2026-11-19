@@ -5988,10 +5988,10 @@ Rename the seat `OLD` (a name or an id) to `NEW`. The old name keeps resolving f
 ### nx identity promote
 
 ```
-nx identity promote IDENTITY NAME
+nx identity promote [--token-file FILE] IDENTITY NAME
 ```
 
-Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch and board entry stay. `NAME` may not look like an id (`i<digits>`). The board entry is retitled to `NAME` only when promote runs inside the session that owns it, since the engine lets only that session write the entry; run anywhere else (a shell, the restart script), the promote still succeeds, the entry keeps its old title, and readers still find it by its `identity:` line. An engine-side retitle is planned for a later engine release.
+Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch and board entry stay. In cloud mode (the data credential, no static service token) the engine admits the promote only on the identity token of `IDENTITY` itself: run inside that session it sends the session's own token, and `--token-file FILE` names the token file of a session that is not the caller (the restart script passes `~/.config/nexus/identity/<pid>.<startedAt>.token` of the session it restarts). A tenant credential ignores both. An engine older than 0.1.197 answers `seats need engine 0.1.197 in cloud mode`. `nx identity create` follows the same rule and needs a live identity of its own in cloud mode. `NAME` may not look like an id (`i<digits>`). The board entry is retitled to `NAME` only when promote runs inside the session that owns it, since the engine lets only that session write the entry; run anywhere else (a shell, the restart script), the promote still succeeds, the entry keeps its old title, and readers still find it by its `identity:` line. An engine-side retitle is planned for a later engine release.
 
 ### nx identity may-stop
 

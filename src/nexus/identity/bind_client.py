@@ -3,9 +3,11 @@
 """The HTTP calls to the engine's ``/v1/identity`` routes (RDR-253 Step 1, ``IdentityHandler``).
 
 One small synchronous client shared by the SessionStart hook (the tenant credential), the MCP server (the data
-credential) and the CLI. It sends no identity token itself: the bind that mints one is the call that cannot have
-one, and every other call here is a read or an unfenced write. Fenced writes go through the T2 stores, which attach
-the token (:mod:`nexus.identity.token_header`).
+credential) and the CLI. It attaches an identity token only where it is handed one: the bind that mints one is the
+call that cannot have one, every other call here is a read or an unfenced write, and a data credential makes, promotes
+and delegates seats through the caller's token (RDR-253 option 2: ``create_seat``, ``promote``, ``create_delegated``
+take ``token=``; the callers pass it when :attr:`IdentityClient.scope` is data). Fenced writes go through the T2
+stores, which attach the token (:mod:`nexus.identity.token_header`).
 
 Which routes each credential may call is the engine's decision (``IdentityHandler.admit``), not this module's: a
 refusal comes back as :class:`IdentityApiError` with the engine's status and error code. The calls the MCP
@@ -21,8 +23,22 @@ from urllib.parse import quote
 
 import httpx
 
+from nexus.identity import token_contract
+from nexus.identity.token_file import TokenFile
+
 DEFAULT_TIMEOUT_S: float = 10.0
 DEFAULT_TENANT: str = "default"
+
+#: The credential's scope as this client sees it: a static service token is the tenant credential; a box that mints
+#: short-lived data tokens (cloud mode) holds the data credential.
+SCOPE_TENANT: str = "tenant"
+SCOPE_DATA: str = "data"
+
+#: The refusal an engine older than 0.1.197 gives a data credential on a seat route (RDR-253 option 2). It is the whole
+#: of what the client can tell about the engine, as the ``/version`` flag is not forwarded by the edge yet.
+OLD_ENGINE_SEAT_REFUSAL: str = "a 'data' credential may not call"
+#: The one line every seat caller says for it.
+SEATS_NEED_ENGINE: str = "seats need engine 0.1.197 in cloud mode"
 
 
 class IdentityApiError(Exception):
@@ -39,6 +55,11 @@ class IdentityApiError(Exception):
 
 class IdentityUnavailableError(Exception):
     """The engine could not be reached, or its endpoint or credential does not resolve."""
+
+
+def is_old_engine_seat_refusal(exc: IdentityApiError) -> bool:
+    """Whether *exc* is an engine without RDR-253 option 2 refusing a data credential a seat route."""
+    return exc.status == 403 and exc.message.startswith(OLD_ENGINE_SEAT_REFUSAL)
 
 
 def evidence_body(
@@ -65,7 +86,8 @@ class IdentityClient:
     token that refreshes is never baked in."""
 
     def __init__(self, base_url: str, bearer: str | Callable[[], str], *, tenant: str = DEFAULT_TENANT,
-                 timeout: float = DEFAULT_TIMEOUT_S, http: httpx.Client | None = None) -> None:
+                 timeout: float = DEFAULT_TIMEOUT_S, http: httpx.Client | None = None, scope: str = SCOPE_TENANT) -> None:
+        self._scope = scope
         self._base = base_url.rstrip("/")
         self._bearer = bearer if callable(bearer) else (lambda: bearer)
         self._tenant = tenant
@@ -91,7 +113,7 @@ class IdentityClient:
 
             return get_data_token_manager().bearer_for(base_url, DEFAULT_TENANT) or ""
 
-        return cls(base_url, mint, timeout=timeout)
+        return cls(base_url, mint, timeout=timeout, scope=SCOPE_DATA)
 
     def close(self) -> None:
         self._http.close()
@@ -102,6 +124,12 @@ class IdentityClient:
     @property
     def base_url(self) -> str:
         return self._base
+
+    @property
+    def scope(self) -> str:
+        """:data:`SCOPE_DATA` when the bearer is a minted data token (cloud mode), else :data:`SCOPE_TENANT`. A data
+        credential makes, promotes and delegates seats only through the caller's identity token (RDR-253 option 2)."""
+        return self._scope
 
     @property
     def tenant(self) -> str:
@@ -118,8 +146,9 @@ class IdentityClient:
     # ── transport ───────────────────────────────────────────────────────────
 
     def _request(self, method: str, path: str, *, json: Any = None, params: Mapping[str, Any] | None = None,
-                 fenced: bool = False) -> dict[str, Any]:
+                 fenced: bool = False, token: str | TokenFile | None = None) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._bearer()}", "X-Nexus-Tenant": self._tenant}
+        headers.update(token_contract.headers(token.token if isinstance(token, TokenFile) else token))
         if fenced:
             # RDR-253 Step 6: a membership write is fenced by the engine (ownership and generation). The token is the
             # caller's own; with none, the engine's 403 identity_token_required is the honest answer.
@@ -191,13 +220,15 @@ class IdentityClient:
 
     # ── writes ──────────────────────────────────────────────────────────────
 
-    def create_seat(self, name: str, *, created_by: str = "sam", display_name: str | None = None) -> dict[str, Any]:
-        """A seat: unheld, generation 0, with a live alias (tenant credential only). The caller of this is
-        ``nx identity create`` (Step 4); the policy tests use it to stage seats."""
+    def create_seat(self, name: str, *, created_by: str = "sam", display_name: str | None = None,
+                    token: str | TokenFile | None = None) -> dict[str, Any]:
+        """A seat: unheld, generation 0, with a live alias. The tenant credential makes one outright; the data credential
+        only with *token*, a live identity token of the caller, which the engine stamps into ``created_by``. The caller
+        of this is ``nx identity create`` (Step 4); the policy tests use it to stage seats."""
         body: dict[str, Any] = {"kind": "seat", "name": name, "created_by": created_by}
         if display_name:
             body["display_name"] = display_name
-        return self._request("POST", "", json=body)
+        return self._request("POST", "", json=body, token=token)
 
     def create_ephemeral(self, *, display_name: str | None, created_by: str, evidence: Mapping[str, Any]) -> dict[str, Any]:
         """A new ephemeral identity already bound to the caller (generation 1, event ``start``)."""
@@ -206,18 +237,21 @@ class IdentityClient:
             body["display_name"] = display_name
         return self._request("POST", "", json=body)
 
-    def create_delegated(self, parent: str, *, display_name: str | None, evidence: Mapping[str, Any]) -> dict[str, Any]:
-        """A delegated identity under *parent* for a ``claude -p`` child (tenant credential only): generation 1, live,
+    def create_delegated(self, parent: str, *, display_name: str | None, evidence: Mapping[str, Any],
+                         token: str | TokenFile | None = None) -> dict[str, Any]:
+        """A delegated identity under *parent* for a ``claude -p`` child (tenant credential, or the data credential with
+        *token*, which must name *parent*): generation 1, live,
         one ``start`` row naming the dispatcher's process (*evidence*: host, pid, started_at, proc_start). The answer
         carries ``identity_token``. Step 4: the ``nx`` operator dispatcher is its caller."""
         body: dict[str, Any] = {"parent": parent, "bind": dict(evidence)}
         if display_name:
             body["display_name"] = display_name
-        return self._request("POST", "/delegated", json=body)
+        return self._request("POST", "/delegated", json=body, token=token)
 
-    def promote(self, identity: str, name: str) -> dict[str, Any]:
-        """Make an ephemeral identity a seat named *name* (tenant credential only)."""
-        return self._request("POST", f"/{identity}/promote", json={"name": name})
+    def promote(self, identity: str, name: str, *, token: str | TokenFile | None = None) -> dict[str, Any]:
+        """Make an ephemeral identity a seat named *name* (tenant credential, or the data credential with *token*,
+        which must name *identity*)."""
+        return self._request("POST", f"/{identity}/promote", json={"name": name}, token=token)
 
     def rename(self, old: str, new: str) -> dict[str, Any]:
         """Retire seat *old*'s alias (a name or an id) and give it *new*, retitling its board entry (tenant credential only)."""

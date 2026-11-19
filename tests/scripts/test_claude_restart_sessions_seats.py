@@ -47,6 +47,7 @@ class FakeNx:
         self.calls: list[tuple[str, ...]] = []
         self.down = False
         self.show_returns_garbage = False
+        self.refuse_seats: str | None = None                      # an older engine's refusal of a promote or a create
 
     def ephemeral(self, session_id: str, *, state: str = "live", kind: str = "ephemeral", name: str | None = None) -> str:
         ident = f"i{len(self.identities) + 1}"
@@ -62,6 +63,11 @@ class FakeNx:
         if self.down:
             return out(1, "Error: the engine is not answering (ConnectError)")
         verb, rest = args[0], list(args[1:])
+        if "--token-file" in rest:                                # cloud mode: the target's token file, before the `--`
+            at = rest.index("--token-file")
+            del rest[at:at + 2]
+        if self.refuse_seats and verb in ("promote", "create"):
+            return out(1, f"Error: {self.refuse_seats}")
         if "--" in rest:                                          # click reads what follows `--` as arguments, never options
             before, after = rest[:rest.index("--")], rest[rest.index("--") + 1:]
             rest = before + after
@@ -93,6 +99,7 @@ class FakeNx:
 def nx(crs, monkeypatch) -> FakeNx:
     fake = FakeNx()
     monkeypatch.setattr(crs, "_nx_identity", fake)
+    monkeypatch.setattr(crs, "SEATS_NEED_ENGINE_SAID", False, raising=False)  # the once-per-run memory is module state
     return fake
 
 
@@ -281,3 +288,66 @@ def test_a_failing_seat_call_never_stops_a_restart(crs, nx, monkeypatch, tmp_pat
     nx.down = True
     monkeypatch.setattr(crs, "slash_restart", lambda s: (True, ""))
     assert crs.restart(session(sessionId="old-sid", argv="claude -n tamsin")) is True
+
+
+# ── cloud mode (RDR-253 option 2, nexus-hczdo): the data credential promotes through the target's own token ─────────
+
+
+def _token_file(cfg: Path, pid: int, started_at: int, token: str | None = "tok") -> Path:
+    path = cfg / "identity" / f"{pid}.{started_at}.token"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"identity": "i1", "generation": 1, "token": token, "pid": pid, "started_at": started_at}),
+                    encoding="utf-8")
+    return path
+
+
+def test_a_promote_names_the_targets_own_token_file_so_a_cloud_credential_can_act_for_it(crs, nx, monkeypatch, tmp_path) -> None:
+    """In cloud mode the engine admits a promote only with the identity token of the ephemeral it names. The script is a
+    different process, so it names the TARGET session's token file (<config>/identity/<pid>.<startedAt>.token) and
+    `nx identity promote --token-file` sends that token when the credential is the data one (it ignores the file for a
+    tenant credential)."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    path = _token_file(tmp_path, 111, 5000)
+    eph = nx.ephemeral("sid-1")
+    assert crs.ensure_seat(session(startedAt=5000)) == f"promoted {eph} to seat tamsin"
+    assert ("promote", "--token-file", str(path), "--", eph, "tamsin") in nx.calls
+
+
+@pytest.mark.parametrize("started_at", [None, 6000], ids=["no-startedAt", "no-file-for-it"])
+def test_a_target_with_no_token_file_is_promoted_without_one(crs, nx, monkeypatch, tmp_path, started_at) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _token_file(tmp_path, 111, 5000)
+    eph = nx.ephemeral("sid-1")
+    s = session() if started_at is None else session(startedAt=started_at)
+    assert crs.ensure_seat(s) == f"promoted {eph} to seat tamsin"
+    assert ("promote", "--", eph, "tamsin") in nx.calls, "no token file, no flag: the call is the one it always was"
+
+
+def test_a_token_file_with_no_token_is_not_named(crs, nx, monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    _token_file(tmp_path, 111, 5000, token=None)
+    eph = nx.ephemeral("sid-1")
+    crs.ensure_seat(session(startedAt=5000))
+    assert ("promote", "--", eph, "tamsin") in nx.calls
+
+
+@pytest.mark.parametrize("wording", ["seats need engine 0.1.197 in cloud mode",
+                                     "forbidden: a 'data' credential may not call CREATE on /v1/identity"],
+                         ids=["this-nx", "an-older-nx-passing-the-403-through"])
+def test_an_older_engine_is_one_line_for_the_whole_run_not_one_per_session(crs, nx, wording) -> None:
+    nx.refuse_seats = wording
+    nx.ephemeral("sid-1")
+    first = crs.ensure_seat(session())
+    second = crs.ensure_seat(session(sessionId="sid-2", name="rhea"))
+    third = crs.ensure_seat(session(sessionId="sid-3", name="sol"))
+    assert first == "seats need engine 0.1.197 in cloud mode" and second == "" and third == ""
+    seat_calls = [c[0] for c in nx.calls if c[0] in ("promote", "create")]
+    assert len(seat_calls) == 1, f"once the engine is known to be older no session asks it again: {nx.calls}"
+
+
+def test_a_seat_a_session_already_holds_is_still_carried_after_an_older_engine_was_seen(crs, nx) -> None:
+    nx.refuse_seats = "seats need engine 0.1.197 in cloud mode"
+    crs.ensure_seat(session())
+    nx.ephemeral("sid-9", kind="seat", name="elsewhere", state="live")
+    s = session(sessionId="sid-9", name="other")
+    assert crs.ensure_seat(s).startswith("holds seat elsewhere") and s["nx_seat"] == "elsewhere"

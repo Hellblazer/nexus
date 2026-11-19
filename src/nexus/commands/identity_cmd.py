@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 import click
 
@@ -152,10 +153,13 @@ def rename_cmd(ctx: click.Context, old: str, new: str) -> None:
 
 
 @identity_group.command("promote")
+@click.option("--token-file", "token_file", type=click.Path(path_type=Path, dir_okay=False), default=None,
+              help="Cloud mode: the identity token file of the session that holds IDENTITY, for a caller that is not "
+                   "that session (the restart script). Ignored under a tenant credential.")
 @click.argument("identity")
 @click.argument("name")
 @click.pass_context
-def promote_cmd(ctx: click.Context, identity: str, name: str) -> None:
+def promote_cmd(ctx: click.Context, token_file: Path | None, identity: str, name: str) -> None:
     """Make the ephemeral identity IDENTITY a seat named NAME (an id-shaped name, i<digits>, is refused).
 
     Promote also retitles the identity's threads board entry to NAME, but only when run inside the session that owns
@@ -164,7 +168,7 @@ def promote_cmd(ctx: click.Context, identity: str, name: str) -> None:
     """
     from nexus.identity import ops  # noqa: PLC0415
 
-    _run(ctx, lambda env: ops.promote(env, identity, name))
+    _run(ctx, lambda env: ops.promote(env, identity, name, token_file))
 
 
 @identity_group.command("purge")

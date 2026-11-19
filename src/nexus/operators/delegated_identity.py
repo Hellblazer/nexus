@@ -44,22 +44,26 @@ RENEW_INTERVAL_S: float = 60.0
 END_TIMEOUT_S: float = 5.0
 
 
-def resolve_parent(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> str | None:
-    """The identity this process dispatches for: the token file ``NX_IDENTITY_TOKEN`` names (this process is itself a
-    delegated child), else the token file of its nearest Claude ancestor. Local reads only."""
+def resolve_parent_record(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> Any:
+    """The token file of the identity this process dispatches for: the one ``NX_IDENTITY_TOKEN`` names (this process is
+    itself a delegated child), else its nearest Claude ancestor's; None when there is none. Local reads only."""
     from nexus.identity.token_file import ancestor_token_path, read_token_file  # noqa: PLC0415
 
     explicit = (environ.get("NX_IDENTITY_TOKEN") or "").strip()
     if explicit:
-        record = read_token_file(Path(explicit))
-        return record.identity if record is not None else None
+        return read_token_file(Path(explicit))
     from nexus.session import find_immediate_claude_pid  # noqa: PLC0415
 
     pid = find_immediate_claude_pid()
     if pid <= 0:
         return None
     path = ancestor_token_path(identity_dir, pid, procs.sessions_dir)
-    record = read_token_file(path) if path is not None else None
+    return read_token_file(path) if path is not None else None
+
+
+def resolve_parent(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> str | None:
+    """The identity this process dispatches for (:func:`resolve_parent_record`'s), or None."""
+    record = resolve_parent_record(environ, identity_dir, procs)
     return record.identity if record is not None else None
 
 
@@ -94,7 +98,7 @@ class DelegatedIdentity:
         parent identity or the engine will not. Blocking: call it off the event loop."""
         from nexus.identity import token_contract  # noqa: PLC0415
         from nexus.identity.bind_client import (  # noqa: PLC0415
-            IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body,
+            SCOPE_DATA, IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body,
         )
         from nexus.identity.delegated import delegated_token_path  # noqa: PLC0415
         from nexus.identity.holder import Processes, epoch_seconds, normalise_instant  # noqa: PLC0415
@@ -106,9 +110,10 @@ class DelegatedIdentity:
                 from nexus import config  # noqa: PLC0415
 
                 identity_dir = _identity_dir(config.nexus_config_dir())
-            parent = resolve_parent(os.environ if environ is None else environ, identity_dir, procs)
-            if parent is None:
+            parent_record = resolve_parent_record(os.environ if environ is None else environ, identity_dir, procs)
+            if parent_record is None:
                 return None
+            parent = parent_record.identity
             pid = os.getpid()
             proc_start = normalise_instant(procs.os_start(pid))
             started_at = epoch_seconds(proc_start) * 1000 if proc_start else int(clock() * 1000)
@@ -116,7 +121,11 @@ class DelegatedIdentity:
             owned = client is None
             engine = IdentityClient.from_config() if owned else client
             try:
-                view = engine.create_delegated(parent, display_name=label, evidence=evidence)
+                # RDR-253 option 2: the data credential delegates only from the caller's own identity, proved by the
+                # parent's token. A tenant credential's call is unchanged.
+                on_behalf = ({"token": parent_record} if getattr(engine, "scope", None) == SCOPE_DATA
+                             and token_contract.usable(parent_record.token, parent_record.expires_at, now=clock()) else {})
+                view = engine.create_delegated(parent, display_name=label, evidence=evidence, **on_behalf)
             except BaseException:
                 if owned:
                     engine.close()
