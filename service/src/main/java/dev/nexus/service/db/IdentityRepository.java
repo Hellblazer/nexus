@@ -64,6 +64,8 @@ public final class IdentityRepository {
     static final Set<String> BIND_EVENTS =
         Set.of("start", "resume", "clear", "fork", "takeover", "release", "refresh", "end");
     static final Set<String> CREATED_BY = Set.of("sam", "restart", "session", "dispatch");
+    /** The creator a data-credential seat create is stamped with (RDR-253 amendment, Sam 2026-11-19): the token's identity. */
+    static final java.util.regex.Pattern SELF_CREATOR = java.util.regex.Pattern.compile("^identity:i[0-9]+$");
     static final int ALIAS_GRACE_DAYS = 7;
 
     private static final Pattern NAME = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
@@ -177,8 +179,10 @@ public final class IdentityRepository {
     public Map<String, Object> createSeat(String tenant, String name, String displayName, String createdBy) {
         requireAliasName(name);
         bounded(displayName, "display_name");
-        if (!"sam".equals(createdBy) && !"restart".equals(createdBy)) {
-            throw new IdentityException(400, "bad_created_by", "a seat is created by sam or restart");
+        if (!"sam".equals(createdBy) && !"restart".equals(createdBy)
+                && (createdBy == null || !SELF_CREATOR.matcher(createdBy).matches())) {
+            throw new IdentityException(400, "bad_created_by",
+                "a seat is created by sam, restart, or identity:<id> (the data credential's own token)");
         }
         return scope.withTenant(tenant, ctx -> {
             OffsetDateTime now = now();

@@ -2246,6 +2246,13 @@
     <include file="db/changelog/memory-006-identity-stamp.xml"/>
 
     <!--
+        RDR-253 amendment (Sam 2026-11-19, option 2): identity_records_creator_ck also admits identity:i<n>, the
+        creator a data-credential seat create is stamped with. DDL only (the CHECK widened, no row mutated). After
+        identity-001 and memory-006, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/identity-004-creator-self.xml"/>
+
+    <!--
         Bead nexus-igea9.5 (RDR-252 Step 1): nexus.group_records, the permanent group record (one row per tenant and name).
         A table and not a tuple template: it never expires and is updated in place under a row lock (the included file's
         header). DDL only, nothing backfilled. After memory-006, before the grants-nexus-svc.xml runAlways block.
