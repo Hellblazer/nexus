@@ -145,6 +145,32 @@ def test_a_repeated_round_re_asks_only_the_sessions_without_a_fresh_ready_answer
     assert by["beta"]["how"] == "mail" and "kept_from" not in by["beta"]
 
 
+def test_a_ready_answer_from_a_session_no_longer_idle_is_asked_again(crs, rd, monkeypatch) -> None:
+    """Review r1: a session that answered ready and has since gone busy or opened a shell is asked again (the ask
+    names its shells), not kept until its answer goes stale; the caller's own pane is kept whatever its status."""
+    _earlier_round(crs, rd, {"alpha": 60, "beta": 60, "gamma": 60, "me": 60})
+    asked = _asking(crs, monkeypatch)
+    _live(rd, "alpha")
+    _live(rd, "beta", status="busy")
+    _live(rd, "gamma", status="shell")
+    _live(rd, "me", status="busy", pane="%9")
+    monkeypatch.setenv("TMUX_PANE", "%9")
+    found = crs.sessions()
+    crs.ready_round(_args(), found, found)
+    assert sorted(asked) == ["beta", "gamma"]
+    manifest, _ = crs.load_manifest()
+    assert {t["name"] for t in manifest["targets"] if t["how"] == "kept"} == {"alpha", "me"}
+
+
+def test_a_target_of_the_earlier_round_that_is_gone_is_not_kept(crs, rd, monkeypatch) -> None:
+    """A session that left (not among the live sessions now) is dropped, its fresh answer notwithstanding."""
+    _earlier_round(crs, rd, {"alpha": 60, "gone": 60})
+    _asking(crs, monkeypatch)
+    _round_now(crs, rd, ["alpha"])
+    manifest, _ = crs.load_manifest()
+    assert {t["name"] for t in manifest["targets"]} == {"alpha"}
+
+
 def test_a_kept_answer_reads_ready_at_the_gate_and_the_asked_ones_need_their_own_reply(crs, rd, monkeypatch) -> None:
     _earlier_round(crs, rd, {"alpha": 60, "beta": 60}, bodies={"beta": {"ready": False, "reason": "mid-edit", "eta_min": 5}})
     _asking(crs, monkeypatch)
@@ -260,3 +286,17 @@ def test_the_ask_names_the_tasks_the_script_sees_ahead_of_the_instruction(crs, m
     text = crs.ready_prompt(s, "/tmp/r.json")
     assert text.index("pid 5000 since t: nx ci wait abc") < text.index("TaskStop") < text.index("Answer by writing the file")
     assert len(text.encode()) <= 4096  # the mailbox template's body ceiling
+
+
+def test_a_dry_run_round_says_which_answers_it_would_keep(crs, rd, monkeypatch, capsys) -> None:
+    """Review r1: --ask-ready --dry-run names the sessions whose ready answer a real round would keep, not "would ask"."""
+    _earlier_round(crs, rd, {"alpha": 60, "beta": 901})
+    asked = _asking(crs, monkeypatch)
+    for n in ("alpha", "beta"):
+        _live(rd, n)
+    found = crs.sessions()
+    assert crs.ready_round(_args(dry_run=True), found, found) == 0
+    out = capsys.readouterr().out
+    assert "alpha" in out and "would keep its ready answer from round 20261119-100000" in out
+    assert any("beta" in ln and "would ask" in ln for ln in out.splitlines())
+    assert asked == [], "a dry run asks no one"

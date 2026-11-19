@@ -911,7 +911,7 @@ class RelaunchStalled(Exception):
 
 
 #: Exit status of a run stopped by a RelaunchStalled (0 all restarted, 1 some left, 2 install aborted,
-#: 3 sandbox pass missing, 4 mode refused).
+#: 3 not ready (the go gate), 4 mode refused). The sandbox pass never sets an exit status (A1).
 EXIT_STALLED = 5
 
 
@@ -2857,16 +2857,22 @@ def kept_answers(prev: dict | None, found: list[dict], now: float, max_age: int)
     """The targets of the previous round whose fresh ready answer a repeated round keeps instead of asking again (C1).
 
     A session is kept when it is a current target, its earlier reply file still reads ok (``read_reply``, against the
-    time of the round that asked it), says ready, and is no older than ``max_age``: the same freshness the restart's
-    check applies. Everything else (not ready, missing, unreadable, stale, never asked) is asked again. The entry
+    time of the round that asked it), says ready, is no older than ``max_age`` (the same freshness the restart's
+    check applies), and the session is idle now (or is the caller's own pane). Everything else (not ready, missing, unreadable, stale, never asked) is asked again. The entry
     reuses the old reply file and records which round asked it (``kept_from``) and its ``since``, so a later round can
     keep it again; it carries no ``tuple_id`` or ``marker``, the earlier round's ask was withdrawn when this one began."""
     if not prev:
         return []
-    live = {s["sessionId"] for s in found}
+    live = {s["sessionId"]: s for s in found}
+    own_pane = os.environ.get("TMUX_PANE", "")
     out = []
     for t in prev["targets"]:
-        if t["sessionId"] not in live:
+        s = live.get(t["sessionId"])
+        if s is None:
+            continue
+        # a session that has since gone busy or opened a shell is asked again (the ask names its shells), not kept
+        # until its answer goes stale; the caller's own pane is busy running this and is kept (review r1)
+        if status(s) != "idle" and not (own_pane and s.get("pane") == own_pane):
             continue
         since = reply_since(t, prev)
         kind, r = read_reply(t["path"], since, now)
@@ -2909,8 +2915,13 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
     if a.dry_run:
+        prev, _ = load_manifest()
+        keep = {k["sessionId"]: k for k in kept_answers(prev, found, time.time(), a.ready_max_age)}
         for s in found:
-            print(f"{label(s)}: would ask by {'mail' if has_channel(s) else 'typing'} -> {ready_path(s, stamp)}")
+            if s["sessionId"] in keep:
+                print(f"{label(s)}: would keep its ready answer from round {keep[s['sessionId']]['kept_from']}")
+            else:
+                print(f"{label(s)}: would ask by {'mail' if has_channel(s) else 'typing'} -> {ready_path(s, stamp)}")
         for e in excluded:
             print(f"{e['name']}: excluded, {e['why']}")
         return 0

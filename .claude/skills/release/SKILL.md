@@ -1148,13 +1148,13 @@ Sam the command:
   session two turns). The script's file reply is the only readiness answer.
   The ask the script sends names each session's own background tasks and tells
   it to stop them with TaskStop, finished ones included, before it answers
-  ready; `--ask-ready` types only to an idle session, so a session pinned at
-  `shell` is never asked and is skipped after `--wait` (kimi_nexus_edb,
-  2026-10-26). A later `--ask-ready` round within `--ready-max-age` asks again
+  ready. A session with the channel gets the ask as mail whatever its status;
+  one without it is typed to only when idle, so a session pinned at `shell`
+  is not typed to and is skipped after `--wait` (kimi_nexus_edb, 2026-10-26). A later `--ask-ready` round within `--ready-max-age` asks again
   only the sessions whose last answer was not ready, missing, unreadable or
-  stale, and keeps the others' fresh ready answers; `--status` names the
-  sessions it re-asked and the answers it kept. Re-run it until `--status`
-  shows every target ready.
+  stale, or who have since gone busy or opened a shell, and keeps the others'
+  fresh ready answers; `--status` names the sessions it re-asked and the
+  answers it kept. Re-run it until `--status` shows every target ready.
 
 - Read the dry run's `-n` values against ListAgents. A restart keeps each
   session's CURRENT name (Sam, 2026-10-31); before the script dropped the launch
