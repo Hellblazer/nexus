@@ -254,10 +254,13 @@ def record_count(mem: Any, project: str, scope: gr.Scope, candidates: list[dict[
     return title
 
 
-def check_guard(rows: list[dict[str, Any]], scope: gr.Scope, candidates: list[dict[str, Any]], counted: int | None) -> None:
+def check_guard(rows: list[dict[str, Any]], scope: gr.Scope, candidates: list[dict[str, Any]], counted: int | None,
+                now: datetime) -> None:
     """Refuse a real run that would write a TTL unless this scope's dry-run count is recorded, the caller passes
-    ``--counted <that count>``, and every candidate is one the dry run counted. A run with no candidate writes no TTL
-    and needs none."""
+    ``--counted <that count>``, every candidate is one the dry run counted, and the count still holds: the number
+    of candidates the engine's rule has past their effective TTL at *now* is the recorded one (the count is a
+    snapshot, and a clock that moved past a record's effective TTL since the dry run changes it). A run with no
+    candidate writes no TTL and needs none."""
     if not candidates:
         return
     row = next((r for r in rows if r["title"] == count_title(scope)), None)
@@ -278,6 +281,13 @@ def check_guard(rows: list[dict[str, Any]], scope: gr.Scope, candidates: list[di
     if new:
         raise gr.GateRollupError(
             f"{', '.join(new)} is not in the dry run's count: records changed since it ran. Run --dry-run again. "
+            "Nothing was written.")
+    by_title = {r["title"]: r for r in rows}
+    past = sum(would_expire(by_title[e["title"]], now=now) for e in candidates)
+    if past != rec.count:
+        raise gr.GateRollupError(
+            f"recounted: {past} of the candidates are past their effective TTL now, the dry run recorded {rec.count} "
+            f"for {scope.label}; time has passed or a record changed. Run --dry-run again and report that count. "
             "Nothing was written.")
 
 
@@ -413,7 +423,7 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
         res.lines.append(f"count recorded: {project}/{title}")
         res.lines.append("dry run: archives, the pointer write and its read-back skipped; no TTL and no T3 note written")
         return res
-    check_guard(rows, scope, candidates, counted)
+    check_guard(rows, scope, candidates, counted, now)
 
     res.archived, res.already_whole = gr.archive_records(t3, sel, scope)
     text = write_verified_pointer(t3, project, scope, sel, accept_open, res)

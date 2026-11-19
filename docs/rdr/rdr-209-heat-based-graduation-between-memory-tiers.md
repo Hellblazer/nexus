@@ -1019,8 +1019,13 @@ it. The row carries the tag `gate-rollup-count`, neither `kind:gate` nor `gate`,
 so the rollup never lists it and the census never flags it. A real run that
 would write a TTL refuses, writing nothing, unless (a) that row exists, (b) the
 run passes `--counted N` and N equals the recorded count, the number that was
-reported to Sam, and (c) every candidate is a title the row lists, so a record
-that appeared after the dry run needs a new one. The flag is evidence that the
+reported to Sam, (c) every candidate is a title the row lists, so a record
+that appeared after the dry run needs a new one, and (d) the count still holds:
+the run recomputes how many candidates the engine's rule has past their
+effective TTL at the time of the real run and refuses when that differs from
+the recorded count, because the count is a snapshot and a record that crossed
+its effective TTL since the dry run would otherwise be quarantined without
+Sam having been told. The flag is evidence that the
 caller has the number, not that Sam said yes; his word stays outside the code,
 and the skills tell the session to wait for it. A run with no candidate writes
 no TTL and needs no count, so a rerun that finishes after everything has its TTL
@@ -1354,3 +1359,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Fix check 78cc9b0e4776, defect B (nexus-1gdv0.2.15), doc only: the dry-run test appeared only in the Implementation Plan, not in the Test Plan or the Testing Strategy. The Test Plan gains the dry-run and count-first-guard scenario and extends the TTL and loss-check scenarios to what was built (the real put control, the census narrowing, the quarantine read-back, the restored record); the Testing Strategy names the two legs that must fail when their code is changed (the dry-run count against the engine rule, the guard when deleted); and the reference "(Step 3, Count first)" in the timestamp bullet, which read as Technical Design's own Step 3, now points at the Implementation Plan, Phase 3 Step 3. The wording was copied from the merged code and tests of nexus-1gdv0.2.12 to .14, not from the beads. |
 | 2026-11-19 | Review round 1 (nexus-1gdv0.2.16), blocker 1: the TTL write imported the fresh read's content while the archive and the pointer held the listing's, so a record rewritten between them got a TTL with no archive of its new text. A candidate whose fresh content or timestamp differs from the listing's is now skipped, named and left without a TTL, and a rerun archives its new text first; the residual-race paragraph says so. |
 | 2026-11-19 | Review round 1, blocker 2: the quarantined listing the carry reads before the writes was reused by the read-back, so a row the sweep quarantined after its import (not in that older listing) read as "not in the read after the write". The read-back now makes its own listing; Step 3's read cost says up to two. |
+| 2026-11-19 | Review round 1, blocker 4: the count guard compared only the recorded number, so time passing (a record crossing its effective TTL after the dry run) left the count Sam was told stale while the guard still passed. The real run now recomputes the engine rule over its candidates at its own clock and refuses when the number differs from the recorded count; the guard paragraph says so. |

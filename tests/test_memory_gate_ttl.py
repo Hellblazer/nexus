@@ -832,3 +832,19 @@ def test_no_record_gets_a_ttl_until_every_archive_has_been_written_and_read_back
     out = _phase3("nexus-ab", expect=1)
     assert "forced" in out or "did not read back" in out
     assert all(r["ttl"] is None for r in _rows(db).values()) and set(_rows(db)) == set(names)
+
+
+def test_guard_a_clock_moved_past_a_records_effective_ttl_refuses_the_real_run(db: T2Database, tmp_path: Path) -> None:
+    """The count is a snapshot. A record 20 days old is not past its 30-day TTL at the dry run (count 0), and is at the
+    real run 15 days later, so the sweep would quarantine one more than Sam was told: the run recounts and refuses."""
+    name = _gate(db, "nexus-gc", age_days=20)
+    kw = {"project": REPO, "scope": gr.parse_scope(rdr=RDR, phase="3", beads="nexus-gc", all_phases=False),
+          "accept_open": (), "root": tmp_path, "t3_factory": make_t3}
+    t0 = datetime.now(UTC)
+    dry = gt.run(db.memory, dry_run=True, now=t0, **kw)
+    assert "quarantined by the next expire sweep: 0 of 1" in "\n".join(dry.lines)
+    with pytest.raises(gr.GateRollupError, match=r"now 1 .* recorded 0|recounted"):
+        gt.run(db.memory, dry_run=False, counted=0, now=t0 + timedelta(days=15), **kw)
+    assert _rows(db)[name]["ttl"] is None and documents_by_title(POINTER_P3) == []
+    gt.run(db.memory, dry_run=False, counted=0, now=t0 + timedelta(days=1), **kw)        # unchanged count: it proceeds
+    assert _rows(db)[name]["ttl"] == 30
