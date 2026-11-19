@@ -232,7 +232,82 @@ Open questions:
 
 ## Alternatives Considered
 
-To be written once the candidates above are researched.
+The three candidates from Approach, compared on the five gaps. A preliminary
+read; the open questions above can change it.
+
+| | Gap 1 moved PDF | Gap 2 renamed repo | Gap 3 same-name repo move | Gap 4 second clone | Gap 5 no route |
+| --- | --- | --- | --- | --- | --- |
+| 1. Explicit move command | closes, when the user runs it | closes, when run | closes, when run | no | closes |
+| 2. Recognition at registration | closes automatically | no (a new owner, nothing to match within) | closes (old root gone, same owner) | no | no |
+| 3. Owner matching by hash first | no | no (the hash changes with the path) | becomes a new owner instead, like Gap 2 | closes | no |
+
+### Alternative 1: an explicit move command
+
+**Description**: `nx catalog owners --execute move` re-roots an owner, and a
+document form re-points one curator document, in one engine transaction each.
+
+**Pros**:
+
+- The user states what moved, so it never merges two distinct files
+  (nexus-o19i0 stays true).
+- It is the shape RDR-101 designed for the same-owner case, and chunks carry no
+  path, so it rewrites catalog rows only.
+- It is the remedy GH #1605 asks for.
+
+**Cons**:
+
+- Nothing happens unless the user knows to run it; the default outcome of a
+  move stays wrong.
+- It does not touch Gap 4.
+
+### Alternative 2: recognition at registration
+
+**Description**: a registration that misses on path looks, within the same
+owner, for a live row with the same content hash whose path no longer exists,
+and re-points it.
+
+**Pros**:
+
+- The common case (a file moved and indexed again) fixes itself.
+- `_find_curator_document`'s legacy relative-path leg already does this for a
+  narrower case (`doc_indexer.py:777-815`).
+
+**Cons**:
+
+- It reads the filesystem at registration to decide that the old path is gone;
+  an unmounted volume or a path from another machine looks gone too.
+- It works only within one owner, so a renamed repository (Gap 2) is out of
+  reach.
+- Repo documents carry no content hash at registration today (assumed; to be
+  checked), so it may cover curator documents only.
+
+### Alternative 3: owner matching by hash first
+
+**Description**: resolve an owner by repo hash before name, so two live clones
+get two owners.
+
+**Pros**:
+
+- Closes the silent takeover in Gap 4.
+
+**Cons**:
+
+- It turns every same-name move (Gap 3) into a second owner with duplicated
+  documents, the Gap 2 outcome, unless it is paired with Alternative 1 or with a
+  rule that a name match whose old root is gone is a move.
+
+### Briefly Rejected
+
+- **Match curator documents by title**, as GH #1571 suggests: titles are not
+  unique, and two distinct papers can share one.
+- **Make the old row an alias of the new one** (the reporter's workaround): it
+  keeps two rows and two chunk sets, and the alias still has to be found and
+  set by hand.
+
+Preliminary direction, not a decision: Alternative 1 as the route for every
+gap but Gap 4, with Alternative 3's hash-first matching for Gap 4 only when the
+old root still exists, and Alternative 2 considered for curator documents once
+its false-match risk is measured.
 
 ## Trade-offs
 
