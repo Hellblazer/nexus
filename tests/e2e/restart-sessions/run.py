@@ -64,7 +64,16 @@ Shared by every scenario:
   one poll (the SessionEnd launcher's double fork) is not caught here. Sessions run with
   ``NX_UPGRADE_AUTO=0`` and without the operator's ``NX_TOOLS_DIR``. The
   sessions write to that service as the operator would: the restart mail expires with its
-  TTL, and nothing here asks a session to write anything permanent;
+  TTL, and nothing here asks a session to write anything permanent. They bind no identity there:
+  the copied credential reaches the operator's tenant, so the sessions run with
+  ``NX_IDENTITY_BIND=0`` (their SessionStart hook binds nothing and makes no engine call) and
+  ``NX_IDENTITY_LEASE=0`` (their MCP servers hold no identity lease); with neither, 8.5.0 sessions
+  bound twelve ``rs_*`` identities in the operator's tenant (found 2026-11-19). A census proves
+  it (identity_census.py): the operator's identity list (``nx identity show --all``, read only,
+  in the operator's own environment) is read before each scenario's sessions start and again after
+  cleanup, and the scenario FAILS for any id in the second list that was not in the first ("the
+  sandbox bound an identity on the operator's endpoint"), and for a list it cannot read. A session
+  of the operator's own that starts on this host while a scenario runs is new too: rerun;
 - nx-mcp's own exit teardown, judged on the engine (nexus-iz8ub; needs an installed nx-mcp that
   carries 75e22da36, release 7.97.0 or later; with an older nx, or one whose version cannot be read, the
   teardown findings are skipped with a loud note and the run ends "unverified", exit 2, no pass
@@ -674,7 +683,12 @@ class Sandbox:
                         DISABLE_AUTOUPDATER="1",  # the dim ghost prompt that broke 7.92.0
                         # nexus-75w5d's kill switch: a session's SessionStart must not spawn a detached
                         # nx upgrade --auto, which would act on the operator's install and outlive the run
-                        NX_UPGRADE_AUTO="0")
+                        NX_UPGRADE_AUTO="0",
+                        # The sessions carry a copy of the operator's engine credential (setup copies config.yml), so
+                        # since 8.5.0 their SessionStart hook and MCP identity lease bound RDR-253 identities in the
+                        # operator's tenant (rows i13-i23, names rs_*, found 2026-11-19). Both switches off; the
+                        # identity census in run_scenario proves none was bound.
+                        NX_IDENTITY_BIND="0", NX_IDENTITY_LEASE="0")
         # --nx installs a release: the sandbox's own stand-ins (setup_release) take its place.
         self.market = home / "market"
         self.cache = home / ".claude" / "plugins" / "cache" / MARKET
@@ -2358,7 +2372,9 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
     failures: list[str] = []
     notes: list[str] = []
     ok = False
+    census_before: dict[str, str] | None = None
     try:
+        census_before = _load_slash("identity_census").read(sb.real_nx)  # before any session starts; unreadable is a failure
         sb.setup(crs)
         print(f"[sandbox:{name}] HOME {home}; watch: tmux -L {sb.sock} attach -t rs", flush=True)
         RUNNERS[name](sb, crs, a, failures, notes)
@@ -2398,6 +2414,12 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 sb.watch.stop()
                 # --keep skips cleanup(), the only place the teardown is judged: not a pass (nexus-iz8ub)
                 UNVERIFIED.append(f"{name}: --keep skips cleanup, which is where nx-mcp's teardown is judged")
+            if census_before is not None:  # after the sandbox is ended (read-only; --keep reads it with the sessions up)
+                bad, census_notes = _load_slash("identity_census").check(sb.real_nx, census_before)
+                notes.extend(census_notes)
+                if bad:
+                    failures.extend(bad)
+                    ok = False
             sb.close_servers()
             if not a.keep:
                 for f in claude_session_files(full):  # Claude Code's own per-session temp files

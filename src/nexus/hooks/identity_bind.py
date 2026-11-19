@@ -13,6 +13,8 @@ Imported lazily by its caller: a hook pays its import cost on every invocation.
 
 Not bound here, by design:
 
+* a process with ``NX_IDENTITY_BIND=0`` in its environment (the restart sandbox, whose sessions carry the operator's
+  engine credential): it binds nothing and makes no engine call;
 * a process that carries ``NX_IDENTITY_TOKEN`` (a delegated child): the dispatcher bound it;
 * a process that inherited ``NX_SESSION_ID`` (a nested subprocess reusing its parent's session): the session id is
   not this process's, and binding it would re-point the parent's id at the child (the same rule that keeps the
@@ -33,6 +35,10 @@ from typing import Any
 
 from nexus.identity.binder import HANDOFF_SOURCES, NX_SEAT_ENV, BindOutcome, LaunchFacts, SessionBinder
 from nexus.identity.holder import Processes, epoch_seconds, this_host
+
+#: ``NX_IDENTITY_BIND=0`` makes the hook bind nothing and make no engine call (the MCP server's lease has its own
+#: switch, ``NX_IDENTITY_LEASE=0``).
+NX_IDENTITY_BIND_ENV = "NX_IDENTITY_BIND"
 
 #: What the hook says when the Claude registry file never appeared (the MCP server then binds from the pending file).
 _PENDING_NOTICE = ("identity: not bound yet. The Claude registry file did not appear within 5 seconds; "
@@ -97,6 +103,11 @@ def _log():
 def _run(result: IdentityResult, session_id: str, source: str, env: Mapping[str, str], claude_pid: int | None,
          procs: Processes | Any | None, client: Any, config_dir: Path | None, clock: Callable[[], float],
          sleep: Callable[[float], None]) -> None:
+    # The client switch: a process that holds an engine credential it must not bind with (the restart sandbox copies
+    # the operator's) sets NX_IDENTITY_BIND=0. Checked before anything reads the machine or builds a client.
+    if (env.get(NX_IDENTITY_BIND_ENV) or "").strip() == "0":
+        result.notices.append(f"identity: {NX_IDENTITY_BIND_ENV}=0, so this session binds nothing")
+        return
     from nexus.identity.bind_client import IdentityClient, IdentityUnavailableError  # noqa: PLC0415
     from nexus.identity.token_file import identity_dir  # noqa: PLC0415
 

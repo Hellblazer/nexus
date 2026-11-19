@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from test_restart_sandbox_identity_census import stub_census
 from tests._module_seam import setattr_in
 
 RUN_PY = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "run.py"
@@ -459,6 +460,7 @@ def scenario(run, monkeypatch):
         return dict(state["left"])
 
     monkeypatch.setattr(run, "footprint_after", footprint)
+    stub_census(run, monkeypatch)  # no engine here: the census reads two empty lists
     return state
 
 
