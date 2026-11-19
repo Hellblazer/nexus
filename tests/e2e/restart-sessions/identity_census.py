@@ -103,10 +103,10 @@ def check(nx: str, before: dict[str, str], *, names: Collection[str] = (), pids:
     ours: list[str] = []
     for ident in new:
         name, kind, pid = row_fields(after[ident])
-        if kind == "delegated":
-            notes.append(f"identity census: new delegated identity ignored (a claude -p child of some session, never the sandbox's): {after[ident]}")
-        elif name in names or (pid is not None and pid in pids):
+        if name in names or (pid is not None and pid in pids):
             ours.append(ident)
+        elif kind == "delegated":
+            notes.append(f"identity census: new delegated identity ignored (a claude -p child of a session outside the sandbox): {after[ident]}")
         else:
             notes.append(f"identity census: new identity not attributed to the sandbox (the operator's own session started "
                          f"meanwhile?): {after[ident]}")

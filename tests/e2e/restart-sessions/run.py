@@ -464,7 +464,7 @@ REFUSED = 97
 
 
 #: ``nx identity`` verbs that make or change an identity or a seat: refused in the sandbox, which binds none.
-IDENTITY_WRITES = ("create", "promote", "claim", "release", "rename", "purge")
+IDENTITY_WRITES = ("create", "promote", "claim", "release", "rename", "purge", "alive")
 #: ``nx identity work`` verbs that write (``list`` and ``owners`` read, and the restart script's ready check needs ``list``).
 WORK_WRITES = ("register", "done", "forget", "run")
 
@@ -701,6 +701,8 @@ class Sandbox:
                 "NX_SESSION_ID", "NX_T1_SESSION_ID", "NX_T1_SESSION",
                 # a harness started from a delegated child must not hand its identity (token, seat) to the sessions
                 "NX_IDENTITY_TOKEN", "NX_SEAT",
+                # the restart script runs this nx instead of PATH's, which would bypass the sandbox nx shim
+                "NX_RESTART_NX",
                 # the operator's generation root: hooks would resolve nx there, past the nx stand-in
                 "NX_TOOLS_DIR")
         self.env = {k: v for k, v in os.environ.items() if k not in drop}
