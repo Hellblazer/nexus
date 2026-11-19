@@ -45,7 +45,7 @@ from tests._gate_rollup_support import (  # noqa: F401 — _closed_rdr is an aut
     _titles,
 )
 
-pytestmark = pytest.mark.t2_tenant
+pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
 
 # ── the whole-tag match ──────────────────────────────────────────────────────────
@@ -83,22 +83,6 @@ def test_the_beads_option_lists_several_beads(db: T2Database) -> None:
 
 
 # ── the title predicate (nexus-1gdv0.2.3) ────────────────────────────────────────
-
-@pytest.mark.parametrize(("title", "bead", "expected"), [
-    ("review-abc1234-nexus-1-2026-11-10", "nexus-1", True),            # hyphen-joined, as gate titles are
-    ("nexus-1gdv0-gate-critique", "nexus-1gdv0", True),                # at the start of the title
-    ("critique-c218ddc93-nexus-1gdv0.1.3-2026-11-18", "nexus-1gdv0.1.3", True),
-    ("notes on nexus-1.", "nexus-1", True),                            # a sentence period after it
-    ("review-abc1234-nexus-12-2026-11-10", "nexus-1", False),          # nexus-1 is not nexus-12
-    ("review-abc1234-nexus-1gdv0.2.3-2026-11-10", "nexus-1gdv0.2", False),   # a parent is not its child
-    ("review-abc1234-conexus-abc-2026-11-10", "nexus-abc", False),     # nor the tail of another id
-    ("review-abc1234-nexus-1.2-2026-11-10", "nexus-1", False),
-    ("review-abc1234-NEXUS-1-2026-11-10", "nexus-1", False),           # bead ids are lower case: case matters
-    ("review-abc1234-2026-11-10", "nexus-1", False),
-])
-def test_title_names_bead_predicate(title: str, bead: str, expected: bool) -> None:
-    assert gr.title_names_bead(title, bead) is expected
-
 
 def test_title_match_lists_an_older_untagged_record(db: T2Database) -> None:
     old = "review-59e45b852-nexus-rc4pz-2026-11-18"
@@ -356,14 +340,6 @@ def test_a_body_over_the_store_put_cap_is_split_into_titled_parts_and_reads_back
     assert "archived 1" in out
 
 
-def test_split_text_keeps_every_character_within_the_byte_cap() -> None:
-    text = "é" * 9000 + "\n" + "x" * 30000 + "\nshort\n" + "日本語" * 4000
-    parts = gr.split_text_bytes(text, 4096)
-    assert "".join(parts) == text
-    assert all(0 < len(p.encode()) <= 4096 for p in parts)
-    assert gr.split_text_bytes("tiny", 4096) == ["tiny"]
-
-
 def test_a_pointer_over_the_cap_is_split_and_lists_every_record(db: T2Database) -> None:
     names = [_gate(db, f"nexus-many{i:03d}", sha=f"{i:07x}", body=f"finding {i}") for i in range(130)]
     out = _run("--all")
@@ -442,19 +418,3 @@ def test_default_project_is_the_repository_the_command_runs_in(db: T2Database, m
     assert _titles(_pointer().listed) == [name]
 
 
-def test_pointer_titles() -> None:
-    assert gr.pointer_title(209, "3") == POINTER_P3 and gr.pointer_title(7, None) == "gate-records-rdr-007-all"
-
-
-def test_archive_titles_carry_the_project_so_repos_never_collide() -> None:
-    assert gr.archive_title("alpha", "review-abc-x-2026") != gr.archive_title("beta", "review-abc-x-2026")
-
-
-def test_selection_is_pure_over_the_rows_it_is_given() -> None:
-    now = datetime.now(UTC).isoformat()
-    rows = [{"id": 1, "project": REPO, "title": "review-abc1234-nexus-s-2026-11-10", "tags": "kind:gate,bead:nexus-s,rdr:209",
-             "content": "kind: review\nbead: nexus-s\nsha: abc1234\noutcome: justified\ndate: 2026-11-10\n\nx",
-             "timestamp": now, "ttl": None}]
-    sel = gr.select_records(rows, project=REPO, rdr=209, beads=("nexus-s",), phase="3")
-    assert [r["bead"] for r in sel.listed] == ["nexus-s"] and sel.unmapped == []
-    assert json.loads(json.dumps(sel.listed[0]))["sha"] == "abc1234"

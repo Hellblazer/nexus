@@ -46,7 +46,7 @@ from tests._gate_rollup_support import (  # noqa: F401 — _closed_rdr is an aut
     _titles,
 )
 
-pytestmark = pytest.mark.t2_tenant
+pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
 
 # ── Step 2: the loss check (nexus-1gdv0.2.6) ─────────────────────────────────────
@@ -179,72 +179,6 @@ def test_a_rerun_keeps_a_record_the_read_no_longer_lists_because_its_archive_is_
 
 
 # ── Step 2.3 ordering (nexus-1gdv0.2.7) ──────────────────────────────────────────
-
-def _rec(title: str, verdict: str, *, date: str | None, stamp: str = "2026-11-01T00:00:00Z", bead: str = "nexus-ord") -> dict:
-    """A row as get_all returns it: headered when *date* is given (as gate_record writes it), headerless otherwise."""
-    head = f"kind: review\nbead: {bead}\nsha: abc1234\noutcome: {verdict}\ndate: {date}\n\nbody" if date else \
-        f"older record\n- **outcome**: {verdict}\n"
-    return {"id": 1, "project": REPO, "title": title, "tags": f"kind:gate,bead:{bead}", "content": head,
-            "timestamp": stamp, "ttl": None}
-
-
-def _chain(*rows: dict) -> tuple[str, list[str]]:
-    sel = gr.select_records(rows, project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
-    verdict, newest = gt.verdict_chains(sel)["nexus-ord"]
-    return verdict, [e["title"] for e in newest]
-
-
-def test_order_same_day_no_round_the_worse_verdict_wins_the_tiebreak() -> None:
-    a = _rec("review-aaa1111-nexus-ord-2026-11-10", "justified", date="2026-11-10")
-    b = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
-    c = _rec("confirm-ccc3333-nexus-ord-2026-11-10", "partial", date="2026-11-10")
-    assert _chain(a, b)[0] == "not-justified"
-    assert _chain(b, a)[0] == "not-justified"          # the order the rows arrive in decides nothing
-    assert _chain(a, c)[0] == "partial"
-    verdict, newest = _chain(a, b, c)
-    assert verdict == "not-justified" and newest == sorted(newest) and len(newest) == 3
-
-
-def test_order_a_later_round_is_newer_and_a_no_round_record_sorts_before_r1() -> None:
-    r1 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r1", "not-justified", date="2026-11-10")
-    r2 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r2", "justified", date="2026-11-10")
-    plain = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
-    assert _chain(r1, r2) == ("justified", [r2["title"]])
-    assert _chain(plain, r1)[0] == "not-justified" and _chain(plain, r1)[1] == [r1["title"]]
-    r1j = _rec("critique-bbb2222-nexus-ord-2026-11-10-r1", "justified", date="2026-11-10")
-    assert _chain(plain, r1j) == ("justified", [r1j["title"]])
-    r9 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r9", "not-justified", date="2026-11-10")
-    r10 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r10", "justified", date="2026-11-10")
-    assert _chain(r9, r10) == ("justified", [r10["title"]])    # the round is a number: r10 is newer than r9
-
-
-def test_order_the_date_beats_the_round_and_the_round_beats_the_title() -> None:
-    late = _rec("a-nexus-ord-2026-11-12", "justified", date="2026-11-12")
-    early_r5 = _rec("z-nexus-ord-2026-11-09-r5", "not-justified", date="2026-11-09")
-    assert _chain(late, early_r5) == ("justified", [late["title"]])
-
-
-def test_headerless_record_is_dated_from_the_date_in_its_title() -> None:
-    old = _rec("review-aaa1111-nexus-ord-2026-11-12", "justified", date=None, stamp="2026-11-01T00:00:00Z")
-    head = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
-    old["tags"] = ""        # an older record: no tags, matched by its title
-    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
-    assert gt.verdict_chains(sel)["nexus-ord"][0] == "justified"     # 11-12 (title) is newer than 11-10 (header)
-    old["title"] = "review-aaa1111-nexus-ord-2026-11-08"
-    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
-    assert gt.verdict_chains(sel)["nexus-ord"][0] == "not-justified"
-
-
-def test_headerless_record_with_no_date_in_its_title_is_dated_from_its_timestamp() -> None:
-    old = _rec("review-nexus-ord-first-pass", "justified", date=None, stamp="2026-11-14T08:00:00Z")
-    old["tags"] = ""
-    head = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
-    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
-    assert gt.verdict_chains(sel)["nexus-ord"][0] == "justified"     # the timestamp's day, 11-14, is newest
-    old["timestamp"] = "2026-11-05T08:00:00Z"
-    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
-    assert gt.verdict_chains(sel)["nexus-ord"][0] == "not-justified"
-
 
 def test_order_a_terminal_partial_stops_the_run_like_not_justified(db: T2Database) -> None:
     _gate(db, "nexus-tp", kind="review", sha="aaa1111", outcome="justified", date="2026-11-08")
@@ -719,55 +653,11 @@ def test_guard_a_later_dry_run_replaces_the_count(db: T2Database) -> None:
 
 
 # ── the dry run uses the engine's whole expiry rule (nexus-1gdv0.2.14) ───────────
-NOW = datetime(2026, 11, 16, 12, 0, 0, tzinfo=UTC)
-
-
-def _aged(*, days: float = 0, seconds: float = 0, access: int = 0, stamp: str | None = "x") -> dict:
-    when = NOW - timedelta(days=days, seconds=seconds)
-    return {"timestamp": when.strftime("%Y-%m-%dT%H:%M:%SZ") if stamp else None, "access_count": access}
-
-
-def _dry_count(rows: list[dict]) -> int:
-    entries = [{"title": f"t{i}"} for i in range(len(rows))]
-    lines, past = gt.dry_run_lines(entries, {f"t{i}": r for i, r in enumerate(rows)}, NOW)
-    assert lines[-1] == f"would be quarantined by the next expire sweep: {past} of {len(rows)} candidate record(s)"
-    return past
-
-
-def test_dry_run_heat_record_older_than_30_days_but_inside_its_effective_ttl_is_not_counted() -> None:
-    # access_count 3: effective TTL 30 * (1 + ln 4) = 71.6 days, so 40 days old is not past it
-    assert gt.effective_ttl_days(3) == pytest.approx(71.588, abs=0.001)
-    assert _dry_count([_aged(days=40, access=3)]) == 0
-    assert _dry_count([_aged(days=40, access=0)]) == 1                 # the same age with no heat is past 30 days
-    assert _dry_count([_aged(days=72, access=3)]) == 1                 # and past the heat-lengthened TTL at 72
-    assert _dry_count([_aged(days=71, access=3)]) == 0
-
-
-def test_dry_run_boundary_age_equal_to_the_effective_ttl_is_not_counted_and_one_second_more_is() -> None:
-    assert _dry_count([_aged(days=30, access=0)]) == 0                 # exactly 30.0 days: strictly greater is required
-    assert _dry_count([_aged(days=30, seconds=1, access=0)]) == 1
-    assert gt.would_expire(_aged(days=30), now=NOW) is False
-    assert gt.would_expire(_aged(days=30, seconds=1), now=NOW) is True
-
-
-def test_dry_run_boundary_the_age_is_whole_seconds_as_the_engine_truncates_it() -> None:
-    # the engine divides Duration.toSeconds() by 86,400: 30 days and 0.9 s is still 30.0 days
-    later = NOW + timedelta(milliseconds=900)
-    assert gt.would_expire(_aged(days=30), now=later) is False
-    assert gt.would_expire(_aged(days=30), now=later + timedelta(seconds=1)) is True
-
-
-def test_dry_run_a_row_with_no_timestamp_is_not_counted(db: T2Database) -> None:
-    """The engine skips a null timestamp (MemoryRepository.java:695). The import route cannot store one, so the row is
-    a hand-made dict here, and this test checks the claim about the route against the real engine."""
-    assert _dry_count([_aged(days=400, stamp=None), {"timestamp": "", "access_count": 0}]) == 0
+def test_dry_run_the_import_route_cannot_store_a_null_timestamp(db: T2Database) -> None:
+    """The engine skips a null timestamp (MemoryRepository.java:695); the dry run's test of that uses a hand-made row
+    (tests/test_memory_gate_logic.py) because the import route cannot store one, which is checked here."""
     with pytest.raises(Exception, match=r"(?i)timestamp|400|required"):
         db.memory.import_entry(project=REPO, title="null-ts", content="x", timestamp=None)   # type: ignore[arg-type]
-
-
-def test_dry_run_counts_only_what_is_past_across_a_mixed_set() -> None:
-    rows = [_aged(days=10), _aged(days=31), _aged(days=40, access=3), _aged(days=200, access=3), _aged(days=29.99)]
-    assert _dry_count(rows) == 2
 
 
 # ── review round 1 (nexus-1gdv0.2.16) ────────────────────────────────────────────
