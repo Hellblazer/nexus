@@ -404,7 +404,8 @@ def _single_query_match(corpus: str | None, *, default_corpus: bool = True) -> M
 
 def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan_run_result=None,
                      db=None, bindings=None, question: str = "which documents discuss widgets",
-                     dimensions=None, trace: bool = True, plan_match=None, budget_seconds=None, catalog=None):
+                     dimensions=None, trace: bool = True, plan_match=None, budget_seconds=None, catalog=None,
+                     query_error: Exception | None = None):
     """Call ``nx_answer`` with the matcher, the plan runner, T2 and the catalog patched away.
 
     *db* is the T2 stub (a ``MagicMock``) the run records into, for a test that reads the outcome
@@ -417,6 +418,8 @@ def _drive_nx_answer(match: Match, *, scope: str, structured: bool = False, plan
 
     def _query(**kwargs):
         query_calls.append(kwargs)
+        if query_error is not None:
+            raise query_error
         if kwargs.get("structured"):
             return {"ids": ["c1"], "chunk_collections": [ART_RDR_COLLECTION], "chunk_text_hash": ["h"],
                     "distances": [0.1], "collections": [ART_RDR_COLLECTION]}
@@ -493,6 +496,30 @@ def test_single_query_fast_path_records_its_one_search_as_a_free_sql_step() -> N
     assert (step["step_index"], step["operator"], step["source"], step["cost_usd"], step["ok"]) == (
         0, "query", "sql", 0.0, True)
     assert out["cost_usd"] == 0.0 and out["step_count"] == 1
+
+
+def _telemetry_run(db: MagicMock) -> dict:
+    (call,) = db.telemetry.record_nx_answer_run_complete.call_args_list
+    return call.kwargs
+
+
+def test_the_fast_path_telemetry_row_carries_the_same_sql_step_and_cost() -> None:
+    db = MagicMock(plans=MagicMock())
+    out, _ = _drive_nx_answer(_single_query_match("knowledge,code,docs,rdr"), scope="", structured=True, db=db)
+    row = _telemetry_run(db)
+    assert row["cost_usd"] == 0.0 == out["cost_usd"]
+    assert [(s["operator"], s["source"], s["cost_usd"], s["ok"]) for s in row["steps"]] == [("query", "sql", 0.0, True)]
+
+
+def test_a_fast_path_query_that_raises_records_a_failed_sql_step_in_envelope_and_telemetry() -> None:
+    db = MagicMock(plans=MagicMock())
+    out, calls = _drive_nx_answer(_single_query_match("knowledge,code,docs,rdr"), scope="", structured=True, db=db,
+                                  query_error=RuntimeError("t3 down"))
+    assert len(calls) == 1
+    (step,) = out["steps"]
+    assert (step["source"], step["cost_usd"], step["ok"]) == ("sql", 0.0, False) and out["cost_usd"] == 0.0
+    row = _telemetry_run(db)
+    assert row["cost_usd"] == 0.0 and [s["ok"] for s in row["steps"]] == [False]
 
 
 def test_a_single_query_conflict_ran_nothing_and_records_no_step() -> None:

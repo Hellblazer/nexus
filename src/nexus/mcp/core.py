@@ -15464,12 +15464,14 @@ async def nx_answer(
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            # the envelope and the telemetry row carry the same failed step, so neither reads its cost as unknown
+            _failed_steps = [_fast_path_step_record(elapsed_ms, ok=False)]
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_complete(
                         db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=f"Error: {exc}", step_records=[_fast_path_step_record(elapsed_ms, ok=False)],
+                        final_text=f"Error: {exc}", step_records=_failed_steps,
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
@@ -15482,6 +15484,7 @@ async def nx_answer(
                 f"Error in single-step query: {exc}",
                 plan_id=best.plan_id,
                 step_count=1,
+                step_records=_failed_steps,
             )
 
     # ── Step 3: seed link-context ────────────────────────────────────────
