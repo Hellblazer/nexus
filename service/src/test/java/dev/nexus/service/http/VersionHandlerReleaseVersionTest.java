@@ -335,6 +335,14 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_docs_by_meta_supported\":true");
     }
 
+    /** RDR-254: both move routes, one flag. The flag is the client's only probe, so it lands once both routes exist. */
+    @Test
+    void versionAdvertisesTheRdr254MoveRoutes_AsOneFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogMoveCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_move_supported\":true");
+    }
+
     @Test
     void versionAdvertisesTheRdr241Route_CatalogSensitiveLocators_AsItsOwnFlag() {
         var body = new StringBuilder();
