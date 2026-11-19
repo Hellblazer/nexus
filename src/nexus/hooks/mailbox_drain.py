@@ -628,6 +628,17 @@ def _transport_error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+#: RDR-253 Step 5: this session's identity token (see the plugin script's ``_IDENTITY_TOKEN``): sent only on a
+#: request whose subspace is ``mailbox/<identity>``, which the engine fences.
+_IDENTITY_TOKEN = ""
+
+
+def _identity_headers(subspace: object) -> dict[str, str]:
+    if _IDENTITY_TOKEN and isinstance(subspace, str) and subspace.startswith("mailbox/i") and subspace[9:].isdigit():
+        return {"X-Nexus-Identity-Token": _IDENTITY_TOKEN}
+    return {}
+
+
 def _post(base_url: str, token: str, route: str, body: dict[str, Any],
           *, is_local: bool, budget_s: float | None = None) -> dict[str, Any] | None:
     """POST and return the decoded body, or None on a 404. Raises :class:`_Skip`
@@ -653,7 +664,8 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     url = f"{base_url}{route}"
     req = urllib.request.Request(
         url, data=payload, method="POST",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                 **_identity_headers(body.get("subspace"))},
     )
     # Never spend longer than the drain has left: a sequence of calls each
     # just under the per-call cap would otherwise blow the whole budget while
@@ -1346,6 +1358,17 @@ def _drain_all(payload: dict[str, Any], out: _Out) -> None:
     # longer read here at all -- see the module docstring's "WHERE THE
     # FLOOR DOES NOT REACH" section.
     addresses: list[str] = [session_id] if _valid_address(session_id) else []
+    # RDR-253 Step 5, Phase 1: both the session mailbox and mailbox/<identity> (the plugin script does the same).
+    global _IDENTITY_TOKEN
+    if addresses:
+        from nexus.identity.board import binding_for_session  # noqa: PLC0415 -- hook import cost
+
+        try:
+            identity, _IDENTITY_TOKEN = binding_for_session(session_id, config_dir)
+        except Exception:  # noqa: BLE001 -- no identity: the session mailbox alone, as before Step 5
+            identity, _IDENTITY_TOKEN = "", ""
+        if identity and _valid_address(identity):
+            addresses.append(identity)
     if not addresses:
         _log_skip("no address to drain: the payload carried no usable session id")
         return

@@ -60,14 +60,20 @@ def entries_for_identity(entries: Iterable[Mapping[str, Any]], identity: str) ->
 
 
 def identity_for_session(session_id: str, config_dir: Path | None = None) -> str:
-    """The identity a token file binds *session_id* to, or ``""``.
+    """The identity a token file binds *session_id* to, or ``""`` (:func:`binding_for_session`'s first half)."""
+    return binding_for_session(session_id, config_dir)[0]
+
+
+def binding_for_session(session_id: str, config_dir: Path | None = None) -> tuple[str, str]:
+    """``(identity, token)`` a token file binds *session_id* to, or ``("", "")``; *token* is ``""`` when the file
+    holds none (an engine that issues no identity tokens).
 
     A hook knows only its payload's session id. The token files under ``<config>/identity/`` name each one's session
     id and every session id the identity has held (``session_ids``), so a session id from before ``/clear`` still
     finds its seat. When several files match (a stale one beside the live one), the newest by mtime wins.
     """
     if not session_id:
-        return ""
+        return "", ""
     from nexus.identity.token_file import identity_dir, read_token_file, token_files  # noqa: PLC0415 -- hook import cost
 
     if config_dir is None:
@@ -75,7 +81,7 @@ def identity_for_session(session_id: str, config_dir: Path | None = None) -> str
 
         config_dir = _nx_config.nexus_config_dir()
     want = session_id.lower()
-    best: tuple[float, str] | None = None
+    best: tuple[float, str, str] | None = None
     for path in token_files(identity_dir(config_dir)):
         record = read_token_file(path)
         if record is None or not is_identity_id(str(record.identity or "")):
@@ -88,5 +94,5 @@ def identity_for_session(session_id: str, config_dir: Path | None = None) -> str
         except OSError:
             continue
         if best is None or stamp > best[0]:
-            best = (stamp, str(record.identity))
-    return best[1] if best else ""
+            best = (stamp, str(record.identity), record.token or "")
+    return (best[1], best[2]) if best else ("", "")

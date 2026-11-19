@@ -421,6 +421,10 @@ class SubscriptionSet:
     #: session, or None. NOT a mailbox subspace and NOT listed by
     #: :meth:`entries` -- see the class docstring.
     leased_name: str | None = None
+    #: RDR-253 Step 5: this session's identity, or None. While set, ``mailbox/<identity>`` is delivered beside
+    #: ``mailbox/<session_id>`` (Phase 1 dual subscription: a new-client sender addresses the identity, an old one
+    #: the session). Not persisted: it is read from the token file at each load (:func:`load`).
+    identity: str | None = None
     _board: dict[str, str | None] = field(default_factory=dict)
     #: RDR-249 TD3 (S7, nexus-mdbds.11.1): aura-owned board topics, each
     #: mapped to its start position and the names of the auras holding it.
@@ -454,6 +458,18 @@ class SubscriptionSet:
     @property
     def session_mailbox(self) -> str:
         return f"mailbox/{self.session_id}"
+
+    @property
+    def identity_mailbox(self) -> str | None:
+        return f"mailbox/{self.identity}" if self.identity else None
+
+    def set_identity(self, identity: str | None) -> None:
+        """Deliver ``mailbox/<identity>`` (or stop, with None); the waiter re-reads :meth:`entries` on the bump."""
+        identity = identity or None
+        if identity == self.identity:
+            return
+        self.identity = identity
+        self._bump()
 
     # ── Observer (Approach item 6, Technical Design "Waiting") ──────────────
 
@@ -739,6 +755,8 @@ class SubscriptionSet:
         wait on (:meth:`~nexus.mcp.channel.ChannelWaiter._build_specs`),
         so leaving it out here is what stops push delivery for it."""
         out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
+        if self.identity_mailbox:
+            out.append({"subspace": self.identity_mailbox})
         # Copies: a tool thread reads this while the loop can add an aura topic.
         for topic, since in list(self._board.items()):
             entry: dict[str, Any] = {"subspace": topic}
@@ -966,8 +984,21 @@ def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = 
             continue
         obj = SubscriptionSet.from_json(data)
         obj.leased_name = None  # see the docstring: the name is stale on resume
+        obj.identity = _token_identity()
         return obj
-    return SubscriptionSet(session_id=session_id)
+    return SubscriptionSet(session_id=session_id, identity=_token_identity())
+
+
+def _token_identity() -> str | None:
+    """This process's identity from its leased token file (RDR-253 Step 5), or None (no binding, an old engine)."""
+    try:
+        from nexus.identity.token_header import current  # noqa: PLC0415 -- deferred: MCP startup cost
+
+        record = current()
+    except Exception:  # noqa: BLE001 -- no identity: the session mailbox alone, as before Step 5
+        return None
+    identity = str(record.identity) if record is not None else ""
+    return identity if re.fullmatch(r"i[0-9]+", identity) else None
 
 
 def persist(t1: Any, subs: "SubscriptionSet") -> None:

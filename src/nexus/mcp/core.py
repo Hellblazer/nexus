@@ -130,6 +130,8 @@ from nexus.tuple_directory import (
     no_session_id_message,
     resolve_default_from,
     resolve_env_session_id,
+    identity_alias_lookup,
+    resolve_send,
     resolve_send_address,
 )
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): the session's subscription
@@ -9649,8 +9651,11 @@ def mailbox_send(
             else resolve_default_from()
         )
 
-        def _send(db: Any) -> tuple[str, str, str]:
-            address, address_kind = resolve_send_address(to, db.tuples)
+        alias = identity_alias_lookup()
+
+        def _send(db: Any) -> tuple[str, str, str, str]:
+            target = resolve_send(to, db.tuples, alias)
+            address, address_kind = target.address, target.address_kind
             dims: dict[str, str] = {"from": from_id, "address_kind": address_kind}
             if kind:
                 dims["kind"] = kind
@@ -9659,10 +9664,11 @@ def mailbox_send(
             tuple_id = db.tuples.out(
                 f"mailbox/{address}", {"to": address}, dims, body, nonce=str(uuid.uuid4()),
             )
-            return tuple_id, address, address_kind
+            return tuple_id, address, address_kind, target.notice
 
-        tuple_id, address, address_kind = _t2_index_write(_send, op="mailbox_send")
-        return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
+        tuple_id, address, address_kind, notice = _t2_index_write(_send, op="mailbox_send")
+        sent = {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
+        return {**sent, "notice": notice} if notice else sent
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _fail({"error": _mcp_tool_error("mailbox_send", e).removeprefix("Error: ")})
 

@@ -28,6 +28,7 @@ never ends the wait.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -84,6 +85,9 @@ class WaitOutcome:
     own_dropped: int = 0
 
 
+_IDENTITY_MAILBOX = re.compile(r"mailbox/i[0-9]+")
+
+
 def subscriber_for(session_id: str) -> str:
     return f"{SUBSCRIBER_PREFIX}{session_id}"
 
@@ -91,9 +95,10 @@ def subscriber_for(session_id: str) -> str:
 def build_specs(
     session_id: str, board_entries: list[dict[str, Any]], *, waiter_token: str,
 ) -> list[WaitSpec]:
-    """The session mailbox first, then each board topic with its watermark.
-    *board_entries* is :meth:`SubscriptionSet.entries`'s shape; any mailbox
-    entry in it is ignored (the session's own mailbox is always first)."""
+    """The session mailbox first, then the identity mailbox when *board_entries* carries one (RDR-253 Step 5, Phase 1
+    dual subscription), then each board topic with its watermark. *board_entries* is
+    :meth:`SubscriptionSet.entries`'s shape; any other mailbox entry in it is ignored (the session's own mailbox is
+    always first)."""
     from nexus.mcp.channel import DEFAULT_BOARD_START_SKEW_S, _parse_created_at  # noqa: PLC0415 — deferred: loads the MCP package
 
     subscriber = subscriber_for(session_id)
@@ -106,6 +111,9 @@ def build_specs(
     specs = [WaitSpec(subspace=f"mailbox/{session_id}", n=WAIT_ROWS, announce=announce())]
     for entry in board_entries:
         subspace = entry.get("subspace") or ""
+        if _IDENTITY_MAILBOX.fullmatch(subspace) and all(s.subspace != subspace for s in specs):
+            specs.append(WaitSpec(subspace=subspace, n=WAIT_ROWS, announce=announce()))
+            continue
         if not subspace.startswith("board/"):
             continue
         since: tuple[str, str] | None = None
