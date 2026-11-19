@@ -460,6 +460,9 @@ def tuple_wait_cmd(
         click.echo(STOPPED_HINT, err=True)
         label.finish()
         raise SystemExit(1) from e
+    except BaseException:  # Ctrl-C (KeyboardInterrupt) mid-park: end the row, then let it propagate
+        label.finish()
+        raise
     finally:
         if store is not None:
             store.close()

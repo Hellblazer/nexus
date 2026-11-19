@@ -178,6 +178,23 @@ def test_the_two_hundred_row_limit_forgets_finished_work_once_and_retries(box: B
     assert "fresh" in left and not any(f"w{n}" in left for n in range(150)) and "w199" in left, "only done rows went"
 
 
+def test_the_limit_also_forgets_worktree_rows_whose_directory_is_gone(box: Box, tmp_path) -> None:
+    """An agent's isolation worktree registers from the preflight and is removed by the harness; nothing marks it done,
+    so the limit's purge drops a worktree row whose directory no longer exists, and keeps one that still does."""
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    box.engine.put_work(i1, "worktree", str(kept), "running")
+    for n in range(199):
+        box.engine.put_work(i1, "worktree", str(tmp_path / f"gone{n}"), "running")
+    row = work.register(box.engine, i1, "wait", "fresh")
+    assert row.state == "running"
+    left = {k[2] for k in box.engine.work if k[0] == i1}
+    assert left == {str(kept), "fresh"}
+
+
 def test_the_limit_with_nothing_finished_to_forget_is_the_engines_refusal(box: Box) -> None:
     from nexus.identity import work
     from nexus.identity.bind_client import IdentityApiError

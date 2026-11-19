@@ -52,6 +52,15 @@ def test_a_wait_that_fails_is_still_marked_done(monkeypatch: pytest.MonkeyPatch,
     assert labels[-1] == ("wait", "s1", "done")
 
 
+def test_a_wait_stopped_by_ctrl_c_is_still_marked_done(monkeypatch: pytest.MonkeyPatch, labels: list) -> None:
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("nexus.tuple_wait.run_wait", interrupted)
+    _wait()
+    assert labels == [("wait", "s1", "running"), ("wait", "s1", "done")]
+
+
 def test_no_identity_means_no_label_and_the_wait_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.channel_launch._claude_ancestor_argv", lambda: "claude --resume x")
     monkeypatch.setattr(tuple_cmd, "_store", _Store)
