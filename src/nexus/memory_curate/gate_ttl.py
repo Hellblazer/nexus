@@ -331,7 +331,7 @@ def write_ttl(mem: Any, project: str, candidates: list[dict[str, Any]], fresh: d
         except Exception as exc:  # noqa: BLE001 — name the record; the ones already written keep their TTL and a rerun finishes
             raise gr.GateRollupError(
                 f"the TTL write stopped at {row['title']!r}: {type(exc).__name__}: {exc}; "
-                f"{len(sent)} earlier record(s) have the TTL, and a rerun writes the rest") from exc
+                f"{len(sent)} earlier record(s) have the TTL; run --dry-run again, then rerun with its count to write the rest") from exc
         sent[row["title"]] = row
     return sent
 

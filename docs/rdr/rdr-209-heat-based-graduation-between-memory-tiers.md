@@ -863,7 +863,7 @@ pointer reaches the same lookup with less. It stays a recorded alternative.
 
 A pointer write that fails sets no TTL. A loss-check failure sets no TTL and
 names the title or bead. A TTL write that fails part way leaves some records
-with the TTL and some without; a rerun finishes the rest. The silent failure to
+with the TTL and some without; a fresh `--dry-run` and a rerun with its count finish the rest (the guard recounts the remaining candidates, so the earlier count no longer matches). The silent failure to
 guard is a TTL set without a pointer: the pointer is written and read back
 first, in that order, and the test plan forces the pointer write to fail and
 asserts no record gets a TTL. On the counter side, the visible failure is an
