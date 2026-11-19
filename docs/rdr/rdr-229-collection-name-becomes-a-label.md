@@ -815,8 +815,13 @@ The key moves table by table in strangler order:
   The completion check registers it once gate 3 holds on the install, as
   it registers P4.1's drop move (below). Its template is the no-op
   re-stamp, its verification returns the table's null ids, and its
-  `on_complete` drops the seven keys. P3.7's one-row rename waits for its
-  `completed_at`. The queue's key goes with its column at P4.1. Every
+  `on_complete` drops the seven keys and, where `aspect_extraction_queue`
+  still exists, the queue's key too, under the guard the engine already
+  uses for a table that may be gone (`IF to_regclass(...) IS NOT NULL
+  THEN ... DROP CONSTRAINT IF EXISTS`, fk-002:217-223), because P4.1's
+  primary key swap cannot drop `(tenant_id, name)` while a key references
+  it (T2 `229-research-61`). P3.7's one-row rename waits for its
+  `completed_at`. Every
   per-collection index is rebuilt with `WHERE collection_id = <id>` and a
   name hashed from model, tenant and id, so a label change never strands
   one. Readers (engine repositories, SQL functions, client caches) key on
@@ -826,14 +831,16 @@ The key moves table by table in strangler order:
   `collection_id`; a label is still accepted at the route boundary and
   resolved to the id once, by `CollectionRegistry`, which is keyed by id
   with a label index beside it. Responses carry both.
-- **Contract (Phase 4).** The old composites `chunks_collection_fk` and
-  `canary_query_ring_collection_fk`, and five of the six plain name keys,
-  are already gone, dropped before P3.7's one-row rename by the name-key
-  drop move (Switch). The name columns on referencing tables are
-  dropped, and with them the chunks and centroid name primary keys, the
-  three name child keys and `aspect_extraction_queue`'s cascading name key;
-  then the `(tenant_id, name, embedding_model)` UNIQUE, which no key
-  references any more (P4.1). Dropping
+- **Contract (Phase 4).** All eight name keys to the registry, the two
+  composites and the six plain ones, are already gone, dropped before
+  P3.7's one-row rename by the name-key drop move (Switch). The name
+  columns on referencing tables are dropped, and with them the chunks and
+  centroid name primary keys and the three name child keys; then
+  `superseded_by` and the `(tenant_id, name, embedding_model)` UNIQUE, and
+  last the registry's primary key swap. The registry changeset runs only
+  once a check finds no foreign key on the name, and once the name-key
+  drop move has completed, so the drops cannot meet a key that still
+  depends on them (P4.1; T2 `229-research-61`). Dropping
   `superseded_by` drops the label index whose predicate reads it, so P4.1
   re-creates that index on `superseded_by_id` (item 7). Before any of
   that, an engine release retires the Java name path (P4.0): the name
@@ -1769,7 +1776,7 @@ its acceptance is that test green plus the census pin it lowers.
   - P3.3a Foreign-key repoint: the seven registry foreign keys from tables
     that are not partitioned gain an id twin on `collection_id`, `NOT VALID`,
     beside the name key, which P3.3a does not drop (the name-key drop move
-    of P3.7 drops five of them, P4.1 the queue's; item 6, Switch), and
+    of P3.7 drops all seven; item 6, Switch), and
     one validation move per referencing table registered in the same
     changeset (driving table that table, template a re-stamp of rows still
     null, the VALIDATE as its `on_complete`; item 6, Switch). Test: each
@@ -1846,9 +1853,10 @@ its acceptance is that test green plus the census pin it lowers.
   completion check, which includes P3.4's index builds there, and until it
   passes the rename keeps its fourteen-table rewrite (item 6, "Readers during the stamp"). P3.7 also ships the name-key drop move: the
   completion check registers it once gate 3 holds, its `on_complete` drops
-  the seven name foreign keys that refuse a one-row rename, and the
+  the seven name foreign keys that refuse a one-row rename and the queue's
+  key where that table exists, and the
   one-row rename waits for its `completed_at` as well (item 6, Switch; T2
-  `229-research-58`). The rename, like every other `NoteUri.moveTo` caller, rewrites only
+  `229-research-58`, `229-research-61`). The rename, like every other `NoteUri.moveTo` caller, rewrites only
   `nx-note://` URIs that `isNote` classes as notes, never `chroma://`
   residue, the rule P2.10 ships (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
@@ -1922,17 +1930,26 @@ its acceptance is that test green plus the census pin it lowers.
   and reports it in `boot_work`, and serves by the id at the first boot
   after the floor holds.
 - P4.1 After P3.11 and P4.0; its acceptance includes RDR-248's committed fixture
-  and a stated effect on backups taken before P3.1 (item 10). Primary key
-  to `(tenant_id, collection_id)`; drop the three name child keys; then
-  the name columns on referencing tables, which takes the chunks and
-  centroid name primary keys with them, and `aspect_extraction_queue`'s
-  cascading name key where that table still exists; the `(tenant_id, name,
-  embedding_model)` UNIQUE and
-  `superseded_by` (replaced by `superseded_by_id`) (T2 `229-research-53`).
-  The old composites `chunks_collection_fk` and
-  `canary_query_ring_collection_fk`, and five of the six plain name keys,
-  are not P4.1's: P3.7's name-key drop move has dropped them (item 6,
-  Switch; T2 `229-research-58`). UNIQUE `(tenant_id,
+  and a stated effect on backups taken before P3.1 (item 10). Drops first:
+  the three name child keys; then the name columns on referencing tables,
+  which takes the chunks and centroid name primary keys with them; then,
+  in the registry changeset, `superseded_by` (replaced by
+  `superseded_by_id`) and the `(tenant_id, name, embedding_model)` UNIQUE;
+  and last in that changeset, the primary key swap to `(tenant_id,
+  collection_id)` (T2 `229-research-53`). No name key to the registry is
+  P4.1's: P3.7's name-key drop move has dropped all eight, the queue's
+  where that table exists (item 6, Switch; T2 `229-research-58`,
+  `229-research-61`). PostgreSQL refuses to drop "a constraint that
+  something else depends on", such as "a unique or primary key constraint"
+  a foreign key references, without CASCADE (ddl-alter), so the registry
+  changeset carries `onFail="CONTINUE"` preconditions on the
+  `completed_at` of the `catalog_collections` stamp move (P3.1), which is
+  the move that drives that table and so the label RDR-246's rule 3
+  requires for its `DROP COLUMN`, of P3.7's name-key drop move and of
+  P4.1's drop move, and a check that no foreign key references
+  `catalog_collections` but the id keys (inferred, not read: read from
+  `pg_constraint`). It is skipped and retried at each boot until all
+  hold. UNIQUE `(tenant_id,
   collection_id, embedding_model)` stays: the RDR-225 composite depends on
   it, and PostgreSQL drops such a constraint only with CASCADE (item 6; T2
   `229-research-44`). Each drop waits for this install's stamp, swap and
@@ -1949,9 +1966,11 @@ its acceptance is that test green plus the census pin it lowers.
   so the move never exists before the moves it depends on have
   completed, and its verification only checks its own table (T2
   `229-research-52`). On every other table the dropping changeset carries
-  the CONTINUE precondition on that drop move's `completed_at`, so it
-  waits for the same gate. The changeset that swaps the registry's primary key and drops
-  `superseded_by` also re-creates the partial UNIQUE on live labels over
+  CONTINUE preconditions on that table's own stamp move's `completed_at`,
+  the label of a move that drives the table as rule 3 requires (RDR-246
+  lines 986-999), and on that drop move's, so it waits for the same gate
+  (T2 `229-research-61`). The registry changeset, after it drops
+  `superseded_by`, also re-creates the partial UNIQUE on live labels over
   `superseded_by_id IS NULL` (item 7), which holds because the CHECK
   `(superseded_by = '') = (superseded_by_id IS NULL)` keeps that column NULL
   exactly on live rows. Test: a superseded
@@ -1987,7 +2006,10 @@ drop move wait also for P3.4 on that install; the one-row rename waits
 also for the name-key drop move's `completed_at`. P3.5b's SQL readers wait for
 the stamp moves. P4.0's engine serves migration-only until gate 3 and the
 name-key drop move's `completed_at` hold on the install (P4.0), and P4.1
-waits for P4.0 in bead order.
+waits for P4.0 in bead order. On each install P4.1's registry changeset
+waits for the `catalog_collections` stamp move, P3.7's name-key drop move
+and P4.1's drop move to have `completed_at` set, and for no foreign key to
+reference the registry's name (P4.1).
 
 ### Day 2 Operations
 
