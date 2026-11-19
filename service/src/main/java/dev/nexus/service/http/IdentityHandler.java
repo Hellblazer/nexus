@@ -179,7 +179,8 @@ public final class IdentityHandler implements HttpHandler {
         String tokenIdentity = RequestContext.identity();
         if (tokenIdentity == null) {
             throw new IdentityException(403, "identity_token_required",
-                "the data credential may do this only for the identity its own identity token names; send that token");
+                "the data credential may do this only for the identity its own live identity token names; send that token"
+                    + " (an expired token counts as none: the session rebinds on its next start)");
         }
         fence.requireOwner(ex, tenant, owner == null ? tokenIdentity : owner);
         return tokenIdentity;

@@ -4,9 +4,19 @@ package dev.nexus.service;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
+import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_RECORDS;
+import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_TOKENS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -276,6 +286,88 @@ class IdentityDataSelfServiceTest extends IdentityFenceHarness {
     void theTenantCredentialStillRefreshesWithoutAToken() {
         Seat s = bindSeat("tenant-refresh", 268);
         assertThat(seatEvent(s, "refresh").status()).as("the tenant credential is the trust boundary").isEqualTo(200);
+    }
+
+    @Test
+    void aDataRefreshCannotReviveASeatWhoseHolderWasRecordedGone() {
+        Seat s = bindSeat("refresh-lapsed-gone", 271);
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        scope.withTenant(TENANT, ctx -> ctx.update(IDENTITY_RECORDS).set(IDENTITY_RECORDS.STATE, "lapsed")
+            .set(IDENTITY_RECORDS.LAPSED_AT, now).set(IDENTITY_RECORDS.GONE_AT, now)
+            .where(IDENTITY_RECORDS.TENANT_ID.eq(TENANT)).and(IDENTITY_RECORDS.ID.eq(s.id())).execute());
+        Resp r = dataBind(s.token(), s, "refresh", Map.of());
+        assertThat(r.status()).as(r.raw()).isEqualTo(409);
+        assertThat(r.error()).isEqualTo("identity_not_held");
+        assertThat(get(null, "/v1/identity/" + s.id()).text("state")).as("not revived by a stale token").isEqualTo("lapsed");
+    }
+
+    @Test
+    void aDataRefreshOfAnEndedIdentityIsRefused() {
+        Seat e = bindEphemeral(272);
+        assertThat(seatEvent(e, "end").status()).isEqualTo(200);
+        Resp r = dataBind(e.token(), e, "refresh", Map.of());
+        assertThat(r.status()).as(r.raw()).isEqualTo(409);
+        assertThat(r.error()).isEqualTo("identity_not_held");
+    }
+
+    @Test
+    void aDataRefreshWithAnExpiredTokenIsRefusedWithNoGrace() {
+        Seat s = bindSeat("refresh-expired", 273);
+        scope.withTenant(TENANT, ctx -> ctx.update(IDENTITY_TOKENS)
+            .set(IDENTITY_TOKENS.EXPIRES_AT, OffsetDateTime.now(ZoneOffset.UTC).minusMinutes(1))
+            .where(IDENTITY_TOKENS.IDENTITY_ID.eq(s.id())).execute());
+        Resp r = dataBind(s.token(), s, "refresh", Map.of());
+        assertThat(r.status()).as("the bind route ignores an expired token, so the fence sees none: " + r.raw()).isEqualTo(403);
+        assertThat(r.error()).isEqualTo("identity_token_required");
+    }
+
+    @Test
+    void theCapCountsACreatedSeatThatWasLaterBound() {
+        Seat caller = bindEphemeral(274);
+        String firstId = null;
+        for (int i = 0; i < 5; i++) {
+            Resp r = dataSeat(caller.token(), "bound-later-" + i);
+            assertThat(r.status()).isEqualTo(200);
+            if (firstId == null) firstId = r.text("id");
+        }
+        Map<String, Object> start = new LinkedHashMap<>(evidence("sess-bound-" + firstId, 275, null));
+        start.put("event", "start");
+        start.put("expected_generation", 0);
+        assertThat(post(null, "/v1/identity/" + firstId + "/bind", start).status()).isEqualTo(200);
+        assertThat(dataSeat(caller.token(), "bound-later-6").error()).as("counted in every state").isEqualTo("seat_limit");
+    }
+
+    @Test
+    void concurrentCreatesOfOneIdentityCannotPassTheCap() throws Exception {
+        Seat caller = bindEphemeral(276);
+        for (int i = 0; i < 4; i++) {
+            assertThat(dataSeat(caller.token(), "race-pre-" + i).status()).isEqualTo(200);
+        }
+        int racers = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(racers);
+        CountDownLatch go = new CountDownLatch(1);
+        List<Future<Resp>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < racers; i++) {
+                int n = i;
+                results.add(pool.submit(() -> {
+                    go.await();
+                    return dataSeat(caller.token(), "race-" + n);
+                }));
+            }
+            go.countDown();
+            int ok = 0;
+            int limited = 0;
+            for (Future<Resp> f : results) {
+                Resp r = f.get();
+                if (r.status() == 200) ok++;
+                else if ("seat_limit".equals(r.error())) limited++;
+            }
+            assertThat(ok).as("exactly one create takes the fifth place").isEqualTo(1);
+            assertThat(limited).isEqualTo(racers - 1);
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     // ── what stays as it was ─────────────────────────────────────────────────
