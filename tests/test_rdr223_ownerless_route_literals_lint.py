@@ -176,7 +176,19 @@ def test_every_reference_to_an_ownerless_route_is_allowlisted_with_a_reason() ->
         "upsert_chunks* client method in code. A test that needs an orphan or a chunk ahead of its "
         "owner calls tests/_chunk_seed.py::seed_chunks_direct (tests/AGENTS.md). Only a file that "
         f"stubs the transport, writes owned chashes, or is about the route belongs in _ALLOWED: {offenders}"
+        + "\nIf one of those applies, the _ALLOWED entry is (a reason over 20 characters):\n"
+        + _allowed_entry_lines(offenders)
     )
+
+
+def _allowed_entry_lines(paths: list[str]) -> str:
+    return "\n".join(f'    "{p}": "<stubs the transport | writes owned chashes | is about the route: why>",' for p in paths)
+
+
+def test_the_failure_gives_the_allowed_line_to_paste() -> None:
+    """Suite audit item 9 (2026-11-19): 6 develop reds in two weeks; the check is unchanged."""
+    assert _allowed_entry_lines(["tests/x.py"]) == (
+        '    "tests/x.py": "<stubs the transport | writes owned chashes | is about the route: why>",')
 
 
 def test_the_allowlist_has_no_stale_entries_and_every_reason_is_real() -> None:
