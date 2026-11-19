@@ -970,7 +970,10 @@ not of the minted form (item 8) unless the engine minted it, so a user
 cannot claim a label that a later mint would produce. The rule may drop the
 conformant shape only because, after P2.9, no site in the widened routing
 census (item 4, P1.1) routes by the label's prefix (item 12). P3.6 waits
-for it.
+for it. Whether the alphabet excludes `/` is still open (Contradiction
+Check), and no audit yet covers where a label meets a file path. P3.6's
+tests exercise one label with a space, `%`, `:` and a non-ASCII character
+on Windows (Cross-Cutting, Windows).
 
 In the registry, a rename becomes `UPDATE catalog_collections SET name =
 <new>` on one row; the note-URI and aspect-task rewrites below still touch
@@ -1315,14 +1318,18 @@ every script and note URI that names one.
 - [ ] Critical Assumption 5 measured (P3.2) before P3.1's changeset is
   final, and so before the Phase 3 switch changesets: it sets each move's
   `chunk_size`, `sleep_ms` and `statement_timeout_ms`.
-- [ ] RDR-246's data-move mechanism active everywhere Phase 3 runs:
+- [ ] RDR-246's data-move mechanism active on the cloud before Phase 3
+  runs there:
   nexus-f3yqd.2 ("Data moves run as background jobs via dml_utils, never at
   boot") is in progress, with nexus-f3yqd.2.23 ("Phase 2 activation, waiting
   on Sam's go: cloud pg_background install and the first registered move")
   open (T2 `229-research-32`). It gates the first cloud run of P3.1's move,
   not P3.1's registration, so P3.1 can be the first registered move that
   .2.23 waits for. A Phase 3 cut can still reach an install whose moves are
-  blocked. There its readers stay on names (item 6, "A blocked move").
+  blocked. There its readers stay on names (item 6, "A blocked move"). A
+  BYO or `--no-pg-bundle` PostgreSQL "gets it from its DBA" (RDR-246 lines
+  801-802); until then that install is such a case (Cross-Cutting,
+  Deployment model).
 
 ### Minimum Viable Validation
 
@@ -1504,7 +1511,9 @@ its acceptance is that test green plus the census pin it lowers.
   `validate_collection_name` becomes the label rule (item 7). Test: a
   100-character label and a non-conformant label are accepted, a control
   character is refused, a second live row with one label is refused, and a
-  user label of the minted form (`c` followed by digits) is refused.
+  user label of the minted form (`c` followed by digits) is refused; on
+  Windows, a label holding a space, `%`, `:` and a non-ASCII character is
+  registered, listed, searched and renamed (Cross-Cutting, Windows).
   Label reuse after supersession waits for P4.1. The "second live row
   with one label is refused" test stays in the suite through P4.1.
 - P3.7 After P3.4 and P3.5: rename becomes a one-row registry update plus the
@@ -1797,6 +1806,25 @@ The history tables' nullable `collection_id` (item 6) names no consumer.
   builds in the PCI reconciler's pattern, each visible in `boot_work` and
   resumable (item 6). Whether the swap's `on_complete` needs a maintenance
   window is unverified until P3.2 times it (Critical Assumption 5).
+- **BYO or `--no-pg-bundle` local PostgreSQL**: such an install gets
+  pg_background "from its DBA ... Until the step has run, moves report
+  `blocked:`" (RDR-246 lines 801-805), and nx doctor shows a red row for
+  each (lines 891-892). Per bead: P3.1's changeset still applies (columns,
+  `NOT VALID` CHECKs, move registration, the dual write), but every move
+  stays blocked (the stamp, P3.3a's and P3.3c's validations and the swap).
+  P3.5's readers stay on names, P3.4 builds no index on the id, and P3.7's
+  rename keeps its fourteen-table rewrite. P4.1's drops never apply,
+  because each waits for the stamp's `completed_at` (item 6, "A blocked
+  move"). Inferred, not read: P3.3b's pass is an engine pass, not a move,
+  so it still builds; P3.6 and P3.8 touch only the registry and still
+  apply. T2 `229-research-47`.
+- **Windows**: RDR-246 verified pg_background on the Windows x64 bundle:
+  "built for Linux x86_64 and arm64 (manylinux_2_28), macOS arm64 and
+  Windows x64. On each, a relocated bundle ran `CREATE EXTENSION` and a
+  background worker" (RDR-246 lines 225-227). So a bundled Windows install
+  runs the moves. Where a label meets a file path is not audited yet, and
+  the label alphabet is open (Contradiction Check). P3.6's tests exercise on Windows one
+  label holding a space, `%`, `:` and a non-ASCII character.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
   Each Phase 3 step up to P3.6 leaves the name path working. From P3.7 a
