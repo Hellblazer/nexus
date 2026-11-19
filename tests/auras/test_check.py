@@ -338,3 +338,122 @@ def test_every_entry_kind_is_an_auracheck_not_a_raise(shipped: Path) -> None:
     ]
     [c] = check_auras(entries, cwd=None, templates=[BOARD])
     assert isinstance(c, AuraCheck) and not c.ok
+
+
+# -- RDR-252 Step 4 part A (nexus-igea9.7): self.identity, the warning level and the serving-group check ---------------
+
+
+def test_self_identity_is_accepted_for_a_declared_string_argument() -> None:
+    aura = _aura(minimal(extra='\n[args]\nme = "self.identity"\n'))
+    assert check_arguments(aura, _header("me:string")) == []
+
+
+@pytest.mark.parametrize("typ", ["integer", "number", "boolean"])
+def test_self_identity_is_refused_for_an_argument_that_is_not_a_string(typ: str) -> None:
+    aura = _aura(minimal(extra='\n[args]\nme = "self.identity"\n'))
+    got = check_arguments(aura, _header(f"me:{typ}"))
+    assert _keys(got) == {("arguments", "args.me")}
+    assert "string" in got[0].detail
+
+
+def test_self_identity_is_accepted_for_an_optional_string_and_refused_for_an_undeclared_name() -> None:
+    aura = _aura(minimal(extra='\n[args]\nme = "self.identity"\n'))
+    assert check_arguments(aura, _header("me:string?")) == []
+    assert _keys(check_arguments(aura, _header("other:string?"))) == {("arguments", "args.me")}
+
+
+def test_the_dictionary_check_does_not_look_for_self_identity_among_the_dims() -> None:
+    aura = _aura(minimal(extra='\n[args]\nme = "self.identity"\n').replace("board/topic", "board/ci/x--done"))
+    findings, skipped = check_dictionary(aura, [BOARD_CI])
+    assert findings == [] and skipped == []
+
+
+OWNER = "board/ci/nexus-develop--owner"
+
+
+def _owner_aura(*, group: str | None = "push-train", subspace: str = OWNER):
+    text = minimal().replace('subspace = "board/topic"', f'subspace = "{subspace}"')
+    if group is not None:
+        text += f'\n[load]\ngroup = "{group}"\n'
+    return _aura(text)
+
+
+def _record(name: str = "push-train", serves=("nexus-develop",), **kw):
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+
+    return GroupRecord(name, serves=tuple(serves), **kw)
+
+
+def _serving(aura, reader, now=None):
+    from nexus.auras.check import check_serving_group  # noqa: PLC0415
+
+    return check_serving_group(aura, reader, now=now)
+
+
+def test_the_serving_group_named_in_load_raises_no_warning() -> None:
+    assert _serving(_owner_aura(), lambda _n: _record()) == ([], [])
+
+
+def test_a_load_group_that_does_not_serve_the_triggers_topic_is_a_warning() -> None:
+    warnings, skipped = _serving(_owner_aura(group="review-pair"), lambda n: _record(n, serves=("other",)))
+    assert skipped == []
+    assert [(w.check, w.key) for w in warnings] == [("serving_group", "load.group")]
+    assert "nexus-develop" in warnings[0].detail and "review-pair" in warnings[0].detail
+
+
+def test_an_owner_aura_with_no_load_group_is_a_warning() -> None:
+    warnings, skipped = _serving(_owner_aura(group=None), lambda _n: _record())
+    assert skipped == [] and [(w.check, w.key) for w in warnings] == [("serving_group", "load")]
+
+
+def test_a_group_with_no_record_is_a_warning() -> None:
+    warnings, skipped = _serving(_owner_aura(), lambda _n: None)
+    assert skipped == [] and [w.key for w in warnings] == ["load.group"]
+    assert "no record" in warnings[0].detail
+
+
+def test_a_disbanded_group_does_not_serve() -> None:
+    warnings, _ = _serving(_owner_aura(), lambda _n: _record(ended_at="2026-11-18T10:00:00Z"))
+    assert [w.key for w in warnings] == ["load.group"] and "disbanded" in warnings[0].detail
+
+
+def test_an_aura_not_triggered_on_an_owner_subspace_is_not_checked_at_all() -> None:
+    reads: list[str] = []
+
+    def reader(name):
+        reads.append(name)
+        return None
+
+    for subspace in ("board/ci/nexus-develop--done", "board/topic", "board/ci/nexus-develop--push"):
+        assert _serving(_owner_aura(group="whatever", subspace=subspace), reader) == ([], [])
+    assert _serving(_owner_aura(group=None, subspace="board/topic"), reader) == ([], [])
+    assert reads == []
+
+
+def test_a_group_that_cannot_be_read_is_skipped_by_name_and_is_not_a_warning() -> None:
+    from nexus.auras.load_gate import GroupUnreadable  # noqa: PLC0415
+
+    def reader(_name):
+        raise GroupUnreadable("the engine is down")
+
+    warnings, skipped = _serving(_owner_aura(), reader)
+    assert warnings == []
+    assert [(s.check, "engine is down" in s.reason) for s in skipped] == [("serving_group", True)]
+
+
+def test_no_reader_is_a_skip_for_an_owner_aura_that_names_a_group() -> None:
+    warnings, skipped = _serving(_owner_aura(), None)
+    assert warnings == [] and [s.check for s in skipped] == ["serving_group"]
+
+
+def test_check_auras_carries_warnings_and_skips_and_a_warning_is_not_a_refusal(shipped: Path) -> None:
+    _proc(shipped, "some_proc", "none")
+    (shipped / "mine.aura.toml").write_text(
+        minimal("mine").replace('subspace = "board/topic"', f'subspace = "{OWNER}"') + '\n[load]\ngroup = "elsewhere"\n',
+        encoding="utf-8",
+    )
+    entries = enumerate_auras(cwd=None)
+    [warned] = check_auras(entries, cwd=None, templates=None, read_group=lambda n: _record(n, serves=("other",)))
+    assert warned.ok and [w.check for w in warned.warnings] == ["serving_group"]
+    [skipped] = check_auras(entries, cwd=None, templates=None, read_group=None)
+    assert skipped.ok and skipped.warnings == () and "serving_group" in {s.check for s in skipped.skipped}

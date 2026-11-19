@@ -11,17 +11,28 @@ the session has the session's claude in its ancestor chain too, but its own clau
 under its own pid and session id (observed 2026-11-15, with kind ``interactive``), is nearer. When the chain cannot be read up to a registered process, it loads none and says
 so. Each loaded aura holds its trigger topic as an aura-owned subscription. An aura past ``MAX_BOARD_TOPICS``, or
 one whose ``display.threads`` value another loaded aura already writes, is refused by name.
+
+An aura whose file carries ``[load] group = "<name>"`` (RDR-252) loads only when the session's identity is a member
+of that group and the group is live (:mod:`nexus.auras.load_gate`). The identity, the memberships (one read) and each
+named group's record (one read per group) are injected, so the stage is tested without an engine. A server that
+started unbound, or whose reads fail, loads no group-gated aura and says why; an ungated aura is not affected. Every
+decision is recorded (:attr:`AuraLoader.decisions`) and handed to the state-file writer (``state_sink``), which
+``nx aura list`` reads (:mod:`nexus.auras.loaded_state`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import dataclasses
+from collections.abc import Callable, Iterable, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import structlog
 
 from nexus.auras.aura import Aura
+from nexus.auras.load_gate import GroupReader, default_group_reader, group_is_live
+from nexus.auras.loaded_state import AuraState, LoadedState
 from nexus.db.t2.http_tuple_store import SchemaViolationError
 
 _log = structlog.get_logger(__name__)
@@ -34,6 +45,12 @@ class AuraLoader:
     returns the registry's ``(name, pid)`` for the session id, or ``None``; *registered_owner* returns the nearest
     process at or above this server that has a registry entry, or ``None`` when the walk up cannot reach one;
     *make_runtime* builds the evaluator for the loaded auras and *attach* hands it to the waiter.
+
+    RDR-252: *identity* returns the session's bound identity id, or ``None`` when it is unbound; *memberships*
+    returns the names of the groups that identity belongs to (one call per load); *read_group* returns one group's
+    record, ``None`` for no record, or raises (one call per group a loading aura names); *now* is the clock for a
+    group's ``ends``; *state_sink* receives ``(claude pid, LoadedState)`` after each decision and after an identity
+    change (:meth:`note_identity`). Each failing read is a reason, never an exception out of the loader.
     """
 
     def __init__(
@@ -47,6 +64,11 @@ class AuraLoader:
         registered_owner: Callable[[], int | None],
         make_runtime: Callable[[list[Aura]], Any],
         attach: Callable[[Any], None],
+        identity: Callable[[], str | None] | None = None,
+        memberships: Callable[[str], Iterable[str]] | None = None,
+        read_group: GroupReader | None = None,
+        now: Callable[[], datetime] | None = None,
+        state_sink: Callable[[int, LoadedState], None] | None = None,
     ) -> None:
         self.session_id = session_id
         self.subs = subs
@@ -56,6 +78,17 @@ class AuraLoader:
         self._owner = registered_owner
         self._make_runtime = make_runtime
         self._attach = attach
+        self._identity = identity if identity is not None else (lambda: None)
+        self._memberships = memberships
+        self._read_group = read_group
+        self._now = now if now is not None else (lambda: datetime.now(timezone.utc))
+        self._state_sink = state_sink
+        #: What each turned-on aura's load came to, by name: loaded or not, why, and its ``[load]`` group.
+        self.decisions: dict[str, AuraState] = {}
+        #: The identity the load was evaluated for (``None`` when the server was unbound).
+        self.loaded_identity: str | None = None
+        self._state: LoadedState | None = None
+        self._state_pid: int | None = None
         #: True once the load decision is final: auras loaded, none turned on, or refused for good.
         self.loaded = False
         self._miss_logged = False
@@ -80,6 +113,12 @@ class AuraLoader:
             self.loaded = True
             self.subs.release_auras()
             _log.warning("auras_load_failed", session_id=self.session_id, error=str(exc))
+            if self._state is not None:
+                self.decisions = {
+                    name: AuraState(False, "load_failed", d.group) if d.loaded else d for name, d in self.decisions.items()
+                }
+                self._state = dataclasses.replace(self._state, auras=dict(self.decisions))
+                self._emit_state()
 
     def _load(self) -> None:
         # The on/off filter first: every aura ships off, so most sessions stop here, before any process walk.
@@ -100,27 +139,121 @@ class AuraLoader:
         if owner != pid:
             self._not_loaded("not_this_sessions_process", entry_pid=pid, owner_pid=owner)
             return
+        identity = self._identity_or_none()
+        self.loaded_identity = identity
+        gate = self._gate(auras, identity)
         accepted: list[Aura] = []
         blocks: dict[str, str] = {}
         for aura in auras:
+            verdict = gate.get(aura.name)
+            if verdict is not None and not verdict.loaded:
+                self.decisions[aura.name] = verdict
+                _log.info("aura_not_loaded", aura=aura.name, reason=verdict.reason, group=verdict.group)
+                continue
             if aura.threads in blocks:
                 _log.warning(
                     "aura_refused", aura=aura.name,
                     reason=f"display.threads {aura.threads!r} is already written by aura {blocks[aura.threads]!r}",
                 )
+                self.decisions[aura.name] = AuraState(False, "refused_threads", aura.load_group)
                 continue
             try:
                 self.subs.subscribe_aura(aura.name, aura.subspace)
             except SchemaViolationError as exc:
                 _log.warning("aura_refused", aura=aura.name, subspace=aura.subspace, reason=str(exc))
+                self.decisions[aura.name] = AuraState(False, "refused_subscription", aura.load_group)
                 continue
             blocks[aura.threads] = aura.name
             accepted.append(aura)
+            self.decisions[aura.name] = AuraState(True, "loaded", aura.load_group)
+        self._publish_state(pid, identity)
         if not accepted:
             self._not_loaded("none_accepted")
             return
         self._attach(self._make_runtime(accepted))
         _log.info("auras_loaded", session_id=self.session_id, auras=[a.name for a in accepted])
+
+    # -- RDR-252: the group gate and the state file -------------------------------------------------------------------
+
+    def _identity_or_none(self) -> str | None:
+        try:
+            return self._identity()
+        except Exception as exc:  # noqa: BLE001 -- an identity that cannot be read is an unbound server
+            _log.warning("auras_identity_unreadable", session_id=self.session_id, error=str(exc))
+            return None
+
+    def _gate(self, auras: Sequence[Aura], identity: str | None) -> dict[str, AuraState]:
+        """The verdict of each group-gated aura in *auras*, by name: one membership read, then one group read per
+        distinct group a not-yet-excluded aura names. An ungated aura has no entry and reads nothing."""
+        gated = [a for a in auras if a.load_group is not None]
+        out: dict[str, AuraState] = {}
+        if not gated:
+            return out
+
+        def refuse(aura: Aura, reason: str) -> None:
+            out[aura.name] = AuraState(False, reason, aura.load_group)
+
+        if identity is None:
+            for aura in gated:
+                refuse(aura, "unbound")
+            return out
+        member_of: set[str] | None = None
+        if self._memberships is not None:
+            try:
+                member_of = set(self._memberships(identity))
+            except Exception as exc:  # noqa: BLE001 -- GroupUnreadable, an engine error or a bug: loads nothing gated
+                _log.warning("auras_memberships_unreadable", session_id=self.session_id, error=str(exc))
+        if member_of is None:
+            for aura in gated:
+                refuse(aura, "memberships_unreadable")
+            return out
+        records: dict[str, AuraState] = {}
+        for aura in gated:
+            group = aura.load_group
+            assert group is not None
+            if group not in member_of:
+                refuse(aura, "not_a_member")
+                continue
+            if group not in records:
+                records[group] = self._group_verdict(group)
+            out[aura.name] = records[group]
+        return out
+
+    def _group_verdict(self, group: str) -> AuraState:
+        if self._read_group is None:
+            return AuraState(False, "group_unreadable", group)
+        try:
+            record = self._read_group(group)
+        except Exception as exc:  # noqa: BLE001 -- GroupUnreadable, an engine error or a bug
+            _log.warning("auras_group_unreadable", session_id=self.session_id, group=group, error=str(exc))
+            return AuraState(False, "group_unreadable", group)
+        if record is None:
+            return AuraState(False, "no_group_record", group)
+        if not group_is_live(record, self._now()):
+            return AuraState(False, "group_disbanded", group)
+        return AuraState(True, "loaded", group)
+
+    def _publish_state(self, pid: int, identity: str | None) -> None:
+        self._state_pid = pid
+        self._state = LoadedState(identity=identity, loaded_identity=identity, auras=dict(self.decisions))
+        self._emit_state()
+
+    def _emit_state(self) -> None:
+        if self._state_sink is None or self._state is None or self._state_pid is None:
+            return
+        try:
+            self._state_sink(self._state_pid, self._state)
+        except Exception as exc:  # noqa: BLE001 -- the state file is a convenience for nx aura list
+            _log.warning("auras_state_write_failed", session_id=self.session_id, error=str(exc))
+
+    def note_identity(self, identity: str | None) -> None:
+        """The server's heartbeat saw its identity change: rewrite the state file with the new ``identity``. The loaded
+        set and ``loaded_identity`` stay the ones the auras were built for, so ``nx aura list`` can report the
+        mismatch until the server reconnects. A no-op before a load has recorded anything. Never raises."""
+        if self._state is None or self._state.identity == identity:
+            return
+        self._state = dataclasses.replace(self._state, identity=identity)
+        self._emit_state()
 
 
 def _discover(cwd: Path) -> tuple[list[Aura], Path]:
@@ -215,14 +348,19 @@ def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cw
         if not sent:
             raise RuntimeError("the channel did not take the notice now: held until the gate opens, or no stream")
 
+    loader_cell: list[AuraLoader] = []
+
     def make_runtime(auras: list[Aura]) -> AuraRuntime:
         read, put = t2_threads_io(store_ctx)
-        return AuraRuntime(auras, writer=ThreadsBlockWriter(session_id, read_entries=read, put=put), notify=notify)
+        return AuraRuntime(
+            auras, writer=ThreadsBlockWriter(session_id, read_entries=read, put=put), notify=notify,
+            identity=loader_cell[0].loaded_identity if loader_cell else None,
+        )
 
     def attach(runtime: AuraRuntime) -> None:
         waiter.aura_sink = runtime.offer
 
-    return AuraLoader(
+    loader = AuraLoader(
         session_id, subs,
         discover=discover,
         is_on=lambda name: is_enabled(name, repo_root=top[0]),
@@ -230,7 +368,83 @@ def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cw
         registered_owner=lambda: registered_owner(os.getpid(), _claude_sessions_dir()),
         make_runtime=make_runtime,
         attach=attach,
+        identity=bound_identity,
+        memberships=read_memberships,
+        read_group=default_group_reader(),
+        state_sink=state_writer(session_id),
     )
+    loader_cell.append(loader)
+    _follow_identity(loader, loop)
+    return loader
+
+
+def bound_identity() -> str | None:
+    """The session's bound identity id from this process's token file, or ``None`` when it holds no usable token
+    (an unbound server, or a Desktop server that did not make the bind itself from the pending file)."""
+    from nexus.identity import token_header  # noqa: PLC0415 -- deferred: the identity package is a leaf
+
+    record = token_header.current()
+    return record.identity if record is not None else None
+
+
+def read_memberships(identity: str) -> list[str]:
+    """The names of the groups *identity* belongs to, by one read of RDR-253's membership route. Raises
+    :class:`~nexus.auras.load_gate.GroupUnreadable` when the engine cannot answer."""
+    from nexus.auras.load_gate import GroupUnreadable  # noqa: PLC0415
+    from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError  # noqa: PLC0415
+
+    client = None
+    try:
+        client = IdentityClient.from_config()
+        return [r["group"] for r in client.memberships(identity) if isinstance(r.get("group"), str)]
+    except (IdentityApiError, IdentityUnavailableError) as exc:
+        raise GroupUnreadable(f"{type(exc).__name__}: {exc}") from exc
+    finally:
+        if client is not None:
+            client.close()
+
+
+def state_writer(session_id: str) -> Callable[[int, LoadedState], None]:
+    """The ``state_sink`` of the real loader: it names the holder (the Claude process the registry file records),
+    writes ``<config>/auras/loaded-<claude pid>.<startedAt>.json``, and removes it when the server exits."""
+    import atexit  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    from nexus import config as _config  # noqa: PLC0415 -- resolved at call time, so a redirected config dir is honoured
+    from nexus.auras.loaded_state import remove_own, state_dir, state_path, write_state  # noqa: PLC0415
+    from nexus.identity.holder import read_registry_entry, this_host  # noqa: PLC0415
+
+    registered: set[Path] = set()
+
+    def write(pid: int, state: LoadedState) -> None:
+        entry = read_registry_entry(pid)
+        if entry is None or entry.started_at is None:
+            _log.info("auras_state_not_written", session_id=session_id, reason="no registry file for the claude process")
+            return
+        path = state_path(state_dir(_config.nexus_config_dir()), pid, entry.started_at)
+        write_state(path, dataclasses.replace(
+            state, host=this_host(), pid=pid, started_at=entry.started_at, proc_start=entry.proc_start,
+            server_pid=os.getpid(), session_id=session_id,
+        ))
+        if path not in registered:
+            registered.add(path)
+            atexit.register(remove_own, path, server_pid=os.getpid())
+
+    return write
+
+
+def _follow_identity(loader: AuraLoader, loop: Any) -> None:
+    """Rewrite the state file when the identity lease adopts another identity (RDR-252: "on each identity change the
+    heartbeat sees"). A server with no lease (one started by hand) has nothing to follow."""
+    from nexus.mcp import identity_lease  # noqa: PLC0415 -- deferred: the MCP server's lease
+
+    def changed(identity: str) -> None:
+        try:
+            loop.call_soon_threadsafe(loader.note_identity, identity)
+        except RuntimeError:  # the loop is closed: the waiter is gone
+            pass
+
+    identity_lease.add_change_listener(changed)
 
 
 #: Seconds a worker waits for the waiter's loop to take a channel notice: above the send's own gate bound

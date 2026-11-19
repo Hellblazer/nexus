@@ -15,6 +15,11 @@ need more than the file:
   every field of ``trigger.match``, ``clear.match`` and each ``dims.<f>`` source is a dimension
   of it; a ``body.<f>`` source is checked against the template's ``doc.body`` where it serves one.
 
+* ``serving_group`` (a warning, RDR-252; needs a group reader): an aura triggered on a ``board/ci/<base>--owner``
+  subspace should be loaded only in the group that serves ``<base>``, so a missing ``[load]`` table, a ``[load]``
+  group with no record, a disbanded one, or one whose ``serves`` lacks ``<base>`` is warned about. A warning does
+  not refuse the file. Any other aura is not checked here.
+
 A check that cannot run is :class:`Skipped` by name, with its reason, and never counts as passed.
 
 The ``[clear]`` rule. A post meets a match when it carries every pair. A post meets both
@@ -25,13 +30,16 @@ on ``outcome``.
 """
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from nexus.auras.aura import Aura, AuraError
+from nexus.auras.load_gate import GroupReader, GroupUnreadable, group_is_live
 from nexus.auras.loader import AuraEntry
 from nexus.lua_runtime import library
 from nexus.lua_runtime.errors import ScriptError
@@ -54,6 +62,15 @@ class Finding:
 
 
 @dataclass(frozen=True)
+class CheckWarning:
+    """A finding that does not refuse the file: the check that made it, the dotted key at fault, and why."""
+
+    check: str
+    key: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class Skipped:
     """A check that did not run, by name, with the reason. Never a pass."""
 
@@ -69,6 +86,7 @@ class AuraCheck:
     root: str
     findings: tuple[Finding, ...]
     skipped: tuple[Skipped, ...]
+    warnings: tuple[CheckWarning, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -91,6 +109,11 @@ def check_arguments(aura: Aura, header: Header) -> list[Finding]:
         Finding("arguments", f"args.{name}", f"the procedure {aura.procedure!r} declares no argument {name!r}")
         for name, _ in aura.args
         if name not in declared
+    ]
+    out += [
+        Finding("arguments", f"args.{name}", f"self.{src.value} fills a string, and {name!r} is declared {declared[name].type}")
+        for name, src in aura.args
+        if src.kind == "self" and name in declared and declared[name].type != "string"
     ]
     return out
 
@@ -159,6 +182,52 @@ def check_dictionary(aura: Aura, templates: Sequence[dict[str, Any]]) -> tuple[l
     return findings, skipped
 
 
+#: ``board/ci/<base>--owner``: the subspace the stamper posts owner rows on (RDR-252).
+_OWNER_RE = re.compile(r"board/ci/(?P<base>.+)--owner")
+
+
+def check_serving_group(
+    aura: Aura, read_group: GroupReader | None, *, now: datetime | None = None
+) -> tuple[list[CheckWarning], list[Skipped]]:
+    """The serving-group warning for an aura triggered on ``board/ci/<base>--owner`` (module docstring).
+
+    No other aura is checked and no read is made for it. With no reader, or a read that raises
+    :class:`~nexus.auras.load_gate.GroupUnreadable`, the check is :class:`Skipped` by name and raises no warning.
+    An aura with no ``[load]`` group needs no read: it loads in every session, which is the warning."""
+    m = _OWNER_RE.fullmatch(aura.subspace)
+    if m is None:
+        return [], []
+    base = m["base"]
+    if aura.load_group is None:
+        return [
+            CheckWarning(
+                "serving_group", "load",
+                f"{aura.subspace} carries owner rows for {base!r} and the aura has no [load] group, so it loads in every session",
+            )
+        ], []
+    if read_group is None:
+        return [], [Skipped("serving_group", "no group reader is available, so the serving group is unchecked")]
+    try:
+        record = read_group(aura.load_group)
+    except GroupUnreadable as exc:
+        return [], [Skipped("serving_group", f"the group {aura.load_group!r} could not be read: {exc}")]
+    moment = now if now is not None else datetime.now(timezone.utc)
+    key = "load.group"
+    if record is None:
+        return [CheckWarning("serving_group", key, f"the group {aura.load_group!r} has no record, so it serves nothing")], []
+    if not group_is_live(record, moment):
+        return [CheckWarning("serving_group", key, f"the group {aura.load_group!r} is disbanded, so it serves nothing")], []
+    if base not in record.serves:
+        return [
+            CheckWarning(
+                "serving_group", key,
+                f"the group {aura.load_group!r} does not serve {base!r} (it serves {sorted(record.serves)!r}), "
+                f"so this aura would load in a group that never sees its rows",
+            )
+        ], []
+    return [], []
+
+
 def _check_procedure(
     aura: Aura, cwd: Path | None, probe: library.ProbeArg
 ) -> tuple[list[Finding], Header | None]:
@@ -197,6 +266,8 @@ def check_auras(
     unavailable: str = NO_REGISTRY,
     only: str | None = None,
     probe: library.ProbeArg = library.UNPROBED,
+    read_group: GroupReader | None = None,
+    now: datetime | None = None,
 ) -> list[AuraCheck]:
     """Check *entries* (from :func:`~nexus.auras.enumerate_auras`), or only the one named *only*.
 
@@ -205,7 +276,8 @@ def check_auras(
     An empty list is skipped too: a registry that lists no template cannot vouch for a field.
     The ``threads`` check always looks across every entry, so a filtered run still sees the
     aura that shares its block. A :class:`~nexus.lua_runtime.header.RepoProbeError` from the
-    library propagates.
+    library propagates. *read_group* reads a group's record for the serving-group warning (:func:`check_serving_group`);
+    with ``None`` that check is skipped for an aura that needs it.
     """
     if templates is not None and not templates:
         templates, unavailable = None, "the registry lists no templates"
@@ -216,6 +288,7 @@ def check_auras(
             continue
         findings: list[Finding] = []
         skipped: list[Skipped] = []
+        warnings: list[CheckWarning] = []
         result = e.result
         if isinstance(result, LibraryError):
             findings.append(Finding("library", "(file)", f"{result.reason}: {result.detail}"))
@@ -227,6 +300,9 @@ def check_auras(
             if header is not None:
                 findings += check_arguments(result, header)
             findings += check_clear(result)
+            serving_warnings, serving_skipped = check_serving_group(result, read_group, now=now)
+            warnings += serving_warnings
+            skipped += serving_skipped
             if e.name in threads:
                 findings.append(threads[e.name])
             if templates is None:
@@ -235,5 +311,5 @@ def check_auras(
                 dict_findings, dict_skipped = check_dictionary(result, templates)
                 findings += dict_findings
                 skipped += dict_skipped
-        out.append(AuraCheck(e.name, e.root, tuple(findings), tuple(skipped)))
+        out.append(AuraCheck(e.name, e.root, tuple(findings), tuple(skipped), tuple(warnings)))
     return out

@@ -121,7 +121,7 @@ def test_a_directory_named_like_an_aura_is_not_an_aura(shipped: Path) -> None:
 
 
 def test_a_file_that_breaks_the_grammar_is_a_typed_refusal_naming_file_and_key(shipped: Path) -> None:
-    _write(shipped, "bad", minimal("bad").replace('threads = "a block"', 'threads = "a block"\nchannel = "yes"'))
+    _write(shipped, "bad", minimal("bad").replace('threads = "a block"', 'threads = "a block"\nchannel = 3'))
     with pytest.raises(AuraError) as err:
         auras.load_aura("bad", cwd=None)
     assert (err.value.kind, err.value.file, err.value.key) == ("wrong_type", "bad.aura.toml", "display.channel")
@@ -381,3 +381,315 @@ def test_a_dangling_link_named_like_an_aura_is_reported_not_dropped(shipped: Pat
 def test_the_lua_listing_still_ignores_such_entries(shipped: Path) -> None:
     (shipped / "dir.lua").mkdir()
     assert library.procedures(cwd=None) == []
+
+
+# -- RDR-252 Step 4 part A (nexus-igea9.7): load by group membership ---------------------------------------------------
+
+_GATED = minimal("gated").replace(
+    'subspace = "board/topic"', 'subspace = "board/ci/nexus-develop--owner"'
+) + '\n[load]\ngroup = "push-train"\n'
+
+
+def test_group_gated_aura_is_not_loaded_for_a_non_member() -> None:
+    """The first RDR-252 Step 4 test: a bound identity whose memberships lack the aura's group loads nothing and
+    never subscribes to the aura's trigger subspace. Red before the work: [load] is an unknown key."""
+    from nexus.auras.session import AuraLoader  # noqa: PLC0415
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    aura = auras.parse_aura(_GATED.encode(), name="gated")
+    subs = SubscriptionSet(session_id="11111111-2222-3333-4444-555555555555")
+    attached: list = []
+    group_reads: list[str] = []
+    loader = AuraLoader(
+        "11111111-2222-3333-4444-555555555555", subs,
+        discover=lambda: [aura],
+        is_on=lambda _n: True,
+        entry=lambda _sid: ("tamsin", 100),
+        registered_owner=lambda: 100,
+        make_runtime=lambda loaded: loaded,
+        attach=attached.append,
+        identity=lambda: "identity-a",
+        memberships=lambda _identity: ["some-other-group"],
+        read_group=lambda name: group_reads.append(name),
+    )
+    loader.on_resolve("tamsin")
+    assert attached == []
+    assert subs.aura_topics() == []
+    assert group_reads == []
+
+
+class _GatedHarness:
+    """The loader with RDR-252's injected reads counted: the identity, its memberships, one group record."""
+
+    def __init__(self, *, identity="identity-a", memberships=("push-train",), groups=None, auras=None, now=None):
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+        from nexus.auras.session import AuraLoader  # noqa: PLC0415
+        from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+        self.subs = SubscriptionSet(session_id=_SID)
+        self.attached: list = []
+        self.membership_reads: list[str] = []
+        self.group_reads: list[str] = []
+        self.states: list = []
+        records = {"push-train": GroupRecord("push-train", serves=("nexus-develop",))} if groups is None else groups
+        parsed = auras_mod_parse(_GATED, "gated") if auras is None else auras
+
+        def read_memberships(who):
+            self.membership_reads.append(who)
+            if isinstance(memberships, Exception):
+                raise memberships
+            return list(memberships)
+
+        def read_group(name):
+            self.group_reads.append(name)
+            found = records.get(name)
+            if isinstance(found, Exception):
+                raise found
+            return found
+
+        self.loader = AuraLoader(
+            _SID, self.subs,
+            discover=lambda: parsed,
+            is_on=lambda _n: True,
+            entry=lambda _sid: ("tamsin", 100),
+            registered_owner=lambda: 100,
+            make_runtime=lambda loaded: loaded,
+            attach=self.attached.append,
+            identity=lambda: identity,
+            memberships=read_memberships,
+            read_group=read_group,
+            now=now or (lambda: datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)),
+            state_sink=lambda pid, state: self.states.append((pid, state)),
+        )
+        self.loader.on_resolve("tamsin")
+
+    @property
+    def loaded(self) -> list[str]:
+        return [a.name for batch in self.attached for a in batch]
+
+
+_SID = "11111111-2222-3333-4444-555555555555"
+
+
+def auras_mod_parse(text: str, name: str) -> list:
+    return [auras.parse_aura(text.encode(), name=name)]
+
+
+def _variant(name: str, *, group: str = "push-train", topic: str = "nexus-develop") -> object:
+    text = (
+        _GATED.replace('aura = "gated"', f'aura = "{name}"').replace('threads = "a block"', f'threads = "block {name}"')
+        .replace('group = "push-train"', f'group = "{group}"').replace("nexus-develop--owner", f"{topic}--owner")
+    )
+    return auras.parse_aura(text.encode(), name=name)
+
+
+def test_a_member_of_a_live_group_loads_the_aura_and_subscribes_to_its_trigger() -> None:
+    h = _GatedHarness()
+    assert h.loaded == ["gated"]
+    assert h.subs.aura_topics() == ["board/ci/nexus-develop--owner"]
+    assert h.loader.decisions["gated"].loaded and h.loader.decisions["gated"].group == "push-train"
+
+
+def test_one_membership_read_and_one_group_read_per_named_group() -> None:
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+
+    h = _GatedHarness(
+        memberships=("push-train", "review-pair"),
+        auras=[_variant("one"), _variant("two"), _variant("other", group="review-pair", topic="nexus-x")],
+        groups={"push-train": GroupRecord("push-train"), "review-pair": GroupRecord("review-pair")},
+    )
+    assert sorted(h.loaded) == ["one", "other", "two"]
+    assert h.membership_reads == ["identity-a"]
+    assert sorted(h.group_reads) == ["push-train", "review-pair"]
+
+
+def test_an_ungated_aura_reads_nothing_and_loads_for_an_unbound_server() -> None:
+    h = _GatedHarness(identity=None, auras=auras_mod_parse(minimal("plain"), "plain"))
+    assert h.loaded == ["plain"]
+    assert h.membership_reads == [] and h.group_reads == []
+
+
+def test_an_unbound_server_loads_no_group_gated_aura_and_says_why() -> None:
+    plain = auras_mod_parse(minimal("plain"), "plain")
+    h = _GatedHarness(identity=None, auras=[*plain, *auras_mod_parse(_GATED, "gated")])
+    assert h.loaded == ["plain"]
+    assert h.subs.aura_topics() == ["board/topic"]
+    assert h.membership_reads == [] and h.group_reads == []
+    assert (h.loader.decisions["gated"].loaded, h.loader.decisions["gated"].reason) == (False, "unbound")
+
+
+def test_a_disbanded_group_loads_nothing() -> None:
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+
+    ended = {"push-train": GroupRecord("push-train", ended_at="2026-11-18T10:00:00Z")}
+    passed = {"push-train": GroupRecord("push-train", ends="2026-11-19T11:59:59Z")}
+    for groups, reason in ((ended, "group_disbanded"), (passed, "group_disbanded"), ({}, "no_group_record")):
+        h = _GatedHarness(groups=groups)
+        assert h.loaded == [] and h.subs.aura_topics() == [], reason
+        assert h.loader.decisions["gated"].reason == reason
+
+
+def test_a_group_whose_end_is_still_ahead_or_open_is_live() -> None:
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+
+    for ends in ("2026-11-19T12:00:01Z", "open", None):
+        h = _GatedHarness(groups={"push-train": GroupRecord("push-train", ends=ends)})
+        assert h.loaded == ["gated"], ends
+
+
+def test_a_non_member_never_reads_the_group() -> None:
+    h = _GatedHarness(memberships=("elsewhere",))
+    assert h.loaded == [] and h.group_reads == []
+    assert h.loader.decisions["gated"].reason == "not_a_member"
+
+
+@pytest.mark.parametrize("which", ["memberships", "group"])
+def test_an_unreadable_read_loads_no_gated_aura(which: str) -> None:
+    from nexus.auras.load_gate import GroupUnreadable  # noqa: PLC0415
+
+    if which == "memberships":
+        h = _GatedHarness(memberships=GroupUnreadable("engine down"))
+        assert h.loader.decisions["gated"].reason == "memberships_unreadable"
+    else:
+        h = _GatedHarness(groups={"push-train": GroupUnreadable("engine down")})
+        assert h.loader.decisions["gated"].reason == "group_unreadable"
+    assert h.loaded == [] and h.subs.aura_topics() == []
+
+
+def test_every_decision_reaches_the_state_sink_with_the_identity() -> None:
+    h = _GatedHarness(memberships=("elsewhere",))
+    [(pid, state)] = h.states
+    assert pid == 100
+    assert state.loaded_identity == "identity-a"
+    gated = state.auras["gated"]
+    assert (gated.loaded, gated.reason, gated.group) == (False, "not_a_member", "push-train")
+
+
+def test_group_liveness_follows_ended_at_ends_and_a_missing_record() -> None:
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    from nexus.auras.load_gate import GroupRecord, group_is_live, group_status  # noqa: PLC0415
+
+    now = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+    assert group_is_live(GroupRecord("g"), now) and group_status(GroupRecord("g"), now) == "live"
+    assert not group_is_live(None, now) and group_status(None, now) == "no_group_record"
+    assert group_status(GroupRecord("g", ended_at="2026-11-01T00:00:00Z"), now) == "group_disbanded"
+    assert not group_is_live(GroupRecord("g", ends="2026-11-19T12:00:00Z"), now), "ends is the first instant it is over"
+    assert not group_is_live(GroupRecord("g", ends="2026-11-19T11:00:00+00:00"), now)
+    assert group_is_live(GroupRecord("g", ends="2026-11-19T13:00:00"), now), "a bare instant is UTC"
+    assert group_is_live(GroupRecord("g", ends="garbage"), now), "an ends that is no instant never ends the group"
+
+
+def test_this_build_has_no_default_group_reader_until_nexus_groups_plugs_in() -> None:
+    from nexus.auras.load_gate import default_group_reader  # noqa: PLC0415
+
+    assert default_group_reader() is None
+
+
+def test_a_loader_built_without_a_group_reader_refuses_the_gated_aura_as_unreadable() -> None:
+    from nexus.auras.session import AuraLoader  # noqa: PLC0415
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    subs = SubscriptionSet(session_id=_SID)
+    loader = AuraLoader(
+        _SID, subs, discover=lambda: auras_mod_parse(_GATED, "gated"), is_on=lambda _n: True,
+        entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=lambda a: a, attach=lambda _r: None,
+        identity=lambda: "id-a", memberships=lambda _i: ["push-train"],
+    )
+    loader.on_resolve("tamsin")
+    assert subs.aura_topics() == []
+    assert loader.decisions["gated"].reason == "group_unreadable"
+
+
+def test_a_loader_with_no_identity_source_is_unbound() -> None:
+    from nexus.auras.session import AuraLoader  # noqa: PLC0415
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    subs = SubscriptionSet(session_id=_SID)
+    loader = AuraLoader(
+        _SID, subs, discover=lambda: auras_mod_parse(_GATED, "gated"), is_on=lambda _n: True,
+        entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=lambda a: a, attach=lambda _r: None,
+    )
+    loader.on_resolve("tamsin")
+    assert loader.decisions["gated"].reason == "unbound"
+
+
+def test_an_identity_that_cannot_be_read_is_an_unbound_server() -> None:
+    def broken() -> str:
+        raise OSError("token file unreadable")
+
+    from nexus.auras.session import AuraLoader  # noqa: PLC0415
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    subs = SubscriptionSet(session_id=_SID)
+    loader = AuraLoader(
+        _SID, subs, discover=lambda: auras_mod_parse(_GATED, "gated"), is_on=lambda _n: True,
+        entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=lambda a: a, attach=lambda _r: None,
+        identity=broken, memberships=lambda _i: ["push-train"], read_group=lambda _n: None,
+    )
+    loader.on_resolve("tamsin")
+    assert loader.decisions["gated"].reason == "unbound"
+
+
+def test_a_load_that_fails_after_deciding_marks_the_loaded_auras_failed_in_the_state() -> None:
+    h = _GatedHarness()
+    assert h.states[-1][1].auras["gated"].loaded is True
+
+    def broken(_loaded):
+        raise RuntimeError("runtime bug")
+
+    from nexus.auras.session import AuraLoader  # noqa: PLC0415
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    states: list = []
+    subs = SubscriptionSet(session_id=_SID)
+    loader = AuraLoader(
+        _SID, subs, discover=lambda: auras_mod_parse(_GATED, "gated"), is_on=lambda _n: True,
+        entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=broken, attach=lambda _r: None,
+        identity=lambda: "id-a", memberships=lambda _i: ["push-train"], read_group=lambda n: _group(n),
+        state_sink=lambda pid, state: states.append(state),
+    )
+    loader.on_resolve("tamsin")
+    assert subs.aura_topics() == [] and states[-1].auras["gated"].reason == "load_failed"
+
+
+def _group(name):
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+
+    return GroupRecord(name)
+
+
+def test_read_memberships_returns_group_names_and_turns_engine_errors_into_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.auras import session  # noqa: PLC0415
+    from nexus.auras.load_gate import GroupUnreadable  # noqa: PLC0415
+    from nexus.identity import bind_client  # noqa: PLC0415
+
+    class Fake:
+        closed = 0
+        rows: object = [{"group": "push-train"}, {"group": "review-pair"}, {"role": "no group field"}]
+
+        def memberships(self, identity):
+            if isinstance(self.rows, Exception):
+                raise self.rows
+            assert identity == "id-a"
+            return self.rows
+
+        def close(self):
+            Fake.closed += 1
+
+    fake = Fake()
+    monkeypatch.setattr(bind_client.IdentityClient, "from_config", classmethod(lambda cls, **_k: fake))
+    assert session.read_memberships("id-a") == ["push-train", "review-pair"] and Fake.closed == 1
+    for error in (bind_client.IdentityApiError(404, "unknown_identity", "no"), bind_client.IdentityUnavailableError("down")):
+        fake.rows = error
+        with pytest.raises(GroupUnreadable):
+            session.read_memberships("id-a")
+    assert Fake.closed == 3, "the client is closed on every path"
+    monkeypatch.setattr(
+        bind_client.IdentityClient, "from_config",
+        classmethod(lambda cls, **_k: (_ for _ in ()).throw(bind_client.IdentityUnavailableError("no endpoint"))),
+    )
+    with pytest.raises(GroupUnreadable):
+        session.read_memberships("id-a")
