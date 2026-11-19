@@ -257,6 +257,44 @@ def test_a_fork_refused_identity_token_required_lapses_it_too_and_never_blocks_t
     assert len([e for e in logs if LAPSED_LINE in str(e.get("consequence", ""))]) == 1
 
 
+@pytest.mark.parametrize("refusal", [
+    IdentityApiError(403, "not_owner", "the token names another identity", {}),
+    IdentityApiError(500, None, "engine error", {}),
+    REFUSED,
+], ids=["not_owner", "server_error", "identity_token_required"])
+@pytest.mark.parametrize("token", ["tok-0", None], ids=["token", "no_token"])
+def test_a_refused_fork_never_stops_the_renewal_on_the_same_tick(tmp_path: Path, refusal: IdentityApiError,
+                                                                token: str | None) -> None:
+    """The fork row is sent before the renewal in one heartbeat: a refusal of it used to skip the renewal, retry every tick
+    and lapse the seat in 300 seconds with the session alive."""
+    clocks = _Clocks()
+    lease, engine, procs = _lease(tmp_path, clocks)
+    engine.session = lambda sid: (_ for _ in ()).throw(IdentityApiError(404, "unknown_session", "no", {}))   # type: ignore[method-assign]
+    engine.refuse_bind = refusal
+    _file(tmp_path, token, expires_at=clocks.wall + 3_000 if token else None)
+    procs.write_registry(100, 100_000, T0, session_id="branch-sid")
+    for _ in range(3):
+        report = lease.tick()
+        assert report.renewed and not report.superseded, "the lease is renewed whatever the fork row did"
+        clocks.advance(HEARTBEAT_S)
+    assert engine.count("renew") == 3
+    if refusal is REFUSED:
+        assert engine.count("fork") == 1, "a lapsed token is not retried"
+    else:
+        assert engine.count("fork") == 3, "another refusal is retried on the next tick"
+
+
+def test_a_fork_refused_for_a_stale_generation_still_flags_superseded_and_skips_the_renewal(tmp_path: Path) -> None:
+    clocks = _Clocks()
+    lease, engine, procs = _lease(tmp_path, clocks)
+    engine.session = lambda sid: (_ for _ in ()).throw(IdentityApiError(404, "unknown_session", "no", {}))   # type: ignore[method-assign]
+    engine.refuse_bind = IdentityApiError(409, "generation_superseded", "i1 is at generation 2", {})
+    _file(tmp_path, "tok-0", expires_at=clocks.wall + 3_000)
+    procs.write_registry(100, 100_000, T0, session_id="branch-sid")
+    report = lease.tick()
+    assert report.superseded and not report.renewed and engine.count("renew") == 0
+
+
 def test_another_403_or_a_stale_generation_is_not_a_lapse(tmp_path: Path) -> None:
     clocks = _Clocks()
     lease, engine, _ = _lease(tmp_path, clocks)

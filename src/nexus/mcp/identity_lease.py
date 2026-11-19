@@ -292,7 +292,14 @@ class IdentityLease:
         client = self._engine()
         if now >= self._next_renew:
             try:
-                self._fork_if_unknown(client, report)
+                try:
+                    self._fork_if_unknown(client, report)
+                except IdentityApiError as exc:
+                    if (token_contract.is_stale_generation(exc.status, exc.code)
+                            or (exc.status == 409 and exc.code in ("not_held", "identity_not_held"))):
+                        raise   # the renewal's own handling below: superseded, or the seat is gone
+                    # any other refusal of the fork row (a lapsed token is handled inside it) never costs the seat its lease
+                    _log.warning("identity_lease_fork_failed", identity=identity, error=str(exc))
                 client.renew(identity, generation, self._version)
                 report.renewed = True
             except IdentityApiError as exc:
