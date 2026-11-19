@@ -68,6 +68,9 @@ def test_the_standing_mail_wait_is_not_reported_other_waits_are(crs, monkeypatch
 
 @pytest.mark.parametrize(("code", "text", "want"), [
     (1, "Error: unknown_session: no identity has held session sid-1", []),      # no identity: no work
+    (2, "Usage: nx identity [OPTIONS] COMMAND [ARGS]...\nError: No such command 'work'.", []),   # an nx older than Step 6
+    (2, "Usage: nx [OPTIONS] COMMAND [ARGS]...\nError: No such command 'identity'.", []),   # older still
+    (2, "Error: No such option: --running", None),                              # a usage error is not "no work"
     (1, "Error: the engine is not answering", None),
     (0, "not json", None),
     (0, json.dumps({"identity": "i1"}), None),
@@ -153,8 +156,8 @@ def test_status_prints_each_targets_running_work_and_the_exit_code_ignores_it(cr
 
 def test_a_running_row_a_restart_would_cut_off_blocks_ready(crs, monkeypatch) -> None:
     """Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): the ready check keeps the process table AND reads
-    the work rows. The gate gets a real manifest and reply, so it reaches ``readiness()``. A running wait, watcher or
-    labrun row blocks; a worktree or tmux row (it outlives the session) and an empty list do not; an unreadable list
+    the work rows. The gate gets a real manifest and reply, so it reaches ``readiness()``. A running labrun or watcher
+    row blocks (no wait row reaches the gate: the standing one is dropped by ``session_work``, older ones are stale); a worktree or tmux row (it outlives the session) and an empty list do not; an unreadable list
     blocks as an unreadable task list does. Stale rows never arrive here: ``session_work`` reads ``--running``, which
     leaves them out (tests/identity/test_work_registry.py pins that filter)."""
     now = time.time()
@@ -173,7 +176,7 @@ def test_a_running_row_a_restart_would_cut_off_blocks_ready(crs, monkeypatch) ->
 
     assert gate([]) == 0
     assert gate(["worktree /w", "tmux sock"]) == 0, "a worktree or a tmux server outlives the session"
-    for kind in ("wait sid-other", "watcher ci", "labrun r1"):
+    for kind in ("watcher ci", "labrun r1"):
         assert gate(["worktree /w", kind]) == 3, f"{kind} is cut off by a restart: it blocks ready"
     assert gate(None) == 3, "a work list that cannot be read is not 'no work'"
     rows = crs.readiness(found, manifest, now, 300, "%9")
@@ -182,3 +185,24 @@ def test_a_running_row_a_restart_would_cut_off_blocks_ready(crs, monkeypatch) ->
     assert "1 registered work row(s) still run: labrun r1" in crs.readiness(found, manifest, now, 300, "%9")[0]["blocker"]
     # the caller's own session is exempt, as it is from the task list
     assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%1") == 0
+
+
+def test_session_work_against_a_real_child_process_serving_list_running(crs, monkeypatch, tmp_path) -> None:
+    """End to end through a subprocess: an ``nx`` that serves ``identity work list --session S --running --json`` the way
+    the real CLI shapes it, and one that predates the verb (exit 2, "No such command 'identity'", as 8.4.1 answers)."""
+    fake = tmp_path / "nx"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2 $3" = "identity work list" ]; then\n'
+        "  echo '{\"identity\": \"i1\", \"alive\": true, \"work\": ["
+        "{\"kind\": \"wait\", \"ref\": \"sid-1\", \"state\": \"running\", \"updated_at\": \"t\", \"stale\": false}, "
+        "{\"kind\": \"labrun\", \"ref\": \"r1\", \"state\": \"running\", \"updated_at\": \"t\", \"stale\": false}]}'\n"
+        "  exit 0\nfi\nexit 9\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setattr(crs, "_nx_binary", lambda: str(fake))
+    work = crs.session_work({"sessionId": "sid-1"})
+    assert work == ["labrun r1"], "the standing wait is left out; the lab run is listed"
+    assert crs.blocking_work(work) == ["labrun r1"]
+    fake.write_text("#!/bin/sh\necho \"Usage: nx [OPTIONS] COMMAND [ARGS]...\" >&2\n"
+                    "echo \"Error: No such command 'identity'. Did you mean 'init'?\" >&2\nexit 2\n", encoding="utf-8")
+    assert crs.session_work({"sessionId": "sid-1"}) == [], "an nx older than Step 6 has no registered work"

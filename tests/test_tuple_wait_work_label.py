@@ -4,6 +4,8 @@ session id, running while the wait parks, ``done`` when it exits, whatever the r
 wait to fail or to stop."""
 from __future__ import annotations
 
+import sys
+
 import pytest
 from click.testing import CliRunner
 
@@ -204,6 +206,7 @@ def _posix_label(monkeypatch: pytest.MonkeyPatch, written: list[str]):
     return label
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals: checked before any signal.SIGHUP is touched")
 def test_a_hangup_ends_the_row_too(monkeypatch: pytest.MonkeyPatch) -> None:
     """r1 item 3: a closed terminal sends HUP; a wait that died of it left its row running until the purge."""
     import signal
@@ -221,6 +224,7 @@ def test_a_hangup_ends_the_row_too(monkeypatch: pytest.MonkeyPatch) -> None:
         signal.signal(signal.SIGHUP, before)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals: checked before any signal.SIGHUP is touched")
 def test_an_ignored_hangup_stays_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     """``nohup nx tuple wait``: HUP is SIG_IGN, and arming must not make the process killable by it."""
     import signal
@@ -236,6 +240,7 @@ def test_an_ignored_hangup_stays_ignored(monkeypatch: pytest.MonkeyPatch) -> Non
         signal.signal(signal.SIGHUP, before)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals: checked before any signal.SIGHUP is touched")
 def test_a_previous_python_handler_is_called_not_bypassed(monkeypatch: pytest.MonkeyPatch) -> None:
     import signal
 
@@ -251,16 +256,18 @@ def test_a_previous_python_handler_is_called_not_bypassed(monkeypatch: pytest.Mo
         signal.signal(signal.SIGTERM, before)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals: checked before any signal.SIGHUP is touched")
 def test_a_handler_python_cannot_restore_falls_back_to_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """``signal.getsignal`` answers None for a handler installed outside Python; ``signal.signal(n, None)`` would raise."""
     import signal
 
-    before = signal.getsignal(signal.SIGTERM)
+    before = {n: signal.getsignal(n) for n in (signal.SIGTERM, signal.SIGHUP)}
     try:
         label = _posix_label(monkeypatch, [])
         setattr_in(monkeypatch, "nexus.identity.work", "signal.getsignal", lambda n: None)
         label.arm_sigterm()
         label.finish()
-        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL and signal.getsignal(signal.SIGHUP) == signal.SIG_DFL
     finally:
-        signal.signal(signal.SIGTERM, before if before is not None else signal.SIG_DFL)
+        for n, handler in before.items():
+            signal.signal(n, handler if handler is not None else signal.SIG_DFL)

@@ -188,7 +188,6 @@ import sys
 import tempfile
 import threading
 import time
-import types
 import urllib.parse
 import uuid
 import zlib

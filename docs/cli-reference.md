@@ -6015,7 +6015,7 @@ Background work this session's identity owns (RDR-253 Step 6): `worktree` (the a
 - `list` shows one identity's rows: `SEAT` (a name or an id), `--session ID`, or the caller's own. **A `running` row of an identity that is not alive is stale**: it is marked so, and `--running` drops it. `--json` prints `{identity, alive, work: [{kind, ref, state, updated_at, stale}]}`.
 - `owners` lists every identity that registered a resource and whether each owner's holder is alive.
 
-The restart script's `--status` table and the readiness ask list each target's running work (never a stale row, and not the session's own standing mail wait). A session that replies ready while a running `wait`, `watcher` or `labrun` row of its live identity is listed is not counted ready, the same as one whose process table still shows a background task (Sam, 2026-11-19); a work list that cannot be read blocks the same way, until it is checked or `--force` is given. A `worktree` or `tmux` row outlives the session and never blocks.
+The restart script's `--status` table and the readiness ask list each target's running work (never a stale row, and not the session's own standing mail wait). A session that replies ready while a running `labrun` or `watcher` row of its live identity is listed is not counted ready, the same as one whose process table still shows a background task (Sam, 2026-11-19); a work list that cannot be read blocks the same way, until it is checked or `--force` is given. A `worktree` or `tmux` row outlives the session and never blocks, and neither does a `wait` row: the session's own standing mail wait is meant to run, and a wait from an earlier session is stale.
 
 ### nx identity purge
 

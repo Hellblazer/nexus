@@ -2389,7 +2389,15 @@ def session_work(s: dict) -> list[str] | None:
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
-        return [] if "unknown_session" in done.stdout + done.stderr else None
+        said = done.stdout + done.stderr
+        if "unknown_session" in said:
+            return []
+        # An installed nx older than RDR-253 Step 6 has no `identity work` (click: exit 2, "No such command"). It cannot
+        # have registered any work, so it has none; reading it as unknown would block every session at the first restart
+        # onto a release that adds the verb, since the ready check runs before --nx installs the new client.
+        if done.returncode == 2 and "No such command" in said:
+            return []
+        return None
     try:
         rows = json.loads(done.stdout)["work"]
     except (ValueError, KeyError, TypeError):
@@ -2398,8 +2406,9 @@ def session_work(s: dict) -> list[str] | None:
 
 
 def blocking_work(work: list[str] | None) -> list[str]:
-    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a wait, watcher or labrun.
-    A worktree or a tmux server outlives the session, so it never blocks ready."""
+    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a labrun or a watcher (a wait
+    is in the set too, but none arrives: the session's standing wait is left out by ``session_work`` and a wait from an
+    earlier session is stale). A worktree or a tmux server outlives the session, so it never blocks ready."""
     return [w for w in work or [] if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
 
 
@@ -2650,7 +2659,8 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                         row["blocker"] = "said ready, but its background tasks could not be listed; check it, or --force"
                     elif s.get("pane") != caller_pane:
                         # Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): ps AND the work rows. A
-                        # running wait, watcher or labrun row of a live identity is work a restart would cut off.
+                        # running labrun or watcher row of a live identity is work a restart would cut off (a wait row
+                        # never reaches here: session_work drops the standing one, and --running drops older ones).
                         row["work"] = work = session_work(s)
                         cut = blocking_work(work)
                         if cut:

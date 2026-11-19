@@ -591,3 +591,34 @@ def test_a_command_that_cannot_be_executed_is_a_clean_error(monkeypatch) -> None
     setattr_in(monkeypatch, "nexus.identity.work", "subprocess.Popen", popen)
     with pytest.raises(IdentityCommandError, match="not executable"):
         work._spawn(["./not-x"])
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="POSIX signals")
+def test_work_run_under_nohup_keeps_the_hangup_ignored(monkeypatch) -> None:
+    """``nohup nx identity work run ...``: HUP is SIG_IGN on entry. Installing the forwarder over it would make the wrapper
+    pass a hangup on to a command nohup was protecting (confirmation N3)."""
+    import signal
+
+    from nexus.identity import work
+
+    seen: dict[str, object] = {}
+
+    class Child:
+        def send_signal(self, signum: int) -> None:
+            seen.setdefault("sent", []).append(signum)  # type: ignore[union-attr]
+
+        def wait(self) -> int:
+            return 0
+
+    def popen(argv):
+        seen["hup_during"] = signal.getsignal(signal.SIGHUP)
+        return Child()
+
+    setattr_in(monkeypatch, "nexus.identity.work", "subprocess.Popen", popen)
+    before = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        assert work._spawn(["true"]) == 0
+        assert seen["hup_during"] == signal.SIG_IGN, "the forwarder was installed over nohup's ignore"
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, before)

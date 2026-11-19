@@ -497,6 +497,8 @@ def _spawn(argv: Sequence[str]) -> int:
 
     if threading.current_thread() is threading.main_thread():
         for signum in _FORWARDED:
+            if signal.getsignal(signum) == signal.SIG_IGN:
+                continue                    # `nohup nx identity work run ...`: an ignored HUP stays ignored, here and in the child
             previous[signum] = signal.signal(signum, forward)
     try:
         try:
@@ -511,5 +513,5 @@ def _spawn(argv: Sequence[str]) -> int:
         code = child.wait()
     finally:
         for signum, handler in previous.items():
-            signal.signal(signum, handler)
+            signal.signal(signum, handler if handler is not None else signal.SIG_DFL)   # None: set outside Python
     return 128 - code if code < 0 else code
