@@ -55,7 +55,6 @@ domain = [
   "commands/catalog_cmds/remediation.py::remediate_paths_cmd",
   "commands/catalog_cmds/sensitivity.py::_targets",
   "mcp/catalog.py::catalog_list",
-  "mcp/catalog.py::catalog_search",
   "operators/sensitive_paths.py::file_tool_restriction",
   "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan",
   "upgrade_ladder/rungs/manifest_span_fill.py::ManifestSpanFillRung._scan",
@@ -140,11 +139,6 @@ emit = { class = "BULK JOB", calls = 1, reason = "Serves nx catalog sensitive wi
 id = "mcp/catalog.py::catalog_list"
 match = { site = "mcp/catalog.py::catalog_list" }
 emit = { class = "BOUNDED", calls = 2, reason = "Its all_documents calls read one page of limit + 1 documents and stay; its owner and content_type branches read the whole owner or type and slice, which this table does not count." }
-
-[[row]]
-id = "mcp/catalog.py::catalog_search"
-match = { site = "mcp/catalog.py::catalog_search" }
-emit = { class = "AGGREGATE", calls = 1, reason = "The author-alone branch, unattended (Gap 3); Phase 2 reads it through the author route.", next = "nexus-uwggq.2.12" }
 
 [[row]]
 id = "operators/sensitive_paths.py::file_tool_restriction"

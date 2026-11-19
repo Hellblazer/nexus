@@ -165,6 +165,40 @@ _ZERO_MATCH_NOTE = (
 )
 
 
+def _author_alone_rows(cat, author: str, *, limit: int, offset: int, keep) -> list[dict]:
+    """The rows of ``catalog_search`` with *author* as its only filter (RDR-241, nexus-uwggq.2.12).
+
+    Asks for ``limit + 1`` rows at *offset* so ``has_more`` is read from the raw rows the engine returned, then
+    applies *keep* to the page as the final filter: a row *keep* drops never hides a following page. An engine
+    that does not answer is an error row naming the route, never an empty answer and never a walk."""
+    from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable  # noqa: PLC0415 — function-local import avoids catalog import at module load
+    from nexus.mcp._catalog_author import read_author_rows  # noqa: PLC0415 — function-local import avoids catalog import at module load
+
+    try:
+        raw, count = read_author_rows(cat, author, want=limit + 1, offset=offset)
+    except EngineRouteUnavailable as exc:
+        return _fail([{"error": str(exc)}])
+    has_more = len(raw) > limit
+    page = [e for e in raw[:limit] if keep(e)]
+    result: list[dict] = []
+    if page:
+        presented = _present_entries(cat, page)
+        result = presented.rows + presented.trailer()
+    elif not has_more:
+        # An empty list renders as nothing, which reads as a broken tool (nexus-r88er F12). The route's count is
+        # exact, so past offset 0 the note says how many matches lie before the page asked for. Rows the filter
+        # dropped are matches on this page, not before it, so they take the zero-match note.
+        if offset == 0 or raw:
+            return [{"note": _ZERO_MATCH_NOTE}]
+        return [{"note": (
+            f"No rows at offset {offset}: this search has {count} match{'' if count == 1 else 'es'}, "
+            "all before that offset."
+        )}]
+    if has_more:
+        result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
+    return result
+
+
 # Note: core server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
 # mcp__plugin_conexus_nexus__search).
@@ -250,7 +284,11 @@ def catalog_search(
                 matches = cat.find(
                     query, content_type=content_type or None, limit=offset + limit + 1,
                 )
-        elif owner or corpus or file_path or content_type or author:
+        elif author and not (owner or corpus or file_path or content_type):
+            # Author alone is one bounded request to the engine's author route per page, never a walk of the
+            # catalog (RDR-241, nexus-uwggq.2.12). Every other filter keeps its own complete source below.
+            return _author_alone_rows(cat, author, limit=limit, offset=offset, keep=_keep)
+        elif owner or corpus or file_path or content_type:
             # Each source below is COMPLETE for its own filter (nexus-3bafq:
             # the old fallback read one limit+offset+1 page of all_documents
             # and filtered it, so file_path or author alone saw the first
@@ -261,13 +299,10 @@ def catalog_search(
                 candidates = cat.by_corpus(corpus)
             elif content_type:
                 candidates = cat.by_content_type(content_type)
-            elif file_path:
+            else:
                 candidates = _file_path_candidates(cat, file_path)
                 if by_path_uri is not None and all(str(c.tumbler) != path_uri_tumbler for c in candidates):
                     candidates = [by_path_uri, *candidates]
-            else:
-                # author alone: the engine has no author filter.
-                candidates = cat.all_documents()
             matches = [e for e in candidates if _keep(e)]
         else:
             return _fail([{"error": "query or at least one filter required"}])
