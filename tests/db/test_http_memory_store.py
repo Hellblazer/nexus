@@ -661,6 +661,10 @@ class TestSearch:
         assert [r["title"] for r in rows] == [r["title"] for r in everything[1:3]]
         assert store.search_page("marramgrass", project="oldeng", limit=2, offset=9) == ([], 5)
 
+    def test_search_page_stopword_only_raises_value_error(self, store: HttpMemoryStore) -> None:
+        with pytest.raises(ValueError):
+            store.search_page("and", project="sp", limit=5, offset=0)
+
     def test_search_page_fallback_clamps_the_page_where_the_engine_does(self, monkeypatch) -> None:
         """The new engine clamps a limit above 10,000 (as /v1/memory/list does); the old-engine
         fallback cuts the same page, so the page size does not depend on the engine."""
