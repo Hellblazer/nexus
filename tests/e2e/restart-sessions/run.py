@@ -66,14 +66,24 @@ Shared by every scenario:
   sessions write to that service as the operator would: the restart mail expires with its
   TTL, and nothing here asks a session to write anything permanent. They bind no identity there:
   the copied credential reaches the operator's tenant, so the sessions run with
-  ``NX_IDENTITY_BIND=0`` (their SessionStart hook binds nothing and makes no engine call) and
-  ``NX_IDENTITY_LEASE=0`` (their MCP servers hold no identity lease); with neither, 8.5.0 sessions
-  bound twelve ``rs_*`` identities in the operator's tenant (found 2026-11-19). A census proves
-  it (identity_census.py): the operator's identity list (``nx identity show --all``, read only,
-  in the operator's own environment) is read before each scenario's sessions start and again after
-  cleanup, and the scenario FAILS for any id in the second list that was not in the first ("the
-  sandbox bound an identity on the operator's endpoint"), and for a list it cannot read. A session
-  of the operator's own that starts on this host while a scenario runs is new too: rerun;
+  ``NX_IDENTITY_BIND=0`` (their SessionStart hook binds nothing and makes no engine call; their MCP
+  servers start no identity lease) and ``NX_IDENTITY_LEASE=0`` (the lease's own switch); with
+  neither, 8.5.0 sessions bound twelve ``rs_*`` identities in the operator's tenant (found
+  2026-11-19). Three checks in identity_census.py prove it, all read only and in the operator's
+  own environment. Before any session starts, the INSTALLED nx must honour ``NX_IDENTITY_BIND``
+  (its own interpreter is asked; one that predates it ends the run UNVERIFIED, exit 2, with no
+  session started). After each scenario, ``nx identity show --session <sid>`` for every session id
+  it ran must answer ``unknown_session`` (a binding in any state fails, an ended one included; an
+  unreadable answer fails too), and the list of live and lapsed identities on this host
+  (``nx identity show --all``) is read before the scenario's sessions start and after cleanup: a
+  new row whose name is one of the scenario's session names or whose pid is one the run recorded
+  FAILS the scenario ("the sandbox bound an identity on the operator's endpoint"); any other new
+  row is a note (the operator may start sessions meanwhile), a delegated one is ignored, and a
+  list that cannot be read fails. The sandbox's nx also refuses the ``nx identity`` verbs that
+  make or change an identity or seat (create, promote, claim, release, rename, purge, and the
+  ``work`` writes), logging each to nx-identity-refused.log. Because the sessions run unbound, this
+  gate does not exercise the restart's seat and identity paths (ensure_seat and promote, the NX_SEAT
+  carry-over, attested mail);
 - nx-mcp's own exit teardown, judged on the engine (nexus-iz8ub; needs an installed nx-mcp that
   carries 75e22da36, release 7.97.0 or later; with an older nx, or one whose version cannot be read, the
   teardown findings are skipped with a loud note and the run ends "unverified", exit 2, no pass
@@ -105,7 +115,8 @@ Shared by every scenario:
   PATH records every ``cache`` command and refuses ``tool install``, ``upgrade`` and
   ``uninstall`` (anything else goes to the real uv). X is the installed version's next
   patch that is not a tag in this checkout. The ``nx`` stand-in also records and refuses
-  ``nx upgrade`` (the version-lockstep hook's action would upgrade the operator's install).
+  ``nx upgrade`` (the version-lockstep hook's action would upgrade the operator's install) and the
+  ``nx identity`` writes named above.
   The marketplace and plugin updates are the real
   claude CLI's.
 
@@ -452,18 +463,37 @@ def credentials_left(config_dir: Path) -> list[str]:
 REFUSED = 97
 
 
-def nx_shim_text(real_nx: str, marker: Path, refused_log: Path) -> str:
+#: ``nx identity`` verbs that make or change an identity or a seat: refused in the sandbox, which binds none.
+IDENTITY_WRITES = ("create", "promote", "claim", "release", "rename", "purge")
+#: ``nx identity work`` verbs that write (``list`` and ``owners`` read, and the restart script's ready check needs ``list``).
+WORK_WRITES = ("register", "done", "forget", "run")
+
+
+def nx_shim_text(real_nx: str, marker: Path, refused_log: Path, identity_log: Path | None = None) -> str:
     """The sandbox's nx: after the stand-in install, ``--version`` reports the installed release;
     ``nx upgrade`` (the version-lockstep hook's action, an ``--auto`` spawn) is recorded and
-    refused, since it would upgrade the operator's install; anything else runs the real nx."""
+    refused, since it would upgrade the operator's install; so is every ``nx identity`` verb that makes or changes
+    an identity or seat (``IDENTITY_WRITES``, ``WORK_WRITES``), recorded in *identity_log*: the sandbox's sessions
+    carry the operator's credential and bind nothing, and the restart script's seat creation (``ensure_seat``,
+    which logs one line when it is refused) must not add a seat the identity census cannot see; anything else
+    runs the real nx."""
     m, log = shlex.quote(str(marker)), shlex.quote(str(refused_log))
-    return ("#!/bin/sh\n# restart sandbox: nx --version reports the stand-in install; nx upgrade is refused\n"
+    ilog = shlex.quote(str(identity_log if identity_log is not None else refused_log))
+    return ("#!/bin/sh\n# restart sandbox: nx --version reports the stand-in install; nx upgrade and the nx identity writes are refused\n"
             f'if [ "$1" = "--version" ] && [ -f {m} ]; then echo "nx, version $(cat {m})"; exit 0; fi\n'
+            'all="$*"; cmd=""; sub=""; sub2=""\n'
             'for a in "$@"; do case "$a" in\n'
             "  -*) ;;\n"
-            f'  upgrade) echo "$*" >> {log}; exit {REFUSED} ;;\n'
-            "  *) break ;;\n"
+            '  *) if [ -z "$cmd" ]; then cmd=$a; elif [ -z "$sub" ]; then sub=$a; elif [ -z "$sub2" ]; then sub2=$a; break; fi ;;\n'
             "esac; done\n"
+            f'[ "$cmd" = upgrade ] && {{ echo "$all" >> {log}; exit {REFUSED}; }}\n'
+            'if [ "$cmd" = identity ]; then\n'
+            f'  refuse() {{ echo "$all" >> {ilog}; echo "restart sandbox: nx identity $1 is refused here (the sandbox binds no identity)" >&2; exit {REFUSED}; }}\n'
+            '  case "$sub" in\n'
+            f'    {"|".join(IDENTITY_WRITES)}) refuse "$sub" ;;\n'
+            f'    work) case "$sub2" in {"|".join(WORK_WRITES)}) refuse "work $sub2" ;; esac ;;\n'
+            "  esac\n"
+            "fi\n"
             f"exec {shlex.quote(real_nx)} \"$@\"\n")
 
 
@@ -669,6 +699,8 @@ class Sandbox:
                 "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
                 "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID",
                 "NX_SESSION_ID", "NX_T1_SESSION_ID", "NX_T1_SESSION",
+                # a harness started from a delegated child must not hand its identity (token, seat) to the sessions
+                "NX_IDENTITY_TOKEN", "NX_SEAT",
                 # the operator's generation root: hooks would resolve nx there, past the nx stand-in
                 "NX_TOOLS_DIR")
         self.env = {k: v for k, v in os.environ.items() if k not in drop}
@@ -700,6 +732,7 @@ class Sandbox:
         self.uv_cleans = home / "uv-cache-clean.log"
         self.uv_refused = home / "uv-refused.log"
         self.nx_refused = home / "nx-refused.log"
+        self.nx_identity_refused = home / "nx-identity-refused.log"
         self.reinstall_argv = home / "reinstall-argv.txt"
         self.holds = {name: home / f"{name}.hold" for name in spec.busy}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}"
@@ -862,7 +895,7 @@ class Sandbox:
             raise RuntimeError("nx is not on PATH")
         self.bin.mkdir()
         shim = self.bin / "nx"
-        shim.write_text(nx_shim_text(self.real_nx, self.installed_marker, self.nx_refused), encoding="utf-8")
+        shim.write_text(nx_shim_text(self.real_nx, self.installed_marker, self.nx_refused, self.nx_identity_refused), encoding="utf-8")
         shim.chmod(0o755)
         # The script cleans uv's cached conexus before installing; in the detached child that runs
         # with the tmux server's environment, whose UV_CACHE_DIR is the operator's. Record it instead.
@@ -2393,6 +2426,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         with signals_deferred() as pending:
             sids: set[str] = set()
             full: set[str] = set()
+            pids: set[int] = set()
             try:
                 for hold in sb.holds.values():
                     hold.unlink(missing_ok=True)
@@ -2400,6 +2434,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 full |= {str(d.get("sessionId", "")) for d in sb.before.values() if d}
                 full.discard("")
                 sids = {sid[:8] for sid in full}
+                pids = {int(d.get("pid", 0) or 0) for d in [*sb.entries(), *sb.before.values()] if d} - {0}
             except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
                 notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
             if not a.keep:
@@ -2415,8 +2450,14 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 # --keep skips cleanup(), the only place the teardown is judged: not a pass (nexus-iz8ub)
                 UNVERIFIED.append(f"{name}: --keep skips cleanup, which is where nx-mcp's teardown is judged")
             if census_before is not None:  # after the sandbox is ended (read-only; --keep reads it with the sessions up)
-                bad, census_notes = _load_slash("identity_census").check(sb.real_nx, census_before)
+                bad, census_notes = _load_slash("identity_census").judge(
+                    sb.real_nx, census_before, sids=full, pids=pids | {p for p, _ in sb.watch.seen()},
+                    names=directory_names(sb), expect=bool(sb.before))
                 notes.extend(census_notes)
+                if sb.nx_identity_refused.exists():
+                    refused = sb.nx_identity_refused.read_text(encoding="utf-8").splitlines()
+                    notes.append(f"the nx shim refused {len(refused)} nx identity write(s) (the restart script's seat creation "
+                                 f"for a user-named session, as it does on every roll): {refused[:5]}")
                 if bad:
                     failures.extend(bad)
                     ok = False
@@ -2721,6 +2762,11 @@ def main() -> int:
     claude = shutil.which("claude")
     if not claude or not shutil.which("tmux"):
         print("RESTART SANDBOX UNVERIFIED: claude or tmux not on PATH", flush=True)
+        return 2
+    # The sessions run the INSTALLED nx, which must honour NX_IDENTITY_BIND; if it does not, no session starts here
+    # (each would bind an identity on the operator's endpoint).
+    if gap := _load_slash("identity_census").bind_switch_gap(shutil.which("nx") or ""):
+        print(f"RESTART SANDBOX UNVERIFIED: {gap}; no session was started, nothing was recorded", flush=True)
         return 2
     # A SIGTERM must still reach each scenario's finally: the private tmux server holds the token in
     # its environment and must not outlive the run.

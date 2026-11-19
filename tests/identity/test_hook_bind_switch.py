@@ -48,15 +48,27 @@ def test_the_switch_binds_nothing_says_so_and_builds_no_client(tmp_path: Path, b
 
 
 def test_the_switch_makes_no_bind_call_even_with_a_client_handed_in(tmp_path: Path) -> None:
+    calls: list[str] = []
+
     class _Engine:
+        """Records every touch: the hook swallows an exception raised here, so a raise would prove nothing."""
+
         def __getattr__(self, name: str):
-            raise AssertionError(f"the switch must make no engine call: {name}")
+            calls.append(name)
+            return lambda *a, **k: {}
 
     procs = FakeProcesses(tmp_path / "sessions")
     procs.start(700, T0)
     got = bind_at_session_start("sid-s", "startup", env={"NX_IDENTITY_BIND": "0"}, claude_pid=700, procs=procs,
                                 client=_Engine(), config_dir=tmp_path / "config")
+    assert calls == [], "no engine call of any kind"
     assert got.outcome is None and any("NX_IDENTITY_BIND=0" in n for n in got.notices)
+
+
+@pytest.mark.parametrize("value", [" 0", "0 ", "0\n"])
+def test_the_switch_strips_whitespace_as_the_lease_does(tmp_path: Path, built: _Calls, value: str) -> None:
+    got = _hook(tmp_path, {"NX_IDENTITY_BIND": value})
+    assert built.built == 0 and any("NX_IDENTITY_BIND=0" in n for n in got.notices)
 
 
 @pytest.mark.parametrize("env", [{}, {"NX_IDENTITY_BIND": "1"}, {"NX_IDENTITY_BIND": ""}])

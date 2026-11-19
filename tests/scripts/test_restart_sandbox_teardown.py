@@ -614,6 +614,7 @@ def _main_with(run, monkeypatch, *, bad: bool, unverified: bool):
     crs = types.SimpleNamespace(script_sha256=lambda _s: "s", claude_version=lambda _c: "1", tmux_version=lambda: "t",
                                 harness_sha256=lambda *a: "h")
     monkeypatch.setattr(run, "load_script", lambda: crs)
+    stub_census(run, monkeypatch)  # the installed nx honours NX_IDENTITY_BIND here; the real probe asks the real nx
     recorded = []
 
     def scenario(name, claude, a, crs):
