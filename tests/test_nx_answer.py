@@ -5769,6 +5769,50 @@ class TestAnswerShapeGate:
         assert recorded[-1]["final_text"].startswith("[non-answer: hydration_dump]")
 
     @pytest.mark.asyncio
+    async def test_structured_chunks_are_deduplicated_and_capped_gh1667(self):
+        """GH #1667: three retrieval steps return the same 40 ids plus 40 of their own each;
+        the envelope carries each id once (first occurrence), at most 50, and says how many
+        distinct ids the cap dropped."""
+        from nexus.mcp.core import nx_answer
+
+        def _step(prefix: str) -> dict:
+            ids = [f"shared{i}" for i in range(40)] + [f"{prefix}{i}" for i in range(40)]
+            return {"ids": ids, "collections": ["rdr__1-1"], "distances": [0.1] * len(ids),
+                    "chunk_text_hash": list(ids)}
+
+        result = MagicMock()
+        result.steps = [_step("a"), _step("b"), _step("c"),
+                        {"contents": ["x"], "missing": [], "section_types": ["class"]}]
+        result.dropped_reduce_steps = []
+        result.step_records = []
+        match = _ad_hoc_match_for_grow([
+            {"tool": "search", "args": {"query": "$intent", "corpus": "rdr"}},
+            {"tool": "store_get_many", "args": {"ids": "$step1.ids"}},
+        ])
+        db_stub = MagicMock()
+        db_stub.plans.save_plan = MagicMock(return_value=999)
+        db_stub.telemetry._supports_nx_answer_run_complete.return_value = False
+        db_stub.telemetry.record_nx_answer_run = MagicMock(return_value=1)
+
+        with patch("nexus.plans.matcher.plan_match", return_value=[]), \
+             patch("nexus.mcp.core._nx_answer_plan_miss", AsyncMock(return_value=match)), \
+             patch("nexus.plans.runner.plan_run", AsyncMock(return_value=result)), \
+             patch("nexus.mcp.core._t2_ctx") as t2_ctx, \
+             patch("nexus.mcp.core._t2_index_write", lambda fn, **_kw: fn(db_stub)), \
+             patch("nexus.mcp.core.scratch", return_value="ok"), \
+             patch("nexus.mcp.core._get_catalog", return_value=None), \
+             patch("nexus.mcp_infra.get_t1_plan_cache", return_value=None):
+            t2_ctx.return_value.__enter__.return_value = db_stub
+            env = await nx_answer(question="why does RDR-160 route bge-768", structured=True)
+
+        ids = [c["id"] for c in env["chunks"]]
+        assert len(ids) == 50 and len(set(ids)) == 50
+        assert ids[:40] == [f"shared{i}" for i in range(40)], "first occurrence order survives"
+        assert ids[40:] == [f"a{i}" for i in range(10)]
+        # 40 shared + 3 * 40 own = 160 distinct; 50 kept
+        assert env["chunks_truncated"] == 110
+
+    @pytest.mark.asyncio
     async def test_library_plan_non_answer_bumps_failure_outcome(self):
         from nexus.mcp.core import nx_answer
 

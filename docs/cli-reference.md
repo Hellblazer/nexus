@@ -6466,6 +6466,14 @@ predicted `usd`/`ms`/`basis`, and which one was chosen are written to
 predicted_cost_usd, basis}`; `None` on any path that never reaches Step
 1's hit branch — force_dynamic, a plan-miss, or an error before Step 1).
 
+The envelope's `chunks` list (id, chash, collection, distance per chunk) is
+deduplicated by chunk id, keeping the first occurrence, so the order the plan's
+steps returned them in survives, and capped at 50 entries (GH #1667; a plan
+with several retrieval steps used to return every id once per step, which made
+the reply tens of thousands of characters). `chunks_truncated` is always
+present: the number of distinct chunk ids the cap dropped, 0 when none were
+(duplicates removed by the dedupe are not counted).
+
 The envelope also carries `answer_shape` (nexus-90gyo; extended by RDR-232 Phase 3, nexus-jypmj.3.3):
 what `final_text` structurally is. Two shapes carry prose. `answered` is a
 synthesized answer. `insufficient_evidence` is a partial answer: the coverage
