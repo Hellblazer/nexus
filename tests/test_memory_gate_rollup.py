@@ -34,6 +34,22 @@ RDR = 209
 POINTER_P3 = "gate-records-rdr-209-phase-3"
 
 
+def _write_rdr(root: Path, number: int, status: str, phases: dict[str, str] | None = None) -> None:
+    """An RDR file under ``root/docs/rdr``: the frontmatter status, and one heading per phase (``{"3": "CLOSED"}``)."""
+    d = root / "docs" / "rdr"
+    d.mkdir(parents=True, exist_ok=True)
+    body = "".join(f"\n### Phase {n}{f' ({mark}, 2026-11-06)' if mark else ''}: work\n" for n, mark in (phases or {}).items())
+    (d / f"rdr-{number:03d}-test.md").write_text(f"---\ntitle: t\nid: RDR-{number:03d}\nstatus: {status}\n---\n{body}")
+
+
+@pytest.fixture(autouse=True)
+def _closed_rdr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """RDR-209 is closed in the repository the command runs in (its working directory), unless a test says otherwise."""
+    _write_rdr(tmp_path, RDR, "closed")
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
 def _put(db: T2Database, title: str, content: str = "body", tags: str = "", project: str = REPO,
          ttl: int | None = None, age_days: float | None = None) -> None:
     db.put(project=project, title=title, content=content, tags=tags, ttl=ttl)
@@ -282,7 +298,7 @@ def test_a_closed_phase_yields_one_pointer_listing_its_three_records(db: T2Datab
     names = [_gate(db, "nexus-p1", kind="review"), _gate(db, "nexus-p1", kind="critique", sha="bbb2222"),
              _gate(db, "nexus-p2", kind="confirm", sha="ccc3333", outcome="partial")]
     _gate(db, "nexus-p9", sha="fff6666")   # a bead outside the phase
-    out = _phase3("nexus-p1,nexus-p2")
+    out = _phase3("nexus-p1,nexus-p2", "--accept-open", "nexus-p2")
     assert "3 listed" in out and "0 unmapped" in out
     got = _pointer()
     assert _titles(got.listed) == sorted(names)
@@ -325,14 +341,14 @@ def test_the_verdict_comes_from_the_header_or_from_an_older_records_last_outcome
          tags="kind:gate,bead:nexus-h2")
     plain = "review-abc1234-nexus-h3-2026-11-10"
     _put(db, plain, "text\noutcome: not-justified\n", tags="kind:gate,bead:nexus-h3")
-    _phase3("nexus-h1,nexus-h2,nexus-h3")
+    _phase3("nexus-h1,nexus-h2,nexus-h3", "--accept-open", "nexus-h1", "--accept-open", "nexus-h3")
     got = {r["title"]: r["verdict"] for r in _pointer().listed}
     assert got == {head: "not-justified", old: "justified", plain: "not-justified"}
 
 
 def test_a_body_line_does_not_stand_in_for_the_header_outcome(db: T2Database) -> None:
     name = _gate(db, "nexus-h4", outcome="partial", body="quoted example:\noutcome: justified")
-    _phase3("nexus-h4")
+    _phase3("nexus-h4", "--accept-open", "nexus-h4")
     assert {r["title"]: r["verdict"] for r in _pointer().listed} == {name: "partial"}
 
 
@@ -414,13 +430,15 @@ def test_a_pointer_over_the_cap_is_split_and_lists_every_record(db: T2Database) 
 
 
 def test_a_rerun_that_needs_fewer_parts_names_the_stale_ones(db: T2Database) -> None:
+    # unmapped records are not carried, so a shorter unmapped list is what makes a pointer shorter
+    _gate(db, "nexus-keep")
     for i in range(130):
-        _gate(db, f"nexus-many{i:03d}", sha=f"{i:07x}", body=f"finding {i}")
+        _put(db, f"review-{i:07x}-no-bead-{i:03d}-2026-11-10", "x", tags="kind:gate,rdr:209")
     _run("--all")
     assert _pointer("gate-records-rdr-209-all").parts >= 2
-    for row in list(db.get_all(REPO))[3:]:
-        db.delete(project=REPO, title=row["title"])
-    assert len(db.get_all(REPO)) == 3
+    for row in db.get_all(REPO):
+        if "no-bead" in row["title"]:
+            db.delete(project=REPO, title=row["title"])
     out = _run("--all")
     assert _pointer("gate-records-rdr-209-all").parts == 1
     assert "stale: 'gate-records-rdr-209-all (part 2)'" in out
@@ -497,3 +515,128 @@ def test_selection_is_pure_over_the_rows_it_is_given() -> None:
     sel = gr.select_records(rows, project=REPO, rdr=209, beads=("nexus-s",), phase="3")
     assert [r["bead"] for r in sel.listed] == ["nexus-s"] and sel.unmapped == []
     assert json.loads(json.dumps(sel.listed[0]))["sha"] == "abc1234"
+
+
+# ── Step 2: the loss check (nexus-1gdv0.2.6) ─────────────────────────────────────
+
+def test_an_open_phase_is_refused_and_nothing_is_written(db: T2Database, tmp_path: Path) -> None:
+    _gate(db, "nexus-o1")
+    _write_rdr(tmp_path, RDR, "accepted", {"3": "", "4": "CLOSED"})      # phase 3 has no close marker
+    out = _phase3("nexus-o1", expect=1)
+    assert "not closed" in out and "phase 3" in out
+    assert documents_by_title(POINTER_P3) == [] and documents_by_title(f"{REPO}/{_titles_all(db)[0]}") == []
+    out = _run("--all", expect=1)                                          # --all needs the RDR itself closed
+    assert "not closed" in out
+
+
+def test_a_phase_with_the_close_marker_passes_in_an_open_rdr_and_a_sub_phase_follows_its_phase(
+        db: T2Database, tmp_path: Path) -> None:
+    name = _gate(db, "nexus-o2")
+    _write_rdr(tmp_path, RDR, "accepted", {"3": "CLOSED"})
+    _phase3("nexus-o2")
+    assert _titles(_pointer().listed) == [name]
+    _run("--phase", "3a", "--beads", "nexus-o2")                           # 3a is closed when phase 3 is
+    assert _pointer("gate-records-rdr-209-phase-3a").listed
+    _run("--phase", "4", "--beads", "nexus-o2", expect=1)                  # phase 4 has no heading at all
+
+
+def _titles_all(db: T2Database) -> list[str]:
+    return sorted(_rows(db))
+
+
+def test_a_planted_unresolvable_title_stops_the_run_and_names_it(db: T2Database) -> None:
+    mine = _gate(db, "nexus-u1")
+    ghost = {"project": REPO, "title": "review-ghost-nexus-u0-2026-11-01", "kind": "review", "bead": "nexus-u0",
+             "sha": "0000000", "verdict": "justified", "timestamp": "2026-11-01T00:00:00Z",
+             "archive": gr.archive_title(REPO, "review-ghost-nexus-u0-2026-11-01"), "parts": 1}
+    planted, parts = gr.render_pointer(gr.parse_scope(rdr=RDR, phase="3", beads="nexus-u0", all_phases=False), REPO,
+                                       gr.Selection(listed=[ghost]))
+    t3 = make_t3()
+    gr.write_parts(t3, title=POINTER_P3, text=planted, tags="gate-pointer", category=gr.POINTER_CATEGORY)
+    out = _phase3("nexus-u1", expect=1)
+    assert ghost["title"] in out and "nothing was written" in out
+    assert gr.read_archive(t3, REPO, mine, 1) is None                      # no archive was written
+    assert _titles(gr.read_pointer(t3, POINTER_P3).listed) == [ghost["title"]]   # the planted pointer is untouched
+    assert parts == 1
+
+
+def test_a_not_justified_newest_record_stops_the_run_and_is_named_and_accept_open_lets_it_through(
+        db: T2Database) -> None:
+    _gate(db, "nexus-n1", kind="review", sha="aaa1111", outcome="justified", date="2026-11-08")
+    worse = _gate(db, "nexus-n1", kind="critique", sha="bbb2222", outcome="not-justified", date="2026-11-09")
+    out = _phase3("nexus-n1", expect=1)
+    assert "nexus-n1" in out and worse in out and "not justified" in out
+    assert documents_by_title(POINTER_P3) == [] and documents_by_title(f"{REPO}/{worse}") == []
+    out = _phase3("nexus-n1", "--accept-open", "nexus-n1")
+    assert worse in out                                                    # the record is still printed for a person
+    got = _pointer()
+    assert got.accepted_open == ("nexus-n1",) and len(got.listed) == 2
+    out = _phase3("nexus-n1", "--accept-open", "nexus-nope", expect=1)
+    assert "nexus-nope" in out and "no listed record" in out
+
+
+def test_an_older_not_justified_record_does_not_stop_a_bead_whose_newest_is_justified(db: T2Database) -> None:
+    _gate(db, "nexus-n2", kind="review", sha="aaa1111", outcome="not-justified", date="2026-11-08")
+    _gate(db, "nexus-n2", kind="confirm", sha="bbb2222", outcome="justified", date="2026-11-09")
+    out = _phase3("nexus-n2")
+    assert "not justified: nexus-n2" in out and "not-justified" in out      # still printed for a person
+    assert len(_pointer().listed) == 2
+
+
+def test_a_bead_less_record_takes_no_part_in_the_chain_check(db: T2Database) -> None:
+    _gate(db, "nexus-b1")
+    bare = "review-abc1234-no-bead-p3-2026-11-10"
+    _put(db, bare, "kind: review\noutcome: not-justified\n\nbody", tags="kind:gate,rdr:209")
+    _phase3("nexus-b1")                                                    # a not-justified unmapped record is no bead's chain
+    assert _titles(_pointer().unmapped) == [bare]
+
+
+def test_the_loss_check_leaves_every_access_count_unchanged(db: T2Database) -> None:
+    a = _gate(db, "nexus-c1")
+    for _ in range(3):
+        db.get(project=REPO, title=a)                                      # a real read: the counter is 3
+    before = {t: r["access_count"] for t, r in _rows(db).items()}
+    assert before[a] == 3
+    _phase3("nexus-c1", "--dry-run")
+    _phase3("nexus-c1")
+    assert {t: r["access_count"] for t, r in _rows(db).items()} == before
+
+
+def test_the_pointer_must_read_back_with_the_same_list(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    _gate(db, "nexus-r1")
+    _gate(db, "nexus-r1", sha="bbb2222")
+    real = gr.read_pointer
+    calls = []
+
+    def lossy(t3, title):
+        got = real(t3, title)
+        calls.append(title)
+        if len(calls) > 1 and got is not None:       # the second read is the read-back
+            got.listed = got.listed[:1]
+        return got
+
+    monkeypatch.setattr(gr, "read_pointer", lossy)
+    out = _phase3("nexus-r1", expect=1)
+    assert "did not read back" in out and len(calls) == 2
+
+
+def test_a_dry_run_refuses_an_open_phase_as_the_real_run_does(db: T2Database, tmp_path: Path) -> None:
+    _gate(db, "nexus-o3")
+    _write_rdr(tmp_path, RDR, "accepted", {"3": ""})
+    out = _phase3("nexus-o3", "--dry-run", expect=1)
+    assert "not closed" in out
+
+
+def test_a_rerun_keeps_a_record_the_read_no_longer_lists_because_its_archive_is_whole(db: T2Database) -> None:
+    kept = _gate(db, "nexus-k1")
+    reaped = _gate(db, "nexus-k1", sha="bbb2222")
+    _phase3("nexus-k1")
+    assert db.delete(project=REPO, title=reaped)                    # what RDR-207's reap leaves: no row, no quarantine
+    out = _phase3("nexus-k1")
+    got = {r["title"]: r for r in _pointer().listed}
+    assert sorted(got) == sorted([kept, reaped])
+    assert got[reaped]["state"] == "absent" and "state" not in got[kept]
+    assert "carried: 1" in out
+    assert gr.read_archive(make_t3(), REPO, reaped, 1) is not None    # the full text is still there
+    _phase3("nexus-k1")                                              # and a third run keeps it too
+    assert sorted(r["title"] for r in _pointer().listed) == sorted([kept, reaped])

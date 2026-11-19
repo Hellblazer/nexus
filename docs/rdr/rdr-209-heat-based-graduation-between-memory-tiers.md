@@ -531,18 +531,26 @@ the cause if any of these fail:
 
 1. The phase is closed: the RDR's frontmatter status is `closed`, or every
    phase heading it names carries the close marker (the rule Step 4 uses,
-   `memory_curate/__init__.py:516-521`, `:646`). A record for an open phase is
-   never touched.
-2. Every listed title is present in the read that listed it, the pointer
-   record reads back from T3 by its title with the same list, and every listed
-   record's archive reads back whole and equal to the record, so no record gets
-   a TTL until its full text reads back from T3. These reads do not stamp
-   access (A8).
+   `memory_curate/__init__.py:516-521`, `:646`; `--all` needs the RDR itself
+   closed). A record for an open phase is never touched: the refusal comes
+   before anything is written, the archives and the pointer included.
+2. Every title the run lists resolves. A record of this read resolves by being
+   in it. A record an earlier pointer (same title) listed that this read no
+   longer lists, because the reap deleted its row, is carried into the new
+   pointer marked `state: absent`, provided its archive still reads back whole;
+   if it does not, the run stops and names the title, because that record's
+   full text would be lost. So a record the reap deleted never drops out of
+   the listing. After the pointer is written it is read back from T3 by its
+   title and must list the same records, and every listed record's archive
+   reads back whole and equal to the record, so no record gets a TTL until its
+   full text reads back from T3. These reads do not stamp access (A8).
 3. For each listed bead, its newest record (by header date, then round) has
    the verdict `justified`. A bead whose newest record is `partial` or
-   `not-justified` stops the TTL step and is named, unless the run names it
-   with `--accept-open <bead>`, which the pointer records. A record with no
-   bead has no chain to check; it is "unmapped" and gets no TTL.
+   `not-justified` stops the run and is named, unless the run names it with
+   `--accept-open <bead>` (repeatable), which the pointer records in an
+   `accepted-open:` header line; a name that matches no listed bead is
+   refused. Every non-justified record of a listed bead is printed. A record
+   with no bead has no chain to check; it is "unmapped" and gets no TTL.
 
 This is narrower than Amendment A1's wording, "each ship-blocker named in a
 gate record is either fixed by a listed sha or names its bead". A ship-blocker
@@ -900,7 +908,12 @@ whole; `--dry-run` writes nothing, and no run writes anything to T2.
 As designed. Tests: an open phase is refused; a planted unresolvable title
 stops the run and names it; a bead whose newest record is `not-justified`
 stops the run and is named, and `--accept-open` lets it through and appears in
-the pointer; a record with no bead takes no part in the chain and gets no TTL;
+the pointer, while an older not-justified record under a justified newest one
+does not stop it; a record with no bead takes no part in the chain and gets no
+TTL; a record an earlier pointer listed that the read no longer lists stays in
+the new pointer when its archive is whole; the pointer reads back with the same
+list; a phase with the close marker passes in an open RDR and a sub-phase
+follows its phase, and `--dry-run` refuses an open phase as the real run does;
 the check leaves every record's `access_count` unchanged (A8).
 
 #### Step 3: The 30-day TTL
@@ -1182,3 +1195,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Gate finding d021dc53c85b, second half (nexus-1gdv0.2.3): the fix round dropped `--include-titled`, so title matching became unconditional, and no predicate for "a title that names a listed bead" was written. It is now named in Step 1 and built (`title_names_bead`): the row has no tags at all, and its title holds the bead id as a whole token, `(?<![A-Za-z0-9.])<id>(?!\.?[A-Za-z0-9])`, case-sensitive, with a hyphen not counted as an id character because gate titles join words with it. It is on only under `--phase` (`--all` has no bead list), and a title naming two listed beads is unmapped. The Step 1 test list gains the negative cases. The predicate was checked on the live store: 628 of the 646 untagged gate-shaped titles that carry a bead-shaped id match each id they carry (the other 18 are an id cut short by the checking pattern, not by the predicate). |
 | 2026-11-19 | Gate finding S6, pointer half (nexus-1gdv0.2.4): the pointer now lists each record's timestamp exactly as `get_all` returned it, unmapped records included, because the pointer was the one place that would keep a record's date after the TTL write and the reap and did not carry it. The second half of S6, what a rerun does with a record a person restored (`nx memory restore` clears the TTL), belongs to Step 3 with the TTL write and is not settled here. |
 | 2026-11-19 | Gate finding S7 and Sam's ruling "Keep findings in full" (nexus-1gdv0.2.5): the claim that Steps 1 to 3 retire the gate records "without losing them", and the line "it keeps its sources by title and copies no body", overstated what survives, because after the TTL, quarantine, rollup and reap only the pointer and RDR-207's summary were left. The one-line excerpt default is withdrawn. Step 1 now writes each listed record's full text to T3 as a note of its own (subject `nexus-rdr-research`, `category=gate_record`, titled `<project>/<T2 title>`, split into titled parts when over 16,384 bytes), reads it back and compares it before the pointer is written, and the pointer names each archive and its part count; unmapped records are not archived. Step 2 reads every archive back before any TTL. Wording amended in Gap 6, the Approach, Step 1, Step 2, the test lists and the Day 2 table. The loss check's own read of the archive is Step 2 and is not built here. |
+| 2026-11-19 | Phase 3 Step 2, the loss check (nexus-1gdv0.2.6), built before any write. The run refuses an open phase before it writes anything, the archives and the pointer included, by the census flag's own rule (closed status, or the phase heading's close marker; `--all` needs the RDR closed). Check 2 gains a meaning the earlier text lacked, because a title taken from the read that listed it is present by construction: a record an earlier pointer listed that the read no longer lists is carried into the new pointer (`state: absent`) when its archive reads back whole, and an archive that does not stops the run naming the title; so a record the reap deleted never drops out of the listing. The pointer is read back with the same list. A not-justified or partial newest record stops the run unless `--accept-open <bead>` (repeatable, recorded in the pointer, refused when it names no listed bead). The command moved out of `commands/memory.py` (now back under its 800-line cap) into `memory_curate/gate_cli.py`, registered in `cli.py`; the loss check lives in `memory_curate/gate_ttl.py`. |

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -262,30 +262,38 @@ class Pointer:
     unmapped: list[dict[str, Any]]
     parts: int = 1
     beads: tuple[str, ...] | None = None
+    accepted_open: tuple[str, ...] = ()
 
 
-def _pointer_text(scope: Scope, project: str, sel: Selection, parts: int) -> str:
+def _pointer_text(scope: Scope, project: str, sel: Selection, parts: int, accepted_open: Sequence[str],
+                  carried: Sequence[dict[str, Any]]) -> str:
+    listed = sorted([*sel.listed, *carried], key=lambda e: (e["timestamp"], e["title"]))
     lines = [f"gate-rollup pointer: {scope.label}", f"project: {project}"]
     if scope.beads is not None:
         lines.append(f"beads: {','.join(scope.beads)}")
+    if accepted_open:
+        lines.append(f"accepted-open: {','.join(accepted_open)}")
     lines += [
-        f"listed: {len(sel.listed)}", f"unmapped: {len(sel.unmapped)}", f"parts: {parts}",
+        f"listed: {len(listed)}", f"unmapped: {len(sel.unmapped)}", f"parts: {parts}",
         f"archive: each listed record's full text is the note '<project>/<title>' in {ARCHIVE_SUBJECT} "
         f"(category {ARCHIVE_CATEGORY}), in 'parts' notes titled '<archive> (part N)' when over "
         f"{QUOTAS.MAX_DOCUMENT_BYTES} bytes; an unmapped record is not archived",
-        "## listed", *(json.dumps(e, ensure_ascii=False) for e in sel.listed),
+        "## listed", *(json.dumps(e, ensure_ascii=False) for e in listed),
         "## unmapped", *(json.dumps(e, ensure_ascii=False) for e in sel.unmapped),
     ]
     return "\n".join(lines) + "\n"
 
 
-def render_pointer(scope: Scope, project: str, sel: Selection) -> tuple[str, int]:
+def render_pointer(scope: Scope, project: str, sel: Selection, *, accepted_open: Sequence[str] = (),
+                   carried: Sequence[dict[str, Any]] = ()) -> tuple[str, int]:
     """``(text, parts)``: the pointer's text and how many notes of at most the store_put cap it makes.
 
-    The text states its own part count, so the count and the text are settled together."""
+    *carried* are records an earlier pointer listed that this run's read no longer lists (kept, never dropped);
+    *accepted_open* are the beads the run let through with ``--accept-open``. The text states its own part
+    count, so the count and the text are settled together."""
     parts = 1
     for _ in range(6):
-        text = _pointer_text(scope, project, sel, parts)
+        text = _pointer_text(scope, project, sel, parts, tuple(accepted_open), carried)
         needed = len(split_text_bytes(text, QUOTAS.MAX_DOCUMENT_BYTES))
         if needed == parts:
             return text, parts
@@ -297,7 +305,7 @@ def parse_pointer(text: str) -> Pointer:
     """The inverse of :func:`render_pointer`: each record line is one JSON object, read under its section header."""
     sections: dict[str, list[dict[str, Any]]] = {"listed": [], "unmapped": []}
     current: str | None = None
-    parts, beads = 1, None
+    parts, beads, accepted = 1, None, ()
     for line in text.splitlines():
         if line.startswith("## "):
             current = line[3:].strip()
@@ -307,7 +315,9 @@ def parse_pointer(text: str) -> Pointer:
             parts = int(line[7:])
         elif current is None and line.startswith("beads: "):
             beads = tuple(line[7:].split(","))
-    return Pointer(sections["listed"], sections["unmapped"], parts, beads)
+        elif current is None and line.startswith("accepted-open: "):
+            accepted = tuple(line[15:].split(","))
+    return Pointer(sections["listed"], sections["unmapped"], parts, beads, accepted)
 
 
 # ── the T3 side ──────────────────────────────────────────────────────────────────
@@ -400,66 +410,43 @@ def write_parts(t3: Any, *, title: str, text: str, tags: str, category: str) -> 
     return len(pieces)
 
 
-# ── the run ──────────────────────────────────────────────────────────────────────
+# ── the run's pieces (the orchestration is gate_ttl.run) ─────────────────────────
 
-@dataclass
-class Result:
-    scope: Scope
-    selection: Selection
-    lines: list[str] = field(default_factory=list)
-    archived: int = 0
-    already_whole: int = 0
-    pointer_title: str = ""
-    pointer_parts: int = 0
-    stale: list[str] = field(default_factory=list)
-
-
-def _listing_lines(scope: Scope, project: str, sel: Selection) -> list[str]:
+def listing_lines(scope: Scope, project: str, sel: Selection) -> list[str]:
     out = [f"{scope.label} in {project}: {len(sel.listed)} listed, {len(sel.unmapped)} unmapped"]
     out += [f"  listed    {e['timestamp']}  {e['verdict']:<13} {e['bead']}  {e['title']}" for e in sel.listed]
     out += [f"  unmapped  {e['timestamp']}  {e['title']} ({e['reason']})" for e in sel.unmapped]
     return out
 
 
-def run(rows: Iterable[dict[str, Any]], *, project: str, scope: Scope, dry_run: bool,
-        t3_factory: Callable[[], Any]) -> Result:
-    """List the run's records from *rows*, then (unless *dry_run*) archive them and write the pointer.
+def archive_tags(scope: Scope) -> str:
+    return f"gate-archive,rdr:{scope.rdr:03d}"
 
-    Archives are written first, each only when it does not already read back whole, and the pointer last, so a
-    pointer never names an archive that was not verified. Nothing is written to T2."""
-    sel = select_records(rows, project=project, rdr=scope.rdr, beads=scope.beads, phase=scope.phase)
-    res = Result(scope, sel, _listing_lines(scope, project, sel))
-    res.pointer_title = pointer_title(scope.rdr, scope.phase)
-    if not sel.listed and not sel.unmapped:
-        res.lines.append("nothing to write: no pointer record")
-        return res
-    text, res.pointer_parts = render_pointer(scope, project, sel)
-    if dry_run:
-        archive_bytes = sum(len(c.encode()) for c in sel.contents.values())
-        res.lines += [
-            f"dry run: would archive up to {len(sel.listed)} record(s) ({archive_bytes} bytes) in {ARCHIVE_SUBJECT} "
-            f"and write pointer {res.pointer_title!r} ({len(text.encode())} bytes, pointer parts: {res.pointer_parts}); "
-            "nothing written"]
-        return res
-    t3 = t3_factory()
+
+def archive_records(t3: Any, sel: Selection, scope: Scope) -> tuple[int, int]:
+    """Write each listed record's archive unless it already reads back whole: ``(written, already_whole)``."""
     col = collection_name(t3)
-    tags = f"gate-archive,rdr:{scope.rdr:03d}"
+    written = whole = 0
     for e in sel.listed:
         content = sel.contents[e["title"]]
         if read_parts(t3, col, e["archive"], e["parts"]) == content:
-            res.already_whole += 1
+            whole += 1
             continue
-        write_parts(t3, title=e["archive"], text=content, tags=f"{tags},bead:{e['bead']}", category=ARCHIVE_CATEGORY)
-        res.archived += 1
-    write_parts(t3, title=res.pointer_title, text=text, tags=f"gate-pointer,rdr:{scope.rdr:03d}",
-                category=POINTER_CATEGORY)
-    n = res.pointer_parts + 1
-    while read_note(t3, col, f"{res.pointer_title} (part {n})") is not None:
-        res.stale.append(f"{res.pointer_title} (part {n})")
+        write_parts(t3, title=e["archive"], text=content, tags=f"{archive_tags(scope)},bead:{e['bead']}",
+                    category=ARCHIVE_CATEGORY)
+        written += 1
+    return written, whole
+
+
+def write_pointer(t3: Any, scope: Scope, text: str, parts: int) -> list[str]:
+    """Write the pointer (*text* is :func:`render_pointer`'s) and return the titles of older trailing parts a
+    shorter pointer leaves behind. Nothing deletes them."""
+    title = pointer_title(scope.rdr, scope.phase)
+    write_parts(t3, title=title, text=text, tags=f"gate-pointer,rdr:{scope.rdr:03d}", category=POINTER_CATEGORY)
+    col = collection_name(t3)
+    stale: list[str] = []
+    n = parts + 1
+    while read_note(t3, col, f"{title} (part {n})") is not None:
+        stale.append(f"{title} (part {n})")
         n += 1
-    res.lines += [
-        f"archived {res.archived} record(s), {res.already_whole} already whole",
-        f"pointer: {res.pointer_title} ({len(text.encode())} bytes), pointer parts: {res.pointer_parts}",
-    ]
-    res.lines += [f"stale: {t!r} is left from an earlier, longer pointer; nothing here deletes it" for t in res.stale]
-    return res
+    return stale
