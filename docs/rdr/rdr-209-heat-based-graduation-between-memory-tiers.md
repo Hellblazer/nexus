@@ -625,7 +625,8 @@ does not grow with the number of records.
   30 days in a closed phase is the one A1 asks to retire. How many records are
   already past their effective TTL: not measured. Sam chose this on 2026-11-16
   (by dialog in halcyon's session, relayed by halcyon: "Keep timestamps, count
-  first"), with a count step before the first real run (Step 3, Count first).
+  first"), with a count step before the first real run (Implementation Plan,
+  Phase 3 Step 3, the 30-day TTL: Count first).
 - *What expiry does.* Quarantine only, as RDR-207 built it: the record is
   hidden, restorable, and deleted only after an attended `nx memory rollup`
   marks it and `nx memory reap` runs. A record's heat lengthens its life by
@@ -1156,9 +1157,23 @@ In scope:
 - **Scenario**: TTL; **Verify**: three records get `ttl=30` with every other
   field, `access_count` and timestamp unchanged; a record seeded with a null
   agent and session keeps both null, and the test fails when the step is
-  switched to `put`; a never-accessed record stays never-accessed; rerun is a
-  no-op; a forced pointer failure leaves no TTL; the `<repo>_rdr` rows get none
-  and the census no longer flags them.
+  switched to `put`, with `NX_AGENT` and a session set so a `put` control
+  writes both; a never-accessed record stays never-accessed; rerun is a no-op;
+  a forced pointer failure leaves no TTL; the `<repo>_rdr` rows get none and the
+  census no longer flags them (`<repo>` only, `kind:gate` only); a row the sweep
+  quarantined right after the write reads back as quarantined, not as a
+  mismatch, and a rerun keeps it in the pointer; a record a person restored is
+  not given a TTL again.
+- **Scenario**: dry run and count-first guard; **Verify**: the dry run applies
+  the closed-phase check, the verdict chain and the earlier-pointer check, writes
+  no TTL and no T3 note, stamps no access, and says it skipped the pointer write
+  and read-back; it reports exactly the number of candidates past `ttl_days * (1
+  + ln(access_count + 1))`, the engine's rule, with a heat record inside its
+  effective TTL not counted, a record exactly at it not counted (strictly
+  greater), and a row with no timestamp not counted; a real run with no recorded
+  count, a missing or different `--counted`, or a candidate the dry run did not
+  count refuses and writes nothing; a count recorded for another phase or for
+  `--all` does not unlock it.
 - **Scenario**: tenant isolation; **Verify**: another tenant's rows are
   neither stamped, listed nor given a TTL.
 
@@ -1186,7 +1201,11 @@ removed from the engine (the 25 outside rows then show a count of 1). The
 pointer-before-TTL leg must fail for its stated reason when the ordering guard
 is deleted. The listing tests include the untagged-body record, which is
 the case that motivated reading whole tags. The null-attribution TTL test must
-fail for its stated reason when the step is switched to `put`. A new check (the
+fail for its stated reason when the step is switched to `put`. The dry-run count
+test must fail when the dry run stops matching the engine's rule: when the heat
+term is dropped, when the comparison becomes non-strict or when the age is not
+truncated to seconds. The count-first guard test must fail when the guard is
+deleted. A new check (the
 loss check) is run live once and its first run, with the counts examined
 and skipped, goes in its bead before close. The first live run is the first run
 without `--dry-run` that passes the loss check: it is the one that writes the
@@ -1325,3 +1344,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Fix check 78cc9b0e4776, defect B and observations A and C (nexus-1gdv0.2.12): the RDR did not say which Step 2 checks the dry run applies, though it writes no pointer, nor which run is the loss check's first live run. Step 2 now says: `--dry-run` applies the closed-phase check, the verdict chain and the earlier-pointer half of check 2 (reading the earlier pointer and the quarantined listing), refuses exactly as the real run does, skips the archives, the pointer write and its read-back and says so, and counts the listed records that pass and have no TTL, minus unmapped and restored ones. The Testing Strategy defines the first live run as the first run without `--dry-run` that passes the loss check, with its counts (examined, skipped by cause, given a TTL) recorded in its bead. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect A and observations B and C (nexus-1gdv0.2.13), with Sam's 2026-11-16 ruling "Per RDR and phase": "the real run waits for his word" had no mechanism, and the `phase-review-gate` and `rdr-close` skills name the command at close, so a session could run the real thing first. The dry run now records its count as one T2 row in `<repo>` (`gate-rollup-count-rdr-<NNN>-phase-<P>` or `-all`, tag `gate-rollup-count`, never `kind:gate` or `gate`), and a real run that would write a TTL refuses, writing nothing, unless the row exists, `--counted N` equals its count and every candidate is a title it lists; a run with no candidate needs none. The scope of "first run" is per RDR and phase, keyed like the pointer. The `--counted` flag was an open choice for Sam in the plan; the default taken here is that it is required, as evidence the caller has the number, and the RDR says it is not Sam's yes. "The dry run writes nothing" is corrected to no TTL, no T3 note and one count row. Both skills say to run `--dry-run` first, tell Sam its count and wait for his word. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect C and observations A and B (nexus-1gdv0.2.14): the dry-run test seeded "one past and one not", which pinned neither the heat term nor the boundary, so a dry run that dropped `ln(access_count + 1)` or used `>=` would pass. Step 3 now states the engine rule the dry run computes (null timestamp skipped, age in whole seconds over 86,400, `ttl * (1 + ln(access_count + 1))`, strict comparison) and the test list pins it with a fixed clock: a heat record inside its effective TTL is not counted, a record exactly at it is not and one second older is, truncation to seconds, a null timestamp, and a mixed set. Each fails when its term is removed. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect B (nexus-1gdv0.2.15), doc only: the dry-run test appeared only in the Implementation Plan, not in the Test Plan or the Testing Strategy. The Test Plan gains the dry-run and count-first-guard scenario and extends the TTL and loss-check scenarios to what was built (the real put control, the census narrowing, the quarantine read-back, the restored record); the Testing Strategy names the two legs that must fail when their code is changed (the dry-run count against the engine rule, the guard when deleted); and the reference "(Step 3, Count first)" in the timestamp bullet, which read as Technical Design's own Step 3, now points at the Implementation Plan, Phase 3 Step 3. The wording was copied from the merged code and tests of nexus-1gdv0.2.12 to .14, not from the beads. |
