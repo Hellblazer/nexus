@@ -54,10 +54,19 @@ def gate_rollup_cmd(rdr: int, phase: str | None, beads: str | None, all_phases: 
         scope = gr.parse_scope(rdr=rdr, phase=phase, beads=beads, all_phases=all_phases)
     except gr.ScopeError as exc:
         raise click.UsageError(str(exc)) from exc
-    if project is None:
-        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred: only the default needs the repository name
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred: only this verb needs the repository name
 
-        project = _repo_identity(Path.cwd())[0]
+    try:
+        repo = _repo_identity(Path.cwd())[0]
+    except Exception as exc:  # noqa: BLE001 — a deleted working directory or an identity failure: name it, write nothing
+        raise click.ClickException(f"the repository could not be identified: {type(exc).__name__}: {exc}") from exc
+    project = repo if project is None else project
+    if project.endswith("_rdr"):
+        raise click.UsageError(f"--project {project} is the RDR gate flow's project: gate-rollup never reads or changes it")
+    if project != repo:
+        raise click.UsageError(
+            f"--project {project} is not the repository you are in ({repo}): the open-phase check reads this "
+            "repository's RDR files, and no other checkout's. Run it from that repository's checkout.")
     root = repo_toplevel(Path.cwd())
     try:
         with t2_handle() as db:

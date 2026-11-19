@@ -848,3 +848,13 @@ def test_guard_a_clock_moved_past_a_records_effective_ttl_refuses_the_real_run(d
     assert _rows(db)[name]["ttl"] is None and documents_by_title(POINTER_P3) == []
     gt.run(db.memory, dry_run=False, counted=0, now=t0 + timedelta(days=1), **kw)        # unchanged count: it proceeds
     assert _rows(db)[name]["ttl"] == 30
+
+
+def test_project_must_be_the_repository_the_command_runs_in_and_never_a_repo_rdr_project(db: T2Database) -> None:
+    _gate(db, "nexus-pj")
+    out = _run_raw("--phase", "3", "--beads", "nexus-pj", "--dry-run", "--project", f"{REPO}_rdr", expect=2)
+    assert "_rdr" in out and "never" in out
+    out = _run_raw("--phase", "3", "--beads", "nexus-pj", "--dry-run", "--project", "otherrepo", expect=2)
+    assert "otherrepo" in out and REPO in out and "RDR files" in out
+    assert [t for t in _rows(db, with_counts=True) if t.startswith("gate-rollup-count-")] == []   # nothing was recorded
+    assert "1 listed" in _run_raw("--phase", "3", "--beads", "nexus-pj", "--dry-run")           # the repo's own project passes

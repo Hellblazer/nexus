@@ -509,7 +509,13 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   reader never guesses. A rerun that needs fewer parts names the older trailing
   ones as stale and does not delete them (a T3 delete is a catalog tombstone
   path, not part of this command). A run that lists nothing writes no pointer.
-  `--project` defaults to the current repository.
+  `--project` defaults to the current repository and must be it: a name ending
+  `_rdr` is refused (the RDR gate flow's project is never read or changed), and
+  so is any project that is not the working directory's repository. The
+  open-phase check reads that checkout's RDR files, there is no mapping from a
+  project name to another checkout, and a project that did not match would be
+  checked against the wrong RDR. The choice is to refuse, not to look the
+  repository up, because the command runs from the checkout it rolls up.
 - *The archive.* Sam, 2026-11-16: "Keep findings in full". The pointer is a
   pointer, and each listed record's full text is kept beside it as a T3 note of
   its own in the same subject, `category=gate_record`, titled
@@ -1360,3 +1366,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Review round 1 (nexus-1gdv0.2.16), blocker 1: the TTL write imported the fresh read's content while the archive and the pointer held the listing's, so a record rewritten between them got a TTL with no archive of its new text. A candidate whose fresh content or timestamp differs from the listing's is now skipped, named and left without a TTL, and a rerun archives its new text first; the residual-race paragraph says so. |
 | 2026-11-19 | Review round 1, blocker 2: the quarantined listing the carry reads before the writes was reused by the read-back, so a row the sweep quarantined after its import (not in that older listing) read as "not in the read after the write". The read-back now makes its own listing; Step 3's read cost says up to two. |
 | 2026-11-19 | Review round 1, blocker 4: the count guard compared only the recorded number, so time passing (a record crossing its effective TTL after the dry run) left the count Sam was told stale while the guard still passed. The real run now recomputes the engine rule over its candidates at its own clock and refuses when the number differs from the recorded count; the guard paragraph says so. |
+| 2026-11-19 | Review round 1, blocker 5: `--project` accepted `<repo>_rdr` and any other project, so the open-phase check could read one repository's RDR files for another repository's records. A project ending `_rdr` is refused, and so is a project that is not the working directory's repository (the check reads that checkout's RDR files and nothing maps a project name to another checkout; refusing was chosen over a lookup because the command runs from the checkout it rolls up). |

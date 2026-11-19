@@ -34,6 +34,7 @@ def _closed_rdr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """RDR-209 is closed in the repository the command runs in (its working directory), unless a test says otherwise."""
     _write_rdr(tmp_path, RDR, "closed")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("nexus.repo_identity._repo_identity", lambda cwd: (REPO, "hash"))   # the repository this test is in
     return tmp_path
 
 
