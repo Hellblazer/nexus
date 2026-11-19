@@ -211,7 +211,8 @@ def test_claude_still_receives_the_token_via_the_server_env(
 
 def test_stale_tmux_server_is_reset_before_the_run_loop() -> None:
     """Plan-audit round-1 residual (bead notes): run_ladder.py's own tmux
-    socket (--sock veh77-ladder) can carry a server left running from an
+    socket (--sock; pid-named by default since nexus-hczdo.1.10, so only a reused
+    --sock name) can carry a server left running from an
     earlier invocation, with that earlier invocation's own environment.
     Kill (or refuse) it before the first run of THIS invocation."""
     text = _source()
