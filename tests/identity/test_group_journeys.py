@@ -240,7 +240,8 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
         post("ack", s1, alpha.identity)
         post("clear", s1, "engine", episode_at=e1)
         post("owner", s2, "engine", owner=alpha.identity, next=beta.identity, reason="earliest_suspect", episode_at=e2, refresh=False, handoffs=0)
-        post("owner", s2, "engine", owner=beta.identity, next=None, reason="handoff", episode_at=e2, refresh=False, handoffs=1)
+        # the engine's hand-on row carries a NEW episode_at (OwnerDecision.handOn passes in.now()); it is the same red
+        post("owner", s2, "engine", owner=beta.identity, next=None, reason="handoff", episode_at=minutes_ago(5), refresh=False, handoffs=1)
         post("ack", s2, alpha.identity)                                  # the red was handed away from alpha: this does not count
         post("ack", s2, beta.identity)
         post("owner", s3, "engine", owner=alpha.identity, next=beta.identity, reason="no_record", episode_at=e3, refresh=False, handoffs=0)
