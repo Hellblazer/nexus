@@ -269,11 +269,15 @@ print(json.dumps(_get_catalog().sensitive_locators(limit=10), default=str)[:400]
 def core_steps() -> list[Step]:
     t = "threads"
     return [
-        Step("identity-seat-create", "nx", ["identity", "create", "@label@-seat"], core=True, expect_route="/v1/identity"),
-        Step("identity-seat-show", "nx", ["identity", "show", "@label@-seat", "--json"], core=True),
+        # Bind first: in cloud mode a seat is made only through a live session's own identity token
+        # (0.1.197 cloud self-seat), so seat create and show carry the bound identity's token file.
         Step("identity-bind", "py", ["-c", _IDENTITY_BIND], core=True,
              capture={"identity": "json:identity", "token_file": "json:token_file", "generation": "json:generation"},
              expect_route="/v1/identity"),
+        Step("identity-seat-create", "nx", ["identity", "create", "@label@-seat"], core=True, identity=True,
+             needs=["identity"], expect_route="/v1/identity"),
+        Step("identity-seat-show", "nx", ["identity", "show", "@label@-seat", "--json"], core=True, identity=True,
+             needs=["identity"]),
         Step("memory-put-threads-identity", "nx",
              ["memory", "put", "-", "-p", t, "-t", "@label@", "--tags", "cloudleg"], core=True, identity=True,
              needs=["identity"], expect_route="/v1/memory/put",
