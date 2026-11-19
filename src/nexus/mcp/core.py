@@ -150,6 +150,7 @@ from nexus.mcp import subscriptions as _subscriptions
 # announces mail references and never claims them -- imported as a module
 # for the same reason as `_subscriptions` just above.
 from nexus.mcp import channel as _channel
+from nexus.mcp import identity_seam  # RDR-253 Step 3: the guarded seam to the identity lease (an import failure never reaches the server)
 
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
@@ -1098,9 +1099,7 @@ def _start_t1_handoff_watch_task() -> None:
 
     global _T1_HANDOFF_WATCH_TASK
     _T1_HANDOFF_WATCH_TASK = asyncio.create_task(_t1_handoff_watch_loop())
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: server start cost (RDR-253 Step 3)
-
-    identity_lease.start_safely()
+    identity_seam.start()
 
 
 async def _cancel_t1_handoff_watch_task() -> None:
@@ -1463,9 +1462,7 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # later to compare-then-delete its lease rather than blindly unlink
     # it -- see `clear_t1_session_lease_if_matches`'s docstring.
     old_session_token = _os.environ.get("NX_T1_SESSION", "").strip() or None
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: rare/branch-local path (RDR-253 Step 3)
-
-    await identity_lease.follow_marker(marker, log)
+    await identity_seam.follow_marker(marker, log)
     if old_session_id == new_session_id:
         # Nothing to do (e.g. a re-tick that raced the previous one's own
         # consume, or a resume that lands back on the id already active).
@@ -2800,9 +2797,7 @@ def _start_session_name_release() -> threading.Thread | None:
     (resource exhaustion): the caller's exit goes on and the rows lapse
     by TTL."""
     global _NAME_RELEASE_THREAD, _NAME_RELEASE_DEADLINE
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
-
-    identity_lease.start_shutdown()
+    identity_seam.start_shutdown()
     running = _NAME_RELEASE_THREAD
     if running is not None and running.is_alive():
         return running
@@ -2821,9 +2816,7 @@ def _start_session_name_release() -> threading.Thread | None:
 
 def _await_session_name_release(thread: threading.Thread | None) -> None:
     """Wait for *thread* until the release's shared deadline, then give up; and for the identity shutdown until its own."""
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
-
-    identity_lease.await_shutdown()
+    identity_seam.await_shutdown()
     if thread is None:
         return
     thread.join(max(0.0, _NAME_RELEASE_DEADLINE - time.monotonic()))
