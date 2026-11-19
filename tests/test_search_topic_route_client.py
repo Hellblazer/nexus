@@ -510,6 +510,22 @@ class TestEvent:
         _search(engine, cols)
         assert engine.route_calls() == [], "the default path is unchanged"
 
+    @pytest.mark.parametrize("case", ["where", "chash_allow", "code_only"])
+    def test_without_the_opt_in_a_call_that_cannot_route_stays_off_the_route(self, monkeypatch, case) -> None:
+        # the slower route buys nothing when the request goes unrouted anyway
+        cols = _cols("code", _BGE, 2) if case == "code_only" else _cols("docs", _BGE, 2)
+        engine = _engine(monkeypatch, cols)
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV)
+        kw: dict = {"topic_route": _TOP1}
+        if case == "where":
+            kw["where"] = {"bib_year": 2020}
+        if case == "chash_allow":
+            with chash_allow_scope(["a" * 64]):
+                _search(engine, cols, **kw)
+        else:
+            _search(engine, cols, **kw)
+        assert engine.route_calls() == []
+
     def test_a_client_without_the_route_cannot_route(self, monkeypatch) -> None:
         cols = _cols("docs", _BGE, 2)
         engine = _engine(monkeypatch, cols)

@@ -70,6 +70,11 @@ IN_SAMPLE_KINDS = ("rdr",)
 OUT_OF_SAMPLE_KINDS = ("title", "generic")
 ROUTE_EVENT = "search_topic_route"
 ROUTE_COUNTS = ("routed", "no_topics", "fallback", "skipped", "unreported")
+#: Pre-declared 2026-11-19, before any run: a FAIL from a run in which fewer questions than this had a routed top1
+#: arm is reported as inconclusive (diluted), since it says little about routing. A pass is not affected.
+MIN_ROUTED_QUESTIONS = 10
+#: Stop early, before spending the whole cap, when this many questions in a row routed no collection at the start.
+EARLY_VACUITY_QUESTIONS = 3
 BOOTSTRAP_SEED = 1340
 BOOTSTRAP_N = 2000
 SCOPE_NOTES = (
@@ -157,7 +162,8 @@ def _answer_arm(q: dict[str, Any], arm: str, *, answer_fn: Callable, catalog: An
     cost = envelope.get("cost_usd")
     steps = [s for s in envelope.get("steps") or [] if isinstance(s, dict)]
     if cost is None or any(s.get("cost_usd") is None for s in steps):
-        raise _Stop("cost_unknown", f"{q['qid']} {arm}: the envelope or one of its steps has no cost_usd")
+        raise _Stop("cost_unknown", f"{q['qid']} {arm}: the envelope or one of its steps has no cost_usd",
+                    cost_usd=float(cost) if cost is not None else 0.0)
     try:
         return _score_arm(q, envelope, float(cost), elapsed, logs, catalog)
     except Exception as e:  # noqa: BLE001 — the call was paid for: stop, and count it
@@ -175,6 +181,9 @@ def _score_arm(q: dict[str, Any], envelope: dict[str, Any], cost: float, elapsed
     }
     if out["budget_exhausted_at_step"] is not None:
         out["error"] = f"budget exhausted at step {out['budget_exhausted_at_step']}: a partial run is not scored"
+        return out
+    if not chunks:
+        out["error"] = "no chunks: the plan retrieved nothing (a failed run is not scored as a loss)"
         return out
     rows = [{"chash": c.get("chash", ""), "collection": c.get("collection", ""), "distance": c.get("distance")}
             for c in chunks]
@@ -198,7 +207,8 @@ def ordered(queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def run(queries: list[dict[str, Any]], *, answer_fn: Callable, catalog: Any, cap_usd: float, scope: str | None,
         call_budget_usd: float = 1.0, done: list[dict[str, Any]] | None = None, spent_usd: float = 0.0,
         checkpoint: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = list(done or [])
+    # a resumed run keeps its paired rows and runs an unpaired question again
+    rows: list[dict[str, Any]] = [r for r in (done or []) if r.get("paired")]
     finished = {r["qid"] for r in rows}
     spent = spent_usd
     largest = max((r[a]["cost_usd"] for r in rows for a in ARMS), default=0.0)
@@ -227,6 +237,9 @@ def run(queries: list[dict[str, Any]], *, answer_fn: Callable, catalog: Any, cap
             row["paired"] = all(row[a]["error"] is None for a in ARMS)
             row["same_plan"] = row["off"]["plan_id"] == row["top1"]["plan_id"]
             rows.append(row)
+            if (len(rows) == EARLY_VACUITY_QUESTIONS and not done
+                    and all(r["top1"]["route"]["routed"] == 0 for r in rows)):
+                raise _Stop("vacuous_early", f"the first {len(rows)} questions' top1 arms routed no collection")
             if checkpoint is not None:
                 checkpoint(state())
             print(  # noqa: T201 — progress line of a bench script
@@ -275,6 +288,16 @@ def summarize(rows: list[dict[str, Any]], *, stopped: str | None = None) -> dict
     rule = pass_rule(_rule_rows(paired, PRIMARY))
     errors = [r["qid"] for r in rows if not r.get("paired")]
     complete = stopped is None and not errors and not vacuous
+    if vacuous:
+        verdict = "vacuous: the top1 arms routed no collection"
+    elif not complete:
+        verdict = "incomplete: no verdict"
+    elif rule["passed"]:
+        verdict = "pass: default may become top1"
+    elif len(routed) < MIN_ROUTED_QUESTIONS:
+        verdict = f"inconclusive (diluted: {len(routed)} of {len(paired)} questions routed): default stays off"
+    else:
+        verdict = "fail: default stays off"
     return {
         "orderings": ORDERINGS, "primary": PRIMARY,
         "n": len(rows), "paired": len(paired), "errors": len(errors), "error_qids": errors,
@@ -284,9 +307,8 @@ def summarize(rows: list[dict[str, Any]], *, stopped: str | None = None) -> dict
         "in_sample": _split([r for r in paired if r["kind"] in IN_SAMPLE_KINDS]),
         "out_of_sample": _split([r for r in paired if r["kind"] in OUT_OF_SAMPLE_KINDS]),
         "pass_rule": rule,
-        "verdict": ("vacuous: the top1 arms routed no collection" if vacuous
-                    else "incomplete: no verdict" if not complete
-                    else "pass: default may become top1" if rule["passed"] else "fail: default stays off"),
+        "routed_fraction": f"{len(routed)} of {len(paired)}", "min_routed_questions": MIN_ROUTED_QUESTIONS,
+        "verdict": verdict,
         "informational": {
             "secondary_ordering_rule": pass_rule(_rule_rows(paired, SECONDARY)),
             "routed_questions_only_rule": pass_rule(_rule_rows(routed, PRIMARY)),
@@ -294,6 +316,19 @@ def summarize(rows: list[dict[str, Any]], *, stopped: str | None = None) -> dict
         },
         "scope_notes": list(SCOPE_NOTES),
     }
+
+
+def resume_mismatch(prior: dict[str, Any], head: dict[str, Any]) -> str:
+    """Why *prior* is not the same measurement as one about to start with *head*, or ``""``."""
+    if prior.get("queries") != head["queries"]:
+        return "the question files differ from the recorded run (names or sha256)"
+    if prior.get("scope") != head["scope"]:
+        return "the scope differs from the recorded run"
+    pm, hm = prior.get("manifest") or {}, head["manifest"]
+    for key in ("git_sha", "host_class", "engine_build"):
+        if key in hm and pm.get(key) != hm.get(key):
+            return f"the manifest's {key} differs ({pm.get(key)!r} recorded, {hm.get(key)!r} now)"
+    return ""
 
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
@@ -333,14 +368,18 @@ def main(argv: list[str] | None = None) -> int:
         queries = queries[: a.limit]
     done: list[dict[str, Any]] = []
     spent = 0.0
-    if a.resume:
-        prior = json.loads(a.out.read_text())
-        done, spent = prior["rows"], float(prior["spent_usd"])
     head = {
         "manifest": build_manifest(Path.cwd()), "scope": a.scope,
         "queries": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in a.queries},
         "per_collection_env": os.environ.get("NX_SEARCH_PER_COLLECTION"),
     }
+    if a.resume:
+        prior = json.loads(a.out.read_text())
+        why = resume_mismatch(prior, head)
+        if why:
+            print(f"refused to resume: {why}", file=sys.stderr)  # noqa: T201
+            return 2
+        done, spent = prior["rows"], float(prior["spent_usd"])
 
     def checkpoint(state: dict[str, Any]) -> None:
         _write(a.out, {**head, **state, "summary": summarize(state["rows"], stopped="running")})

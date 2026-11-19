@@ -102,6 +102,11 @@ def _ndcg(grades: list[int], gt: dict[str, int]) -> float:
     return min(1.0, dcg / idcg) if idcg else 0.0
 
 
+def _grading(q: dict[str, Any]) -> dict[str, Any]:
+    """The owner and exact-basename grading a question asks for (generic questions, RDR-134 Step 9)."""
+    return {"owner": q.get("owner"), "exact": bool(q.get("exact"))}
+
+
 def score(rows: list[dict[str, Any]], gt: dict[str, int], catalog: Any,
           with_colls: bool = False, *, owner: str | None = None, exact: bool = False) -> dict[str, Any]:
     """``with_colls`` adds ``top3_coll``: the collection of each ``top3`` document, in step.
@@ -189,13 +194,13 @@ def measure_prod_query(q: dict[str, Any], prod: list[str], routed: list[str], t3
     p0 = p0_search(q["text"], prod, 30, t3, cluster_by=None, taxonomy=None, sensitivity="include")
     p0_rows = [{"chash": getattr(r, "id", ""), "distance": float(getattr(r, "distance", 1.0)),
                 "collection": getattr(r, "collection", "")} for r in p0]
-    row["P0"] = {**score(p0_rows, q["gt"], catalog), "s": time.monotonic() - t0}
-    row["P0s"] = score(merge(p0_rows), q["gt"], catalog)  # same rows, ordered by distance
+    row["P0"] = {**score(p0_rows, q["gt"], catalog, **_grading(q)), "s": time.monotonic() - t0}
+    row["P0s"] = score(merge(p0_rows), q["gt"], catalog, **_grading(q))  # same rows, ordered by distance
 
     t0 = time.monotonic()
     plain = {c: search_one(t3, q["text"], c) for c in prod}
     off_s = time.monotonic() - t0
-    row["OFF"] = {**score(merge([r for rs in plain.values() for r in rs]), q["gt"], catalog), "s": off_s}
+    row["OFF"] = {**score(merge([r for rs in plain.values() for r in rs]), q["gt"], catalog, **_grading(q)), "s": off_s}
 
     calls = {"search": 0, "embed": 0, "ann": 0, "topic_search": 0}
     ranked = rank_topics(t3, cstore, tax, q["text"], routed, calls, {})
@@ -209,7 +214,7 @@ def measure_prod_query(q: dict[str, Any], prod: list[str], routed: list[str], t3
                 rows += plain[c]
             else:
                 rows += tr
-        row[arm] = score(merge(rows), q["gt"], catalog)
+        row[arm] = score(merge(rows), q["gt"], catalog, **_grading(q))
         for label, gset in (gates or {}).items():
             grows: list[dict[str, Any]] = []
             for c in prod:
@@ -218,7 +223,7 @@ def measure_prod_query(q: dict[str, Any], prod: list[str], routed: list[str], t3
                     grows += plain[c]
                 else:
                     grows += tr
-            row[f"{arm}@g{label}"] = score(merge(grows), q["gt"], catalog, with_colls=True)
+            row[f"{arm}@g{label}"] = score(merge(grows), q["gt"], catalog, with_colls=True, **_grading(q))
     for tr in top1.values():
         stats["routed"] += 1
         if not tr:

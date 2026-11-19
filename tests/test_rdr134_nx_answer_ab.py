@@ -326,3 +326,54 @@ def test_main_refuses_without_a_spend_cap() -> None:
     with pytest.raises(SystemExit) as exc:
         ab.main(["--out", "/dev/null"])
     assert exc.value.code == 2
+
+
+def test_a_resume_runs_an_unpaired_question_again() -> None:
+    first = _run(_Q[:2], _answer(_BETTER, exhausted={"top1": 3}))
+    assert [r["paired"] for r in first["rows"]] == [False, False]
+    seen: list = []
+    out = _run(_Q[:2], _answer(_BETTER, seen=seen), done=first["rows"], spent_usd=first["spent_usd"])
+    assert {q for q, _, _ in seen} == {"q0", "q1"} and all(r["paired"] for r in out["rows"])
+
+
+def test_a_resume_of_a_different_measurement_is_refused() -> None:
+    head = {"queries": {"a.yaml": "1"}, "scope": None, "manifest": {"git_sha": "x", "engine_build": "e1"}}
+    assert ab.resume_mismatch(dict(head), head) == ""
+    assert "question files" in ab.resume_mismatch({**head, "queries": {"a.yaml": "2"}}, head)
+    assert "scope" in ab.resume_mismatch({**head, "scope": "docs"}, head)
+    assert "engine_build" in ab.resume_mismatch({**head, "manifest": {"git_sha": "x", "engine_build": "e0"}}, head)
+
+
+def test_an_answer_with_no_chunks_is_unpaired_not_a_loss() -> None:
+    (row,) = _run(_Q[:1], _answer({"off": [("good", 0.1)], "top1": []}))["rows"]
+    assert row["top1"]["error"].startswith("no chunks") and row["paired"] is False
+
+
+def test_an_unknown_step_cost_still_counts_the_known_envelope_cost() -> None:
+    out = _run(answer=_answer(_BETTER, step_cost=None, cost=0.07))
+    assert out["stopped"] == "cost_unknown" and out["spent_usd"] == pytest.approx(0.07)
+
+
+def test_three_questions_that_route_nothing_stop_the_run_early() -> None:
+    seen: list = []
+    out = _run([_q(i) for i in range(6)], _answer(_BETTER, routed=0, seen=seen))
+    assert out["stopped"] == "vacuous_early" and len(seen) == 6, "three questions, two arms each, then stop"
+
+
+def test_a_fail_from_a_diluted_run_is_inconclusive_and_a_pass_is_not_affected() -> None:
+    def arm(v: float, routed: int) -> dict:
+        return {"distance": {"ndcg3": v, "recall10": v}, "envelope": {"ndcg3": v, "recall10": v},
+                "elapsed_s": 1.0, "route": {"routed": routed}}
+
+    def row(qid: str, kind: str, off: float, top1: float, routed: int) -> dict:
+        return {"qid": qid, "kind": kind, "paired": True, "same_plan": True, "off": arm(off, 0),
+                "top1": arm(top1, routed)}
+
+    few = [row("R0", "rdr", 0.5, 0.4, 1)] + [row(f"G{i}", "generic", 0.5, 0.5, 0) for i in range(10)]
+    s = ab.summarize(few)
+    assert s["verdict"].startswith("inconclusive (diluted: 1 of 11")
+    many = [row(f"R{i}", "rdr", 0.5, 0.4, 1) for i in range(10)] + [row(f"G{i}", "generic", 0.5, 0.5, 1)
+                                                                     for i in range(10)]
+    assert ab.summarize(many)["verdict"].startswith("fail")
+    wins = [row("R0", "rdr", 0.0, 1.0, 1)] + [row(f"G{i}", "generic", 0.5, 0.5, 0) for i in range(10)]
+    assert ab.summarize(wins)["verdict"].startswith("pass")
