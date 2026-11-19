@@ -101,12 +101,24 @@ def _engine() -> tuple[Search, ByTitle]:
     return search, by_title
 
 
-def _entries(session_id: str, name: str, search: Search, by_title: ByTitle) -> list[tuple[str, Session]]:
+def _entries(
+    session_id: str, name: str, search: Search, by_title: ByTitle, identity: str = ""
+) -> list[tuple[str, Session]]:
     found = []
+    if identity:
+        # RDR-253 Step 5: the entry's identity: line finds it across /clear and restart, whatever its session: line says
+        for row in search(identity):
+            title = str(row.get("title", ""))
+            session = parse_session(title, str(row.get("content", "")))
+            if session.identity == identity:
+                found.append((title, session))
+        if found:
+            return found
     for row in search(session_id):
         title = str(row.get("title", ""))
         session = parse_session(title, str(row.get("content", "")))
-        if session.session_id == session_id:
+        # an entry whose identity line names another seat is that seat's, even if its session line is stale here
+        if session.session_id == session_id and session.identity in ("", identity):
             found.append((title, session))
     if found or not name:
         return found
@@ -132,16 +144,21 @@ def _section(title: str, session: Session, now: datetime) -> list[str]:
 
 
 def _lookup(
-    session_id: str, now: datetime | None, search: Search | None, by_title: ByTitle | None, name: str | None
+    session_id: str, now: datetime | None, search: Search | None, by_title: ByTitle | None, name: str | None,
+    identity: str | None = None,
 ) -> list[str]:
     if search is None or by_title is None:
         engine_search, engine_by_title = _engine()
         search = search or engine_search
         by_title = by_title or engine_by_title
     resolved = session_name(session_id) if name is None else name
+    if identity is None:
+        from nexus.identity.board import identity_for_session  # noqa: PLC0415 -- hook import cost
+
+        identity = identity_for_session(session_id)
     clock = now or datetime.now().astimezone()
     out: list[str] = []
-    for title, session in _entries(session_id, resolved, search, by_title):
+    for title, session in _entries(session_id, resolved, search, by_title, identity):
         out.extend(_section(title, session, clock))
     return out
 
@@ -154,12 +171,14 @@ def due_lines(
     by_title: ByTitle | None = None,
     name: str | None = None,
     budget_s: float | None = None,
+    identity: str | None = None,
 ) -> list[str]:
     """The SessionStart section for *session_id*'s board: a heading, one line per due thread (and per ``due:`` that
     cannot be read), a blank; or ``[]``.
 
     *now* defaults to local time, so a ``due:`` date comes due at the operator's midnight. *search* and *by_title*
-    default to the engine's ``threads`` project; *name* defaults to :func:`session_name`. Returns within *budget_s*
+    default to the engine's ``threads`` project; *name* defaults to :func:`session_name`; *identity* defaults to the
+    one a token file binds *session_id* to (RDR-253 Step 5), and finds the entry first. Returns within *budget_s*
     (default ``NX_BOARD_DUE_BUDGET_S``) plus thread start-up, whatever the engine does.
     """
     if not session_id:
@@ -178,7 +197,7 @@ def due_lines(
             from nexus.db.data_token import mint_deadline  # noqa: PLC0415 — a ContextVar: set in this thread
 
             with mint_deadline(budget):
-                result.append(_lookup(session_id, now, search, by_title, name))
+                result.append(_lookup(session_id, now, search, by_title, name, identity))
         except Exception as exc:  # noqa: BLE001 — a hook must never fail; no reminder is the cost, and it is logged
             failure.append(f"{type(exc).__name__}: {exc}")
 
