@@ -112,6 +112,7 @@ class DelegatedIdentity:
         self._token = token
         self._lifetime = lifetime_s
         self._issued = clock()
+        self._refresh_stopped = False   # the engine refused a refresh for want of a live token: renewal goes on, refresh stops
         self._task: asyncio.Future[None] | None = None
 
     # ── begin ───────────────────────────────────────────────────────────────
@@ -213,7 +214,8 @@ class DelegatedIdentity:
             return False
         try:
             self._client.renew(self.identity, self._generation)
-            if self._lifetime is not None and self._clock() >= self._issued + self._lifetime / 2:
+            if (self._lifetime is not None and not self._refresh_stopped
+                    and self._clock() >= self._issued + self._lifetime / 2):
                 # its own token, the one being refreshed: the process's file names the dispatcher's identity, not this one's
                 view = self._client.bind(self.identity, "refresh", self._generation, self._evidence, token=self._token)
                 token, lifetime = token_contract.token_from_response(view)
@@ -233,6 +235,13 @@ class DelegatedIdentity:
             if exc.status == 409 or exc.status == 404:
                 _log.warning("delegated_identity_not_ours", identity=self.identity, code=exc.code)
                 return False
+            if token_contract.is_token_required(exc.status, exc.code):
+                # the child's own token expired (engine 0.1.198 gives it no grace): it cannot be refreshed again, so stop
+                # asking; the renewal goes on and the child keeps its binding until it ends. Logged once, never the token.
+                self._refresh_stopped = True
+                _log.warning("delegated_identity_token_lapsed", identity=self.identity,
+                             consequence="the identity token expired; it is not refreshed again, and the renewal continues")
+                return True
             _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))
         except IdentityUnavailableError as exc:
             _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))

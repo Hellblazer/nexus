@@ -113,8 +113,9 @@ class BindOutcome:
 def _token_gone(exc: IdentityApiError) -> bool:
     """Whether the engine refused a ``fork`` for want of a live identity token (engine 0.1.198: a data credential's fork
     needs one, and a process whose token expired while the laptop slept has none). A ``start`` needs none, so the caller
-    binds the process as a new start. The code is matched, never the message."""
-    return exc.status == 403 and exc.code == "identity_token_required"
+    starts the identity the process holds again (:meth:`SessionBinder._restart_own`). The code is matched, never the
+    message."""
+    return token_contract.is_token_required(exc.status, exc.code)
 
 
 class SessionBinder:
@@ -220,7 +221,8 @@ class SessionBinder:
 
     def _keep(self, facts: LaunchFacts, own: Mapping[str, Any]) -> BindOutcome | None:
         """``clear`` and ``fork``: same generation, new session id. None when the engine will not (the seat was
-        taken or ended meanwhile): the caller then binds the process as a new start. A credential that may not send
+        taken or ended meanwhile): the caller then binds the process as a new start. A fork refused for want of a live token
+        (an expired one) starts the same identity again instead (:meth:`_restart_own`). A credential that may not send
         ``clear`` (the data credential of a mint-only install) sends the same change as ``fork``, which it may."""
         if not self._privileged and facts.source == "clear":
             return None
@@ -235,10 +237,28 @@ class SessionBinder:
                 event = "fork"
                 view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
         except IdentityApiError as exc:
-            if exc.status == 409 or _token_gone(exc):
+            if _token_gone(exc):
+                return self._restart_own(facts, own, row=f"{facts.source}_restart_own")
+            if exc.status == 409:
                 return None
             raise
         return self._finish(facts, view, event, row=f"{facts.source}_in_process", action="bound")
+
+    def _restart_own(self, facts: LaunchFacts, own: Mapping[str, Any], *, row: str) -> BindOutcome:
+        """The engine refused this process's ``fork`` for want of a live token (its token expired while the laptop slept):
+        start the SAME identity again, from the same process. A ``start`` needs no token, and the engine's acquire reads
+        the same host, pid and ``startedAt`` as the same process: no generation change, a fresh token in the answer. Not
+        :meth:`_startup`, which binds whatever the launch names or mints a new ephemeral and would orphan the held identity.
+
+        The evidence carries the NEW session id, because the fork this replaces indexed it and the next fenced write keyed
+        on that session reads the index.
+
+        This path relies on a data credential being able to ``start`` its own identity without a token. It breaks if
+        RDR-253 Phase 2 closes the start gap (Phase 2 open item 1: a data-credential ``start`` of a held identity needing
+        the caller's own live token): a session whose token lapsed would then have no way back but a new launch."""
+        prior = (own.get("holder") or {}).get("session_id")
+        view = self._client.bind(own["id"], "start", int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+        return self._finish(facts, view, "start", row=row, action="bound")
 
     def _resume(self, facts: LaunchFacts, own: Mapping[str, Any] | None) -> BindOutcome | None:
         try:
@@ -321,7 +341,7 @@ class SessionBinder:
         except IdentityApiError as exc:
             if not _token_gone(exc):
                 raise
-            return self._startup(facts, rebind=False)   # as _keep does: a start needs no token
+            return self._restart_own(facts, own, row="resume_unindexed_restart_own")   # as _keep does
         return self._finish(facts, view, "fork", row="resume_unindexed_reuse", action="unchanged")
 
     def _startup(self, facts: LaunchFacts, *, rebind: bool) -> BindOutcome:

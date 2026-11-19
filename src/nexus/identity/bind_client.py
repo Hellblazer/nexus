@@ -112,7 +112,7 @@ def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, 
     if exc.status == 401:
         return f"the credential or {token_source} was not accepted (expired, unknown or another tenant's)" + (
             f": {unauthorized}" if unauthorized else "")
-    if code == "identity_token_required":
+    if code == token_contract.TOKEN_REQUIRED_CODE:
         return no_token
     if code == "not_owner":
         return (f"the identity token names {exc.body.get('token_identity') or 'another identity'}, not "
@@ -126,7 +126,9 @@ def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, 
     if code == "seat_limit":
         named = exc.body.get("cap")
         cap = named if isinstance(named, int) and not isinstance(named, bool) else SEAT_LIMIT
-        return f"{identity or 'this identity'} has created its {cap} seats, the most a session's credential may: {seat_limit}"
+        named_id = exc.body.get("identity")
+        who = named_id if isinstance(named_id, str) and named_id else identity   # a create names none of its own: the body does
+        return f"{who or 'this identity'} has created its {cap} seats, the most a session's credential may: {seat_limit}"
     if code == "bad_created_by":
         return "a tenant credential may give created_by only as sam or restart"
     if code in _SEAT_REFUSALS:
