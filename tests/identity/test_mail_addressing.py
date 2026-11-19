@@ -71,11 +71,27 @@ class _Engine:
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
 
 
-def test_an_alias_whose_seat_a_new_client_holds_resolves_to_the_identity_mailbox() -> None:
+def test_a_live_seat_with_one_directory_holder_gets_the_mail_in_that_holders_session_mailbox() -> None:
+    """``identity_state == "live"`` is not "the receiver drains mailbox/<id>": a Steps 3/4 client and an unleased
+    Desktop binding are live too and read only their session mailbox, and a new client drains that one as well."""
     engine = _Engine(NOW, {"marginalia": ("i12", "live", None, "")})
     tuples = _Tuples({"marginalia": [OLD_SESSION]})
-    assert resolve_send("marginalia", tuples, engine.alias) == SendTarget("i12", "identity")
-    assert tuples.reads == [], "a live seat never needs the directory"
+    assert resolve_send("marginalia", tuples, engine.alias) == SendTarget(OLD_SESSION, "session")
+    assert tuples.reads == ["directory/marginalia"]
+
+
+def test_a_live_seat_nobody_holds_in_the_directory_waits_in_the_identity_mailbox() -> None:
+    """An unleased binding (or a seat whose holder has not armed the name yet): no directory row, so the seat reads
+    ``mailbox/<id>`` when it binds."""
+    engine = _Engine(NOW, {"marginalia": ("i12", "live", None, "")})
+    assert resolve_send("marginalia", _Tuples(), engine.alias) == SendTarget("i12", "identity")
+
+
+def test_a_live_seat_held_by_two_sessions_is_refused_not_guessed() -> None:
+    engine = _Engine(NOW, {"marginalia": ("i12", "live", None, "")})
+    tuples = _Tuples({"marginalia": [OLD_SESSION, "22222222-2222-4333-8444-555555555555"]})
+    with pytest.raises(DirectoryResolutionError, match="held by more than one session"):
+        resolve_send("marginalia", tuples, engine.alias)
 
 
 def test_an_identity_id_goes_straight_to_its_mailbox() -> None:

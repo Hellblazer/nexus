@@ -202,11 +202,13 @@ def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
 def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> SendTarget:
     """RDR-253 Step 5: resolve ``to`` for a mixed fleet of old and new clients.
 
-    An identity id goes straight to ``mailbox/<id>``. A name resolves through ``alias/<name>`` first: when the seat
-    is ``live`` (a new client holds its lease, and every new client subscribes ``mailbox/<id>``) the mail goes there.
-    When the seat has no binding by a new client, the name falls back to ``directory/<name>`` and that session's
-    mailbox, as :func:`resolve_send_address` resolves it; with no directory holder either, the mail waits in
-    ``mailbox/<id>`` for the seat. A retired alias inside its grace resolves with the engine's notice naming the new
+    An identity id goes straight to ``mailbox/<id>``. A name resolves through ``alias/<name>`` first, to learn the
+    seat and any retired-alias notice, but a live ``identity_state`` does not say the receiver drains
+    ``mailbox/<id>``: a Steps 3/4 client and an unleased Desktop binding are live too and read only their session
+    mailbox. So the mail goes to the one live holder of ``directory/<name>``, in that holder's session mailbox
+    (every new client drains ``mailbox/<session>`` as well, by dual subscription), as :func:`resolve_send_address`
+    resolves it; two holders are refused. Only when nobody holds the name does the mail wait in ``mailbox/<id>``
+    for the seat to bind. A retired alias inside its grace resolves with the engine's notice naming the new
     name; past it the engine answers 410 and the send is refused with "renamed to <new> on <date>". An unknown name,
     or an alias lookup that cannot be made (an engine without identity routes), is the directory's alone.
     """
@@ -228,8 +230,6 @@ def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> Send
     notice = str(found.get("notice") or "")
     if not looks_like_identity_id(identity):
         return SendTarget(*resolve_send_address(to, tuples))
-    if found.get("identity_state") == "live":
-        return SendTarget(identity, "identity", notice)
     entries = list_directory_entries(to, tuples)
     if not any((row.dims or {}).get("session_id") for row in entries):
         return SendTarget(identity, "identity", notice)  # nobody holds the name: the seat reads it when it binds
