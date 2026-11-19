@@ -1334,9 +1334,25 @@ threads board, recorded through halcyon's session).
 
 ### Contradiction Check
 
-None known. The draft's tension with RDR-204's 2026-09-09 ruling is
-resolved by D1. The draft's rejection of a surrogate key is reversed by D3,
-and Alternative 2 now records the rejected name-as-key design.
+The draft's tension with RDR-204's 2026-09-09 ruling is resolved by D1. The
+draft's rejection of a surrogate key is reversed by D3, and Alternative 2
+now records the rejected name-as-key design. Gate round 1 (2026-11-19) found
+these, now resolved in the text:
+
+- Phase 3 written as boot changesets against RDR-246's rule: item 6, "How
+  each Phase 3 step runs".
+- Sam's 2026-11-12 RDR-247 ruling (stamp before build) against an
+  unordered full stamp: Scope boundary with RDR-247.
+- nexus-j4gl6, closed into RDR-247, still cited as this RDR's live tracker:
+  Problem Statement.
+- Label reuse and a one-row rename asserted in Phase 3 while the name is
+  still the primary key: item 7 and P4.1.
+
+Still open, for a design call: whether the label alphabet excludes `/`,
+which `NoteUri.collectionOf` treats as the end of the collection; what
+makes a live `(content_type, owner_id, embedding_model)` tuple unique once
+minting removes the name from that job; and the safe engine downgrade point
+after P3.3.
 
 ### Assumption Verification
 
@@ -1356,7 +1372,13 @@ for 5).
 ### Scope Verification
 
 The Minimum Viable Validation runs in the local-service gate during Phase 2
-and again after Phase 3, and is not deferred.
+and again after Phase 3, and is not deferred. Items that gate round 1 found
+with no plan step now have one: routing by content type (P2.9), the tenant
+backup (P2.1, P3.11), queued aspect tasks on rename (P3.7), and name-keyed
+views and triggers (P3.5b). Still without one: a disposition for
+`catalog_documents.corpus` and `catalog_reconcile_rows.physical_collection`,
+which carry names with no foreign key and are not in item 6's Expand list.
+The history tables' nullable `collection_id` (item 6) names no consumer.
 
 ### Cross-Cutting Concerns
 
@@ -1406,7 +1428,7 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
 - `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-31`, and
+- T2 `nexus_rdr/229-research-1` to `-38`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
   superseded).
 - T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
@@ -1431,3 +1453,10 @@ large, and moved under a ratchet.
   to `-16`; `-30` measurement; `-31` census total and bead state), with
   `229-refresh-2026-11-19` recording that `-9`, `-12` and `-13` still hold.
 - 2026-11-19: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 2 ship-blocker(s)); blob `691241710dec`; critique `nexus_rdr/229-gate-critique-2026-11-19-r1`.
+- 2026-11-19: Gate round 1 fixes. C1: Phase 3 runs on RDR-246's data
+  moves and the PCI reconciler's build pattern, with no maintenance window.
+  C2: a fourth census class, routing by content type, moved to the row by
+  P2.9 before P3.6 and P3.8. S1, S3, S5 and S8 fixed; S2 and S6 in part;
+  S4 and S7 left for a design call; Observation 3 corrected. The Finalization
+  Gate's Contradiction Check and Scope Verification regenerated. T2
+  `229-research-32` to `-38` added.
