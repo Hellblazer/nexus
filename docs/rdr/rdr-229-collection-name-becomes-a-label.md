@@ -1108,8 +1108,9 @@ same attributes as any other). Phase 4 drops the column and
 No name parsing comes back for these sites. Each prefix test becomes a test
 of the row's `content_type`, read through the source its caller already
 has. The routing class is 23 sites plus the `taxonomy__` half of the 12
-`_BYPASS_SCHEMA_PREFIXES` tests, 35 tests in all (T2 `229-research-34`,
-`229-research-39`):
+`_BYPASS_SCHEMA_PREFIXES` tests, 35 client tests, and one engine site,
+`NoteUri.isFileRoutedCollection`: 36 in all (T2 `229-research-34`,
+`229-research-39`, `229-research-49`):
 
 - *Listing rows in hand.* `health.py:12516` and
   `commands/catalog_cmds/doctor.py:1570` filter `t3.list_collections()`
@@ -1432,7 +1433,10 @@ its acceptance is that test green plus the census pin it lowers.
   existing collection and on a new one that has no row yet. Test: a
   listing outage during `nx index md` neither fails the write nor
   re-indexes an unchanged file.
-- P2.4 Score calibration and taxonomy thresholds from the row.
+- P2.4 Taxonomy thresholds from the row. Score calibration already reads
+  the row first and parses the name only when that answers nothing
+  (`scoring.py:175-182`), item 1's NoRow outcome, which stays (T2
+  `229-research-49`).
 - P2.5 Engine: explicit `lifecycle_state` at registration; lifecycle reads
   from the row in `QuarantineOrigin`, `ChunkReaper`, `VectorHandler`,
   `PgVectorRepository`; the `quarantine-` half of the client's
