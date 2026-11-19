@@ -119,14 +119,16 @@ public final class CatalogMoves {
         return new CatalogRepository.MergeRefused(message);
     }
 
-    /** An absolute path, or the handler's 400: a relative path would be written into rows as if it named a place. */
+    private static final java.util.regex.Pattern DRIVE_PATH = java.util.regex.Pattern.compile("^[A-Za-z]:[\\\\/].*", java.util.regex.Pattern.DOTALL);
+
+    /**
+     * An absolute path, or the handler's 400: a relative path would be written into rows as if it named a place. A shape
+     * check, independent of the engine host's OS (a Linux engine must accept a Windows client's path): absolute is a leading
+     * {@code /}, a drive letter, a colon and a separator ({@code C:\} or {@code C:/}), or a leading {@code \\\\} (UNC).
+     * {@code C:docs} (drive-relative) and {@code docs/a.pdf} are relative.
+     */
     private static void requireAbsolute(String field, String path) {
-        boolean absolute;
-        try {
-            absolute = Paths.get(path).isAbsolute();
-        } catch (InvalidPathException e) {
-            absolute = false;
-        }
+        boolean absolute = path.startsWith("/") || path.startsWith("\\\\") || DRIVE_PATH.matcher(path).matches();
         if (!absolute) throw new IllegalArgumentException("'" + field + "' must be an absolute path, got " + path);
     }
 
@@ -204,7 +206,8 @@ public final class CatalogMoves {
                 throw refuse(t + " already holds " + newUri + " but belongs to owner " + ownerPrefixOf(t) + ", not "
                     + ownerPrefixOf(s) + ": a move absorbs a row only of the document's own owner");
             }
-            refuseAliasCycles(ctx, tenant, Map.of(t, s), List.of(s));
+            // No alias-cycle check here: S may not be an alias of another row (refused above), so absorbing T into S
+            // cannot close a loop. The owner fold, where an S may be an alias, checks its graph (planFold).
             Boolean tSensitive = ctx.select(CATALOG_DOCUMENTS.SENSITIVE).from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(t))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))

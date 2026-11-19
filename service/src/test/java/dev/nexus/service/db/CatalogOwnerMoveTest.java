@@ -389,7 +389,9 @@ class CatalogOwnerMoveTest {
     // ── review round: locks, alias graph, rollback, input ────────────────────
 
     @Test
-    void locksDocumentsInCOrder() throws Exception {
+    void lockOrderHookReportsTheSortedDocumentOrder() throws Exception {
+        // The C-collation choice itself is pinned by the code (orderBy ... collate("C")), not by this fixture: every
+        // tumbler here shares the 1.1. prefix, so its order is the same in any collation. This pins the hook's report.
         // RDR-254 review B2: lockDocumentRowsSorted sorts tumblers as Java strings (C order); the owner move's lock
         // must take the same order whatever the database collation, or a concurrent link write can deadlock with it.
         String t = tenant();
@@ -404,7 +406,7 @@ class CatalogOwnerMoveTest {
         }
         List<String> order = seen.get();
         assertThat(order).hasSize(12);
-        assertThat(order).as("C order: 1.1.10 before 1.1.2").isSortedAccordingTo(String::compareTo);
+        assertThat(order).as("sorted as Java strings: 1.1.10 before 1.1.2").isSortedAccordingTo(String::compareTo);
         assertThat(order.indexOf("1.1.10")).isLessThan(order.indexOf("1.1.2"));
     }
 
@@ -463,6 +465,19 @@ class CatalogOwnerMoveTest {
         assertThat(snapshot(t)).isEqualTo(before);
         assertThat(owner(t, "1.1")).containsEntry("repo_root", OLD_ROOT).containsEntry("repo_hash", HASH_A);
         assertThat(owner(t, "1.2").get("deactivated_at")).isNull();
+    }
+
+    @Test
+    void aWindowsDriveLetterNewRootPassesValidation_andARelativeOrDriveRelativeOneDoesNot() throws Exception {
+        // RDR-254 confirmation: validation is a shape check, independent of the engine host. What the rewrite then does
+        // with a root this host cannot resolve (deriveSourceUri skips it) is not asserted here.
+        String t = tenant();
+        repoOwner(t, "1.1", "proj", HASH_A, OLD_ROOT);
+        file(t, "1.1", "src/x.py", COLL_A);
+        assertThat(moves.moveOwner(t, "1.1", "C:\\work\\proj", HASH_B, true).toMap()).containsEntry("dry_run", true);
+        assertThat(moves.moveOwner(t, "1.1", "D:/work/proj", HASH_B, true).toMap()).containsEntry("dry_run", true);
+        assertThatThrownBy(() -> moves.moveOwner(t, "1.1", "C:proj", HASH_B, true))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("absolute");
     }
 
     @Test
