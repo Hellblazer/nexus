@@ -2,7 +2,7 @@
 """nexus-uwggq.1.5 (RDR-241 Phase 2): ``nx doctor --check-references`` reads the engine's by-scheme route, one
 read per registered non-file scheme, and never walks the catalog.
 
-Covers the client reader (:func:`nexus.catalog.doc_route_wire.read_docs_by_scheme`: no request without the
+Covers the client reader (:func:`nexus.catalog.engine_reads.by_scheme.read_docs_by_scheme`: no request without the
 ``/version`` flag, paging to the exact count, a body off the contract raises), the candidate list (one read per
 scheme in registry order, alias rows dropped, tumbler-text order), the CLI on an engine without the route (not
 checked, exit 0, no walk), a row ``urlparse`` cannot parse (reported, never aborting the check), and one HTTP
@@ -21,7 +21,7 @@ import pytest
 
 from nexus import aspect_readers, doctor_references
 from nexus.aspect_readers import StatOk
-from nexus.catalog.doc_route_wire import DOCS_BY_SCHEME_FLAG, read_docs_by_scheme
+from nexus.catalog.engine_reads.by_scheme import DOCS_BY_SCHEME_FLAG, read_docs_by_scheme
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 _ON = {DOCS_BY_SCHEME_FLAG: True}

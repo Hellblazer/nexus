@@ -285,7 +285,7 @@ STUB_METADATA_TIMED_OUT = object()
 #: the engine's per-collection ``timed_out`` rows arrive instead of a client-side timeout, and under the public edge's
 #: roughly 30 s cut.
 STUB_METADATA_TIMEOUT_S = 28.0
-from nexus.catalog.doc_route_wire import read_docs_by_scheme
+from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
 from nexus.catalog.doctor_route_wire import (  # noqa: F401 — the constants are re-exported: callers import them here
     INDEX_RUN_CENSUS_MAX_LIMIT,
     INDEX_RUN_CENSUS_RULES_DIFFER,
@@ -1293,7 +1293,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def documents_by_scheme(self, scheme: str) -> list[CatalogEntry] | None:
         """Every live document whose ``urlparse(source_uri).scheme`` is *scheme* lowercased (``GET /docs/by-scheme``,
-        nexus-uwggq.1.5), all pages, in tumbler order: see :func:`nexus.catalog.doc_route_wire.read_docs_by_scheme`.
+        nexus-uwggq.1.5), all pages, in tumbler order: see :func:`nexus.catalog.engine_reads.by_scheme.read_docs_by_scheme`.
         ``None`` when the engine answered ``/version`` without the flag (no request is sent). A ``/version`` probe that
         failed says nothing about the route and raises, as an error, a malformed body or a row with no tumbler do; a
         row repeated across pages (offset paging under concurrent inserts) is kept once."""
