@@ -159,24 +159,76 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
     offenders = _scan_offenders(request.session.items)
 
     if offenders:
-        sample = "\n  ".join(offenders[:20])
-        suffix = (
-            f"\n  ... (+{len(offenders) - 20} more)"
-            if len(offenders) > 20
-            else ""
-        )
-        pytest.fail(
-            "RDR-109 Phase 1: the following tests reference voyage-"
-            "(context|code)-3 but do not opt in to the `cloud_mode` "
-            "fixture and are not listed in `_MODE_LINT_EXCLUDE`:\n  "
-            + sample
-            + suffix
-            + "\n\nFix: add `cloud_mode` to the test's fixture list "
-            "(or `pytestmark = pytest.mark.usefixtures(\"cloud_mode\")` "
-            "at module/class scope) if the test asserts cloud-mode "
-            "behavior; or add the nodeid to `_MODE_LINT_EXCLUDE` in "
-            "tests/conftest.py with a documented reason."
-        )
+        pytest.fail(_census_failure(offenders))
+
+
+#: A lint run that collected fewer items than this was path-scoped: the census needs the whole tests/ tree.
+_FULL_CORPUS_FLOOR = 20_000
+
+
+@pytest.mark.lint
+def test_the_mode_census_runs_in_a_lint_run_over_the_full_collection(
+    request: pytest.FixtureRequest, full_collection: list,
+) -> None:
+    """The census above reads session.items, so ``-m lint`` deselects it and a green lint run never ran it (two
+    census reds passed full lint runs on 2026-11-19). This one runs the same scan over every item the process
+    collected, deselected ones included (conftest's ``full_collection``), so the lint bucket catches it too. The
+    dedicated census job stays the enforcement of record (suite audit item 9)."""
+    if request.config.getoption("keyword", default=""):
+        pytest.skip("a -k run narrows on purpose; the census needs the whole corpus")
+    if len(full_collection) < _FULL_CORPUS_FLOOR:
+        pytest.skip(f"collected {len(full_collection)} items (path-scoped run); the census needs the whole tests/ tree")
+    scope = _default_selection(full_collection)
+    offenders = _scan_offenders(scope)
+    if offenders:
+        pytest.fail(_census_failure(offenders))
+
+
+def _default_addopts_markexpr() -> str:
+    """The ``-m`` expression of pyproject's default addopts: what the dedicated census job selects."""
+    import shlex  # noqa: PLC0415 - used only by this lint-run census
+    import tomllib  # noqa: PLC0415
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    addopts = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]["addopts"]
+    args = shlex.split(addopts)
+    return args[args.index("-m") + 1]
+
+
+def _default_selection(items: list) -> list:
+    """The items the default selection keeps, so this census scans exactly the corpus the census job scans (an
+    integration or slow test is outside the RDR-109 census by the job's own selection)."""
+    from _pytest.mark import MarkMatcher  # noqa: PLC0415
+    from _pytest.mark.expression import Expression  # noqa: PLC0415
+
+    expr = Expression.compile(_default_addopts_markexpr())
+    return [i for i in items if expr.evaluate(MarkMatcher.from_markers(i.iter_markers()))]
+
+
+def test_the_lint_census_scans_what_the_census_job_selects() -> None:
+    """The lint-run census filters by the default addopts expression, read from pyproject."""
+    assert _default_addopts_markexpr() == "not integration and not slow and not lint"
+
+
+def _census_failure(offenders: list[str]) -> str:
+    sample = "\n  ".join(offenders[:20])
+    suffix = (
+        f"\n  ... (+{len(offenders) - 20} more)"
+        if len(offenders) > 20
+        else ""
+    )
+    return (
+        "RDR-109 Phase 1: the following tests reference voyage-"
+        "(context|code)-3 but do not opt in to the `cloud_mode` "
+        "fixture and are not listed in `_MODE_LINT_EXCLUDE`:\n  "
+        + sample
+        + suffix
+        + "\n\nFix: add `cloud_mode` to the test's fixture list "
+        "(or `pytestmark = pytest.mark.usefixtures(\"cloud_mode\")` "
+        "at module/class scope) if the test asserts cloud-mode "
+        "behavior; or add the nodeid to `_MODE_LINT_EXCLUDE` in "
+        "tests/conftest.py with a documented reason."
+    )
 
 
 # RDR-109 / nexus-vgq89 ratchet: these two exclusion sets may only ever

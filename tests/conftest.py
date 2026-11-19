@@ -2525,6 +2525,14 @@ _MANDATORY_PIN_PROPERTY = "nx_mandatory_pin_marked"
 # either way", never a silent pass and never a false FAIL) instead of
 # scanning a proven-partial view.
 _raw_collected_count = 0
+#: The full pre-deselection item list (see pytest_itemcollected and the ``full_collection`` fixture).
+FULL_COLLECTION_KEY: pytest.StashKey[list] = pytest.StashKey[list]()
+
+
+@pytest.fixture
+def full_collection(request: pytest.FixtureRequest) -> list:
+    """Every item this process collected, before ``-m``/``-k`` deselection and pytest-split's shard selection."""
+    return request.config.stash.get(FULL_COLLECTION_KEY, [])
 
 
 def pytest_itemcollected(item: pytest.Item) -> None:
@@ -2548,6 +2556,9 @@ def pytest_itemcollected(item: pytest.Item) -> None:
     """
     global _raw_collected_count
     _raw_collected_count += 1
+    # Every collected item, kept before any deselection, for a census that must see the whole corpus even in a
+    # run that deselects it (the lint-run mode census, tests/test_mode_declarations_are_explicit.py).
+    item.config.stash.setdefault(FULL_COLLECTION_KEY, []).append(item)
 
 
 # Below this ratio of (session.items after all deselection) / (raw
