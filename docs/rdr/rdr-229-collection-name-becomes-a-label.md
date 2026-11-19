@@ -576,7 +576,8 @@ writers fill both, readers and constraints switch to the id, and only then
 does Phase 4 drop the name columns and the parsers. Up to P3.6 the old
 path still works, so each of those steps ships on its own and can stop.
 From P3.7 the referencing tables' name columns are dead until P4.1 drops
-them (item 7). On each install, readers leave the name path only once every
+them (item 7), so an engine downgraded past P3.7 reads stale names; the
+safe downgrade point is still open (Contradiction Check). On each install, readers leave the name path only once every
 stamp move there has completed (item 6, "Readers during the stamp").
 
 Nothing is renamed by any phase. An existing collection's name becomes its
@@ -995,7 +996,9 @@ transaction" (`AspectTaskRefs.java:23-26`, called at
 reader off the referencing tables' name columns (P3.5) and every
 per-collection index off the name (P3.4). From P3.7 those columns are dead:
 unread, and no longer rewritten by a rename, so they hold the label each row
-was written under until P4.1 drops them.
+was written under until P4.1 drops them. An engine downgraded to a release
+before P3.7 would read them; where a downgrade is safe is still open
+(Contradiction Check).
 
 **8. Minting (D2).** When a collection is registered with no label, the
 engine takes the next `collection_id` and sets the label to `c` followed by
@@ -1798,7 +1801,8 @@ The history tables' nullable `collection_id` (item 6) names no consumer.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
   Each Phase 3 step up to P3.6 leaves the name path working. From P3.7 a
   rename leaves the referencing tables' name columns on the old label, so
-  the name path is dead from there until P4.1 drops it (item 7). On each
+  the name path is dead from there until P4.1 drops it (item 7), and the
+  safe engine downgrade point is open (Contradiction Check). On each
   install that happens only after its stamp moves have completed, because
   the one-row rename waits for the same check (item 6, "Readers during the
   stamp").
