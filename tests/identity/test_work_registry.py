@@ -7,11 +7,16 @@ and a dict stands in for the process table. What the real engine does with the s
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 from tests.test_identity_cmd import Box
+
+#: The CLI resolves a worktree ref to its real path ("/p" is "C:\\p" on Windows), so rows seeded straight into the
+#: fake engine use the same spelling.
+P_REAL = os.path.realpath("/p")
 
 
 @pytest.fixture
@@ -98,7 +103,7 @@ def test_the_stale_case_a_running_row_of_an_identity_that_is_not_alive_never_blo
 
 def test_an_owner_that_ended_or_whose_seat_was_released_is_not_alive(box: Box) -> None:
     i1 = box.running_seat("alpha", 100)
-    box.engine.put_work(i1, "worktree", "/p", "running")
+    box.engine.put_work(i1, "worktree", P_REAL, "running")
     box.engine.records[i1].update(state="unheld", holder=None)         # released: no holder at all
     assert box.run("may-stop", "--kind", "worktree", "--ref", "/p").exit_code == 0
     box.engine.records[i1].update(state="ended")
@@ -134,8 +139,8 @@ def test_may_stop_fails_closed_when_the_engine_does_not_answer(box: Box) -> None
 def test_two_owners_one_alive_one_crashed_names_only_the_live_one(box: Box) -> None:
     live = box.running_seat("alpha", 100)
     dead = box.running_seat("beta", 101)
-    box.engine.put_work(live, "worktree", "/p", "running")
-    box.engine.put_work(dead, "worktree", "/p", "running")
+    box.engine.put_work(live, "worktree", P_REAL, "running")
+    box.engine.put_work(dead, "worktree", P_REAL, "running")
     crash(box, 101)
     result = box.run("may-stop", "--kind", "worktree", "--ref", "/p")
     assert result.exit_code == 3 and "alpha" in result.output and "beta" not in result.output, result.output
@@ -148,11 +153,11 @@ def test_register_done_and_forget_write_the_callers_row(box: Box, monkeypatch: p
     i1 = box.running_seat("alpha", 100)
     as_caller(monkeypatch, i1)
     assert box.run("work", "register", "--kind", "worktree", "--ref", "/p").exit_code == 0
-    assert box.engine.work[(i1, "worktree", "/p")][0] == "running"
+    assert box.engine.work[(i1, "worktree", P_REAL)][0] == "running"
     assert box.run("work", "done", "--kind", "worktree", "--ref", "/p").exit_code == 0
-    assert box.engine.work[(i1, "worktree", "/p")][0] == "done"
+    assert box.engine.work[(i1, "worktree", P_REAL)][0] == "done"
     out = box.run("work", "forget", "--kind", "worktree", "--ref", "/p")
-    assert out.exit_code == 0 and (i1, "worktree", "/p") not in box.engine.work
+    assert out.exit_code == 0 and (i1, "worktree", P_REAL) not in box.engine.work
 
 
 def test_a_process_with_no_identity_registers_nothing_and_still_exits_zero(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
