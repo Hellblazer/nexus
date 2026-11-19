@@ -110,7 +110,7 @@ class _Catalog:
 
 
 _CAT = _Catalog({"good": "docs/benchmarking.md", "bad": "docs/other.md", "far": "docs/far.md"})
-_OURS = "docs__1-1__voyage-context-3__v1"
+_OURS = "docs__1-1__bge-base-en-v1-5__v1"
 _log = structlog.get_logger("tests.ab")
 
 
@@ -285,7 +285,7 @@ def test_another_owners_file_earns_nothing() -> None:
     cat = _Catalog({"theirs": "docs/benchmarking.md"})
 
     async def fn(**kw):
-        return {"chunks": [{"chash": "theirs", "collection": "docs__1-94__voyage-context-3__v1", "distance": 0.1}],
+        return {"chunks": [{"chash": "theirs", "collection": "docs__1-94__bge-base-en-v1-5__v1", "distance": 0.1}],
                 "cost_usd": 0.01, "steps": [], "plan_id": "p", "step_count": 1, "budget_exhausted_at_step": None}
 
     (row,) = ab.run(_Q[:1], answer_fn=fn, catalog=cat, cap_usd=1.0, scope=None, call_budget_usd=0.05)["rows"]

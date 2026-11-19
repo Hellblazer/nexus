@@ -136,8 +136,8 @@ _CAT = _Cat({"ours": "CHANGELOG.md", "theirs": "CHANGELOG.md", "rdr4": "docs/rdr
 
 
 def test_another_owners_file_of_the_same_name_holds_a_slot_and_grades_zero() -> None:
-    rows = [{"chash": "theirs", "collection": "docs__1-94__voyage-context-3__v1"},
-            {"chash": "ours", "collection": "docs__1-1__voyage-context-3__v1"}]
+    rows = [{"chash": "theirs", "collection": "docs__1-94__bge-base-en-v1-5__v1"},
+            {"chash": "ours", "collection": "docs__1-1__bge-base-en-v1-5__v1"}]
     out = ab2.score(rows, {"changelogmd": 3}, _CAT, owner="1-1", exact=True)
     assert out["top3"][0].startswith("docs__1-94") and out["top3"][1] == "CHANGELOG.md"
     assert 0 < out["ndcg3"] < 1.0, "the foreign file took rank 1 and earned nothing"
@@ -146,6 +146,6 @@ def test_another_owners_file_of_the_same_name_holds_a_slot_and_grades_zero() -> 
 
 
 def test_exact_matching_no_longer_credits_a_longer_basename() -> None:
-    rows = [{"chash": "rdr4", "collection": "rdr__1-1__voyage-context-3__v1"}]
+    rows = [{"chash": "rdr4", "collection": "rdr__1-1__bge-base-en-v1-5__v1"}]
     assert ab2.score(rows, {"architecturemd": 3}, _CAT, owner="1-1", exact=True)["ndcg3"] == 0.0
     assert ab2.score(rows, {"architecturemd": 3}, _CAT)["ndcg3"] > 0.0, "control: the substring match credits it"
