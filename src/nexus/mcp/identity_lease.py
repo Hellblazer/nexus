@@ -424,6 +424,31 @@ class IdentityLease:
 # ── the process's one lease ─────────────────────────────────────────────────
 
 _LEASE: IdentityLease | None = None
+
+
+def add_change_listener(listener: Callable[[str], None]) -> Callable[[], None]:
+    """Call *listener* with the new identity id whenever a heartbeat or a handoff marker adopts another identity than
+    the lease held (a cross-seat ``/resume``, a take-over, the first bind of an unbound server). Built on the one
+    notifier, :func:`add_identity_listener`'s list, filtered to identity moves: a generation change of the same
+    identity, and the identity already held when this is called, do not call it. It runs on the thread that adopted,
+    outside the lease's lock, and an exception in it is logged and dropped. Returns the function that removes it.
+    The aura loader listens (RDR-252)."""
+    last: list[str | None] = [getattr(_LEASE, "identity", None)]
+
+    def on_identity(identity: str | None) -> None:
+        if identity and identity != last[0]:
+            last[0] = identity
+            listener(identity)
+
+    _IDENTITY_LISTENERS.append(on_identity)
+
+    def remove() -> None:
+        with contextlib.suppress(ValueError):
+            _IDENTITY_LISTENERS.remove(on_identity)
+
+    return remove
+
+
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 _GUARD = threading.Lock()
