@@ -183,6 +183,7 @@ class IdentityLease:
     def _adopt(self, record: TokenFile) -> bool:
         with self._lock:
             changed = (record.identity, record.generation) != (self.identity, self.generation)
+            identity_moved = record.identity != self.identity
             newer_token = record.token != self.token
             if not changed and not newer_token and record.session_id == self.session_id:
                 return False
@@ -198,7 +199,9 @@ class IdentityLease:
             self._known_sessions.update(record.session_ids)
             if record.session_id:
                 self._known_sessions.add(record.session_id)
-            return True
+        if identity_moved:
+            _notify_identity_change(record.identity)
+        return True
 
     def adopt_marker(self, *, identity: str | None, generation: int | None, token_file: str | None) -> bool:
         """Adopt the identity a T1 handoff marker names, reading the token file it points at. The path must be this
@@ -400,6 +403,30 @@ class IdentityLease:
 # ── the process's one lease ─────────────────────────────────────────────────
 
 _LEASE: IdentityLease | None = None
+_LISTENERS: list[Callable[[str], None]] = []
+
+
+def add_change_listener(listener: Callable[[str], None]) -> Callable[[], None]:
+    """Call *listener* with the new identity id whenever a heartbeat or a handoff marker adopts another identity than
+    the lease held (a cross-seat ``/resume``, a take-over, the first bind of an unbound server). It runs on the
+    thread that adopted, outside the lease's lock, and an exception in it is logged and dropped. Returns the function
+    that removes it. The aura state file listens (RDR-252)."""
+    _LISTENERS.append(listener)
+
+    def remove() -> None:
+        with contextlib.suppress(ValueError):
+            _LISTENERS.remove(listener)
+
+    return remove
+
+
+def _notify_identity_change(identity: str) -> None:
+    for listener in list(_LISTENERS):
+        try:
+            listener(identity)
+        except Exception as exc:  # noqa: BLE001 -- a listener never costs the lease its heartbeat
+            _log.warning("identity_change_listener_failed", error=f"{type(exc).__name__}: {exc}")
+
 _THREAD: threading.Thread | None = None
 _STOP = threading.Event()
 _GUARD = threading.Lock()

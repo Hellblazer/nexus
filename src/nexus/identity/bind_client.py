@@ -137,6 +137,11 @@ class IdentityClient:
         params = {"host": host, "pid": pid, "proc_start": proc_start, "history": "1"}
         return list(self._request("GET", "/bindings", params=params).get("bindings") or [])
 
+    def memberships(self, identity: str) -> list[dict[str, Any]]:
+        """The groups *identity* belongs to, in join order: ``{identity, group, role, joined_at}`` each (RDR-253 Step 1,
+        ``GET /v1/identity/<id>/memberships``). 404 ``unknown_identity`` for an identity the engine has no record of."""
+        return list(self._request("GET", f"/{identity}/memberships").get("memberships") or [])
+
     def log(self, identity: str) -> list[dict[str, Any]]:
         """The identity's binding log, oldest first (``nx identity show`` prints its tail)."""
         return list(self._request("GET", f"/{identity}/bindings").get("bindings") or [])
