@@ -137,8 +137,7 @@ of this RDR, not a regression. Full record: T2
 - `tests/test_moved_curator_doc_identity_characterization.py`, 3 tests at the
   registration level: moved PDF, the 409 on repoint, byte-identical copies.
 
-Both tests are uncommitted in worktree `nexus-wt/tamsin-gh1571` at the time of
-writing.
+Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
 
 ### Key Discoveries
 
@@ -176,12 +175,34 @@ writing.
   location when the path the row holds no longer exists. Absolute-path
   registrations, PDFs included, never take it. It is a working precedent for
   "the old path is gone, so the new location may claim the row".
+- **Documented** (source): a file moved inside one repository is already
+  recognised by content hash. Every row `nx index repo` sends to the engine's
+  reconcile carries the file's sha256 as `content_hash` and in its
+  `base_metadata` (`indexer.py:1567-1568`). On a complete walk only
+  (`catalog-048-reconcile.xml:224`, `:635`), the commit takes each of the
+  owner's live rows that the walk did not see, and if a present row has the
+  same `metadata.content_hash` it classes the old row `rename` (`:637-654`):
+  its links move to the new row (`:674`) and the old row is trashed (`:713`).
+  The new row has its own tumbler, so identity is not kept, but links are.
+  "Gone" here means absent from a complete walk of the owner's root, not a
+  filesystem probe. This is Alternative 2, shipped for repo files within one
+  owner; it cannot reach Gaps 2 and 3, where the relative path either changes
+  owner or does not change at all.
+- **Documented** (source): the tenant-wide `same-as` linker
+  (`nexus.catalog_link_same_content`, created by `content_hash_dedup`) links
+  live pdf and paper rows that share a content hash. It runs from
+  `nx index repo` (`indexer.py:1748`) and from the catalog links command, not
+  from `nx index pdf`, so a moved curator PDF gets no `same-as` link to its old
+  row unless the user runs that command.
 
 ### Critical Assumptions
 
 - [ ] A moved document can be recognised as the same document from evidence the
   catalog already holds (content hash, old path gone, same owner) without false
   merges of genuinely distinct copies (nexus-o19i0 keeps live copies separate).
+  The repo reconcile's rename rule already uses exactly this evidence within one
+  owner (Key Discoveries); whether it extends safely to curator documents,
+  where no complete walk exists, is the open part.
   — **Status**: Unverified — **Method**: Source Search, then Spike
 - [ ] Rewriting `source_uri` in place leaves chunks and links intact, because
   chunks carry no path (RDR-101's invariant). — **Status**: Unverified —
@@ -238,7 +259,7 @@ read; the open questions above can change it.
 | | Gap 1 moved PDF | Gap 2 renamed repo | Gap 3 same-name repo move | Gap 4 second clone | Gap 5 no route |
 | --- | --- | --- | --- | --- | --- |
 | 1. Explicit move command | closes, when the user runs it | closes, when run | closes, when run | no | closes |
-| 2. Recognition at registration | closes automatically | no (a new owner, nothing to match within) | closes (old root gone, same owner) | no | no |
+| 2. Recognition at registration | closes automatically | no (a new owner, nothing to match within) | no (the relative path matches, so registration never misses) | no | no |
 | 3. Owner matching by hash first | no | no (the hash changes with the path) | becomes a new owner instead, like Gap 2 | closes | no |
 
 ### Alternative 1: an explicit move command
@@ -271,15 +292,18 @@ and re-points it.
 - The common case (a file moved and indexed again) fixes itself.
 - `_find_curator_document`'s legacy relative-path leg already does this for a
   narrower case (`doc_indexer.py:777-815`).
+- For repo files it is already built: the reconcile's rename rule
+  (Key Discoveries). The new work is the curator path only.
 
 **Cons**:
 
-- It reads the filesystem at registration to decide that the old path is gone;
-  an unmounted volume or a path from another machine looks gone too.
+- A curator registration has no complete walk to say the old path is gone, so
+  it would have to probe the filesystem, and an unmounted volume or a path from
+  another machine looks gone too. The repo rule avoids that probe.
 - It works only within one owner, so a renamed repository (Gap 2) is out of
-  reach.
-- Repo documents carry no content hash at registration today (assumed; to be
-  checked), so it may cover curator documents only.
+  reach, and a same-name repository move (Gap 3) changes no relative path, so
+  the repo rule never fires there.
+- A file moved and edited in one step has a new hash and is not recognised.
 
 ### Alternative 3: owner matching by hash first
 
@@ -311,13 +335,49 @@ its false-match risk is measured.
 
 ## Trade-offs
 
+These follow the preliminary direction above and change if it does.
+
 ### Consequences
 
-To be written.
+- A move becomes something the user does on purpose. Until they run the
+  command, a moved PDF still indexes as a second document and a renamed
+  repository still becomes a second owner; the command repairs the result
+  after the fact, so the default outcome of a move is unchanged.
+- The re-point keeps the tumbler. The repo reconcile's rename keeps links but
+  mints a new tumbler; an explicit move keeps both, so a citation by tumbler
+  survives a move made with the command and does not survive one the reconcile
+  absorbs. The two paths then disagree on what a move preserves.
+- Chunks are not touched. A move rewrites catalog rows (owner root and hash,
+  `source_uri`, `file_path`) only, because chunks carry no path (RDR-108); the
+  cost of a move is one row per document, not a re-embed.
+- When the new path already has its own row (the GH #1571 state), the move has
+  to absorb that row: its chunks, manifest and links fold into the old one
+  before the old row takes the path, or the live `source_uri` index refuses
+  the write. That makes the document form a merge, not a rename.
+- Hash-first owner matching for Gap 4 gives a second live clone its own owner.
+  Files the two clones share are then indexed twice, once per owner, which is
+  the right result for two working trees but doubles their storage.
 
 ### Risks
 
-To be written.
+- A move of a large owner rewrites thousands of rows. As one engine
+  transaction it holds locks for its duration; split up, it can stop half done.
+  Either way it is a data move, so under the rule against boot-time data
+  migrations it must be a visible, resumable job the user starts, not
+  something the engine does on its own.
+- Hash-first owner matching depends on telling "the old root still exists"
+  from "the old root is gone". A root on an unmounted volume looks gone, so a
+  second clone on a removable disk could be read as a move and take the owner
+  over, the very bug Gap 4 names. The check has to fail toward a separate
+  owner.
+- Absorbing the duplicate row loses whatever only that row holds (links made
+  to it, aspects extracted from it) unless each is carried over. The repo
+  reconcile's rename moves links only (`catalog-048-reconcile.xml:674`), so
+  aspects and other per-document records are the part to enumerate.
+- If curator recognition (Alternative 2) is added later, a byte-identical copy
+  made on purpose at a new path while the original sits on an unmounted
+  volume would be folded into the original, which breaks nexus-o19i0's rule
+  that live copies stay separate.
 
 ## Implementation Plan
 
