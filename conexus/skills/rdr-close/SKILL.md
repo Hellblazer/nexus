@@ -150,6 +150,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
    ```
    Code-enforced flip: rewrites the RDR file `status -> closed`, adds `closed_date`, and updates the README index-row status cell in one tested action. A record still `draft` (work shipped without the accept gate) closes only with `--reason "<why it shipped without acceptance>"`, the table's guarded `close-unaccepted` edge; without it the command refuses `reason-not-stated`. Hand-editing frontmatter is the source of the RDR-165/166 ledger drift (T2 advanced, file left stale) — always use the command. (`--date YYYY-MM-DD` overrides the default of today.)
 3. (The README index row is updated by the command in step 2 — no separate regen step.)
+3a. Run `nx memory gate-rollup --rdr NNN --all` (add `--dry-run` to see the listing first). It writes the RDR's gate-record pointer to T3 (RDR-209 Phase 3 Step 1); nothing blocks the close without it.
 3b. **Tick or annotate every remaining `- [ ]` checkbox in the RDR body** — check it off if done, or replace with `- [deferred: nexus-XXXXX]` / `- [waived: <reason>]`. A closed RDR with unchecked boxes reads as hidden scope loss to every future audit (58 of 144 closed RDRs carried them as of 2026-07-13).
 4. **Scoped conditional reindex** — if the RDR body changed during close (e.g. divergence notes added, post-mortem link inserted, or any text outside the frontmatter block modified), run `nx index rdr` **scoped to the single RDR file**, NOT the whole corpus:
 

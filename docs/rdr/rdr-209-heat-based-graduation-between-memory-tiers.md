@@ -476,7 +476,14 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   field header `gate_record` writes (`gate_record.lua:79-88`) or, for an older
   record, from its last `outcome` line. It is a pointer: it keeps its sources
   by title and copies no body. Records whose verdict or bead cannot be read
-  are listed under "unmapped" and keep no TTL.
+  are listed under "unmapped" and keep no TTL. A pointer over the store_put cap
+  (`QUOTAS.MAX_DOCUMENT_BYTES`, 16,384 bytes) is written in parts, split at line
+  boundaries: the first keeps the title, the rest are titled `<title> (part 2)`
+  and so on, and a `parts: k` header line in the first names how many, so a
+  reader never guesses. A rerun that needs fewer parts names the older trailing
+  ones as stale and does not delete them (a T3 delete is a catalog tombstone
+  path, not part of this command). A run that lists nothing writes no pointer.
+  `--project` defaults to the current repository.
 - *The trigger.* The `phase-review-gate` skill's close step (`SKILL.md:24`) and
   the `rdr-close` skill name the command. Nothing blocks a close without it;
   Step 4's census is what shows a missed run.
@@ -832,7 +839,9 @@ matches; an older untagged record whose title names a listed bead is listed; a
 record with no bead is listed as unmapped; a quarantined record is not listed;
 another tenant's rows are not listed; the `<repo>_rdr` rows are neither listed
 nor changed; a seeded closed phase yields one pointer listing its three
-records.
+records; a pointer over the cap is split and still lists every record, and a
+rerun that needs fewer parts names the stale ones; a rerun replaces the pointer;
+`--dry-run` writes nothing, and no run writes anything to T2.
 
 #### Step 2: The loss check
 
@@ -1113,3 +1122,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 - 2026-11-16: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `43b12b69464f`; critique `nexus_rdr/209-gate-critique-2026-11-16-r1`.
 | 2026-11-16 | Accepted (Sam, by dialog in halcyon's session: "Keep timestamps, count first"), with the Count first step (fix check `nexus_rdr/209-fix-check-78cc9b0e4776` PASS). Epic nexus-1gdv0. Residual dispositions: gate S3 nexus-1gdv0.1.2, S5 nexus-1gdv0.2.7, S6 nexus-1gdv0.2.4, S7 nexus-1gdv0.2.5, S8 nexus-1gdv0.3; fix check d021: nexus-1gdv0.2.2, .2.3, .2.9, .2.10, .2.11; fix check 78cc: nexus-1gdv0.2.12, .2.13, .2.14, .2.15. |
 | 2026-11-18 | Gate finding S3 closed with the engine search page (nexus-1gdv0.1.1, nexus-1gdv0.1.2): the total is one statement (a CTE, a one-row count and the page left-joined), not a window count, so a page past the end still carries it and the page and the total share one snapshot; `limit` is clamped to 10,000 as `/v1/memory/list` clamps it and a bad `offset` is a 400. Wording amended under standing grant 3 to match the code reviewed at the nexus-1gdv0.1.3 gate (`MemorySearchPage`, tests in `MemorySearchPageTest`, `MemorySearchPageStatementsTest` and `MemoryRepositoryQuarantineReadPathTest`). |
+| 2026-11-19 | Phase 3 Step 1, the command (nexus-1gdv0.2.1). `nx memory gate-rollup` is built with the pointer record as designed. The size question the gate left to the implementation (critique observation 4) is settled as split, not refuse: a pointer over 16,384 bytes is written in titled parts that the first part counts, and a rerun that needs fewer parts names the stale ones (a T3 delete is a catalog tombstone path, so none is deleted). A run that lists nothing writes no pointer. Wording only; the design is unchanged. |

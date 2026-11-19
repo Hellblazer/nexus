@@ -714,6 +714,46 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             )
 
 
+@memory.command("gate-rollup")
+@click.option("--rdr", type=click.IntRange(1, 9999), required=True, help="The RDR number")
+@click.option("--phase", default=None, help="The phase to roll up (3, 3a); needs --beads")
+@click.option("--beads", default=None,
+              help="The phase's bead ids, comma separated: the 'Item N = <bead-id>' lines of the phase-review-gate close step")
+@click.option("--all", "all_phases", is_flag=True, default=False,
+              help="Every phase of the RDR, by its rdr:<NNN> tag (the rdr-close step); alone")
+@click.option("--project", "-p", default=None, help="The repository's T2 project (default: this repository)")
+@click.option("--dry-run", is_flag=True, default=False, help="Print the listing; write nothing")
+def gate_rollup_cmd(rdr: int, phase: str | None, beads: str | None, all_phases: bool, project: str | None,
+                    dry_run: bool) -> None:
+    """List a phase's gate records and keep them in T3 (RDR-209 Phase 3).
+
+    Reads the repository's gate records (whole tag kind:gate, never <repo>_rdr), archives each listed
+    record's full text as a T3 note in nexus-rdr-research and writes one pointer record,
+    gate-records-rdr-<NNN>-phase-<P> or -all, that lists them with their verdicts, shas and timestamps.
+    Records that map to no bead or have no readable verdict are listed as unmapped and are not archived.
+    A rerun replaces the pointer. Writes nothing to T2: no TTL, no tag, no change.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred: heavy T3 dep, only a write needs it
+    from nexus.memory_curate import gate_rollup as gr  # noqa: PLC0415 — deferred: only this verb needs the module
+
+    try:
+        scope = gr.parse_scope(rdr=rdr, phase=phase, beads=beads, all_phases=all_phases)
+    except gr.ScopeError as exc:
+        raise click.UsageError(str(exc)) from exc
+    if project is None:
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deferred: only the default needs the repository name
+
+        project = _repo_identity(Path.cwd())[0]
+    with t2_handle() as db:
+        rows = list(db.get_all(project))
+    try:
+        result = gr.run(rows, project=project, scope=scope, dry_run=dry_run, t3_factory=make_t3)
+    except gr.GateRollupError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for line in result.lines:
+        click.echo(line)
+
+
 @memory.command("curate")
 @click.option("--files", "do_files", is_flag=True, default=False,
               help="Memory-file section: unindexed, oversized, dangling index entries, declared "
