@@ -139,7 +139,10 @@ most of the surface in the census is unguarded.
 Some code legitimately reads a name that has no row on this install yet:
 restoring a recovery bundle (whose format carries the recorded name, not the
 source row), `nx catalog migrate-fallback`, the indexer's legacy-collection
-migration, and the engine's ETL import. A reader repoint that removes their
+migration, the engine's ETL import, and the tenant restore of RDR-248's
+`nx backup`, whose export keys `catalog_collections` on `("tenant_id text",
+"name text")` and the chunks' foreign key on `"tenant_id,name,embedding_model"`
+(`TenantExport.java:355`, `:389-390`; T2 `229-research-36`). A reader repoint that removes their
 name-parse fallback before they have another source would break the upgrade
 and restore paths. The bead names this hazard directly: the reader cutover
 must not be able to strand a migration path.
@@ -794,6 +797,17 @@ rate). From minor release N+1 on it is refused with a message that says to re-ex
 because a recovery bundle may outlive its source, names the last conexus
 version that still imports it.
 
+The tenant backup (RDR-248) is a second serialization of the key. From
+P3.1, `TenantExport`'s table model carries `collection_id` on
+`catalog_collections` and on every table that gains it, and the restore
+maps it the way it already maps every reassigned id: "build a temp map of
+old id to new id from the table's own sequence ... so ids are always
+reassigned" (RDR-248 lines 370-372; T2 `229-research-36`). RDR-248's own
+rule binds the Phase 4 column drops: "a migration that drops or retypes an
+exported column goes red there and must say what it does to old backups"
+(lines 580-582). P4.1 therefore states what it does to a backup taken
+before P3.1, and RDR-248's committed fixture is part of its acceptance.
+
 **11. `legacy_grandfathered` goes (D5).** Phase 3 stops writing it: the
 client stops deriving it, and `collectionForTuple` drops its
 `legacy_grandfathered = false` filter (a grandfathered collection has the
@@ -1047,7 +1061,8 @@ its acceptance is that test green plus the census pin it lowers.
 **Phase 2: readers move to the row**
 
 - P2.1 Non-stranding tests first: recovery bundle import, migrate-fallback,
-  legacy-collection migration, ETL import, each with a row-less legacy name.
+  legacy-collection migration, ETL import, tenant restore (RDR-248), each
+  with a row-less legacy name.
   Blocks P2.2 to P2.9.
 - P2.2 `resolve_collection`, `find_collection` and the `legacy_names`
   module; move the parsers; classify every remaining caller.
@@ -1134,12 +1149,19 @@ its acceptance is that test green plus the census pin it lowers.
   starts the N-minor-release count (item 10, Open Item O1).
 - P3.10 Rewrite `docs/collections.md` Rule 3 and `docs/storage-tiers.md` §
   Collections for labels, minted ids and attribute lookup.
-- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.5; client
+- P3.11 Tenant backup carries the id (item 10): `TenantExport`'s table
+  model gains `collection_id` on every table that has it, and the restore
+  maps old ids to new through RDR-248's id map. Test: a backup taken after
+  P3.1 restores with every chunk on its collection's new id, and RDR-248's
+  committed fixture, taken before P3.1, still loads.
+- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.5 and P3.11; client
   floor bumps in the release that first depends on each.
 
 **Phase 4: contract and retire**
 
-- P4.1 Primary key to `(tenant_id, collection_id)`; drop the name columns on
+- P4.1 After P3.11; its acceptance includes RDR-248's committed fixture
+  and a stated effect on backups taken before P3.1 (item 10). Primary key
+  to `(tenant_id, collection_id)`; drop the name columns on
   referencing tables, the `(tenant_id, name, embedding_model)` UNIQUE and
   `superseded_by` (replaced by `superseded_by_id`).
 - P4.2 Drop `legacy_grandfathered` and `idx_catalog_collections_legacy`.
@@ -1164,7 +1186,7 @@ production tenants; P4.4 waits for its release count.
 | --- | --- | --- | --- | --- | --- |
 | Census pins (client, engine, SQL) | In scope (the tests print their tables) | In scope | N/A | In scope (`-m lint` and the Java gate tests) | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
-| `collection_id` and label | `nx collection list` (id, label, attributes) | `nx catalog show` | `nx collection delete` (by label or id) | `nx doctor` null-id and label-clash census | Recovery bundle (carries the row from P3.9) |
+| `collection_id` and label | `nx collection list` (id, label, attributes) | `nx catalog show` | `nx collection delete` (by label or id) | `nx doctor` null-id and label-clash census | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (carries the id from P3.11) |
 
 ### New Dependencies
 
