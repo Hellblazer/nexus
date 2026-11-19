@@ -75,6 +75,26 @@ def test_the_file_is_named_by_the_claude_pid_and_started_at_and_round_trips(adir
     assert got.loaded_identity == "id-a" and got.server_pid == 9000
 
 
+def test_a_short_write_does_not_truncate_the_state_file(adir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-igea9.7 round 1: os.write may write fewer bytes than asked; the file is published whole."""
+    from tests._module_seam import setattr_in  # noqa: PLC0415
+
+    real_write = os.write
+    chunks: list[int] = []
+
+    def three_at_a_time(fd: int, data: Any) -> int:
+        n = real_write(fd, bytes(data)[:3])
+        chunks.append(n)
+        return n
+
+    setattr_in(monkeypatch, ls, "os.write", three_at_a_time)
+    state = _state()
+    path = _put(adir, state)
+    assert len(chunks) > 3, "the writer had to come back for the rest"
+    got = ls.read_state(path)
+    assert got is not None and got.auras == state.auras and got.identity == "id-a"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
 def test_the_file_is_private_to_the_user(adir: Path) -> None:
     path = _put(adir, _state())
@@ -280,6 +300,21 @@ def test_list_json_carries_the_load_state_per_aura(
     assert rows["idle"]["loaded"] is None
 
 
+def test_list_says_to_reconnect_when_the_load_could_not_read_the_engine(
+    shipped: Path, monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses,
+) -> None:
+    """The engine was down at start: the load is final for this server's life, so a reader needs the way out."""
+    procs.start(4242, START, started_at=4242000)
+    _put(adir, _state(pid=4242, started_at=4242000, gated=ls.AuraState(False, "memberships_unreadable", "push-train"),
+                      plain=ls.AuraState(True, "loaded", None)))
+    _inputs(monkeypatch, adir, procs, pid=4242, identity="id-a")
+    rows = {ln.split()[0]: ln for ln in _list().output.splitlines() if ln.split() and ln.split()[0] in {"gated", "plain"}}
+    assert "memberships_unreadable" in rows["gated"] and "reconnect" in rows["gated"] and "/mcp" in rows["gated"]
+    assert "reconnect" not in rows["plain"]
+    shown = {r["name"]: r for r in json.loads(_list("--json").stdout)}
+    assert shown["gated"]["loaded"] == {"loaded": False, "reason": "memberships_unreadable", "group": "push-train"}, "--json is unchanged"
+
+
 def test_list_with_no_claude_ancestor_lists_the_state_files_on_stderr_without_claiming_one(
     shipped: Path, monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses,
 ) -> None:
@@ -369,12 +404,27 @@ def test_list_removes_the_state_file_of_a_dead_server(
 
 def test_the_real_inputs_name_the_config_dir_and_do_not_raise(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+    from nexus import session as nx_session  # noqa: PLC0415
+    from nexus.identity import token_header  # noqa: PLC0415
+
+    monkeypatch.setattr(nx_session, "find_immediate_claude_pid", lambda: 4242)
+    monkeypatch.setattr(nx_session, "_command_name_of", lambda pid: "claude" if pid == 4242 else "bash")
+    monkeypatch.setattr(token_header, "current", lambda **_k: TokenFile(
+        identity="id-x", generation=1, token="t", expires_at=None, session_id="s", pid=4242, started_at=1, proc_start=None))
     directory, procs, pid, identity, idir = aura_cmd._loaded_inputs()
     assert directory == tmp_path / "cfg" / "auras"
     assert idir == tmp_path / "cfg" / "identity", "the holder check reads the token files of the same config dir"
-    assert pid is None or isinstance(pid, int)
-    assert identity is None or isinstance(identity, str)
+    assert (pid, identity) == (4242, "id-x"), "the Claude ancestor's pid and the identity of its token"
     assert callable(getattr(procs, "alive", None)), "the real process table"
+    monkeypatch.setattr(nx_session, "_command_name_of", lambda pid: "bash")          # an ancestor that is not Claude
+    monkeypatch.setattr(token_header, "current", lambda **_k: None)                  # and no usable token
+    _dir, _procs, pid, identity, _idir = aura_cmd._loaded_inputs()
+    assert (pid, identity) == (None, None)
+    def broken() -> int:
+        raise OSError("process table unreadable")
+
+    monkeypatch.setattr(nx_session, "find_immediate_claude_pid", broken)
+    assert aura_cmd._loaded_inputs()[2:4] == (None, None), "a process that cannot be read is no ancestor and no identity"
 
 
 # -- the heartbeat and the loader: an identity change rewrites the file ---------------------------------------------------
@@ -419,7 +469,21 @@ def test_the_loader_rewrites_the_state_with_the_new_identity_and_keeps_the_loade
     assert second.auras == first.auras
 
 
-def test_a_note_before_any_load_and_a_failing_sink_are_harmless() -> None:
+def test_a_note_before_any_load_writes_nothing_and_a_failing_sink_is_harmless() -> None:
+    from nexus.auras.session import AuraLoader  # noqa: PLC0415
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    from .test_load import _SID, auras_mod_parse, _GATED  # noqa: PLC0415
+
+    written: list = []
+    loader = AuraLoader(
+        _SID, SubscriptionSet(session_id=_SID), discover=lambda: auras_mod_parse(_GATED, "gated"), is_on=lambda _n: True,
+        entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=lambda a: a, attach=lambda _r: None,
+        identity=lambda: "id-a", memberships=lambda _i: ["push-train"], read_group=lambda n: None,
+        state_sink=lambda pid, state: written.append(state),
+    )
+    loader.note_identity("id-b")                                  # no load has happened: remembered, nothing written
+    assert written == [] and not loader.loaded
     h = _GatedHarness(identity="id-a")
     h.loader._state_sink = lambda _pid, _state: (_ for _ in ()).throw(OSError("disk full"))   # noqa: SLF001
     h.loader.note_identity("id-b")                                                              # does not raise

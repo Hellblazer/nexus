@@ -98,7 +98,9 @@ def write_state(path: Path, state: LoadedState) -> None:
     try:
         fd = open_private(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
         try:
-            os.write(fd, json.dumps(asdict(stamped)).encode("utf-8"))
+            pending = memoryview(json.dumps(asdict(stamped)).encode("utf-8"))
+            while pending:  # os.write may take fewer bytes than it is given
+                pending = pending[os.write(fd, pending):]
         finally:
             os.close(fd)
         os.replace(str(tmp), str(path))

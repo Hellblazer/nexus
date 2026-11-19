@@ -477,8 +477,8 @@ def _owner_aura_file(root: Path, group: str = "elsewhere") -> None:
     )
 
 
-def _group_reader(monkeypatch: pytest.MonkeyPatch, reader, why: str = "") -> None:
-    monkeypatch.setattr(aura_cmd, "_group_reader", lambda: (reader, why))
+def _group_reader(monkeypatch: pytest.MonkeyPatch, reader) -> None:
+    monkeypatch.setattr(aura_cmd, "_group_reader", lambda: reader)
 
 
 def test_check_prints_a_serving_group_warning_and_still_exits_zero(shipped: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -497,10 +497,15 @@ def test_check_prints_a_serving_group_warning_and_still_exits_zero(shipped: Path
 def test_check_says_skipped_when_the_group_cannot_be_read(shipped: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _owner_aura_file(shipped)
     _registry(monkeypatch, None, "no engine")
-    _group_reader(monkeypatch, None, "the group client is unavailable")
+    from nexus.auras.load_gate import GroupUnreadable  # noqa: PLC0415
+
+    def down(_name):
+        raise GroupUnreadable("the group client is unavailable")
+
+    _group_reader(monkeypatch, down)
     res = _run("check")
     assert res.exit_code == 0, res.output
-    assert "skipped serving_group: the group client is unavailable" in res.output
+    assert "skipped serving_group: the group 'elsewhere' could not be read" in res.output
     assert "warning" not in res.output.replace("with warnings", "")
 
 

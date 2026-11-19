@@ -204,6 +204,16 @@ def test_set_sends_only_what_was_given_and_merges_a_per_topic_deadline_into_the_
         "ack_deadline": 25, "ack_deadline_by_topic": {"nexus-develop": 30, "other": 40}}
 
 
+@pytest.mark.parametrize("minutes", ["٣", "²", "１０"])
+def test_a_deadline_in_non_ascii_digits_is_a_usage_error_not_a_traceback_or_a_surprise_value(minutes: str) -> None:
+    """str.isdigit() is true for a superscript two (int() then raises) and for Arabic-Indic digits (int() accepts them)."""
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    result = _run(_env(wire), "set", "push-train", "--ack-deadline-for", f"nexus-develop={minutes}")
+    assert result.exit_code == 2 and "whole minutes" in result.output, result.output
+    assert not isinstance(result.exception, ValueError)
+    assert not wire.sent("POST", "/v1/group/push-train/set")
+
+
 def test_set_leader_resolves_a_seat_name_ends_open_and_serves_replace() -> None:
     wire = Wire().on("GET", "/v1/identity/alias/folio", 200, {"identity": "i4", "state": "live"}) \
                  .on("POST", "/v1/group/push-train/set", 200, RECORD)
@@ -492,6 +502,32 @@ def test_ack_times_says_so_when_it_stops_at_the_row_ceiling(monkeypatch: pytest.
     assert "stopped at 4 rows" in text.stderr
     full = _run(_env(wire, tuples=_Tuples(rows[:3])), "ack-times", "push-train")
     assert "stopped at" not in full.stderr, "no notice when the read reached the end"
+
+
+def test_importing_the_command_module_does_not_import_the_identity_resolver() -> None:
+    """The refusal types are imported when a verb runs (nexus-igea9.7 round 1: the comment said deferred, the import ran at
+    decoration time, which is module import)."""
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    code = "import sys, nexus.commands.group_cmd; sys.exit(1 if 'nexus.identity.resolver' in sys.modules else 0)"
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stderr or "nexus.identity.resolver was imported by the module"
+
+
+def test_a_refusal_the_resolver_names_is_still_one_line_and_exit_one() -> None:
+    from nexus.identity.resolver import IdentityConflictError  # noqa: PLC0415
+
+    class Env:
+        client = None
+        tuples = None
+
+        @staticmethod
+        def caller() -> str:
+            raise IdentityConflictError([])
+
+    result = CliRunner().invoke(group_group, ["leave", "push-train"], obj={"group_env": Env()})
+    assert result.exit_code == 1 and "different identities" in result.output
 
 
 def test_the_command_is_registered_and_every_verb_has_help() -> None:
