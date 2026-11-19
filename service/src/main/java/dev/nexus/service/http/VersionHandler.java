@@ -768,6 +768,21 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * RDR-253 amendment capability advertisement (Sam 2026-11-19, "go with option 2, no bridge"): does this engine let
+     * the data credential promote the ephemeral identity its own identity token names, create a delegated identity
+     * whose parent its token names, and create a seat when it carries a live token?
+     *
+     * <p>An independent flag, and the only evidence: an older engine refuses those calls with 403 {@code forbidden}
+     * for the data credential, so a cloud client (whose laptop holds only the data credential) reads this flag and
+     * skips seat promotion and delegation on an older engine instead of logging one 403 per session. Always present,
+     * always {@code true} on an engine carrying the change. Cloud clients see it only once the public conexus edge
+     * allowlists it (engine-release step 3e): that allowlist entry is paired work with the cut.
+     */
+    static void appendIdentitySelfSeatCapabilityField(StringBuilder body) {
+        body.append(",\"identity_self_seat_supported\":true");
+    }
+
+    /**
      * How long this engine process has been up, and when it started
      * (nexus-904y8).
      *
@@ -1013,6 +1028,7 @@ public final class VersionHandler implements HttpHandler {
         appendTenantImportCapabilityField(body);
         // nexus-7fku2.1.4 (RDR-134 Step 4): topic_route on POST /v1/vectors/search-per-collection.
         appendVectorTopicRouteCapabilityField(body);
+        appendIdentitySelfSeatCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

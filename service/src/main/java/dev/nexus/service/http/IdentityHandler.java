@@ -122,8 +122,11 @@ public final class IdentityHandler implements HttpHandler {
     /** Whether {@code scope} may call {@code route} (the bind event is checked by the caller). */
     static boolean admit(Route route, String scope) {
         return switch (route) {
-            case CREATE, DELEGATED, RENAME, PROMOTE, GONE, PURGE -> tenantScope(scope);
-            case BIND, RENEW, SHOW, LOG, ALIAS, SESSION, BY_HOST, MEMBER_WRITE, MEMBER_READ,
+            case RENAME, GONE, PURGE -> tenantScope(scope);
+            // RDR-253 amendment (Sam 2026-11-19, option 2): the data credential reaches these three only for the
+            // identity its own identity token names; selfService() fences each call once the target is known.
+            case CREATE, DELEGATED, PROMOTE,
+                 BIND, RENEW, SHOW, LOG, ALIAS, SESSION, BY_HOST, MEMBER_WRITE, MEMBER_READ,
                  CREATE_EPHEMERAL, WORK_WRITE, WORK_READ -> tenantScope(scope) || dataScope(scope);
         };
     }
@@ -157,6 +160,25 @@ public final class IdentityHandler implements HttpHandler {
                 HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
             }
         }
+    }
+
+    /**
+     * The fence of a data-credential seat create, promote or delegated create (RDR-253 amendment, Sam 2026-11-19):
+     * the caller's identity token must name {@code owner} at its current generation, and {@code owner} must be held.
+     * The tenant credential is not fenced here, as before. Returns the token's identity, or null for the tenant
+     * credential.
+     */
+    private String selfService(HttpExchange ex, String tenant, String scope, String owner) {
+        if (tenantScope(scope)) {
+            return null;
+        }
+        String tokenIdentity = RequestContext.identity();
+        if (tokenIdentity == null) {
+            throw new IdentityException(403, "identity_token_required",
+                "the data credential may do this only for the identity its own identity token names; send that token");
+        }
+        fence.requireOwner(ex, tenant, owner == null ? tokenIdentity : owner);
+        return tokenIdentity;
     }
 
     private static IdentityException forbidden(Route route, String scope) {
@@ -244,7 +266,11 @@ public final class IdentityHandler implements HttpHandler {
         String createdBy = string(body, "created_by");
         if ("seat".equals(kind)) {
             require(Route.CREATE, scope);
-            return repo.createSeat(tenant, string(body, "name"), display, createdBy);
+            // A data credential creates a seat only with a live token; the seat starts unheld, so it touches no
+            // identity, and its creator is the token's identity whatever the body says.
+            String caller = selfService(ex, tenant, scope, null);
+            return repo.createSeat(tenant, string(body, "name"), display,
+                caller == null ? createdBy : "identity:" + caller);
         }
         if ("ephemeral".equals(kind)) {
             require(Route.CREATE_EPHEMERAL, scope);
@@ -259,7 +285,12 @@ public final class IdentityHandler implements HttpHandler {
         if (!"POST".equals(method)) throw methodNotAllowed();
         require(Route.DELEGATED, scope);
         Map<String, Object> body = readBody(ex);
-        return withToken(tenant, repo.createDelegated(tenant, string(body, "parent"), string(body, "display_name"),
+        String parent = string(body, "parent");
+        if (!tenantScope(scope)) {
+            if (parent == null || parent.isBlank()) throw new IllegalArgumentException("parent is required");
+            selfService(ex, tenant, scope, parent);
+        }
+        return withToken(tenant, repo.createDelegated(tenant, parent, string(body, "display_name"),
             evidence(map(body, "bind"))));
     }
 
@@ -322,6 +353,7 @@ public final class IdentityHandler implements HttpHandler {
             case "promote" -> {
                 if (!"POST".equals(method)) throw methodNotAllowed();
                 require(Route.PROMOTE, scope);
+                selfService(ex, tenant, scope, id);
                 return repo.promote(tenant, id, string(readBody(ex), "name"));
             }
             case "bind" -> {
