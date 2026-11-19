@@ -433,9 +433,10 @@ class TestRealCatalogRoundTrip:
             Tumbler.parse("1.1"), "Web reference doc",
             content_type="knowledge", source_uri="HTTPS://example.invalid/some-doc",
         )
+        # A scheme no reader stats; not chroma://knowledge__..., which the engine rewrites to nx-note:// on register.
         cat.register(
-            Tumbler.parse("1.1"), "Chroma reference doc",
-            content_type="knowledge", source_uri="chroma://knowledge__thing/some-doc",
+            Tumbler.parse("1.1"), "Gopher reference doc",
+            content_type="knowledge", source_uri="gopher://example.invalid/1/some-doc",
         )
         cat.register(
             Tumbler.parse("1.1"), "File-backed doc",
@@ -447,6 +448,7 @@ class TestRealCatalogRoundTrip:
         assert result.exit_code == 0, result.output
         assert "1 reference-only document(s) sampled (of 1 candidate(s))" in result.output
         assert "1 fresh, 0 stale" in result.output
+        assert "https: fresh=1" in result.output  # the HTTPS:// row, read through the engine's case rule
         assert str(ref_tumbler) not in result.output  # only stale/dangling rows are named
 
     def test_record_https_etag_merges_with_preexisting_meta(self, t2_service_env) -> None:
