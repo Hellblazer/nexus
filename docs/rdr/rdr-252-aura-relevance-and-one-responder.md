@@ -370,7 +370,9 @@ treats it as not live (`reason=owner_unleased`; `252-research-5` F4). A
 Desktop server knows its identity only when it made the bind itself from the
 pending file (`252-research-6` F5); RDR-253 otherwise gives it no token and
 no identity. It loads group-gated auras only in that case, and otherwise
-loads none and says so in `nx aura list`. A
+loads none and says so in `nx aura list`; when the identity lease later
+adopts its first identity, the server gates its group-gated auras once more
+(see Load by membership). A
 delegated identity is mapped to its `parent` before any of this, so a push by
 a `claude -p` child is owned by the seat that dispatched it
 (`252-research-5` F6). No other liveness source is added; the session
@@ -527,8 +529,12 @@ Load is evaluated when the session's MCP server starts, the only time auras
 and config are read today (Sam's answer 3). A server start is not a new
 session: the session survives an MCP reconnect (`/mcp`) and a restart, as the
 8.3.0 restart round on 2026-11-16 showed. To join or leave a group, a session
-writes or removes its membership and reconnects its MCP server. Unknown keys
-are refused by `nx aura check`.
+writes or removes its membership and reconnects its MCP server. One case is
+not left to a reconnect: a server that loaded with no identity gates its
+group-gated auras once more when the identity lease adopts its first identity
+(from the pending file, or from a token file a hook wrote), and loads the ones
+that pass. Every other change waits for a reconnect. Unknown keys are refused
+by `nx aura check`.
 
 **Typed displays and noise.** `ci_develop_red` triggers on
 `board/ci/nexus-develop--owner` and clears on its `kind=clear` rows, so the
@@ -555,7 +561,9 @@ and today an argument can come only from the tuple or a literal. So:
   3; `252-research-6` F6), so after a switch the loaded auras and
   `self.identity` are the old identity's until the MCP server reconnects;
   `nx aura list` shows the mismatch and says to reconnect. A server that
-  starts unbound loads no group-gated aura and says so the same way. The
+  starts unbound loads no group-gated aura and says so the same way, and
+  gates them once more when the lease adopts its first identity; every
+  other change waits for a reconnect. The
   MCP server writes its bound identity and loaded aura set to a state file
   keyed like RDR-253's token files by its Claude process's pid and start
   time (`~/.config/nexus/auras/loaded-<claude pid>.<startedAt>.json`),
@@ -924,6 +932,10 @@ None.
   refresh after it carries `reason=escalated`.
 - Identity switch: after a cross-seat `/resume`, `nx aura list` reports the
   mismatch until a reconnect; an unbound start loads no group-gated aura.
+- Late bind: a server that loaded with no identity gates its group-gated
+  auras once when the lease adopts its first identity (also when that lands
+  while the load is still running), and the runtime fires with
+  `self.identity` filled; a later identity change gates nothing again.
 - `nx group join` refuses an ephemeral identity; `join`, `leave` and
   `list` round-trip.
 - Stamp mapping: the stamper maps a stamp to an identity through the
@@ -1064,3 +1076,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-17: fix check `252-fix-check-b03c30cf28aa` failed (2 counted BLOCKS-PLANNING: a start-time replay with no mechanism, and the `board-ci` token reaching owner rows); fixed once (`nexus_rdr/252-research-9`): the replay promise dropped (a late server shows the next row); the engine refuses a `board-ci`-scoped write to `--owner` and `--push`; the stamper runs on every `--done` write, owner rows only for a served topic and clear rows for any open red; refreshes carry their row's reason and hand-offs `reason=handoff`; the null-owner escalated display; re-form named in the leader-only rules, locked, every field the form call's, history kept in `gc_audit`; the disband cascade exempt from the membership checks, no join to a disbanded group, `ended_at` cleared only by re-form; one lock order shared with the stamper; the override for an `unleased` leader stated in RDR-253's terms; the state-file cleanup by RDR-253's holder check; the aura's group tied to the serving group.
 - 2026-11-17: accepted by Sam ("Accept and plan"); last fix check `252-fix-check-b460ee2181a5` PASS 3-0; its seven counted DISCOVER-AT-IMPLEMENTATION items go to the plan as bead notes.
 - 2026-11-18: wording matched to the reviewed Step 2 code (nexus-igea9.2, 5cf9ab46d): the push record's key and `push-<tip>` nonce, the lock released before the write, and the write's time bound.
+- 2026-11-19: wording matched to the reviewed Step 4 code (nexus-igea9.7): a server that loaded with no identity gates its group-gated auras once more when the identity lease adopts its first identity; every other change waits for a reconnect; Test Plan line added.
