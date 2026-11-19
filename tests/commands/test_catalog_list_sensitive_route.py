@@ -106,8 +106,10 @@ class FakeEngine:
                 raise httpx.HTTPStatusError("x", request=request, response=httpx.Response(self.by_meta_status, request=request))
             rows = [r for r in self.live() if (not kw.get("content_type") or r["content_type"] == kw["content_type"])
                     and (kw.get("sensitive") != "true" or r["sensitive"])]
-            page = [self.wire(r) for r in rows][kw["offset"]:kw["offset"] + kw["limit"]] + self.by_meta_inject
-            return {"count": len(rows), "limit": kw["limit"], "offset": kw["offset"], "documents": page}
+            # an engine fault that keeps its envelope consistent: the injected rows count as matches after the real ones
+            answer = [self.wire(r) for r in rows] + self.by_meta_inject
+            page = answer[kw["offset"]:kw["offset"] + kw["limit"]]
+            return {"count": len(answer), "limit": kw["limit"], "offset": kw["offset"], "documents": page}
         assert path == "/sensitive", path
         self.calls.append(("GET", "/sensitive", {"limit": kw["limit"]}))
         if self.sensitive_status is not None:

@@ -99,7 +99,9 @@ class FakeEngine:
                 if (not kw.get("content_type") or r["content_type"] == kw["content_type"])
                 and (kw.get("sensitive") != "true" or r["sensitive"])
                 and meta_matches(r["meta"], eq)]
-        return {"count": len(rows), "limit": limit, "offset": offset, "documents": [self.wire(r) for r in rows[offset:offset + limit]] + self.inject}
+        # an engine fault that keeps its envelope consistent: the injected rows count as matches after the real ones
+        answer = [self.wire(r) for r in rows] + self.inject
+        return {"count": len(answer), "limit": limit, "offset": offset, "documents": answer[offset:offset + limit]}
 
     def post(self, path: str, body: dict | None = None, **kw: Any) -> Any:
         raise AssertionError(f"unexpected POST {path}")
