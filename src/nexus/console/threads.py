@@ -41,6 +41,8 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 
+from nexus.identity.board import identity_of
+
 #: A session whose newest update is older than this is greyed out.
 STALE_AFTER = timedelta(hours=24)
 
@@ -432,8 +434,6 @@ def _following_fields(lines: list[str], i: int, *, past_thread_fields: bool = Fa
 
 
 def parse_session(name: str, content: str) -> Session:
-    from nexus.identity.board import identity_of
-
     identity = identity_of(content)
     notes: list[str] = []
     threads: list[dict[str, Any]] = []
