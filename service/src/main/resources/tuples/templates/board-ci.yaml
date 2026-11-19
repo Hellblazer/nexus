@@ -63,7 +63,7 @@ doc:
     - the owner stamper, kind=owner and kind=clear rows to --owner
     - a session, its kind=ack row to --owner
   readers:
-    - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (rule 7 of docs/agents/worktrees.md)
+    - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (worktrees guide, rule 7)
     - a session that called tuple_subscribe on board/ci/nexus-develop--done gets a best-effort wake per completed run set of a develop sha (rule 7)
     - nx tuple rd and nx tuple wait page the log
   fields:
