@@ -76,13 +76,13 @@ found the right product and the right threads (94% of the declines' top-10
 chunks came from the question's own product) but ranked the key-bearing
 messages too low.
 
-An interim shape count from the deep-analyst agent sharpens this (T1 scratch
-entry `1b794fd7`, 2026-11-19; not yet a durable record). The 130 questions fall
-into three shapes:
+A shape count sharpens this (T2 `nexus_rdr/herb-full-pool-decline-shapes-2026-11-19`,
+counted from the run's answer and score records). The 130 questions fall into
+three shapes:
 
 | Shape | Example form | Questions | Declined |
 | --- | --- | --- | --- |
-| affected | "companies affected by issues in <component>" | 50 | 0 |
+| affected | "companies affected by issues in <component>" (mean F1 58.7) | 50 | 0 |
 | max-bugs | "company with the most resolved / unresolved / reopened bugs in <product>" | 60 | 46 |
 | prev-release | questions about a previous release | 20 | 9 |
 
@@ -268,10 +268,9 @@ provenance tag from callers, so only the grow path can mark a plan grown.
   description; the planner's tool reference omits five dispatchable tools.
 - **Documented**: aspect schemas are paper-shaped; no shipped schema extracts
   HERB's facets.
-- **Assumed** (interim, T1 only): all 55 declines are aggregate or
-  prev-release questions. Becomes Verified when the deep-analyst agent's T2
-  record lands (`herb-full-pool-retrieval-variants-2026-11-19`, not present at
-  draft time).
+- **Verified** (counted, T2 `nexus_rdr/herb-full-pool-decline-shapes-2026-11-19`):
+  all 55 declines are aggregate (46 of 60) or prev-release (9 of 20) questions;
+  the 50 "affected" questions never declined and score mean F1 58.7.
 - **Assumed**: a planner told the fields and the extra tools would write a
   filter-and-scan or filter-and-count plan. The pre-registered experiment
   (below) tests this.
@@ -547,8 +546,7 @@ Not run; this RDR is a draft.
 - T2 `nexus_rdr/herb-full-pool-decline-recheck-2026-11-19`
 - T2 `nexus_rdr/herb-plan-experiment-prereg-2026-11-19`
 - T2 `nexus_rdr/herb-full-pool-company-prereg`
-- T1 scratch `1b794fd7` (interim shape census; pending T2
-  `herb-full-pool-retrieval-variants-2026-11-19`)
+- T2 `nexus_rdr/herb-full-pool-decline-shapes-2026-11-19` (shape census)
 - HERB: arXiv 2506.23139, Table 2
 - Source: `src/nexus/mcp/core.py`, `src/nexus/plans/matcher.py`,
   `src/nexus/plans/runner.py`, `src/nexus/aspect_extractor.py`,
@@ -559,3 +557,4 @@ Not run; this RDR is a draft.
 ## Revision History
 
 - 2026-11-19: drafted. Experiment results pending.
+- 2026-11-19: shape census moved from Assumed to Verified (T2 record).
