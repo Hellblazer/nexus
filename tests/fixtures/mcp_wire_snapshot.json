@@ -776,6 +776,10 @@
             "default": "",
             "type": "string"
           },
+          "scope": {
+            "default": "session",
+            "type": "string"
+          },
           "tags": {
             "default": "",
             "type": "string"
@@ -801,6 +805,10 @@
           },
           "project": {
             "default": "",
+            "type": "string"
+          },
+          "scope": {
+            "default": "session",
             "type": "string"
           }
         },

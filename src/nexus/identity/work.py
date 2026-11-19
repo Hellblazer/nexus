@@ -74,17 +74,25 @@ class Work:
 
 def register(client: Any, identity: str, kind: str, ref: str, state: str = RUNNING) -> Work:
     """Register the work, or change its state in place. An identity holds at most 200 rows (``409 work_limit``): the
-    first refusal forgets this identity's own ``done`` rows (finished work has no further use) and the call is repeated
-    once."""
+    first refusal forgets this identity's own ``done`` rows (finished work has no further use) and its ``worktree`` rows
+    whose path no longer exists on this host (an agent's isolation worktree is removed by the harness, and nothing marks
+    its row done), and the call is repeated once."""
     try:
         return Work.of(client.put_work(identity, kind, ref, state))
     except IdentityApiError as exc:
         if exc.code != "work_limit":
             raise
     for row in client.work_of(identity):
-        if row.get("state") == DONE:
+        if row.get("state") == DONE or worktree_gone(row):
             client.remove_work(identity, str(row["kind"]), str(row["ref"]))
     return Work.of(client.put_work(identity, kind, ref, state))
+
+
+def worktree_gone(row: Mapping[str, Any]) -> bool:
+    """A ``worktree`` row whose absolute path is not a directory on this host. A path on another host reads as gone
+    here too, which is why only the work-limit purge and display filters use it, never may-stop."""
+    ref = str(row.get("ref") or "")
+    return row.get("kind") == "worktree" and ref.startswith("/") and not os.path.isdir(ref)
 
 
 def mark_done(client: Any, identity: str, kind: str, ref: str) -> Work:
@@ -419,21 +427,36 @@ def _spawn(argv: Sequence[str]) -> int:
     marks the row done. Handlers are installed on the main thread only, and put back afterwards."""
     from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — deferred: leaf import cost
 
-    try:
-        child = subprocess.Popen(argv_off_cwd(argv))
-    except FileNotFoundError:
-        raise IdentityCommandError(f"command not found: {argv[0]}") from None
+    # Handlers go in BEFORE the spawn, so a signal in that window is held and passed on once the child exists, not
+    # lost with the child orphaned. SIGINT is not forwarded: a terminal's Ctrl-C already reaches the child through the
+    # foreground process group, and this process only has to outlive it to mark the row done.
+    holder: dict[str, Any] = {}
+    pending: list[int] = []
     previous: dict[int, Any] = {}
-    if threading.current_thread() is threading.main_thread():
-        def forward(signum: int, frame: Any) -> None:
-            try:
-                child.send_signal(signum)
-            except OSError:
-                pass
 
+    def forward(signum: int, frame: Any) -> None:
+        if signum == signal.SIGINT:
+            return
+        child_now = holder.get("child")
+        if child_now is None:
+            pending.append(signum)
+            return
+        try:
+            child_now.send_signal(signum)
+        except OSError:
+            pass
+
+    if threading.current_thread() is threading.main_thread():
         for signum in _FORWARDED:
             previous[signum] = signal.signal(signum, forward)
     try:
+        try:
+            child = subprocess.Popen(argv_off_cwd(argv))
+        except FileNotFoundError:
+            raise IdentityCommandError(f"command not found: {argv[0]}") from None
+        holder["child"] = child
+        for signum in pending:
+            forward(signum, None)
         code = child.wait()
     finally:
         for signum, handler in previous.items():

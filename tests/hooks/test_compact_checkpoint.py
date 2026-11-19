@@ -1569,15 +1569,20 @@ class TestRunningWork:
         monkeypatch.setattr(mod, "_nx_command", lambda: [sys.executable, str(shim)])
 
     def test_running_rows_are_listed_after_the_board_and_the_checks(self, mod, env, monkeypatch, tmp_path) -> None:
+        live_wt = tmp_path / "wt-live"
+        live_wt.mkdir()
+        gone_wt = tmp_path / "wt-gone"  # an agent's isolation worktree the harness removed: never listed
         self._rows(monkeypatch, tmp_path, mod,
-                   "import json; print(json.dumps({'identity': 'i1', 'alive': True, 'work': [{'kind': 'worktree', 'ref': '/w/a', "
-                   "'state': 'running', 'stale': False}, {'kind': 'labrun', 'ref': 'full', 'state': 'running', 'stale': False}]})); "
+                   f"import json; print(json.dumps({{'identity': 'i1', 'alive': True, 'work': [{{'kind': 'worktree', 'ref': {str(live_wt)!r}, "
+                   f"'state': 'running', 'stale': False}}, {{'kind': 'worktree', 'ref': {str(gone_wt)!r}, 'state': 'running', 'stale': False}}, "
+                   "{'kind': 'labrun', 'ref': 'full', 'state': 'running', 'stale': False}]})); "
                    "sys.exit(0)")
         code, out = run(mod, monkeypatch, "pre", pre_payload())
         assert code == 0 and out == ""
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert "## Background work this identity still has running" in text
-        assert "- worktree /w/a" in text and "- labrun full" in text
+        assert f"- worktree {live_wt}" in text and "- labrun full" in text
+        assert str(gone_wt) not in text
         assert text.index("## Threads board entry") < text.index("## Background work") < text.index("## Working state")
 
     def test_no_rows_adds_no_section(self, mod, env, monkeypatch) -> None:
