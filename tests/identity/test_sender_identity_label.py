@@ -100,10 +100,9 @@ def test_the_drain_hook_labels_an_identity_from_by_the_senders_token_file(tag: A
 def test_the_channel_push_labels_an_identity_from_by_the_senders_token_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import nexus.config as nx_config  # noqa: PLC0415
     from nexus.mcp.channel import TupleRow  # noqa: PLC0415
 
-    monkeypatch.setattr(nx_config, "nexus_config_dir", lambda: tmp_path)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     _token_file(tmp_path, "i12", SENDER_SESSION)
 
     def row(frm: str) -> Any:
