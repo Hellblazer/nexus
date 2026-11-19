@@ -168,14 +168,18 @@ Two more things must hold, and neither can be read from the variable:
   switch on was GREEN on a commit whose Windows surface (the Windows jobs of that
   workflow and of `pg-bundle-cache-seed.yml`, `scripts/*windows*`,
   `scripts/windows_*.py`, `.github/actions/*windows*`, `service/pom.xml`) equals the
-  commit being tagged. Start it on the frozen tree (Step 1b): dispatch on a branch
-  pushed at `TAG_SHA` (`git push origin "$TAG_SHA":refs/heads/engine-cut/vX.Y.Z`, then
-  `gh workflow run engine-service-release.yml --ref engine-cut/vX.Y.Z`), or on `develop`
-  while its Windows surface still equals `TAG_SHA`'s. A non-tag ref runs every Windows step except sign, upload and
+  commit being tagged. Start it when the cut starts (Step 2b), on `develop` while its
+  Windows surface still equals `TAG_SHA`'s
+  (`git diff --stat "$TAG_SHA" origin/develop -- <the Windows surface above>` is empty);
+  on develop the run also builds the POSIX native jobs. Do not dispatch on an
+  `engine-cut/*` branch pushed at `TAG_SHA`: the `apple-signing` environment's protection
+  rules refuse that branch, so the linux-amd64, linux-arm64 and mac-arm64 native jobs fail
+  in seconds with no steps run and only the Windows jobs' result can be read (0.1.197,
+  run 44528101260). A non-tag ref runs every Windows step except sign, upload and
   promote, so this is the only run that exercises the release workflow's own Windows
   jobs before the tag (the rehearsal cannot: it is not allowed to trigger release
   jobs). Read the run's conclusion once:
-  `gh run list --workflow=engine-service-release.yml --event=workflow_dispatch --branch=<the branch you dispatched on> --limit 5 --json conclusion,headSha,createdAt`.
+  `gh run list --workflow=engine-service-release.yml --event=workflow_dispatch --branch=develop --limit 5 --json conclusion,headSha,createdAt`.
   Record the run id in the cut's bead.
 
 After the cut publishes (Step 4), confirm it carries them:
