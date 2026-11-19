@@ -38,6 +38,19 @@ from nexus.db.t2.http_tuple_store import SchemaViolationError
 _log = structlog.get_logger(__name__)
 
 
+@dataclasses.dataclass(frozen=True)
+class _Plan:
+    """What a load's reads found (:meth:`AuraLoader._prepare`), for :meth:`AuraLoader._commit` to apply. ``kind`` is
+    ``load`` (the rest of the fields are set), ``retry`` (try at the next resolve), or the reason nothing loads."""
+
+    kind: str
+    auras: Sequence[Aura] = ()
+    pid: int = 0
+    identity: str | None = None
+    gate: dict[str, AuraState] = dataclasses.field(default_factory=dict)
+    fields: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
 class AuraLoader:
     """Loads one session's auras once; see the module docstring.
 
@@ -96,6 +109,9 @@ class AuraLoader:
         self._runtime: Any = None
         self._noted_identity: str | None = None
         self._regated = False
+        self._loading = False
+        #: Removes the lease listener that feeds :meth:`note_identity` (set by :func:`start_for_waiter`).
+        self._release: Callable[[], None] | None = None
         #: True once the load decision is final: auras loaded, none turned on, or refused for good.
         self.loaded = False
         self._miss_logged = False
@@ -104,56 +120,102 @@ class AuraLoader:
         _log.info("auras_not_loaded", session_id=self.session_id, reason=reason, **fields)
 
     def on_resolve(self, name: str | None) -> None:
-        """Called with each registry resolve of this session's name. Never raises."""
-        if self.loaded:
+        """Called with each registry resolve of this session's name. Never raises. This form reads and commits on the
+        calling thread (a test, or a caller with no loop); the server uses :meth:`on_resolve_async` through
+        :func:`on_loop`, which does the reads on a worker thread."""
+        if not self._resolve_miss(name):
             return
+        try:
+            plan = self._prepare()
+        except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter
+            self._load_failed(exc)
+            return
+        self._finish(plan)
+
+    async def on_resolve_async(self, name: str | None) -> None:
+        """:meth:`on_resolve` with every blocking read (the library files, the process walk, the membership and group
+        reads) on a worker thread, and the commit (the subscription set, the runtime, the state) back on the calling
+        loop. A resolve that arrives while one is in flight is dropped: the next one tries again."""
+        import asyncio  # noqa: PLC0415
+
+        if self._loading or not self._resolve_miss(name):
+            return
+        self._loading = True
+        try:
+            try:
+                plan = await asyncio.to_thread(self._prepare)
+            except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter
+                self._load_failed(exc)
+                return
+            self._finish(plan)
+            if self._noted_identity is not None:  # the lease bound while the reads ran: the commit may have seen none
+                await self.note_identity_async(self._noted_identity)
+        finally:
+            self._loading = False
+
+    def _resolve_miss(self, name: str | None) -> bool:
+        """False when there is nothing to load for this resolve: already decided, or the session is not named yet."""
+        if self.loaded:
+            return False
         if name is None:
             if not self._miss_logged:
                 self._miss_logged = True
                 self._not_loaded("session_not_named", detail="no session registry, or no interactive entry yet")
-            return
-        try:
-            self._load()
-        except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter
-            # Config and files are read once a server start, so a retry would only repeat this line. Drop any
-            # topic already held: with no sink attached, its rows would be neither evaluated nor announced.
-            self.loaded = True
-            self.subs.release_auras()
-            _log.warning("auras_load_failed", session_id=self.session_id, error=str(exc))
-            if self._state is not None:
-                self.decisions = {
-                    name: AuraState(False, "load_failed", d.group) if d.loaded else d for name, d in self.decisions.items()
-                }
-                self._state = dataclasses.replace(self._state, auras=dict(self.decisions))
-                self._emit_state()
+            return False
+        return True
 
-    def _load(self) -> None:
+    def _load_failed(self, exc: Exception) -> None:
+        # Config and files are read once a server start, so a retry would only repeat this line. Drop any
+        # topic already held: with no sink attached, its rows would be neither evaluated nor announced.
+        self.loaded = True
+        self.subs.release_auras()
+        _log.warning("auras_load_failed", session_id=self.session_id, error=str(exc))
+        if self._state is not None:
+            self.decisions = {
+                name: AuraState(False, "load_failed", d.group) if d.loaded else d for name, d in self.decisions.items()
+            }
+            self._state = dataclasses.replace(self._state, auras=dict(self.decisions))
+            self._emit_state()
+
+    def _finish(self, plan: _Plan) -> None:
+        try:
+            self._commit(plan)
+        except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter
+            self._load_failed(exc)
+
+    def _prepare(self) -> _Plan:
+        """Every read of a load, touching no loader state: the library files, the on/off filter, the registry entry, the
+        process walk, the identity, and the gate (one membership read, one group read per group). Safe on any thread."""
         # The on/off filter first: every aura ships off, so most sessions stop here, before any process walk.
         auras = [a for a in self._discover() if self._is_on(a.name)]
         if not auras:
-            self.loaded = True
-            self._not_loaded("none_turned_on")
-            return
+            return _Plan("none_turned_on")
         entry = self._entry(self.session_id)
         if entry is None:
-            return  # the entry went between the name read and this one: the next resolve tries again
+            return _Plan("retry")  # the entry went between the name read and this one: the next resolve tries again
         _name, pid = entry
         owner = self._owner()
-        self.loaded = True
         if owner is None:
-            self._not_loaded("ancestry_unreadable", entry_pid=pid)
-            return
+            return _Plan("ancestry_unreadable", fields={"entry_pid": pid})
         if owner != pid:
-            self._not_loaded("not_this_sessions_process", entry_pid=pid, owner_pid=owner)
-            return
+            return _Plan("not_this_sessions_process", fields={"entry_pid": pid, "owner_pid": owner})
         # An identity the lease reported before this load (a pending bind that beat the registry) counts when the token
         # read misses it: the lease wrote the token file before it told us, so a miss is a read that raced the write.
         identity = self._identity_or_none() or self._noted_identity
-        self.loaded_identity = identity
-        self._discovered = auras
-        gate = self._gate(auras, identity)
-        accepted = self._admit(auras, gate)
-        self._publish_state(pid, identity)
+        return _Plan("load", auras=auras, pid=pid, identity=identity, gate=self._gate(auras, identity))
+
+    def _commit(self, plan: _Plan) -> None:
+        """Apply a plan on the loop: the decisions, the subscriptions, the runtime and the state."""
+        if plan.kind == "retry":
+            return
+        self.loaded = True
+        if plan.kind != "load":
+            self._not_loaded(plan.kind, **plan.fields)
+            return
+        self.loaded_identity = plan.identity
+        self._discovered = plan.auras
+        accepted = self._admit(plan.auras, plan.gate)
+        self._publish_state(plan.pid, plan.identity)
         if not accepted:
             self._not_loaded("none_accepted")
             return
@@ -271,26 +333,60 @@ class AuraLoader:
         The one exception to "the loaded set stays": a server whose load saw NO identity (a Desktop server, or a pending
         bind the lease had not made yet) gates its group-gated auras again, once, when the lease reports its first bind,
         since nothing else would ever load them in this server's life."""
+        pending = self._note(identity)
+        if pending:
+            self._regate(pending, identity, self._gate(pending, identity))
+        self._rewrite_identity(identity)
+
+    async def note_identity_async(self, identity: str | None) -> None:
+        """:meth:`note_identity` with the late gate's reads on a worker thread (the lease's listener runs this on the
+        loop through :func:`_follow_identity`)."""
+        import asyncio  # noqa: PLC0415
+
+        pending = self._note(identity)
+        if pending:
+            assert identity is not None
+            try:
+                gate = await asyncio.to_thread(self._gate, pending, identity)
+            except Exception as exc:  # noqa: BLE001 -- _gate does not raise; a bug here is not the waiter's to die of
+                _log.warning("auras_late_gate_failed", session_id=self.session_id, error=str(exc))
+                return
+            self._regate(pending, identity, gate)
+        self._rewrite_identity(identity)
+
+    def close(self) -> None:
+        """Stop listening to the identity lease. The server's loader lives as long as the server; a test that starts
+        one ends it so the lease's listener list does not grow."""
+        release, self._release = self._release, None
+        if release is not None:
+            release()
+
+    def flush_state(self, timeout: float = 10.0) -> bool:
+        """Wait for the state writes handed to a threaded sink to finish (a sink with nothing to wait for is idle)."""
+        wait = getattr(self._state_sink, "wait_idle", None)
+        return True if wait is None else bool(wait(timeout))
+
+    def _note(self, identity: str | None) -> list[Aura] | None:
+        """Remember *identity*; return the auras to gate again (once, on the first bind of a server that loaded with no
+        identity) or None."""
         if identity is not None:
             self._noted_identity = identity
-        if self._state is None:
-            return
-        if identity is not None and self.loaded_identity is None and not self._regated:
-            self._regated = True
-            self._regate(identity)
-        if self._state.identity == identity:
+        if self._state is None or identity is None or self.loaded_identity is not None or self._regated:
+            return None
+        self._regated = True
+        return [a for a in self._discovered if self.decisions.get(a.name) == AuraState(False, "unbound", a.load_group)] or None
+
+    def _rewrite_identity(self, identity: str | None) -> None:
+        if self._state is None or self._state.identity == identity:
             return
         self._state = dataclasses.replace(self._state, identity=identity)
         self._emit_state()
 
-    def _regate(self, identity: str) -> None:
-        pending = [a for a in self._discovered if self.decisions.get(a.name) == AuraState(False, "unbound", a.load_group)]
-        if not pending:
-            return
+    def _regate(self, pending: list[Aura], identity: str, gate: dict[str, AuraState]) -> None:
         self.loaded_identity = identity
         accepted: list[Aura] = []
         try:
-            accepted = self._admit(pending, self._gate(pending, identity))
+            accepted = self._admit(pending, gate)
             if accepted:
                 if self._runtime is not None:
                     self._runtime.extend(accepted, identity)
@@ -424,10 +520,10 @@ def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cw
         identity=bound_identity,
         memberships=read_memberships,
         read_group=default_group_reader(),
-        state_sink=state_writer(session_id),
+        state_sink=threaded_sink(state_writer(session_id)),
     )
     loader_cell.append(loader)
-    _follow_identity(loader, loop)
+    loader._release = _follow_identity(loader, loop)  # noqa: SLF001 -- the loader's own listener handle
     return loader
 
 
@@ -494,18 +590,67 @@ def state_writer(
     return write
 
 
-def _follow_identity(loader: AuraLoader, loop: Any) -> None:
-    """Rewrite the state file when the identity lease adopts another identity (RDR-252: "on each identity change the
-    heartbeat sees"). A server with no lease (one started by hand) has nothing to follow."""
+class _Sink:
+    """A state sink that hands each write to one worker thread, in order, so the file I/O of a load or an identity change
+    never runs on the waiter's loop. ``wait_idle`` is for a test and for shutdown."""
+
+    def __init__(self, write: Callable[[int, LoadedState], None]) -> None:
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        self._write = write
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aura-state")
+        self._pending: list[Any] = []
+
+    def __call__(self, pid: int, state: LoadedState) -> None:
+        self._pending = [f for f in self._pending if not f.done()]
+        self._pending.append(self._pool.submit(self._run, pid, state))
+
+    def _run(self, pid: int, state: LoadedState) -> None:
+        try:
+            self._write(pid, state)
+        except Exception as exc:  # noqa: BLE001 -- the state file is a convenience for nx aura list
+            _log.warning("auras_state_write_failed", error=str(exc))
+
+    def wait_idle(self, timeout: float) -> bool:
+        from concurrent.futures import wait  # noqa: PLC0415
+
+        _done, not_done = wait(list(self._pending), timeout=timeout)
+        return not not_done
+
+
+def threaded_sink(write: Callable[[int, LoadedState], None]) -> _Sink:
+    """*write* (a state writer) run on one worker thread; see :class:`_Sink`."""
+    return _Sink(write)
+
+
+def _spawn(loop: Any, coro_fn: Callable[..., Any], *args: Any, keep: set[Any]) -> None:
+    """Start ``coro_fn(*args)`` as a task on *loop* from any thread. The task is held in *keep* until it ends, since the
+    loop keeps only a weak reference to it."""
+
+    def start() -> None:
+        task = loop.create_task(coro_fn(*args))
+        keep.add(task)
+        task.add_done_callback(keep.discard)
+
+    loop.call_soon_threadsafe(start)
+
+
+def _follow_identity(loader: AuraLoader, loop: Any) -> Callable[[], None]:
+    """Rewrite the state file (and, for a server that loaded unbound, gate once more) when the identity lease adopts
+    another identity (RDR-252: "on each identity change the heartbeat sees"). Returns the function that removes the
+    listener, which the loader keeps (:meth:`AuraLoader.close`). A server with no lease (one started by hand) has
+    nothing to follow."""
     from nexus.mcp import identity_lease  # noqa: PLC0415 -- deferred: the MCP server's lease
+
+    tasks: set[Any] = set()
 
     def changed(identity: str) -> None:
         try:
-            loop.call_soon_threadsafe(loader.note_identity, identity)
+            _spawn(loop, loader.note_identity_async, identity, keep=tasks)
         except RuntimeError:  # the loop is closed: the waiter is gone
             pass
 
-    identity_lease.add_change_listener(changed)
+    return identity_lease.add_change_listener(changed)
 
 
 #: Seconds a worker waits for the waiter's loop to take a channel notice: above the send's own gate bound
@@ -514,14 +659,16 @@ NOTICE_TIMEOUT_S: float = 35.0
 
 
 def on_loop(loader: AuraLoader, loop: Any) -> Callable[[str | None], None]:
-    """A callback for each registry resolve that runs :meth:`AuraLoader.on_resolve` on *loop*: the 60 s
-    re-resolve runs on the lease thread, and the subscription set is read on the waiter's loop."""
+    """A callback for each registry resolve that runs :meth:`AuraLoader.on_resolve_async` on *loop*: the 60 s
+    re-resolve runs on the lease thread, and the subscription set is read on the waiter's loop. The loader's reads
+    (files, process walk, membership and group reads) run on a worker thread; only the commit is on the loop."""
+    tasks: set[Any] = set()
 
     def call(name: str | None) -> None:
         if loader.loaded:
             return
         try:
-            loop.call_soon_threadsafe(loader.on_resolve, name)
+            _spawn(loop, loader.on_resolve_async, name, keep=tasks)
         except RuntimeError:  # the loop is closed: the waiter is gone
             pass
 
