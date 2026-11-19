@@ -56,6 +56,9 @@ CAND_CLOUD_FIELD_MAP="${CAND_CLOUD_FIELD_MAP:-service_url:NX_SERVICE_URL token:N
 # CAND_UV_CACHE_DIR for a fully private one.
 CAND_UV_BIN="${CAND_UV_BIN:-uv}"
 
+# This file's own directory: the runner and the local-config helper are siblings, invoked by path.
+_CAND_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
 _cand_die() { echo "candidate_sandbox: $*" >&2; return 1; }
 
 # cand_sandbox_create <dir>  : make the sandbox skeleton, write <dir>/env.sh and <dir>/run.
@@ -85,27 +88,9 @@ cand_sandbox_create() {
         printf 'export CAND_SBX_PY=%q\n' "$root/home/.local/share/uv/tools/conexus/bin/python"
         printf 'export CAND_SBX_UV_CACHE=%q\n' "$uvcache"
     } >"$root/env.sh"
-    # The runner. Its own env is the whitelist; secrets are read from files by the INNER
-    # shell, so no argv ever carries one.
-    cat >"$root/run" <<'RUNNER'
-#!/usr/bin/env bash
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-h="$here/home"
-exec /usr/bin/env -i \
-    HOME="$here/home" USER="${USER:-sandbox}" LANG="${LANG:-en_US.UTF-8}" TERM="${TERM:-xterm-256color}" \
-    NEXUS_CONFIG_DIR="$here/home/.config/nexus" CLAUDE_CONFIG_DIR="$h/.claude" NX_NO_TELEMETRY=1 \
-    TMPDIR="$here/tmp" UV_TOOL_DIR="$here/home/.local/share/uv/tools" UV_TOOL_BIN_DIR="$here/home/.local/bin" \
-    PATH="$here/home/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    SBX_SECRETS="$here/secrets" \
-    /bin/bash -c '
-        for f in "$SBX_SECRETS"/*; do
-            [ -f "$f" ] || continue
-            IFS= read -r v <"$f" || true
-            export "$(basename "$f")=$v"
-        done
-        unset SBX_SECRETS v f
-        exec /usr/bin/env "$@"' _ "$@"
-RUNNER
+    # The runner (a sibling file, not a heredoc: a body over 512 bytes deadlocks under bash 5.3 when the kernel
+    # shrinks pipes). Its env is the whitelist; secrets are read from files by its INNER shell.
+    cp "$_CAND_LIB_DIR/candidate_sandbox_runner.sh" "$root/run" || return 1
     chmod 700 "$root/run"
     # shellcheck disable=SC1091
     . "$root/env.sh"
@@ -174,18 +159,7 @@ cand_sandbox_config() {
       local)
         local ej="${2:?engine.json}" idx="${3:-0}"
         # The token goes engine.json -> secrets file inside python; it is never an argument or stdout.
-        "${E2E_PYTHON:?run e2e_python_resolve first}" - "$ej" "$idx" "$CAND_SBX_ROOT/secrets" <<'PY' || return 1
-import json, os, sys
-doc = json.load(open(sys.argv[1])); i = int(sys.argv[2]); out = sys.argv[3]
-url = doc["base_url"]
-if not url.startswith("http://127.0.0.1:"):
-    sys.exit("refusing a non-loopback local engine: " + url.split("//", 1)[-1].split("/")[0].rsplit(":", 1)[0])
-tenants = doc.get("tenants") or [{"tenant": doc["tenant"], "token": doc["token"]}]
-for name, value in (("NX_SERVICE_URL", url), ("NX_SERVICE_TOKEN", tenants[i]["token"]), ("NX_LOCAL", "1")):
-    fd = os.open(os.path.join(out, name), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(value + "\n")
-PY
+        "${E2E_PYTHON:?run e2e_python_resolve first}" "$_CAND_LIB_DIR/candidate_sandbox_local_config.py" "$ej" "$idx" "$CAND_SBX_ROOT/secrets" || return 1
         ;;
       *) _cand_die "unknown client mode '$mode' (local|cloud)"; return 1 ;;
     esac

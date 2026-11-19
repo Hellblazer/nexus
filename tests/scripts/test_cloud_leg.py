@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from tests._module_seam import setattr_in
+from tests._tmp_root import child_env_with_tmpdir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 E2E = REPO_ROOT / "tests" / "e2e"
@@ -644,7 +645,8 @@ def _leg(tmp_path: Path, *args: str, op: dict[str, str] | None = None, op_fail: 
     if extra_path is not None:
         path = f"{extra_path}:{path}"
     env = {"PATH": path, "HOME": str(home), "NX_CLOUD_WINDOW_DIR": str(wdir),
-           "NEXUS_CONFIG_DIR": str(home / ".config/nexus"), "TMPDIR": str(tmp_path), **(ambient or {})}
+           "NEXUS_CONFIG_DIR": str(home / ".config/nexus"), **(ambient or {})}
+    env = child_env_with_tmpdir(env, tmp_path)
     extra = []
     if wheel:
         w = tmp_path / "x.whl"
