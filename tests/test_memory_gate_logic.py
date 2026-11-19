@@ -106,21 +106,22 @@ def test_order_reads_a_round_in_the_middle_of_the_title() -> None:
     assert _chain(confirm, review) == ("justified", [confirm["title"]])
 
 
-def test_order_a_bead_id_with_r_and_digits_is_not_a_round() -> None:
-    """``-r<N>`` counts only when a ``-`` or the end follows the digits, so ``nexus-r0tui`` is no round 0."""
-    assert gt.order_key({"title": "review-nexus-r0tui-2026-11-15", "timestamp": ""}, "")[1] == 0
+def test_order_a_bead_id_is_never_read_as_a_round() -> None:
+    """``-r<N>`` counts only when a ``-`` or the end follows the digits, and the record's own bead id is removed first,
+    so neither ``nexus-r7tui`` nor a legal id like ``nexus-r1234`` is a round."""
+    assert gt.order_key({"title": "review-nexus-r7tui-2026-11-15", "timestamp": ""}, "")[1] == 0
     assert gt.order_key({"title": "critique-abc-nexus-x-r3", "timestamp": ""}, "")[1] == 3
     assert gt.order_key({"title": "critique-abc-r2-nexus-x-r7-2026-11-15", "timestamp": ""}, "")[1] == 7
+    assert gt.order_key({"title": "review-abc-nexus-r1234-2026-11-15", "bead": "nexus-r1234", "timestamp": ""}, "")[1] == 0
+    assert gt.order_key({"title": "critique-nexus-r1234-r2-2026-11-15", "bead": "nexus-r1234", "timestamp": ""}, "")[1] == 2
 
 
-def test_order_same_day_and_round_the_later_timestamp_is_newer() -> None:
-    """Dates are day-granular and the round is optional, but every row carries its write time: within one day and
-    round, the later write is the newer record, and the worse verdict decides only an exact tie."""
-    review = _rec("review-aaa1111-nexus-ord-2026-11-15", "partial", date="2026-11-15", stamp="2026-11-15T21:57:49Z")
-    confirm = _rec("confirm-ccc3333-nexus-ord-2026-11-15", "justified", date="2026-11-15", stamp="2026-11-15T22:15:35Z")
-    assert _chain(review, confirm) == ("justified", [confirm["title"]])
-    late_partial = _rec("critique-ddd4444-nexus-ord-2026-11-15", "partial", date="2026-11-15", stamp="2026-11-15T23:00:00Z")
-    assert _chain(confirm, late_partial) == ("partial", [late_partial["title"]])
+def test_order_ignores_the_write_time_so_a_re_put_cannot_pass_a_partial() -> None:
+    """A re-put re-stamps a row: an older justified record edited after a newer partial one must not become newest.
+    Same date and round: the worse verdict decides, whatever the write times."""
+    review = _rec("review-aaa1111-nexus-ord-2026-11-15", "justified", date="2026-11-15", stamp="2026-11-15T23:59:00Z")
+    critique = _rec("critique-bbb2222-nexus-ord-2026-11-15", "partial", date="2026-11-15", stamp="2026-11-15T10:00:00Z")
+    assert _chain(review, critique)[0] == "partial"
 
 
 def test_order_the_date_beats_the_round_and_the_round_beats_the_title() -> None:

@@ -29,7 +29,8 @@ def _head(root: Path) -> str:
 @click.option("--all", "all_phases", is_flag=True, default=False,
               help="Every phase of the RDR, by its rdr:<NNN> tag (the rdr-close step); alone")
 @click.option("--accept-open", "accept_open", multiple=True,
-              help="Let a bead through whose newest record is not justified (repeatable); the pointer records it")
+              help="Let a bead through whose newest record is not justified (repeatable; the pointer records it). "
+                   "Pass it only with Sam's stamp for that bead (RDR-209 Step 2.3)")
 @click.option("--counted", type=click.IntRange(min=0), default=None,
               help="The count a --dry-run reported ('would be quarantined by the next expire sweep'); a real run that "
                    "writes a TTL needs it, and refuses unless it equals the count that dry run recorded")

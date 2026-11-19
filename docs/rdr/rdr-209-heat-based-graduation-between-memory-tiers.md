@@ -558,17 +558,20 @@ the cause if any of these fail:
    reads back whole and equal to the record, so no record gets a TTL until its
    full text reads back from T3. These reads do not stamp access (A8).
 3. For each listed bead, its newest record has the verdict `justified`. Newest
-   is by header date, then round, then the row's write time. A record with no field header
+   is by header date, then round. A record with no field header
    (an older one) is dated from the first `YYYY-MM-DD` in its title, else from
    its timestamp's day; the round is the title's last `-r<N>` followed by `-` or
-   the end (a number, so `-r10` follows `-r9`; live titles put it before the
-   date, `confirm-<bead>-r2-2026-11-15`, and a bead id such as `nexus-r0tui` is
-   no round), 0 when there is none, because `gate_record` writes no round field.
-   Only when records share the newest date, round and write time (or have none)
-   does the worse verdict decide (`not-justified` over `partial` over
-   `justified`). A terminal `partial` is not a pass: it stops the run like
-   `not-justified`. Sam ruled on 2026-11-19 that a partial on a close needs his
-   stamp, given per bead with `--accept-open` (T2
+   the end, read with the record's own bead id removed from the title (a number,
+   so `-r10` follows `-r9`; live titles put it before the date,
+   `confirm-<bead>-r2-2026-11-15`, and an id such as `nexus-r1234` is no round),
+   0 when there is none, because `gate_record` writes no round field. Dates are
+   day-granular and the round is optional, so when more than one record shares
+   the newest date and round the worse verdict decides (`not-justified` over
+   `partial` over `justified`); the row's timestamp is not used, because a
+   re-put re-stamps a row and would let an edited older record pass. A terminal
+   `partial` is not a pass: it stops the run like `not-justified`, and a bead
+   whose newest record is `partial` rolls up only with Sam's per-bead stamp,
+   given with `--accept-open` (Sam 2026-11-19, T2
    `nexus/sam-ruling-token-sequencing-and-rollup-bar-2026-11-19`). A bead whose newest
    record is `partial` or `not-justified` stops the run and is named, unless the run names it with
    `--accept-open <bead>` (repeatable), which the pointer records in an
@@ -1388,4 +1391,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Review round 1, blocker 6: the pointer read-back compared only (project, title), so a pointer that came back with different `ttl_set`, `restored` or `state` marks, the ones the next run decides from, passed. It now compares those too. |
 | 2026-11-19 | Review round 1, blocker 7: a wrong `--beads` or `--project` printed "0 listed", which read as a pass. The output now starts with the rows examined and the `kind:gate` rows seen, and says so when none of the gate rows is in the run; the first live run's counts (nexus-1gdv0.2.17) come from these lines. |
 | 2026-11-19 | Review round 1, wording (nexus-1gdv0.2.16): the Step 1 test-list sentence "no run writes anything to T2" is corrected (the dry run writes one count row; no run changes a gate record's text, tags or timestamp); the count row is in the Day 2 table; "is a mechanism, not a process rule" now says what the code requires (a current, recorded count) and that Sam's word is a process step the skills state; "every other field" is narrowed, because the import route also clears the quarantine stamps, re-stamps the row's identity with the caller and truncates the timestamp to the second; and the cross-scope limit of the restore rule is stated (a restore after a `--phase` run is not protected from a later `--all` run). |
-| 2026-11-19 | First live dry run (nexus-1gdv0.2.17, RDR-249, refused before any write): titles carry the round mid-title, so the trailing-only round read a later justified confirm and an earlier partial review of one day as a tie and the partial won. Step 2.3 now reads the round wherever a `-` or the end follows it and orders by the row's write time within a day and round, the worse verdict deciding only an exact tie; and it records Sam's ruling that a terminal partial rolls up only with his per-bead `--accept-open` stamp (grant 3). |
+| 2026-11-19 | First live dry run (nexus-1gdv0.2.17, RDR-249, refused before any write): titles carry the round mid-title, so the trailing-only round read an `-r1` partial and an `-r2` justified of one day as a tie and the partial won. Step 2.3 now reads the round wherever a `-` or the end follows it, with the record's own bead id removed first; the tie rule is unchanged (worse verdict), and the text says the row timestamp is not used. It also records Sam's ruling that a terminal partial rolls up only with his per-bead `--accept-open` stamp. Wording matches the reviewed fix (grant 3). |
