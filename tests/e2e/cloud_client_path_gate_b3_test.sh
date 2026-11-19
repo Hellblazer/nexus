@@ -927,7 +927,7 @@ else
   echo "[FAIL] leg A does not call _version_contract_verdict"; FAIL=$((FAIL+1))
 fi
 _vbody() {  # <python dict updates>
-  python3 -c 'import json,sys
+  "$E2E_PYTHON" -c 'import json,sys
 b={"release_version":"0.1.250","embedding_mode":"voyage","embedding_models":["voyage-context-3"],
    "nx_answer_steps_supported":True,"catalog_docs_by_author_supported":True,
    "catalog_docs_by_meta_supported":True,"catalog_sensitive_locators_supported":True}
