@@ -855,9 +855,9 @@ The key moves table by table in strangler order:
   that release the dual path stays in Java. That engine carries a boot
   floor, because a release reaches an install whatever its moves have
   done: it serves migration-only until gate 3 of the completion check
-  holds on the install and P3.7's name-key drop move has `completed_at`
-  set, the state in which P3.7's one-row rename runs (T2
-  `229-research-59`).
+  holds on the install, P3.7's name-key drop move has `completed_at`
+  set and every P3.5b changeset has applied, the state in which P3.7's
+  one-row rename runs (T2 `229-research-59`, `229-research-64`).
 
 **How each Phase 3 step runs (RDR-246).** No Phase 3 step rewrites the rows
 of, or builds an index on, a table that grows with user data inside the
@@ -1097,10 +1097,28 @@ while the engine serves:
     `on_complete` (inferred, not read). A rename between gate 2 and gate 3
     costs only an index P3.4 builds again for the new id before gate 3 can
     hold, while readers are on names (inferred, not read). So no search
-    reads by an id before that collection's index on it exists. Inferred,
-    not read: each gate takes effect at the first boot after it holds,
-    the boot at which a CONTINUE changeset "applies at the first boot
-    after the move completes" (RDR-246 lines 942-944). A client cache
+    reads by an id before that collection's index on it exists.
+
+    The check is not read only at boot. The move worker knows in process
+    when a move completes: the completion transaction sets `completed_at`
+    and returns `Result.completed()` (`VerifyingFinisher.java:244-287`),
+    and the worker acts on it (`case COMPLETED -> ...`,
+    `DataMoveWorker.java:562`). So the engine re-reads the check when the
+    worker records a `completed_at`, and, inferred, not read, when a
+    reconciler pass ends, since gate 3 reads `PciCatalog`; the gates the
+    engine's Java acts on (P3.3b's pass, P3.4's builds, registering the
+    name-key and P4.1 drop moves, the Java readers, the one-row rename and
+    P4.0's floor) take effect with no restart (T2 `229-research-64`). A
+    CONTINUE changeset still "applies at the first boot after the move
+    completes" (RDR-246 lines 942-944): P3.5b's SQL readers on tables
+    outside the chunk family, and P4.1's changesets. Until P3.5b's apply,
+    those readers read the name columns, which a one-row rename no longer
+    rewrites, so the one-row rename also waits for every P3.5b changeset
+    to be recorded as applied (inferred, not read: read from Liquibase's
+    `databasechangelog`). When every stamp move is complete and a P3.5b
+    changeset is not yet applied, the check publishes a `boot_work` entry
+    that asks for a restart, which nx doctor shows (inferred, not read).
+    That is the one restart the chain from a half-stamped store needs. A client cache
     keyed by id holds a stable id only from the name-key drop move's
     `completed_at` on the install, when the
     rename becomes one row: before it, the name-path rename inserts a new
@@ -1853,8 +1871,8 @@ its acceptance is that test green plus the census pin it lowers.
   CONTINUE precondition or, on the chunk family, by reading both shapes;
   P3.5a and P3.5c for gate 3, which includes P3.4 on that install. Test: a store with only half its
   chunks stamped (the stamp move paused part-way) still searches, lists and
-  renames correctly after the P3.5 cut, and reads by the id from the first
-  boot after the move completes.
+  renames correctly after the P3.5 cut, and reads by the id once the check
+  sees gate 3 hold, with no restart.
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route accepts `collection_id` and
     a label; responses carry both. Client caches keyed by id, which they
@@ -1888,8 +1906,9 @@ its acceptance is that test green plus the census pin it lowers.
   completion check registers it once gate 3 holds, its `on_complete` drops
   the seven name foreign keys that refuse a one-row rename and the queue's
   key where that table exists, and the
-  one-row rename waits for its `completed_at` as well (item 6, Switch; T2
-  `229-research-58`, `229-research-61`). Between gate 3 and that
+  one-row rename waits for its `completed_at` as well, and for every
+  P3.5b changeset to have applied (item 6, Switch; T2
+  `229-research-58`, `229-research-61`, `229-research-64`). Between gate 3 and that
   `completed_at` the engine refuses a rename, naming the move, because
   readers are on the id and the name-path rename would give the
   collection a new id (item 6; T2 `229-research-63`). The rename, like every other URI-move path, rewrites only
@@ -1951,8 +1970,9 @@ its acceptance is that test green plus the census pin it lowers.
   re-home by id. Until this release the dual path stays in Java. It keeps
   P3.1 to P3.7's changesets, moves, completion check and index passes, so
   an install that jumps from before P3.1 to this release still reaches
-  its floor. The floor: at boot the completion check reads gate 3 and the
-  `completed_at` of P3.7's name-key drop move; until both hold, the engine
+  its floor. The floor: the completion check reads gate 3, the
+  `completed_at` of P3.7's name-key drop move and whether every P3.5b
+  changeset has applied; until all three hold, the engine
   serves migration-only. It starts, applies its changesets and runs the
   move worker and the index passes, and refuses every collection-scoped
   read and write with a typed error that names the floor. It does not
@@ -1960,12 +1980,18 @@ its acceptance is that test green plus the census pin it lowers.
   "refuses to serve"), because the move worker and the reconciler start
   only after `service.start()` (`Main.java:620`, `:646`, `:681`), so an
   exiting engine would never run the moves its floor waits for (inferred,
-  not read; T2 `229-research-59`). Like every gate, the floor lifts at
-  the first boot after it holds (item 6). Test: the P4.0 engine booted on
-  a half-stamped store (the stamp move paused part-way) refuses
-  collection-scoped routes naming the floor, keeps the stamp move running
-  and reports it in `boot_work`, and serves by the id at the first boot
-  after the floor holds.
+  not read; T2 `229-research-59`). The check is re-read when the move
+  worker records a `completed_at` and when a reconciler pass ends, so the
+  floor lifts in the running process once it holds (item 6). From a
+  half-stamped store the chain needs one restart: the boot after the
+  stamp moves complete, which applies P3.5b's CONTINUE changesets, asked
+  for by a `boot_work` entry (item 6; T2 `229-research-64`). Test, over
+  the whole chain: the P4.0 engine booted on a half-stamped store (the
+  stamp move paused part-way) refuses collection-scoped routes naming the
+  floor and reports the stamp move in `boot_work`; when the stamp
+  completes it asks for a restart; after that one restart, gates 1 to 3,
+  the name-key drop move and the floor follow in one process with no
+  further restart, and it then serves by the id.
 - P4.1 After P3.11 and P4.0; its acceptance includes RDR-248's committed fixture
   and a stated effect on backups taken before P3.1 (item 10). Drops first:
   the three name child keys; then the name columns on referencing tables,
@@ -2040,9 +2066,13 @@ has a valid unique index; P3.4's builds wait for the swaps and every
 validation move; the engine's id readers, P3.7's name-key drop move and
 one-row rename and P4.1's
 drop move wait also for P3.4 on that install; the one-row rename waits
-also for the name-key drop move's `completed_at`. P3.5b's SQL readers wait for
-the stamp moves. P4.0's engine serves migration-only until gate 3 and the
-name-key drop move's `completed_at` hold on the install (P4.0), and P4.1
+also for the name-key drop move's `completed_at` and for every P3.5b
+changeset to have applied. P3.5b's SQL readers wait for
+the stamp moves, and apply at the first boot after them. P4.0's engine
+serves migration-only until gate 3, the
+name-key drop move's `completed_at` and P3.5b's changesets hold on the
+install (P4.0). Every other gate takes effect in the running engine when
+the check is re-read (item 6). P4.1
 waits for P4.0 in bead order. On each install P4.1's registry changeset
 waits for the `catalog_collections` stamp move, P3.7's name-key drop move
 and P4.1's drop move to have `completed_at` set, and for no foreign key to
@@ -2088,12 +2118,13 @@ None.
 - **Scenario**: an engine with the P3.5 cut boots on a store with only half
   its chunks stamped (the stamp move paused part-way) — **Verify**: search,
   listings and a rename return what they returned before the cut, and the
-  engine reads by the id from the first boot after the move completes.
+  engine reads by the id once the check sees gate 3 hold, with no restart.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
   collection-scoped routes with an error that names the floor, the stamp
-  move keeps running in `boot_work`, and it serves by the id at the first
-  boot after gate 3 and the name-key drop move hold.
+  move keeps running in `boot_work`, it asks for one restart once the
+  stamp completes, and after that restart it reaches gate 3, the
+  name-key drop move and the floor in one process and serves by the id.
 - **Scenario**: rename a collection that has chunk and `canary_query_ring`
   rows after P3.7 — **Verify**: one registry
   row changes; chunk, manifest, taxonomy and history rows and the
@@ -2351,14 +2382,15 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   deployed first. Routes accept both a label and an id from P3.5, so an
   older client keeps working until the floor bump. An install that skips
   releases is guarded by its own moves, not by the cut order: its readers
-  switch at the first boot after the completion check's gates pass there
+  switch once the completion check sees its gates pass there
   (item 6, "Readers during the stamp"). A client trusts a collection's
   id as stable only from P3.7's name-key drop move's `completed_at`
   there; between gate 3 and that point the engine refuses a rename (item
   6). The same holds at Phase 4: an
   install that skips from before P3.1 to a release with P4.0 meets P4.0's
-  boot floor, which serves it migration-only until gate 3 and P3.7's
-  name-key drop move hold there (P4.0; T2 `229-research-59`).
+  boot floor, which serves it migration-only until gate 3, P3.7's
+  name-key drop move and P3.5b's changesets hold there (P4.0; T2
+  `229-research-59`, `229-research-64`).
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: every changeset is walked on a PITR fork rehearsal
@@ -2399,8 +2431,8 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   install that happens only after its stamp moves have completed, because
   the one-row rename waits for the same check (item 6, "Readers during the
   stamp"). The Java name path stays in the engine until P4.0, whose boot
-  floor serves an install migration-only until that install's gate 3 and
-  name-key drop move hold, so an id-only engine never serves a
+  floor serves an install migration-only until that install's gate 3,
+  name-key drop move and P3.5b changesets hold, so an id-only engine never serves a
   half-stamped store (P4.0).
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: N/A.
