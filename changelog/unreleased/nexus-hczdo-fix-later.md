@@ -1,0 +1,7 @@
+### Fixed
+
+- **A `/clear` in a session whose binder may not send `clear` restarts the identity the session holds, not a new ephemeral one.** The MCP server's binder (the data credential's pending bind) used to fall through to a startup that made a second ephemeral identity beside the live binding; it now starts the held identity again from the same process, so a pid has one live binding and keeps its identity (nexus-hczdo).
+- **A delegated `claude -p` child refreshes its identity token on the same line as the session's lease.** It refreshed at half life, leaving between 30 and 60 minutes at any moment a laptop sleep could begin; it now refreshes once under 50 minutes are left, so a sleep under about 50 minutes does not lapse it (nexus-hczdo).
+- **The MCP server reaches its identity lease through a guarded seam.** A failure to import the lease is logged and no longer reaches server start, the T1 handoff tick or the exit path (nexus-hczdo).
+- **An aura's group gate follows the engine's verdict that a group is no longer live,** including a group whose `ends` the client cannot parse (nexus-igea9).
+- **`nx group join` and `nx group list` print one line and exit 1 over a malformed membership or roster row,** instead of a KeyError traceback (nexus-igea9).
