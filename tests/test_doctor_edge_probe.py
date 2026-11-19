@@ -71,6 +71,8 @@ class _Engine:
             def _correlation_echo(self) -> str | None:
                 """What the engine's AuthFilter echoes on every response, after the path's defect. The engine
                 keeps a valid inbound id and otherwise generates ``nxe-`` plus 32 hex (CorrelationId.java)."""
+                if outer.mode == "edge_waf_403":
+                    return None  # the edge answered; the engine, which sets the echo, never saw the request
                 inbound = None if outer.corr == "strip_in" else self.headers.get(_CORRELATION)
                 valid = inbound is not None and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", inbound) is not None
                 # Only an id that passed the accept pattern is echoed (no CR/LF can reach a header).
@@ -359,6 +361,40 @@ class TestCorrelationOutcome:
         result = _run()
         assert result.hop == probe.HOP_KEY_DROPPED
         assert result.correlation == probe.CORRELATION_OVERWRITE
+        assert result.exit_code == 1, "the idempotency verdict alone sets the exit code"
+
+    def test_an_edge_refusal_reports_no_correlation_outcome(self, engine_for) -> None:
+        """A WAF 403 never reached the engine, so its missing echo is not a response strip."""
+        engine_for("edge_waf_403")
+        result = _run()
+        assert result.hop == probe.HOP_EDGE
+        assert result.correlation is None
+        assert "correlation" not in probe.render(result)
+
+    def test_a_response_strip_names_the_pre_phase_1_engine_too(self, engine_for) -> None:
+        engine_for("echo", "strip_out")
+        assert "predates RDR-167 Phase 1" in probe.render(_run())
+
+    @pytest.mark.parametrize("failure", ["guard", "network"])
+    def test_a_failing_run_restores_the_invocations_own_id(self, engine_for, monkeypatch, failure: str) -> None:
+        from nexus import correlation  # noqa: PLC0415
+
+        engine_for("echo")
+        if failure == "guard":
+            monkeypatch.delenv("NX_ALLOW_PROD_WRITE")
+            monkeypatch.setattr(
+                hvc, "_post",
+                lambda *a, **k: (_ for _ in ()).throw(service_endpoint.ProductionWriteGuardError("refused")),
+            )
+        else:
+            monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://127.0.0.1:1", "tok"))
+        token = correlation.bind("outer-invocation-id")
+        try:
+            result = _run()
+            assert correlation.current_correlation_id() == "outer-invocation-id"
+        finally:
+            correlation.reset(token)
+        assert not result.ok
 
     def test_an_engine_error_response_is_still_read(self, engine_for) -> None:
         """The engine echoes on every response, an error included."""

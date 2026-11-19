@@ -27,7 +27,9 @@ gate was busy: retry or fix the credential, it says nothing about the edge).
 
 RDR-167 Phase 2 (nexus-dngtz.2) rides the same POST: the probe binds a known ``X-Correlation-ID`` P (32
 hex, never the engine's ``nxe-`` marker) for that one request and names one of four outcomes from the id
-the engine echoes (:func:`classify_correlation_echo`). The outcome is a second row, not part of the
+the engine echoes (:func:`classify_correlation_echo`), read only from an answer the engine itself sent.
+"Response strip" (no echo) cannot tell a stripped header from an engine without Phase 1, and its row says
+so. The outcome is a second row, not part of the
 verdict: a lost correlation id costs log joining across tiers, not a duplicate execution, so it never
 changes the exit code a scheduled step reads.
 
@@ -84,7 +86,9 @@ _CORRELATION_MEANING: dict[str, str] = {
     CORRELATION_INBOUND_STRIP: "the engine received no valid header (stripped, or replaced by an invalid value) "
                                "and generated its own",
     CORRELATION_OVERWRITE: "something on the path replaced the id, inbound or on the response",
-    CORRELATION_RESPONSE_STRIP: "the response header was removed on the way back",
+    CORRELATION_RESPONSE_STRIP: "no echo: a hop removed the response header on the way back, or the engine "
+                                "predates RDR-167 Phase 1 and echoes nothing (compare its version with the "
+                                "engine release that carries Phase 1)",
 }
 _ENGINE_GENERATED_PREFIX = "nxe-"
 
@@ -109,7 +113,7 @@ class EdgeProbeResult:
     quarantine_collection: str | None = None
     host: str | None = None
     inconclusive: bool = False
-    #: The RDR-167 Phase 2 outcome, or None when no HTTP response came back to read it from.
+    #: The RDR-167 Phase 2 outcome, or None when the engine's own answer did not come back to read it from.
     correlation: str | None = None
     correlation_sent: str | None = None
     correlation_echo: str | None = None
@@ -250,7 +254,10 @@ def run_edge_probe(*, expect_host: str | None = None) -> EdgeProbeResult:
         return fail(f"REFUSED by the dev-checkout production-write guard: {_redact(exc)}", HOP_SETUP)
     except hvc.VectorServiceError as exc:
         code = getattr(exc, "code", None)
-        if code is not None:
+        # Only the engine echoes the id (AuthFilter), so a missing echo is a response strip only on an answer
+        # the engine sent: its JSON error body, and no edge ``Server`` header. A WAF refusal or a gateway
+        # 502/504 never reached the engine and says nothing about the header (no row).
+        if code is not None and not exc.edge_refusal and isinstance(exc.engine_body, dict):
             answered = True
             identity.update(hvc._pop_idempotency_response_headers())
         if code in (401, 403) and not exc.edge_refusal:

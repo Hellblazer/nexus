@@ -840,14 +840,15 @@ under Technical Design (Log sink, Reader contract).
 
 Extend `nx doctor --probe-edge` (`src/nexus/doctor_edge_probe.py`) to send a known
 `X-Correlation-ID` and read back the id the engine echoes, the way the existing probe
-compares the echoed `Idempotency-Key` with the one sent (`doctor_edge_probe.py:214-226`).
+compares the echoed `Idempotency-Key` with the one sent (`run_edge_probe` in `doctor_edge_probe.py`).
 It reports four outcomes, not one, which the engine's `nxe-` prefix on an id it generates makes
 distinguishable. The probe sends a valid id P without that prefix and reads the echo:
 **pass-through** (echo equals P), **inbound strip** (the echo starts with `nxe-`: the engine
 received no valid header and made its own), **overwrite** (an echo that is present, is not P
 and has no `nxe-` prefix, so something on the path replaced the id) and **response strip** (no
 echo, so the response header was removed on the way back). The engine side is built
-(`CorrelationId.java`); the probe is not.
+(`CorrelationId.java`), and so is the probe (nexus-dngtz.2): it reads the echo only from an answer
+the engine sent, and its response-strip row also names an engine without Phase 1, which echoes nothing.
 This closes the assumption in research-8.
 
 ### Phase 3 (optional, later): JSON logs
