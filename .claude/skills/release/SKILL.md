@@ -685,21 +685,26 @@ base tag's, apart from the version, so there is nothing new to rehearse.
 
 Sam, 2026-11-19: 8.5.0 shipped two faults only cloud mode showed (the CDN stripped `X-Nexus-Identity-Token`, so
 identity-line board writes answered 403; the laptop's data credential could not create seats), and every gate ran
-against a local engine. Run `tests/e2e/cloud-leg.sh` on the release candidate before the tag, inside an announced
-cloud window, against the cloud test tenant only:
+against a local engine. After Step 4b has moved this release's ledger entries to `## Shipped`, and before the tag, run
+`tests/e2e/cloud-leg.sh` on the release candidate, inside an announced cloud window, against the cloud test tenant only
+(run `scripts/build-gate-jar.sh` first: the local slot boots the gate jar):
 
 ```bash
 uv build --wheel -o dist-candidate/
-tests/e2e/cloud-leg.sh --wheel dist-candidate/conexus-X.Y.Z-py3-none-any.whl --window <window-id>
+tests/e2e/cloud-leg.sh --wheel dist-candidate/conexus-X.Y.Z-py3-none-any.whl --window <window-id> --release vX.Y.Z
 ```
 
 It installs the wheel into a scratch HOME, drives the core write paths (identity-line T2 write, seat and identity,
-mailbox send and claim, T1, T3 round trip) and each wire-ledger `## Unshipped` route (`docs/wire-contract-pending.md`)
-through the real client, once on a local engine and once through the public edge, and FAILS on any 4xx or 5xx the
-cloud run returns that the local run does not. A red blocks the tag. It refuses without the window marker
-(`~/.config/nexus-cloud-windows/<id>.window`, written by the releaser after announcing the window), on any credential
-but the `release-test` tenant's (1Password item `nexus cloud test tenant (release-test)`, read with `op-auto`),
-and on a non-https edge. `--local-vs-local` proves the plumbing with no cloud. Run no other cloud walk outside a window.
+mailbox send and claim, T1, T3 round trip) and each route of THIS release's `## Shipped` wire-ledger entries
+(`docs/wire-contract-pending.md`, selected by `--release`) through the real client, once on a local engine and once
+through the public edge, and FAILS on any 4xx or 5xx the cloud run returns that the local run does not. It also fails on
+an unmapped ledger route (map it in `ROUTE_MAP`, or `--accept-skip "<route>:<reason>"`) and on zero ledger entries (a
+release with none says `--no-ledger-entries-ok "<reason>"`). A red blocks the tag. It refuses without the window marker
+(`~/.config/nexus-cloud-windows/<id>.window`, mode 0600, at most 4 h, written by the releaser after announcing the window:
+it records an announcement and does not verify one), on any credential but the `release-test` tenant's (1Password item
+`nexus cloud test tenant (release-test)`, read with `op-auto`), and on any edge but `api.conexus-nexus.com`.
+`--local-vs-local` proves the plumbing with no cloud. Run no other cloud walk outside a window. Paste the report, from the
+`examined` line to the verdict line (counts, `ledger entries driven`, window id, run id, `PASSED`), onto the cut bead.
 
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 

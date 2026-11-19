@@ -230,6 +230,16 @@ cand_engine_stop() {
     CAND_PG_ROOT=""
 }
 
+# cand_sandbox_scrub <dir> : delete every credential and token a sandbox holds (secrets, identity token files),
+# leaving the rest for inspection. cloud-leg.sh calls it on every exit path, --keep included.
+cand_sandbox_scrub() {
+    local d="${1:?}"
+    [ -f "$d/env.sh" ] || return 1
+    rm -rf "$d/secrets" "$d/home/.config/nexus/identity"
+    find "$d" -name '*.token' -type f -delete 2>/dev/null
+    return 0
+}
+
 # cand_sandbox_destroy <dir> : delete a sandbox (secrets included). Refuses a path outside what create made.
 cand_sandbox_destroy() {
     local d="${1:?}"

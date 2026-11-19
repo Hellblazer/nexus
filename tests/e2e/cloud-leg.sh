@@ -8,11 +8,15 @@
 # create seats). A red blocks the tag. Logic: tests/e2e/lib/cloud_leg.py; sandbox: lib/candidate_sandbox.sh.
 #
 # USAGE
-#   tests/e2e/cloud-leg.sh --wheel <candidate.whl> --window <id> [--ledger docs/wire-contract-pending.md]
-#                          [--release <vX.Y.Z>] [--core-only] [--op-item <title>] [--op-vault AI] [--work-dir <dir>] [--keep]
-#   The release additions are the wire ledger's `## Unshipped` entries (or the named --release's `## Shipped`
-#   ones), each mapped to a client call or listed SKIPPED. --core-only runs the fixed core alone: use it against an
-#   engine that has not deployed the release's routes yet (they would answer 404 in the cloud and 200 locally).
+#   tests/e2e/cloud-leg.sh --wheel <candidate.whl> --window <id> [--release v<X.Y.Z>] [--core-only]
+#        [--expect-red <step>:<reason>]... [--accept-skip "<route>:<reason>"]... [--no-ledger-entries-ok "<reason>"]
+#        [--ledger <file>] [--op-item <title>] [--op-vault AI] [--work-dir <dir>] [--keep] [--plan-only]
+#   The release additions are the wire ledger's entries (docs/wire-contract-pending.md): `## Unshipped`, or with
+#   --release v<X.Y.Z> that release's `## Shipped` entries (the release skill's Step 4b has moved them there). Each
+#   route maps to a client call; an unmapped route FAILS unless --accept-skip names it. A full run with zero ledger
+#   entries FAILS unless --no-ledger-entries-ok gives a reason. --core-only runs the fixed core alone and reports how many
+#   ledger routes it did not drive. --expect-red <step>:<reason> turns that step's cloud-only failure into EXPECTED-RED
+#   (a step the cut itself fixes); a PASS on it fails the run. --plan-only prints the plan and stops.
 #   tests/e2e/cloud-leg.sh --local-vs-local --wheel <candidate.whl>     # plumbing self-test, no cloud, no window
 #
 # REFUSES (exit 2, nothing written, before any sandbox exists) unless
@@ -36,14 +40,19 @@ source "$REPO_ROOT/tests/e2e/lib/candidate_sandbox.sh"
 e2e_python_resolve 11 || exit 2
 LEG="$REPO_ROOT/tests/e2e/lib/cloud_leg.py"
 
-CORE_ONLY=0 WHEEL="" WINDOW="" LEDGER="$REPO_ROOT/docs/wire-contract-pending.md" RELEASE="" KEEP=0 LOCAL_VS_LOCAL=0
+CORE_ONLY=0 WHEEL="" WINDOW="" LEDGER="$REPO_ROOT/docs/wire-contract-pending.md" LEDGER_SET=0 RELEASE="" KEEP=0 LOCAL_VS_LOCAL=0
+PLAN_ONLY=0 NO_LEDGER_OK="" EXPECT_RED=() ACCEPT_SKIP=()
 OP_ITEM="${NX_CLOUDLEG_OP_ITEM:-nexus cloud test tenant (release-test)}" OP_VAULT="${NX_CLOUDLEG_OP_VAULT:-AI}"
 OP_BIN="${NX_CLOUDLEG_OP:-op-auto}" WORK="" RUN_ID="" WORK_AUTO=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --wheel) WHEEL="${2:?}"; shift 2 ;;
         --window) WINDOW="${2:?}"; shift 2 ;;
-        --ledger) LEDGER="${2:?}"; shift 2 ;;
+        --ledger) LEDGER="${2:?}"; LEDGER_SET=1; shift 2 ;;
+        --expect-red) EXPECT_RED+=("${2:?}"); shift 2 ;;
+        --accept-skip) ACCEPT_SKIP+=("${2:?}"); shift 2 ;;
+        --no-ledger-entries-ok) NO_LEDGER_OK="${2:?}"; shift 2 ;;
+        --plan-only) PLAN_ONLY=1; shift ;;
         --release) RELEASE="${2:?}"; shift 2 ;;
         --op-item) OP_ITEM="${2:?}"; shift 2 ;;
         --op-vault) OP_VAULT="${2:?}"; shift 2 ;;
@@ -63,6 +72,14 @@ cleanup() {
     local rc=$?
     set +e
     cand_engine_stop
+    # EVERY exit path, --keep included: no credential, identity token or engine token stays in a kept work dir.
+    if [ -n "${WORK:-}" ]; then
+        local d
+        for d in "$WORK/local" "$WORK/cloud"; do
+            [ -f "$d/env.sh" ] && cand_sandbox_scrub "$d" >/dev/null 2>&1
+        done
+        rm -f "$WORK/engine/engine.json" 2>/dev/null
+    fi
     if [ "$KEEP" = 0 ]; then
         [ -n "${WORK:-}" ] && [ -f "$WORK/local/env.sh" ] && cand_sandbox_destroy "$WORK/local" >/dev/null 2>&1
         [ -n "${WORK:-}" ] && [ -f "$WORK/cloud/env.sh" ] && cand_sandbox_destroy "$WORK/cloud" >/dev/null 2>&1
@@ -94,19 +111,32 @@ if [ "$LOCAL_VS_LOCAL" = 0 ]; then
             fi
         fi
     done
-    "$E2E_PYTHON" "$LEG" check-target --cred-dir "$CREDD" --item-title "$OP_ITEM" || exit 2
+    # the item's OWN title as the vault returned it, not the argument string
+    if ! "$OP_BIN" item get "$OP_ITEM" --vault "$OP_VAULT" --format json 2>/dev/null | "$E2E_PYTHON" "$LEG" item-title >"$CREDD/_title" 2>/dev/null \
+       || [ ! -s "$CREDD/_title" ]; then
+        echo "REFUSED: 1Password item '$OP_ITEM' (vault $OP_VAULT) answered no title" >&2
+        exit 2
+    fi
+    # one reader of every credential value: the same normalised text is checked and sent
+    "$E2E_PYTHON" "$LEG" normalize-cred --cred-dir "$CREDD" || exit 2
+    "$E2E_PYTHON" "$LEG" check-target --cred-dir "$CREDD" --item-title-file "$CREDD/_title" || exit 2
 fi
-[ -f "$WHEEL" ] || { echo "REFUSED: --wheel <candidate wheel> is required and must exist" >&2; exit 2; }
+if [ "$LEDGER_SET" = 1 ] && [ ! -f "$LEDGER" ]; then
+    echo "REFUSED: --ledger $LEDGER does not exist" >&2
+    exit 2
+fi
 
 # ── plan, sandboxes, slots ─────────────────────────────────────────────────────
 [ -n "$WORK" ] || { WORK="$(mktemp -d "${TMPDIR:-/tmp}/cloudleg-work.XXXXXX")"; WORK_AUTO=1; }
 mkdir -p "$WORK"; chmod 700 "$WORK"
-LEDGER_ARGS=()
-if [ "$CORE_ONLY" = 0 ]; then
-    [ -f "$LEDGER" ] && LEDGER_ARGS=(--ledger "$LEDGER")
-    [ -z "$RELEASE" ] || LEDGER_ARGS+=(--release "$RELEASE")
-fi
-"$E2E_PYTHON" "$LEG" plan --run "$RUN_ID" "${LEDGER_ARGS[@]}" --out "$WORK/plan.json"
+PLAN_ARGS=(--ledger "$LEDGER")
+[ -z "$RELEASE" ] || PLAN_ARGS+=(--release "$RELEASE")
+[ "$CORE_ONLY" = 0 ] || PLAN_ARGS+=(--core-only)
+[ -z "$NO_LEDGER_OK" ] || PLAN_ARGS+=(--no-ledger-entries-ok "$NO_LEDGER_OK")
+for x in ${ACCEPT_SKIP[@]+"${ACCEPT_SKIP[@]}"}; do PLAN_ARGS+=(--accept-skip "$x"); done
+"$E2E_PYTHON" "$LEG" plan --run "$RUN_ID" "${PLAN_ARGS[@]}" --out "$WORK/plan.json" || exit 2
+if [ "$PLAN_ONLY" = 1 ]; then exit 0; fi
+[ -f "$WHEEL" ] || { echo "REFUSED: --wheel <candidate wheel> is required and must exist" >&2; exit 2; }
 
 tenants=1; [ "$LOCAL_VS_LOCAL" = 1 ] && tenants=2
 cand_engine_start "$REPO_ROOT" "$WORK/engine" "$tenants"
@@ -128,7 +158,10 @@ echo "cloud-leg: run $RUN_ID, label cloudleg-$RUN_ID, $([ "$LOCAL_VS_LOCAL" = 1 
     --workdir "$WORK/taps" --out "$WORK/local.json"
 "$E2E_PYTHON" "$LEG" run-slot --plan "$WORK/plan.json" --slot cloud --sandbox "$WORK/cloud" --host "$CLOUD_HOST" \
     --workdir "$WORK/taps" --out "$WORK/cloud.json"
+CMP_ARGS=(--window "${WINDOW:--}" --edge-host "$CLOUD_HOST")
+for x in ${EXPECT_RED[@]+"${EXPECT_RED[@]}"}; do CMP_ARGS+=(--expect-red "$x"); done
 rc=0
-"$E2E_PYTHON" "$LEG" compare --plan "$WORK/plan.json" --local "$WORK/local.json" --cloud "$WORK/cloud.json" | tee "$WORK/report.txt" || rc=$?
-echo "cloud-leg: left behind (cannot be deleted by the client): seat cloudleg-$RUN_ID-seat and the ephemeral identity labelled cloudleg-$RUN_ID"
+"$E2E_PYTHON" "$LEG" compare --plan "$WORK/plan.json" --local "$WORK/local.json" --cloud "$WORK/cloud.json" "${CMP_ARGS[@]}" | tee "$WORK/report.txt" || rc=${PIPESTATUS[0]}
+echo "cloud-leg: left behind (the client cannot delete these): seat cloudleg-$RUN_ID-seat, and the now-empty collection knowledge__cloud-leg-probe__* in the tenant. The ephemeral identity cloudleg-$RUN_ID was ended."
+echo "cloud-leg: paste the report from the 'examined' line to the verdict line onto the cut bead."
 exit "$rc"

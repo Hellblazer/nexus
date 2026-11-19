@@ -33,7 +33,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +45,18 @@ WINDOW_SCOPE = "cloud-leg"
 WINDOW_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 RUN_ID_RE = re.compile(r"^[a-z0-9]{6,24}$")
 
-#: The fixed core never shrinks below this many examined (non-cleanup, non-optional) steps; see core_floor().
+#: Wall-clock bound for one step's process, in seconds.
 STEP_TIMEOUT_S = 180
+
+#: The only edge host the leg will talk to. NX_CLOUDLEG_EDGE_HOST_OVERRIDE names one more, explicitly; the report prints it.
+ALLOWED_EDGE_HOSTS = frozenset({"api.conexus-nexus.com"})
+EDGE_OVERRIDE_ENV = "NX_CLOUDLEG_EDGE_HOST_OVERRIDE"
+
+#: A window marker may not span more than this (it records an announcement; the leg cannot verify one).
+MAX_WINDOW = timedelta(hours=4)
+
+#: store-search reads its own write through an index that may lag: this many tries, this long apart (recorded).
+SEARCH_TRIES, SEARCH_WAIT_S = 3, 5.0
 
 TAP_DIR = Path(__file__).resolve().parent / "cloud_leg_tap"
 
@@ -83,6 +93,9 @@ def check_window(window_id: str, directory: Path, now: datetime | None = None) -
     marker = Path(directory) / f"{window_id}.window"
     if not marker.is_file():
         raise Refusal(f"no announced cloud window: {marker} does not exist (the releaser writes it after announcing the window)")
+    st = marker.stat()
+    if st.st_uid != os.getuid() or (st.st_mode & 0o777) != 0o600:
+        raise Refusal(f"window marker {marker.name} must be owned by the current user with mode 0600 (it is {oct(st.st_mode & 0o777)}, uid {st.st_uid})")
     doc = parse_kv(marker.read_text(encoding="utf-8"))
     if doc.get("window") != window_id:
         raise Refusal(f"window marker {marker.name} names window '{doc.get('window')}', not '{window_id}'")
@@ -94,6 +107,8 @@ def check_window(window_id: str, directory: Path, now: datetime | None = None) -
         opened, expires = _parse_instant(doc["opened_at"]), _parse_instant(doc["expires_at"])
     except (KeyError, ValueError):
         raise Refusal(f"window {window_id} has no readable opened_at/expires_at (ISO 8601)") from None
+    if expires - opened > MAX_WINDOW:
+        raise Refusal(f"window {window_id} spans {expires - opened}, more than the {MAX_WINDOW} the leg accepts")
     moment = now or datetime.now(timezone.utc)
     if not opened <= moment < expires:
         raise Refusal(f"window {window_id} is not in effect now: {doc['opened_at']} to {doc['expires_at']}")
@@ -128,9 +143,39 @@ def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def normalize_secret(text: str) -> str:
+    """The ONE reader of a credential value: surrounding whitespace dropped, one line only. check_target compares this
+    and the sandbox sends this (cloud-leg.sh rewrites each credential file through it before either happens)."""
+    value = text.strip()
+    if not value or "\n" in value or "\r" in value or any(ord(c) < 32 for c in value):
+        raise Refusal("a credential value is empty or spans more than one line")
+    return value
+
+
+def normalize_cred_dir(directory: Path) -> None:
+    for f in Path(directory).iterdir():
+        if f.is_file() and not f.name.startswith("_"):
+            value = normalize_secret(f.read_text(encoding="utf-8"))
+            os.chmod(f, 0o600)
+            fd = os.open(f, os.O_WRONLY | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(value + "\n")
+
+
+def item_title_from_json(text: str) -> str:
+    try:
+        title = json.loads(text).get("title")
+    except (ValueError, AttributeError):
+        title = None
+    if not isinstance(title, str) or not title.strip():
+        raise Refusal("the 1Password item answered no title (the item was not read)")
+    return title
+
+
 def check_target(*, service_url: str, token: str, mint_tenant: str, item_title: str,
-                 ambient_environ: dict[str, str], ambient_config: Path | None) -> None:
-    """Refuse unless the credential is the test tenant's, on the public https edge. Raises Refusal."""
+                 ambient_environ: dict[str, str], ambient_config: Path | None) -> str:
+    """Refuse unless the credential is the test tenant's, on the pinned public https edge. Raises Refusal.
+    *item_title* is the 1Password item's own title as the vault returned it. Returns the edge host."""
     if not service_url.startswith("https://"):
         raise Refusal("service_url is not the public https edge (https:// required)")
     rest = service_url[len("https://"):].split("/", 1)[0]
@@ -139,8 +184,12 @@ def check_target(*, service_url: str, token: str, mint_tenant: str, item_title: 
         raise Refusal("service_url carries user:password@, which is refused")
     if host in {"localhost", "127.0.0.1", "::1", ""} or host.endswith(".local") or re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
         raise Refusal("service_url is not the public https edge (a loopback or private host)")
-    if "test" not in item_title.lower():
-        raise Refusal("the 1Password item title does not name a test tenant (it must contain 'test')")
+    override = (ambient_environ.get(EDGE_OVERRIDE_ENV) or "").strip().lower()
+    if host not in ALLOWED_EDGE_HOSTS and host != override:
+        raise Refusal(f"service_url host '{host}' is not the pinned edge {sorted(ALLOWED_EDGE_HOSTS)} "
+                      f"(an explicit {EDGE_OVERRIDE_ENV}=<host> would allow another, and the report prints it)")
+    if not re.search(r"\btest\b", item_title, re.IGNORECASE):
+        raise Refusal("the 1Password item's own title does not name a test tenant (it must contain the word 'test')")
     if mint_tenant != REQUIRED_TENANT:
         raise Refusal(f"the credential's mint_tenant is '{mint_tenant}', not '{REQUIRED_TENANT}': refusing a tenant that is not the test tenant")
     if not token:
@@ -148,11 +197,12 @@ def check_target(*, service_url: str, token: str, mint_tenant: str, item_title: 
     ambient = _ambient_credentials(ambient_environ, ambient_config)
     th = _sha(token)
     for key in ("service_token", "mint_token"):
-        if ambient.get(key) and _sha(ambient[key]) == th:
+        if ambient.get(key) and _sha(normalize_secret(ambient[key])) == th:
             raise Refusal(f"the test credential is the operator's own ambient {key}: refusing the operator's normal credential")
     if ambient.get("mint_tenant") and ambient["mint_tenant"] != REQUIRED_TENANT and ambient.get("mint_token") \
-            and _sha(ambient["mint_token"]) == th:
+            and _sha(normalize_secret(ambient["mint_token"])) == th:
         raise Refusal("the test credential is bound to the operator's own tenant")
+    return host
 
 
 # ── the step plan ───────────────────────────────────────────────────────────
@@ -164,7 +214,6 @@ class Step:
     argv: list[str]
     core: bool = False
     cleanup: bool = False
-    optional_verb: str | None = None   # the nx command group a client may lack (the step is then SKIPPED)
     identity: bool = False          # attach NX_IDENTITY_TOKEN (the bound identity's token file)
     needs: list[str] = field(default_factory=list)      # variables an earlier step must have captured
     capture: dict[str, str] = field(default_factory=dict)  # var -> "json:<key>" | "re:<pattern>"
@@ -173,6 +222,8 @@ class Step:
     expect_route: str | None = None    # a route the client must have called: a client that quietly skips a
                                        # route it believes the engine lacks (a stripped /version flag) would
                                        # otherwise exit 0 having exercised nothing
+    benign_refusal: bool = False   # only a step flagged so may pass by being refused identically in both slots
+    tries: int = 1                 # attempts before the step is judged (a read of an index that may lag)
     origin: str = "core"           # "core", or the ledger entry's "<sha7> <bead> <route>"
 
 
@@ -193,7 +244,13 @@ path = delegated_token_path(identity_dir(config.nexus_config_dir()), view["id"])
 write_token_file(path, TokenFile(identity=view["id"], generation=int(view["generation"]), token=tok,
                                  expires_at=token_contract.expires_at(life), session_id=None, pid=os.getpid(),
                                  started_at=now, proc_start=None, host=host, registry_dir=None))
-print(json.dumps({"identity": view["id"], "token_file": str(path)}))
+print(json.dumps({"identity": view["id"], "token_file": str(path), "generation": int(view["generation"])}))
+"""
+
+_IDENTITY_END = r"""
+import json
+from nexus.identity.bind_client import IdentityClient
+print(json.dumps(IdentityClient.from_config().bind("@identity@", "end", int("@generation@"))))
 """
 
 _BY_AUTHOR = r"""
@@ -212,11 +269,11 @@ print(json.dumps(_get_catalog().sensitive_locators(limit=10), default=str)[:400]
 def core_steps() -> list[Step]:
     t = "threads"
     return [
-        Step("identity-seat-create", "nx", ["identity", "create", "@label@-seat"], core=True, optional_verb="identity",
-             expect_route="/v1/identity"),
-        Step("identity-seat-show", "nx", ["identity", "show", "@label@-seat", "--json"], core=True, optional_verb="identity"),
+        Step("identity-seat-create", "nx", ["identity", "create", "@label@-seat"], core=True, expect_route="/v1/identity"),
+        Step("identity-seat-show", "nx", ["identity", "show", "@label@-seat", "--json"], core=True),
         Step("identity-bind", "py", ["-c", _IDENTITY_BIND], core=True,
-             capture={"identity": "json:identity", "token_file": "json:token_file"}, expect_route="/v1/identity"),
+             capture={"identity": "json:identity", "token_file": "json:token_file", "generation": "json:generation"},
+             expect_route="/v1/identity"),
         Step("memory-put-threads-identity", "nx",
              ["memory", "put", "-", "-p", t, "-t", "@label@", "--tags", "cloudleg"], core=True, identity=True,
              needs=["identity"], expect_route="/v1/memory/put",
@@ -239,24 +296,29 @@ def core_steps() -> list[Step]:
              core=True, expect_route="/v1/catalog/manifest/write_many",
              stdin="@label@ is a release-candidate cloud leg round-trip note about pelagic cobalt lanterns.\n"),
         Step("store-search", "nx", ["search", "pelagic cobalt lanterns @label@", "--corpus", "knowledge", "-m", "5"],
-             core=True, expect_stdout="@label@", expect_route="/v1/vectors/search"),
+             core=True, expect_stdout="@label@", expect_route="/v1/vectors/search", tries=SEARCH_TRIES),
         # cleanup, run in this order after the rest
         Step("store-delete", "nx", ["store", "delete", "-c", "cloud-leg-probe", "--title", "@label@", "--yes"],
              core=True, cleanup=True),
         Step("scratch-delete", "nx", ["scratch", "delete", "@scratch_id@"], core=True, cleanup=True, needs=["scratch_id"]),
         Step("memory-delete-threads", "nx", ["memory", "delete", "-p", t, "-t", "@label@", "--yes"], core=True,
              cleanup=True, identity=True, needs=["identity"]),
+        Step("identity-end", "py", ["-c", _IDENTITY_END], core=True, cleanup=True, needs=["identity", "generation"],
+             expect_route="/v1/identity/{id}/bind"),
     ]
 
 
-#: Release additions: a wire-ledger route -> the client call that exercises it. A route absent here is SKIPPED.
+#: Release additions: a wire-ledger route -> the client call that exercises it. A route absent here is UNMAPPED, which
+#: fails the run unless --accept-skip names it with a reason.
 ROUTE_MAP: dict[str, Step] = {
     "GET /v1/catalog/docs/by-scheme": Step("route-docs-by-scheme", "nx", ["doctor", "--check-references"],
-                                              expect_route="/v1/catalog/docs/by-scheme"),
+                                           expect_route="/v1/catalog/docs/by-scheme"),
     "GET /v1/catalog/docs/by-meta": Step("route-docs-by-meta", "nx", ["catalog", "list", "--meta", "cloudleg=@run@", "--json"],
-                                           expect_route="/v1/catalog/docs/by-meta"),
-    "GET /v1/catalog/docs/by-author": Step("route-docs-by-author", "py", ["-c", _BY_AUTHOR], expect_route="/v1/catalog/docs/by-author"),
-    "GET /v1/catalog/sensitive/locators": Step("route-sensitive-locators", "py", ["-c", _LOCATORS], expect_route="/v1/catalog/sensitive/locators"),
+                                         expect_route="/v1/catalog/docs/by-meta"),
+    "GET /v1/catalog/docs/by-author": Step("route-docs-by-author", "py", ["-c", _BY_AUTHOR],
+                                           expect_route="/v1/catalog/docs/by-author"),
+    "GET /v1/catalog/sensitive/locators": Step("route-sensitive-locators", "py", ["-c", _LOCATORS],
+                                               expect_route="/v1/catalog/sensitive/locators"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
@@ -273,55 +335,110 @@ def _load_ledger_module() -> Any:
 
 def ledger_entries(ledger: Path, release: str | None = None) -> list[Any]:
     """The `## Unshipped` entries of the wire ledger (docs/wire-contract-pending.md), or, with *release*, the
-    `## Shipped` entries whose `shipped in` is that tag. Parsed by scripts/check_wire_contract_pairing.parse_ledger,
-    the one parser of the format."""
+    `## Shipped` entries whose `shipped in` is that tag (the release skill's Step 4b has moved this release's
+    entries there by the time the leg runs). Parsed by scripts/check_wire_contract_pairing.parse_ledger, the one
+    parser of the format. A ledger path that is not a file is an error, never an empty ledger."""
+    if not Path(ledger).is_file():
+        raise Refusal(f"the wire ledger {ledger} does not exist")
     parsed = _load_ledger_module().parse_ledger(Path(ledger))
     if release is None:
         return list(parsed.unshipped.values())
     return [e for e in parsed.shipped.values() if e.shipped_in == release]
 
 
-def release_steps(entries: list[Any]) -> tuple[list[Step], list[tuple[str, str]]]:
-    """(steps, skipped): one step per distinct mapped route; every other entry or route is SKIPPED with a reason."""
-    steps: list[Step] = []
-    skipped: list[tuple[str, str]] = []
+def entry_routes(entries: list[Any]) -> list[tuple[str, str]]:
+    """[(entry tag, "METHOD /path")] for every route the entries name, in order, de-duplicated by route."""
+    out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for e in entries:
+        for m, p in _ROUTE_RE.findall(e.note):
+            r = f"{m} {p}"
+            if r not in seen:
+                seen.add(r)
+                out.append((f"{e.sha[:7]} {e.bead}", r))
+    return out
+
+
+def release_steps(entries: list[Any], accept_skip: dict[str, str] | None = None) -> tuple[list[Step], list[tuple[str, str]], list[tuple[str, str]]]:
+    """(steps, skipped, unmapped). One step per distinct mapped route. *skipped* are entries that name no route (text-only
+    or a flag change) and routes named in *accept_skip* (with the reason). *unmapped* are routes with no mapped client
+    call and no accepted skip: each is a failure of the run."""
+    accept = dict(accept_skip or {})
+    steps: list[Step] = []
+    skipped: list[tuple[str, str]] = []
+    unmapped: list[tuple[str, str]] = []
+    routed_tags = {tag for tag, _r in entry_routes(entries)}
+    for e in entries:
         tag = f"{e.sha[:7]} {e.bead}"
-        routes = list(dict.fromkeys(f"{m} {p}" for m, p in _ROUTE_RE.findall(e.note)))
-        if not routes:
+        if tag not in routed_tags:
             skipped.append((tag, "no wire route named in the entry (text-only or a flag change)"))
-            continue
-        for r in routes:
-            if r in seen:
-                continue
-            seen.add(r)
-            mapped = ROUTE_MAP.get(r)
-            if mapped is None:
-                skipped.append((f"{tag} {r}", "no client call is mapped to this route"))
-                continue
+    for tag, r in entry_routes(entries):
+        mapped = ROUTE_MAP.get(r)
+        if mapped is not None:
             steps.append(Step(**{**asdict(mapped), "origin": f"{tag} {r}"}))
-    return steps, skipped
+            continue
+        path = r.split(" ", 1)[1]
+        reason = accept.get(r) or accept.get(path)
+        if reason:
+            skipped.append((f"{tag} {r}", f"accepted: {reason}"))
+        else:
+            unmapped.append((f"{tag} {r}", "no client call is mapped to this route (map it in ROUTE_MAP or --accept-skip it)"))
+    return steps, skipped, unmapped
 
 
-def build_plan(run: str, ledger: Path | None, release: str | None) -> dict[str, Any]:
+def parse_pairs(items: list[str], what: str) -> dict[str, str]:
+    """`key:reason` (the reason is mandatory) -> {key: reason}."""
+    out: dict[str, str] = {}
+    for item in items:
+        key, sep, reason = item.partition(":")
+        if not sep or not key.strip() or not reason.strip():
+            raise Refusal(f"{what} needs <key>:<reason> with a non-empty reason, got '{item}'")
+        out[key.strip()] = reason.strip()
+    return out
+
+
+def build_plan(run: str, ledger: Path | None, release: str | None, *, core_only: bool = False,
+               accept_skip: dict[str, str] | None = None, no_ledger_ok: str = "") -> dict[str, Any]:
     if not RUN_ID_RE.match(run):
         raise ValueError(f"run id {run!r} must match {RUN_ID_RE.pattern}")
-    entries = ledger_entries(ledger, release) if ledger else []
-    rsteps, skipped = release_steps(entries)
+    entries: list[Any] = []
+    if ledger is not None and (not core_only or Path(ledger).is_file()):
+        entries = ledger_entries(ledger, release)
+    elif ledger is None and not core_only:
+        raise Refusal("a full run needs the wire ledger (--ledger), or --core-only")
+    failures: list[str] = []
+    rsteps: list[Step] = []
+    skipped: list[tuple[str, str]] = []
+    unmapped: list[tuple[str, str]] = []
+    not_driven = 0
+    if core_only:
+        not_driven = len(entry_routes(entries))
+    else:
+        rsteps, skipped, unmapped = release_steps(entries, accept_skip)
+        for key in (accept_skip or {}):
+            if key not in {r for _t, r in entry_routes(entries)} | {r.split(" ", 1)[1] for _t, r in entry_routes(entries)}:
+                raise Refusal(f"--accept-skip names '{key}', which no ledger entry names")
+        if not entries and not no_ledger_ok:
+            failures.append(f"the ledger selection ({'release ' + release if release else '## Unshipped'}) has zero entries, so no "
+                            "release route was driven; pass --core-only, or --no-ledger-entries-ok \"<reason>\" if none is correct")
+        failures += [f"unmapped ledger route {t}: {why}" for t, why in unmapped]
     main = [s for s in core_steps() if not s.cleanup]
     cleanup = [s for s in core_steps() if s.cleanup]
     steps = main + rsteps + cleanup
+    driven = {s.origin.rsplit(" ", 2)[0] for s in rsteps}
     return {"run": run, "label": f"cloudleg-{run}", "steps": [asdict(s) for s in steps],
-            "skipped": [list(x) for x in skipped], "ledger_entries": len(entries), "floor": core_floor(steps)}
+            "skipped": [list(x) for x in skipped], "unmapped": [list(x) for x in unmapped], "failures": failures,
+            "ledger_entries": len(entries), "ledger_driven": len(driven), "routes_driven": len(rsteps),
+            "core_only": core_only, "release": release, "no_ledger_ok": no_ledger_ok, "not_driven_routes": not_driven,
+            "floor": core_floor(steps)}
 
 
 def core_floor(steps: list[Step] | list[dict[str, Any]]) -> int:
-    """The non-vacuity floor: the fixed core's steps that a client must support (not cleanup, not optional-verb)."""
+    """The non-vacuity floor: the fixed core's steps (not cleanup) that must come out PASS (or expected-red)."""
     n = 0
     for s in steps:
         d = s if isinstance(s, dict) else asdict(s)
-        if d["core"] and not d["cleanup"] and not d["optional_verb"]:
+        if d["core"] and not d["cleanup"]:
             n += 1
     return n
 
@@ -353,7 +470,13 @@ def read_secrets(sandbox: Path) -> list[str]:
 
 def parse_tap(path: Path) -> tuple[bool, list[tuple[int, str, str]]]:
     """(tap-ready, [(status, METHOD, normalized route)]) from one step's tap file."""
-    ready, rows = False, []
+    ready, rows, _hosts = parse_tap_hosts(path)
+    return ready, rows
+
+
+def parse_tap_hosts(path: Path) -> tuple[bool, list[tuple[int, str, str]], set[str]]:
+    """parse_tap plus the set of hosts the tap saw."""
+    ready, rows, hosts = False, [], set()
     if Path(path).is_file():
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             if line == "#tap-ready":
@@ -362,7 +485,9 @@ def parse_tap(path: Path) -> tuple[bool, list[tuple[int, str, str]]]:
             parts = line.split("\t")
             if len(parts) >= 3 and parts[0].lstrip("-").isdigit():
                 rows.append((int(parts[0]), parts[1], norm_route(parts[2])))
-    return ready, rows
+                if len(parts) >= 4:
+                    hosts.add(parts[3])
+    return ready, rows, hosts
 
 
 _ID_SEG = re.compile(r"^(i\d+|\d+|[0-9a-f]{8,}|[0-9a-f]{8}-[0-9a-f-]{27}|.*cloudleg-.*)$")
@@ -413,7 +538,7 @@ def _capture(spec: str, stdout: str) -> str | None:
 
 
 def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, workdir: Path, slot: str,
-             clients_have: dict[str, bool] | None = None) -> list[dict[str, Any]]:
+             sleep: Any = time.sleep) -> list[dict[str, Any]]:
     """Run every step of *plan* in one sandbox. Returns one result dict per step."""
     sandbox = Path(sandbox)
     secrets = read_secrets(sandbox)
@@ -421,50 +546,48 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
     py = str(sandbox / "home/.local/share/uv/tools/conexus/bin/python")
     variables = {"run": plan["run"], "label": plan["label"]}
     Path(workdir).mkdir(parents=True, exist_ok=True)
-    verbs: dict[str, bool] = dict(clients_have or {})
     results: list[dict[str, Any]] = []
     for n, step in enumerate(plan["steps"]):
         res: dict[str, Any] = {"name": step["name"], "slot": slot, "exit": None, "taps": [], "tap_ready": False,
-                               "stdout": "", "error": "", "skipped": None, "blocked": None}
-        verb = step["optional_verb"]
-        if verb:
-            if verb not in verbs:
-                probe = subprocess.run([runner, nx, verb, "--help"], capture_output=True, text=True, timeout=60)
-                verbs[verb] = probe.returncode == 0
-            if not verbs[verb]:
-                res["skipped"] = f"client has no `nx {verb}` command"
-                results.append(res)
-                continue
+                               "stdout": "", "error": "", "skipped": None, "blocked": None, "attempts": 0,
+                               "benign": bool(step.get("benign_refusal")), "host": host}
         missing = [v for v in step["needs"] if v not in variables]
         if missing:
             res["blocked"] = "needs " + ", ".join(missing) + " from an earlier step"
             res["exit"] = -1
             results.append(res)
             continue
-        tapfile = Path(workdir) / f"tap-{slot}-{n:02d}-{step['name']}.log"
-        tapfile.unlink(missing_ok=True)
-        extras = [f"PYTHONPATH={TAP_DIR}", f"NX_CLOUDLEG_TAP={tapfile}", f"NX_CLOUDLEG_HOST={host}"]
-        if step["identity"] and "token_file" in variables:
-            extras.append(f"NX_IDENTITY_TOKEN={variables['token_file']}")
         argv = [_fill(a, variables) for a in step["argv"]]
         exe = [nx] if step["kind"] == "nx" else [py]
-        cmd = [runner, *extras, *exe, *argv]
         stdin = _fill(step["stdin"], variables) if step["stdin"] is not None else None
-        try:
-            cp = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=STEP_TIMEOUT_S)
-            out, err, code = cp.stdout, cp.stderr, cp.returncode
-        except subprocess.TimeoutExpired:
-            out, err, code = "", "TimeoutExpired", 124
-        res["exit"] = code
-        res["tap_ready"], taps = parse_tap(tapfile)
-        res["taps"] = [list(t) for t in taps]
-        res["stdout"] = _scrub(out, secrets)[:600]
-        first_err = next((ln for ln in reversed(err.strip().splitlines()) if ln.strip()), "")
-        res["error"] = _scrub(first_err, secrets)[:160]
         want = step["expect_stdout"]
-        res["expect_ok"] = True if want is None else (_fill(want, variables) in out)
+        for attempt in range(1, max(1, int(step.get("tries", 1))) + 1):
+            tapfile = Path(workdir) / f"tap-{slot}-{n:02d}-{step['name']}-{attempt}.log"
+            tapfile.unlink(missing_ok=True)
+            extras = [f"PYTHONPATH={TAP_DIR}", f"NX_CLOUDLEG_TAP={tapfile}", f"NX_CLOUDLEG_HOST={host}"]
+            if step["identity"] and "token_file" in variables:
+                extras.append(f"NX_IDENTITY_TOKEN={variables['token_file']}")
+            try:
+                cp = subprocess.run([runner, *extras, *exe, *argv], input=stdin, capture_output=True, text=True,
+                                    timeout=STEP_TIMEOUT_S)
+                out, err, code = cp.stdout, cp.stderr, cp.returncode
+            except subprocess.TimeoutExpired:
+                out, err, code = "", "TimeoutExpired", 124
+            res["attempts"] = attempt
+            res["exit"] = code
+            res["tap_ready"], taps, seen_hosts = parse_tap_hosts(tapfile)
+            res["taps"] = [list(t) for t in taps]
+            res["hosts"] = sorted(seen_hosts)
+            res["stdout"] = _scrub(out, secrets)[:600]
+            first_err = next((ln for ln in reversed(err.strip().splitlines()) if ln.strip()), "")
+            res["error"] = _scrub(first_err, secrets)[:160]
+            res["expect_ok"] = True if want is None else (_fill(want, variables) in out)
+            if code == 0 and res["expect_ok"]:
+                break
+            if attempt < int(step.get("tries", 1)):
+                sleep(SEARCH_WAIT_S)
         res["expect_route"] = step.get("expect_route")
-        if code == 0:
+        if res["exit"] == 0:
             for var, spec in step["capture"].items():
                 got = _capture(spec, out)
                 if got:
@@ -489,15 +612,14 @@ def _cell(res: dict[str, Any]) -> str:
         return "blocked"
     bad = sorted({s for s, _m, _r in res["taps"] if BAD(s)})
     head = f"exit {res['exit']}" if res["exit"] else "ok"
+    tries = f" a={res['attempts']}" if res.get("attempts", 1) > 1 else ""
     if bad:
-        return head + " " + ",".join(str(s) for s in bad)
-    return head + (f" ({len(res['taps'])} req)" if res["taps"] else "")
+        return head + " " + ",".join(str(s) for s in bad) + tries
+    return head + (f" ({len(res['taps'])} req{tries})" if res["taps"] else tries)
 
 
 def judge_step(local: dict[str, Any], cloud: dict[str, Any]) -> tuple[str, str]:
-    """(verdict, reason). Verdicts: PASS, PASS-both-refused, FAIL, SKIPPED."""
-    if local.get("skipped") or cloud.get("skipped"):
-        return "SKIPPED", local.get("skipped") or cloud.get("skipped") or ""
+    """(verdict, reason). Verdicts: PASS, PASS-both-refused (only a step flagged benign), FAIL."""
     for res in (local, cloud):
         if res.get("blocked"):
             return "FAIL", f"{res['slot']}: blocked, {res['blocked']}"
@@ -516,9 +638,9 @@ def judge_step(local: dict[str, Any], cloud: dict[str, Any]) -> tuple[str, str]:
     if local["exit"] != 0 and cloud["exit"] == 0:
         return "FAIL", f"local-only failure (exit {local['exit']}): {local['error'] or 'no error text'}"
     if local["exit"] != 0 and cloud["exit"] != 0:
-        if _bad_set(local) and _bad_set(local) == _bad_set(cloud):
-            return "PASS-both-refused", "the same refusal in both slots; the path was not exercised past it"
-        return "FAIL", f"failed in both slots without a matching refusal (exit {cloud['exit']}): {cloud['error']}"
+        if local.get("benign") and _bad_set(local) and _bad_set(local) == _bad_set(cloud):
+            return "PASS-both-refused", "the same refusal in both slots (a step flagged benign)"
+        return "FAIL", f"failed in both slots (exit {cloud['exit']}): {cloud['error'] or 'no error text'}"
     for res in (local, cloud):
         want = res.get("expect_route")
         if want and res["exit"] == 0 and not any(r == want for _s, _m, r in res["taps"]):
@@ -535,32 +657,47 @@ class Report:
     examined: int
     skipped: list[tuple[str, str]]
     failed: int
+    expected_red: int
     both_refused: int
     nonvacuity: list[str]
+    plan_failures: list[str] = field(default_factory=list)
+    footer: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
-        return self.failed == 0 and not self.nonvacuity
+        return self.failed == 0 and not self.nonvacuity and not self.plan_failures
 
     def render(self) -> str:
         w = max([len(r["step"]) for r in self.rows] + [4])
         lines = [f"{'step'.ljust(w)}  {'local':<14} {'cloud':<18} verdict"]
         for r in self.rows:
             lines.append(f"{r['step'].ljust(w)}  {r['local']:<14} {r['cloud']:<18} {r['verdict']}" + (f"  - {r['reason']}" if r["reason"] else ""))
+        for msg in self.plan_failures:
+            lines.append(f"PLAN FAILURE: {msg}")
         reasons = "; ".join(f"{a}: {b}" for a, b in self.skipped) or "none"
         lines.append("")
-        lines.append(f"examined {self.examined}, skipped {len(self.skipped)} ({reasons}), failed {self.failed}"
+        lines.append(f"examined {self.examined}, skipped {len(self.skipped)} ({reasons}), failed {self.failed + len(self.plan_failures)}"
+                     + (f", expected-red {self.expected_red}" if self.expected_red else "")
                      + (f", both-refused {self.both_refused}" if self.both_refused else ""))
+        lines.extend(self.footer)
         for msg in self.nonvacuity:
             lines.append(f"NON-VACUITY FAILURE: {msg}")
         lines.append("CLOUD LEG PASSED" if self.ok else "CLOUD LEG FAILED")
         return "\n".join(lines)
 
 
-def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[str, Any]], floor: int | None = None) -> Report:
+def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[str, Any]], floor: int | None = None, *,
+            expect_red: dict[str, str] | None = None, window: str = "-", edge_host: str = "",
+            environ: dict[str, str] | None = None) -> Report:
     floor = plan.get("floor", 0) if floor is None else floor
+    expect_red = dict(expect_red or {})
+    names = {s["name"] for s in plan["steps"]}
+    for k in expect_red:
+        if k not in names:
+            raise Refusal(f"--expect-red names '{k}', which is not a step of this plan ({', '.join(sorted(names))})")
+    env = os.environ if environ is None else environ
     rows: list[dict[str, str]] = []
-    examined = failed = refused = 0
+    examined = failed = refused = red = core_ok = 0
     skipped = [(a, b) for a, b in plan.get("skipped", [])]
     by_local = {r["name"]: r for r in local}
     by_cloud = {r["name"]: r for r in cloud}
@@ -571,62 +708,99 @@ def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[
             failed += 1
             examined += 1
             continue
-        verdict, reason = judge_step(by_local[name], by_cloud[name])
-        rows.append({"step": name, "local": _cell(by_local[name]), "cloud": _cell(by_cloud[name]), "verdict": verdict, "reason": reason})
-        if verdict == "SKIPPED":
-            skipped.append((name, reason))
-            continue
+        lres, cres = by_local[name], by_cloud[name]
+        verdict, reason = judge_step(lres, cres)
+        if name in expect_red:
+            why = expect_red[name]
+            if verdict == "FAIL" and (lres["exit"] != 0 or lres.get("blocked")):
+                reason = f"{reason} (the LOCAL slot failed too, so this is not the expected cloud-only red)"
+            elif verdict == "FAIL":
+                verdict, reason = "EXPECTED-RED", f"{reason}; expected: {why}"
+            else:
+                verdict, reason = "FAIL", f"expected red but passed: remove --expect-red {name}"
+        rows.append({"step": name, "local": _cell(lres), "cloud": _cell(cres), "verdict": verdict, "reason": reason})
         examined += 1
         if verdict == "FAIL":
             failed += 1
+        elif verdict == "EXPECTED-RED":
+            red += 1
         elif verdict == "PASS-both-refused":
             refused += 1
+        if step["core"] and not step["cleanup"] and verdict in {"PASS", "PASS-both-refused", "EXPECTED-RED"}:
+            core_ok += 1
+    footer = [f"ledger entries driven: {plan.get('ledger_driven', 0)} of {plan.get('ledger_entries', 0)} "
+              f"(routes driven: {plan.get('routes_driven', 0)}; "
+              + (f"release {plan['release']}" if plan.get("release") else "## Unshipped") + ")"]
+    if plan.get("no_ledger_ok"):
+        footer.append(f"no ledger entries accepted: {plan['no_ledger_ok']}")
+    if plan.get("core_only"):
+        footer.append(f"CORE-ONLY: {plan.get('not_driven_routes', 0)} ledger routes not driven")
+    if env.get(EDGE_OVERRIDE_ENV):
+        footer.append(f"EDGE HOST OVERRIDE in effect: {EDGE_OVERRIDE_ENV}={env[EDGE_OVERRIDE_ENV]}")
+    hosts = sorted({h for r in cloud for h in r.get("hosts", [])})
+    footer.append(f"cloud slot tapped host: {', '.join(hosts) or 'none'}" + (f" (expected {edge_host})" if edge_host else ""))
+    footer.append(f"core steps ok {core_ok} of floor {floor}; run {plan['run']}; window {window}")
     nonv = []
+    if edge_host and hosts != [edge_host]:
+        nonv.append(f"the cloud slot's tap shows host(s) {hosts or 'none'}, not the edge {edge_host}")
     if examined == 0:
         nonv.append("every step was skipped or none ran; nothing was examined")
-    elif examined < floor:
-        nonv.append(f"examined {examined} is below the floor of {floor} (the fixed core)")
-    return Report(rows, examined, skipped, failed, refused, nonv)
+    elif core_ok < floor:
+        nonv.append(f"only {core_ok} core steps passed or were expected-red; the floor is {floor} (the fixed core)")
+    return Report(rows, examined, skipped, failed, red, refused, nonv, list(plan.get("failures", [])), footer)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def _read_file(p: Path) -> str:
-    return Path(p).read_text(encoding="utf-8").strip()
+    return normalize_secret(Path(p).read_text(encoding="utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="cloud_leg.py")
     sub = ap.add_subparsers(dest="cmd", required=True)
     w = sub.add_parser("check-window"); w.add_argument("--window", required=True); w.add_argument("--dir")
-    t = sub.add_parser("check-target"); t.add_argument("--cred-dir", required=True); t.add_argument("--item-title", required=True)
+    nc = sub.add_parser("normalize-cred"); nc.add_argument("--cred-dir", required=True)
+    ti = sub.add_parser("item-title")  # stdin: `op item get --format json`; prints the title
+    t = sub.add_parser("check-target"); t.add_argument("--cred-dir", required=True); t.add_argument("--item-title-file", required=True)
     t.add_argument("--ambient-config")
     p = sub.add_parser("plan"); p.add_argument("--run", required=True); p.add_argument("--ledger"); p.add_argument("--release")
-    p.add_argument("--out", required=True)
+    p.add_argument("--core-only", action="store_true"); p.add_argument("--accept-skip", action="append", default=[])
+    p.add_argument("--no-ledger-entries-ok", default=""); p.add_argument("--out", required=True)
     r = sub.add_parser("run-slot"); r.add_argument("--plan", required=True); r.add_argument("--slot", required=True)
     r.add_argument("--sandbox", required=True); r.add_argument("--host", required=True); r.add_argument("--workdir", required=True)
     r.add_argument("--out", required=True)
     c = sub.add_parser("compare"); c.add_argument("--plan", required=True); c.add_argument("--local", required=True)
-    c.add_argument("--cloud", required=True); c.add_argument("--floor", type=int)
+    c.add_argument("--cloud", required=True); c.add_argument("--floor", type=int); c.add_argument("--expect-red", action="append", default=[])
+    c.add_argument("--window", default="-"); c.add_argument("--edge-host", default="")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "check-window":
             print(check_window(a.window, Path(a.dir) if a.dir else window_dir()))
             return 0
+        if a.cmd == "normalize-cred":
+            normalize_cred_dir(Path(a.cred_dir))
+            return 0
+        if a.cmd == "item-title":
+            print(item_title_from_json(sys.stdin.read()))
+            return 0
         if a.cmd == "check-target":
             cd = Path(a.cred_dir)
             amb = Path(os.environ.get("NEXUS_CONFIG_DIR") or Path.home() / ".config" / "nexus") / "config.yml"
-            check_target(service_url=_read_file(cd / "service_url"), token=_read_file(cd / "token"),
-                         mint_tenant=_read_file(cd / "mint_tenant") if (cd / "mint_tenant").is_file() else "",
-                         item_title=a.item_title, ambient_environ=dict(os.environ),
-                         ambient_config=Path(a.ambient_config) if a.ambient_config else amb)
-            print("target ok: https edge, test tenant, not the operator's credential")
+            edge = check_target(service_url=_read_file(cd / "service_url"), token=_read_file(cd / "token"),
+                                mint_tenant=_read_file(cd / "mint_tenant") if (cd / "mint_tenant").is_file() else "",
+                                item_title=Path(a.item_title_file).read_text(encoding="utf-8").strip(),
+                                ambient_environ=dict(os.environ),
+                                ambient_config=Path(a.ambient_config) if a.ambient_config else amb)
+            print(f"target ok: pinned https edge {edge}, test tenant, not the operator's credential")
             return 0
         if a.cmd == "plan":
-            plan = build_plan(a.run, Path(a.ledger) if a.ledger else None, a.release)
+            plan = build_plan(a.run, Path(a.ledger) if a.ledger else None, a.release, core_only=a.core_only,
+                              accept_skip=parse_pairs(a.accept_skip, "--accept-skip"), no_ledger_ok=a.no_ledger_entries_ok.strip())
             Path(a.out).write_text(json.dumps(plan, indent=1), encoding="utf-8")
-            print(f"plan: {len(plan['steps'])} steps ({plan['floor']} floor), {len(plan['skipped'])} skipped, "
-                  f"{plan['ledger_entries']} ledger entries")
+            print(f"plan: {len(plan['steps'])} steps ({plan['floor']} floor), {plan['ledger_entries']} ledger entries "
+                  f"({plan['routes_driven']} routes driven, {len(plan['unmapped'])} unmapped, {len(plan['skipped'])} skipped)"
+                  + ("; CORE-ONLY" if plan["core_only"] else ""))
             return 0
         if a.cmd == "run-slot":
             plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))
@@ -637,7 +811,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if a.cmd == "compare":
             plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))
-            rep = compare(plan, json.loads(Path(a.local).read_text()), json.loads(Path(a.cloud).read_text()), a.floor)
+            rep = compare(plan, json.loads(Path(a.local).read_text()), json.loads(Path(a.cloud).read_text()), a.floor,
+                          expect_red=parse_pairs(a.expect_red, "--expect-red"), window=a.window, edge_host=a.edge_host)
             print(rep.render())
             return 0 if rep.ok else 1
     except Refusal as exc:

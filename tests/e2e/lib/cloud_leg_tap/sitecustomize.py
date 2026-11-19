@@ -5,9 +5,9 @@
 Put this directory on PYTHONPATH of an ``nx`` (or candidate-python) process and name a file in NX_CLOUDLEG_TAP:
 Python imports ``sitecustomize`` at start and this patches the two transports the client uses (``httpx.Client.send``
 for the T2, scratch, tuple and identity stores; ``http.client.HTTPConnection`` for the T3 vector client), appending
-``<status>\\t<METHOD>\\t<path>`` per exchange. Only requests to the host in NX_CLOUDLEG_HOST are recorded. Never
+``<status>\\t<METHOD>\\t<path>\\t<host>`` per exchange. Only requests to the host in NX_CLOUDLEG_HOST are recorded. Never
 records a header, a query string or a body, so a bearer or identity token cannot reach the file. A request that
-raises records status 0 and the exception's class name as a fourth field.
+raises records status 0 and the exception's class name as a fifth field.
 """
 import os
 import threading
@@ -17,8 +17,8 @@ _HOST = os.environ.get("NX_CLOUDLEG_HOST", "")
 _LOCK = threading.Lock()
 
 
-def _rec(status, method, path, err=""):
-    line = f"{status}\t{method}\t{path.split('?', 1)[0]}" + (f"\t{err}" if err else "") + "\n"
+def _rec(status, method, path, host, err=""):
+    line = f"{status}\t{method}\t{path.split('?', 1)[0]}\t{host}" + (f"\t{err}" if err else "") + "\n"
     with _LOCK, open(_TAP, "a", encoding="utf-8") as fh:
         fh.write(line)
 
@@ -38,10 +38,10 @@ def _install():
             resp = orig_send(self, request, *args, **kwargs)
         except BaseException as exc:
             if mine:
-                _rec(0, request.method, request.url.path, type(exc).__name__)
+                _rec(0, request.method, request.url.path, request.url.host, type(exc).__name__)
             raise
         if mine:
-            _rec(resp.status_code, request.method, request.url.path)
+            _rec(resp.status_code, request.method, request.url.path, request.url.host)
         return resp
 
     httpx.Client.send = send
@@ -60,10 +60,10 @@ def _install():
             resp = orig_get(self, *args, **kwargs)
         except BaseException as exc:
             if mine:
-                _rec(0, tag[0], tag[1], type(exc).__name__)
+                _rec(0, tag[0], tag[1], self.host, type(exc).__name__)
             raise
         if mine:
-            _rec(resp.status, tag[0], tag[1])
+            _rec(resp.status, tag[0], tag[1], self.host)
         return resp
 
     hc.HTTPConnection.putrequest = putrequest

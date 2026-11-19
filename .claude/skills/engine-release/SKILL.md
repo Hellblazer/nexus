@@ -282,11 +282,24 @@ times the bound (marginalia, on nexus-f3yqd.1).
 
 ### 3i. PRE-TAG: cloud leg on the client candidate (BLOCKING; the cloud test tenant only)
 
-Before the tag, run `tests/e2e/cloud-leg.sh --core-only --wheel <candidate wheel> --window <id>` inside an announced
-cloud window, against the cloud test tenant only (release skill Step 6f has the full text). It drives the core write
-paths through the public edge and compares them with a local engine; a cloud-only 4xx or 5xx is red and blocks the tag.
-`--core-only` because this cut's new routes answer 404 at the edge until the deploy; after Step 6's deploy relay
-confirms the tag is live, rerun it without `--core-only` so the ledger's `## Unshipped` routes are driven too.
+Say it plainly: a pre-tag run tests the candidate CLIENT against the OLD cloud engine, because the tag is what arms the
+deploy. Anything this cut itself fixes (self-seat in 0.1.197, a new route, a new header the edge must pass) can only
+read red here. Run it inside an announced cloud window, against the cloud test tenant only (release skill Step 6f has
+the full text):
+
+```bash
+uv build --wheel -o dist-candidate/        # a candidate wheel of the tree you will tag, when only the engine is cut
+scripts/build-gate-jar.sh
+tests/e2e/cloud-leg.sh --core-only --wheel dist-candidate/conexus-*.whl --window <id> \
+    --expect-red <step>:"<what this cut fixes>"   # one per step the cut fixes, e.g. identity-seat-create
+```
+
+`--core-only` because the cut's new routes answer 404 at the edge until the deploy; its report says how many ledger
+routes it did not drive. Each `--expect-red` step is reported EXPECTED-RED with its status and reason and does not fail the
+run, and a PASS on it fails the run ("expected red but passed": remove the flag). After Step 6's deploy relay confirms the
+tag is live, rerun it WITHOUT `--core-only` and without those flags (`--release vX.Y.Z` for the client's own ledger
+entries): that rerun is the real test, and it gates the client tag push. Paste both reports, from the `examined` line to the
+verdict line, onto the cut bead.
 
 ### 4. Push the tag (Sam, or the AI on Sam's go for the release)
 
