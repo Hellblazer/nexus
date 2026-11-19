@@ -1,3 +1,0 @@
-### Changed
-
-- **Operator dispatch reads the engine's sensitive-locator list instead of the whole catalog.** When a dispatched `claude -p` child may use Read, Grep or Glob, the deny rules for sensitive documents' source files now come from one bounded read of `GET /v1/catalog/sensitive/locators` (the sensitive documents plus the documents merged into them), not from listing every catalog document (RDR-241). On an engine without the route, on a failed or timed-out read, or when the list holds more than 10,000 rows, the child gets no file tools, as it already did for an unreadable catalog; the reason is in the `operator_dispatch_file_tools_dropped` log event and the operator's answer carries no notice (nexus-uwggq.2.13).

@@ -1,3 +1,0 @@
-### Changed
-
-- **MCP `catalog_search` with `author` alone asks the engine instead of listing the catalog (RDR-241 Phase 2).** The tool reads one page at a time from `GET /v1/catalog/docs/by-author` instead of fetching every document and filtering on the client. It needs an engine that advertises `catalog_docs_by_author_supported` on `GET /version` (the engine-service release that carries the route); against an older engine the tool answers an error row naming the route and that release, and when the engine cannot answer in time it answers an error row saying so. It never answers an empty result, and never falls back to listing. A `limit` above the route's cap of 1000 is paged. Author combined with a query, owner, corpus, content type or file path is unchanged.
