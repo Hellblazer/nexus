@@ -205,8 +205,17 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
   where no complete walk exists, is the open part.
   — **Status**: Unverified — **Method**: Source Search, then Spike
 - [ ] Rewriting `source_uri` in place leaves chunks and links intact, because
-  chunks carry no path (RDR-101's invariant). — **Status**: Unverified —
-  **Method**: Source Search
+  chunks carry no path (RDR-101's invariant). For chunks and links this holds:
+  the manifest `catalog_document_chunks` is keyed by `doc_id`
+  (`catalog-001-baseline.xml:171-175`) and `catalog_links` by tumbler
+  (`:127-135`). It does not hold for aspects: `document_aspects` is unique on
+  (tenant, collection, `source_path`) (`aspects-001-baseline.xml:75`) and also
+  stores `source_uri` (`:71`), so a re-point leaves its aspect row on the old
+  path, a legacy row with an empty `doc_id` no longer joins, and the next
+  extraction at the new path writes a second row for the same document.
+  `document_highlights` is keyed by `doc_id` (`:121`) and is safe. A move must
+  rewrite the aspect row's path too. — **Status**: Partly verified (chunks,
+  links, highlights; aspects refuted) — **Method**: Source Search
 - [ ] Two live clones under one folder name are rare enough, or detectable
   enough, that refusing or splitting them is acceptable. — **Status**:
   Unverified — **Method**: Docs Only (needs usage evidence)
@@ -372,8 +381,10 @@ These follow the preliminary direction above and change if it does.
   owner.
 - Absorbing the duplicate row loses whatever only that row holds (links made
   to it, aspects extracted from it) unless each is carried over. The repo
-  reconcile's rename moves links only (`catalog-048-reconcile.xml:674`), so
-  aspects and other per-document records are the part to enumerate.
+  reconcile's rename moves links only (`catalog-048-reconcile.xml:674`).
+  Aspects are keyed by path (Critical Assumptions), so the move has to carry
+  or rewrite them; any other per-document table is enumerated by the
+  implementation, not listed here.
 - If curator recognition (Alternative 2) is added later, a byte-identical copy
   made on purpose at a new path while the original sits on an unmounted
   volume would be folded into the original, which breaks nexus-o19i0's rule
