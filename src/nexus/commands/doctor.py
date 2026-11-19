@@ -3437,7 +3437,7 @@ def _engine_work_lines() -> list[str]:
          "as its first line). Exits 1 when any sampled document reads "
          "'stale' or 'dangling'; 'unknown' never fails this check alone. "
          "Not applicable (exit 0) on a box with no reference-only "
-         "documents; not checked (exit 0) on an engine without GET "
+         "documents; not checked (exit 3) on an engine without GET "
          "/v1/catalog/docs/by-scheme. Remedy for a document stuck at 'unknown' because it "
          "predates ETag capture: `nx catalog backfill-etags`. A host that "
          "mints a fresh ETag on every response reads 'unknown': an ETag "

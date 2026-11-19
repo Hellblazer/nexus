@@ -35,7 +35,8 @@ def read_docs_by_scheme(
     offset = 0
     while True:
         body = http_get(
-            "/docs/by-scheme", idempotent=True, timeout=DOCS_BY_SCHEME_TIMEOUT_S,
+            # Sent once: a retry of a page the engine cut at its 10 s bound would run the scan again.
+            "/docs/by-scheme", idempotent=False, timeout=DOCS_BY_SCHEME_TIMEOUT_S,
             scheme=scheme, limit=page, offset=offset,
         )
         if not isinstance(body, dict):

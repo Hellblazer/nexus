@@ -1294,9 +1294,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def documents_by_scheme(self, scheme: str) -> list[CatalogEntry] | None:
         """Every live document whose ``urlparse(source_uri).scheme`` is *scheme* lowercased (``GET /docs/by-scheme``,
         nexus-uwggq.1.5), all pages, in tumbler order: see :func:`nexus.catalog.doc_route_wire.read_docs_by_scheme`.
-        ``None`` when the engine lacks the route (no request is sent); an error or a malformed body raises."""
-        rows = read_docs_by_scheme(self._get, self._version_flags(), scheme)
-        return None if rows is None else [_to_entry(d) for d in rows if d.get("tumbler")]
+        ``None`` when the engine answered ``/version`` without the flag (no request is sent). A ``/version`` probe that
+        failed says nothing about the route and raises, as an error, a malformed body or a row with no tumbler do; a
+        row repeated across pages (offset paging under concurrent inserts) is kept once."""
+        flags = self._version_flags()
+        if flags.get("catalog_docs_by_scheme_supported") is not True and self._version_probe_failed:
+            raise RuntimeError("GET /version failed, so whether the engine answers /docs/by-scheme is unknown")
+        rows = read_docs_by_scheme(self._get, flags, scheme)
+        if rows is None:
+            return None
+        if any(not d.get("tumbler") for d in rows):
+            raise ValueError("docs/by-scheme returned a document with no tumbler")
+        return [_to_entry(d) for d in {d["tumbler"]: d for d in reversed(rows)}.values()][::-1]
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead

@@ -5,16 +5,17 @@ still fresh? (nexus-tb2yj, RDR-169 Gap 6 leg 3.)
 ``stat_source``/``staleness_signal`` (``nexus.aspect_readers``) had no
 production caller: nexus-oqenh leg 1 shipped the real ``https://`` HEAD
 stat, and nexus-0ne1m taught it to compare a recorded ``ETag``, but nothing
-walked the catalog and called either. This module is that caller.
+called either over the catalog. This module is that caller.
 
 A "reference-only" catalog document is one whose ``source_uri`` names an
 EXTERNAL resource — any scheme other than ``file://`` (a repo-local path,
 whose freshness a filesystem sync/reindex sweep already covers, not this
 check): ``https://``, ``obsidian://``, ``x-devonthink-item://``,
 ``nx-scratch://``, ``nx-note://`` (content-addressed — always reads
-'fresh', walked for completeness but never contributes a stale/dangling
-row). A ``chroma://`` row is residue (RDR-231): no stat handler claims it,
-so it reads 'unknown' and never fails the check. Sampling draws up to ``sample`` such documents (seeded like
+'fresh', read for completeness but never contributes a stale/dangling
+row). Candidates come from one engine by-scheme read per scheme the stat
+registry covers (nexus-uwggq.1.5, RDR-241 Phase 2), so a row no handler
+claims, such as ``chroma://`` residue (RDR-231), is not read at all. Sampling draws up to ``sample`` such documents (seeded like
 ``--check-embeddings``: today's UTC date by default, so the same day
 reproduces the same sample) and stats each through ``stat_source`` with ONE
 shared ``httpx.Client``, reusing the recorded ``ETag``
@@ -44,6 +45,9 @@ one exhausted its retries, is
 states the number at the default sample size, and a run prints its own
 estimate (from the REQUESTED ``--references-sample``, before sampling
 narrows it to however many candidates actually exist) as its first line.
+
+Exit 3 ("could not check") when the engine does not answer the by-scheme
+route; nothing walks the catalog in its place (RDR-241).
 
 Exit 0 (informational) when the sample found zero reference-only documents
 at all — "not applicable", never a red line on a box with none (the
@@ -142,10 +146,11 @@ class ReferenceCheckResult:
 
 
 def is_reference_only(source_uri: str) -> bool:
-    """A catalog document is "reference-only" for this check when its
-    ``source_uri`` names an external, non-``file://`` resource — every
-    scheme ``stat_source``'s registry covers except ``file`` (see the
-    module docstring for why ``file://`` is out of scope here).
+    """Does *source_uri* name an external, non-``file://`` resource (any parsed scheme but ``file``)?
+
+    The scheme predicate the check was built on; candidates now come from the engine's by-scheme read, which
+    applies the same scheme rule, so production no longer calls this (it is kept as the predicate's statement and
+    is tested on its own).
     """
     if not source_uri:
         return False
@@ -155,6 +160,9 @@ def is_reference_only(source_uri: str) -> bool:
 
 #: The scheme's lexical form, as the engine's by-scheme route matches it (``CatalogDocReads.SCHEME_GRAMMAR``).
 _SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):")
+#: What ``urlsplit`` (and the route) strips before reading a scheme: leading U+0001..U+0020, then tab, CR and LF anywhere.
+_LEADING_STRIP = "".join(map(chr, range(0x01, 0x21)))
+_UNSAFE_BYTES = {ord(c): None for c in "\t\r\n"}
 
 
 def _scheme_of(source_uri: str) -> str:
@@ -165,7 +173,7 @@ def _scheme_of(source_uri: str) -> str:
     try:
         return urlparse(source_uri).scheme
     except ValueError:
-        m = _SCHEME_RE.match(source_uri.lstrip("".join(map(chr, range(0x01, 0x21)))))
+        m = _SCHEME_RE.match(source_uri.lstrip(_LEADING_STRIP).translate(_UNSAFE_BYTES))
         return m.group(1).lower() if m else ""
 
 
@@ -177,10 +185,12 @@ def reference_only_candidates(cat: Any) -> list[Any] | None:
     ``urlparse(source_uri).scheme`` equals the scheme lowercased, so ``HTTPS://...`` is read as ``https``, as the
     walk did (Sam 2026-11-16, ask uwggq15-scheme-case option C); a row whose scheme no reader can stat
     (``chroma://``, a Windows drive path) is not read, since it could only ever report "unknown". Rows come back
-    sorted by tumbler text, the order the walk listed them in.
+    sorted by tumbler text in code-point order. The walk listed them in the database's ``ORDER BY tumbler``, which
+    is the same on a C-collated database and can swap mixed-depth tumblers on a locale-collated one; order matters
+    only to which rows the seeded sample picks when candidates outnumber it.
 
-    ``None`` when the engine lacks the route: the caller reports the check not checked, and nothing walks in its
-    place (RDR-241).
+    ``None`` when the engine lacks the route: the caller reports the check not checked (exit 3, "could not
+    check"), and nothing walks in its place (RDR-241).
     """
     out: list[Any] = []
     for scheme in registered_stat_schemes():
@@ -189,7 +199,8 @@ def reference_only_candidates(cat: Any) -> list[Any] | None:
         rows = cat.documents_by_scheme(scheme)
         if rows is None:
             return None
-        out.extend(e for e in rows if not e.alias_of)
+        # The client's own scheme test runs last, so an engine bug cannot widen the answer silently (RDR-241).
+        out.extend(e for e in rows if not e.alias_of and _scheme_of(e.source_uri) == scheme)
     return sorted(out, key=lambda e: str(e.tumbler))
 
 
@@ -324,7 +335,9 @@ def run_check_references(*, sample: int, seed: int | None) -> None:
             "[ ] Reference staleness: not checked (the engine does not answer GET /v1/catalog/docs/by-scheme; "
             "an engine that advertises catalog_docs_by_scheme_supported does)"
         )
-        return
+        # Exit 3, "could not check", as nx catalog doctor --sensitive-with-aspects does (RDR-241, 2026-11-17): a
+        # dedicated check that examined nothing is not a pass (the nexus-moht0 vacuous-gate rule).
+        raise SystemExit(3)
     if not candidates:
         click.echo("[✓] Reference staleness: not applicable (no reference-only catalog documents)")
         return

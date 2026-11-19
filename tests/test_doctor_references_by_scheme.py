@@ -57,6 +57,8 @@ def test_pages_until_the_exact_count() -> None:
     assert read_docs_by_scheme(get, _ON, "https", page=2) == rows
     assert [(c["path"], c["scheme"], c["offset"], c["limit"]) for c in calls] == [
         ("/docs/by-scheme", "https", 0, 2), ("/docs/by-scheme", "https", 2, 2), ("/docs/by-scheme", "https", 4, 2)]
+    # Sent once each: a retried page the engine cut at its statement bound would run the scan again.
+    assert all(c["idempotent"] is False for c in calls)
 
 
 def test_zero_matches_is_one_request_and_an_empty_list() -> None:
@@ -78,17 +80,25 @@ def test_rows_deleted_between_pages_end_the_read() -> None:
 @pytest.mark.parametrize("body", [
     [],
     {"count": -1, "limit": 2, "offset": 0, "documents": []},
-    {"count": True, "limit": 2, "offset": 0, "documents": []},
+    {"count": True, "limit": 2, "offset": 0, "documents": [{}]},
     {"count": 1, "limit": 2, "offset": 7, "documents": [{"tumbler": "1.1.1"}]},
     {"count": 1, "limit": 2, "offset": 0, "documents": "x"},
     {"count": 1, "limit": 2, "offset": 0, "documents": ["1.1.1"]},
-    {"count": 9, "limit": 2, "offset": 0, "documents": [{}, {}, {}]},
     {"count": 9, "limit": 2, "offset": 0, "documents": []},
 ], ids=["list", "negative-count", "bool-count", "offset-echo", "docs-not-list", "doc-not-object",
-        "over-page", "empty-page-short-of-count"])
+        "empty-page-short-of-count"])
 def test_a_body_off_the_contract_raises(body: Any) -> None:
     with pytest.raises(ValueError):
         read_docs_by_scheme(lambda _p, **_k: body, _ON, "https", page=2)
+
+
+def test_a_page_larger_than_asked_raises() -> None:
+    """The body echoes each requested offset, so only the page-size check can refuse it."""
+    def _get(_p: str, **kw: Any) -> dict:
+        return {"count": 9, "limit": 2, "offset": kw["offset"], "documents": [{}, {}, {}]}
+
+    with pytest.raises(ValueError):
+        read_docs_by_scheme(_get, _ON, "https", page=2)
 
 
 # ── the candidate list and the CLI ──────────────────────────────────────────
@@ -137,11 +147,33 @@ def test_candidates_drop_aliases_and_come_in_tumbler_text_order() -> None:
 def test_an_engine_without_the_route_is_not_checked(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     cat = _Cat([_Entry("1.1.1", "https://a/1")], supported=False)
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: cat)
-    doctor_references.run_check_references(sample=10, seed=1)  # no SystemExit: exit 0
+    with pytest.raises(SystemExit) as exc:
+        doctor_references.run_check_references(sample=10, seed=1)
+    assert exc.value.code == 3  # could not check
     out = capsys.readouterr().out
     assert out.startswith("[ ] Reference staleness: not checked")
     assert "catalog_docs_by_scheme_supported" in out
     assert cat.schemes == ["obsidian"]  # the first scheme's None stops the reads
+
+
+def test_a_row_the_engine_should_not_have_returned_is_dropped() -> None:
+    class _Wide(_Cat):
+        def documents_by_scheme(self, scheme: str) -> list[_Entry] | None:
+            return [_Entry("1.1.1", "file:///a"), _Entry("1.1.2", f"{scheme}://x")]
+
+    got = doctor_references.reference_only_candidates(_Wide([]))
+    assert got is not None and {e.tumbler for e in got} == {"1.1.2"}
+    assert len(got) == 5  # one per registered non-file scheme, the file:// row dropped each time
+
+
+def test_a_failed_version_probe_is_an_unreadable_catalog_exit_1(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    client = _client_with({}, True, [])
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: client)
+    with pytest.raises(SystemExit) as exc:
+        doctor_references.run_check_references(sample=10, seed=1)
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "UNREADABLE" in out and "GET /version failed" in out
 
 
 def test_a_route_error_is_an_unreadable_catalog(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -154,6 +186,14 @@ def test_a_route_error_is_an_unreadable_catalog(monkeypatch: pytest.MonkeyPatch,
         doctor_references.run_check_references(sample=10, seed=1)
     assert exc.value.code == 1
     assert "UNREADABLE" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("uri", ["  https://[bad/x", "ht\ntps://[bad/x", "\x01HTTPS://[bad/x"],
+                         ids=["leading-spaces", "interior-newline", "leading-control-capitals"])
+def test_the_lexical_scheme_fallback_strips_as_the_route_does(uri: str) -> None:
+    with pytest.raises(ValueError):
+        urlparse(uri)
+    assert doctor_references._scheme_of(uri) == "https"
 
 
 def test_a_row_urlparse_rejects_is_reported_not_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,6 +237,31 @@ class _FakeEngine(BaseHTTPRequestHandler):
         off, lim = int(q["offset"]), int(q["limit"])
         hits = [r for r in type(self).rows if urlparse(r["source_uri"]).scheme == q["scheme"].lower()]
         self._send({"count": len(hits), "limit": lim, "offset": off, "documents": hits[off:off + lim]})
+
+
+def _client_with(flags: dict, probe_failed: bool, rows: list[dict]) -> HttpCatalogClient:
+    client = HttpCatalogClient("http://127.0.0.1:9", _token="test-token")
+    client._version_flags = lambda: flags  # type: ignore[method-assign]
+    client._version_probe_failed = probe_failed
+    client._get = _pager(rows)[1]  # type: ignore[method-assign]
+    return client
+
+
+def test_a_failed_version_probe_raises_instead_of_reading_as_an_old_engine() -> None:
+    with pytest.raises(RuntimeError, match="GET /version failed"):
+        _client_with({}, True, []).documents_by_scheme("https")
+    assert _client_with({}, False, []).documents_by_scheme("https") is None
+
+
+def test_a_row_with_no_tumbler_raises() -> None:
+    with pytest.raises(ValueError, match="no tumbler"):
+        _client_with(_ON, False, [{"tumbler": "1.1.1"}, {"title": "x"}]).documents_by_scheme("https")
+
+
+def test_a_row_repeated_across_pages_is_kept_once_in_first_seen_order() -> None:
+    rows = [{"tumbler": "1.1.1"}, {"tumbler": "1.1.2"}, {"tumbler": "1.1.2"}, {"tumbler": "1.1.3"}]
+    got = _client_with(_ON, False, rows).documents_by_scheme("https")
+    assert got is not None and [str(e.tumbler) for e in got] == ["1.1.1", "1.1.2", "1.1.3"]
 
 
 def test_client_method_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
