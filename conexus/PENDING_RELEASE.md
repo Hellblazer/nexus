@@ -48,3 +48,6 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
+
+- `conexus/skills/phase-review-gate/SKILL.md` -- the close step runs `nx memory gate-rollup --dry-run`, tells Sam the count and waits for his word before the real run (RDR-209 Phase 3, nexus-1gdv0.2); the verb ships in the client, so this waits for the client release.
+- `conexus/skills/rdr-close/SKILL.md` -- step 3a rolls up the RDR's gate records with `nx memory gate-rollup --all` after a dry run and Sam's word (RDR-209 Phase 3, nexus-1gdv0.2); the verb ships in the client, so this waits for the client release.
