@@ -68,8 +68,7 @@ def _group_reader() -> tuple[Any, str]:
     name. The one group seam of the command (RDR-252)."""
     from nexus.auras.load_gate import default_group_reader  # noqa: PLC0415 -- deferred: CLI startup cost
 
-    reader = default_group_reader()
-    return (reader, "") if reader is not None else (None, "no group client is available in this build")
+    return default_group_reader(), ""
 
 
 def _loaded_inputs() -> tuple[Path, Any, int | None, str | None]:
