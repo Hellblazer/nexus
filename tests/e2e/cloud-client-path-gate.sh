@@ -857,10 +857,10 @@ case "$SERVICE_URL" in
 esac
 echo "Gating client path against: $SERVICE_URL"
 
-# ── Leg A: /version contract through the edge ────────────────────────────
-_leg_enter A "/version contract"
-VERSION_BODY="$(curl -sS -m 20 "$SERVICE_URL/version")" || _leg_fail "A: /version unreachable"
-uv run python - "$VERSION_BODY" <<'PY' || _leg_fail "A: /version contract violated (see above)"
+# Leg A's /version contract, a function so the offline suite (cloud_client_path_gate_b3_test.sh) extracts and
+# runs the real check on canned bodies (nexus-uwggq.2.8). Prints one VIOLATION line per error; exit 1 on any.
+_version_contract_verdict() {
+    uv run --quiet python - "$1" <<'PY'
 import json, sys
 from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
@@ -898,6 +898,19 @@ if steps_supported is not True:
         f"(got {steps_supported!r}) — the .p1d per-step cost/quality "
         "telemetry capability probe is inert for every cloud client"
     )
+# RDR-241 Phase 2 (nexus-uwggq.2.8, gate Significant S5): the three route flags must read true through the
+# edge, which trims /version to an allowlist; a flag it does not list reads as absent to every cloud client.
+for flag, inert in (
+    ("catalog_docs_by_author_supported",
+     "catalog_search by author alone answers an error for every cloud client (nexus-uwggq.2.12)"),
+    ("catalog_docs_by_meta_supported",
+     "nx catalog list --meta and nx catalog gc exit naming the route for every cloud client (nexus-uwggq.2.14, .2.15)"),
+    ("catalog_sensitive_locators_supported",
+     "operator dispatch drops its file tools for every cloud client, logged as operator_dispatch_file_tools_dropped "
+     "(nexus-uwggq.2.13)"),
+):
+    if body.get(flag) is not True:
+        errs.append(f"{flag} missing/false through the edge (got {body.get(flag)!r}) — {inert}")
 if errs:
     print("  /version body:", json.dumps(body), file=sys.stderr)
     for e in errs:
@@ -905,8 +918,15 @@ if errs:
     sys.exit(1)
 print(f"  ok: release_version={body['release_version']} "
       f"embedding_mode={mode} models={models} "
-      f"nx_answer_steps_supported={steps_supported}")
+      f"nx_answer_steps_supported={steps_supported} catalog_docs_by_author_supported=True "
+      f"catalog_docs_by_meta_supported=True catalog_sensitive_locators_supported=True")
 PY
+}
+
+# ── Leg A: /version contract through the edge ────────────────────────────
+_leg_enter A "/version contract"
+VERSION_BODY="$(curl -sS -m 20 "$SERVICE_URL/version")" || _leg_fail "A: /version unreachable"
+_version_contract_verdict "$VERSION_BODY" || _leg_fail "A: /version contract violated (see above)"
 
 # ── Leg B: the edge auth contract (Sam, 2026-09-28) ──────────────────────
 #    B1: an UNAUTHENTICATED /health is refused by the edge (measured 403). An
