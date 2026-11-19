@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import structlog
@@ -248,21 +249,47 @@ def _default_reader() -> Any:
     return make_catalog_reader()
 
 
+class _LocatorsCapped(Exception):
+    """The route answered ``capped: true``: more rows than the dispatch asked for."""
+
+
+#: The bound the dispatch asks the locator route for (the route's own maximum). A longer list is "cannot say".
+LOCATOR_LIMIT: int = 10_000
+
+
 def file_tool_restriction(*, reader: Any = None) -> FileToolRestriction:
     """What to do about Read, Grep and Glob for one dispatch, from the catalog's live sensitive documents.
 
+    One bounded read of the engine's sensitive-locator route (``GET /v1/catalog/sensitive/locators``, RDR-241
+    Gap 3): the live sensitive documents and the live documents whose ``alias_of`` names one, each carrying its own
+    ``sensitive`` flag. No walk of the catalog. A route that cannot answer (an engine without it, a 404 or 503, a
+    reader with no such method) and a capped answer are "cannot say", never "none": the file tools are dropped and
+    the reason names the cause (the log event ``dispatch_file_deny_catalog_unreadable``; the operator's answer
+    carries no notice).
+
     Blocking (the catalog is read over HTTP): call it from a thread. *reader* is the catalog read handle; with
-    none, the factory's. Any failure to list the catalog is ``drop_file_tools`` (never "no rules")."""
+    none, the factory's."""
     try:
         if reader is None:
             reader = _default_reader()
         if reader is None:
             raise RuntimeError("no catalog reader")
-        entries = list(reader.all_documents(limit=0))
+        answer = reader.sensitive_locators(limit=LOCATOR_LIMIT)
+        if answer["capped"] is not False:
+            raise _LocatorsCapped(f"the sensitive-locator list holds more than {LOCATOR_LIMIT:,} rows")
+        rows = answer["documents"]
+        if not all(isinstance(r, dict) and isinstance(r.get("sensitive"), bool) for r in rows):
+            # a row with no flag of its own would read as "not sensitive" in _restrict: fail closed instead
+            raise ValueError("a locator row carries no boolean sensitive flag")
+        entries = [SimpleNamespace(**row) for row in rows]
     except Exception as exc:  # noqa: BLE001 — every failure of the read is "unknown", whatever its class
         _log.warning("dispatch_file_deny_catalog_unreadable", error=str(exc)[:300])
+        if isinstance(exc, AttributeError) and "sensitive_locators" in str(exc):
+            cause = "this catalog reader has no sensitive_locators route"
+        else:
+            cause = str(exc) or type(exc).__name__
         return FileToolRestriction(
-            drop_file_tools=True, reason=f"the catalog could not be listed ({type(exc).__name__}: {exc})"[:300],
+            drop_file_tools=True, reason=f"the sensitive documents could not be listed ({cause})"[:300],
         )
     result = _restrict(entries)
     _log.info(

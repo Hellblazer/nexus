@@ -20,6 +20,9 @@ class NoSensitiveDocuments:
     def all_documents(self, *, limit: int = 0) -> list[Any]:
         return []
 
+    def sensitive_locators(self, limit: int = 10_000) -> dict[str, Any]:
+        return {"count": 0, "limit": limit, "capped": False, "documents": []}
+
     def by_doc_id(self, doc_id: str) -> None:
         return None
 

@@ -55,7 +55,6 @@ domain = [
   "commands/catalog_cmds/remediation.py::remediate_paths_cmd",
   "commands/catalog_cmds/sensitivity.py::_targets",
   "mcp/catalog.py::catalog_list",
-  "operators/sensitive_paths.py::file_tool_restriction",
   "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan",
   "upgrade_ladder/rungs/manifest_span_fill.py::ManifestSpanFillRung._scan",
 ]
@@ -141,9 +140,6 @@ match = { site = "mcp/catalog.py::catalog_list" }
 emit = { class = "BOUNDED", calls = 2, reason = "Its all_documents calls read one page of limit + 1 documents and stay; its owner and content_type branches read the whole owner or type and slice, which this table does not count." }
 
 [[row]]
-id = "operators/sensitive_paths.py::file_tool_restriction"
-match = { site = "operators/sensitive_paths.py::file_tool_restriction" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Runs per operator dispatch, unattended (Gap 3); Phase 2 reads it through the locator route.", next = "nexus-uwggq.2.13" }
 
 [[row]]
 id = "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan"
