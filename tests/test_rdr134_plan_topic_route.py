@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import pytest
 import structlog
+import yaml
 
 from bench.topic_route_nx_answer_ab import arm_setting
 from nexus import call_deadline
@@ -351,3 +352,33 @@ def test_a_config_that_cannot_load_gives_no_route_and_a_warning(monkeypatch: pyt
         assert trs.configured_route() is None
     events = [e for e in logs if e.get("event") == trs.CONFIG_UNREADABLE_EVENT]
     assert len(events) == 1 and "not a regex" in events[0]["error"]
+
+
+@pytest.mark.parametrize("error", [
+    yaml.YAMLError("mapping values are not allowed here"),
+    OSError("config.yml: permission denied"),
+    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+], ids=["yaml", "oserror", "unicode"])
+def test_any_unreadable_config_gives_no_route_and_one_capped_warning(
+    monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    """The route is an optional, off-by-default setting, so a config.yml that cannot be read at all (YAML, file or
+    encoding error) must not end a plan run that has no search step: no route, one warning carrying the error capped at
+    200 characters. The search steps re-read the config and report the error themselves."""
+
+    def broken(*a: Any, **k: Any) -> dict:
+        raise error
+
+    monkeypatch.setattr(_config, "load_config", broken)
+    with structlog.testing.capture_logs() as logs:
+        assert trs.configured_route() is None
+    events = [e for e in logs if e.get("event") == trs.CONFIG_UNREADABLE_EVENT]
+    assert len(events) == 1 and len(events[0]["error"]) <= 200 and events[0]["setting_state"] == "unreadable"
+
+
+def test_an_unreadable_config_warning_caps_a_long_error() -> None:
+    long = EntityConfigError("x" * 500)
+    with structlog.testing.capture_logs() as logs, patch.object(_config, "load_config", side_effect=long):
+        assert trs.configured_route() is None
+    (event,) = [e for e in logs if e.get("event") == trs.CONFIG_UNREADABLE_EVENT]
+    assert event["error"] == "x" * 200
