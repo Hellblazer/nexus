@@ -18,6 +18,8 @@ never raises; one entry per start and template family is kept, and an unused one
 
 from __future__ import annotations
 
+import dataclasses
+
 import importlib.util
 import json
 import os
@@ -203,6 +205,9 @@ def cache(tmp_path: Path, **kw) -> object:
     kw.setdefault("rewrite_fn", rewrite_fn)
     kw.setdefault("clean_check", clean)
     kw.setdefault("pick_port", lambda: NEW_PORT)
+    # A fixed clock unless the test brings its own: with the wall clock a save and a restore a second apart ask for a
+    # 1 s tuple-clock shift, which a stub rewrite that reports none would refuse (develop red on 2415e26ec).
+    kw.setdefault("clock", Clock())
     return sc.SeedCache(tmp_path / "cache", **kw)
 
 
@@ -711,10 +716,8 @@ def test_rows_that_still_name_the_saved_run_dir_after_the_rewrite_fall_back(
     tmp_path: Path,
 ) -> None:
     def half(config: Path, pairs, shift_s: float = 0.0) -> object:
-        got = rewrite_fn(config, pairs)
-        return sc.StoreRewrite(
-            got.rows, got.before, {**got.after, "catalog_owners.repo_root": 1}
-        )
+        got = rewrite_fn(config, pairs, shift_s)
+        return dataclasses.replace(got, after={**got.after, "catalog_owners.repo_root": 1})
 
     c, k, _ = seeded_cache(tmp_path, rewrite_fn=half)
     dst = new_run(tmp_path)
