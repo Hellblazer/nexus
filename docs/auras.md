@@ -130,32 +130,36 @@ nx aura check [NAME]  # grammar, procedure, argument mapping, subspace fields
 
 ## Writing your own
 
-An aura file sits beside its procedure in a library root: the shipped `src/nexus/procedures/`, or a repo's `.nexus/procedures/` (read only while `NX_PROCEDURES_REPO_ROOT=1`). RDR-249's first example, the form the shipped `ci_develop_red` had before RDR-252 moved it onto the owner post, is the shape to copy (the shipped file in `src/nexus/procedures/` is the current one):
+An aura file sits beside its procedure in a library root: the shipped `src/nexus/procedures/`, or a repo's `.nexus/procedures/` (read only while `NX_PROCEDURES_REPO_ROOT=1`). The shipped `ci_develop_red` is the shape to copy. This copy wraps the shipped `ci_red_notice` procedure, so it passes the arguments that procedure declares, and it takes the engine's owner and clear posts only:
 
 ```toml
-aura = "ci_develop_red"
-summary = "A red develop sha, posted to this session's threads entry."
+aura = "my_develop_red"
+summary = "A red develop sha and who owns it, posted to this session's threads entry."
 procedure = "ci_red_notice"
 
 [trigger]
-subspace = "board/ci/nexus-develop--done"   # one concrete board/<topic> or board/ci/<topic>; no wildcards
-match = { kind = "sha", outcome = "failure" } # equality on dimensions; absent means every post
+subspace = "board/ci/nexus-develop--owner"       # one concrete board/<topic> or board/ci/<topic>; no wildcards
+match = { kind = "owner", from = "engine" }      # equality on dimensions; absent means every post
 
-[args]                                       # each procedure argument from dims.<f>, body.<f>, id, subspace, self.identity, or = "literal"
+[args]                                           # each procedure argument from dims.<f>, body.<f>, id, subspace, self.identity, or = "literal"
 sha = "dims.sha"
-outcome = "dims.outcome"
+owner = "body.owner"
+next = "body.next"
+refresh = "body.refresh"
+reason = "body.reason"
+me = "self.identity"
 
 [when]
-field = "show"                               # a boolean in the procedure's result; absent means always show
+field = "show"                                   # a boolean in the procedure's result; absent means always show
 
 [clear]
-match = { kind = "sha", outcome = "success" } # optional; must differ from the trigger on some key
+match = { kind = "clear", from = "engine" }      # optional; must differ from the trigger on some key
 
 [display]
-channel = true                               # optional fixed-template notice: true, false, or a boolean field of the result
-threads = "develop CI red"                   # required: the block title, one line, at most 80 characters
+channel = "wake"                                 # optional fixed-template notice: true, false, or a boolean field of the result
+threads = "my develop CI red"                    # required: the block title, one line, at most 80 characters
 
-# [load]                                     # optional: load only in a member of this group (see above)
+# [load]                                         # optional: load only in a member of this group (see above)
 # group = "push-train"
 ```
 
