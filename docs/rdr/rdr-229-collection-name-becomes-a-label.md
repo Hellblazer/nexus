@@ -594,9 +594,11 @@ key; they change no schema key and rename nothing. Phase 3 adds the surrogate ke
 and moves every reference onto it in the strangler order (expand, switch,
 contract): new id columns are added and backfilled beside the name columns,
 writers fill both, readers and constraints switch to the id, and only then
-does Phase 4 drop the name columns and the parsers. Up to P3.6 the old
+does Phase 4 drop the name columns and the parsers. Up to P3.4 the old
 path still works, so each of those steps ships on its own and can stop.
-From P3.7 the referencing tables' name columns are dead until P4.1 drops
+P3.5 and P3.7 ship in one engine cut, because P3.5a's rename refusal
+ends only when a move that P3.7 ships and registers completes (P3.7);
+P3.6 ships on its own. From P3.7 the referencing tables' name columns are dead until P4.1 drops
 them (item 7), so an engine downgraded past P3.7 reads stale names; the
 safe downgrade point is still open (Contradiction Check). On each install, readers leave the name path only once every
 stamp move there has completed (item 6, "Readers during the stamp").
@@ -1091,13 +1093,25 @@ while the engine serves:
     Until gate 3, `CollectionRegistry` hands readers the name, the jOOQ
     readers read the name columns, and `renameCollectionTxn` keeps
     rewriting the fourteen `COLLECTION_SCOPED_TABLES`. From gate 3 until
-    P3.7's name-key drop move has `completed_at` set, readers are on the
+    the one-row rename can run, that is until P3.7's name-key drop move
+    has `completed_at` set and every P3.5b changeset has applied (below),
+    readers are on the
     id while the rename is still the name path, which gives the collection
     a new id that its index on the old id does not select (T2
     `229-research-53`, `229-research-63`). The engine therefore refuses a
-    rename in that window, with a typed error that names the move; the
+    rename in that window: gate 3 holds and not both of those. The typed
+    error names the missing condition, the move while it has no
+    `completed_at`, else the restart that applies P3.5b's changesets. The
     window is that move's run, a short pass over the registry and its
-    `on_complete` (inferred, not read). A rename between gate 2 and gate 3
+    `on_complete`, and, where a P3.5b changeset has not applied, the time
+    to that restart (inferred, not read). The refusal, the drop move's
+    registration at gate 3 and the one-row rename ship in one engine cut,
+    P3.5's and P3.7's: the drop label joins the read set only with the
+    release that ships the move, and a label with no row counts as
+    incomplete, so a release with the refusal and not the move refuses
+    every rename from gate 3 on, and one with the move and not the
+    refusal lets a name-path rename give an id-keyed collection a new id
+    (P3.7; T2 `229-research-69`). A rename between gate 2 and gate 3
     costs only an index P3.4 builds again for the new id before gate 3 can
     hold, while readers are on names (inferred, not read). So no search
     reads by an id before that collection's index on it exists.
@@ -1911,19 +1925,26 @@ its acceptance is that test green plus the census pin it lowers.
   with a name-predicate index lacks a valid id-predicate one. The bounded drop of the
   shared leaf graph that follows is RDR-247's.
 - P3.5 Readers switch to the id, as three beads; "P3.5" elsewhere means
-  all three. On each install the switch waits for the completion check
+  all three. P3.5 ships in one engine cut with P3.7, which holds the
+  rename refusal P3.5a states (P3.7). On each install the switch waits for the completion check
   (item 6, "Readers during the stamp"): P3.5b for every stamp move, by the
   CONTINUE precondition or, on the chunk family, by reading both shapes;
   P3.5a and P3.5c for gate 3, which includes P3.4 on that install. Test: a store with only half its
   chunks stamped (the stamp move paused part-way) still searches, lists and
-  renames correctly after the P3.5 cut, and reads by the id once the check
-  sees gate 3 hold, with no restart.
+  renames correctly after the P3.5 and P3.7 cut while gate 3 does not
+  hold, and reads by the id once the check sees gate 3 hold, with no
+  restart; from gate 3 a rename is refused until P3.7's one-row rename
+  can run (P3.7).
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route accepts `collection_id` and
     a label; responses carry both. Client caches keyed by id, which they
     trust as stable only once P3.7's name-key drop move has `completed_at`
     set on the install (item 6): until then a rename gives the collection a
-    new id, and from gate 3 to that point the engine refuses a rename.
+    new id, and from gate 3 until P3.7's one-row rename can run (that move
+    complete and every P3.5b changeset applied) the engine refuses a
+    rename, with a typed error that names the missing condition, the move
+    or the restart. The refusal ships in P3.7's engine cut, which is
+    P3.5's (P3.7).
   - P3.5b SQL readers: the plpgsql functions, the views keyed on names
     (`collection_vector_stats`, `live_chunks`) and triggers that fire on a
     name column (`catalog-044`'s `AFTER INSERT OR UPDATE OF
@@ -1953,10 +1974,17 @@ its acceptance is that test green plus the census pin it lowers.
   key where that table exists, and the
   one-row rename waits for its `completed_at` as well, and for every
   P3.5b changeset to have applied (item 6, Switch; T2
-  `229-research-58`, `229-research-61`, `229-research-64`). Between gate 3 and that
-  `completed_at` the engine refuses a rename, naming the move, because
+  `229-research-58`, `229-research-61`, `229-research-64`). From gate 3
+  until the one-row rename can run, that is while the move has no
+  `completed_at` or a P3.5b changeset has not applied, the engine refuses
+  a rename with a typed error that names the missing condition, the move
+  or the restart that applies P3.5b's changesets, because
   readers are on the id and the name-path rename would give the
-  collection a new id (item 6; T2 `229-research-63`). The rename, like every other URI-move path, rewrites only
+  collection a new id (item 6; T2 `229-research-63`). P3.7 ships in one
+  engine cut with P3.5: the rename refusal, the name-key drop move's
+  registration at gate 3 and the one-row rename are all in that cut,
+  because the drop label joins the completion check's read set only with
+  the release that ships the move (item 6; T2 `229-research-69`). The rename, like every other URI-move path, rewrites only
   `nx-note://` URIs that `isNote` classes as notes, never `chroma://`
   residue, the rule P2.10 ships (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
@@ -1967,7 +1995,9 @@ its acceptance is that test green plus the census pin it lowers.
   and the one-row rename of a file-routed collection that has `chroma://`
   residue to a prefix-free label leaves the residue on its old segment
   (P2.10's test covers the other four paths); a rename after gate 3 and
-  before the name-key drop move completes is refused with the move named.
+  before the name-key drop move completes is refused with the move named;
+  and a rename after that move completes and before every P3.5b changeset
+  has applied is refused with the restart named.
 - P3.8 Minting (item 8), after P2.9, P2.10, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
@@ -1999,7 +2029,9 @@ its acceptance is that test green plus the census pin it lowers.
   collection delete` by label or id (it takes a name today,
   `commands/collection.py:547-550`). T2 `229-research-48`. Test: each
   surface on a fixture with a null id and a minted label.
-- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.8 and P3.11; client
+- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3, P3.4, P3.5
+  with P3.7 as one cut (the rename refusal, the name-key drop move's
+  registration and the one-row rename; P3.7), P3.6, P3.8 and P3.11; client
   floor bumps in the release that first depends on each. One release may
   hold several of these cuts, and an install may skip releases, so the
   cut order does not decide when an install's readers switch; its own
@@ -2099,7 +2131,8 @@ P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
 2 and for P3.2; the first cloud run of its move waits for nexus-f3yqd.2.23
 (Prerequisites). P3.2 blocks P3.1, P3.3 and P3.4. P3.4 waits for P3.3. Within P3.3, P3.3c waits for P3.3b, whose
 indexes its verification requires. P3.12 waits for P3.5a and P3.6. P3.3a waits for P3.1. P3.3 blocks P3.5 and P3.7. P3.7 also waits
-for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P2.10 (the
+for P3.4 and P3.5 (item 7), and P3.5 and P3.7 ship in one engine cut,
+with the rename refusal and the name-key drop move's registration (P3.7). P3.8 waits for P2.8, P2.9, P2.10 (the
 residue rule, item 7), P3.6 (which
 enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
 item 8); P3.6 waits for P2.9 and P2.10. Phase 4 waits for every Phase 3 bead to be deployed on both
@@ -2112,7 +2145,8 @@ validation move; the engine's id readers, P3.7's name-key drop move and
 one-row rename and P4.1's
 drop move wait also for P3.4 on that install; the one-row rename waits
 also for the name-key drop move's `completed_at` and for every P3.5b
-changeset to have applied. P3.5b's SQL readers wait for
+changeset to have applied, and from gate 3 until then the engine refuses
+a rename. P3.5b's SQL readers wait for
 the stamp moves, and apply at the first boot after them. P4.0's engine
 serves migration-only until gate 3, the
 name-key drop move's `completed_at` and P3.5b's changesets hold on the
@@ -2160,9 +2194,10 @@ None.
   file — **Verify**: the client census fails, naming the shape.
 - **Scenario**: `chash_conformance_report` before and after the rewrite on
   the same seeded data — **Verify**: identical rows.
-- **Scenario**: an engine with the P3.5 cut boots on a store with only half
+- **Scenario**: an engine with the P3.5 and P3.7 cut boots on a store with only half
   its chunks stamped (the stamp move paused part-way) — **Verify**: search,
-  listings and a rename return what they returned before the cut, and the
+  listings and a rename return what they returned before the cut while
+  gate 3 does not hold, and the
   engine reads by the id once the check sees gate 3 hold, with no restart.
 - **Scenario**: an engine with P4.0 boots on a store with only half its
   chunks stamped — **Verify**: it serves migration-only, refusing
@@ -2282,8 +2317,8 @@ Gate round 2 (2026-11-19) found these, now addressed in the text:
 - A label index whose predicate column P4.1 drops: P4.1 re-creates it on
   `superseded_by_id` (item 7; T2 `229-research-45`).
 - "At every step the old path still works" against the dead name columns
-  from P3.7: the Approach now says "up to P3.6" and points at the open
-  downgrade point.
+  from P3.7: the Approach now says "up to P3.4", with P3.5 and P3.7 one
+  cut and P3.6 on its own, and points at the open downgrade point.
 - The RDR-246 prerequisite stated for every install while BYO PostgreSQL
   blocks moves, and no Windows line: Prerequisites and Cross-Cutting (T2
   `229-research-47`).
@@ -2350,8 +2385,9 @@ found these in those fixes, now resolved in the text:
 - `catalog_reconcile_commit` is a fifth URI-move path: P2.10 redefines it
   (item 7, item 12, P2.10; T2 `229-research-62`).
 - Readers on the id from gate 3 while a rename still minted a new id: the
-  engine refuses a rename until the name-key drop move completes (item
-  6, P3.5a, P3.7, Versioning; T2 `229-research-63`).
+  engine refuses a rename until the name-key drop move completes and
+  every P3.5b changeset has applied (item 6, P3.5a, P3.7, Versioning; T2
+  `229-research-63`, `229-research-69`).
 - P4.0's floor waited on restarts with no trigger: the check is re-read
   in process, and the one restart the chain needs is asked for (item 6,
   P3.7, P4.0, Test Plan; T2 `229-research-64`).
@@ -2453,7 +2489,9 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: P2.5, P2.6, P2.9, P2.10, the Phase 3 engine beads and P4.0 ride engine cuts;
+- **Versioning**: P2.5, P2.6, P2.9, P2.10, the Phase 3 engine beads and P4.0 ride engine cuts,
+  P3.5 and P3.7 one cut together with the rename refusal and the name-key
+  drop move's registration (P3.7);
   the client floor bumps in the release that first depends on each, engine
   deployed first. Routes accept both a label and an id from P3.5, so an
   older client keeps working until the floor bump. An install that skips
@@ -2461,8 +2499,8 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   switch once the completion check sees its gates pass there
   (item 6, "Readers during the stamp"). A client trusts a collection's
   id as stable only from P3.7's name-key drop move's `completed_at`
-  there; between gate 3 and that point the engine refuses a rename (item
-  6). The same holds at Phase 4: an
+  there; from gate 3 until that point and every P3.5b changeset has
+  applied, the engine refuses a rename (item 6). The same holds at Phase 4: an
   install that skips from before P3.1 to a release with P4.0 meets P4.0's
   boot floor, which serves it migration-only until gate 3, P3.7's
   name-key drop move and P3.5b's changesets hold there (P4.0; T2
@@ -2500,7 +2538,10 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   label holding a space, `%`, `:` and a non-ASCII character.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
-  Each Phase 3 step up to P3.6 leaves the name path working. From P3.7 a
+  Each Phase 3 step up to P3.4 leaves the name path working and can ship
+  and stop alone, and so can P3.6. P3.5 and P3.7 are one engine cut:
+  P3.5a's rename refusal ends only when P3.7's name-key drop move
+  completes, and only P3.7 ships and registers that move (P3.7). From P3.7 a
   rename leaves the referencing tables' name columns on the old label, so
   the name path is dead from there until P4.1 drops it (item 7), and the
   safe engine downgrade point is open (Contradiction Check). On each
