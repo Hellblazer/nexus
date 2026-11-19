@@ -1134,6 +1134,19 @@ processes without one (not `claude -p` children, whose binding is their
 dispatcher's). The engine has no route that lists every identity, so an identity
 that no process on this host holds does not appear.
 
+Open items carried into Phase 2 (accepted gaps, Sam 2026-11-19: "yes, accept both for now", T2
+`nexus/sam-ruling-rdr253-accepted-gaps-0198-2026-11-19`):
+
+1. Takeover by the data credential is narrowed, not closed. Engine 0.1.198 requires the identity's own live token
+   on a data-credential `refresh` or `fork`, which closed the covert path. A data-credential `start` or `resume` can
+   still take a held identity with a `holder_gone` verdict built from the holder's readable fields, and a
+   data-credential `end` needs no token. That eviction is loud (the real holder is superseded). Closing it needs the
+   caller's own live token on `start` and `resume` of a held identity and on `end`, and a design for a fresh launch
+   that has no token yet.
+2. The seat cap counts only seats the data credential creates directly. Creating ephemerals with the data
+   credential (no token, no cap) and promoting each, and each delegated child's own five, bypass it. A cap per
+   credential or per tenant would close that.
+
 ### Day 2 Operations
 
 - `nx identity show [seat]`: the identity, its aliases, current binding and
@@ -1321,3 +1334,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-19: the data credential's self-service is bounded (Sam's choices on the drafted text, T2 `nexus/sam-ruling-rdr253-0198-hardening-A-cap5-2026-11-19`, option A and cap 5; sequencing T2 `nexus/sam-ruling-token-sequencing-and-rollup-bar-2026-11-19`): at most 5 seats an identity creates through it (409 `seat_limit`); a data-credential `refresh` or `fork` needs the identity's own live token, with no grace for an expired one; the cap ships in engine 0.1.198, the client sending the token in 8.5.1, and the token rule's enforcement in 0.1.199.
 - 2026-11-19: 0.1.199 folded into 0.1.198 (Sam, T2 `nexus/sam-ruling-merge-0198-0199-2026-11-19`): the token rule's enforcement ships in 0.1.198 with the cap, deployed after the sessions restart onto 8.5.1.
 - 2026-11-19: wording matched to the reviewed 0.1.198 cap and token-rule code (grant 3; reviews T2 `nexus/review-rdr253-0198-cap-token-2026-11-19` and `nexus/critique-rdr253-0198-cap-token-2026-11-19`): the token rule narrows the takeover gap (refresh and fork), it does not close it (start, resume and end); the cap counts seats created directly, for the identity's life (no route deletes a seat), not promoted ephemerals; an expired token counts as none.
+- 2026-11-19: two accepted gaps recorded as Phase 2 open items (grant 3; Sam's acceptance, T2 `nexus/sam-ruling-rdr253-accepted-gaps-0198-2026-11-19`): data-credential takeover through `start`, `resume` and `end`; the seat cap's bypass through promoted ephemerals and delegated children.
