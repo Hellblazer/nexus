@@ -8278,9 +8278,9 @@ def memory_search(
     200-char content snippet each; advance with `offset`.
     """
     if limit < 1:
-        return f"Error: limit must be 1 or more, got {limit}."
+        return _fail(f"Error: limit must be 1 or more, got {limit}.")
     if offset < 0:
-        return f"Error: offset must be 0 or more, got {offset}."
+        return _fail(f"Error: offset must be 0 or more, got {offset}.")
     try:
         with _t2_ctx() as db:
             page, total = db.search_page(query, project=project or None, limit=limit, offset=offset)
