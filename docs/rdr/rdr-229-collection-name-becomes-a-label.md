@@ -1501,11 +1501,28 @@ these, now resolved in the text:
 - Label reuse and a one-row rename asserted in Phase 3 while the name is
   still the primary key: item 7 and P4.1.
 
+The round 1 fix check found these, now resolved in the text:
+
+- A routing class counted over one code shape, which P2.9 said it emptied:
+  the routing census (T2 `229-research-39`), item 12 and P2.9, measured by
+  P1.1.
+- Minting allowed before the recovery bundle carries the row: item 8 and
+  P3.8 wait for P3.9.
+- "No maintenance window" asserted while Critical Assumption 5 was
+  unverified: item 6 and Deployment model now leave it to P3.2.
+- A `NOT VALID` composite foreign key on the partitioned `nexus.chunks`,
+  which PostgreSQL refuses: item 6 validates it directly.
+
 Still open, for a design call: whether the label alphabet excludes `/`,
 which `NoteUri.collectionOf` treats as the end of the collection; what
 makes a live `(content_type, owner_id, embedding_model)` tuple unique once
-minting removes the name from that job; and the safe engine downgrade point
-after P3.3.
+minting removes the name from that job; the safe engine downgrade point
+after P3.3; and how a URI-string classifier (`NoteUri.isNote`,
+`is_note_uri`) tells file residue from a note once a rename to a
+prefix-free label moves residue onto that label. `NoteUri.moveTo` rewrites
+`chroma://<old>/` to `chroma://<new>/` for residue too, so item 12's
+registry route and a frozen prefix list both misclassify that residue (T2
+`229-research-40`).
 
 ### Assumption Verification
 
@@ -1526,9 +1543,13 @@ for 5).
 
 The Minimum Viable Validation runs in the local-service gate during Phase 2
 and again after Phase 3, and is not deferred. Items that gate round 1 found
-with no plan step now have one: routing by content type (P2.9), the tenant
-backup (P3.11, in P3.1's and P3.3's cuts), queued aspect tasks on rename (P3.7), and name-keyed
-views and triggers (P3.5b). Still without one: a disposition for
+with no plan step now have one: routing by content type, 23 sites plus the
+`taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES` (P2.9), the recovery-bundle
+sites (migration sources, P3.9 before P3.8), the tenant backup (P3.11, in
+P3.1's and P3.3's cuts), every writer of the dual write (P3.1), queued
+aspect tasks on rename (P3.7), and name-keyed views and triggers (P3.5b).
+Still without one: a writer of `taxonomy_centroids`, which the writer
+census did not find; and a disposition for
 `catalog_documents.corpus` and `catalog_reconcile_rows.physical_collection`,
 which carry names with no foreign key and are not in item 6's Expand list.
 The history tables' nullable `collection_id` (item 6) names no consumer.
@@ -1582,7 +1603,7 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
 - `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-38`, and
+- T2 `nexus_rdr/229-research-1` to `-41`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
   superseded).
 - T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
@@ -1614,3 +1635,14 @@ large, and moved under a ratchet.
   S4 and S7 left for a design call; Observation 3 corrected. The Finalization
   Gate's Contradiction Check and Scope Verification regenerated. T2
   `229-research-32` to `-38` added.
+- 2026-11-19: Fix check 1 (`nexus_rdr/229-fix-check-759ec4ba66a9`, FAIL)
+  re-fix. The routing census was re-run over every prefix shape (23 sites
+  plus the `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`). Minting now
+  waits for P3.9, and the recovery-bundle sites are migration sources. The
+  Phase 3 mechanics are stated as rules: the CHECK's scope and writers, the
+  move timeouts, PostgreSQL's partitioned-key route, the direct validation
+  of the composite key, the swap move's shape, P3.2 before P3.1 and P3.4
+  after P3.3. The "no maintenance window" claim is withdrawn until P3.2.
+  The tenant backup ships in P3.1's and P3.3's cuts and is no longer listed
+  as a name reader. The URI-string classifier change was not made (T2
+  `229-research-40`). T2 `229-research-39` to `-41` added.
