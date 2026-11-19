@@ -78,12 +78,18 @@ class GroupRecord:
 
     @classmethod
     def from_wire(cls, body: Mapping[str, Any]) -> GroupRecord:
-        return cls(
-            name=str(body["name"]), leader=str(body["leader"]), purpose=body.get("purpose"),
-            requested_by=body.get("requested_by"), formed_at=body.get("formed_at"), ends=body.get("ends"),
-            ended_at=body.get("ended_at"), ack_deadline=int(body.get("ack_deadline") or 0),
-            ack_deadline_by_topic={str(k): int(v) for k, v in (body.get("ack_deadline_by_topic") or {}).items()},
-            serves=tuple(body.get("serves") or ()), live=bool(body.get("live")))
+        """The record from the engine's answer. An answer the record cannot be built from (a missing ``name`` or
+        ``leader``, a deadline that is not a number, a map that is not a map) is a :class:`GroupsError` with code
+        ``bad_response``, never a KeyError, ValueError or TypeError for a verb to trace-back on."""
+        try:
+            return cls(
+                name=str(body["name"]), leader=str(body["leader"]), purpose=body.get("purpose"),
+                requested_by=body.get("requested_by"), formed_at=body.get("formed_at"), ends=body.get("ends"),
+                ended_at=body.get("ended_at"), ack_deadline=int(body.get("ack_deadline") or 0),
+                ack_deadline_by_topic={str(k): int(v) for k, v in (body.get("ack_deadline_by_topic") or {}).items()},
+                serves=tuple(body.get("serves") or ()), live=bool(body.get("live")))
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            raise GroupsError(200, "bad_response", f"the engine's group record is unreadable ({type(exc).__name__}: {exc})") from exc
 
 
 def own_identity_id() -> str:

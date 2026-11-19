@@ -390,6 +390,40 @@ def test_leave_and_list_over_an_html_answer_exit_one_instead_of_not_a_member_or_
     assert shown.exit_code == 1 and "(none)" not in shown.output, shown.output
 
 
+_UNREADABLE = {
+    "no_leader": {k: v for k, v in RECORD.items() if k != "leader"},              # KeyError
+    "deadline_not_a_number": {**RECORD, "ack_deadline": "soon"},                  # ValueError
+    "deadline_a_list": {**RECORD, "ack_deadline": [20]},                          # TypeError
+    "per_topic_not_a_map": {**RECORD, "ack_deadline_by_topic": ["nexus-develop"]},  # AttributeError
+}
+
+
+def _one_line_exit_one(result: Any) -> None:
+    assert isinstance(result.exception, SystemExit) and result.exit_code == 1, (result.exception, result.output)
+    assert "unreadable" in result.output and "Traceback" not in result.output, result.output
+    assert len([ln for ln in result.output.splitlines() if ln.strip()]) == 1, result.output
+
+
+@pytest.mark.parametrize("record", list(_UNREADABLE.values()), ids=list(_UNREADABLE))
+def test_a_group_record_the_wire_cannot_build_is_one_line_and_exit_one_in_list_and_set(record: dict[str, Any]) -> None:
+    """nexus-igea9.7 round 2: GroupRecord.from_wire raised KeyError, ValueError or TypeError out of a verb as a traceback."""
+    listing = Wire().on("GET", "/v1/group/push-train", 200, record).on("GET", "/v1/identity/groups/push-train", 200, {"members": []})
+    _one_line_exit_one(_run(_env(listing), "list", "push-train"))
+    _one_line_exit_one(_run(_env(listing), "list", "push-train", "--json"))
+    setting = Wire().on("GET", "/v1/group/push-train", 200, record)
+    _one_line_exit_one(_run(_env(setting), "set", "push-train", "--ack-deadline-for", "nexus-develop=40"))
+    assert setting.sent("POST", "/v1/group/push-train/set") == [], "nothing was written over a record it could not read"
+    answer = Wire().on("POST", "/v1/group/push-train/set", 200, record)
+    _one_line_exit_one(_run(_env(answer), "set", "push-train", "--ack-deadline", "25"))
+
+
+def test_from_wire_names_the_unreadable_record_as_a_groups_error() -> None:
+    for record in _UNREADABLE.values():
+        with pytest.raises(GroupsError) as seen:
+            GroupRecord.from_wire(record)
+        assert seen.value.code == "bad_response" and "unreadable" in str(seen.value)
+
+
 # ── ack-times ───────────────────────────────────────────────────────────────
 
 SHA1, SHA2, SHA3 = "a" * 40, "b" * 40, "c" * 40
