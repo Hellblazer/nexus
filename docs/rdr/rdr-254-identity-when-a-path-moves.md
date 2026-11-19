@@ -33,7 +33,15 @@ holds documents indexed one by one, such as `nx index pdf`. A document's
 **source_uri** is the `file://` address of the file it came from; its
 **file_path** is that path (relative to the repo root for a repo owner, absolute
 for a curator document). A **chunk** is a piece of a document's text stored in
-T3 for search.
+T3 for search, and a document's **manifest** lists its chunks. The **engine**
+is the Java service that owns the catalog's Postgres tables; the **client** is
+the `nx` command. An **aspect row** holds fields extracted from a document by a
+model; a **highlights row** holds a DEVONthink document's highlights. **Trash**
+soft-deletes a document (it can be restored); **deactivate** does the same for
+an owner. An **alias** is a document marked as a duplicate of another
+(`alias_of`). The **repo reconcile** is the step of `nx index repo` that
+compares the files it walked with the owner's documents. nexus-o19i0 is the
+rule that two live files with the same bytes stay two documents.
 
 ## Problem Statement
 
@@ -199,11 +207,17 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
   printed from the module), so no T3 row names a path.
 - **Verified** (source): an owner's name is unique per tenant and owner type
   (`catalog_owners_unique_name_type`, `catalog-001-baseline.xml:47`), and its
-  repo hash is unique among non-blank hashes (`:51`). The client looks an owner
-  up by repo hash first (`cat.owner_for_repo`, `indexer.py:1388`) and registers
-  on a miss with the folder's base name (`:1397-1403`); the engine then matches
-  that name first (`resolveOwnerAddress`), which is where a second clone takes
-  the first clone's owner over (Gap 4).
+  repo hash is unique among non-blank hashes (`:51`). Every `nx index repo`
+  registers its owner through `ensure_owner_for_repo`
+  (`http_catalog_client.py:885`, called from `commands/index.py:107`, `:125`,
+  `:1145`) before the indexer runs, and an in-repo `nx index md`, `rdr` or `pdf`
+  does too (`doc_indexer.py:982`). It looks the owner up by repo hash
+  (`owner_for_repo`) and, on a miss, upserts with the folder's base name; the
+  engine then matches that name first (`resolveOwnerAddress`), which is where a
+  second clone takes the first clone's owner over (Gap 4) and a same-name move
+  re-roots the owner row (Gap 3). By the time the indexer's own lookup runs
+  (`indexer.py:1388`) the owner exists, so its `register_owner` branch
+  (`:1397-1403`) is reached only when that pre-registration failed.
 - **Verified** (source): an aspect row's `source_path` is the catalog
   `file_path` the document was registered with (`_canonicalize_source_path`,
   `aspect_worker.py:1368`; the indexer passes it at `indexer.py:6417`). For a
@@ -235,7 +249,7 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
   the user runs the merge. A false match costs one printed line, so the probe's
   known blind spot (an unmounted volume reads as gone) merges nothing.
   — **Method**: Design decision (halcyon for Sam, 2026-11-19)
-- [ ] Rewriting `source_uri` in place leaves chunks and links intact, because
+- [x] Rewriting `source_uri` in place leaves chunks and links intact, because
   chunks carry no path (RDR-101's invariant). For chunks and links this holds:
   the manifest `catalog_document_chunks` is keyed by `doc_id`
   (`catalog-001-baseline.xml:171-175`) and `catalog_links` by tumbler
@@ -264,29 +278,32 @@ files are two documents until the user says one moved. The design has three
 parts.
 
 1. **A move command** closes Gaps 1, 2, 3 and 5. `nx catalog owners --execute
-   move` re-roots an owner, or re-points one document, in one engine
-   transaction. When the new path already has its own row, the move absorbs
-   that row into the old one, so the old row keeps its tumbler, links and
-   metadata.
-2. **Move hints**: detect, don't act. An index run that sees a move prints
-   the exact move command and changes nothing. The cases it sees: a curator
-   document whose content hash matches a row whose file is gone, a repository
-   whose owner was registered at a root that is gone, and a new repository
-   whose files match an owner whose root is gone. A false match prints one
-   line and merges nothing, which is why a filesystem probe is acceptable here
-   when it was not for Alternative 2.
+   move` re-roots a repo owner, or re-points one curator document, in one
+   engine transaction. When the new path already has its own row, the move
+   absorbs that row into the old one, so the old row keeps its tumbler, links
+   and metadata.
+2. **Move hints**: detect, don't act. Index runs and the owner census read the
+   catalog for the signs of a move and print the exact move command; they
+   change nothing. The signs are durable catalog state, so a hint repeats on
+   every run until the move is made. The cases: a curator document whose
+   content hash matches a row whose file is gone, an owner whose documents
+   point outside its recorded root, and an owner whose root is gone and whose
+   files match another owner's. A false match prints one line and merges
+   nothing, which is why a filesystem probe is acceptable here when it was not
+   for Alternative 2.
 3. **A separate owner for a second live clone** closes Gap 4. When a
-   repository's folder name matches an owner whose recorded root still exists
-   as a git work tree with a different repo hash, the client registers the
+   repository's folder name matches an owner whose recorded root is still a
+   different git work tree on this machine, the client registers the
    repository under its own name, `<folder>-<repo hash>`, and does not take
    the owner over. Nothing is refused.
 
 ### Technical Design
 
-**Terms used here.** The *old row* is the document that holds the identity to
-keep: its tumbler, links, aspects and highlights. The *new row* is a document
-registered at the new path after the move, which the move absorbs. The *old
-owner* and *new owner* are the same for repositories.
+**Terms used here.** The *old row* S is the document whose identity is kept:
+its tumbler, links, aspects and highlights. The *new row* T is a document
+registered at the new path after the move, which the move absorbs. For an
+owner move, A is the owner that keeps its identity and B is an owner
+registered at the new root before the move.
 
 #### The move command
 
@@ -298,11 +315,15 @@ nx catalog owners --execute move --document <tumbler> --new-path <path>
 It follows the existing mutation arms of `nx catalog owners`
 (`owners.py`, the `deactivate` and `reactivate` arms): it reports by default,
 and writes only with `--no-dry-run --confirm`. The client checks that the new
-path exists, so the user cannot point a row at nothing. For `--owner` it also
-checks that the new root is a git work tree and computes its repo hash
-(`_repo_identity_with_main`), then sends both to the engine. Both forms
-print the same counts, as a dry run and after a write: rows re-pointed, rows
-absorbed, rows trashed, aspect rows rewritten.
+path exists, so the user cannot point a row at nothing. `--owner` takes a repo
+owner only; the client checks that the new root is a git work tree and
+computes its repo hash (`_repo_identity_with_main`), then sends both.
+`--document` takes a curator document only, because a repo file's path is
+relative to its owner's root and moves with the owner. Both forms print the
+same counts, as a dry run and after a write: rows re-pointed, rows absorbed,
+rows trashed, rows skipped, aspect and highlight rows rewritten. The report
+also lists every absorbed tumbler, since an absorb cannot be fully undone
+(below).
 
 The engine gets two routes, each one transaction:
 
@@ -312,117 +333,161 @@ The engine gets two routes, each one transaction:
   dry_run}`.
 
 A dry run runs the same code and rolls back, so its counts are the write's
-counts.
+counts. A client whose engine lacks a route refuses with the engine version
+it needs.
 
-**Document move.** For the old row S and the new path P:
+**Absorb.** Absorbing T into S runs `mergeDocuments`' steps with S as the
+canonical row: T's links are remapped onto S (`remapLinksForMerge`), a
+sensitive T raises S, and every `alias_of` that names T is pointed at S. Then
+T's `source_uri` is cleared, as `mergeDocuments` clears a duplicate's, and T is
+trashed (`document_trash`, which sets `deleted_at`). T's chunk manifest is left
+on the trashed row, and `purge_trash` removes it after its grace window, as for
+any trashed document. Absorb refuses when T and S belong to different owners
+other than in an owner fold, because the catalog's `source_uri` lookup is not
+owner-scoped and a cross-owner absorb would merge documents the user did not
+name.
 
-1. If a live row T other than S holds P as its `source_uri`, absorb T into S.
-   The absorb reuses `mergeDocuments`' link and sensitivity steps
-   (`remapLinksForMerge`; a sensitive T raises S). T's highlights move to S
-   when S has none. Then T is trashed (the `deleted_at` soft delete, which
-   `nx catalog trash` can restore) and its chunk manifest is released.
-2. Set S's `source_uri` to `file://P` and its `file_path` to P.
-3. Rewrite S's aspect row: `source_path` and `source_uri` to the new path. If
-   T has an aspect row at P, that row is the newer extraction: it is
-   re-keyed to S's `doc_id` and S's old-path row is deleted, because the unique
-   key (tenant, collection, `source_path`) allows one row per path.
-4. Set the `source_uri` of S's highlights row, if it has one, to `file://P`.
+**Document move.** For a curator document S and the new path P:
 
-The move leaves the three tables that only log a path (`index_failures`,
-`catalog_reconcile_rows`, the PDF pipeline's run state) as they are: they
-record what happened at the old path, and none is read to find a document.
+1. If a live row T other than S holds `file://P`, absorb T into S.
+2. Set S's `source_uri` to `file://P` and its `file_path` to P. A legacy row
+   whose `file_path` is relative (the `_find_curator_document` legacy leg)
+   becomes absolute.
+3. Rewrite S's aspect rows. If T had an aspect row at P in S's collection, it
+   is the newer extraction: delete S's old-path row first, then re-key T's row
+   to S's `doc_id`, so the unique key (tenant, collection, `source_path`) never
+   holds two rows. Otherwise set S's row's `source_path` and `source_uri` to P.
+   Any other aspect row of T is deleted.
+4. Highlights: if S has no highlights row and T has one, re-key T's row to S's
+   `doc_id` and collection; otherwise T's row is deleted. S's row's
+   `source_uri` becomes `file://P`.
 
 S keeps its own chunks. If the file changed in the move, S's stored content
 hash no longer matches the file, and the next index run at P re-chunks S the
 way it re-chunks any edited file. The move never moves a chunk.
 
-**Owner move.** For the old owner A and the new root R with repo hash H:
+**Owner move.** For repo owner A, new root R and its repo hash H:
 
-1. If another live owner B already holds H (the user indexed at R before
-   moving, the Gap 2 order), fold B into A. For each of B's live documents,
-   the row of A with the same `file_path` is S, and B's row is absorbed into
-   it by the document move's step 1. B's documents with no counterpart in A
-   (files added after the move) are trashed, and the next index run registers
-   them under A. Then B is deactivated (the catalog-022 soft delete, undone by
-   `--execute reactivate`) and its repo hash is cleared, since the hash index
-   allows one owner per hash.
-2. Set A's `repo_root` to R and its `repo_hash` to H. A keeps its name.
-3. For every document of A, live or trashed, set `source_uri` to
-   `file://R/<file_path>`. The relative `file_path` does not change.
+1. Every other owner holding H, live or deactivated, is folded into A. Such an
+   owner B exists when the user indexed at R before moving (the Gap 2 order).
+   For each live document of B, the live row of A with the same relative
+   `file_path` is S, and B's row is absorbed into it; B's aspect and highlight
+   rows go as in the document move, except that S's own aspect row keeps its
+   relative `source_path`. B's documents with no counterpart in A (files added
+   after the move) are trashed, and the next index run registers them under A.
+   Then B is deactivated and its repo hash cleared, since the hash index allows
+   one owner per hash; this runs before step 2 writes H to A.
+2. Set A's `repo_root` to R and its `repo_hash` to H. A keeps its name. When A
+   already has R and H (the Gap 3 case, where registration re-rooted it), this
+   step changes nothing and step 3 does the work.
+3. Rewrite the `source_uri` of A's documents, live and trashed, that are
+   root-derived: a `file://` URI that ends in `/<file_path>`, with a relative
+   `file_path`. The new value is the engine's own derivation for a registration
+   at R (`deriveSourceUri`), so the move and a fresh registration agree.
+   Every other row (another scheme, an empty URI, an absolute `file_path`) is
+   skipped and counted. The old root is never needed, so the move works after
+   registration has already overwritten it.
 4. Rewrite the `source_uri` of those documents' aspect and highlights rows the
    same way. An aspect row's `source_path` is the relative `file_path` and
    stays as it is.
 
-B's collections and their chunks are left in place. The move's report names
-them, and removing them is the user's call (`nx collection delete`), because a
-delete is not something a move does on its own.
+B's chunks go the way of any trashed document's: `purge_trash` sweeps chunks
+only trashed manifests reference after its grace window (inferred from its
+`strandedChunkCount` javadoc, not run). Nothing in the move deletes a
+collection.
 
-**Size and locking.** A move rewrites catalog and aspect rows only, never T3.
-For a repository the size of nexus (7,197 tracked files), an owner move updates
-on the order of 7,000 document rows, up to as many aspect rows, and one owner
-row. With a fold of B it also trashes or absorbs up to as many of B's rows
-again, about 15,000 to 20,000 row writes in all. That is one Postgres
-transaction of seconds, which holds row locks on the two owners' documents
-while it runs. It is a user-run command that touches catalog rows only, so the
-rule against boot-time data migrations does not apply. It leaves nothing to
-resume: the transaction commits whole or not at all.
+**Undo.** A move can be undone only in part. A second move puts S's path
+back. An absorbed row restored from trash comes back without its
+`source_uri`, links and highlights, which now belong to S, and a folded owner
+reactivated with `--execute reactivate` comes back with no repo hash and its
+documents trashed. The dry run is therefore the safeguard, and the report's
+list of absorbed tumblers is the record.
+
+**Size and locking.** A move rewrites catalog, aspect and highlight rows
+only, never T3. For a repository the size of nexus (7,197 tracked files), an
+owner move updates on the order of 7,000 document rows, up to as many aspect
+rows, and one owner row; a fold of B absorbs or trashes up to as many of B's
+rows again. That is an estimate of 15,000 to 20,000 row writes, not a
+measurement, in one Postgres transaction that holds row locks on the two
+owners' documents while it runs. It is a user-run command that touches catalog
+rows only, so the rule against boot-time data migrations does not apply, and
+it leaves nothing to resume: the transaction commits whole or not at all.
 
 #### Move hints
 
-Each hint is one line, printed at the end of the run that saw the move, and
-names the exact command. A hint never writes.
+A hint is one line naming the exact command, printed at the end of a run. A
+hint never writes. Each reads durable catalog state, so it repeats on every run
+until the move is made or the old owner is deactivated, and none depends on
+catching the moment of registration. Every hint is printed only when the
+engine reports the move routes, so a client never prints a command its engine
+refuses.
 
-- **Curator document (Gap 1).** When an index run creates a new curator
-  document and stamps its content hash H, the client asks the engine's
-  metadata route for the owner's other live rows with `content_hash` equal to
-  H (the route behind `nx catalog list --meta`). For each one whose file is
-  absent on this machine, it prints `nx catalog owners --execute move
-  --document <old tumbler> --new-path <new path> --no-dry-run --confirm`. A
-  row whose file is still present is a copy and gets no hint (nexus-o19i0).
-- **Same-name repository move (Gap 3).** When `owner_for_repo` misses on the
-  repo hash and an owner with the same name and owner type exists, the client
-  reads that owner's recorded `repo_root`. If that root is gone, registration
-  proceeds as it does today (the engine re-roots the owner row), and the run
-  prints `nx catalog owners --execute move --owner <prefix> --new-root <path>
-  --no-dry-run --confirm` so the documents follow. Documents are never
-  re-pointed automatically.
-- **Renamed repository (Gap 2).** When an index run registers a new repo owner,
-  the client lists repo owners whose recorded root is gone (the census
-  classifier, `_classify_owner_root`). For each, it looks up the content hashes
-  of up to 20 of the new owner's files in that owner. When at least half are
-  found, it prints the owner move command with the old owner's prefix and the
-  new root.
-- **Census.** `nx catalog owners --census` adds, under each `path_vanished`
-  owner, the move command with a `<new root>` placeholder, next to the
-  deactivate arm it already offers.
+- **Curator document (Gap 1).** `stamp_registered_content_hash`
+  (`multi_batch_write.py:357`) is the one helper both curator pipelines call
+  after registering a document (`doc_indexer.py:1764`,
+  `pipeline_stages.py:766`). After it stamps hash H on document D, the client
+  asks the metadata route for live rows with `content_hash` equal to H
+  (`documents_by_meta`, which is tenant-wide and paged), keeps those under D's
+  owner prefix other than D, and prints `nx catalog owners --execute move
+  --document <old tumbler> --new-path <D's path> --no-dry-run --confirm` for
+  each whose file is absent on this machine. A row whose file is present is a
+  copy and gets no hint (nexus-o19i0).
+- **Documents outside their root (Gap 3).** At the end of `nx index repo`, the
+  client reads the first page of the owner's documents and counts root-derived
+  `source_uri`s that do not start with `file://<repo_root>/`. When any do, it
+  prints `nx catalog owners --execute move --owner <prefix> --new-root
+  <repo_root> --no-dry-run --confirm`. This catches the same-name move after
+  registration has silently re-rooted the owner row, on that run and every
+  later one.
+- **Renamed repository (Gap 2).** At the end of `nx index repo` for owner X,
+  the client lists repo owners whose recorded root is gone on this machine
+  (`_classify_owner_root`'s `path_vanished`). For each such owner V, it takes
+  X's first 20 documents in tumbler order that carry `meta.content_hash`
+  (stamped at registration for repo files, `indexer._register_time_meta`), asks
+  the metadata route for each hash, and counts the hashes that also have a
+  live row under V's prefix. When V matches at least half, it prints the owner
+  move command with V's prefix and X's root. The 20 and the half are starting
+  values to tune on a real renamed repository at implementation; they decide
+  only whether a line prints.
+- **Census.** `nx catalog owners --census` gains a `docs_outside_root` class
+  for an owner with root-derived documents outside its root, reported with the
+  owner move command, and adds under each `path_vanished` owner the move
+  command with a `<new root>` placeholder, beside the deactivate arm it
+  already offers.
 
 #### A second live clone (Gap 4)
 
-The change is in the client, at the point where `owner_for_repo` misses
-(`indexer.py:1388`). Before registering, the client looks up an owner with the
-same name and owner type. If one exists, its recorded `repo_root` is still a
-git work tree on this machine, and that work tree's repo hash differs from
-this repository's, the client registers this repository under the name
-`<folder>-<repo hash>`. The engine sees a new name and a new hash and creates a
-new owner. Its existing name-first match (`resolveOwnerAddress`) is unchanged,
-so the engine characterization test for Gap 4 stays true; the client stops
-sending the name that triggers it.
+Every repo owner registration goes through `ensure_owner_for_repo`
+(`http_catalog_client.py:885`): `nx index repo` (`commands/index.py:107`,
+`:125`, `:1145`) and an in-repo `nx index md`, `rdr` or `pdf`
+(`doc_indexer.py:982`). The two sites that call `register_owner` for a repo
+owner directly, `indexer.py:1397` and `commands/catalog.py:1427`, are moved
+onto it, so the rule lives in one place.
 
-If the root is gone, the case is Gap 3 and gets the hint. If the root's status
-cannot be read (a permission error), the client treats it as present and
-registers a separate owner: a wrong split costs one duplicate index, a wrong
-takeover costs the first clone's documents.
+On an `owner_for_repo` miss, before the upsert, `ensure_owner_for_repo` looks
+up an owner with the same name and owner type (`/owners/by_name`). If one
+exists and its recorded `repo_root` is a git work tree on this machine that is
+not the same directory as this repository (`os.path.samefile`, so a symlinked
+or differently cased path to the same clone is not split), the client
+registers this repository as `<folder>-<repo hash>`. The engine sees a new name
+and a new hash and creates a new owner. If the recorded root cannot be read (a
+permission error), the client also registers a separate owner: a wrong split
+costs one duplicate index, a wrong takeover costs the first clone its owner.
+If the root is gone, registration proceeds as today and the Gap 3 hint picks
+the case up at the end of the run.
 
-Existing owners that two clones already share are not split after the fact.
-The first registration from each clone after this change resolves by its own
-repo hash, and a clone whose hash the shared owner no longer carries gets its
-own owner from then on.
+The engine's name-first match (`resolveOwnerAddress`) is unchanged, so the
+engine characterization test for Gap 4 stays true; the client stops sending
+the name that triggers it. Owners two clones already share are not split after
+the fact: their documents keep the mixed roots they have. The Gap 3 hint
+reports them; there the remedy is the user's call, not necessarily a move. A clone whose hash the shared owner no longer carries gets its
+own owner on its next registration.
 
 ## Alternatives Considered
 
 Three candidates, compared on the five gaps. The decision (Proposed Solution)
-takes Alternative 1, adds hints that print its command, and takes Alternative
-3 for Gap 4 only.
+takes Alternative 1, adds hints that print its command, and for Gap 4 takes
+Alternative 3's outcome (two live clones, two owners) by a client-side rule.
 
 | | Gap 1 moved PDF | Gap 2 renamed repo | Gap 3 same-name repo move | Gap 4 second clone | Gap 5 no route |
 | --- | --- | --- | --- | --- | --- |
@@ -498,8 +563,9 @@ get two owners.
 
 Decision (halcyon for Sam, 2026-11-19): Alternative 1 for Gaps 1, 2, 3 and 5,
 with move hints answering its main con (nothing happens unless the user knows
-to run it). Alternative 3's hash-first matching only for Gap 4, and only when
-the old root still exists. Alternative 2 is rejected as an automatic act: its
+to run it). For Gap 4, Alternative 3's outcome, and only when the old root
+still exists: the client gives the second clone its own name, and the engine's
+matching does not change. Alternative 2 is rejected as an automatic act: its
 filesystem probe cannot tell an unmounted volume or another machine's path
 from a deleted file, so the same probe is used only to print a hint.
 
@@ -509,29 +575,31 @@ from a deleted file, so the same probe is used only to print a hint.
 
 - A move stays something the user does on purpose. A moved PDF still indexes
   as a second document and a renamed repository still becomes a second owner,
-  but the run that does it now prints the command that repairs it.
+  but that run and every later one print the command that repairs it.
 - The move keeps the tumbler. The repo reconcile's rename, which absorbs a file
   moved inside one repository, keeps links but mints a new tumbler. A citation
   by tumbler survives a move made with the command and does not survive one the
   reconcile absorbs. This RDR leaves the reconcile as it is.
-- Chunks are not touched. A move rewrites catalog and aspect rows only, because
+- Chunks are not touched. A move rewrites catalog, aspect and highlight rows only, because
   chunks carry no path (RDR-108). A moved and edited file is re-chunked by the
   next index run, as any edited file is.
 - When the new path already has its own row (the GH #1571 state, and Gap 2
   when the user indexed before moving), the move absorbs that row, so the
-  document form is a merge as well as a rename. The absorbed row is trashed and
-  can be restored.
+  document form is a merge as well as a rename. The absorbed row is trashed;
+  restoring it brings back a row without its path, links or highlights, so an
+  absorb is not fully reversible (Technical Design, Undo).
 - Files added to a renamed repository between its re-index and the move lose
   the links made to them in that window: the fold trashes them, and the next
   index run registers them under the old owner with new tumblers.
 - A second live clone gets its own owner. Files the two clones share are
   indexed twice, once per owner: the right result for two working trees, at
   twice the storage for those files.
-- The absorbed owner's collections stay until the user deletes them.
+- A folded owner's chunks are swept by `purge_trash` after its grace window,
+  with its trashed documents; its collections are not deleted.
 
 ### Risks
 
-- A large owner move is one transaction of some 15,000 to 20,000 row writes,
+- A large owner move is one transaction of an estimated 15,000 to 20,000 row writes,
   holding row locks on two owners' documents for seconds. An index run on
   either owner at the same time waits for it or fails on a conflict and is run
   again. The move is never resumable work: it commits whole or not at all.
@@ -567,17 +635,23 @@ path, with the old tumbler, the link, and no second search hit.
 #### Step 1: Document move
 
 Add `POST /v1/catalog/documents/move` (CatalogHandler, CatalogRepository) with
-the four steps of the Technical Design, one transaction, and a dry run that
-rolls back. Tests against a real Postgres: a plain re-point; an absorb that
-remaps links, raises sensitivity, moves highlights and re-keys the newer aspect
-row; a refusal for a missing or trashed tumbler; a dry run that writes nothing
-and reports the same counts.
+the absorb and the four steps of the Technical Design, one transaction, and a
+dry run that rolls back. Tests against a real Postgres: a plain re-point; an
+absorb that remaps links and `alias_of`, raises sensitivity, clears and trashes
+T, moves highlights and re-keys the newer aspect row without a unique-key
+violation; a refusal for a missing or trashed tumbler, a repo-owned S, and a T
+under another owner; a dry run that writes nothing and reports the same
+counts.
 
 #### Step 2: Owner move
 
-Add `POST /v1/catalog/owners/move`: re-root, rewrite `source_uri` on live and
-trashed documents, rewrite aspect and highlights `source_uri`, and fold an
-owner already holding the new repo hash. Extend
+Add `POST /v1/catalog/owners/move`: fold every other owner holding the new
+repo hash (live or deactivated), re-root, rewrite root-derived `source_uri`
+with `deriveSourceUri` and count the rows skipped, and rewrite aspect and
+highlights `source_uri`. Tests besides the characterization cases: an owner
+already at R and H (the Gap 3 shape) whose documents still name the old root;
+a deactivated owner holding H; a row with another scheme or an absolute
+`file_path`, skipped. Extend
 `OwnerConvergenceByNameCharacterizationTest`: the renamed-move case gains a
 move and asserts one owner, the old tumblers at the new paths, and the second
 owner deactivated with no repo hash. Its same-name and second-clone cases keep
@@ -599,32 +673,40 @@ tumbler kept.
 
 #### Step 4: Curator hint
 
-After a curator registration creates a document and stamps its content hash,
-query the metadata route and print the document hint for each matching row
-whose file is absent. Tests: a moved PDF prints the hint; a byte-identical copy
-whose original is present prints none.
+Hook the hint to `stamp_registered_content_hash`, the helper both curator
+pipelines call, so `nx index pdf` and `nx index md` both reach it. Query the
+metadata route for the hash, keep rows under the document's owner prefix, and
+print the document hint for each whose file is absent; print nothing on an
+engine without the move routes. CLI-level tests through `nx index pdf` and
+`nx index md`: a moved file prints the hint; a byte-identical copy whose
+original is present prints none; an old engine prints none.
 
 #### Step 5: Repository hints
 
-The same-name hint at the `owner_for_repo` miss (`indexer.py:1388`), the
-renamed-repository hint after a new owner registers, and the census line under
-`path_vanished` owners. Tests for each, and one that no hint writes a row.
+The documents-outside-root hint and the renamed-repository hint at the end of
+`nx index repo`, and the census's `docs_outside_root` class and its line under
+`path_vanished` owners. CLI-level tests through `nx index repo`: a same-name
+move prints the hint on the run that re-roots the owner and on the next run; a
+renamed repository prints the owner move command; no hint writes a row.
 
 ### Phase 4: Second clone
 
 #### Step 6: Separate owner
 
-At the `owner_for_repo` miss, register under `<folder>-<repo hash>` when a
-same-name owner's root is a live git work tree with a different hash, or
-cannot be read. Tests: two live clones give two owners and neither takes the
-other over; a gone root falls through to the Gap 3 hint.
+In `ensure_owner_for_repo`, on an `owner_for_repo` miss, register under
+`<folder>-<repo hash>` when a same-name owner's root is another live git work
+tree (not `os.path.samefile` with this one) or cannot be read; move the direct
+repo `register_owner` calls (`indexer.py:1397`, `commands/catalog.py:1427`)
+onto it. CLI-level tests through `nx index repo`: two live clones give two
+owners and neither takes the other over; a symlinked path to the same clone is
+not split; a gone root falls through to the Gap 3 hint.
 
 ### Day 2 Operations
 
-The design creates no new persistent resource. The move writes existing rows,
-and its reversals are existing commands: `nx catalog trash` restores an
-absorbed row, `--execute reactivate` restores a folded owner, and a second move
-puts paths back.
+The design creates no new persistent resource. The move writes existing rows.
+Its reversal is partial (Technical Design, Undo): a second move puts paths
+back; `nx catalog trash` and `--execute reactivate` restore an absorbed row
+and a folded owner without what the move gave to S.
 
 ### New Dependencies
 
@@ -643,10 +725,12 @@ None.
   with the old tumblers, the new root and hash; the second owner is
   deactivated.
 - **Scenario**: a repository moved under the same folder name (Gap 3) —
-  **Verify**: the hint prints; after the move every `source_uri` names the new
-  root.
+  **Verify**: the hint prints on that run and on the next one; after the move
+  every root-derived `source_uri` names the new root.
 - **Scenario**: two live clones with one folder name (Gap 4) — **Verify**: two
   owners; a run from either clone changes neither owner's root.
+- **Scenario**: the same clone reached through a symlink — **Verify**: one
+  owner, no split.
 - **Scenario**: two byte-identical live copies — **Verify**: no hint; two
   documents (nexus-o19i0).
 - **Scenario**: a move whose dry run is not confirmed — **Verify**: no row
@@ -690,7 +774,9 @@ a second clone is the chosen behaviour.
 | `CatalogRepository.mergeDocuments`, `remapLinksForMerge` | nexus engine | Source Search |
 | `owners.py` mutation arms (`deactivate`, `reactivate`) | nexus client | Source Search |
 | `nx catalog list --meta` metadata route | nexus engine | Source Search |
-| `_repo_identity_with_main`, `owner_for_repo` | nexus client | Source Search |
+| `_repo_identity_with_main`, `ensure_owner_for_repo`, `owner_for_repo` | nexus client | Source Search |
+| `stamp_registered_content_hash`, `documents_by_meta` | nexus client | Source Search |
+| `deriveSourceUri`, `document_trash` | nexus engine | Source Search |
 
 ### Scope Verification
 
@@ -700,8 +786,8 @@ Phase 3 Step 4 run after Phase 2, not deferred.
 ### Cross-Cutting Concerns
 
 - **Versioning**: the client command needs the engine routes; on an older
-  engine it refuses with the engine version it needs, as the metadata route's
-  callers do.
+  engine it refuses with the engine version it needs, and the hints print
+  nothing there.
 - **Build tool compatibility**: N/A
 - **Licensing**: N/A
 - **Deployment model**: local and cloud alike; the routes are tenant-scoped like
@@ -715,6 +801,11 @@ Phase 3 Step 4 run after Phase 2, not deferred.
 
 ### Proportionality
 
-Right-sized: one command with two forms, four hints and one client rule. The
+Right-sized: one command with two forms, four hints and one client rule in one
+shared function. The
 Research Findings carry the line references the design leans on and nothing
 else.
+
+## Revision History
+
+- 2026-11-19: Gate round 1 — BLOCKED (1 Critical, 0 Significant, 1 ship-blocker(s)); blob `def7ceb59122`; critique `nexus_rdr/254-gate-critique-2026-11-19-r1`.
