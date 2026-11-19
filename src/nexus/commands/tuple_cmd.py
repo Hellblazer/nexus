@@ -431,12 +431,15 @@ def tuple_wait_cmd(
         run_wait,
     )
 
-    from nexus.identity.work import finish_own, register_own  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.identity.work import Label  # noqa: PLC0415 — deferred: CLI startup cost
 
     store = None
     # RDR-253 Step 6: the wait is background work the session owns, so a checkpoint and the restart report list it by
-    # identity. A label only: it is written best effort and never fails or delays the wait.
-    labelled = register_own("wait", session_id)
+    # identity. A label only: written best effort with a short timeout, and ended AFTER the notice is printed, so it
+    # never fails or delays a delivery. A SIGTERM ends it too; a superseded wait leaves its successor's row alone.
+    label = Label("wait", session_id)
+    label.start()
+    label.arm_sigterm()
     try:
         store = _store()
         outcome = run_wait(
@@ -450,16 +453,16 @@ def tuple_wait_cmd(
     except EngineTooOldError as e:
         _print_tuple_error(e)
         click.echo(STOPPED_HINT, err=True)
+        label.finish()
         raise SystemExit(EXIT_ENGINE_TOO_OLD) from e
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
         _print_tuple_error(e)
         click.echo(STOPPED_HINT, err=True)
+        label.finish()
         raise SystemExit(1) from e
     finally:
         if store is not None:
             store.close()
-        if labelled:
-            finish_own("wait", session_id)
 
     notes = {
         SUPERSEDED: (
@@ -487,10 +490,12 @@ def tuple_wait_cmd(
         click.echo(json.dumps({
             "reason": outcome.reason, "notices": outcome.lines, "rerun": rerun, "hint": hint,
         }))
+        label.finish(skip=outcome.reason == SUPERSEDED)
         return
     for line in outcome.lines if rerun else ():
         click.echo(line)
     click.echo(hint)
+    label.finish(skip=outcome.reason == SUPERSEDED)
 
 
 @tuple_group.command(name="in")
