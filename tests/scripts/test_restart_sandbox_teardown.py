@@ -700,7 +700,7 @@ def test_the_hangup_probe_can_fail(run, tmp_path) -> None:
 
 
 def test_the_hangup_probe_never_touches_the_default_tmux_server() -> None:
-    text = RUN_PY.read_text(encoding="utf-8")
+    text = RUN_PY.with_name("hangup_probe.py").read_text(encoding="utf-8")
     body = text[text.index("def tmux_hangup_probe"):text.index("def hangup_check_main")]
     assert '"-L", sock' in body and '"-f", "/dev/null"' in body
     assert "kill-server" in body
