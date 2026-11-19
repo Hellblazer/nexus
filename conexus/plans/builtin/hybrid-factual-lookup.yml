@@ -91,6 +91,19 @@ plan_json:
         # rank step downstream handles relevance. RF-9; tracked
         # systemically as nexus-h3e2.
         threshold: 2.0
+        # lexical: true is here for the RERANK, not for the lexical leg.
+        # MCP search applies the cross-encoder rerank only when lexical=True
+        # (core.py: lexical_rerank = lexical and t3.supports_server_rerank);
+        # there is no rerank-only switch. Measured 2026-11-19 on 50 HERB
+        # lookup questions (local bge, T2 nexus/plan10-lexical-measure-2026-11-19):
+        # gold-company reach at 20 went 0.795 -> 0.968 (paired +0.173, 95% CI
+        # [+0.123, +0.227]; 27 of 50 questions up, none down). The lexical leg
+        # itself returned 0 rows on all 50 (it ANDs every word of a whole
+        # question), and rerank-only matched lexical=True on every question.
+        # Cost: the search call goes from ~0.2 s to ~5-10 s (p95 ratio 40x or
+        # more); plan 10's rank and generate steps are claude -p calls of 11 s
+        # or more each. Cloud mode was not timed when this landed.
+        lexical: true
     - tool: traverse
       args:
         seeds: $step1.tumblers

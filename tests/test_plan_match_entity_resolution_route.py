@@ -25,6 +25,7 @@ YAML to the library without it, so they stay true when another builtin changes.
 """
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -143,7 +144,13 @@ def test_the_template_is_the_curated_discovery_listing_builtin_the_rdr_names() -
 
 def test_the_step_body_is_hybrid_factual_lookups() -> None:
     hybrid = yaml.safe_load((_BUILTIN_DIR / "hybrid-factual-lookup.yml").read_text())
-    assert _template()["plan_json"] == hybrid["plan_json"]
+    # One deliberate difference: plan 10's search step asks for ``lexical: true`` (the cross-encoder rerank,
+    # measured on lookup questions, T2 nexus/plan10-lexical-measure-2026-11-19). This plan serves the listing and
+    # count shapes, where a whole-question lexical query measured no lift (HERB declines, r20 0.00 -> 0.07), so it
+    # does not take the rerank. Everything else must stay the same body.
+    plan10 = copy.deepcopy(hybrid["plan_json"])
+    assert plan10["steps"][0]["args"].pop("lexical") is True
+    assert _template()["plan_json"] == plan10
     assert _template()["default_bindings"] == hybrid["default_bindings"]
 
 
