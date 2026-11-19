@@ -1755,8 +1755,14 @@ def _nx_binary() -> str:
     return shutil.which("nx") or "nx"
 
 
+#: The variables that would make the `nx` this script starts act as some session: the delegated-token pointer, and the
+#: id of the session that happened to launch the script. The script has no identity of its own (see :func:`ensure_seat`).
+_SESSION_ENV = ("NX_IDENTITY_TOKEN", "CLAUDE_CODE_SESSION_ID")
+
+
 def _nx_identity(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
-    return subprocess.run([_nx_binary(), "identity", *args], capture_output=True, text=True, timeout=timeout)
+    env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
+    return subprocess.run([_nx_binary(), "identity", *args], capture_output=True, text=True, timeout=timeout, env=env)
 
 
 def _identity_error(done: subprocess.CompletedProcess) -> str:
@@ -1816,6 +1822,11 @@ def ensure_seat(s: dict) -> str:
     so the promote names the target's token file (:func:`_target_token_file`); a create is refused by `nx` without a live
     identity of its own, which this script never has, so a session with no live ephemeral gets one line saying why. An
     engine older than 0.1.197 is said once per run (SEATS_NEED_ENGINE), not once per session.
+
+    Why the script holds no identity token of its own: the restart runs detached under tmux (`run-shell`), so it has no
+    `claude` ancestor and `nx` finds no ancestor token file; an `nx` that did find one (a script run by hand from inside
+    a session) would send THAT session's token and the create would be stamped to it. `_nx_identity` enforces the
+    environment half by removing NX_IDENTITY_TOKEN and CLAUDE_CODE_SESSION_ID from the child's environment.
 
     Never raises and never blocks the restart, whatever goes wrong: returns what it did, or why it did not ("" when
     there was nothing to do)."""

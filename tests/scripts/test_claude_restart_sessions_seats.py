@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from nexus.identity.token_file import TokenFile, identity_dir, token_path, write_token_file
 from tests._module_seam import setattr_in
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
@@ -351,3 +352,32 @@ def test_a_seat_a_session_already_holds_is_still_carried_after_an_older_engine_w
     nx.ephemeral("sid-9", kind="seat", name="elsewhere", state="live")
     s = session(sessionId="sid-9", name="other")
     assert crs.ensure_seat(s).startswith("holds seat elsewhere") and s["nx_seat"] == "elsewhere"
+
+
+def test_the_script_names_the_token_file_by_the_same_function_the_hook_writes_it_with(crs, nx, monkeypatch, tmp_path) -> None:
+    """The script keeps its own copy of the `<pid>.<startedAt>.token` name (it is a standalone script). A file written at
+    token_file.token_path's answer must be the one it names, so a change to the name breaks this test, not a restart."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    path = token_path(identity_dir(tmp_path), 111, 5000)
+    write_token_file(path, TokenFile(identity="i1", generation=1, token="tok", expires_at=9e9, session_id="sid-1", pid=111,
+                                     started_at=5000, proc_start=None))
+    assert crs._target_token_file(session(startedAt=5000)) == str(path)
+
+
+def test_the_child_nx_never_inherits_a_session_token_or_session_id(crs, monkeypatch) -> None:
+    """The script has no identity token of its own (it runs detached under tmux, with no claude ancestor), so the nx it
+    starts must not find one in its environment either: an inherited NX_IDENTITY_TOKEN would be sent as the script's."""
+    seen: list[dict[str, str]] = []
+
+    def fake_run(cmd, **kw):
+        seen.append(dict(kw["env"]))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setenv("NX_IDENTITY_TOKEN", "/some/delegated.token")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-of-whoever-ran-the-script")
+    monkeypatch.setenv("NX_KEEP_ME", "yes")
+    setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
+    crs._nx_identity("show", "x")
+    assert len(seen) == 1
+    assert "NX_IDENTITY_TOKEN" not in seen[0] and "CLAUDE_CODE_SESSION_ID" not in seen[0]
+    assert seen[0].get("NX_KEEP_ME") == "yes", "the rest of the environment is inherited"
