@@ -271,9 +271,36 @@ public final class OwnerDecision {
 
     private static final Comparator<BoardRow> BY_TIME = Comparator.comparing(BoardRow::createdAt).thenComparing(BoardRow::id);
 
-    /** The newest owner or clear row; acks are not state. */
+    /**
+     * The newest owner or clear row the engine posted; acks are not state, nor is a row another writer posted, nor an
+     * owner row whose body cannot be read as one (it is treated as absent, never thrown on).
+     */
     private static BoardRow currentRow(List<BoardRow> owners) {
-        return owners.stream().filter(r -> "owner".equals(r.kind()) || "clear".equals(r.kind())).max(BY_TIME).orElse(null);
+        return owners.stream().filter(OwnerDecision::isState).max(BY_TIME).orElse(null);
+    }
+
+    private static boolean isState(BoardRow r) {
+        if (!"engine".equals(r.dim("from"))) {
+            return false;
+        }
+        if ("clear".equals(r.kind())) {
+            return true;
+        }
+        if (!"owner".equals(r.kind())) {
+            return false;
+        }
+        Map<String, Object> b = parse(r.body());
+        if (b == null || !(b.get("episode_at") instanceof String episode) || !(b.get("handoffs") instanceof Number)) {
+            return false;
+        }
+        try {
+            Instant.parse(episode);
+        } catch (java.time.format.DateTimeParseException e) {
+            return false;
+        }
+        return (b.get("owner") == null || b.get("owner") instanceof String)
+            && (b.get("next") == null || b.get("next") instanceof String)
+            && (b.get("reason") == null || b.get("reason") instanceof String);
     }
 
     private static List<String> shas(List<PushChain.Node> suspects) {

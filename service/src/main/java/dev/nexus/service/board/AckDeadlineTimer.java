@@ -22,7 +22,8 @@ import java.util.concurrent.TimeUnit;
  * {@link #arm} replaces the task of a topic and a null instant cancels it, so the stamper arms after every
  * evaluation and a superseded episode keeps no timer.
  *
- * <p>A task never ends its own schedule: nothing here throws out of the executor's thread.
+ * <p>A task never ends its own schedule: nothing here throws out of the executor's thread, and a hand-off that
+ * fails is retried after {@link #RETRY}.
  */
 public final class AckDeadlineTimer {
 
@@ -33,6 +34,9 @@ public final class AckDeadlineTimer {
     public interface Handoff {
         void fire(String tenant, String baseTopic);
     }
+
+    /** How long after a failed hand-off the same topic is tried again. */
+    static final Duration RETRY = Duration.ofSeconds(30);
 
     private record Key(String tenant, String base) { }
 
@@ -79,6 +83,10 @@ public final class AckDeadlineTimer {
             handoff.fire(key.tenant(), key.base());
         } catch (Throwable t) {
             log.warn("event=board_ack_deadline_failed tenant={} base={} error={}", key.tenant(), key.base(), t.getMessage(), t);
+            // A transient failure must not drop the deadline: retry shortly, unless the hand-off armed something itself.
+            if (!armed.containsKey(key)) {
+                arm(key.tenant(), key.base(), clock.instant().plus(RETRY));
+            }
         }
     }
 

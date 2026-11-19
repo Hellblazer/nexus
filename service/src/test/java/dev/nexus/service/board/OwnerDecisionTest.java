@@ -44,4 +44,23 @@ class OwnerDecisionTest {
         assertThat(d.post().sha()).isEqualTo("Y");
         assertThat(OwnerFixture.bodyOf(d.post())).containsEntry("owner", "A").containsEntry("suspects_total", 2);
     }
+
+    private static java.util.Optional<DoneVerdict.Verdict> verdictOf(String body) {
+        return DoneVerdict.of(new BoardRow("d1", OwnerFixture.T0,
+            new java.util.LinkedHashMap<>(Map.of("from", "github", "kind", "sha", "sha", "Y")), body, null));
+    }
+
+    @Test
+    void aTruncatedRunsListWithNoListedFailureHasNoVerdictButAListedFailureStillIsRed() {
+        String ok = "[100,1,\"CI\",\"success\"]";
+        String red = "[101,1,\"CI\",\"failure\"]";
+
+        assertThat(verdictOf("{\"sha\":\"Y\",\"n\":3,\"runs\":[" + ok + "]}")).as("two runs were dropped").isEmpty();
+        assertThat(verdictOf("{\"sha\":\"Y\",\"n\":3,\"runs\":[" + ok + "," + red + "]}")).get()
+            .extracting(DoneVerdict.Verdict::outcome).isEqualTo("failure");
+        assertThat(verdictOf("{\"sha\":\"Y\",\"n\":1,\"runs\":[" + ok + "]}")).get()
+            .extracting(DoneVerdict.Verdict::outcome).as("n equals the list: nothing dropped").isEqualTo("success");
+        assertThat(verdictOf("{\"sha\":\"Y\",\"runs\":[" + ok + "]}")).get()
+            .extracting(DoneVerdict.Verdict::outcome).as("no n: nothing to say about dropped runs").isEqualTo("success");
+    }
 }

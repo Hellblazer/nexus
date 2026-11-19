@@ -308,15 +308,21 @@ public final class TupleHandler implements HttpHandler {
         if (modeRaw != null) {
             var res = repo.outReplace(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
                     delaySeconds);
-            HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(res.id()))
-                    + ",\"outcome\":" + HttpUtil.jsonString(res.outcome().wire()) + "}");
-            ownerHook.afterOut(tenant, subspace, dims, tupleBody);
+            try {
+                HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(res.id()))
+                        + ",\"outcome\":" + HttpUtil.jsonString(res.outcome().wire()) + "}");
+            } finally {
+                ownerHook.afterOut(tenant, subspace, dims, tupleBody);   // committed row: stamp even if the answer fails
+            }
             return;
         }
         byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
                 delaySeconds);
-        HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
-        ownerHook.afterOut(tenant, subspace, dims, tupleBody);   // RDR-252: after the answer, so it cannot fail or slow the write
+        try {
+            HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
+        } finally {
+            ownerHook.afterOut(tenant, subspace, dims, tupleBody);   // RDR-252: after the answer attempt, even if it throws
+        }
     }
 
     // ── rd / rdp ─────────────────────────────────────────────────────────────

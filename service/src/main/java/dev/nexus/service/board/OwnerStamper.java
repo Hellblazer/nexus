@@ -113,7 +113,7 @@ public final class OwnerStamper implements OwnerOutHook {
     // ── one evaluation ───────────────────────────────────────────────────────
 
     private void evaluate(String tenant, String base, OwnerDecision.Trigger trigger) {
-        OwnerDecision.Decision d = scope.withTenant(tenant, ctx -> {
+        scope.withTenant(tenant, ctx -> {
             BoardTopicLock.lock(ctx, tenant, base);
             List<BoardRow> pushes = BoardReads.rows(ctx, tenant, base, "push");
             List<BoardRow> dones = BoardReads.rows(ctx, tenant, base, "done");
@@ -128,11 +128,12 @@ public final class OwnerStamper implements OwnerOutHook {
             if (decision.post() != null) {
                 post(tenant, base, decision.post());
             }
+            // Armed under the lock, so an older evaluation cannot overwrite a newer one's deadline.
+            if (timer != null) {
+                timer.arm(tenant, base, decision.deadline());
+            }
             return decision;
         });
-        if (timer != null) {
-            timer.arm(tenant, base, d.deadline());
-        }
     }
 
     private void postStamperError(String tenant, String base, String sha) {

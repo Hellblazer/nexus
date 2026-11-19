@@ -138,16 +138,87 @@ class OwnerStamperConcurrencyTest {
     }
 
     @Test
-    void aServesChangeRacingADoneWriteLeavesAtMostOneOwnerRow() throws Exception {
+    void aServesChangeRacingADoneWriteLeavesExactlyOneOwnerRow() throws Exception {
         String[] f = redOnY();
         se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
 
-        together(List.of(
-            () -> { se.stamper.afterOut(f[0], "board/ci/nexus-develop--done",
-                Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}"); return null; },
-            () -> se.env.as(f[0], f[1], "POST", "/push-train/set", Map.of("serves", List.of(StamperEnv.BASE, "nexus-main"))).status()));
+        // The stamper swallows what an evaluation throws (a deadlock, a serialization failure) and logs it, so the
+        // log is where a lock fault in the race shows.
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OwnerStamper.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        List<Integer> statuses;
+        try {
+            statuses = together(List.of(
+                () -> { se.stamper.afterOut(f[0], "board/ci/nexus-develop--done",
+                    Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}"); return 200; },
+                () -> se.env.as(f[0], f[1], "POST", "/push-train/set",
+                    Map.of("serves", List.of(StamperEnv.BASE, "nexus-main"))).status()));
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
 
-        assertThat(se.ownerRows(f[0], StamperEnv.BASE).size()).isLessThanOrEqualTo(1);
-        assertThat(IdentityTestEnv.freshTenant()).isNotNull();
+        assertThat(statuses.get(1)).as("the serves change").isEqualTo(200);
+        assertThat(logs.list.stream().map(e -> e.getFormattedMessage()).filter(m -> m.contains("board_owner_stamper_failed")).toList())
+            .as("no evaluation failed in the race").isEmpty();
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).hasSize(1);
+    }
+
+    /** A scheduler whose first {@code schedule} call blocks until released, so a test can hold one evaluation in its arm. */
+    private static final class BlockingScheduler extends java.util.concurrent.ScheduledThreadPoolExecutor {
+        final CountDownLatch inArm = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        private final java.util.concurrent.atomic.AtomicBoolean first = new java.util.concurrent.atomic.AtomicBoolean(true);
+
+        BlockingScheduler() {
+            super(1);
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> schedule(Runnable command, long delay, java.util.concurrent.TimeUnit unit) {
+            if (first.compareAndSet(true, false)) {
+                inArm.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return super.schedule(() -> { }, 365, java.util.concurrent.TimeUnit.DAYS);
+        }
+    }
+
+    @Test
+    void anOlderEvaluationCannotOverwriteANewerOnesDeadline() throws Exception {
+        String[] f = redOnY();
+        java.time.Instant d1 = java.time.Instant.parse("2031-01-01T00:00:00Z");
+        java.time.Instant d2 = java.time.Instant.parse("2031-01-02T00:00:00Z");
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        OwnerStamper stamper = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock,
+            (in, trigger) -> new OwnerDecision.Decision(null, calls.incrementAndGet() == 1 ? d1 : d2));
+        BlockingScheduler sched = new BlockingScheduler();
+        AckDeadlineTimer timer = new AckDeadlineTimer(sched, java.time.Clock.systemUTC(), (t, b) -> { });
+        stamper.bind(timer);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> older = pool.submit(() -> stamper.onDeadline(f[0], StamperEnv.BASE));
+            assertThat(sched.inArm.await(20, java.util.concurrent.TimeUnit.SECONDS)).as("the older evaluation reached its arm").isTrue();
+            Future<?> newer = pool.submit(() -> stamper.onDeadline(f[0], StamperEnv.BASE));
+            Thread.sleep(700);
+            assertThat(calls.get()).as("the newer evaluation waits for the topic lock the older one still holds").isEqualTo(1);
+
+            sched.release.countDown();
+            older.get(20, java.util.concurrent.TimeUnit.SECONDS);
+            newer.get(20, java.util.concurrent.TimeUnit.SECONDS);
+
+            assertThat(calls.get()).isEqualTo(2);
+            assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("the newer evaluation's deadline stands").isEqualTo(d2);
+        } finally {
+            sched.release.countDown();
+            pool.shutdownNow();
+            sched.shutdownNow();
+        }
     }
 }

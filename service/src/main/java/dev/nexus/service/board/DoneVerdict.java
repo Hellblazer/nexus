@@ -13,7 +13,8 @@ import java.util.Set;
  * {@code cancelled}. It is {@code dims.outcome} when present (the adapter writes it once its FOLD_RESULT_DIMS switch
  * is on); otherwise it is derived from the {@code runs} conclusions in the body with the template's rules: any run
  * that concluded failure, timed_out, startup_failure or action_required is a failure; else a run with an unknown
- * conclusion (including the old two-element entries) leaves no verdict; else a run that concluded cancelled or stale
+ * conclusion (including the old two-element entries), or a body whose {@code n} counts more runs than it lists
+ * (trailing entries dropped), leaves no verdict; else a run that concluded cancelled or stale
  * is cancelled; else success. Only {@code success} and {@code failure} are verdicts.
  */
 public final class DoneVerdict {
@@ -79,7 +80,9 @@ public final class DoneVerdict {
         if (failed) {
             return RED;
         }
-        if (unknown) {
+        // Trailing runs were dropped (n counts the fold): with no failure listed, an unlisted one may have failed.
+        boolean truncated = body.path("n").isNumber() && body.get("n").asLong() > body.get("runs").size();
+        if (unknown || truncated) {
             return null;
         }
         return cancelled ? "cancelled" : OK;

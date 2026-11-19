@@ -134,6 +134,7 @@ class OwnerStamperWiringTest {
         String a = se.env.seat(t, "alpha");
         se.formEnding(t, l, null, a);
         se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-alpha");
 
         out(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
             "dims", Map.of("from", "github", "kind", "sha", "sha", "X", "outcome", "cancelled"),
@@ -141,11 +142,53 @@ class OwnerStamperWiringTest {
         out(adapter, Map.of("subspace", "board/ci/nexus-develop", "keys", Map.of("topic", "nexus-develop"),
             "dims", Map.of("from", "github", "kind", "job"),
             "body", "{\"state\":\"completed\",\"conclusion\":\"failure\"}", "nonce", UUID.randomUUID().toString()));
-        // A red written last proves the stamper ran for the earlier writes: its row is the only one.
-        out(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
-            "dims", Map.of("from", "github", "kind", "sha", "sha", "X", "outcome", "failure"),
-            "body", "{\"state\":\"concluded\",\"sha\":\"X\"}", "nonce", UUID.randomUUID().toString()));
+        // The hook runs after the response on the request's thread; give a wrongly posted row time to land.
+        Thread.sleep(500);
+        assertThat(se.ownerRows(t, StamperEnv.BASE)).as("nothing posted for a cancelled or an unrelated write").isEmpty();
 
+        // A red on a different sha: its row is the only one, so the earlier writes posted nothing.
+        out(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
+            "dims", Map.of("from", "github", "kind", "sha", "sha", "Y", "outcome", "failure"),
+            "body", "{\"state\":\"concluded\",\"sha\":\"Y\"}", "nonce", UUID.randomUUID().toString()));
+
+        eventually(() -> se.ownerRows(t, StamperEnv.BASE), r -> !r.isEmpty());
+        Thread.sleep(300);
+        var rows = se.ownerRows(t, StamperEnv.BASE);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.getFirst().sha()).isEqualTo("Y");
+    }
+
+    @Test
+    void aFailedAnswerStillStampsTheOwnerRow() throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String adapter = "adapter-" + UUID.randomUUID();
+        seedToken(adapter, t, TokenStore.SCOPE_BOARD_CI);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        se.formEnding(t, l, null, a);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+
+        // The first send of the answer fails (a client that went away): the row is committed, so it is stamped anyway.
+        java.util.concurrent.atomic.AtomicBoolean failed = new java.util.concurrent.atomic.AtomicBoolean();
+        dev.nexus.service.http.HttpUtil.setSendObserverForTests(ex -> {
+            if (ex.getRequestURI().getPath().equals("/v1/tuples/out") && failed.compareAndSet(false, true)) {
+                throw new java.io.UncheckedIOException(new java.io.IOException("simulated send failure"));
+            }
+        });
+        try {
+            var r = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/tuples/out")
+                .header("Authorization", "Bearer " + adapter).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(Map.of(
+                    "subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
+                    "dims", Map.of("from", "github", "kind", "sha", "sha", "X", "outcome", "failure"),
+                    "body", "{\"state\":\"concluded\",\"sha\":\"X\"}", "nonce", UUID.randomUUID().toString()))))
+                .build(), HttpResponse.BodyHandlers.ofString());
+            assertThat(failed.get()).as("the send failure was injected").isTrue();
+            assertThat(r.statusCode()).isNotEqualTo(200);
+        } finally {
+            dev.nexus.service.http.HttpUtil.setSendObserverForTests(null);
+        }
         var rows = eventually(() -> se.ownerRows(t, StamperEnv.BASE), r -> !r.isEmpty());
         assertThat(rows).hasSize(1);
         assertThat(rows.getFirst().sha()).isEqualTo("X");

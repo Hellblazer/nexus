@@ -100,4 +100,34 @@ class OwnerDecisionOrderTest {
 
         assertThat(b).containsEntry("suspects", List.of("X", "Y")).containsEntry("owner", "A").containsEntry("next", "C");
     }
+
+    private static BoardRow row(String from, String kind, String sha, String body) {
+        return new BoardRow("zz-" + kind + "-" + from, OwnerFixture.T0.plus(java.time.Duration.ofDays(1)),
+            new java.util.LinkedHashMap<>(Map.of("from", from, "kind", kind, "sha", sha)), body, null);
+    }
+
+    @Test
+    void aClearOrOwnerRowFromAnotherWriterIsNotState() {
+        OwnerFixture f = base();
+        f.done("P2", "failure");
+        f.recordNow(f.decide());
+        f.owners.add(row("mallory", "clear", "P2", "{}"));
+        f.owners.add(row("mallory", "owner", "ZZ", "{\"owner\":\"B\",\"episode_at\":\"2026-01-01T00:00:00Z\",\"handoffs\":0}"));
+
+        assertThat(f.decide().post()).as("the engine's open row at P2 still stands").isNull();
+    }
+
+    @Test
+    void aMalformedEngineOwnerRowIsTreatedAsAbsentAndNeverThrows() {
+        for (String bad : List.of("{}", "not json", "null", "[]", "{\"owner\":5,\"episode_at\":\"x\",\"handoffs\":\"1\"}",
+                "{\"owner\":\"A\",\"handoffs\":0}", "{\"owner\":\"A\",\"episode_at\":\"2026-01-01T00:00:00Z\"}")) {
+            OwnerFixture f = base();
+            f.done("P2", "failure");
+            f.owners.add(row("engine", "owner", "P2", bad));
+
+            OwnerDecision.Decision d = f.decide();
+
+            assertThat(d.post()).as("body " + bad + ": no open row, so a new episode").isNotNull();
+        }
+    }
 }

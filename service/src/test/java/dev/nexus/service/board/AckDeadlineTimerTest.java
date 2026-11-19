@@ -204,4 +204,24 @@ class AckDeadlineTimerTest {
         assertThat(sched.tasks.getFirst().delayMs()).isZero();
         sched.tasks.getFirst().task().run();   // must not throw
     }
+
+    @Test
+    void aFailedHandoffIsRetriedShortlyAndALaterArmReplacesTheRetry() {
+        ManualScheduler sched = new ManualScheduler();
+        AckDeadlineTimer timer = new AckDeadlineTimer(sched, Clock.fixed(EPISODE, ZoneOffset.UTC), (t, b) -> {
+            throw new IllegalStateException("boom");
+        });
+        timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
+
+        sched.tasks.getFirst().task().run();
+
+        assertThat(sched.tasks).as("a retry was scheduled").hasSize(2);
+        assertThat(sched.tasks.get(1).delayMs()).isEqualTo(AckDeadlineTimer.RETRY.toMillis());
+        assertThat(timer.armedAt("t1", "b")).isEqualTo(EPISODE.plus(AckDeadlineTimer.RETRY));
+
+        timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(40)));
+
+        assertThat(sched.tasks.get(1).cancelled()[0]).as("the retry is replaced").isTrue();
+        assertThat(timer.armedAt("t1", "b")).isEqualTo(EPISODE.plus(Duration.ofMinutes(40)));
+    }
 }
