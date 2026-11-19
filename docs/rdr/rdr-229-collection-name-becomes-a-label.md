@@ -192,7 +192,7 @@ name, so these paths have to find the row by its attributes first.
 | RDR-176 (survivable managed migration) | Precedent, closed | Shipped nexus-zvcou (one config-first service URL and token chain for every storage command) as nexus-t9rmg.8. The bead asked to fold zvcou in or hard-depend on it; it is satisfied and carries no work here. |
 | RDR-204 (embedding profile; `catalog_collections` as the authority) | Origin, closed | Shipped most of nexus-j4gl6 steps 1 and 2. Rejected step 3 (opaque names) on 2026-09-09 with a reopen trigger. This RDR takes over its two census gates, repairs their blind spots, and finishes the reader move. It does not restate RDR-204's schema; it builds on it. |
 | RDR-210 (one local engine serves both embedders) | Adjacent, closed 2026-10-26 | Finds model siblings and its re-embed target by the row tuple `(content_type, owner_id)`, never by a name (its Gap 4 fix and its RDR-229 row). One name-based sibling matcher is left, `repo_identity.list_sibling_collections`, with no caller in `src`; P2.7 retires it. |
-| RDR-225 (one vector table per embedding model) | Adjacent, closed 2026-10-22 (T2 `229-research-25`) | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`; the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
+| RDR-225 (one vector table per embedding model) | Adjacent, closed 2026-10-22 (T2 `229-research-25`) | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`, which targets a new registry UNIQUE on those three columns (item 6, P3.1); the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
 | RDR-246 (data moves are background jobs) | Dependency, accepted 2026-11-16 | Its `nexus.data_moves` registry and `DataMoveWorker` run Phase 3's stamp and key swap as visible, resumable background moves, never at boot (item 6; T2 `229-research-32`). Its activation (nexus-f3yqd.2) is a Phase 3 prerequisite. |
 | RDR-247 (one index per row) | Downstream, deferred 2026-11-12 | Waits for this RDR and then rides with it as one visible job (Scope boundary with RDR-247). Received nexus-j4gl6 when Sam closed it on 2026-11-10. |
 | RDR-236 (chunk-row metadata normalization) | Adjacent, accepted, Phase 4 in progress | Its not-additive Phase 4 cut and Phase 3's dual write both change the chunk write path (Sequencing). |
@@ -237,7 +237,7 @@ index rebuild on the id (P3.4). A collection's rows are stamped before its
 index is built on the id, so no index is built twice. RDR-247 owns the
 bounded drop of the shared leaf graph, which is not in this RDR. The stamp
 cannot stop at new rows, the cost comparison's option (c): D3's chunks
-primary key holds `collection_id`, so every row must carry one before P3.3
+primary key holds `collection_id`, so every row must carry one before P3.3c
 swaps the key. What (c) adds, stamping a collection's old rows just before
 its index build, fits P3.1's order. It is not an alternative to stamping
 everything.
@@ -697,7 +697,13 @@ two-segment knowledge name that has no row.
 bigint GENERATED ALWAYS AS IDENTITY`, unique across the installation, with a
 UNIQUE `(tenant_id, collection_id)` that every reference targets, so
 `tenant_id` still leads every foreign key (row-level security and partition
-pruning on tenant leaves are unchanged). At Phase 4 the primary key becomes
+pruning on tenant leaves are unchanged). The RDR-225 composite foreign key
+needs one more: it now references "UNIQUE (tenant_id, name,
+embedding_model)" (`vectors-030:126-127`, `:1062-1066`), and PostgreSQL
+requires the referenced columns to be "the columns of a non-deferrable
+unique or primary key constraint" (T2 `229-research-44`). So P3.1 also adds
+UNIQUE `(tenant_id, collection_id, embedding_model)`, and it stays after
+Phase 4 as that key's target. At Phase 4 the primary key becomes
 `(tenant_id, collection_id)` and `(tenant_id, name)` stops being a key.
 
 A bigint rather than a UUID because the id joins the chunks primary key,
@@ -722,8 +728,35 @@ The key moves table by table in strangler order:
 - **Switch.** Each foreign key is re-created on `(tenant_id, collection_id)`
   (or `(tenant_id, collection_id, embedding_model)` for the RDR-225
   composite), `NOT VALID` first and validated after by a data move's
-  `on_complete`. The exception is the RDR-225 composite from the
-  partitioned `nexus.chunks`, which PostgreSQL validates directly (below). The
+  `on_complete` (P3.3a). The exception is the RDR-225 composite from the
+  partitioned `nexus.chunks`, which PostgreSQL validates directly (below).
+  Each validation is its own move, one per referencing table: the seven
+  registry foreign keys from tables that are not partitioned
+  (`topic_assignments`, `document_aspects`, `topics`, `taxonomy_meta`,
+  `document_highlights`, `canary_query_ring`, and `aspect_extraction_queue`
+  where it still exists), and the three child foreign keys into
+  `nexus.chunks` (the manifest, `topic_assignments`, `chunk_orphaned_at`;
+  vectors-030:1017-1050). Each move's driving table is the referencing
+  table. Its template is the stamp's re-stamp of rows whose id is still
+  null, which matches no row once the stamp has run. Its verification
+  returns rows with a null id, and its `on_complete` is the VALIDATE. A
+  template with no DML is not allowed: dml_utils raises "i_sql_text must
+  contain <driving_table> exactly once" and the same for
+  `<chunking_clause>` (`assert_chunking_template.sql:28-40`; T2
+  `229-research-44`). The P3.3a changeset registers the seven registry
+  moves. The three child moves are registered by the swap's `on_complete`
+  in its own transaction, because their constraints exist only after it,
+  and a move worked before its constraint exists would fail for good: the
+  worker "goes on to the next open move" past a blocked one
+  (`DataMoveWorker.java:49`), and an `on_complete` error that is not
+  transient "is the move's" (`DataMoveFailureClassifier.java:165-168`).
+  Inferred, not read: VALIDATE of a missing constraint raises 42704, and
+  an `on_complete` can INSERT into `nexus.data_moves`. Four of these
+  moves are chunk-family (`topic_assignments` twice, the manifest,
+  `chunk_orphaned_at`), and such an `on_complete` ends the per-collection
+  index builders (`VerifyingFinisher.java:40-41`). So P3.4's builds start
+  only after every validation move has completed, read by the boot-time
+  completion check (below). The
   chunks and centroid primary keys are rebuilt per leaf on `(tenant_id,
   collection_id, chash, embedding_model)` and `(tenant_id, collection_id,
   topic_id, embedding_model)`, and the three child foreign keys follow. Every
@@ -787,20 +820,24 @@ while the engine serves:
 - *Index builds follow the PCI reconciler's pattern.* RDR-246 keeps index
   builds out of a move: `on_complete` holds transactional DDL, "never CREATE
   INDEX CONCURRENTLY" (lines 546-550). The per-leaf unique indexes for the
-  new chunks and centroid keys, and every per-collection index on the id
-  (P3.4), are built the way the PCI reconciler builds today. An engine pass
+  new chunks and centroid keys (P3.3b), and every per-collection index on
+  the id (P3.4), are built the way the PCI reconciler builds today. The
+  per-leaf pass is new code: the reconciler builds per-collection HNSW
+  indexes, "USING hnsw ... WHERE collection = %L"
+  (`PciBuilderSession.java:115-118`; T2 `229-research-44`). An engine pass
   runs in the background after the engine serves and issues one `CREATE
   INDEX CONCURRENTLY` at a time. It reports in `boot_work` (the reconciler's
   entry is `pci-reconcile`, "building search indexes"). A build ended by a
   database stop, or by a restart that applies a schema change, "is left
   INVALID, and a later pass drops it and rebuilds it from the start"
   (`PciBootWork.java`; T2 `229-research-33`). The per-collection indexes on
-  the id (P3.4) are built after P3.3's swap, and a collection's index only
-  once none of its rows has a null `collection_id`. That is the
+  the id (P3.4) are built after P3.3c's swap and after every foreign-key
+  validation move has completed (Switch, above), and a collection's index
+  only once none of its rows has a null `collection_id`. That is the
   stamp-before-build order of Sam's RDR-247 ruling (Scope boundary with
-  RDR-247). Built after the swap, they are not ended by the swap's
-  chunk-family `on_complete`, which ends builds in flight (RDR-246). So an
-  index is built a second time only after a kill.
+  RDR-247). Built after the swap and the validations, they are not ended
+  by those moves' chunk-family `on_complete`, which ends builds in flight
+  (RDR-246). So an index is built a second time only after a kill.
 - *The switch is a move's `on_complete`.* The partitioned key follows
   PostgreSQL's documented route: `ALTER TABLE ONLY` the parent `ADD PRIMARY
   KEY`, a matching key on each leaf, then `ALTER INDEX ... ATTACH
@@ -808,7 +845,7 @@ while the engine serves:
   constraints", `ddl-partitioning.html`; T2 `229-research-41`). Each leaf's
   key takes the unique index built concurrently above, through `ADD ...
   USING INDEX`, which "is not currently supported on partitioned tables"
-  but is on a leaf. So P3.3 registers, per table whose key it swaps
+  but is on a leaf. So P3.3c registers, per table whose key it swaps
   (`nexus.chunks`, `nexus.taxonomy_centroids`), a move whose driving table
   is that table, run per tenant and leaf. Its template re-stamps rows whose
   id is still null, which is a no-op after P3.1. Inferred, not read:
@@ -816,8 +853,9 @@ while the engine serves:
   verification query returns any leaf without a valid unique index on the
   new key, and any row with a null id. Its `on_complete` drops the old key
   and the three child foreign keys, adds the new key by that route, and
-  re-adds the three child foreign keys `NOT VALID`, validated by a later
-  move: their referencing tables are not partitioned. The outbound composite
+  re-adds the three child foreign keys `NOT VALID` (their referencing
+  tables are not partitioned), and registers the three moves that validate
+  them (Switch, above). The outbound composite
   foreign key from `nexus.chunks` to `catalog_collections` cannot be added
   `NOT VALID`, "because PostgreSQL does not take NOT VALID for a partitioned
   referencing table", so it is validated directly in the same `on_complete`
@@ -871,7 +909,8 @@ while the engine serves:
     for every stamp label and its replacement, and keeps the answer for the
     process. Until the answer is yes, `CollectionRegistry` hands readers the
     name, the jOOQ readers read the name columns, the PCI reconciler builds
-    no index on the id, and `renameCollectionTxn` keeps rewriting the
+    no index on the id (for P3.4 the same read also covers every
+    foreign-key validation move), and `renameCollectionTxn` keeps rewriting the
     fourteen `COLLECTION_SCOPED_TABLES`. Inferred, not read: the switch
     takes effect at the first boot after the last stamp move completes,
     the same boot at which a CONTINUE changeset "applies at the first boot
@@ -1104,8 +1143,8 @@ list stays complete because of two facts and one rule:
 | Row cache | Engine `CollectionRegistry` (keyed by tenant and name), client `mcp_infra._collections_cache`, client registration cache | Change: key by `collection_id`, with a label index for the route boundary. |
 | Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI and aspect-task rewrites (`AspectTaskRefs`); `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
 | Per-collection index | `PciBuilderSession`, `PciCatalog` | Change: predicate and name hash on `collection_id`; every existing index rebuilt. |
-| Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, and one whose `on_complete` swaps the keys; no new mover. |
-| Per-leaf unique index builds | `PciReconciler`, `PciBuilderSession`, `PciBootWork` | Reuse the pattern: background `CREATE INDEX CONCURRENTLY` after serve, `boot_work`, INVALID leftovers dropped and rebuilt. |
+| Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, one per referencing table for each foreign-key validation (P3.3a, P3.3c), and one whose `on_complete` swaps the keys; no new mover. |
+| Per-leaf unique index builds | `PciReconciler`, `PciBuilderSession`, `PciBootWork` | New code in the reconciler's pattern (P3.3b): the reconciler builds per-collection HNSW indexes (`PciBuilderSession.java:115-118`), not per-leaf unique indexes. Background `CREATE INDEX CONCURRENTLY` after serve, `boot_work`, INVALID leftovers dropped and rebuilt. |
 | Recovery bundle | `catalog/recovery_bundle.py` | Extend: the format carries the registry row; the name path stays for N minor releases (Open Item O1). |
 
 ### Decision Rationale
@@ -1379,8 +1418,9 @@ its acceptance is that test green plus the census pin it lowers.
 **Phase 3: the surrogate key and the label**
 
 - P3.1 Expand, after P3.2: `catalog_collections.collection_id` (identity)
-  with UNIQUE `(tenant_id, collection_id)` as plain changeset work on a
-  small table; `collection_id` columns on every referencing table (item 6
+  with UNIQUE `(tenant_id, collection_id)` and UNIQUE `(tenant_id,
+  collection_id, embedding_model)`, the RDR-225 composite's future target
+  (item 6), as plain changeset work on a small table; `collection_id` columns on every referencing table (item 6
   list) and, `NOT VALID`, the CHECK `(<name column> IS NULL) =
   (collection_id IS NULL)` on each; every writer (item 6's census: 109 Java
   write sites, 26 SQL functions) sets the id on insert and update from this
@@ -1401,22 +1441,33 @@ its acceptance is that test green plus the census pin it lowers.
   largest size class (Critical Assumption 5). Result in T2 and on the bead;
   it sets each move's `chunk_size`, `sleep_ms` and `statement_timeout_ms`,
   and says whether the swap needs a maintenance window.
-- P3.3 Switch the foreign keys: the eight registry foreign keys onto
-  `collection_id`, added `NOT VALID` where the referencing table is not
-  partitioned; the per-leaf unique indexes for the chunks and centroid keys
-  built in the reconciler's pattern; then, per table, a registered move
-  (driving table that table, template a re-stamp of rows still null) whose
-  `on_complete` swaps the primary key by `ALTER TABLE ONLY ... ADD PRIMARY
-  KEY`, per-leaf `ADD ... USING INDEX` and `ALTER INDEX ... ATTACH
-  PARTITION`, re-adds the three child foreign keys `NOT VALID` (validated by
-  a later move), and validates the RDR-225 composite directly (item 6).
+- P3.3 Switch the keys, as three beads; "P3.3" elsewhere means all three.
   Walked on a PITR fork before the cloud deploy and on a local store.
-  `TenantExport`'s key model changes in the same cut (P3.11).
+  `TenantExport`'s key model changes in P3.3a's and P3.3c's cuts (P3.11).
+  - P3.3a Foreign-key repoint: the seven registry foreign keys from tables
+    that are not partitioned re-created on `collection_id`, `NOT VALID`, and
+    one validation move per referencing table registered in the same
+    changeset (driving table that table, template a re-stamp of rows still
+    null, the VALIDATE as its `on_complete`; item 6, Switch). Test: each
+    move completes and leaves its constraint validated.
+  - P3.3b Per-leaf unique-index pass: new engine code in the reconciler's
+    pattern builds, per leaf, the unique indexes for the new chunks and
+    centroid keys (item 6). Test: a pass ended mid-build leaves an INVALID
+    index that the next pass drops and rebuilds.
+  - P3.3c Swap: per table, a registered move (driving table that table,
+    template a re-stamp of rows still null) whose `on_complete` swaps the
+    primary key by `ALTER TABLE ONLY ... ADD PRIMARY KEY`, per-leaf `ADD ...
+    USING INDEX` and `ALTER INDEX ... ATTACH PARTITION`, re-adds the three
+    child foreign keys `NOT VALID`, registers the three moves that validate
+    them, and validates the RDR-225 composite directly (item 6). Test: no
+    child validation move exists before its constraint does.
 - P3.4 After P3.3: rebuild every per-collection index on `collection_id`
   (predicate and name hash) through the PCI reconciler, which reports in
   `boot_work` and rebuilds a killed build from the start; each collection's
   index is built only once none of its rows has a null id
-  (stamp-before-build, Scope boundary with RDR-247); `PciCatalog` reads the
+  (stamp-before-build, Scope boundary with RDR-247), and no build starts
+  until every P3.3 validation move has completed, so a chunk-family
+  `on_complete` cannot end it (item 6); `PciCatalog` reads the
   id back from the predicate. Test: a collection with a row whose
   `collection_id` is null gets no index on the id. The bounded drop of the
   shared leaf graph that follows is RDR-247's.
@@ -1492,7 +1543,10 @@ its acceptance is that test green plus the census pin it lowers.
   and a stated effect on backups taken before P3.1 (item 10). Primary key
   to `(tenant_id, collection_id)`; drop the name columns on
   referencing tables, the `(tenant_id, name, embedding_model)` UNIQUE and
-  `superseded_by` (replaced by `superseded_by_id`). Each drop waits for
+  `superseded_by` (replaced by `superseded_by_id`). UNIQUE `(tenant_id,
+  collection_id, embedding_model)` stays: the RDR-225 composite depends on
+  it, and PostgreSQL drops such a constraint only with CASCADE (item 6; T2
+  `229-research-44`). Each drop waits for
   this install's stamp moves (item 6, "Readers during the stamp"). On the
   chunk family (`nexus.chunks`, the manifest, `topic_assignments`,
   `chunk_orphaned_at`) a drop is a move's `on_complete`: a destructive
@@ -1520,7 +1574,8 @@ its acceptance is that test green plus the census pin it lowers.
 
 P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
 2 and for P3.2; the first cloud run of its move waits for nexus-f3yqd.2.23
-(Prerequisites). P3.2 blocks P3.1, P3.3 and P3.4. P3.4 waits for P3.3. P3.3 blocks P3.5 and P3.7. P3.7 also waits
+(Prerequisites). P3.2 blocks P3.1, P3.3 and P3.4. P3.4 waits for P3.3. Within P3.3, P3.3c waits for P3.3b, whose
+indexes its verification requires. P3.3 blocks P3.5 and P3.7. P3.7 also waits
 for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P3.6 (which
 enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
 item 8); P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
