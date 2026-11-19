@@ -498,7 +498,9 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   (to the second): the creation date a record has, which Step 3's import keeps
   and which the pointer therefore still shows after the TTL write and the reap.
   An unmapped record carries its timestamp too. The pointer also names each
-  listed record's archive and its part count (below). Records whose verdict or
+  listed record's archive and its part count (below), whether a run gave it a
+  TTL (`ttl_set`), whether a person restored it (`restored`) and, for a record
+  the read no longer lists, its `state` (Step 2.2, Step 3). Records whose verdict or
   bead cannot be read are listed under "unmapped" and keep no TTL. A pointer
   over the store_put cap
   (`QUOTAS.MAX_DOCUMENT_BYTES`, 16,384 bytes) is written in parts, split at line
@@ -634,7 +636,23 @@ does not grow with the number of records.
   `<repo>`, and the sub-phase rule (3a counts as closed when phase 3 is) is now
   pinned on a `<repo>` row, so its coverage is kept.
 - *Rerun.* The command is idempotent: the pointer is replaced, records that
-  already have a TTL are skipped.
+  already have a TTL are skipped, and records an earlier pointer listed that
+  the read no longer lists are carried (Step 2.2). A person's restore is not
+  undone. `nx memory restore` makes a row permanent (`ttl` NULL), which looks
+  exactly like a record never given a TTL, and the restore also clears the
+  rollup mark, so the earlier pointer is the only evidence. Each listed record
+  therefore carries `ttl_set`: the first pointer is written before the TTL
+  writes, with the mark false, and once the writes and their read-back are done
+  the pointer is written again with the mark true for each record a run gave a
+  TTL (a record that already had a TTL and was listed before counts as ours). A
+  rerun that finds a listed record with `ttl_set` true and no TTL leaves it
+  alone, prints `restored, left alone: <title>` and keeps it in the pointer
+  marked `restored`, so the next rerun skips it too. A record the earlier
+  pointer listed with the mark false whose TTL write stopped part way is not
+  a restore: it is a candidate again. A missing or unreadable earlier pointer
+  reads as a first run, which gives a record nobody listed before a TTL. If the
+  second pointer write fails after the TTLs were written the run says so and a
+  rerun writes the marks.
 - *Residual race.* The write sends the content read a moment earlier. A
   reviewer who rewrote the same title in that moment would be overwritten, and
   a row quarantined in that moment would be restored, because the import clears
@@ -782,7 +800,9 @@ pointer reaches the same lookup with less. It stays a recorded alternative.
 - A gate record given its TTL keeps its own timestamp, so one already older than
   its effective TTL is quarantined at the next expire sweep (hidden, restorable
   with `nx memory restore`). It drops out of Step 4's census because it now has
-  a TTL.
+  a TTL. A record a person restores has no TTL again, so the census flags it
+  again; the rerun leaves it alone (Step 3, Rerun), and the flag is the
+  reminder that a person decided to keep it.
 - The counter's history is mixed: before the deploy it counts matches, after
   it counts receipts. Only a delta since the baseline has the new meaning.
 - Phases 1 and 2 are not built, so nothing graduates and bead nexus-2k66t.1
@@ -982,7 +1002,13 @@ critique, fix-check) get no TTL and `_census` no longer flags them; a planted
 record without a readable verdict is unmapped and keeps no TTL; a pointer that
 does not read back leaves no TTL; an access that lands between the listing and
 the import keeps its count; a field that does not read back is named with the
-original row and the run exits nonzero.
+original row and the run exits nonzero; a row the sweep quarantined right after
+the write is reported as quarantined, not as a mismatch, and a rerun carries it
+marked `quarantined`; a record a person restored (no TTL again, listed with
+`ttl_set` by an earlier run) is not given a TTL again, is named and stays marked
+`restored`, while a record no earlier pointer lists still gets one; a rerun
+after a TTL write that stopped part way finishes the rest and does not call them
+restored; the pointer still lists each timestamp after the TTL write.
 
 #### Step 4 (shipped): the census flag
 
@@ -1246,3 +1272,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Fix check d021dc53c85b, defects B and C (nexus-1gdv0.2.9) and audit residual (4): the census change of Step 3 is built. `_census` reads only `<repo>`, its `<repo>_rdr` title-number branch and `_RDR_TITLE` are deleted, and its predicate is `kind:gate` only (a row tagged only `gate` is neither listed by the rollup nor flagged). The three census tests that pinned `<repo>_rdr` rows as flagged now seed them and assert they are not flagged; one is renamed; the sub-phase case moves to a `<repo>` row so its coverage is kept. Step 3 names the change. |
 | 2026-11-19 | Fix check d021dc53c85b, defects A and C (nexus-1gdv0.2.10): the null-attribution test of Step 3 could not tell `put` from import, because in a bare test process `NX_AGENT` and the session both resolve to None and a `put` would also leave them null. The test now sets `NX_AGENT` and `NX_SESSION_ID` (and stops the config file leaking in), asserts first that a `put` under those settings writes both non-null, then asserts the import keeps both null; it refuses to pass when the control writes nothing. |
 | 2026-11-19 | Fix check d021dc53c85b, defects B and C, A on cost (nexus-1gdv0.2.11): keeping the row's own timestamp means the expire sweep can quarantine an old record before it is read back, and `get_all` hides a quarantined row. The read-back now looks a missing row up in the quarantined listing before calling it missing and reports it as quarantined, restorable with `nx memory restore <id>`, still comparing its fields. A rerun carries a record an earlier pointer listed that the read no longer lists: `state: quarantined` when it is in the quarantined listing (whatever its archive, its row is restorable), `state: absent` when it is neither live nor quarantined and its archive reads back whole (the reaped-record rule of nexus-1gdv0.2.6), and stops naming it when that archive is gone. A run whose read lists nothing still refreshes an earlier pointer. The read cost per run is stated in Step 3: one `get_all` before and one after the writes, one quarantined listing and one pointer read, none per record. |
+| 2026-11-19 | Gate finding S6, second half (nexus-1gdv0.2.4): `nx memory restore` makes a row permanent again (`ttl` NULL) and clears the rollup mark, so a restored gate record looks exactly like one never given a TTL, and a rerun would have given it a TTL again, undoing a person's decision. The rule is written in Step 3 (Rerun) and built, in the form the bead recommended (skip and name): each listed record in the pointer carries `ttl_set`, written false before the TTL writes and true after them for each record a run gave a TTL (the pointer is written a second time for that), so a rerun that finds a listed record with `ttl_set` and no TTL leaves it alone, prints `restored, left alone: <title>` and keeps it marked `restored`. A record the earlier pointer lists unmarked, whose write stopped part way, stays a candidate, so a partial write is not mistaken for a restore. The Consequences bullet now says Step 4's census flags a restored record again and why that is left as the reminder. |

@@ -46,6 +46,7 @@ class Result:
     ttl_written: list[str] = field(default_factory=list)
     ttl_skipped: list[str] = field(default_factory=list)
     quarantined: list[str] = field(default_factory=list)
+    restored: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
 
 
@@ -133,7 +134,7 @@ def quarantine_lookup(mem: Any, project: str) -> Callable[[], dict[str, dict[str
 
 # ── check 2: titles resolve ──────────────────────────────────────────────────────
 
-def merge_previous(t3: Any, scope: gr.Scope, sel: gr.Selection,
+def merge_previous(t3: Any, prev: gr.Pointer | None, sel: gr.Selection,
                    quarantined: Callable[[], dict[str, dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[str]]:
     """``(carried, unresolvable)``: the earlier pointer's records this run's read no longer lists.
 
@@ -141,7 +142,6 @@ def merge_previous(t3: Any, scope: gr.Scope, sel: gr.Selection,
     not lost, whatever its archive). One that is neither live nor quarantined (the reap deleted it) is carried marked
     ``state: absent`` while its archive reads back whole; one whose archive does not cannot be resolved, and the run
     stops naming it."""
-    prev = gr.read_pointer(t3, gr.pointer_title(scope.rdr, scope.phase))
     if prev is None:
         return [], []
     live = {e["title"] for e in sel.listed}
@@ -177,6 +177,43 @@ def would_expire(row: dict[str, Any], *, now: datetime, ttl_days: int = TTL_DAYS
         return False
     age_days = int((now - stamp).total_seconds()) / 86400.0
     return age_days > effective_ttl_days(int(row.get("access_count") or 0), ttl_days)
+
+
+def classify(sel: gr.Selection, prev: gr.Pointer | None, by_title: dict[str, dict[str, Any]],
+             res: Result) -> list[dict[str, Any]]:
+    """The records to give a TTL, and the ``ttl_set`` mark of every listed record.
+
+    A record that has no TTL is a candidate, unless the earlier pointer says a run already gave it one
+    (``ttl_set``): then a person restored it (``nx memory restore`` clears the TTL), the rerun leaves it alone,
+    names it and keeps it marked ``restored``, so it is not given a TTL again and the next rerun skips it too. A
+    record the earlier pointer listed without that mark, whose write stopped part way, is a candidate. A record that
+    has a TTL already is skipped, and counts as ours when the earlier pointer listed it."""
+    was = {r["title"]: r for r in (prev.listed if prev else [])}
+    candidates: list[dict[str, Any]] = []
+    for e in sel.listed:
+        before = was.get(e["title"])
+        if by_title[e["title"]].get("ttl") is not None:
+            e["ttl_set"] = before is not None
+            res.ttl_skipped.append(e["title"])
+        elif before is not None and before.get("ttl_set"):
+            e["ttl_set"], e["restored"] = True, True
+            res.restored.append(e["title"])
+        else:
+            e["ttl_set"] = False
+            candidates.append(e)
+    return candidates
+
+
+def write_verified_pointer(t3: Any, project: str, scope: gr.Scope, sel: gr.Selection, accept_open: tuple[str, ...],
+                           res: Result) -> str:
+    """Write the pointer and read it back from T3; it must list the same records. Returns its text."""
+    text, res.pointer_parts = gr.render_pointer(scope, project, sel, accepted_open=accept_open, carried=res.carried)
+    res.stale = gr.write_pointer(t3, scope, text, res.pointer_parts)
+    back = gr.read_pointer(t3, res.pointer_title)
+    want = {(e["project"], e["title"]) for e in [*sel.listed, *res.carried]}
+    if back is None or {(e["project"], e["title"]) for e in back.listed} != want:
+        raise gr.GateRollupError(f"the pointer {res.pointer_title!r} did not read back from T3 with the same list")
+    return text
 
 
 # ── the TTL write ────────────────────────────────────────────────────────────────
@@ -279,7 +316,8 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
 
     t3 = t3_factory()
     quarantined = quarantine_lookup(mem, project)
-    res.carried, bad = merge_previous(t3, scope, sel, quarantined)
+    prev = gr.read_pointer(t3, res.pointer_title)
+    res.carried, bad = merge_previous(t3, prev, sel, quarantined)
     if bad:
         raise gr.GateRollupError(
             f"the earlier pointer lists {', '.join(bad)}, which is neither in this read nor archived in T3 any more; "
@@ -288,24 +326,28 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
         res.lines.append("nothing to write: no pointer record")
         return res
     by_title = {r["title"]: r for r in rows}
-    candidates = [e for e in sel.listed if by_title[e["title"]].get("ttl") is None]
-    res.ttl_skipped = [e["title"] for e in sel.listed if by_title[e["title"]].get("ttl") is not None]
+    candidates = classify(sel, prev, by_title, res)
+    res.lines += [f"restored, left alone: {t}" for t in res.restored]
     if dry_run:
         res.lines += dry_run_lines(candidates, by_title, now)
         res.lines.append("dry run: archives, the pointer write and its read-back skipped; nothing written")
         return res
 
-    text, res.pointer_parts = gr.render_pointer(scope, project, sel, accepted_open=accept_open, carried=res.carried)
     res.archived, res.already_whole = gr.archive_records(t3, sel, scope)
-    res.stale = gr.write_pointer(t3, scope, text, res.pointer_parts)
-    back = gr.read_pointer(t3, res.pointer_title)
-    want = {(e["project"], e["title"]) for e in [*sel.listed, *res.carried]}
-    if back is None or {(e["project"], e["title"]) for e in back.listed} != want:
-        raise gr.GateRollupError(f"the pointer {res.pointer_title!r} did not read back from T3 with the same list")
+    text = write_verified_pointer(t3, project, scope, sel, accept_open, res)
     fresh = {r["title"]: r for r in mem.get_all(project)}        # one read, right before the writes
     sent = write_ttl(mem, project, candidates, fresh, res)
     res.ttl_written = list(sent)
     read_back(mem, project, sent, res, quarantined)
+    if sent:                    # the pointer now says which records a run gave a TTL, so a rerun can tell a restore
+        for e in candidates:
+            e["ttl_set"] = e["ttl_set"] or e["title"] in sent
+        try:
+            text = write_verified_pointer(t3, project, scope, sel, accept_open, res)
+        except gr.GateRollupError as exc:
+            raise gr.GateRollupError(
+                f"{len(sent)} record(s) now have the TTL but the pointer's ttl marks were not written ({exc}); "
+                "rerun to write them") from exc
     res.lines += [
         f"archived {res.archived} record(s), {res.already_whole} already whole",
         f"ttl: wrote {len(sent)} record(s) with ttl={TTL_DAYS}, {len(res.ttl_skipped)} already have a TTL",
