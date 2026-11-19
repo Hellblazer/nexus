@@ -216,6 +216,68 @@ class IdentityDataSelfServiceTest extends IdentityFenceHarness {
         }
     }
 
+    // ── refresh and fork need the identity's own live token (Sam 2026-11-19, option A; engine 0.1.198) ──
+
+    private Resp dataBind(String token, Seat s, String event, Map<String, Object> extra) {
+        Map<String, Object> body = new LinkedHashMap<>(s.evidence());
+        body.put("event", event);
+        body.put("expected_generation", s.generation());
+        body.putAll(extra);
+        return data(token, "/v1/identity/" + s.id() + "/bind", body);
+    }
+
+    @Test
+    void aDataRefreshWithTheIdentitysOwnLiveTokenMintsANewOne() {
+        Seat s = bindSeat("refresh-own", 261);
+        Resp r = dataBind(s.token(), s, "refresh", Map.of());
+        assertThat(r.status()).as(r.raw()).isEqualTo(200);
+        assertThat(r.text("identity_token")).isNotBlank();
+    }
+
+    @Test
+    void aDataRefreshWithNoTokenIsRefusedEvenNamingTheHolderProcess() {
+        Seat s = bindSeat("refresh-tokenless", 262);
+        Resp r = dataBind(null, s, "refresh", Map.of());          // s.evidence() names the holder's host, pid and start
+        assertThat(r.status()).as(r.raw()).isEqualTo(403);
+        assertThat(r.error()).isEqualTo("identity_token_required");
+    }
+
+    @Test
+    void aDataRefreshWithAnotherIdentitysTokenIsRefused() {
+        Seat victim = bindSeat("refresh-victim", 263);
+        Seat other = bindSeat("refresh-other", 264);
+        Resp r = dataBind(other.token(), victim, "refresh", Map.of());
+        assertThat(r.status()).as(r.raw()).isEqualTo(403);
+        assertThat(r.error()).isEqualTo("not_owner");
+    }
+
+    @Test
+    void aDataRefreshWithASupersededTokenIsRefused() {
+        Seat first = bindSeat("refresh-superseded", 265);
+        Seat second = resumeInNewProcess(first, 266, true);
+        Resp r = data(first.token(), "/v1/identity/" + first.id() + "/bind",
+            new LinkedHashMap<>(Map.of("event", "refresh", "expected_generation", second.generation())));
+        assertThat(r.status()).as(r.raw()).isEqualTo(409);
+        assertThat(r.error()).isEqualTo("generation_superseded");
+    }
+
+    @Test
+    void aDataForkNeedsTheIdentitysOwnLiveTokenToo() {
+        Seat s = bindSeat("fork-guard", 267);
+        Map<String, Object> fork = Map.of("session_id", "sess-fork-" + s.pid(), "prior_session_id", s.sessionId());
+        Resp tokenless = dataBind(null, s, "fork", fork);
+        assertThat(tokenless.status()).as(tokenless.raw()).isEqualTo(403);
+        assertThat(tokenless.error()).isEqualTo("identity_token_required");
+        Resp own = dataBind(s.token(), s, "fork", fork);
+        assertThat(own.status()).as(own.raw()).isEqualTo(200);
+    }
+
+    @Test
+    void theTenantCredentialStillRefreshesWithoutAToken() {
+        Seat s = bindSeat("tenant-refresh", 268);
+        assertThat(seatEvent(s, "refresh").status()).as("the tenant credential is the trust boundary").isEqualTo(200);
+    }
+
     // ── what stays as it was ─────────────────────────────────────────────────
 
     @Test
