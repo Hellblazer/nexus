@@ -876,7 +876,7 @@ def _on_tmpfs_root(
         if mounts_text is None:
             return False
     return (
-        _mount_fstype(mounts_text, str(shm_dir)) == "tmpfs"
+        _mount_fstype(mounts_text, shm_dir.as_posix()) == "tmpfs"
         and Path(parent).is_relative_to(shm_dir)
     )
 

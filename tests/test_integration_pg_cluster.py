@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -114,7 +115,7 @@ class TestClusterConf:
         assert "wal_level" not in disk and "fsync = off" in disk
 
     def test_the_boot_and_the_integration_conf_share_one_fsync_constant(self) -> None:
-        src = Path(sub.__file__).read_text()
+        src = Path(sub.__file__).read_text(encoding="utf-8")
         assert "f.write(THROWAWAY_FSYNC_CONF)" in src
         assert src.count("full_page_writes = off") == 1
 
@@ -642,6 +643,10 @@ class TestSweepOwnerRecordTrust:
         assert (precious / "keep").exists() and link.is_symlink() and rec.exists()
         assert result.errors == [str(rec)] and result.reaped == []
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="the sweep skips its file-owner check on Windows (os.name == 'nt'): st_uid is 0 there, not the service identity",
+    )
     def test_a_record_owned_by_another_uid_is_ignored_and_signals_nothing(
         self, tmp_path, monkeypatch, owned_children,
     ) -> None:
@@ -875,7 +880,7 @@ class TestSocketPathReserve:
             len(m)
             for p in _TESTS.rglob("*.py")
             if p.name != "test_integration_pg_cluster.py"
-            for m in re.findall(r'pg_data_tempdir\(\s*(?:prefix=)?"([^"]*)"', p.read_text())
+            for m in re.findall(r'pg_data_tempdir\(\s*(?:prefix=)?"([^"]*)"', p.read_text(encoding="utf-8"))
         )
         assert longest >= 26, "scan is vacuous"
         needed = 1 + longest + 8 + len("/.s.PGSQL.65535")
@@ -889,7 +894,9 @@ class TestSocketPathReserve:
 
     def test_a_root_at_the_new_limit_is_accepted(self) -> None:
         room = sub._SOCKET_PATH_MAX - sub._SOCKET_SUFFIX_RESERVE
-        root = "/" + "a" * (room - 1)
+        # The root is length-checked as the absolute path it becomes: on Windows that gains a drive ("C:").
+        drive = os.path.splitdrive(os.path.abspath("/"))[0]
+        root = drive + "/" + "a" * (room - 1 - len(drive))
         assert sub.choose_pg_root(env={"NX_TEST_PG_ROOT": root}) == Path(root)
 
     def test_the_actual_path_is_checked_when_the_dir_is_made(
@@ -913,9 +920,15 @@ class TestThrowawayClusterDefaultRoot:
     def _fakes(self, tmp_path, monkeypatch):
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        pg_ctl = bin_dir / "pg_ctl"
-        pg_ctl.write_text("#!/bin/sh\nexit 0\n")
-        pg_ctl.chmod(0o755)
+        if sys.platform == "win32":
+            # Windows launches an executable, not a shebang script, and finds "pg_ctl" as "pg_ctl.exe". The
+            # code under test runs this only to stop a cluster and never reads the result, so any stock
+            # System32 executable stands in; it need not exit 0.
+            shutil.copy(Path(os.environ["SystemRoot"]) / "System32" / "hostname.exe", bin_dir / "pg_ctl.exe")
+        else:
+            pg_ctl = bin_dir / "pg_ctl"
+            pg_ctl.write_text("#!/bin/sh\nexit 0\n")
+            pg_ctl.chmod(0o755)
         made: list[str] = []
 
         def _initdb(bin_d, *, prefix, parent_dir=None, username=None):
@@ -1006,7 +1019,7 @@ class TestEveryIntegrationClusterGetsTheConf:
     def test_every_provision_driven_file_applies_the_reloadable_conf(self) -> None:
         assert set(self._APPLY_CALLS) == self._PROVISION_DRIVEN
         for rel, want in self._APPLY_CALLS.items():
-            code = _code_only((_TESTS / rel).read_text())
+            code = _code_only((_TESTS / rel).read_text(encoding="utf-8"))
             assert code.count("apply_reloadable_throwaway_conf(bins.pg_ctl, config_dir)") == want, rel
 
     def test_every_caller_appends_the_conf(self) -> None:
@@ -1015,7 +1028,7 @@ class TestEveryIntegrationClusterGetsTheConf:
         for p in sorted(_TESTS.rglob("*.py")):
             if p.name in self._NOT_FIXTURES:
                 continue
-            code = _code_only(p.read_text())
+            code = _code_only(p.read_text(encoding="utf-8"))
             makes = code.count("pg_data_tempdir(")
             rel = str(p.relative_to(_TESTS))
             if makes and rel in self._PROVISION_DRIVEN:
@@ -1219,6 +1232,10 @@ class TestSweepRemovesAStaleOwnerRecordTmp:
         self._sweep(root)
         assert nested.exists() and sibling.exists()
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="os.utime(follow_symlinks=False) is unavailable on Windows, so the link cannot be given an old mtime",
+    )
     def test_a_symlink_with_the_tmp_name_is_neither_followed_nor_removed(self, tmp_path) -> None:
         root = tmp_path / "nexus-test-pg-1000"
         root.mkdir()
@@ -1252,6 +1269,12 @@ def fake_java(tmp_path) -> str:
     """A ``java`` that ignores its arguments and sleeps: an engine JVM stand-in. It is an interpreter script
     that never execs, so its command line is the same from spawn to exit (a shell script that execs ``sleep``
     changes it under a recorder)."""
+    if sys.platform == "win32":
+        # Windows cannot exec a shebang script; a batch file it can launch. ``ping`` is the sleep (its
+        # ``-n`` count is one echo a second); the batch process keeps one command line from spawn to exit.
+        java = tmp_path / "fake-java.cmd"
+        java.write_text("@echo off\r\nping -n 61 127.0.0.1 >nul\r\n")
+        return str(java)
     java = tmp_path / "fake-java"
     java.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
     java.chmod(0o755)
