@@ -433,6 +433,7 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     from nexus.auras.loaded_state import read_state, state_dir  # noqa: PLC0415
     from nexus.identity import token_header  # noqa: PLC0415
     from nexus.identity.token_file import TokenFile, write_token_file  # noqa: PLC0415
+    from nexus.mcp import identity_lease  # noqa: PLC0415
 
     (repo / ".nexus.yml").write_text("auras:\n  ci_develop_red: on\n", encoding="utf-8")
     claude, cfg = tmp_path / "claude", tmp_path / "cfg"
@@ -477,13 +478,16 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
     before = len(_REAL_RUNS)
+    listeners = list(identity_lease._LISTENERS)  # noqa: SLF001
     subs, loader, sender, calls = asyncio.run(scenario(["push-train"], title, sid))
+    first_loader = loader
     assert subs.aura_topics() == [owner_subspace] and loader.loaded_identity == "i7"
     assert _ran(before) == 1
     ack = f" Ack: post kind=ack sha={_RED_SHA} to {owner_subspace}."
     assert f"state: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n" in _entry(title), "me was i7"
     assert [text for text, _meta in sender.calls] == [channel_notice(aura, owner_subspace, "o1")]
     assert sorted(set(calls)) == ["GET /v1/group/push-train", "GET /v1/identity/i7/memberships"], "one read of each"
+    assert loader.flush_state(), "the state file is written on a worker thread"
     written = read_state(state_dir(cfg) / f"loaded-{parent}.1700.json")
     assert written is not None and written.identity == "i7" and written.auras["ci_develop_red"].loaded
 
@@ -494,6 +498,11 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     assert subs.aura_topics() == [] and _ran(before) == 0 and sender.calls == []
     assert loader.decisions["ci_develop_red"].reason == "not_a_member"
     assert "GET /v1/group/push-train" not in calls, "a non-member reads no group"
+    assert len(identity_lease._LISTENERS) == len(listeners) + 2, "each start listens to the lease"  # noqa: SLF001
+    loader.close()
+    first_loader.close()
+    loader.close()                                                  # twice is harmless
+    assert identity_lease._LISTENERS == listeners, "close removes the loader's listener: none leaks per start"  # noqa: SLF001
 
 
 def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(repo: Path) -> None:

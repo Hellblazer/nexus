@@ -603,6 +603,100 @@ def test_a_server_that_loaded_bound_does_not_gate_again_on_a_change() -> None:
     assert h.membership_reads == ["identity-a"] and h.runtimes[0].extended == []
 
 
+def _off_the_loop() -> bool:
+    import asyncio  # noqa: PLC0415
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return True
+    return False
+
+
+def test_the_gate_reads_run_off_the_loop_and_the_subscription_on_it() -> None:
+    """nexus-igea9.7 round 1: a membership read and a group read are blocking HTTP (up to a timeout each); on the
+    waiter's loop they would stall every channel delivery. on_loop does the reads on a worker thread and commits on the loop."""
+    import asyncio  # noqa: PLC0415
+
+    from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+    from nexus.auras.session import AuraLoader, on_loop  # noqa: PLC0415
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    seen: dict[str, bool] = {}
+
+    async def go():
+        subs = SubscriptionSet(session_id=_SID)
+        committed: list[bool] = []
+
+        def memberships(_who):
+            seen["memberships"] = _off_the_loop()
+            return ["push-train"]
+
+        def read_group(name):
+            seen["group"] = _off_the_loop()
+            return GroupRecord(name)
+
+        def make(loaded):
+            committed.append(not _off_the_loop())
+            return loaded
+
+        loader = AuraLoader(
+            _SID, subs, discover=lambda: auras_mod_parse(_GATED, "gated"), is_on=lambda _n: True,
+            entry=lambda _sid: ("tamsin", 100), registered_owner=lambda: 100, make_runtime=make, attach=lambda _r: None,
+            identity=lambda: "identity-a", memberships=memberships, read_group=read_group,
+        )
+        on_loop(loader, asyncio.get_running_loop())("tamsin")
+        for _ in range(500):
+            if loader.loaded and committed:
+                break
+            await asyncio.sleep(0.01)
+        return loader, subs, committed
+
+    loader, subs, committed = asyncio.run(go())
+    assert seen == {"memberships": True, "group": True}, "the reads ran on a worker thread"
+    assert committed == [True] and subs.aura_topics() == ["board/ci/nexus-develop--owner"], "the load itself committed on the loop"
+    assert loader.decisions["gated"].loaded
+
+
+def test_the_late_gate_after_a_first_bind_also_reads_off_the_loop() -> None:
+    import asyncio  # noqa: PLC0415
+
+    h = None
+
+    async def go():
+        nonlocal h
+        h = _LateBind(auras=auras_mod_parse(_GATED, "gated"))
+        reads: list[bool] = []
+        original = h.loader._memberships  # noqa: SLF001
+
+        def watching(who):
+            reads.append(_off_the_loop())
+            return original(who)
+
+        h.loader._memberships = watching  # noqa: SLF001
+        h.loader.on_resolve("tamsin")
+        await h.loader.note_identity_async("identity-a")
+        return reads
+
+    assert asyncio.run(go()) == [True]
+    assert h is not None and h.loader.decisions["gated"].loaded
+
+
+def test_the_state_sink_writes_on_one_worker_thread_in_order(tmp_path) -> None:
+    import threading  # noqa: PLC0415
+
+    from nexus.auras.session import threaded_sink  # noqa: PLC0415
+
+    seen: list[tuple[int, str, str]] = []
+    sink = threaded_sink(lambda pid, state: seen.append((pid, state, threading.current_thread().name)))
+    sink(1, "a")  # type: ignore[arg-type]
+    sink(1, "b")  # type: ignore[arg-type]
+    assert sink.wait_idle(10)
+    assert [s for _p, s, _t in seen] == ["a", "b"]
+    assert {t for _p, _s, t in seen} != {threading.current_thread().name}, "not the caller's thread"
+    assert len({t for _p, _s, t in seen}) == 1, "one worker keeps the writes in order"
+
+
 def test_an_unbound_server_loads_no_group_gated_aura_and_says_why() -> None:
     plain = auras_mod_parse(minimal("plain"), "plain")
     h = _GatedHarness(identity=None, auras=[*plain, *auras_mod_parse(_GATED, "gated")])
