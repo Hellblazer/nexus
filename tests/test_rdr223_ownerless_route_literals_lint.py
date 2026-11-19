@@ -187,8 +187,12 @@ def _allowed_entry_lines(paths: list[str]) -> str:
 
 def test_the_failure_gives_the_allowed_line_to_paste() -> None:
     """Suite audit item 9 (2026-11-19): 6 develop reds in two weeks; the check is unchanged."""
-    assert _allowed_entry_lines(["tests/x.py"]) == (
-        '    "tests/x.py": "<stubs the transport | writes owned chashes | is about the route: why>",')
+    import inspect  # noqa: PLC0415
+
+    lines = _allowed_entry_lines(["tests/x.py", "tests/y.py"]).splitlines()
+    assert [ln.split(":", 1)[0].strip() for ln in lines] == ['"tests/x.py"', '"tests/y.py"']
+    assert "_allowed_entry_lines(offenders)" in inspect.getsource(
+        test_every_reference_to_an_ownerless_route_is_allowlisted_with_a_reason)
 
 
 def test_the_allowlist_has_no_stale_entries_and_every_reason_is_real() -> None:

@@ -179,6 +179,9 @@ def test_the_mode_census_runs_in_a_lint_run_over_the_full_collection(
     if len(full_collection) < _FULL_CORPUS_FLOOR:
         pytest.skip(f"collected {len(full_collection)} items (path-scoped run); the census needs the whole tests/ tree")
     scope = _default_selection(full_collection)
+    assert len(scope) >= _FULL_CORPUS_FLOOR // 2, (
+        f"non-vacuity: the default selection kept {len(scope)} of {len(full_collection)} collected items"
+    )
     offenders = _scan_offenders(scope)
     if offenders:
         pytest.fail(_census_failure(offenders))

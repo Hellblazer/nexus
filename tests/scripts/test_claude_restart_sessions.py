@@ -3296,4 +3296,3 @@ def test_the_revive_window_keeps_a_shell_when_claude_exits_on_a_real_tmux(crs, m
     time.sleep(1.5)  # the stand-in has exited by now
     assert tm.panes().get(pane) == "0", "the window closed with claude"
     assert tm.run("display-message", "-p", "-t", pane, "#{pane_current_command}") in {"sh", "bash", "zsh"}
-

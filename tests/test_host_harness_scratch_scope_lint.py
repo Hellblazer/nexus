@@ -617,3 +617,7 @@ def test_the_guard_messages_give_the_entry_to_add_and_the_count_to_set() -> None
     fix = _ledger_fix_lines({"a.sh": 3, "b.sh": 1}, {"a.sh": 2, "c.sh": 1, "b.sh": 1})
     assert "set 'a.sh' to count 3 (was 2) after reviewing the new site" in fix
     assert "delete the 'c.sh' entry: no site is left" in fix and "b.sh" not in fix
+    import inspect  # noqa: PLC0415
+
+    assert "_allowlist_entry_lines(offenders)" in inspect.getsource(test_every_host_harness_site_is_allowlisted)
+    assert "_ledger_fix_lines(live_counts, ledger_counts)" in inspect.getsource(test_ledger_matches_live_count)

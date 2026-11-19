@@ -113,7 +113,12 @@ def test_a_legacy_lease_whose_endpoint_cmdline_really_reads_empty_does_not_signa
     )
     try:
         assert bystander.stdout is not None
+        import select  # noqa: PLC0415 - Linux-only test
+
+        readable, _, _ = select.select([bystander.stdout], [], [], 30)
+        assert readable, "the bystander said nothing within 30 s"
         ready = bystander.stdout.readline().strip()
+        # Loud, not a skip: a Linux kernel lets a process blank its own argv, so a host that cannot is a finding.
         assert ready == "blank", f"the bystander could not blank its own command line: {ready!r}"
         assert sr.process_command(bystander.pid) == "", "the product's /proc read must see the empty command line"
         registry = _registry(tmp_path)

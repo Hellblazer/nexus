@@ -973,6 +973,8 @@ _NOT_NEXUS_TEST_CODE = (
     "the child is a shell or python tool that never imports tests.* nor runs tests/conftest.py, "
     "the only readers of NX_TEST_TMP_ORIG"
 )
+
+
 def _unexplained_tmpdir_message(unexplained: dict[str, int]) -> str:
     """The failure for TMPDIR overrides that neither use the helper nor carry an exempt entry: where each one
     is, the fix (the helper), and, only when the child cannot run nexus test code, the exact ledger line."""
@@ -1805,3 +1807,7 @@ def test_the_unexplained_tmpdir_override_message_names_the_fix_and_the_exact_exe
     assert '    "tests/x/test_y.py::_run": "<why the child needs no ORIG_ENV drop>",' in msg
     assert "tests/x/test_y.py:42" in msg
     assert msg.index("child_env_with_tmpdir(os.environ") < msg.index("add to _TMPDIR_OVERRIDE_EXEMPT")
+    import inspect  # noqa: PLC0415
+
+    guard = TestChildEnvWithTmpdir.test_every_tmpdir_override_in_the_tests_goes_through_the_helper_or_is_exempt_with_a_reason
+    assert "_unexplained_tmpdir_message(unexplained)" in inspect.getsource(guard)

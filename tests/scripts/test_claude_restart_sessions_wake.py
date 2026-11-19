@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tests._module_seam import setattr_in
+from tests._restart_fake_clock import fake_clock
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
 P = "plugin:conexus@nexus-plugins"
@@ -35,7 +36,7 @@ def crs(tmp_path, monkeypatch):
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     monkeypatch.setattr(module, "LOG", tmp_path / "restart.log")
-    setattr_in(monkeypatch, module, "time.sleep", lambda _s: None)
+    fake_clock(module, monkeypatch)
     # The exit-and-resume path under test here; /restart has its own tests (test_claude_restart_sessions_slash.py).
     monkeypatch.setattr(module, "NO_SLASH", True)
     # RDR-253 Step 4: restart() makes or keeps a seat through `nx identity`, which reaches the engine; the seat
