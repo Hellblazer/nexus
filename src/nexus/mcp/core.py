@@ -8277,13 +8277,13 @@ def memory_search(
     Returns a paged, human-readable list of matching entries with a
     200-char content snippet each; advance with `offset`.
     """
+    if limit < 1:
+        return f"Error: limit must be 1 or more, got {limit}."
     try:
         with _t2_ctx() as db:
-            results = db.search(query, project=project or None)
-        if not results:
+            page, total = db.search_page(query, project=project or None, limit=limit, offset=offset)
+        if not total:
             return "No results."
-        total = len(results)
-        page = results[offset:offset + limit]
         if not page:
             return f"No results at offset {offset} (total {total})."
         lines: list[str] = []

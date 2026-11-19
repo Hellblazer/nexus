@@ -598,6 +598,53 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return [_normalize(r) for r in resp]
         return []
 
+    def search_page(
+        self,
+        query: str,
+        project: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        access: str = "track",
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """One page of :meth:`search`: ``(rows, matching_total)`` (RDR-209 Phase 0b).
+
+        The engine reads and stamps only the page it returns and answers ``{rows, matching_total}``,
+        an empty page past the end still carrying the total. An engine older than the page ignores
+        ``limit`` and answers every match, already stamped (RDR-209 A6); the page is then cut here
+        and the list's length is the total. A stopword-only query raises ``ValueError`` as
+        :meth:`search` does.
+
+        Raises:
+            ValueError: ``limit`` below 1 or ``offset`` below 0, before any request; or the query
+                has no searchable terms.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit}")
+        if offset < 0:
+            raise ValueError(f"offset must be 0 or more, got {offset}")
+        payload: dict[str, Any] = {"query": query, "access": access, "limit": limit, "offset": offset}
+        if project:
+            payload["project"] = project
+        resp = self._raise_degenerate_query_as_value_error(
+            lambda: self._post(
+                "/v1/memory/search",
+                payload,
+                mutates=False,
+                timeout=timeout,
+                retry_read_timeout=retry_read_timeout,
+            ),
+            query,
+        )
+        if isinstance(resp, dict):
+            return [_normalize(r) for r in resp.get("rows") or []], int(resp.get("matching_total") or 0)
+        if isinstance(resp, list):
+            every = [_normalize(r) for r in resp]
+            return every[offset:offset + limit], len(every)
+        return [], 0
+
     def list_entries(
         self,
         project: str | None = None,

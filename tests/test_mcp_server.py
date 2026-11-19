@@ -2161,6 +2161,36 @@ def test_memory_search_pagination_offset_beyond_end(t2_path):
     assert "No results at offset 100" in memory_search(query="offsets", limit=10, offset=100)
 
 
+@pytest.mark.parametrize("limit", [0, -3])
+def test_memory_search_with_a_limit_below_one_is_a_usage_error_and_sends_nothing(monkeypatch, limit):
+    """RDR-209 Phase 0b (nexus-1gdv0.1.5): the page goes to the engine, so a page of no rows is refused
+    before the store is opened."""
+    def no_store():
+        raise AssertionError("memory_search opened T2 for a limit below 1")
+
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", no_store)
+    out = memory_search(query="anything", limit=limit)
+    assert "limit" in out.lower() and str(limit) in out
+    assert "opened T2" not in out
+
+
+@pytest.mark.t2_tenant
+def test_memory_search_sends_its_page_to_the_engine(t2_path, monkeypatch):
+    for i in range(4):
+        memory_put(content=f"saltmarsh finding {i}", project="testproj", title=f"salt{i}.md")
+    asked: list[tuple[int, int]] = []
+    real = T2Database.search_page
+
+    def spy(self, query, project=None, limit=20, offset=0, access="track"):
+        asked.append((limit, offset))
+        return real(self, query, project=project, limit=limit, offset=offset, access=access)
+
+    monkeypatch.setattr(T2Database, "search_page", spy)
+    out = memory_search(query="saltmarsh", limit=3, offset=1)
+    assert asked == [(3, 1)]
+    assert "showing 2-4 of 4 (end)" in out
+
+
 # ── Result size cap (nexus-2xjge) ───────────────────────────────────────────
 #
 # None of these tools clamp a caller-supplied ``limit`` (nor, for

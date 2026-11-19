@@ -533,6 +533,16 @@ class T2Database:
     ) -> list[dict[str, Any]]:
         return self.memory.search(query, project=project, access=access)
 
+    def search_page(
+        self,
+        query: str,
+        project: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        access: AccessPolicy = "track",
+    ) -> tuple[list[dict[str, Any]], int]:
+        return self.memory.search_page(query, project=project, limit=limit, offset=offset, access=access)
+
     def list_entries(
         self,
         project: str | None = None,

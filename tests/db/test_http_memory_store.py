@@ -648,6 +648,19 @@ class TestSearch:
         results = store.search("zzzznotfound", project="empty-proj")
         assert results == []
 
+    def test_search_page_against_an_engine_that_answers_a_bare_list(self, store: HttpMemoryStore) -> None:
+        """An engine older than RDR-209's page ignores limit and answers every match (and has already
+        stamped them all, RDR A6). The client cuts the same page and counts the list as the total."""
+        for i in range(5):
+            store.put("oldeng", f"o{i}", f"marramgrass entry {i}", ttl=30)
+        everything = store.search("marramgrass", project="oldeng")
+
+        rows, total = store.search_page("marramgrass", project="oldeng", limit=2, offset=1)
+
+        assert total == len(everything) == 5
+        assert [r["title"] for r in rows] == [r["title"] for r in everything[1:3]]
+        assert store.search_page("marramgrass", project="oldeng", limit=2, offset=9) == ([], 5)
+
     def test_search_glob(self, store: HttpMemoryStore) -> None:
         store.put("glob-prod", "g1", "quuxzorp globbing content", ttl=30)
         results = store.search_glob("quuxzorp", "glob-*")
