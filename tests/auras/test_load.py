@@ -582,10 +582,52 @@ def test_group_liveness_follows_ended_at_ends_and_a_missing_record() -> None:
     assert group_is_live(GroupRecord("g", ends="garbage"), now), "an ends that is no instant never ends the group"
 
 
-def test_this_build_has_no_default_group_reader_until_nexus_groups_plugs_in() -> None:
-    from nexus.auras.load_gate import default_group_reader  # noqa: PLC0415
+class _FakeGroups:
+    """Stands in for nexus.groups.GroupsClient: ``record`` answers from a table or raises what it is told to."""
 
-    assert default_group_reader() is None
+    def __init__(self, records: dict, fail: Exception | None = None) -> None:
+        self.records, self.fail, self.reads = records, fail, []
+
+    def record(self, name: str):
+        self.reads.append(name)
+        if self.fail is not None:
+            raise self.fail
+        return self.records.get(name)
+
+
+def test_the_group_reader_maps_the_engine_record_and_a_missing_name() -> None:
+    from nexus.auras.load_gate import GroupRecord as GateRecord  # noqa: PLC0415
+    from nexus.auras.load_gate import group_reader_from  # noqa: PLC0415
+    from nexus.groups import GroupRecord as EngineRecord  # noqa: PLC0415
+
+    engine = EngineRecord(name="push-train", leader="i1", purpose=None, requested_by=None, formed_at="t",
+                          ends=None, ended_at=None, ack_deadline=20, ack_deadline_by_topic={},
+                          serves=("nexus-develop",), live=True)
+    read = group_reader_from(_FakeGroups({"push-train": engine}))
+    assert read("push-train") == GateRecord("push-train", serves=("nexus-develop",), leader="i1")
+    assert read("gone") is None
+
+
+def test_a_group_read_that_fails_is_unreadable_never_no_record() -> None:
+    from nexus.auras.load_gate import GroupUnreadable, group_reader_from  # noqa: PLC0415
+    from nexus.groups import GroupsError, GroupsUnavailableError  # noqa: PLC0415
+
+    for exc in (GroupsError(500, "internal", "boom"), GroupsUnavailableError("down")):
+        with pytest.raises(GroupUnreadable):
+            group_reader_from(_FakeGroups({}, fail=exc))("push-train")
+
+
+def test_the_default_reader_with_no_engine_endpoint_is_unreadable_not_a_failed_start(monkeypatch) -> None:
+    from nexus import groups  # noqa: PLC0415
+    from nexus.auras.load_gate import GroupUnreadable, default_group_reader  # noqa: PLC0415
+
+    def _none(**_kw):
+        raise groups.GroupsUnavailableError("no endpoint")
+
+    monkeypatch.setattr(groups.GroupsClient, "from_config", staticmethod(_none))
+    read = default_group_reader()
+    with pytest.raises(GroupUnreadable):
+        read("push-train")
 
 
 def test_a_loader_built_without_a_group_reader_refuses_the_gated_aura_as_unreadable() -> None:

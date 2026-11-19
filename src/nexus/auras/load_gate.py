@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 
 class GroupUnreadable(Exception):
@@ -40,11 +41,43 @@ class GroupRecord:
 GroupReader = Callable[[str], GroupRecord | None]
 
 
-def default_group_reader() -> GroupReader | None:
-    """The group read the MCP server and ``nx aura check`` use, or ``None`` when this build has no group client.
-    ``nexus.groups`` (RDR-252 Step 4 part B, over ``/v1/group``) plugs in here; until it does, a group-gated aura
-    loads in no session (``group_unreadable``) and ``nx aura check`` reports the serving-group check Skipped."""
-    return None
+def group_reader_from(client: Any) -> GroupReader:
+    """A :data:`GroupReader` over a ``nexus.groups.GroupsClient``: its record mapped to this module's
+    :class:`GroupRecord`, ``None`` for a name with no record, and every other failure raised as
+    :class:`GroupUnreadable`, never read as "no record"."""
+    from nexus.groups import GroupsError, GroupsUnavailableError, read_group  # noqa: PLC0415 -- deferred: auras must not import the HTTP client at module load
+
+    def read(name: str) -> GroupRecord | None:
+        try:
+            record = read_group(client, name)
+        except (GroupsError, GroupsUnavailableError) as exc:
+            raise GroupUnreadable(f"group {name} could not be read") from exc
+        if record is None:
+            return None
+        return GroupRecord(name=record.name, serves=tuple(record.serves), ended_at=record.ended_at,
+                           ends=record.ends, leader=record.leader)
+
+    return read
+
+
+def default_group_reader() -> GroupReader:
+    """The group read the MCP server and ``nx aura check`` use: ``nexus.groups`` over ``/v1/group``, with the
+    endpoint and credential ``nx`` resolves. The client is built on the first read, so an engine that is down at
+    start makes each read raise :class:`GroupUnreadable` (a gated aura does not load, ``nx aura check`` reports
+    Skipped) instead of failing the caller's start."""
+    client: list[Any] = []
+
+    def read(name: str) -> GroupRecord | None:
+        if not client:
+            from nexus.groups import GroupsClient, GroupsUnavailableError  # noqa: PLC0415 -- deferred: built on first read
+
+            try:
+                client.append(GroupsClient.from_config())
+            except GroupsUnavailableError as exc:
+                raise GroupUnreadable("no engine endpoint or credential resolves for the group read") from exc
+        return group_reader_from(client[0])(name)
+
+    return read
 
 
 def _instant(text: str) -> datetime | None:
