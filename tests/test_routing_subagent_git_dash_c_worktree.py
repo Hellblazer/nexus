@@ -183,6 +183,17 @@ def test_anything_beyond_one_literal_invocation_falls_through(primary, worktree)
     wt, p = str(worktree), str(primary)
     cmds = [
         f"git -C {wt} commit -m x && git commit -m y",
+        f"git -C {wt} commit -m x && touch /tmp/y",
+        f"git -C {wt} commit -m x; touch /tmp/y",
+        f"git -C {wt} commit -m x || touch /tmp/y",
+        f"git -C {wt} commit -m x\ntouch /tmp/y",
+        f'git -C {wt} commit -m "{D}(touch /tmp/y)"',
+        f"git -C {wt} commit -m {BT}touch /tmp/y{BT}",
+        f"git -C {wt} rebase --ex 'x=g; y=it; {D}x{D}y -C {p} reset --hard' abc1234",
+        f"git -C {wt} switch --ignore-other-worktrees develop",
+        f"git -C {wt} branch -u origin/develop",
+        f"git -C {wt} branch --set-upstream-to=origin/develop",
+        f"git -C {wt} stash clear",
         f"git -C {wt} commit -m x; git checkout -- f.txt",
         f"git -C {wt} commit -m x | git reset --hard",
         f"git -C {wt} commit -m x\ngit -C {p} reset --hard",
