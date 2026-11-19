@@ -280,6 +280,14 @@ red control in Leg A's shape from 7.72.1 (engine 0.1.149, before the vectors-030
 walk) exits 1 with `boot-over-ceiling`: 846,283,216 bytes over migrate, 12.6
 times the bound (marginalia, on nexus-f3yqd.1).
 
+### 3i. PRE-TAG: cloud leg on the client candidate (BLOCKING; the cloud test tenant only)
+
+Before the tag, run `tests/e2e/cloud-leg.sh --core-only --wheel <candidate wheel> --window <id>` inside an announced
+cloud window, against the cloud test tenant only (release skill Step 6f has the full text). It drives the core write
+paths through the public edge and compares them with a local engine; a cloud-only 4xx or 5xx is red and blocks the tag.
+`--core-only` because this cut's new routes answer 404 at the edge until the deploy; after Step 6's deploy relay
+confirms the tag is live, rerun it without `--core-only` so the ledger's `## Unshipped` routes are driven too.
+
 ### 4. Push the tag (Sam, or the AI on Sam's go for the release)
 
 The releaser is **Sam**. His go for a named release ("7.95.0 let's get that out

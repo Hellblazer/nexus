@@ -681,6 +681,26 @@ GATE; a custom `--prepare-cmd` bypasses the cache.
 The plugin-only fast lane does not run it: the wheel and engine that lane ships are the
 base tag's, apart from the version, so there is nothing new to rehearse.
 
+### 6f. Cloud leg on the release candidate (BLOCKING; the cloud test tenant only)
+
+Sam, 2026-11-19: 8.5.0 shipped two faults only cloud mode showed (the CDN stripped `X-Nexus-Identity-Token`, so
+identity-line board writes answered 403; the laptop's data credential could not create seats), and every gate ran
+against a local engine. Run `tests/e2e/cloud-leg.sh` on the release candidate before the tag, inside an announced
+cloud window, against the cloud test tenant only:
+
+```bash
+uv build --wheel -o dist-candidate/
+tests/e2e/cloud-leg.sh --wheel dist-candidate/conexus-X.Y.Z-py3-none-any.whl --window <window-id>
+```
+
+It installs the wheel into a scratch HOME, drives the core write paths (identity-line T2 write, seat and identity,
+mailbox send and claim, T1, T3 round trip) and each wire-ledger `## Unshipped` route (`docs/wire-contract-pending.md`)
+through the real client, once on a local engine and once through the public edge, and FAILS on any 4xx or 5xx the
+cloud run returns that the local run does not. A red blocks the tag. It refuses without the window marker
+(`~/.config/nexus-cloud-windows/<id>.window`, written by the releaser after announcing the window), on any credential
+but the `release-test` tenant's (1Password item `nexus cloud test tenant (release-test)`, read with `op-auto`),
+and on a non-https edge. `--local-vs-local` proves the plumbing with no cloud. Run no other cloud walk outside a window.
+
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
 **When this release pins a NEW engine tag, open the PR only after that tag is
