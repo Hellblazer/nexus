@@ -156,7 +156,12 @@ def rename_cmd(ctx: click.Context, old: str, new: str) -> None:
 @click.argument("name")
 @click.pass_context
 def promote_cmd(ctx: click.Context, identity: str, name: str) -> None:
-    """Make the ephemeral identity IDENTITY a seat named NAME (an id-shaped name, i<digits>, is refused)."""
+    """Make the ephemeral identity IDENTITY a seat named NAME (an id-shaped name, i<digits>, is refused).
+
+    Promote also retitles the identity's threads board entry to NAME, but only when run inside the session that owns
+    the entry: the engine lets only that session write it. Run anywhere else (a shell, the restart script), the
+    promote still succeeds and the entry keeps its old title; readers still find it by its identity: line.
+    """
     from nexus.identity import ops  # noqa: PLC0415
 
     _run(ctx, lambda env: ops.promote(env, identity, name))

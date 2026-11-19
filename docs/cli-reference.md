@@ -5987,7 +5987,7 @@ Rename the seat `OLD` (a name or an id) to `NEW`. The old name keeps resolving f
 nx identity promote IDENTITY NAME
 ```
 
-Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch and board entry stay. `NAME` may not look like an id (`i<digits>`).
+Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch and board entry stay. `NAME` may not look like an id (`i<digits>`). The board entry is retitled to `NAME` only when promote runs inside the session that owns it, since the engine lets only that session write the entry; run anywhere else (a shell, the restart script), the promote still succeeds, the entry keeps its old title, and readers still find it by its `identity:` line. An engine-side retitle is planned for a later engine release.
 
 ### nx identity may-stop
 
