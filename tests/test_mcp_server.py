@@ -2174,6 +2174,16 @@ def test_memory_search_with_a_limit_below_one_is_a_usage_error_and_sends_nothing
     assert "opened T2" not in out
 
 
+def test_memory_search_with_a_negative_offset_is_a_usage_error_and_sends_nothing(monkeypatch):
+    def no_store():
+        raise AssertionError("memory_search opened T2 for a negative offset")
+
+    monkeypatch.setattr("nexus.mcp.core._t2_ctx", no_store)
+    out = memory_search(query="anything", limit=5, offset=-1)
+    assert "offset" in out and "-1" in out
+    assert "opened T2" not in out
+
+
 @pytest.mark.t2_tenant
 def test_memory_search_sends_its_page_to_the_engine(t2_path, monkeypatch):
     for i in range(4):

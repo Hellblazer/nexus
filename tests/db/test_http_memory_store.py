@@ -661,6 +661,36 @@ class TestSearch:
         assert [r["title"] for r in rows] == [r["title"] for r in everything[1:3]]
         assert store.search_page("marramgrass", project="oldeng", limit=2, offset=9) == ([], 5)
 
+    def test_search_page_fallback_clamps_the_page_where_the_engine_does(self, monkeypatch) -> None:
+        """The new engine clamps a limit above 10,000 (as /v1/memory/list does); the old-engine
+        fallback cuts the same page, so the page size does not depend on the engine."""
+        bare = HttpMemoryStore.__new__(HttpMemoryStore)
+        rows = [{"id": i, "project": "p", "title": f"t{i}", "content": "c"} for i in range(10_005)]
+        monkeypatch.setattr(bare, "_post", lambda path, payload, **kw: rows)
+
+        page, total = bare.search_page("c", project="p", limit=20_000, offset=0)
+
+        assert total == 10_005
+        assert len(page) == 10_000
+
+    @pytest.mark.parametrize(("answer", "expected"), [
+        ({"rows": [{"id": 1, "project": "p", "title": "a", "content": "c"}], "matching_total": 7},
+         (["a"], 7)),
+        ({"rows": [], "matching_total": 7}, ([], 7)),
+        ({"rows": "not a list", "matching_total": 7}, ([], 0)),
+        ({"rows": [], "matching_total": "abc"}, ([], 0)),
+        ({"rows": [], "matching_total": True}, ([], 0)),
+        ("a string", ([], 0)),
+        (None, ([], 0)),
+    ])
+    def test_search_page_reads_each_answer_shape(self, monkeypatch, answer, expected) -> None:
+        bare = HttpMemoryStore.__new__(HttpMemoryStore)
+        monkeypatch.setattr(bare, "_post", lambda path, payload, **kw: answer)
+
+        rows, total = bare.search_page("c", project="p", limit=5, offset=0)
+
+        assert ([r["title"] for r in rows], total) == expected
+
     def test_search_glob(self, store: HttpMemoryStore) -> None:
         store.put("glob-prod", "g1", "quuxzorp globbing content", ttl=30)
         results = store.search_glob("quuxzorp", "glob-*")

@@ -8279,6 +8279,8 @@ def memory_search(
     """
     if limit < 1:
         return f"Error: limit must be 1 or more, got {limit}."
+    if offset < 0:
+        return f"Error: offset must be 0 or more, got {offset}."
     try:
         with _t2_ctx() as db:
             page, total = db.search_page(query, project=project or None, limit=limit, offset=offset)

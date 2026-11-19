@@ -87,3 +87,15 @@ def test_the_t2_database_passes_the_page_through(tmp_path):
         assert total == 3 and len(rows) == 2
     finally:
         db.close()
+
+
+def test_only_the_rows_on_the_page_are_stamped(store):
+    before = {r["title"]: r["access_count"] for r in store.search("quillwort", project=_PROJECT, access="silent")}
+
+    page, _ = store.search_page("quillwort", project=_PROJECT, limit=2, offset=2)
+
+    after = {r["title"]: r["access_count"] for r in store.search("quillwort", project=_PROJECT, access="silent")}
+    paged = {r["title"] for r in page}
+    assert len(paged) == 2
+    assert {t for t in after if after[t] == before[t] + 1} == paged
+    assert all(after[t] == before[t] for t in after if t not in paged)

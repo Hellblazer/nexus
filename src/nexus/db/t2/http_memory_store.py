@@ -70,6 +70,10 @@ _STOPWORDS: frozenset[str] = frozenset({
 #: All-pairs threshold: projects with ≤ this many entries get full-recall Jaccard.
 _ALL_PAIRS_MAX_ENTRIES = 1000
 
+#: The engine clamps a ``/v1/memory/search`` page at this many rows (as ``/v1/memory/list`` clamps its
+#: own, a7adca21b); :meth:`HttpMemoryStore.search_page`'s old-engine fallback cuts at the same size.
+SEARCH_PAGE_LIMIT_CEILING: int = 10_000
+
 
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
@@ -614,8 +618,11 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         The engine reads and stamps only the page it returns and answers ``{rows, matching_total}``,
         an empty page past the end still carrying the total. An engine older than the page ignores
         ``limit`` and answers every match, already stamped (RDR-209 A6); the page is then cut here
-        and the list's length is the total. A stopword-only query raises ``ValueError`` as
-        :meth:`search` does.
+        and the list's length is the total. The engine clamps ``limit`` at
+        :data:`SEARCH_PAGE_LIMIT_CEILING`, and the fallback cuts at the same ceiling, so the page size
+        does not depend on the engine. An answer of any other shape (a dict whose ``rows`` is not a
+        list or whose ``matching_total`` is not an integer included) reads as ``([], 0)``. A
+        stopword-only query raises ``ValueError`` as :meth:`search` does.
 
         Raises:
             ValueError: ``limit`` below 1 or ``offset`` below 0, before any request; or the query
@@ -639,10 +646,13 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             query,
         )
         if isinstance(resp, dict):
-            return [_normalize(r) for r in resp.get("rows") or []], int(resp.get("matching_total") or 0)
+            rows, total = resp.get("rows"), resp.get("matching_total")
+            if isinstance(rows, list) and isinstance(total, int) and not isinstance(total, bool):
+                return [_normalize(r) for r in rows], total
+            return [], 0
         if isinstance(resp, list):
             every = [_normalize(r) for r in resp]
-            return every[offset:offset + limit], len(every)
+            return every[offset:offset + min(limit, SEARCH_PAGE_LIMIT_CEILING)], len(every)
         return [], 0
 
     def list_entries(
