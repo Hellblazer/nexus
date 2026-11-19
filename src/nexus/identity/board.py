@@ -93,3 +93,53 @@ def binding_for_session(session_id: str, config_dir: Path | None = None) -> tupl
             ) else ""  # never an expired token
             best = (is_current, stamp, str(record.identity), fresh or "")
     return (best[2], best[3]) if best else ("", "")
+
+
+#: The title word of an ephemeral identity launched with no display name (RDR-253 Step 5, nexus-hczdo.1.8). The RDR
+#: titles an ephemeral's entry ``<display name> (i<n>)``; with no name the same shape keeps one pattern, so a reader
+#: (or a person) can always take the id off the end of a title.
+EPHEMERAL_TITLE_WORD = "ephemeral"
+BOARD_PROJECT = "threads"
+
+
+def board_title(*, identity: str, alias: str | None = None, display_name: str | None = None) -> str:
+    """The title a session gives its threads entry. A seat's is its live alias; an ephemeral identity (no alias) is
+    ``<display name> (i<n>)``, or ``ephemeral (i<n>)`` when the launch gave no display name. An identity id is never
+    an alias (alias names shaped ``i<digits>`` are refused), so no title here collides with a seat's."""
+    if alias:
+        return alias
+    return f"{(display_name or '').strip() or EPHEMERAL_TITLE_WORD} ({identity})"
+
+
+def retitle_entry(memory: Any, identity: str, title: str) -> str:
+    """Move *identity*'s threads entry to *title* with ``put_replacing`` (the new title and the old one's quarantine
+    in one engine transaction). Returns one line saying what happened, or ``""`` when no entry carries the line.
+
+    This is the client half of ``nx identity promote``: the engine's promote does not retitle (only ``rename``
+    does, in its own transaction, and a change there is an engine release). The write is fenced like any write to
+    the entry, so it lands only when the caller is the owning session; an operator's shell gets the engine's
+    refusal, which comes back as a line, never an exception: the identity is a seat by then and the entry is still
+    found by its ``identity:`` line whatever its title.
+    """
+    found = None
+    try:
+        for hit in memory.search(f"identity: {identity}", project=BOARD_PROJECT, access="silent")[:10]:
+            row = memory.get(project=BOARD_PROJECT, title=hit.get("title", ""))
+            if row and identity_of(str(row.get("content", ""))) == identity:
+                found = row
+                break
+        if found is None:
+            return ""
+        old = str(found.get("title", ""))
+        if old == title:
+            return ""
+        if memory.get(project=BOARD_PROJECT, title=title) is not None:
+            return f"board entry keeps its title {old!r}: an entry titled {title!r} already exists"
+        memory.put_replacing(BOARD_PROJECT, title, str(found.get("content", "")), old, tags=str(found.get("tags") or ""))
+    except Exception as exc:  # noqa: BLE001 -- the promote already happened; the entry is found by its identity: line
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        why = ("only the owning session may write its entry: run promote inside that session, or retitle it there"
+               if status in (401, 403) else f"{type(exc).__name__}: {exc}")
+        old = str((found or {}).get("title", "")) or "its old title"
+        return f"board entry keeps its title {old!r}: {why}"
+    return f"board entry retitled {old!r} to {title!r}"

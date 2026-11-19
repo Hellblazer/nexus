@@ -25,6 +25,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,6 +78,14 @@ def _real_command_name(pid: int) -> str:
     return _command_name_of(pid)
 
 
+@contextmanager
+def _real_board_memory():
+    from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deferred: CLI startup cost
+
+    with t2_handle() as db:
+        yield db.memory
+
+
 @dataclass
 class IdentityEnv:
     client: Any
@@ -88,6 +97,8 @@ class IdentityEnv:
     client_version: str | None = None
     #: the command name of a pid (``claude`` for a Claude process); "" when unknown. The real one reads the process table.
     command_name: Callable[[int], str] | None = None
+    #: opens a T2 memory store (a context manager) for the threads board; None skips the board (a test with none).
+    board_memory: Callable[[], AbstractContextManager[Any]] | None = None
 
     @property
     def host(self) -> str:
@@ -110,7 +121,7 @@ class IdentityEnv:
             client_version = None
         return cls(client=client, procs=Processes(), identity_dir=identity_dir(config.nexus_config_dir()),
                    environ=os.environ, caller=real_caller_facts, client_version=client_version,
-                   command_name=_real_command_name)
+                   command_name=_real_command_name, board_memory=_real_board_memory)
 
 
 # ── engine access ───────────────────────────────────────────────────────────
@@ -160,7 +171,18 @@ def _reserved(name: str) -> None:
 def promote(env: IdentityEnv, identity: str, name: str) -> list[str]:
     _reserved(name)
     view = _call(env.client.promote, identity, name)
-    return [f"{view['id']} is now the seat {name}"]
+    lines = [f"{view['id']} is now the seat {name}"]
+    if env.board_memory is not None:
+        from nexus.identity.board import retitle_entry  # noqa: PLC0415 — deferred: CLI startup cost
+
+        try:
+            with env.board_memory() as memory:
+                note = retitle_entry(memory, str(view["id"]), name)
+        except Exception as exc:  # noqa: BLE001 — the engine promoted: no T2 handle never undoes that
+            note = f"board entry not retitled: {type(exc).__name__}: {exc}"
+        if note:
+            lines.append(note)
+    return lines
 
 
 def rename(env: IdentityEnv, old: str, new: str) -> list[str]:
@@ -241,7 +263,11 @@ def show_lines(env: IdentityEnv, view: Mapping[str, Any]) -> list[str]:
         head += f", display name {view['display_name']}"
     if view.get("parent"):
         head += f", delegated by {view['parent']}"
+    from nexus.identity.board import board_title  # noqa: PLC0415 — deferred: CLI startup cost
+
+    title = board_title(identity=str(view["id"]), alias=view.get("name"), display_name=view.get("display_name"))
     lines = [head,
+             f"  board title {title}",
              f"  state {view.get('state')}, liveness {view.get('liveness')}, generation {view.get('generation')}, "
              f"lease {view.get('lease')}",
              f"  {_holder_line(view)}",
