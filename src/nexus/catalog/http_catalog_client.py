@@ -1305,7 +1305,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             return None
         if any(not d.get("tumbler") for d in rows):
             raise ValueError("docs/by-scheme returned a document with no tumbler")
-        return [_to_entry(d) for d in {d["tumbler"]: d for d in reversed(rows)}.values()][::-1]
+        first: dict[str, dict] = {}
+        for d in rows:
+            first.setdefault(d["tumbler"], d)
+        return [_to_entry(d) for d in first.values()]
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead

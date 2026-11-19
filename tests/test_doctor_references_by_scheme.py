@@ -259,9 +259,11 @@ def test_a_row_with_no_tumbler_raises() -> None:
 
 
 def test_a_row_repeated_across_pages_is_kept_once_in_first_seen_order() -> None:
-    rows = [{"tumbler": "1.1.1"}, {"tumbler": "1.1.2"}, {"tumbler": "1.1.2"}, {"tumbler": "1.1.3"}]
+    rows = [{"tumbler": "1.1.1", "title": "first"}, {"tumbler": "1.1.2"}, {"tumbler": "1.1.1", "title": "again"},
+            {"tumbler": "1.1.3"}]
     got = _client_with(_ON, False, rows).documents_by_scheme("https")
     assert got is not None and [str(e.tumbler) for e in got] == ["1.1.1", "1.1.2", "1.1.3"]
+    assert got[0].title == "first"
 
 
 def test_client_method_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
