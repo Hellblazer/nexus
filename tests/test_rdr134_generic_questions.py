@@ -78,7 +78,7 @@ def test_keys_are_basenames_that_the_grader_matches_and_that_exist() -> None:
 def test_spread_over_documents() -> None:
     per_doc = Counter(k for q in _raw() for k in _grade3_keys(q))
     assert len(per_doc) >= 5, per_doc
-    assert max(per_doc.values()) <= 3, per_doc
+    assert max(per_doc.values()) <= 2, per_doc  # the header's rule: at most two questions a document
 
 
 def test_qids_and_texts_are_unique() -> None:

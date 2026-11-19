@@ -499,7 +499,9 @@ def test_single_query_fast_path_records_its_one_search_as_a_free_sql_step() -> N
 
 
 def _telemetry_run(db: MagicMock) -> dict:
-    (call,) = db.telemetry.record_nx_answer_run_complete.call_args_list
+    """The one nx_answer_runs write, through either route (a run with no outcome takes the plain record)."""
+    (call,) = (db.telemetry.record_nx_answer_run_complete.call_args_list
+               + db.telemetry.record_nx_answer_run.call_args_list)
     return call.kwargs
 
 
@@ -523,8 +525,10 @@ def test_a_fast_path_query_that_raises_records_a_failed_sql_step_in_envelope_and
 
 
 def test_a_single_query_conflict_ran_nothing_and_records_no_step() -> None:
-    out, calls = _drive_nx_answer(_single_query_match("code"), scope="rdr", structured=True)
+    db = MagicMock(plans=MagicMock())
+    out, calls = _drive_nx_answer(_single_query_match("code"), scope="rdr", structured=True, db=db)
     assert calls == [] and out["steps"] == []
+    assert not _telemetry_run(db).get("steps"), "the telemetry row records no step either"
 
 
 def test_single_query_envelope_always_carries_scope_diagnostics() -> None:

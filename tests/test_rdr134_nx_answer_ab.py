@@ -414,6 +414,21 @@ def test_a_resume_of_a_different_measurement_is_refused() -> None:
     assert "engine_build" in ab.resume_mismatch({**head, "manifest": {"git_sha": "x", "engine_build": "e0"}}, head)
     old = {k: v for k, v in head.items() if k != "primary"}  # a results file from before the primary changed
     assert "primary ordering" in ab.resume_mismatch(old, head)
+    assert "git_sha" in ab.resume_mismatch({**head, "manifest": {"git_sha": "y", "engine_build": "e1"}}, head)
+    # the off arm's path reads NX_SEARCH_PER_COLLECTION, so a resume under another value is another measurement
+    assert "NX_SEARCH_PER_COLLECTION" in ab.resume_mismatch({**head, "per_collection_env": "1"},
+                                                           {**head, "per_collection_env": None})
+
+
+def test_an_engine_without_the_capability_is_refused_before_any_paid_call(monkeypatch, tmp_path) -> None:
+    import nexus.db
+    import nexus.mcp.core
+
+    monkeypatch.setattr(nexus.db, "make_t3", lambda: SimpleNamespace(supports_topic_route=lambda: False))
+    called: list = []
+    monkeypatch.setattr(nexus.mcp.core, "nx_answer", lambda **kw: called.append(kw))
+    assert ab.main(["--cap-usd", "1", "--out", str(tmp_path / "r.json")]) == 2
+    assert called == [] and not (tmp_path / "r.json").exists()
 
 
 def test_an_answer_with_no_chunks_is_unpaired_not_a_loss() -> None:

@@ -372,6 +372,10 @@ def resume_mismatch(prior: dict[str, Any], head: dict[str, Any]) -> str:
         return "the scope differs from the recorded run"
     if prior.get("primary") != head["primary"]:
         return f"the primary ordering differs ({prior.get('primary')!r} recorded, {head['primary']!r} now)"
+    if prior.get("per_collection_env") != head.get("per_collection_env"):
+        # the off arm's default path reads it: another value is another measurement
+        return (f"NX_SEARCH_PER_COLLECTION differs ({prior.get('per_collection_env')!r} recorded, "
+                f"{head.get('per_collection_env')!r} now)")
     pm, hm = prior.get("manifest") or {}, head["manifest"]
     for key in ("git_sha", "host_class", "engine_build"):
         if key in hm and pm.get(key) != hm.get(key):
