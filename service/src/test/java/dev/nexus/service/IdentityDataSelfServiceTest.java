@@ -183,6 +183,39 @@ class IdentityDataSelfServiceTest extends IdentityFenceHarness {
         assertThat(r.error()).isEqualTo("bad_created_by");
     }
 
+    // ── the cap (Sam 2026-11-19, engine 0.1.198: "cap 5") ──────────────────────
+
+    private Resp dataSeat(String token, String stem) {
+        return data(token, "/v1/identity", Map.of("kind", "seat", "name", unique(stem), "created_by", "x"));
+    }
+
+    @Test
+    void anIdentityCreatesAtMostFiveSeatsThroughTheDataCredential() {
+        Seat caller = bindEphemeral(251);
+        for (int i = 0; i < 5; i++) {
+            Resp r = dataSeat(caller.token(), "capped-" + i);
+            assertThat(r.status()).as("seat " + (i + 1) + ": " + r.raw()).isEqualTo(200);
+        }
+        Resp sixth = dataSeat(caller.token(), "capped-6");
+        assertThat(sixth.status()).as(sixth.raw()).isEqualTo(409);
+        assertThat(sixth.error()).isEqualTo("seat_limit");
+    }
+
+    @Test
+    void theCapIsPerIdentityAndTheTenantCredentialIsUncapped() {
+        Seat full = bindEphemeral(252);
+        for (int i = 0; i < 5; i++) {
+            assertThat(dataSeat(full.token(), "full-" + i).status()).isEqualTo(200);
+        }
+        assertThat(dataSeat(full.token(), "full-over").error()).isEqualTo("seat_limit");
+        Seat other = bindEphemeral(253);
+        assertThat(dataSeat(other.token(), "other").status()).as("another identity has its own five").isEqualTo(200);
+        for (int i = 0; i < 6; i++) {
+            Resp t = post(null, "/v1/identity", Map.of("kind", "seat", "name", unique("tenant-uncapped-" + i), "created_by", "sam"));
+            assertThat(t.status()).as("the tenant credential has no cap: " + t.raw()).isEqualTo(200);
+        }
+    }
+
     // ── what stays as it was ─────────────────────────────────────────────────
 
     @Test
