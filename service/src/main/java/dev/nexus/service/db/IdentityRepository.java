@@ -835,6 +835,25 @@ public final class IdentityRepository {
         return java.util.Optional.ofNullable(liveness(tenant, List.of(id)).get(id));
     }
 
+    /**
+     * The live alias of each of these identities, read-only like {@link #liveness}: it takes no row lock and writes
+     * nothing, so a caller may use it under another lock (RDR-252: the owner stamper names the owner and next up by
+     * alias). An identity with no live alias (an ephemeral or delegated one, or one with no record) is absent.
+     */
+    public Map<String, String> liveAliases(String tenant, java.util.Collection<String> ids) {
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        return scope.withTenant(tenant, ctx -> {
+            Map<String, String> out = new LinkedHashMap<>();
+            ctx.select(IDENTITY_ALIASES.IDENTITY_ID, IDENTITY_ALIASES.NAME).from(IDENTITY_ALIASES)
+                .where(IDENTITY_ALIASES.TENANT_ID.eq(tenant)).and(IDENTITY_ALIASES.IDENTITY_ID.in(ids))
+                .and(IDENTITY_ALIASES.STATE.eq("live"))
+                .forEach(r -> out.put(r.value1(), r.value2()));
+            return out;
+        });
+    }
+
     /** The live and lapsed holders on {@code host} (optionally one pid), unleased ones included. */
     public List<Map<String, Object>> bindingsByHost(String tenant, String host, Integer pid) {
         if (host == null || host.isBlank()) {

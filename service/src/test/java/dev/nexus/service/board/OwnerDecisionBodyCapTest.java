@@ -44,4 +44,19 @@ class OwnerDecisionBodyCapTest {
         assertThat(OwnerDecision.json(b).getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(1024);
         assertThat(b).containsEntry("suspects_total", 10);
     }
+
+    @Test
+    void aliasesStampedAfterTheDecisionKeepTheBodyInsideTheCapAndLeaveItsOwnFieldsFirst() {
+        String longId = "i" + "9".repeat(280);
+        OwnerDecision.Post post = new OwnerDecision.Post("owner", sha(0), OwnerDecision.body(longId, longId, "earliest_suspect",
+            java.util.stream.IntStream.range(0, 10).mapToObj(OwnerDecisionBodyCapTest::sha).toList(), 10, OwnerFixture.T0, false, 0));
+
+        OwnerDecision.Post stamped = OwnerDecision.withAliases(post, "a".repeat(64), "b".repeat(64));
+
+        assertThat(stamped.bodyJson().getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(1024);
+        assertThat(stamped.body()).containsEntry("owner_alias", "a".repeat(64)).containsEntry("next_alias", "b".repeat(64))
+            .containsEntry("suspects_total", 10);
+        assertThat(stamped.body().keySet()).containsSubsequence("owner", "owner_alias", "next", "next_alias", "reason");
+        assertThat(OwnerDecision.withAliases(post, null, null)).as("no alias, no change").isSameAs(post);
+    }
 }

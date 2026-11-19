@@ -12,7 +12,7 @@ Every aura ships off. Nexus never turns one on for you.
 
 ## What ships
 
-One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/nexus-develop--owner`, where the engine's owner stamper posts who owns a red develop. The stamper names one owner for each red, and a next-up session behind it. The aura writes a block to your threads entry, worded for what this session has to do:
+One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/nexus-develop--owner`, where the engine's owner stamper posts who owns a red develop. The stamper names one owner for each red, and a next-up session behind it, by identity id and, from engine 0.1.198, also by the seat's live alias (`owner_alias`, `next_alias`), which the notice shows for someone else's red; a row with no alias shows the id. The aura writes a block to your threads entry, worded for what this session has to do:
 
 ```text
 ## aura: develop CI red
@@ -144,7 +144,9 @@ match = { kind = "owner", from = "engine" }      # equality on dimensions; absen
 [args]                                           # each procedure argument from dims.<f>, body.<f>, id, subspace, self.identity, or = "literal"
 sha = "dims.sha"
 owner = "body.owner"
+owner_alias = "body.owner_alias"        # engine 0.1.198 on; absent from a row with no alias, which the procedure then shows by id
 next = "body.next"
+next_alias = "body.next_alias"
 refresh = "body.refresh"
 reason = "body.reason"
 me = "self.identity"

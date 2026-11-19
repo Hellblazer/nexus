@@ -153,7 +153,26 @@ public final class OwnerStamper implements OwnerOutHook {
         }
     }
 
-    private void post(String tenant, String base, OwnerDecision.Post p) {
+    /**
+     * RDR-252, Sam 2026-11-19: the body names the owner and next up by identity id, and this adds each one's live alias
+     * as {@code owner_alias} and {@code next_alias}, read at stamp time, so a notice can say a seat's name. An identity
+     * with no live alias gets no field. The decision stays a function of ids; a {@code clear} row names no one.
+     */
+    private OwnerDecision.Post withAliases(String tenant, OwnerDecision.Post p) {
+        Object owner = p.body().get("owner");
+        Object next = p.body().get("next");
+        List<String> named = java.util.stream.Stream.of(owner, next).filter(String.class::isInstance)
+            .map(String.class::cast).distinct().toList();
+        if (named.isEmpty()) {
+            return p;
+        }
+        Map<String, String> alias = identities.liveAliases(tenant, named);
+        return OwnerDecision.withAliases(p, owner instanceof String o ? alias.get(o) : null,
+            next instanceof String n ? alias.get(n) : null);
+    }
+
+    private void post(String tenant, String base, OwnerDecision.Post decided) {
+        OwnerDecision.Post p = withAliases(tenant, decided);
         String subspace = BoardReads.subspace(base, "owner");
         tuples.out(tenant, subspace, Map.of("topic", base + "--owner"),
             Map.of("from", "engine", "kind", p.kind(), "sha", p.sha()), p.bodyJson(), UUID.randomUUID().toString(), null, null);

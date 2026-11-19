@@ -510,6 +510,23 @@ def test_ack_times_reports_per_red_the_sha_episode_ack_time_and_minutes() -> Non
     assert set(tuples.reads) == {"board/ci/nexus-develop--owner"}, "the topics of the group's serves, on their --owner subspace"
 
 
+def test_ack_times_names_the_owner_by_alias_and_falls_back_to_the_id() -> None:
+    """RDR-252, Sam 2026-11-19: engine 0.1.198 stamps owner_alias beside owner; a row with none (an older engine, or an
+    identity with no live alias) is shown by its id, and the JSON carries null for the alias."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, owner="i4", owner_alias="halcyon", next="i5", next_alias="tamsin", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+        _row("owner", "2026-11-19T12:00:05Z", SHA2, owner="i6", next=None, reason="earliest_suspect", episode_at="2026-11-19T12:00:00Z", refresh=False),
+        _row("ack", "2026-11-19T12:09:00Z", SHA2, who="i6"),
+    ]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
+    assert [(r["owner"], r["owner_alias"], r["acked_by"], r["acked_by_alias"]) for r in reds] == [
+        ("i4", "halcyon", "i4", "halcyon"), ("i6", None, "i6", None)]
+    text = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train").output
+    assert "acked by halcyon at" in text and "acked by i6 at" in text and "acked by i4" not in text
+
+
 def test_ack_times_text_names_an_unacknowledged_red_and_a_group_serving_nothing_is_an_error() -> None:
     rows = [_row("owner", "2026-11-19T14:00:05Z", SHA3, owner="i4", next=None, reason="no_record", episode_at="2026-11-19T14:00:00Z", refresh=False)]
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)

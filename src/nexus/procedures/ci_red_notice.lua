@@ -1,13 +1,15 @@
 -- procedure: ci_red_notice
 -- summary: The line an aura shows for an owner row of a red develop: who owns it and what this session does.
--- args: sha:string, owner:string?, next:string?, refresh:boolean, reason:string, me:string
+-- args: sha:string, owner:string?, owner_alias:string?, next:string?, next_alias:string?, refresh:boolean, reason:string, me:string
 -- grants: none
 
 -- RDR-252 Step 4 (nexus-igea9.7), the procedure the shipped ci_develop_red aura wraps. It reads nothing and
 -- writes nothing: the aura maps the owner row's dims.sha and body.owner, body.next, body.refresh and
 -- body.reason, and the session's own identity (self.identity) as me, and shows the returned text in the
--- session's threads entry. The row carries identity ids, not aliases, and this procedure has no read grant to
--- resolve one, so a name shown for someone else is the id.
+-- session's threads entry. From engine 0.1.198 the row also carries body.owner_alias and body.next_alias, the live
+-- alias of each at stamp time (absent for an identity with none, and on a row an older engine stamped); a name
+-- shown for someone else is that alias, else the id. This procedure has no read grant to resolve an alias itself,
+-- and who owns the red is always decided on the ids: an alias is a name to show and nothing more.
 --
 -- The displays, by state of the row:
 --   owner, the pusher's own red (reason earliest_suspect): "first red in your push"
@@ -21,7 +23,7 @@
 -- row is escalated and names me or names no one (the load gate has made me a member of the serving group).
 -- A refresh row rewrites the block and does not wake again.
 --
--- Values a tuple's writer controls (sha, owner, next, reason, me) are checked against their grammar and never
+-- Values a tuple's writer controls (sha, owner, owner_alias, next, next_alias, reason, me) are checked against their grammar and never
 -- echoed in an error: the error text is logged.
 
 local args = ...
@@ -41,6 +43,9 @@ end
 local me = segment(args.me, "me")
 local owner = segment(args.owner, "owner")
 local next_up = segment(args.next, "next")
+segment(args.next_alias, "next_alias")
+-- The name shown for the owner: its alias when the row has one, else its id.
+local owner_name = segment(args.owner_alias, "owner_alias") or owner
 
 local reason = args.reason
 if not string.match(reason, "^[a-z][a-z_]*$") or #reason > 32 then
@@ -74,10 +79,10 @@ if owner == me or (escalated and owner == nil) then
 elseif owner == nil then
   text = head .. "; no one is named as owner. Hold your pushes."
 elseif next_up == me then
-  text = head .. "; " .. owner .. " owns it. You are next up."
+  text = head .. "; " .. owner_name .. " owns it. You are next up."
   wake = not args.refresh
 else
-  text = head .. "; " .. owner .. " owns it. Hold your pushes."
+  text = head .. "; " .. owner_name .. " owns it. Hold your pushes."
 end
 
 return { show = true, text = text, wake = wake }

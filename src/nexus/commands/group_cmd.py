@@ -382,6 +382,7 @@ def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
         end = cleared if cleared is not None else (reds[index + 1]["rows"][0][0] if index + 1 < len(reds) else None)
         tips = {(r.dims or {}).get("sha") for _, r, _ in episode} | {s for _, _, b in episode for s in (b.get("suspects") or [])}
         acked: tuple[datetime, Any] | None = None
+        acked_alias: str | None = None
         for at, ack in acks:
             if at < start or (end is not None and at >= end):
                 continue
@@ -389,14 +390,18 @@ def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
             owner = current[0].get("owner") if current else None
             if owner and (ack.dims or {}).get("from") == owner and (ack.dims or {}).get("sha") in tips:
                 acked = (at, ack)
+                acked_alias = current[0].get("owner_alias")
                 break
         began = _instant(red["key"]) or start
         first = episode[0]
         out.append({
             "sha": (first[1].dims or {}).get("sha"), "episode_at": red["key"], "reason": first[2].get("reason"),
             "owner": episode[-1][2].get("owner"),
+            # RDR-252 (engine 0.1.198): the alias the engine stamped beside the id; null from an older engine's row.
+            "owner_alias": episode[-1][2].get("owner_alias"),
             "handoffs": sum(1 for _, _, b in episode[1:] if b.get("reason") in _HAND_ON_REASONS and not b.get("refresh")),
             "acked_at": acked[1].created_at if acked else None, "acked_by": (acked[1].dims or {}).get("from") if acked else None,
+            "acked_by_alias": acked_alias if acked else None,
             "minutes": round((acked[0] - began).total_seconds() / 60, 1) if acked else None,
             "cleared_at": cleared.isoformat().replace("+00:00", "Z") if cleared else None,
         })
@@ -441,5 +446,5 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     summary = f"{len(reds)} reds, {len(acked)} acknowledged" + (f", median {statistics.median(acked):.1f} min, longest {max(acked):.1f} min" if acked else "")
     click.echo(f"{name}: {summary} (deadline {record.ack_deadline} min)")
     for r in reds:
-        ack = f"acked by {r['acked_by']} at {r['acked_at']}, {r['minutes']} min" if r["acked_at"] else "no ack"
+        ack = f"acked by {r['acked_by_alias'] or r['acked_by']} at {r['acked_at']}, {r['minutes']} min" if r["acked_at"] else "no ack"
         click.echo(f"  {str(r['sha'])[:12]}  episode {r['episode_at']}  {ack}" + (f"  ({r['handoffs']} hand-off)" if r["handoffs"] else ""))
