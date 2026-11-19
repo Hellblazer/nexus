@@ -846,8 +846,10 @@ def _sender_tag(row: dict[str, Any], dims: dict[str, Any]) -> str:
     key (an engine that predates the stamp) is different from a null one.
     NO LABEL IS NOT VERIFICATION: any data-token holder can mint a session
     token for any session id."""
-    label = sender_label(dims.get("from"), row.get("sender_session"),
-                         stamp_known="sender_session" in row)
+    from nexus.identity.board import identity_for_session  # noqa: PLC0415 -- hook import cost, only for an identity-shaped from
+
+    label = sender_label(dims.get("from"), row.get("sender_session"), stamp_known="sender_session" in row,
+                         identity_of=lambda session: identity_for_session(session, _config_dir()))
     return f" [{label}]" if label else ""
 
 

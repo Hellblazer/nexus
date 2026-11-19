@@ -1149,8 +1149,8 @@ def _sender_tag(row: dict[str, Any], dims: dict[str, Any]) -> str:
     key (an engine that predates the stamp) is different from a null one.
     NO LABEL IS NOT VERIFICATION: any data-token holder can mint a session
     token for any session id."""
-    label = sender_label(dims.get("from"), row.get("sender_session"),
-                         stamp_known="sender_session" in row)
+    label = sender_label(dims.get("from"), row.get("sender_session"), stamp_known="sender_session" in row,
+                         identity_of=lambda session: _identity_lookup.lookup(session, _config_dir())[0])
     return f" [{label}]" if label else ""
 
 

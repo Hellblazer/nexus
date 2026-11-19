@@ -29,6 +29,10 @@ key at all):
   a writer that is not session-bound (a CI board post). The label cannot tell
   which, so renderers say "no session on record" for this case, never "does
   not match".
+* ``from`` is an identity id (``i`` plus digits, RDR-253 Step 5) and the receiver can name the identity the stamped
+  session is bound to (``identity_of``, a token-file read on the receiver's host) and it is that identity: no label.
+  An identity the stamped session is not bound to, or one the receiver cannot resolve, reads ``unverified`` like
+  any other claim the stamp does not back.
 * ``from`` is an agent id (``a`` plus 16 hex) and the row is stamped with a
   canonical UUID: it can never equal a session, so it reads
   ``agent mail, sent under session <S>``. Subagents share the parent's token
@@ -80,6 +84,11 @@ def _is_agent_id(value: str) -> bool:
     return len(value) == 17 and value[0] == "a" and all(c in _HEX for c in value[1:])
 
 
+def _is_identity_id(value: str) -> bool:
+    """``i`` plus ASCII digits, the identity id shape (RDR-253)."""
+    return len(value) > 1 and value[0] == "i" and value[1:].isascii() and value[1:].isdigit()
+
+
 def _same_session(claimed: str, stamped: str) -> bool:
     if _is_uuid(claimed) and _is_uuid(stamped):
         return claimed.lower() == stamped.lower()
@@ -92,9 +101,10 @@ def canonical_session(stamp) -> str | None:
     return stamp if isinstance(stamp, str) and _is_uuid(stamp) else None
 
 
-def sender_case(sender_from, sender_session, *, stamp_known: bool = True) -> str | None:
+def sender_case(sender_from, sender_session, *, stamp_known: bool = True, identity_of=None) -> str | None:
     """``None`` for no label, else one of ``CASE_MISMATCH``, ``CASE_NULL``,
-    ``CASE_AGENT``. See the module table."""
+    ``CASE_AGENT``. See the module table. *identity_of* is ``session id -> identity id or ""``, called only for an
+    identity-shaped ``from`` whose stamp is a canonical UUID; a raise is "not resolved"."""
     if not stamp_known:
         return None
     if sender_from is None or sender_from == "":
@@ -104,6 +114,13 @@ def sender_case(sender_from, sender_session, *, stamp_known: bool = True) -> str
     if isinstance(sender_from, str):
         if _same_session(sender_from, sender_session):
             return None
+        if identity_of is not None and _is_identity_id(sender_from) and _is_uuid(sender_session):
+            try:
+                bound = identity_of(sender_session)
+            except Exception:  # noqa: BLE001 -- an unreadable binding is an unresolved one: the claim stays unverified
+                bound = ""
+            if bound == sender_from:
+                return None
         if _is_agent_id(sender_from) and _is_uuid(sender_session):
             return CASE_AGENT
     return CASE_MISMATCH
@@ -119,9 +136,9 @@ def case_word(case: str) -> str:
     return UNVERIFIED
 
 
-def sender_label(sender_from, sender_session, *, stamp_known: bool = True) -> str | None:
+def sender_label(sender_from, sender_session, *, stamp_known: bool = True, identity_of=None) -> str | None:
     """The label for one message, or ``None`` for no label. See the module table."""
-    case = sender_case(sender_from, sender_session, stamp_known=stamp_known)
+    case = sender_case(sender_from, sender_session, stamp_known=stamp_known, identity_of=identity_of)
     if case is None:
         return None
     if case == CASE_AGENT:
