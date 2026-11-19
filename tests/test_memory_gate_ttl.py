@@ -766,3 +766,32 @@ def test_dry_run_a_row_with_no_timestamp_is_not_counted(db: T2Database) -> None:
 def test_dry_run_counts_only_what_is_past_across_a_mixed_set() -> None:
     rows = [_aged(days=10), _aged(days=31), _aged(days=40, access=3), _aged(days=200, access=3), _aged(days=29.99)]
     assert _dry_count(rows) == 2
+
+
+# ── review round 1 (nexus-1gdv0.2.16) ────────────────────────────────────────────
+
+def test_a_record_edited_after_it_was_archived_gets_no_ttl_is_named_and_a_rerun_archives_it(
+        db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    edited = _gate(db, "nexus-ed", sha="aaa1111")
+    steady = _gate(db, "nexus-ed", sha="bbb2222")
+    real = gr.write_pointer
+    calls: list[int] = []
+
+    def edit_after_first_pointer(*a, **k):
+        done = real(*a, **k)
+        if not calls:                          # between the archive and the TTL write, a reviewer rewrites the record
+            row = _rows(db)[edited]
+            db.put(project=REPO, title=edited, content=row["content"] + "\nA late finding.", tags=row["tags"])
+        calls.append(1)
+        return done
+
+    with monkeypatch.context() as m:
+        m.setattr(gr, "write_pointer", edit_after_first_pointer)
+        out = _phase3("nexus-ed")
+    rows = _rows(db)
+    assert rows[edited]["ttl"] is None and rows[steady]["ttl"] == 30      # no TTL for text that has no archive
+    assert f"changed since it was archived, no TTL: {edited}" in out
+    assert gr.read_archive(make_t3(), REPO, edited, 1) != rows[edited]["content"]
+    out = _phase3("nexus-ed")                                            # a rerun archives the new text, then writes it
+    assert gr.read_archive(make_t3(), REPO, edited, 1) == _rows(db)[edited]["content"]
+    assert _rows(db)[edited]["ttl"] == 30 and "changed since" not in out

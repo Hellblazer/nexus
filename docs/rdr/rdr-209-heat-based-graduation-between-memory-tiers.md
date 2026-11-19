@@ -669,7 +669,13 @@ does not grow with the number of records.
   stated. The fresh read narrows the same race for `access_count`: a read that
   lands between that read and a record's import loses its count, a window the
   length of the write loop; closing it needs a compare-and-set, which the
-  engine does not have.
+  engine does not have. A rewrite that lands before the fresh read is caught:
+  the archive and the pointer hold the text of the listing, so a candidate whose
+  fresh content or timestamp differs from it is skipped, named
+  (`changed since it was archived, no TTL`), and left without a TTL, because
+  retiring it would retire text that has no archive; a rerun archives the new
+  text and then gives it the TTL. Only a rewrite inside the write loop is left
+  to the race above.
 
 ### Existing Infrastructure Audit
 
@@ -1345,3 +1351,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Fix check 78cc9b0e4776, defect A and observations B and C (nexus-1gdv0.2.13), with Sam's 2026-11-16 ruling "Per RDR and phase": "the real run waits for his word" had no mechanism, and the `phase-review-gate` and `rdr-close` skills name the command at close, so a session could run the real thing first. The dry run now records its count as one T2 row in `<repo>` (`gate-rollup-count-rdr-<NNN>-phase-<P>` or `-all`, tag `gate-rollup-count`, never `kind:gate` or `gate`), and a real run that would write a TTL refuses, writing nothing, unless the row exists, `--counted N` equals its count and every candidate is a title it lists; a run with no candidate needs none. The scope of "first run" is per RDR and phase, keyed like the pointer. The `--counted` flag was an open choice for Sam in the plan; the default taken here is that it is required, as evidence the caller has the number, and the RDR says it is not Sam's yes. "The dry run writes nothing" is corrected to no TTL, no T3 note and one count row. Both skills say to run `--dry-run` first, tell Sam its count and wait for his word. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect C and observations A and B (nexus-1gdv0.2.14): the dry-run test seeded "one past and one not", which pinned neither the heat term nor the boundary, so a dry run that dropped `ln(access_count + 1)` or used `>=` would pass. Step 3 now states the engine rule the dry run computes (null timestamp skipped, age in whole seconds over 86,400, `ttl * (1 + ln(access_count + 1))`, strict comparison) and the test list pins it with a fixed clock: a heat record inside its effective TTL is not counted, a record exactly at it is not and one second older is, truncation to seconds, a null timestamp, and a mixed set. Each fails when its term is removed. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect B (nexus-1gdv0.2.15), doc only: the dry-run test appeared only in the Implementation Plan, not in the Test Plan or the Testing Strategy. The Test Plan gains the dry-run and count-first-guard scenario and extends the TTL and loss-check scenarios to what was built (the real put control, the census narrowing, the quarantine read-back, the restored record); the Testing Strategy names the two legs that must fail when their code is changed (the dry-run count against the engine rule, the guard when deleted); and the reference "(Step 3, Count first)" in the timestamp bullet, which read as Technical Design's own Step 3, now points at the Implementation Plan, Phase 3 Step 3. The wording was copied from the merged code and tests of nexus-1gdv0.2.12 to .14, not from the beads. |
+| 2026-11-19 | Review round 1 (nexus-1gdv0.2.16), blocker 1: the TTL write imported the fresh read's content while the archive and the pointer held the listing's, so a record rewritten between them got a TTL with no archive of its new text. A candidate whose fresh content or timestamp differs from the listing's is now skipped, named and left without a TTL, and a rerun archives its new text first; the residual-race paragraph says so. |

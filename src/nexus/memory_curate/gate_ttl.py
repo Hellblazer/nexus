@@ -47,6 +47,7 @@ class Result:
     ttl_skipped: list[str] = field(default_factory=list)
     quarantined: list[str] = field(default_factory=list)
     restored: list[str] = field(default_factory=list)
+    drifted: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
 
 
@@ -283,18 +284,26 @@ def check_guard(rows: list[dict[str, Any]], scope: gr.Scope, candidates: list[di
 # ── the TTL write ────────────────────────────────────────────────────────────────
 
 def write_ttl(mem: Any, project: str, candidates: list[dict[str, Any]], fresh: dict[str, dict[str, Any]],
-              res: Result) -> dict[str, dict[str, Any]]:
+              contents: dict[str, str], res: Result) -> dict[str, dict[str, Any]]:
     """Write ``ttl=30`` on each candidate through the verbatim import route; return ``{title: row sent}``.
 
     *fresh* is a read of the project taken just before this call, so a reader's access that landed after the listing
-    keeps its count. A row that now has a TTL, or is gone, is skipped. Every other field goes as that read returned
-    it: a null agent or session is sent as absent so it stays NULL, and an empty ``last_accessed`` as ``None``. Never
-    ``put``: it fills a missing agent or session from the writer's environment."""
+    keeps its count. A row that now has a TTL, or is gone, is skipped. So is a row whose content or timestamp is no
+    longer what the archive and the pointer hold (*contents*, the listing's text): it was rewritten after it was
+    archived, and a TTL would retire text that has no archive. It is named, keeps no TTL, and a rerun archives its new
+    text. Of the values sent, the content, tags, agent, session, ``access_count``, ``last_accessed`` and timestamp are
+    the read's: a null agent or session is sent as absent so it stays NULL, and an empty ``last_accessed`` as ``None``.
+    The import route itself also clears the quarantine stamps, re-stamps the row's identity with the caller and
+    truncates the timestamp to the second. Never ``put``: it fills a missing agent or session from the writer's
+    environment."""
     sent: dict[str, dict[str, Any]] = {}
     for e in candidates:
         row = fresh.get(e["title"])
         if row is None or row.get("ttl") is not None:
             res.ttl_skipped.append(e["title"])
+            continue
+        if row["content"] != contents.get(e["title"]) or row.get("timestamp") != e["timestamp"]:
+            res.drifted.append(e["title"])
             continue
         try:
             mem.import_entry(
@@ -409,7 +418,7 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
     res.archived, res.already_whole = gr.archive_records(t3, sel, scope)
     text = write_verified_pointer(t3, project, scope, sel, accept_open, res)
     fresh = {r["title"]: r for r in mem.get_all(project)}        # one read, right before the writes
-    sent = write_ttl(mem, project, candidates, fresh, res)
+    sent = write_ttl(mem, project, candidates, fresh, sel.contents, res)
     res.ttl_written = list(sent)
     read_back(mem, project, sent, res, quarantined)
     if sent:                    # the pointer now says which records a run gave a TTL, so a rerun can tell a restore
@@ -429,5 +438,6 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
     if res.carried:
         res.lines.append(f"carried: {len(res.carried)} record(s) an earlier pointer listed that this read does not")
     res.lines += [f"stale: {t!r} is left from an earlier, longer pointer; nothing here deletes it" for t in res.stale]
+    res.lines += [f"changed since it was archived, no TTL: {t} (a rerun archives its new text)" for t in res.drifted]
     res.lines += res.mismatches
     return res
