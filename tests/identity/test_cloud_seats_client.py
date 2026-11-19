@@ -8,6 +8,7 @@ an identity token the engine cannot resolve is a 401 on every route it rides.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -155,8 +156,7 @@ def test_create_in_cloud_mode_sends_the_sessions_token_and_refuses_without_one(e
     (403, {"error": "identity_token_required", "message": "m"}, "no identity token was sent"),
     (403, {"error": "not_owner", "message": "m", "token_identity": "i3"}, "token names i3"),
     (409, {"error": "generation_superseded", "message": "m"}, "another process holds"),
-    (401, {"error": "identity_token_expired", "message": "m"}, "has expired"),
-    (401, {"error": "cross_tenant_identity_token", "message": "m"}, "another tenant"),
+    (401, {"error": "unauthorized"}, "was not accepted"),
     (409, {"error": "identity_not_held", "message": "m"}, "no process holds"),
     (409, {"error": "not_ephemeral", "message": "m"}, "not an ephemeral"),
     (404, {"error": "unknown_identity", "message": "m"}, "no identity i7"),
@@ -235,9 +235,40 @@ def test_every_other_delegated_refusal_is_its_one_mapped_line_each_time(engine: 
     assert len(logs) == 2 and all("token names i3" in e["error"] and "identity engine" not in e["error"] for e in logs), logs
 
 
+def _imported_modules(source: str) -> set[str]:
+    """Every module a file imports, as dotted names; ``from a import b`` counts ``a`` and ``a.b``."""
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            found.add(node.module)
+            found.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return found
+
+
 def test_the_delegation_path_does_not_import_the_cli_layer() -> None:
     """The one-line refusal wording lives beside the client, so ``operators`` need not import ``identity.ops``."""
-    assert "identity.ops" not in Path(delegated.__file__).read_text(encoding="utf-8")
+    imports = _imported_modules(Path(delegated.__file__).read_text(encoding="utf-8"))
+    assert "nexus.identity.bind_client" in imports, "the scan reads the imports it is meant to"
+    assert not {m for m in imports if m == "nexus.identity.ops" or m.startswith("nexus.identity.ops.")}
+
+
+def test_the_import_scan_sees_every_spelling_of_the_cli_layer() -> None:
+    for spelling in ("import nexus.identity.ops", "from nexus.identity import ops", "from nexus.identity.ops import create"):
+        assert "nexus.identity.ops" in _imported_modules(spelling), spelling
+
+
+def test_the_real_env_wires_the_session_verified_own_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(IdentityClient, "from_config", classmethod(lambda cls, **kw: cls("http://engine.test", "b")))
+    assert IdentityEnv.real().own_token is ops._real_own_token
+
+
+def test_reset_for_tests_clears_the_resolver_backoff() -> None:
+    token_header._RESOLVER_DOWN_UNTIL = 1e12
+    token_header.reset_for_tests()
+    assert token_header._RESOLVER_DOWN_UNTIL == 0.0, "a backoff left by one test would skip the next test's session check"
 
 
 def test_a_named_token_file_wins_over_the_callers_own_token(engine: Engine, tmp_path: Path) -> None:
@@ -271,11 +302,37 @@ def test_generation_superseded_names_the_token_that_was_sent(engine: Engine, tmp
     assert f"the token in {path}" in said and "this process's token" not in said
 
 
-def test_an_expired_token_names_the_token_that_was_sent(engine: Engine, tmp_path: Path) -> None:
+_LIVE_SESSION_ADVICE = "run this from a live session"
+
+
+@pytest.mark.parametrize("body", [{"error": "unauthorized"}, {"error": "identity_token_expired", "message": "m"},
+                                  {"message": "no code at all"}, {}], ids=["engine", "stray-code", "no-code", "empty"])
+def test_every_401_is_the_one_not_accepted_line_whatever_its_code(engine: Engine, tmp_path: Path, body: dict) -> None:
+    """The engine's AuthFilter answers every 401 with {"error":"unauthorized"}; the credential or the identity token was
+    not accepted, and the client cannot tell which, so it says one line for all of them."""
+    said = _promote_refused(engine, tmp_path, 401, body, own=_record())
+    assert "not accepted" in said and "this process's token" in said and "\n" not in said
+    assert "unauthorized:" not in said and "identity engine" not in said
+
+
+def test_a_401_advice_is_per_caller(engine: Engine, tmp_path: Path) -> None:
     path = tmp_path / "target.token"
     write_token_file(path, _record(token="target-tok"))
-    said = _promote_refused(engine, tmp_path, 401, {"error": "identity_token_expired", "message": "m"}, token_file=path)
-    assert f"the token in {path} has expired" in said
+    own = _promote_refused(engine, tmp_path, 401, {"error": "unauthorized"}, own=_record())
+    assert _LIVE_SESSION_ADVICE in own
+    said = _promote_refused(engine, tmp_path, 401, {"error": "unauthorized"}, token_file=path, own=_record())
+    assert f"the token in {path}" in said and _LIVE_SESSION_ADVICE not in said, "a script is not run from a session"
+
+
+def test_a_delegated_401_is_about_the_dispatching_session(engine: Engine, tmp_path: Path, monkeypatch) -> None:
+    logs = _dispatch_refused(engine, tmp_path, monkeypatch, (401, {"error": "unauthorized"}), times=1)
+    assert len(logs) == 1 and "not accepted" in logs[0]["error"] and "dispatching session" in logs[0]["error"], logs
+    assert _LIVE_SESSION_ADVICE not in logs[0]["error"] and "--token-file" not in logs[0]["error"], logs
+
+
+def test_a_delegated_unknown_identity_names_the_parent(engine: Engine, tmp_path: Path, monkeypatch) -> None:
+    logs = _dispatch_refused(engine, tmp_path, monkeypatch, (404, {"error": "unknown_identity", "message": "m"}), times=1)
+    assert len(logs) == 1 and "i2" in logs[0]["error"], logs     # _begin's parent token names i2
 
 
 def test_no_refusal_for_a_script_or_a_token_file_tells_the_caller_to_run_it_inside_the_session(engine: Engine, tmp_path: Path) -> None:
@@ -346,8 +403,7 @@ _REFUSALS = [
     (409, {"error": "not_ephemeral", "message": "m"}),
     (404, {"error": "unknown_identity", "message": "m"}),
     (403, {"error": "forbidden", "message": "m"}),
-    (401, {"error": "identity_token_expired", "message": "m"}),
-    (401, {"error": "cross_tenant_identity_token", "message": "m"}),
+    (401, {"error": "unauthorized", "message": ""}),
     (403, {"error": "forbidden", "message": "a 'data' credential may not call PROMOTE on /v1/identity/i7/promote"}),
     (500, {"error": "boom", "message": "the engine fell over"}),
 ]
@@ -389,8 +445,10 @@ def test_no_token_value_reaches_the_output_on_the_token_file_path(engine: Engine
 
 
 def test_no_parent_token_value_reaches_a_delegation_log(engine: Engine, tmp_path: Path, monkeypatch) -> None:
-    for refusal in (_OLD_ENGINE, (403, {"error": "not_owner", "message": "m"}), (401, {"error": "identity_token_expired", "message": "m"})):
-        assert "parent-tok" not in str(_dispatch_refused(engine, tmp_path, monkeypatch, refusal, times=1))
+    for refusal in (_OLD_ENGINE, (403, {"error": "not_owner", "message": "m"}), (401, {"error": "unauthorized"})):
+        logs = _dispatch_refused(engine, tmp_path, monkeypatch, refusal, times=1)
+        assert logs, f"no warning was captured for {refusal}: the check below would pass over nothing"
+        assert "parent-tok" not in str(logs)
 
 
 # ── engine half, reviewed (8f226497f): session_held and bad_created_by ─────
@@ -415,13 +473,12 @@ def test_session_held_is_one_clear_line_for_a_delegation_and_a_cli_call(engine: 
     assert "session_held" not in str(raised.value) and "\n" not in str(raised.value)
 
 
-@pytest.mark.parametrize("scope", [SCOPE_TENANT, SCOPE_DATA])
-def test_bad_created_by_is_one_clear_line(engine: Engine, tmp_path: Path, scope: str) -> None:
-    """Only a data credential's token may stamp ``identity:<id>`` as the creator; the engine refuses it from a tenant
-    credential with 400 bad_created_by, which both scopes say in one line."""
+def test_bad_created_by_is_one_clear_line(engine: Engine, tmp_path: Path) -> None:
+    """The engine refuses a tenant credential's created_by other than ``sam`` or ``restart`` with 400 bad_created_by (it
+    never sends it to a data credential, which carries no created_by of its own)."""
     engine.answers[("POST", "/v1/identity")] = (400, {"error": "bad_created_by", "message": "m"})
-    with pytest.raises(IdentityCommandError, match="created_by") as raised:
-        ops.create(_env(tmp_path, engine.client(scope), own=_record()), "tamsin", "identity:i7")
+    with pytest.raises(IdentityCommandError, match="only as sam or restart") as raised:
+        ops.create(_env(tmp_path, engine.client(SCOPE_TENANT), own=_record()), "tamsin", "identity:i7")
     assert "bad_created_by:" not in str(raised.value) and "\n" not in str(raised.value)
 
 

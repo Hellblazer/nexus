@@ -33,7 +33,7 @@ from typing import Any
 
 from nexus.identity import token_contract
 from nexus.identity.bind_client import (
-    NO_TOKEN_ADVICE, OWN_TOKEN, SCOPE_DATA, IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body,
+    FILE_TOKEN_401_ADVICE, NO_TOKEN_ADVICE, OWN_TOKEN, OWN_TOKEN_401_ADVICE, SCOPE_DATA, IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body,
     seat_refusal_message,
 )
 from nexus.identity.delegated import check_dispatcher, sweep_delegated
@@ -178,10 +178,11 @@ CREATE_NO_TOKEN = ("no identity token was sent, and in cloud mode a seat is made
 
 
 def _seat_call(env: IdentityEnv, call: Callable[[], Any], identity: str | None, *, token_source: str = OWN_TOKEN,
-               no_token: str = NO_TOKEN_ADVICE) -> Any:
+               no_token: str = NO_TOKEN_ADVICE, unauthorized: str = OWN_TOKEN_401_ADVICE) -> Any:
     """:func:`_call` for the seat calls; a data credential's refusals are said in the words of
-    :func:`~nexus.identity.bind_client.seat_refusal_message` (a tenant credential's are not touched). *token_source*
-    and *no_token* word the lines that name the caller's token."""
+    :func:`~nexus.identity.bind_client.seat_refusal_message`. A tenant credential's are _call's words, except
+    ``bad_created_by``, which is said in the same one line. *token_source*, *no_token* and *unauthorized* word the lines
+    that name the caller's token."""
     if getattr(env.client, "scope", None) != SCOPE_DATA:
         try:
             return call()
@@ -194,7 +195,8 @@ def _seat_call(env: IdentityEnv, call: Callable[[], Any], identity: str | None, 
     try:
         return call()
     except IdentityApiError as exc:
-        raise IdentityCommandError(seat_refusal_message(exc, identity, token_source=token_source, no_token=no_token)) from exc
+        raise IdentityCommandError(seat_refusal_message(exc, identity, token_source=token_source, no_token=no_token,
+                                                            unauthorized=unauthorized)) from exc
     except IdentityUnavailableError as exc:
         raise IdentityCommandError(f"the engine is not answering ({exc})") from exc
 
@@ -244,7 +246,8 @@ def promote(env: IdentityEnv, identity: str, name: str, token_file: Path | None 
     _reserved(name)
     token = _seat_token(env, token_file)
     view = _seat_call(env, lambda: env.client.promote(identity, name, token=token), identity,
-                      token_source=_token_source(token_file))
+                      token_source=_token_source(token_file),
+                      unauthorized=OWN_TOKEN_401_ADVICE if token_file is None else FILE_TOKEN_401_ADVICE)
     lines = [f"{view['id']} is now the seat {name}"]
     if env.board_memory is not None:
         from nexus.identity.board import retitle_entry  # noqa: PLC0415 — deferred: CLI startup cost

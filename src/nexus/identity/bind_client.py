@@ -68,6 +68,10 @@ OWN_TOKEN = "this process's token"
 NO_TOKEN_ADVICE = ("no identity token was sent, and in cloud mode a seat is made, promoted or delegated only through one: "
                    "run it inside the session that holds the identity, or name that session's token file with --token-file")
 
+#: What a caller adds to the 401 line, by who it is: the session itself, or a script naming a session's token file. A
+#: script and a dispatch are not run from a session, so they never say to.
+OWN_TOKEN_401_ADVICE = "a session's server renews its token while it runs, so run this from a live session (or restart this one)"
+FILE_TOKEN_401_ADVICE = "the session that wrote that file renews the token while it runs, so that session must be live"
 #: One line per engine refusal of a seat call (RDR-253 option 2) that needs nothing from the caller; the codes that name
 #: the caller's token, the identity or the token's owner are built in :func:`seat_refusal_message`.
 _SEAT_REFUSALS = {
@@ -78,13 +82,21 @@ _SEAT_REFUSALS = {
 
 
 def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, token_source: str = OWN_TOKEN,
-                         no_token: str = NO_TOKEN_ADVICE) -> str:
+                         no_token: str = NO_TOKEN_ADVICE, unauthorized: str = OWN_TOKEN_401_ADVICE) -> str:
     """One line for an engine refusal of a seat call (a data credential's create, promote or delegate). *token_source*
-    says whose token was sent (``this process's token``, or ``the token in <file>``) and *no_token* is the advice for a
-    call that sent none, so each caller words them for itself. Never contains a token value."""
+    says whose token was sent (``this process's token``, or ``the token in <file>``), *no_token* is the advice for a
+    call that sent none and *unauthorized* the advice after a 401, so each caller words them for itself. Never contains
+    a token value.
+
+    Every 401 is the one line: the engine's AuthFilter answers all of them ``{"error": "unauthorized"}`` (it logs the
+    reason, an expired or another tenant's identity token, and does not send it), so the client cannot tell the data
+    credential from the identity token and does not guess."""
     if is_old_engine_seat_refusal(exc):
         return SEATS_NEED_ENGINE
     code = exc.code
+    if exc.status == 401:
+        return f"the credential or {token_source} was not accepted (expired, unknown or another tenant's)" + (
+            f": {unauthorized}" if unauthorized else "")
     if code == "identity_token_required":
         return no_token
     if code == "not_owner":
@@ -94,15 +106,10 @@ def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, 
         return f"the engine has no identity {identity or ''}".strip()
     if code == "generation_superseded":
         return f"another process holds this identity now, and {token_source} is for an older generation"
-    if code == "identity_token_expired":
-        return (f"{token_source} has expired: a session's server renews it while the session runs, so run this from a "
-                f"live session (or restart this one)")
     if code == "session_held":
         return "the engine already indexes that session id under another identity, so a delegated identity cannot be bound to it"
     if code == "bad_created_by":
-        return "created_by may not name an identity (identity:<id>): the engine stamps that itself, from the token of a live session"
-    if code == "cross_tenant_identity_token":
-        return f"{token_source} belongs to another tenant than this credential's"
+        return "a tenant credential may give created_by only as sam or restart"
     if code in _SEAT_REFUSALS:
         return _SEAT_REFUSALS[code]
     return f"{code or exc.status}: {exc.message}"

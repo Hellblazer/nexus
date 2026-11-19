@@ -77,10 +77,10 @@ def resolve_parent(environ: Mapping[str, str], identity_dir: Path, procs: Any) -
     return record.identity if record is not None else None
 
 
-def _log_refusal(exc: Any) -> None:
+def _log_refusal(exc: Any, parent: str | None = None) -> None:
     """One warning for the engine refusing a delegation. An engine older than 0.1.197 says the same thing for every
-    dispatch, so it is logged once per process; every other refusal is its mapped line, each time. The line never holds a
-    token value."""
+    dispatch, so it is logged once per process; every other refusal is its mapped line, each time, naming *parent* (the
+    dispatching identity). The line never holds a token value."""
     global _SEATS_NEED_ENGINE_LOGGED
     from nexus.identity.bind_client import is_old_engine_seat_refusal, seat_refusal_message  # noqa: PLC0415
 
@@ -88,7 +88,9 @@ def _log_refusal(exc: Any) -> None:
         if _SEATS_NEED_ENGINE_LOGGED:
             return
         _SEATS_NEED_ENGINE_LOGGED = True
-    _log.warning("delegated_identity_not_created", error=seat_refusal_message(exc, None, token_source="the dispatching session's token", no_token=NO_PARENT_TOKEN))
+    _log.warning("delegated_identity_not_created", error=seat_refusal_message(
+        exc, parent, token_source="the dispatching session's token", no_token=NO_PARENT_TOKEN,
+        unauthorized="the dispatching session renews it while it runs"))
 
 
 class DelegatedIdentity:
@@ -128,6 +130,7 @@ class DelegatedIdentity:
         from nexus.identity.holder import Processes, epoch_seconds, normalise_instant  # noqa: PLC0415
         from nexus.identity.token_file import TokenFile, identity_dir as _identity_dir, write_token_file  # noqa: PLC0415
 
+        parent: str | None = None
         try:
             procs = procs if procs is not None else Processes()
             if identity_dir is None:
@@ -176,7 +179,7 @@ class DelegatedIdentity:
                         pass
                 raise
         except IdentityApiError as exc:
-            _log_refusal(exc)
+            _log_refusal(exc, parent)
             return None
         except IdentityUnavailableError as exc:
             _log.warning("delegated_identity_not_created", error=f"{type(exc).__name__}: {exc}")

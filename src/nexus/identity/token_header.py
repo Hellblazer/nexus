@@ -140,7 +140,9 @@ def token_file_path() -> Path | None:
 
 
 def reset_for_tests() -> None:
+    global _RESOLVER_DOWN_UNTIL
     with _LOCK:
+        _RESOLVER_DOWN_UNTIL = 0.0
         _DISCOVERED.clear()
         _ANCESTOR.clear()
         _VERIFIED.clear()
