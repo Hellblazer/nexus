@@ -13,6 +13,7 @@ from collections.abc import Callable
 import click
 
 from nexus.identity.ops import IdentityCommandError, IdentityEnv
+from nexus.identity.work import EXIT_OWNED, OwnedByLiveIdentity
 
 
 def _env(ctx: click.Context) -> IdentityEnv:
@@ -30,8 +31,16 @@ def _run(ctx: click.Context, fn: Callable[[IdentityEnv], list[str]]) -> None:
     try:
         for line in fn(_env(ctx)):
             click.echo(line)
+    except OwnedByLiveIdentity as exc:
+        raise _OwnedExit(str(exc)) from exc
     except IdentityCommandError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+class _OwnedExit(click.ClickException):
+    """``may-stop``'s own exit status for a resource a live identity owns, so a script keys on it, never on the text."""
+
+    exit_code = EXIT_OWNED
 
 
 @click.group("identity")
@@ -186,6 +195,9 @@ def may_stop_cmd(ctx: click.Context, kind: str, ref: str) -> None:
     Run it before removing a worktree or killing a tmux server. Ownership is read from the work rows
     (`nx identity work register`) and liveness from the holder check, never from a name pattern or a process listing.
     A resource no row names is unowned and the answer is yes.
+
+    Exit status: 0 no live owner; 3 a live identity owns it; 1 anything else (the engine does not answer, a bad
+    argument). A worktree's REF is resolved to its real path. Stop on any nonzero status.
     """
     from nexus.identity import work  # noqa: PLC0415
 
@@ -281,7 +293,7 @@ def work_run_cmd(ctx: click.Context, kind: str, ref: str, argv: tuple[str, ...])
     from nexus.identity import work  # noqa: PLC0415
 
     try:
-        code = work.run_command(_env(ctx), kind, ref, argv)
+        code = work.run_command(lambda: _env(ctx), kind, ref, argv)
     except IdentityCommandError as exc:
         raise click.ClickException(str(exc)) from exc
     ctx.exit(code)

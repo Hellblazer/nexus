@@ -27,8 +27,9 @@ def test_tmux_server_of_a_live_identity_is_not_stopped(box: Box) -> None:
     assert i1 == "i1"
     box.engine.put_work(i1, "tmux", "s1", "running")
     result = box.run("may-stop", "--kind", "tmux", "--ref", "s1")
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 3, result.output            # 3: a live identity owns it; 1 is every other failure
     assert "i1" in result.output and "alpha" in result.output and "s1" in result.output, result.output
+    assert " is owned by " in result.output, "the sandbox's refusal contract is the exit status; the wording is for people"
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -65,11 +66,12 @@ def test_a_worktree_whose_owner_is_alive_is_kept_even_when_ps_finds_no_process_i
     path = tmp_path / "nexus-wt" / "alpha"
     path.mkdir(parents=True)
     i1 = box.running_seat("alpha", 100)
-    box.engine.put_work(i1, "worktree", str(path), "running")
+    real = str(path.resolve())                                          # the CLI spells a worktree by its real path
+    box.engine.put_work(i1, "worktree", real, "running")
     assert 100 in box.procs.procs and not any(p for p in box.procs.procs if p != 100), "only the owner's holder runs"
     result = box.run("may-stop", "--kind", "worktree", "--ref", str(path))
-    assert result.exit_code == 1, result.output
-    assert str(path) in result.output and "i1" in result.output and "alpha" in result.output
+    assert result.exit_code == 3, result.output
+    assert real in result.output and "i1" in result.output and "alpha" in result.output
 
 
 def test_a_resource_nobody_registered_is_unowned_and_may_be_stopped(box: Box) -> None:
@@ -115,7 +117,7 @@ def test_an_owner_whose_process_cannot_be_judged_still_blocks(box: Box) -> None:
     i1 = box.running_seat("alpha", 100)
     box.engine.put_work(i1, "tmux", "s1", "running")
     box.procs.os_start = lambda pid: None                               # type: ignore[method-assign]
-    assert box.run("may-stop", "--kind", "tmux", "--ref", "s1").exit_code == 1
+    assert box.run("may-stop", "--kind", "tmux", "--ref", "s1").exit_code == 3
 
 
 def test_may_stop_fails_closed_when_the_engine_does_not_answer(box: Box) -> None:
@@ -136,7 +138,7 @@ def test_two_owners_one_alive_one_crashed_names_only_the_live_one(box: Box) -> N
     box.engine.put_work(dead, "worktree", "/p", "running")
     crash(box, 101)
     result = box.run("may-stop", "--kind", "worktree", "--ref", "/p")
-    assert result.exit_code == 1 and "alpha" in result.output and "beta" not in result.output, result.output
+    assert result.exit_code == 3 and "alpha" in result.output and "beta" not in result.output, result.output
 
 
 # ── register, done, forget, list, run ───────────────────────────────────────
@@ -299,3 +301,179 @@ def test_a_session_with_no_identity_answers_unknown_session_which_the_restart_sc
     'could not be read': pinned here against the real command."""
     result = box.run("work", "list", "--session", "no-such-session", "--running", "--json")
     assert result.exit_code == 1 and "unknown_session" in result.output, result.output
+
+
+# ── fix round 1: a label never fails or delays the work it labels ───────────
+
+
+def test_work_run_runs_the_command_when_the_engine_env_cannot_be_built(box: Box, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """B1: with no resolvable endpoint ``IdentityEnv.real`` raises. The lab run must still start, and its status passes through."""
+    import sys
+
+    from click.testing import CliRunner
+
+    from nexus.commands.identity_cmd import identity_group
+    from nexus.identity.ops import IdentityCommandError, IdentityEnv
+
+    as_caller(monkeypatch, "i1")
+
+    def no_engine(cls):
+        raise IdentityCommandError("no engine to talk to (nothing resolves)")
+
+    monkeypatch.setattr(IdentityEnv, "real", classmethod(no_engine))
+    marker = tmp_path / "ran"
+    result = CliRunner().invoke(identity_group, ["work", "run", "--kind", "labrun", "--ref", "r", "--", sys.executable, "-c",
+                                                 f"import sys; open({str(marker)!r}, 'w').write('x'); sys.exit(6)"])
+    assert result.exit_code == 6 and marker.exists(), result.output
+
+
+def test_work_run_runs_the_command_when_the_engine_answers_something_unexpected(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B1: a row the client cannot read (``Work.of`` raising KeyError) is no reason to skip the command."""
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    as_caller(monkeypatch, i1)
+    box.engine.put_work = lambda *a, **k: {"unexpected": True}          # type: ignore[method-assign]
+    ran: list[str] = []
+    assert work.run_command(box.env(), "labrun", "r", ["x"], runner=lambda argv: ran.append("ran") or 4) == 4
+    assert ran == ["ran"]
+
+
+def test_work_run_forwards_a_signal_to_the_child_and_marks_done(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S8: TERM sent to ``work run`` reaches the wrapped command, the row ends done, and the status is 128 + the signal."""
+    import os
+    import signal
+    import sys
+    import threading
+
+    from nexus.identity import work
+
+    if not hasattr(signal, "SIGTERM") or sys.platform == "win32":
+        pytest.skip("POSIX signals")
+    i1 = box.running_seat("alpha", 100)
+    as_caller(monkeypatch, i1)
+    before = signal.getsignal(signal.SIGTERM)
+    timer = threading.Timer(1.0, lambda: os.kill(os.getpid(), signal.SIGTERM))     # the handler is installed before the child starts
+    timer.start()
+    try:
+        code = work.run_command(box.env(), "labrun", "r", [sys.executable, "-c", "import time; time.sleep(60)"])
+    finally:
+        timer.cancel()
+    assert code == 128 + int(signal.SIGTERM), "the child died of the forwarded TERM"
+    assert box.engine.work[(i1, "labrun", "r")][0] == "done"
+    assert signal.getsignal(signal.SIGTERM) == before, "the handlers are put back"
+
+
+def test_work_done_for_work_with_no_row_is_a_no_op_that_says_so(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    as_caller(monkeypatch, box.running_seat("alpha", 100))
+    result = box.run("work", "done", "--kind", "tmux", "--ref", "never-registered")
+    assert result.exit_code == 0 and "nothing to mark done" in result.output
+    assert box.engine.work == {}, "no finished row is made for work nobody registered"
+
+
+# ── fix round 1: a worktree is its real path ────────────────────────────────
+
+
+def test_a_worktree_is_spelled_by_its_real_path_on_every_verb(box: Box, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S3: a trailing slash, a relative path or a symlinked prefix must find the row, not read as unowned."""
+    import os
+
+    real = tmp_path / "real" / "wt"
+    real.mkdir(parents=True)
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "real")
+    i1 = box.running_seat("alpha", 100)
+    as_caller(monkeypatch, i1)
+    assert box.run("work", "register", "--kind", "worktree", "--ref", f"{link}/wt/").exit_code == 0
+    assert [k[2] for k in box.engine.work] == [str(real.resolve())], "registered under the real path"
+    as_caller(monkeypatch, "i999")                                       # someone else asks about it, by other spellings
+    for spelling in (str(real), f"{link}/wt", f"{link}/wt/", os.path.relpath(real)):
+        out = box.run("may-stop", "--kind", "worktree", "--ref", spelling)
+        assert out.exit_code == 3, (spelling, out.output)
+    assert "alpha" in box.run("work", "owners", "--kind", "worktree", "--ref", f"{link}/wt").output
+    as_caller(monkeypatch, i1)
+    assert box.run("work", "done", "--kind", "worktree", "--ref", f"{link}/wt/").exit_code == 0
+    assert box.engine.work[(i1, "worktree", str(real.resolve()))][0] == "done"
+    assert box.run("work", "forget", "--kind", "worktree", "--ref", f"{link}/wt").exit_code == 0
+    assert box.engine.work == {}
+
+
+def test_may_stop_says_it_cannot_tell_who_the_caller_is_when_it_holds_no_readable_identity(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    i1 = box.running_seat("alpha", 100)
+    box.engine.put_work(i1, "tmux", "s1", "running")
+    as_caller(monkeypatch, None)                                          # an expired token reads as no identity
+    out = box.run("may-stop", "--kind", "tmux", "--ref", "s1")
+    assert out.exit_code == 3 and "cannot tell whether it is the owner" in out.output, out.output
+    as_caller(monkeypatch, "i999")
+    assert "cannot tell" not in box.run("may-stop", "--kind", "tmux", "--ref", "s1").output
+
+
+# ── fix round 1: is_alive on the branches that were not tested ──────────────
+
+
+def holder_on(host: str, pid: int) -> dict:
+    return {"host": host, "pid": pid, "started_at": pid * 1000, "proc_start": "2026-11-17T08:00:00Z", "session_id": "s", "pane": None}
+
+
+def test_a_holder_on_another_host_is_alive_while_its_lease_is_live_and_not_once_lapsed(box: Box) -> None:
+    from nexus.identity.ops import is_alive
+
+    live = box.engine.stage(kind="seat", name="far", state="live", generation=1, holder=holder_on("elsewhere", 500))
+    lapsed = box.engine.stage(kind="seat", name="gone-far", state="lapsed", generation=1, holder=holder_on("elsewhere", 501))
+    assert is_alive(box.env(), live) is True
+    assert is_alive(box.env(), lapsed) is False, "a lapsed lease on another host is not alive"
+    box.engine.put_work(lapsed, "tmux", "s9", "running")
+    assert box.run("may-stop", "--kind", "tmux", "--ref", "s9").exit_code == 0, "its running row is stale"
+    box.engine.put_work(live, "tmux", "s8", "running")
+    assert box.run("may-stop", "--kind", "tmux", "--ref", "s8").exit_code == 3
+
+
+def test_a_lapsed_holder_on_this_host_is_judged_by_its_process(box: Box) -> None:
+    from nexus.identity.ops import is_alive
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.records[i1]["state"] = "lapsed"                            # the lease lapsed; the process still runs
+    assert is_alive(box.env(), i1) is True
+    crash(box, 100)
+    assert is_alive(box.env(), i1) is False
+
+
+def test_a_delegated_identity_is_judged_by_its_dispatcher_process(box: Box) -> None:
+    from nexus.identity.ops import is_alive
+
+    parent = box.running_seat("alpha", 100)
+    box.procs.procs[777] = "2026-11-17T08:00:00Z"                          # the dispatcher: a running process with no registry file
+    child = box.engine.stage(kind="delegated", state="live", generation=1, parent=parent, holder=holder_on(box.procs.host, 777))
+    assert is_alive(box.env(), child) is True
+    box.procs.procs.pop(777)
+    assert is_alive(box.env(), child) is False, "the dispatcher is gone"
+    box.engine.put_work(child, "labrun", "r", "running")
+    assert box.run("may-stop", "--kind", "labrun", "--ref", "r").exit_code == 0
+
+
+def test_the_exit_statuses_are_the_contract_the_sandbox_keys_on(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S7: 0 no live owner, 3 a live identity owns it, 1 anything else (the engine not answering, a bad ref). The sandbox's
+    guard keys on the 3 alone; it lives outside the package and spells the number itself, so it is pinned here."""
+    import importlib.util
+
+    from nexus.identity import work
+    from nexus.identity.bind_client import IdentityUnavailableError
+
+    sibling = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "sandbox_work.py"
+    spec = importlib.util.spec_from_file_location("sandbox_work_pin", sibling)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.EXIT_OWNED == work.EXIT_OWNED == 3
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.put_work(i1, "tmux", "owned", "running")
+    assert box.run("may-stop", "--kind", "tmux", "--ref", "free").exit_code == 0
+    owned = box.run("may-stop", "--kind", "tmux", "--ref", "owned")
+    assert owned.exit_code == 3 and " is owned by " in owned.output
+
+    def down(kind: str, ref: str):
+        raise IdentityUnavailableError("connection refused")
+
+    box.engine.work_owners = down                                      # type: ignore[method-assign]
+    assert box.run("may-stop", "--kind", "tmux", "--ref", "owned").exit_code == 1, "an engine that does not answer is not an owner"
+    assert box.run("may-stop", "--kind", "daemon", "--ref", "x").exit_code == 2, "a bad kind is a usage error"

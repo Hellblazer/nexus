@@ -28,7 +28,10 @@ and a process with no identity token registers nothing.
 """
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -163,17 +166,23 @@ def _call(fn: Callable[..., Any], *args: Any) -> Any:
 # ── the registrars' side: never fail the work ───────────────────────────────
 
 
-def register_own(kind: str, ref: str, state: str = RUNNING, *, client: Any = None, identity: str | None = None) -> bool:
-    """Register work for the identity this process holds. True when a row was written. No identity, no engine, or any
-    refusal gives False and a log line: the work this labels must never fail because its label could not be written."""
+#: Seconds a registrar's engine call may take. A label must never delay what it labels.
+LABEL_TIMEOUT_S = 2.0
+
+
+def register_own(kind: str, ref: str, state: str = RUNNING, *, client: Any = None, identity: str | None = None,
+                 timeout: float = LABEL_TIMEOUT_S) -> bool:
+    """Register work for *identity* (default: the one this process holds). True when a row was written. No identity, no
+    engine, or any refusal gives False and a log line: the work this labels must never fail, or wait on a slow engine,
+    because its label could not be written."""
     try:
         who = identity or caller_identity()
         if who is None:
             return False
         owned = client is None
-        engine = IdentityClient.from_config() if owned else client
+        engine = IdentityClient.from_config(timeout=timeout) if owned else client
         try:
-            register(engine, who, kind, ref, state)
+            register(engine, who, kind, norm_ref(kind, ref), state)
         finally:
             if owned:
                 engine.close()
@@ -183,9 +192,59 @@ def register_own(kind: str, ref: str, state: str = RUNNING, *, client: Any = Non
         return False
 
 
-def finish_own(kind: str, ref: str, *, client: Any = None, identity: str | None = None) -> bool:
+def finish_own(kind: str, ref: str, *, client: Any = None, identity: str | None = None,
+               timeout: float = LABEL_TIMEOUT_S) -> bool:
     """The registrar's clean end: ``done``. Same failure rule as :func:`register_own`."""
-    return register_own(kind, ref, DONE, client=client, identity=identity)
+    return register_own(kind, ref, DONE, client=client, identity=identity, timeout=timeout)
+
+
+class Label:
+    """One registrar's row for one piece of work: registered running at :meth:`start`, ``done`` at :meth:`finish`.
+
+    The identity is captured at start and used at finish, so a token that expired or changed in between never writes the
+    end under another identity or not at all. :meth:`finish` runs once, writes nothing for a label that never started, and
+    is skipped with ``skip=True`` for work another party took over (a superseded wait must not mark its successor's row
+    done). :meth:`arm_sigterm` makes a TERM end the row too, then dies of the TERM as it would have."""
+
+    def __init__(self, kind: str, ref: str, *, timeout: float = LABEL_TIMEOUT_S) -> None:
+        self.kind, self.ref, self.timeout = kind, ref, timeout
+        self.identity: str | None = None
+        self._started = False
+        self._finished = False
+        self._previous: Any = None
+        self._armed = False
+
+    def start(self) -> bool:
+        try:
+            self.identity = caller_identity()
+        except Exception as exc:  # noqa: BLE001 — reading the token file never fails the work
+            _log.warning("identity_work_caller_unreadable", error=f"{type(exc).__name__}: {exc}")
+            return False
+        self._started = bool(self.identity) and register_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout)
+        return self._started
+
+    def finish(self, *, skip: bool = False) -> None:
+        if not self._started or self._finished:
+            return
+        self._finished = True
+        if self._armed:
+            self._armed = False
+            signal.signal(signal.SIGTERM, self._previous)
+        if not skip:
+            finish_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout)
+
+    def arm_sigterm(self) -> None:
+        """Mark the row done on SIGTERM, then let the TERM kill the process (no-op off the main thread)."""
+        if not self._started or threading.current_thread() is not threading.main_thread():
+            return
+
+        def on_term(signum: int, frame: Any) -> None:
+            self.finish()
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
+
+        self._previous = signal.signal(signal.SIGTERM, on_term)
+        self._armed = True
 
 
 # ── what ``nx identity work`` prints ────────────────────────────────────────
@@ -195,6 +254,22 @@ def _kind(kind: str) -> str:
     if kind not in KINDS:
         raise IdentityCommandError(f"kind must be one of {', '.join(KINDS)}")
     return kind
+
+
+class OwnedByLiveIdentity(IdentityCommandError):
+    """``may-stop`` refused because another identity owns the resource with running work and a live holder. A distinct
+    type, so the CLI gives it its own exit status (:data:`EXIT_OWNED`) and a script keys on the status, never the text."""
+
+
+#: ``nx identity may-stop``'s exit status for "a live identity owns it"; 1 is every other failure.
+EXIT_OWNED = 3
+
+
+def norm_ref(kind: str, ref: str) -> str:
+    """The label as the registrar and the checker must both spell it: a worktree is its real absolute path (a relative
+    path, a trailing slash or a symlinked prefix such as /tmp for /private/tmp would otherwise miss the row and read as
+    unowned). Other kinds are labels, used as given."""
+    return os.path.realpath(ref) if kind == "worktree" else ref
 
 
 def _own(who: Callable[[], str | None] | None) -> str:
@@ -207,17 +282,22 @@ def _own(who: Callable[[], str | None] | None) -> str:
 def register_lines(env: IdentityEnv, kind: str, ref: str, state: str = RUNNING, *,
                    who: Callable[[], str | None] | None = None) -> list[str]:
     """``nx identity work register|done``: a row for the caller. A process that holds no identity registers nothing and
-    says so (exit 0): the verb is called from skills and scripts whose work must go on."""
+    says so (exit 0): the verb is called from skills and scripts whose work must go on. ``done`` for work with no row is a
+    no-op that says so (it never creates a finished row for work nobody registered)."""
     _kind(kind)
+    ref = norm_ref(kind, ref)
     identity = (who or caller_identity)()
     if identity is None:
         return ["no identity is bound to this process: nothing registered"]
+    if state == DONE and not any((w.kind, w.ref) == (kind, ref) for w in _call(of, env.client, identity)):
+        return [f"{identity} has no {kind} {ref}: nothing to mark done"]
     row = _call(register, env.client, identity, kind, ref, state)
     return [f"{identity} {row.state} {row.kind} {row.ref}"]
 
 
 def forget_lines(env: IdentityEnv, kind: str, ref: str, *, who: Callable[[], str | None] | None = None) -> list[str]:
     _kind(kind)
+    ref = norm_ref(kind, ref)
     identity = (who or caller_identity)()
     if identity is None:
         return ["no identity is bound to this process: nothing forgotten"]
@@ -260,6 +340,7 @@ def list_lines(report: Mapping[str, Any]) -> list[str]:
 
 def owners_lines(env: IdentityEnv, kind: str, ref: str) -> list[str]:
     _kind(kind)
+    ref = norm_ref(kind, ref)
     rows = _call(owners, env.client, kind, ref)
     if not rows:
         return [f"{kind} {ref}: unowned (no identity registered it)"]
@@ -273,17 +354,20 @@ def owners_lines(env: IdentityEnv, kind: str, ref: str) -> list[str]:
 
 
 def may_stop_lines(env: IdentityEnv, kind: str, ref: str, *, who: Callable[[], str | None] | None = None) -> list[str]:
-    """Refuse (raise, naming the owners) when an identity other than the caller owns the resource with running work and
-    a live holder; else return the lines to print. The caller's own rows never block it, a ``done`` row never blocks, and a
-    stale one never blocks. Ownership is read from the work rows and liveness from the holder check: no name pattern, no
-    process listing, no working directory."""
+    """Refuse (raise :class:`OwnedByLiveIdentity`, naming the owners) when an identity other than the caller owns the
+    resource with running work and a live holder; else return the lines to print. The caller's own rows never block it,
+    a ``done`` row never blocks, and a stale one never blocks. Ownership is read from the work rows and liveness from the
+    holder check: no name pattern, no process listing, no working directory. A worktree's *ref* is its real path."""
     _kind(kind)
+    ref = norm_ref(kind, ref)
     me = (who or caller_identity)()
     live = [w for w in _call(live_owners, env.client, kind, ref, _alive_of(env)) if w.identity != me]
     if live:
         named = "; ".join(f"{_label_of(env, w.identity)} (its holder is alive)" for w in live)
-        raise IdentityCommandError(f"{kind} {ref} is owned by {named}: not stopping it. The owner ends it, or ends its "
-                                   f"session first (`nx identity alive <seat>` says whether it runs).")
+        unsure = ("" if me is not None else " This process holds no readable identity (none bound, or its token expired), "
+                  "so it cannot tell whether it is the owner.")
+        raise OwnedByLiveIdentity(f"{kind} {ref} is owned by {named}: not stopping it.{unsure} The owner ends it, or ends its "
+                                  f"session first (`nx identity alive <seat>` says whether it runs).")
     rows = _call(owners, env.client, kind, ref)
     if not rows:
         return [f"{kind} {ref}: unowned (no identity registered it)"]
@@ -291,40 +375,67 @@ def may_stop_lines(env: IdentityEnv, kind: str, ref: str, *, who: Callable[[], s
     return [f"{kind} {ref}: no live owner other than this process" + (f" (stale rows ignored: {', '.join(stale)})" if stale else "")]
 
 
-def run_command(env: IdentityEnv, kind: str, ref: str, argv: Sequence[str], *,
+def run_command(env: IdentityEnv | Callable[[], IdentityEnv], kind: str, ref: str, argv: Sequence[str], *,
                 who: Callable[[], str | None] | None = None,
                 runner: Callable[[Sequence[str]], int] | None = None) -> int:
     """``nx identity work run``: register the work running, run *argv* (its streams are this process's), write ``done``
     when it exits, and return its exit status unchanged (128 + n for a signal). A process with no identity just runs it.
-    The label is best effort: a refused registration is said once on stderr and the command still runs."""
+
+    The label is best effort in every part: *env* may be a factory, called inside the same guard as the registration, so
+    an engine that cannot be reached, a refusal or an unexpected answer is logged and the command still runs. SIGTERM,
+    SIGINT and SIGHUP sent to this process are forwarded to the child (:func:`_spawn`), and the row is marked done after
+    the child ends."""
     _kind(kind)
+    ref = norm_ref(kind, ref)
     if not argv:
         raise IdentityCommandError("give the command to run after --")
-    identity = (who or caller_identity)()
-    registered = False
-    if identity is not None:
-        try:
-            register(env.client, identity, kind, ref, RUNNING)
-            registered = True
-        except (IdentityApiError, IdentityUnavailableError) as exc:
-            _log.warning("identity_work_run_not_registered", kind=kind, ref=ref, error=str(exc))
+    engine: IdentityEnv | None = None
+    identity: str | None = None
+    try:
+        identity = (who or caller_identity)()
+        if identity is not None:
+            engine = env() if callable(env) else env
+            register(engine.client, identity, kind, ref, RUNNING)
+    except Exception as exc:  # noqa: BLE001 — a label never fails its work
+        _log.warning("identity_work_run_not_registered", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
+        engine = None
     try:
         code = (runner or _spawn)(list(argv))
     finally:
-        if registered and identity is not None:
+        if engine is not None and identity is not None:
             try:
-                mark_done(env.client, identity, kind, ref)
-            except (IdentityApiError, IdentityUnavailableError) as exc:
-                _log.warning("identity_work_run_not_marked_done", kind=kind, ref=ref, error=str(exc))
+                mark_done(engine.client, identity, kind, ref)
+            except Exception as exc:  # noqa: BLE001 — as above
+                _log.warning("identity_work_run_not_marked_done", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
     return code
 
 
+_FORWARDED = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, n))
+
+
 def _spawn(argv: Sequence[str]) -> int:
+    """Run *argv* and return its status (128 + n for a child killed by signal n). SIGTERM, SIGINT and SIGHUP this process
+    receives are passed on to the child, so a stopped ``work run`` stops what it wraps, then returns normally and the caller
+    marks the row done. Handlers are installed on the main thread only, and put back afterwards."""
     from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — deferred: leaf import cost
 
     try:
-        done = subprocess.run(argv_off_cwd(argv), check=False)
+        child = subprocess.Popen(argv_off_cwd(argv))
     except FileNotFoundError:
         raise IdentityCommandError(f"command not found: {argv[0]}") from None
-    return 128 - done.returncode if done.returncode < 0 else done.returncode
+    previous: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        def forward(signum: int, frame: Any) -> None:
+            try:
+                child.send_signal(signum)
+            except OSError:
+                pass
 
+        for signum in _FORWARDED:
+            previous[signum] = signal.signal(signum, forward)
+    try:
+        code = child.wait()
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    return 128 - code if code < 0 else code
