@@ -2204,7 +2204,10 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
     before = _config_snapshot(watched)
     subprocess.run(["bash", "-c", control], cwd=main, env=env, check=True, capture_output=True)
     assert _config_snapshot(watched) == before, "the control wrote"
-    assert not _denied(control.replace("echo git config user.name via-foreach", "echo ok"), main)
+    # `foreach` itself denies now (it runs any command), so the control's verdict
+    # is no longer a statement about the quoted text; what it proves is that the
+    # quoted text, run for real, wrote nothing
+    assert _denied(control.replace("echo git config user.name via-foreach", "echo ok"), main)
     for cmd in (
         "git submodule foreach 'git config user.name via-foreach'",
         'git submodule foreach "git config core.hooksPath /tmp/hk"',
@@ -2669,7 +2672,6 @@ _SIDEFX_READS = [
     "git submodule",
     "git submodule status",
     "git submodule summary",
-    "git submodule foreach 'echo hi'",
     "git submodule update",
     "git fetch origin",
     "git -c help.autocorrect=0 confg user.name x",
@@ -3078,8 +3080,6 @@ _SIDEFX_ALLOWED = [
     "git submodule status",
     "git submodule status --recursive",
     "git submodule summary",
-    "git submodule foreach 'pwd'",
-    "git submodule foreach --recursive 'git status --short'",
     "git submodule update",
     "git submodule update --recursive",
     "git submodule update --remote",
@@ -3130,7 +3130,6 @@ _SIDEFX_ALLOWED = [
     "git log --format={a,b}",
     "git -C {a,b} status",
     "git branch -dr hellmini/x",
-    "git branch -f z0o2p-pdf-final 43726e8891410f307cb4bf3e93f6ba989a4549a2",
     "git branch -dr hellmini/x qwent/y",
     'git -C "$R" rev-parse v1^{tree}',
     "git rev-parse HEAD^{tree} v1^{tag}",
@@ -3187,6 +3186,9 @@ _SIDEFX_SHARED_ONLY = [
     "git branch -D a",
     "git branch -m a b",
     "git branch --edit-description",
+    # moves a branch ref (tests/test_routing_subagent_git_write_gaps.py, gap 1)
+    "git branch -f z0o2p-pdf-final 43726e8891410f307cb4bf3e93f6ba989a4549a2",
+    "git branch --force a b",
 ]
 
 
@@ -3564,8 +3566,10 @@ def test_branch_created_from_a_remote_ref_is_a_documented_limit(shared_repo, lin
     """nexus-k66o5, measured and left out: `git branch <name> origin/x` tracks by
     default (`branch.autoSetupMerge`), as `git switch -c` does from a worktree. A
     rule for it denied `git branch -f <name> <sha>`, a real subagent command that
-    writes no config, so it is not covered. Pinned, so adding it is deliberate."""
-    cmds = ["git branch newb origin/feat", "git branch newb origin/feat --quiet", "git branch -f x abc123"]
+    writes no config, so it is not covered. Pinned, so adding it is deliberate.
+    (`git branch -f` itself now denies in the shared tree for moving a ref, not
+    for config: `_SIDEFX_SHARED_ONLY` and the gap-1 table.)"""
+    cmds = ["git branch newb origin/feat", "git branch newb origin/feat --quiet"]
     assert _denied_among(cmds, shared_repo) == []
     assert _denied_among(cmds, linked_worktree) == []
 
