@@ -1044,6 +1044,7 @@ def _emit_budget_derivation(derivation: Any, *, json_out: bool) -> None:
     click.echo(f"  rows scanned: {d.n_rows_scanned}   executed-ok: {d.n_executed_ok}")
     click.echo(
         f"  excluded: no step records {d.n_excluded_no_steps}, "
+        f"single-query fast path {d.n_excluded_fast_path}, "
         f"pre-flip {d.n_excluded_pre_flip}, unknown cost {d.n_excluded_unknown_cost}, "
         f"continuation handoff/report {d.n_excluded_continuation}"
     )

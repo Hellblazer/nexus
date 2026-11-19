@@ -2567,8 +2567,8 @@ class TestNxAnswerCostAccounting:
     @pytest.mark.t2_tenant
     def test_cost_usd_none_when_no_steps_at_all(self, tmp_path):
         """The call sites that never produce a StepRecord at all (planner
-        failure before any dispatch, a binding refusal before plan_run,
-        the single-step fast path which bypasses the runner) get None —
+        failure before any dispatch, a binding refusal before plan_run; the
+        single-step fast path no longer, it records a sql step) get None —
         sum-of-nothing is honestly 'unknown', not zero."""
         from nexus.db.t2 import T2Database
 

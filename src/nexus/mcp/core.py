@@ -14299,8 +14299,8 @@ async def nx_answer(
         # _step_record_to_wire — the exact dict TelemetryHandler's
         # nx_answer_steps route expects, so a caller sees one shape
         # whether it reads the envelope or `nx answer-runs --json`).
-        # ``[]`` when no plan_run steps executed (single-step fast path,
-        # or any error/miss path before plan_run ever ran).
+        # ``[]`` when no step executed (an error/miss path before plan_run ever ran, or a fast-path scope
+        # conflict); the single-step fast path records its one query as a ``sql`` step (nexus-7fku2.2.3).
         # ``cost_usd`` comes from _run_cost_usd, the function
         # _nx_answer_record_run uses too: every step's non-None cost plus
         # the run's out-of-step dispatch cost (inline planner on a plan miss,
@@ -15132,6 +15132,7 @@ async def nx_answer(
     # ── Step 2: single-step guard ────────────────────────────────────────
     if plan_class == "single_query":
         _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
+        _fast_query_t0 = time.monotonic()  # reset just before the query: the step's own elapsed time
         try:
             from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
             from nexus.plans.runner import (  # noqa: PLC0415 — deferred; matches this module's convention
@@ -15348,6 +15349,7 @@ async def nx_answer(
             # ``result_text`` (doubling the T3 round-trip) even though
             # the structured envelope already contains enough to
             # synthesize a result summary.
+            _fast_query_t0 = time.monotonic()
             if _fast_conflict:
                 chunks = []
                 result_text = no_match
@@ -15409,7 +15411,8 @@ async def nx_answer(
             # The fast path bypasses plan_run, so it records its one query here: a T3-only "sql" step, a known
             # zero cost (runner's convention), so the run's cost reads 0.0 rather than unknown. A scope conflict
             # ran nothing and records no step.
-            _fast_steps = [] if _fast_conflict else [_fast_path_step_record(elapsed_ms, ok=True)]
+            _fast_steps = [] if _fast_conflict else [
+                _fast_path_step_record(int((time.monotonic() - _fast_query_t0) * 1000), ok=True)]
             try:
                 with _t2_ctx() as db:
                     # nexus-yg49g: outcome must reflect whether the run
@@ -15465,7 +15468,7 @@ async def nx_answer(
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
             # the envelope and the telemetry row carry the same failed step, so neither reads its cost as unknown
-            _failed_steps = [_fast_path_step_record(elapsed_ms, ok=False)]
+            _failed_steps = [_fast_path_step_record(int((time.monotonic() - _fast_query_t0) * 1000), ok=False)]
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_complete(
