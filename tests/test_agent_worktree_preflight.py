@@ -13,6 +13,7 @@ ancestry of a required base commit.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -69,6 +70,17 @@ def _run_preflight(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+@pytest.fixture(autouse=True)
+def _stub_nx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The script labels the worktree with ``nx identity work register`` (RDR-253 Step 6): an nx stub that does nothing, so no
+    test here reaches an engine. The label itself is tested in tests/test_agent_worktree_preflight_register.py."""
+    stub = tmp_path / "nx-stub-bin"
+    stub.mkdir()
+    (stub / "nx").write_text("#!/bin/sh\nexit 0\n")
+    (stub / "nx").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub}{os.pathsep}{os.environ['PATH']}")
 
 
 @pytest.fixture
