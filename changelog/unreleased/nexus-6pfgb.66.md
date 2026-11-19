@@ -1,3 +1,0 @@
-### Added
-
-- **Engine: `GET /v1/status` says how many offending chunk writes the would-refuse log could not name (RDR-236 Phase 4 Step 2b).** The new `chunk_metadata_key_log_overflow_total` counts, since boot, the chunk writes carrying a key a chunk row does not keep that arrived after the log's rate limiter was full (10,000 route, tenant, collection, key-set and client combinations live in one minute). Those writes share one overflow line that names only the first of them, so a non-zero count means the `chunk_metadata_key_would_refuse` log missed writers and the two-week read cannot rely on the log alone. `chunk_metadata_key_would_refuse_total` still counts every offending write. The privacy policy now describes what the `chunk_metadata_key_would_refuse` line holds.
