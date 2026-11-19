@@ -20,13 +20,15 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db import make_t3
 from nexus.db.limits import QUOTAS
+import nexus.session as session_mod
 from nexus.db.t2 import T2Database
+from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.mcp.core import store_get
 from nexus.memory_curate import gate_rollup as gr
 from nexus.memory_curate import gate_ttl as gt
 from tests._catalog_fixture_ops import documents_by_title
 from tests._engine_substrate import ensure_engine, mint_test_tenant
-from tests._t2_fixture_ops import backdate_memory, rewrite_memory_row, set_memory_access_count
+from tests._t2_fixture_ops import backdate_memory, rewrite_memory_row, set_memory_access_count, utc_stamp
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -820,8 +822,6 @@ def test_dry_run_counts_exactly_the_record_past_its_effective_ttl_and_writes_not
 
 def test_ttl_a_field_that_does_not_read_back_is_named_with_the_original_row(
         db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
-    from nexus.db.t2.http_memory_store import HttpMemoryStore
-
     name = _gate(db, "nexus-mm")
     real = HttpMemoryStore.import_entry
 
@@ -831,3 +831,26 @@ def test_ttl_a_field_that_does_not_read_back_is_named_with_the_original_row(
     monkeypatch.setattr(HttpMemoryStore, "import_entry", altered)
     out = _phase3("nexus-mm", expect=1)
     assert f"mismatch: {name!r} field tags" in out and "tampered" in out and "original row" in out
+
+
+def test_ttl_null_attribution_stays_null_where_a_put_would_fill_it(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control is real: NX_AGENT and a resolvable session are set, and a put under them writes both. Without that a
+    test process resolves neither (conftest drops CLAUDE_CODE_SESSION_ID, the config dir has no session file), a put
+    would also leave them null, and "stays null" would pass whether or not the write used put."""
+    monkeypatch.setenv("NX_AGENT", "rollup-test-agent")
+    monkeypatch.setenv("NX_SESSION_ID", "rollup-test-session")
+    monkeypatch.setattr(session_mod, "read_claude_session_id", lambda: None)
+    db.memory.put(REPO, "null-attribution-control", "scratch", tags="notes", ttl=30)         # no agent, no session given
+    control = _rows(db)["null-attribution-control"]
+    assert (control["agent"], control["session"]) == ("rollup-test-agent", "rollup-test-session"), (
+        "NX_AGENT and a session are set, so a put must fill both; if it did not, this test cannot tell put from import")
+    name = "review-abc1234-nexus-nu-2026-11-10"
+    db.memory.import_entry(project=REPO, title=name, tags="kind:gate,bead:nexus-nu,rdr:209", timestamp=utc_stamp(days=3),
+                           content="kind: review\nbead: nexus-nu\nrdr: 209\nsha: abc1234\noutcome: justified\n"
+                                   "date: 2026-11-10\n\nbody", agent=None, session=None)
+    seeded = _rows(db)[name]
+    assert seeded["agent"] is None and seeded["session"] is None and seeded["ttl"] is None
+    _phase3("nexus-nu")
+    after = _rows(db)[name]
+    assert after["ttl"] == 30
+    assert after["agent"] is None and after["session"] is None
