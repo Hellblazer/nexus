@@ -170,7 +170,7 @@ def test_the_raw_distance_ordering_sorts_nearest_first_and_the_envelope_order_is
     assert row["off"]["distance"]["ndcg3"] > row["off"]["envelope"]["ndcg3"]
 
 
-def test_the_primary_is_the_calibrated_order_and_raw_distance_is_kept_beside_it() -> None:
+def test_the_primary_is_the_calibrated_order_and_raw_distance_is_kept_beside_it(cloud_mode: None) -> None:  # voyage per-model calibration factors
     # Sam 2026-11-19 after the first partial run: raw distance put voyage-code-3 rows ahead of every
     # voyage-context-3 row on a mixed envelope, whatever routing did (134-research-17).
     assert ab.PRIMARY == "calibrated" and ab.SECONDARY == "envelope" and "distance" in ab.ORDERINGS
@@ -180,7 +180,7 @@ def test_the_primary_is_the_calibrated_order_and_raw_distance_is_kept_beside_it(
     assert set(ab.ORDERINGS) <= set(row["off"])
 
 
-def test_calibration_lifts_a_context_3_row_over_a_nearer_raw_code_row() -> None:
+def test_calibration_lifts_a_context_3_row_over_a_nearer_raw_code_row(cloud_mode: None) -> None:  # voyage per-model calibration factors
     code, docs = "code__1-77__voyage-code-3__v1", "docs__1-1__voyage-context-3__v1"
     chunks = [{"chash": "c", "collection": code, "distance": 0.38},
               {"chash": "d", "collection": docs, "distance": 0.50}]
@@ -188,7 +188,7 @@ def test_calibration_lifts_a_context_3_row_over_a_nearer_raw_code_row() -> None:
     assert [c["chash"] for c in ab.calibrated_order(chunks)] == ["d", "c"], "0.50 * 0.45/0.65 = 0.346 < 0.38"
 
 
-def test_a_mixed_envelope_is_scored_on_the_calibrated_order() -> None:
+def test_a_mixed_envelope_is_scored_on_the_calibrated_order(cloud_mode: None) -> None:  # voyage per-model calibration factors
     # The run's decision reads the calibrated order: the labelled docs row wins it, while raw distance (printed
     # beside it) still puts the nearer code row first.
     rows = [("bad", "code__1-1__voyage-code-3__v1", 0.38), ("good", "docs__1-1__voyage-context-3__v1", 0.50)]
@@ -205,7 +205,7 @@ def test_a_mixed_envelope_is_scored_on_the_calibrated_order() -> None:
     assert off["ndcg3"] == off["calibrated"]["ndcg3"] > off["distance"]["ndcg3"]
 
 
-def test_a_catalog_row_model_wins_over_the_name_and_each_arm_records_the_models_used() -> None:
+def test_a_catalog_row_model_wins_over_the_name_and_each_arm_records_the_models_used(cloud_mode: None) -> None:  # voyage per-model calibration factors
     # Search asks the catalog row first (nexus-ml9vu); a legacy name carries no model token.
     legacy, code = "docs__legacy-papers", "code__1-1__voyage-code-3__v1"
     rows = [("bad", code, 0.38), ("good", legacy, 0.50)]
@@ -232,7 +232,7 @@ def test_the_raw_ordering_is_summarized_beside_the_secondary() -> None:
     assert set(s["informational"]) >= {"secondary_ordering_rule", "raw_ordering_rule"}
 
 
-def test_one_model_calibrates_to_the_raw_order() -> None:
+def test_one_model_calibrates_to_the_raw_order(cloud_mode: None) -> None:  # voyage per-model calibration factors
     docs = "docs__1-1__voyage-context-3__v1"
     chunks = [{"chash": h, "collection": docs, "distance": d} for h, d in (("a", 0.6), ("b", 0.2), ("c", None))]
     assert ab.calibrated_order(chunks) == ab.distance_order(chunks)
