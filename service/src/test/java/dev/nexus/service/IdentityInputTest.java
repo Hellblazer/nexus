@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-253 Step 1 (nexus-hczdo.1.1), review round 1: input the routes must answer with a 400 and never a 500 (a bind
  * with no event, a body that is not a JSON object, a delegated identity with no holder), the free text a data
  * credential may write is bounded, and the data credential may create an ephemeral identity (the MCP server's pending
- * bind) but never a seat.
+ * bind) but no seat and no delegated identity without its own identity token (RDR-253 amendment, 2026-11-19).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class IdentityInputTest {
@@ -135,7 +135,7 @@ class IdentityInputTest {
     }
 
     @Test
-    void theDataCredentialMayCreateAnEphemeralIdentityButNeverASeat() {
+    void theDataCredentialCreatesAnEphemeralButNoSeatOrDelegationWithoutItsOwnToken() {
         String t = IdentityTestEnv.freshTenant();
         Resp eph = env.call(DATA, t, "POST", "", Map.of("kind", "ephemeral", "created_by", "restart", "bind", ev("p1", 7, 70)));
         assertThat(eph.status()).isEqualTo(200);
@@ -143,10 +143,14 @@ class IdentityInputTest {
         assertThat(eph.integer("generation")).isEqualTo(1);
         assertThat(env.call(DATA, t, "POST", "", Map.of("kind", "ephemeral", "created_by", "sam", "bind", ev("p2", 8, 80))).error())
             .as("an ephemeral identity is made by a session or the restart script").isEqualTo("bad_created_by");
+        // RDR-253 amendment (Sam 2026-11-19): the data credential creates a seat or delegates only with its own identity
+        // token (IdentityDataSelfServiceTest); with none, the fence refuses before any write.
         Resp seat = env.call(DATA, t, "POST", "", Map.of("kind", "seat", "name", "dataseat", "created_by", "sam"));
         assertThat(seat.status()).isEqualTo(403);
+        assertThat(seat.error()).isEqualTo("identity_token_required");
         assertThat(env.get(t, "/alias/dataseat").status()).isEqualTo(404);
-        assertThat(env.call(DATA, t, "POST", "/delegated", Map.of("parent", eph.str("id"), "bind", ev("c1", 9, 90))).status())
-            .as("delegated creation stays the dispatcher's, tenant only").isEqualTo(403);
+        Resp delegated = env.call(DATA, t, "POST", "/delegated", Map.of("parent", eph.str("id"), "bind", ev("c1", 9, 90)));
+        assertThat(delegated.status()).isEqualTo(403);
+        assertThat(delegated.error()).as("no token, no delegation").isEqualTo("identity_token_required");
     }
 }

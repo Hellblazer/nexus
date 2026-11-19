@@ -9,6 +9,9 @@
     creator already satisfies the old, narrower predicate), so no DATA EFFECT line applies per
     scripts/data_effect_lint.py's own scope. A separate file because identity-001 may already be applied, and a
     changeset's content is never edited after that.
+
+    Rollback: re-adding the narrow CHECK fails once any seat carries an identity:i<n> creator; such rows must be
+    restamped (or the seats purged) before a rollback.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"

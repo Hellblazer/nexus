@@ -76,8 +76,8 @@ class IdentityDataSelfServiceTest extends IdentityFenceHarness {
         Seat e = bindEphemeral(208);
         assertThat(seatEvent(e, "end").status()).isEqualTo(200);
         Resp r = data(e.token(), "/v1/identity/" + e.id() + "/promote", Map.of("name", unique("ended")));
-        assertThat(r.status()).as(r.raw()).isIn(404, 409);
-        assertThat(r.error()).isIn("identity_not_held", "unknown_identity");
+        assertThat(r.status()).as(r.raw()).isEqualTo(409);
+        assertThat(r.error()).isEqualTo("identity_not_held");
     }
 
     // ── delegated ────────────────────────────────────────────────────────────
@@ -141,7 +141,46 @@ class IdentityDataSelfServiceTest extends IdentityFenceHarness {
         Seat caller = bindEphemeral(222);
         assertThat(seatEvent(caller, "end").status()).isEqualTo(200);
         Resp r = data(caller.token(), "/v1/identity", Map.of("kind", "seat", "name", unique("after-end"), "created_by", "x"));
-        assertThat(r.status()).as(r.raw()).isIn(404, 409);
+        assertThat(r.status()).as(r.raw()).isEqualTo(409);
+        assertThat(r.error()).isEqualTo("identity_not_held");
+    }
+
+    @Test
+    void aDataSeatCreateOrDelegationWithASupersededTokenIsRefused() {
+        Seat first = bindSeat("superseded-create", 223);
+        resumeInNewProcess(first, 224, true);
+        Resp seat = data(first.token(), "/v1/identity", Map.of("kind", "seat", "name", unique("late-seat"), "created_by", "x"));
+        assertThat(seat.status()).as(seat.raw()).isEqualTo(409);
+        assertThat(seat.error()).isEqualTo("generation_superseded");
+        Resp child = data(first.token(), "/v1/identity/delegated", Map.of("parent", first.id(), "bind", childBind(225)));
+        assertThat(child.status()).as(child.raw()).isEqualTo(409);
+        assertThat(child.error()).isEqualTo("generation_superseded");
+    }
+
+    @Test
+    void aDataDelegationNamingNoParentIsABadRequestNotAWrite() {
+        Seat caller = bindSeat("no-parent", 226);
+        Resp r = data(caller.token(), "/v1/identity/delegated", Map.of("bind", childBind(227)));
+        assertThat(r.status()).as(r.raw()).isEqualTo(400);
+    }
+
+    @Test
+    void aDataDelegationMayNotTakeASessionAnotherIdentityHolds() {
+        Seat parent = bindSeat("session-parent", 228);
+        Seat other = bindEphemeral(229);
+        Map<String, Object> bind = new LinkedHashMap<>(childBind(230));
+        bind.put("session_id", other.sessionId());          // the other identity's session
+        Resp r = data(parent.token(), "/v1/identity/delegated", Map.of("parent", parent.id(), "bind", bind));
+        assertThat(r.status()).as(r.raw()).isEqualTo(409);
+        assertThat(r.error()).isEqualTo("session_held");
+        assertThat(get(null, "/v1/identity/sessions/" + other.sessionId()).text("identity")).as("unchanged").isEqualTo(other.id());
+    }
+
+    @Test
+    void theTenantCredentialStillCannotStampAnIdentityCreator() {
+        Resp r = post(null, "/v1/identity", Map.of("kind", "seat", "name", unique("forged"), "created_by", "identity:i77"));
+        assertThat(r.status()).as("only a data credential's own token writes an identity: creator").isEqualTo(400);
+        assertThat(r.error()).isEqualTo("bad_created_by");
     }
 
     // ── what stays as it was ─────────────────────────────────────────────────

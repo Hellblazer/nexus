@@ -179,17 +179,34 @@ public final class IdentityRepository {
     public Map<String, Object> createSeat(String tenant, String name, String displayName, String createdBy) {
         requireAliasName(name);
         bounded(displayName, "display_name");
-        if (!"sam".equals(createdBy) && !"restart".equals(createdBy)
-                && (createdBy == null || !SELF_CREATOR.matcher(createdBy).matches())) {
-            throw new IdentityException(400, "bad_created_by",
-                "a seat is created by sam, restart, or identity:<id> (the data credential's own token)");
+        if (!"sam".equals(createdBy) && !"restart".equals(createdBy)) {
+            throw new IdentityException(400, "bad_created_by", "a seat is created by sam or restart");
         }
+        return insertSeat(tenant, name, displayName, createdBy);
+    }
+
+    /**
+     * A seat the data credential creates for the identity its own token names (RDR-253 amendment, Sam 2026-11-19): unheld,
+     * stamped {@code created_by identity:<identityId>}. The handler fences the token first; this is the only path that
+     * writes an {@code identity:} creator, so {@link #createSeat} (the tenant credential's) is as strict as before.
+     */
+    public Map<String, Object> createSeatForIdentity(String tenant, String name, String displayName, String identityId) {
+        requireAliasName(name);
+        bounded(displayName, "display_name");
+        String creator = "identity:" + identityId;
+        if (!SELF_CREATOR.matcher(creator).matches()) {
+            throw new IdentityException(400, "bad_created_by", "not an identity id: " + identityId);
+        }
+        return insertSeat(tenant, name, displayName, creator);
+    }
+
+    private Map<String, Object> insertSeat(String tenant, String name, String displayName, String createdBy) {
         return scope.withTenant(tenant, ctx -> {
             OffsetDateTime now = now();
             String id = nextId(ctx, tenant);
             IdentityRecordsRecord rec = insertRecord(ctx, tenant, id, "seat", null, displayName, createdBy, now);
             insertAlias(ctx, tenant, id, name, now);
-            log.info("event=identity_created tenant={} id={} kind=seat name={}", tenant, id, name);
+            log.info("event=identity_created tenant={} id={} kind=seat name={} created_by={}", tenant, id, name, createdBy);
             return IdentityRows.view(rec, name);
         });
     }
@@ -730,6 +747,12 @@ public final class IdentityRepository {
     }
 
     /** The session index: a session id to its identity and generation. */
+    /** Whether {@code sessionId} is in the session index (any identity, any generation). */
+    public boolean sessionIndexed(String tenant, String sessionId) {
+        return scope.withTenant(tenant, ctx -> ctx.fetchExists(ctx.selectFrom(IDENTITY_SESSIONS)
+            .where(IDENTITY_SESSIONS.TENANT_ID.eq(tenant)).and(IDENTITY_SESSIONS.SESSION_ID.eq(sessionId))));
+    }
+
     public Map<String, Object> lookupSession(String tenant, String sessionId) {
         return scope.withTenant(tenant, ctx -> {
             var row = ctx.selectFrom(IDENTITY_SESSIONS)
