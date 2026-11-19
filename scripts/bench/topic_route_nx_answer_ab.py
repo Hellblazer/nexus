@@ -12,10 +12,13 @@ class the rule's third clause needs. The arm is switched in-process by replacing
 takes the per-collection route by itself (no ``NX_SEARCH_PER_COLLECTION`` needed); the off arm takes the default
 path, so the pair compares what ships.
 
-Ordering (pre-declared, 2026-11-19, before any run): the PRIMARY statistic, the one the pass rule reads, sorts the
-envelope's chunks by their carried ``distance`` (ascending, chunks with none last): one absolute scale across steps,
-and the ordering 134-research-13 used. The SECONDARY statistic is the envelope order (each step's own ranking, steps
-in plan order); it is printed, never decided on. Each chunk is resolved to a file path through the catalog and graded
+Ordering: the PRIMARY statistic, the one the pass rule reads, sorts the envelope's chunks by CALIBRATED distance
+(each chunk's carried ``distance`` times its collection's model factor, ``scoring._calibration_factor_for_model``,
+applied only when the chunks span more than one model, as search applies it; chunks with none last). It was raw
+carried distance when pre-declared; Sam changed it on 2026-11-19 after the first partial run, where raw distance put
+every voyage-code-3 row ahead of every voyage-context-3 row on a mixed envelope (134-research-17). Raw distance (the
+ordering 134-research-13 used) and the SECONDARY envelope order (each step's own ranking, steps in plan order) are
+printed, never decided on. Each chunk is resolved to a file path through the catalog and graded
 with ``taxonomy_ab2.score``: NDCG@3 (gain 2^g-1), recall@10, dedupe by file name, a generic question graded on its
 owner's collections and the exact basename.
 
@@ -55,11 +58,14 @@ from bench.paths import _resolve_paths_via_catalog
 from bench.taxonomy_ab2 import load_queries, score
 
 ARMS: tuple[str, ...] = ("off", "top1")
-PRIMARY = "distance"
+PRIMARY = "calibrated"
 SECONDARY = "envelope"
+RAW = "distance"
 ORDERINGS = {
-    PRIMARY: "envelope chunks sorted by carried distance, ascending, none last (the ordering of 134-research-13)",
+    PRIMARY: "envelope chunks sorted by calibrated distance (carried distance x model factor when the chunks span "
+             "more than one model), ascending, none last (Sam 2026-11-19, 134-research-17)",
     SECONDARY: "envelope order: each retrieval step's own ranking, steps in plan order (printed, not decided on)",
+    RAW: "envelope chunks sorted by raw carried distance (the ordering of 134-research-13; printed, not decided on)",
 }
 #: The RDR's rule (Step 9). Changing it is Sam's decision.
 MIN_MEAN_DELTA_ALL = 0.03
@@ -140,6 +146,21 @@ def _route_counts(events: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def calibrated_order(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ascending by calibrated distance: search's own per-model factor, applied only when the chunks span more than
+    one embedding model (one model keeps the raw order, as in search); chunks with none keep envelope order after."""
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — heavy; only at scoring
+    from nexus.scoring import _calibration_factor_for_model  # noqa: PLC0415 — as above
+
+    models = {c.get("collection", ""): embedding_model_for_collection_calibrated(c.get("collection", ""))
+              for c in chunks if c.get("distance") is not None}
+    factor = ({coll: _calibration_factor_for_model(m) for coll, m in models.items()}
+              if len(set(models.values())) > 1 else {})
+    keyed = [(c.get("distance") is None, (c.get("distance") or 0.0) * factor.get(c.get("collection", ""), 1.0), i)
+             for i, c in enumerate(chunks)]
+    return [chunks[i] for _none, _d, i in sorted(keyed)]
+
+
 def distance_order(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Ascending by ``distance``; chunks with none keep their envelope order after the rest."""
     keyed = [(c.get("distance") is None, c.get("distance") or 0.0, i) for i, c in enumerate(chunks)]
@@ -194,8 +215,9 @@ def _score_arm(q: dict[str, Any], envelope: dict[str, Any], cost: float, elapsed
             out["error"] = "vacuous: every chunk resolved to an empty path"
             return out
     grade = {"owner": q.get("owner"), "exact": bool(q.get("exact"))}
-    out[PRIMARY] = score(distance_order(rows), q["gt"], catalog, **grade)
+    out[PRIMARY] = score(calibrated_order(rows), q["gt"], catalog, **grade)
     out[SECONDARY] = score(rows, q["gt"], catalog, **grade)
+    out[RAW] = score(distance_order(rows), q["gt"], catalog, **grade)
     out["ndcg3"], out["recall10"] = out[PRIMARY]["ndcg3"], out[PRIMARY]["recall10"]
     return out
 

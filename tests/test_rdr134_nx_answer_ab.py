@@ -170,6 +170,47 @@ def test_the_primary_ordering_sorts_by_distance_and_the_envelope_order_is_kept_b
     assert row["off"]["ndcg3"] == row["off"]["distance"]["ndcg3"] > row["off"]["envelope"]["ndcg3"]
 
 
+def test_the_primary_is_the_calibrated_order_and_raw_distance_is_kept_beside_it() -> None:
+    # Sam 2026-11-19 after the first partial run: raw distance put voyage-code-3 rows ahead of every
+    # voyage-context-3 row on a mixed envelope, whatever routing did (134-research-17).
+    assert ab.PRIMARY == "calibrated" and ab.SECONDARY == "envelope" and "distance" in ab.ORDERINGS
+    answer = _answer({"off": [("far", 0.9), ("good", 0.1)], "top1": [("far", 0.9), ("good", 0.1)]})
+    (row,) = _run(_Q[:1], answer)["rows"]
+    assert row["off"]["ndcg3"] == row["off"]["calibrated"]["ndcg3"]
+    assert set(ab.ORDERINGS) <= set(row["off"])
+
+
+def test_calibration_lifts_a_context_3_row_over_a_nearer_raw_code_row() -> None:
+    code, docs = "code__1-77__voyage-code-3__v1", "docs__1-1__voyage-context-3__v1"
+    chunks = [{"chash": "c", "collection": code, "distance": 0.38},
+              {"chash": "d", "collection": docs, "distance": 0.50}]
+    assert [c["chash"] for c in ab.distance_order(chunks)] == ["c", "d"]
+    assert [c["chash"] for c in ab.calibrated_order(chunks)] == ["d", "c"], "0.50 * 0.45/0.65 = 0.346 < 0.38"
+
+
+def test_a_mixed_envelope_is_scored_on_the_calibrated_order() -> None:
+    # The run's decision reads the calibrated order: the labelled docs row wins it, while raw distance (printed
+    # beside it) still puts the nearer code row first.
+    rows = [("bad", "code__1-1__voyage-code-3__v1", 0.38), ("good", "docs__1-1__voyage-context-3__v1", 0.50)]
+
+    async def fn(*, question: str, structured: bool, trace: bool, **kw: Any) -> dict:
+        if trs.configured_route() is not None:
+            _log.info(ab.ROUTE_EVENT, routed=1, no_topics=0, fallback=0, skipped=0, unreported=0, unrouted_reason=None)
+        return {"chunks": [{"chash": h, "collection": c, "distance": d} for h, c, d in rows], "cost_usd": 0.01,
+                "steps": [{"cost_usd": 0.01}], "plan_id": "p1", "step_count": 1, "budget_exhausted_at_step": None}
+
+    (row,) = _run(_Q[:1], fn)["rows"]
+    off = row["off"]
+    assert off["calibrated"]["top3"][0] == "benchmarking.md" and off["distance"]["top3"][0] == "other.md"
+    assert off["ndcg3"] == off["calibrated"]["ndcg3"] > off["distance"]["ndcg3"]
+
+
+def test_one_model_calibrates_to_the_raw_order() -> None:
+    docs = "docs__1-1__voyage-context-3__v1"
+    chunks = [{"chash": h, "collection": docs, "distance": d} for h, d in (("a", 0.6), ("b", 0.2), ("c", None))]
+    assert ab.calibrated_order(chunks) == ab.distance_order(chunks)
+
+
 def test_a_chunk_with_no_distance_sorts_after_the_rest() -> None:
     chunks = [{"chash": "a", "distance": None}, {"chash": "b", "distance": 0.5}, {"chash": "c", "distance": 0.1}]
     assert [c["chash"] for c in ab.distance_order(chunks)] == ["c", "b", "a"]
@@ -258,7 +299,7 @@ def test_an_unexpected_error_keeps_the_paid_rows() -> None:
 
         def docs_for_chashes(self, chashes):
             _Broken.calls += 1
-            if _Broken.calls > 7:  # three catalog reads an arm: the second question's first arm fails
+            if _Broken.calls > 9:  # four catalog reads an arm: the second question's first arm fails
                 raise RuntimeError("catalog hiccup")
             return super().docs_for_chashes(chashes)
 
@@ -293,7 +334,8 @@ def test_another_owners_file_earns_nothing() -> None:
 
 
 def _paired(qid: str, kind: str, off: float, top1: float) -> dict[str, Any]:
-    arm = lambda v: {"distance": {"ndcg3": v, "recall10": v}, "envelope": {"ndcg3": v, "recall10": v},  # noqa: E731
+    arm = lambda v: {"calibrated": {"ndcg3": v, "recall10": v}, "distance": {"ndcg3": v, "recall10": v},  # noqa: E731
+                     "envelope": {"ndcg3": v, "recall10": v},
                      "elapsed_s": 1.0, "route": {"routed": 1}}
     return {"qid": qid, "kind": kind, "paired": True, "same_plan": True, "off": arm(off), "top1": arm(top1)}
 
@@ -306,7 +348,7 @@ def test_summary_splits_in_sample_from_out_of_sample_with_an_interval() -> None:
     lo, hi = s["out_of_sample"]["ci95_mean_delta"]
     assert lo <= -0.15 <= hi
     assert s["by_kind"]["generic"]["top1"]["ndcg3"] == pytest.approx(0.3)
-    assert s["primary"] == "distance" and s["scope_notes"]
+    assert s["primary"] == "calibrated" and s["scope_notes"]
 
 
 def test_a_verdict_needs_a_complete_run() -> None:
@@ -362,7 +404,8 @@ def test_three_questions_that_route_nothing_stop_the_run_early() -> None:
 
 def test_a_fail_from_a_diluted_run_is_inconclusive_and_a_pass_is_not_affected() -> None:
     def arm(v: float, routed: int) -> dict:
-        return {"distance": {"ndcg3": v, "recall10": v}, "envelope": {"ndcg3": v, "recall10": v},
+        return {"calibrated": {"ndcg3": v, "recall10": v}, "distance": {"ndcg3": v, "recall10": v},
+                "envelope": {"ndcg3": v, "recall10": v},
                 "elapsed_s": 1.0, "route": {"routed": routed}}
 
     def row(qid: str, kind: str, off: float, top1: float, routed: int) -> dict:

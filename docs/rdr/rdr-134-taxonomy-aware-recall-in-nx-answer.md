@@ -720,3 +720,10 @@ The design reuses the RDR-156 routes rather than adding an index.
   matched `hybrid-factual-lookup`, which declares no scope, and its routed
   arm sent no route. A step now routes unless its scope names another domain
   or a topic; prose-only routing of collections stays in the search layer.
+- 2026-11-19: Step 9's primary ordering (pre-declared in the A/B driver as
+  raw carried distance) is now calibrated distance, by Sam's choice after the
+  first partial run: on a mixed code and docs envelope, raw distance put
+  every voyage-code-3 row ahead of every voyage-context-3 row in both arms
+  (`134-research-17`). Raw distance and envelope order are printed, not
+  decided on. The run is redone after the client's calibrated pool cut and
+  the plan reseed.
