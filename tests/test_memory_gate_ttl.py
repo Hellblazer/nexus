@@ -810,3 +810,25 @@ def test_readback_after_a_carry_looks_the_quarantined_listing_up_afresh(db: T2Da
         out = _phase3("nexus-qa")
     assert "mismatch" not in out and f"quarantined (restorable: nx memory restore" in out and old in out
     assert old not in _rows(db)
+
+
+@pytest.mark.parametrize("failure", ["archive write refused", "archive does not read back"])
+def test_no_record_gets_a_ttl_until_every_archive_has_been_written_and_read_back(
+        db: T2Database, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    names = [_gate(db, "nexus-ab", sha="aaa1111"), _gate(db, "nexus-ab", sha="bbb2222"), _gate(db, "nexus-ab", sha="ccc3333")]
+    archive_prefix = f"{REPO}/"
+    if failure == "archive write refused":
+        real_write = gr.write_parts
+
+        def refuse_the_second_archive(t3, *, title, **kw):
+            if title == archive_prefix + sorted(names)[1]:
+                raise gr.GateRollupError(f"{title!r} was not stored (forced)")
+            return real_write(t3, title=title, **kw)
+
+        monkeypatch.setattr(gr, "write_parts", refuse_the_second_archive)
+    else:
+        real_read = gr.read_note
+        monkeypatch.setattr(gr, "read_note", lambda t3, col, title: None if title.startswith(archive_prefix) else real_read(t3, col, title))
+    out = _phase3("nexus-ab", expect=1)
+    assert "forced" in out or "did not read back" in out
+    assert all(r["ttl"] is None for r in _rows(db).values()) and set(_rows(db)) == set(names)
