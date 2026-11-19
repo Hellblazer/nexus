@@ -61,8 +61,9 @@ GH #1605 reports it for a whole repository.
 
 Indexing a PDF again from its new path mints a new document. The old one keeps
 its dead path, its chunks, its metadata and its links, and search returns both
-(GH #1571). Both rows carry the same content hash, and registration never reads
-it. Pointing the old row at the new path with `nx catalog update` then fails
+(GH #1571). Both rows stand for the same bytes (each carries the file's content
+hash when it was indexed on or after 2026-11-03), and registration never
+compares content. Pointing the old row at the new path with `nx catalog update` then fails
 with HTTP 409, because the new row already holds that `source_uri`.
 
 #### Gap 2: A renamed repository becomes a second owner and every document is re-created
@@ -433,7 +434,9 @@ it leaves nothing to resume: the transaction commits whole or not at all.
 #### Move hints
 
 A hint is one line naming the exact command, printed at the end of a run. A
-hint never writes. Every hint is printed only when the engine reports the move
+hint never writes, and it always prints the command's dry-run form, never
+`--no-dry-run --confirm`: the dry run is the design's safeguard (Undo), so the
+user sees the counts and the absorbed tumblers before choosing to write. Every hint is printed only when the engine reports the move
 routes, so a client never prints a command its engine refuses. The two
 repository hints read durable catalog state at the end of `nx index repo`, so
 each repeats on every run until the move is made or the old owner is
@@ -442,10 +445,12 @@ deactivated, and neither depends on catching the moment of registration.
 The curator hint does depend on that moment, by choice. It runs where the
 duplicate is written; a later `nx index pdf` or `nx index md` of the unchanged
 file returns at the staleness check before any writer
-(`_document_is_current`, `doc_indexer.py:2073-2100` and `:3165-3190`), and that
-skip path reads nothing from the catalog (RDR-191 Phase 6). Adding a catalog
-query to every skip to repeat a hint is not worth that cost, so the curator
-hint prints once, on the run that creates the duplicate. Afterwards the
+(`_document_is_current`, `doc_indexer.py:2073-2100` and `:3165-3190`). That
+skip path already reads the document's fence and one manifest row
+(`doc_indexer.py:397-516`); repeating the hint would add a tenant-wide
+metadata query to every unchanged file of every run, which is not worth it,
+so the curator hint prints on a run that writes the document, which includes
+the run that creates the duplicate. Afterwards the
 duplicate itself stays visible (search returns the text twice), and the
 documented command repairs it at any time.
 
@@ -458,14 +463,25 @@ documented command repairs it at any time.
   asks the metadata route for live rows with `content_hash` equal to H
   (`documents_by_meta`, which is tenant-wide and paged), keeps those under D's
   owner prefix other than D, and prints `nx catalog owners --execute move
-  --document <old tumbler> --new-path <D's path> --no-dry-run --confirm` for
+  --document <old tumbler> --new-path <D's path>` for
   each whose file is absent on this machine. A row whose file is present is a
   copy and gets no hint (nexus-o19i0).
+
+  The hint cannot see an old row that has no `meta.content_hash`. PDF and
+  markdown documents carry it only since 2026-11-03 (f90135242, nexus-ypgbz):
+  an older document gains it only when it is indexed again, changed or with
+  `--force`, and `nx catalog backfill-meta` does not fill it. GH #1571's own
+  document is of that age. So for a document indexed before 2026-11-03 and not
+  since, a user who plans to move it runs `nx index pdf --force` (or `md`) on
+  it once before the move, and the hint then works. For one already moved,
+  the old row cannot be stamped any more (its file is gone): the user finds
+  its tumbler (`nx search` returns both copies) and runs the document move by
+  hand.
 - **Documents outside their root (Gap 3).** At the end of `nx index repo`, the
   client reads the first page of the owner's documents and counts root-derived
   `source_uri`s that do not start with `file://<repo_root>/`. When any do, it
   prints `nx catalog owners --execute move --owner <prefix> --new-root
-  <repo_root> --no-dry-run --confirm`. This catches the same-name move after
+  <repo_root>`. This catches the same-name move after
   registration has silently re-rooted the owner row, on that run and every
   later one.
 - **Renamed repository (Gap 2).** At the end of `nx index repo` for owner X,
@@ -611,7 +627,8 @@ from a deleted file, so the same probe is used only to print a hint.
   as a second document and a renamed repository still becomes a second owner,
   but the run prints the command that repairs it: for a repository, that run
   and every later one; for a curator document, the run that writes the
-  duplicate.
+  duplicate, and only when the old row was indexed on or after 2026-11-03 or
+  re-indexed since (Move hints).
 - The move keeps the tumbler. The repo reconcile's rename, which absorbs a file
   moved inside one repository, keeps links but mints a new tumbler. A citation
   by tumbler survives a move made with the command and does not survive one the
@@ -650,8 +667,8 @@ from a deleted file, so the same probe is used only to print a hint.
   a root it cannot read counts as present.
 - A hint can name the wrong old row or owner (a file deleted on purpose whose
   bytes match the new file, an owner whose root is on another machine). Nothing
-  acts on a hint, and the move's dry run shows what would change before the
-  user confirms.
+  acts on a hint, and the line a hint prints is the dry run, which shows what
+  would change before the user adds `--no-dry-run --confirm`.
 - Absorbing a row loses anything only that row holds that the move does not
   carry. The census in Key Discoveries lists every table that keys on a path or
   a document id; the move carries links, sensitivity, highlights and aspects.
@@ -711,6 +728,11 @@ absent or, for an owner, not a git work tree; make the path absolute and, for
 an owner, resolve it to its main repository and compute the hash with
 `_repo_identity_with_main`; refuse on an engine without the capability flag,
 naming the version it needs; print the route's counts and absorbed tumblers.
+Add the two `HttpCatalogClient` writer methods to `CATALOG_WRITE_OPS`
+(`catalog_protocol.py:348`), or the closed write proxy raises
+`AttributeError`. The version the refusal names is a hand-kept
+`CATALOG_MOVE_MIN_ENGINE_VERSION` constant, `None` until the engine tag
+carrying the routes is cut, like `CATALOG_SENSITIVITY_MIN_ENGINE_VERSION`.
 `tests/test_moved_curator_doc_identity_characterization.py`'s moved-PDF and
 409 cases become tests of the command: one live row at the new path, the old
 tumbler kept.
@@ -725,11 +747,15 @@ it; the hook records the hint, and the command prints recorded hints at the
 end of the run. Run it only for a curator-owned document. Query the metadata
 route for the hash, keep rows under the document's owner prefix, and record
 the document hint for each whose file is absent; record nothing on an engine
-without the move routes. The skip path is not touched. CLI-level tests through
-`nx index pdf` and `nx index md`: a moved file prints the hint on the run that
-registers it, and a second run of the unchanged file prints none and makes no
-catalog read on the skip path; a byte-identical copy whose original is present
-prints none; an in-repo markdown file prints none; an old engine prints none.
+without the move routes. The skip path is not touched. A hint query that fails
+or times out is logged and dropped, and never changes the run's exit code.
+CLI-level tests through `nx index pdf` and `nx index md`: a moved file prints
+the hint, in its dry-run form, on the run that registers it, and a second run
+of the unchanged file prints none and makes no `documents_by_meta` call; a
+byte-identical copy whose original is present prints none; an in-repo markdown
+file prints none; an old row with no `meta.content_hash` prints none and no
+error; an old engine prints none; a failing metadata query leaves the exit
+code unchanged.
 
 #### Step 5: Repository hints
 
@@ -738,9 +764,12 @@ The documents-outside-root hint and the renamed-repository hint at the end of
 never deactivate-eligible) and its line under `path_vanished` owners. The
 renamed-repository hint asks the metadata route once per hash and groups the
 hits by owner prefix, so its cost does not grow with the number of vanished
-owners. CLI-level tests through `nx index repo`: a same-name
-move prints the hint on the run that re-roots the owner and on the next run; a
-renamed repository prints the owner move command; no hint writes a row.
+owners. A hint query that fails or times out is logged and dropped, and never
+changes the run's exit code. CLI-level tests through `nx index repo`: a
+same-name move prints the hint, in its dry-run form, on the run that re-roots
+the owner and on the next run; a renamed repository prints the owner move
+command; a healthy, unmoved repository prints none; no hint writes a row; a
+failing metadata query leaves the exit code unchanged.
 
 ### Phase 4: Second clone
 
@@ -769,8 +798,10 @@ None.
 
 ## Test Plan
 
+- **Scenario**: a PDF indexed before 2026-11-03, moved and indexed again —
+  **Verify**: no hint and no error; the document move run by hand repairs it.
 - **Scenario**: a PDF moved and indexed again (Gap 1) — **Verify**: the hint
-  names the old tumbler on that run, and a later run of the unchanged file
+  names the old tumbler, in its dry-run form, on that run, and a later run of the unchanged file
   prints none; after the move one live row holds the new path with
   the old tumbler and links; search returns the text once.
 - **Scenario**: a moved and edited PDF — **Verify**: no hint (the hash
@@ -814,7 +845,8 @@ it is cheaper by the embedding cost of the whole repository.
 No contradictions found between research findings, design principles, and
 proposed solution. The Key Discovery that the repo reconcile mints a new
 tumbler on a rename is a difference this RDR records in Consequences and
-leaves in place.
+leaves in place. The curator hint's blindness to documents indexed before
+2026-11-03 is a stated limit (Move hints), not a contradiction.
 
 ### Assumption Verification
 
