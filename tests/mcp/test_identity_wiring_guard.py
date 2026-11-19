@@ -13,6 +13,7 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 import nexus.mcp as mcp_pkg
 import nexus.mcp.core as core
@@ -75,13 +76,18 @@ def test_the_start_path_starts_the_lease_when_it_runs(monkeypatch: pytest.Monkey
     assert started == ["start"], "the server's start path did not start the identity lease"
 
 
-def test_the_start_path_survives_a_lease_that_cannot_be_imported(lease_unimportable: None) -> None:
-    asyncio.run(_start_and_stop_the_watch_task())          # raised ModuleNotFoundError at server start before the guard
+def test_the_start_path_survives_a_lease_that_cannot_be_imported_and_says_so(lease_unimportable: None) -> None:
+    with capture_logs() as logs:
+        asyncio.run(_start_and_stop_the_watch_task())      # raised ModuleNotFoundError at server start before the guard
+    said = [e for e in logs if e.get("event") == "identity_lease_unavailable"]
+    assert len(said) == 1 and said[0]["log_level"] == "warning" and "ModuleNotFoundError" in said[0]["error"], logs
 
 
 def test_the_exit_path_survives_a_lease_that_cannot_be_imported(
         lease_unimportable: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(core, "_release_session_names_now", lambda: None)
+    monkeypatch.setattr(core, "_NAME_RELEASE_THREAD", None)       # monkeypatch restores both after the test, so the
+    monkeypatch.setattr(core, "_NAME_RELEASE_DEADLINE", 0.0)      # thread and deadline this sets never reach a later test
     thread = core._start_session_name_release()
     core._await_session_name_release(thread)                # both raised ModuleNotFoundError on exit before the guard
     if thread is not None:
@@ -99,8 +105,8 @@ async def test_the_handoff_tick_survives_a_lease_that_cannot_be_imported(
     monkeypatch.setattr("nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID)
     write_handoff_marker(_MCP_PID, new_session_id="new-sess", claude_pid=_CLAUDE_PID, config_dir=nexus_config_dir(),
                          identity="i7", generation=1, token_file="/nowhere/4242.1.token")
-    os.environ["NX_T1_SESSION_ID"] = "old-sess"
-    os.environ["NX_T1_SESSION"] = "old-token"
+    monkeypatch.setenv("NX_T1_SESSION_ID", "old-sess")            # monkeypatch, not os.environ: the tick rewrites both
+    monkeypatch.setenv("NX_T1_SESSION", "old-token")
 
     await core._t1_handoff_tick(_MCP_PID, MagicMock())
 
