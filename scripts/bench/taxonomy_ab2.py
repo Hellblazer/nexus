@@ -39,6 +39,11 @@ K = 3
 RECALL_K = 10
 K_PROD = 20  # a production per-collection k for n_results=10 (max(5, n*mult), mult 2)
 _RDR = re.compile(r"^RDR-(\d{3})$")
+#: The question kinds ``load_queries`` can return, and the buckets ``main`` summarises, in report order
+#: (``all`` last). ``generic`` is the answer-is-a-generic-document class of RDR-134 Step 8: a question
+#: names it with ``kind: generic`` in its YAML entry.
+QUESTION_KINDS = ("rdr", "title", "generic")
+SUMMARY_KINDS = (*QUESTION_KINDS, "all")
 
 
 def _norm(s: str) -> str:
@@ -64,6 +69,10 @@ def load_queries(paths: list[Path]) -> list[dict[str, Any]]:
                     else:
                         gt[_norm(s)[:30]] = 3
                         kind = "title"
+            if "kind" in q:
+                kind = str(q["kind"])
+                if kind not in QUESTION_KINDS:
+                    raise ValueError(f"{p}: question {q.get('qid')!r}: kind {kind!r} not in {QUESTION_KINDS}")
             if not gt or q["text"] in out:
                 continue
             out[q["text"]] = {"qid": q["qid"], "text": q["text"], "gt": gt, "kind": kind}
@@ -211,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--queries", nargs="+", type=Path, default=[
         Path("bench/queries/spike_5q.yaml"), Path("bench/queries/golden_v1.yaml"),
-        Path("bench/queries/golden_heldout_v1.yaml")])
+        Path("bench/queries/golden_heldout_v1.yaml"), Path("bench/queries/generic_docs_v1.yaml")])
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--gate-from", type=Path, default=None, metavar="COVERAGE_JSON",
@@ -253,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     if gates is not None:
         arms += [f"{b}@g{label}" for label in gates for b in ("top1_F0", "top1_Fk")]
     summary: dict[str, Any] = {"n": len(results), "prod_collections": len(prod), "routed_collections": len(routed)}
-    for kind in ("rdr", "title", "all"):
+    for kind in SUMMARY_KINDS:
         sel = [r for r in results if kind == "all" or r["kind"] == kind]
         if not sel:
             continue
