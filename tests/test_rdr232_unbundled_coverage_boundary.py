@@ -222,8 +222,8 @@ def _retrieve_for(*, repair: bool):
         text = str(kw.get("query") or kw.get("question") or "")
         if text == "q-empty" or (kw.get("lexical") and text not in _PLAN_QUESTIONS):
             # a lexical repair twin (GH #1667) finds nothing here: these tests pin the closure, not the twin.
-            # A plan's OWN search step may carry lexical: true too (hybrid-factual-lookup and entity-resolution
-            # set it to get the rerank), so only a lexical query that is not a plan's question is a twin.
+            # A plan's OWN search step may carry lexical: true too (none does after the 8.5.1 cloud timing
+            # reverted it, GH #1667), so only a lexical query that is not a plan's question is a twin.
             return _structured([])
         if repair and text.startswith(FACET_TEXT):
             return _structured([REPAIR_TEXT])
