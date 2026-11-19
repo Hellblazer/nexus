@@ -20,7 +20,7 @@ from typing import Any
 import structlog
 
 from nexus.db.limits import QUOTAS
-from nexus.memory_curate import _RDR_TAG
+from nexus.memory_curate import _RDR_TAG, _phases_of
 from nexus.tables.audit_tags import split_tags
 
 _log = structlog.get_logger(__name__)
@@ -90,6 +90,11 @@ def part_titles(title: str, count: int) -> list[str]:
 
 # ── the selection ────────────────────────────────────────────────────────────────
 
+def title_in_phase(title: str, phase: str) -> bool:
+    """True when a ``-p<N>`` / ``-phase-<N>`` piece of *title* names *phase*; a sub-phase (3a) counts toward its phase (3)."""
+    return any(p == phase or p.rstrip("abcdefghijklmnopqrstuvwxyz") == phase for p in _phases_of(title))
+
+
 def header_fields(content: str) -> dict[str, str]:
     """The field lines ``gate_record`` writes at the top of a record (kind, bead, rdr, sha, outcome, date).
 
@@ -156,6 +161,9 @@ def select_records(rows: Iterable[dict[str, Any]], *, project: str, rdr: int, be
                 if not (bead in run_beads if run_beads is not None else in_rdr):
                     continue
             else:
+                if not in_rdr or (phase is not None and not title_in_phase(title, phase)):
+                    continue
+                sel.unmapped.append({**_entry(project, row, header, None, verdict_of(content, header)), "reason": "no bead tag"})
                 continue
         else:
             continue

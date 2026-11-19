@@ -118,6 +118,40 @@ def test_the_beads_option_lists_several_beads(db: T2Database) -> None:
 
 # ── the unmapped list (nexus-1gdv0.2.2) ──────────────────────────────────────────
 
+def test_unmapped_under_all_a_bead_less_gate_record_of_the_rdr(db: T2Database) -> None:
+    mapped = _gate(db, "nexus-m1")
+    bare = "review-abc1234-no-bead-2026-11-10"
+    _put(db, bare, "kind: review\nrdr: 209\noutcome: justified\n\nbody", tags="kind:gate,rdr:209")
+    _put(db, "review-abc1234-other-rdr", "x", tags="kind:gate,rdr:777")
+    _run("--all")
+    got = _pointer("gate-records-rdr-209-all")
+    assert _titles(got.listed) == [mapped]
+    assert _titles(got.unmapped) == [bare]
+    assert got.unmapped[0]["reason"] == "no bead tag"
+
+
+def test_unmapped_under_phase_needs_the_phase_in_the_title(db: T2Database) -> None:
+    _put(db, "review-abc1234-p3-2026-11-10", "x", tags="kind:gate,rdr:209")
+    _put(db, "review-abc1234-p3a-2026-11-10", "x", tags="kind:gate,rdr:209")        # sub-phase 3a is phase 3
+    _put(db, "review-abc1234-phase-3-2026-11-10", "x", tags="kind:gate,rdr:209")
+    _put(db, "review-abc1234-p2-2026-11-10", "x", tags="kind:gate,rdr:209")        # another phase
+    _put(db, "review-abc1234-p13-2026-11-10", "x", tags="kind:gate,rdr:209")       # p13 is not phase 3
+    _put(db, "review-abc1234-p3-2026-11-11", "x", tags="kind:gate,rdr:777")        # another RDR
+    _put(db, "review-abc1234-2026-11-10", "x", tags="kind:gate,rdr:209")           # names no phase
+    _phase3("nexus-z")
+    got = _pointer()
+    assert _titles(got.unmapped) == [
+        "review-abc1234-p3-2026-11-10", "review-abc1234-p3a-2026-11-10", "review-abc1234-phase-3-2026-11-10",
+    ]
+    assert got.listed == []
+
+
+def test_unmapped_a_gate_record_with_no_rdr_and_no_bead_is_out_of_scope(db: T2Database) -> None:
+    _put(db, "review-abc1234-p3-2026-11-10", "x", tags="kind:gate")
+    assert "0 listed, 0 unmapped" in _run("--all")
+    assert documents_by_title("gate-records-rdr-209-all") == []
+
+
 def test_unmapped_a_listed_record_whose_verdict_cannot_be_read(db: T2Database) -> None:
     fine = _gate(db, "nexus-v1")
     bad = _gate(db, "nexus-v2", sha="bbb2222", outcome="justified")
@@ -129,6 +163,20 @@ def test_unmapped_a_listed_record_whose_verdict_cannot_be_read(db: T2Database) -
     assert _titles(got.listed) == [fine]
     assert _titles(got.unmapped) == [bad]
     assert got.unmapped[0]["reason"] == "verdict unreadable"
+
+
+def test_unmapped_records_get_no_ttl(db: T2Database) -> None:
+    bare = "review-abc1234-no-bead-p3-2026-11-10"
+    _put(db, bare, "kind: review\n\nbody", tags="kind:gate,rdr:209")
+    _phase3("nexus-z")
+    assert _rows(db)[bare]["ttl"] is None
+
+
+def test_unmapped_never_comes_from_the_rdr_project(db: T2Database) -> None:
+    _put(db, "209-gate-critique-x", "x", tags="rdr,gate,critique", project=f"{REPO}_rdr")
+    _put(db, "209-fix-check-x", "x", tags="kind:gate,rdr:209", project=f"{REPO}_rdr")
+    assert "0 listed, 0 unmapped" in _run("--all")
+    assert documents_by_title("gate-records-rdr-209-all") == []
 
 
 # ── what is never listed ─────────────────────────────────────────────────────────

@@ -452,9 +452,15 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   only the tags are read. Older records carry no tags; the same read lets the
   command match them by a listed bead id in their title, the 72% the title
   mapping reaches (research-2). Records that map to no listed bead are not
-  touched. A record with no bead, whether a `kind:gate` record with no
-  `bead:` tag or a title that names none, is listed under "unmapped" in the
-  pointer and takes no part in Step 2.3 or Step 3, because both work per bead.
+  touched. The "unmapped" list in the pointer holds the records the run can
+  select but cannot tie to a bead: a `kind:gate` record that carries
+  `rdr:<NNN>` and has no `bead:` tag (with `--phase P` only when its title also
+  names phase P by the `-p<N>` / `-phase-<N>` rule of Step 4, a sub-phase such
+  as 3a counting toward phase 3; with `--all` whenever it carries the RDR's
+  tag), and a listed record whose verdict cannot be read. A `kind:gate` record
+  with neither a `bead:` nor an `rdr:` tag is in no run's scope and is left
+  alone; the census counts it as its own unmapped number. Unmapped records take
+  no part in Step 2.3 or Step 3, because both work per bead.
   The cost is one read of the whole project per run, as the census pays; the
   nexus project held 3,158 rows on 2026-09-14 (research-1), and its size today
   is not measured.
@@ -821,8 +827,9 @@ Reviewer and developer write-backs carry `kind:gate`, `bead:<id>` and
 `rdr:<NNN>` tags (`rdr:` dropped when the bead serves no RDR), shipped by
 nexus-qo7ie.1 and pinned by `tests/test_gate_record_tags_lint.py`, so new gate
 records map to a phase without parsing the title. Older records are mapped by
-title; the ones that do not map are listed as unmapped in the pointer record
-and keep no TTL. The lookup is an exact tag match, not a search: `memory_search`
+title; a tagged gate record that carries the RDR but no bead is listed as
+unmapped in the pointer record and keeps no TTL (Step 1 says which rows reach
+that list). The lookup is an exact tag match, not a search: `memory_search`
 tokenizes, and a search for `kind:gate` on 2026-10-31 returned 273 hits, the
 first five untagged critiques matched on words in their bodies (the
 nexus-qo7ie.1 critique). That is why Step 1 reads whole tags with `split_tags` and does not search.
@@ -836,7 +843,10 @@ the command. Tests: only whole-tag matches are listed, and an untagged record
 that mentions `kind:gate` in its body is not; `bead:nexus-1` does not match
 `bead:nexus-12`; a stored value `kind:gate, bead:x` (a space after the comma)
 matches; an older untagged record whose title names a listed bead is listed; a
-record with no bead is listed as unmapped; a quarantined record is not listed;
+`kind:gate` record with `rdr:<NNN>` and no `bead:` tag is listed as unmapped
+under `--all`, and under `--phase P` only when its title names phase P (`-p3-`
+and `-p3a-` for phase 3, not `-p2-` or `-p13-`); a record with neither tag is
+not listed; an unmapped record gets no TTL; a quarantined record is not listed;
 another tenant's rows are not listed; the `<repo>_rdr` rows are neither listed
 nor changed; a seeded closed phase yields one pointer listing its three
 records; a pointer over the cap is split and still lists every record, and a
@@ -962,8 +972,9 @@ In scope:
 - **Scenario**: gate-record listing; **Verify**: only whole-tag matches are
   listed; an untagged record mentioning `kind:gate` is not; `bead:nexus-1` is
   not `bead:nexus-12`; a stored `kind:gate, bead:x` matches; an older untagged
-  record whose title names a listed bead is listed; a record with no bead is
-  unmapped; quarantined rows are not listed; the `<repo>_rdr` rows are neither
+  record whose title names a listed bead is listed; a bead-less `kind:gate`
+  record of the RDR is unmapped (under `--phase`, when its title names the
+  phase); quarantined rows are not listed; the `<repo>_rdr` rows are neither
   listed nor changed.
 - **Scenario**: pointer and loss check; **Verify**: closed phase with three
   records gets one pointer; all three titles resolve from it; an open phase is
@@ -1123,3 +1134,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-16 | Accepted (Sam, by dialog in halcyon's session: "Keep timestamps, count first"), with the Count first step (fix check `nexus_rdr/209-fix-check-78cc9b0e4776` PASS). Epic nexus-1gdv0. Residual dispositions: gate S3 nexus-1gdv0.1.2, S5 nexus-1gdv0.2.7, S6 nexus-1gdv0.2.4, S7 nexus-1gdv0.2.5, S8 nexus-1gdv0.3; fix check d021: nexus-1gdv0.2.2, .2.3, .2.9, .2.10, .2.11; fix check 78cc: nexus-1gdv0.2.12, .2.13, .2.14, .2.15. |
 | 2026-11-18 | Gate finding S3 closed with the engine search page (nexus-1gdv0.1.1, nexus-1gdv0.1.2): the total is one statement (a CTE, a one-row count and the page left-joined), not a window count, so a page past the end still carries it and the page and the total share one snapshot; `limit` is clamped to 10,000 as `/v1/memory/list` clamps it and a bad `offset` is a 400. Wording amended under standing grant 3 to match the code reviewed at the nexus-1gdv0.1.3 gate (`MemorySearchPage`, tests in `MemorySearchPageTest`, `MemorySearchPageStatementsTest` and `MemoryRepositoryQuarantineReadPathTest`). |
 | 2026-11-19 | Phase 3 Step 1, the command (nexus-1gdv0.2.1). `nx memory gate-rollup` is built with the pointer record as designed. The size question the gate left to the implementation (critique observation 4) is settled as split, not refuse: a pointer over 16,384 bytes is written in titled parts that the first part counts, and a rerun that needs fewer parts names the stale ones (a T3 delete is a catalog tombstone path, so none is deleted). A run that lists nothing writes no pointer. Wording only; the design is unchanged. |
+| 2026-11-19 | Gate finding d021dc53c85b, first half (nexus-1gdv0.2.2): the "unmapped" list was unreachable, because under `--phase` a record was selected by a bead and under `--all` by `rdr:<NNN>`, so a record with no bead was never selected. The rule is now written in Step 1 and built: a `kind:gate` record that carries `rdr:<NNN>` and has no `bead:` tag is unmapped under `--all`, and under `--phase P` when its title also names phase P by the `-p<N>` / `-phase-<N>` rule (sub-phase 3a counts toward 3); a listed record with no readable verdict is unmapped; a `kind:gate` record with neither tag is in no run's scope. An untagged record whose title names no listed bead is not unmapped, because it has no `rdr:` tag to put it in scope, so the earlier wording "or a title that names none" is narrowed to match. Unmapped records get no TTL. |
