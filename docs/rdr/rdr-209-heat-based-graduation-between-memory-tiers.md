@@ -989,7 +989,13 @@ nothing and reports one number: how many of those records the next expire
 sweep would quarantine. That number goes to Sam (through the session that
 coordinates the work) before any TTL is written, and the real run waits for
 his word. The dry run is the command with `--dry-run`; it reads with the same
-`get_all` as Step 1 and computes the same effective TTL as the engine. It prints
+`get_all` as Step 1 and computes the same rule as the engine's expire sweep
+(`MemoryRepository.java:686-701`), with an injected clock: a row with no
+timestamp is skipped (`:695`; the import route cannot store one, so it only
+arises from a hand-made row); the age is whole seconds over 86,400 (`:698`);
+the effective TTL is `ttl * (1 + ln(access_count + 1))` with the natural log
+(`:697`); and the row is quarantined only when the age is strictly greater
+(`:699`). It prints
 each candidate as `candidate  <timestamp>  access_count=N  effective TTL X d
 past|within its effective TTL  <title>` and ends with `would be quarantined by
 the next expire sweep: N of K candidate record(s)`.
@@ -1013,8 +1019,13 @@ no TTL and needs no count, so a rerun that finishes after everything has its TTL
 passes. This changes "the dry run writes nothing" to what is true: it writes no
 TTL and no T3 note, and one count row.
 
-As designed. Tests: the dry run writes nothing and reports the count, with one
-seeded record past its effective TTL and one not, counting exactly one; three seeded records each get `ttl=30` with content, tags,
+As designed. Tests: the dry run writes no TTL and no T3 note and reports the count, with one
+seeded record past its effective TTL and one not, counting exactly one; a record
+with `access_count` 3 that is 40 days old (inside its 71.6-day effective TTL) is
+not counted and one at 72 days is, a record exactly at its effective TTL is not
+counted and one second older is, an age is whole seconds, and a row with no
+timestamp is not counted (the heat term, the strict comparison and the
+truncation each fail their test when removed); three seeded records each get `ttl=30` with content, tags,
 agent, session, timestamp, `access_count` and `last_accessed` unchanged; a
 record seeded with a null agent and a null session still has both null after the
 step, with `NX_AGENT` and a resolvable session (`NX_SESSION_ID`) set so the
@@ -1313,3 +1324,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Gate finding S6, second half (nexus-1gdv0.2.4): `nx memory restore` makes a row permanent again (`ttl` NULL) and clears the rollup mark, so a restored gate record looks exactly like one never given a TTL, and a rerun would have given it a TTL again, undoing a person's decision. The rule is written in Step 3 (Rerun) and built, in the form the bead recommended (skip and name): each listed record in the pointer carries `ttl_set`, written false before the TTL writes and true after them for each record a run gave a TTL (the pointer is written a second time for that), so a rerun that finds a listed record with `ttl_set` and no TTL leaves it alone, prints `restored, left alone: <title>` and keeps it marked `restored`. A record the earlier pointer lists unmarked, whose write stopped part way, stays a candidate, so a partial write is not mistaken for a restore. The Consequences bullet now says Step 4's census flags a restored record again and why that is left as the reminder. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect B and observations A and C (nexus-1gdv0.2.12): the RDR did not say which Step 2 checks the dry run applies, though it writes no pointer, nor which run is the loss check's first live run. Step 2 now says: `--dry-run` applies the closed-phase check, the verdict chain and the earlier-pointer half of check 2 (reading the earlier pointer and the quarantined listing), refuses exactly as the real run does, skips the archives, the pointer write and its read-back and says so, and counts the listed records that pass and have no TTL, minus unmapped and restored ones. The Testing Strategy defines the first live run as the first run without `--dry-run` that passes the loss check, with its counts (examined, skipped by cause, given a TTL) recorded in its bead. |
 | 2026-11-19 | Fix check 78cc9b0e4776, defect A and observations B and C (nexus-1gdv0.2.13), with Sam's 2026-11-16 ruling "Per RDR and phase": "the real run waits for his word" had no mechanism, and the `phase-review-gate` and `rdr-close` skills name the command at close, so a session could run the real thing first. The dry run now records its count as one T2 row in `<repo>` (`gate-rollup-count-rdr-<NNN>-phase-<P>` or `-all`, tag `gate-rollup-count`, never `kind:gate` or `gate`), and a real run that would write a TTL refuses, writing nothing, unless the row exists, `--counted N` equals its count and every candidate is a title it lists; a run with no candidate needs none. The scope of "first run" is per RDR and phase, keyed like the pointer. The `--counted` flag was an open choice for Sam in the plan; the default taken here is that it is required, as evidence the caller has the number, and the RDR says it is not Sam's yes. "The dry run writes nothing" is corrected to no TTL, no T3 note and one count row. Both skills say to run `--dry-run` first, tell Sam its count and wait for his word. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect C and observations A and B (nexus-1gdv0.2.14): the dry-run test seeded "one past and one not", which pinned neither the heat term nor the boundary, so a dry run that dropped `ln(access_count + 1)` or used `>=` would pass. Step 3 now states the engine rule the dry run computes (null timestamp skipped, age in whole seconds over 86,400, `ttl * (1 + ln(access_count + 1))`, strict comparison) and the test list pins it with a fixed clock: a heat record inside its effective TTL is not counted, a record exactly at it is not and one second older is, truncation to seconds, a null timestamp, and a mixed set. Each fails when its term is removed. |

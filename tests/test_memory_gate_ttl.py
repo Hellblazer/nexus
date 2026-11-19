@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -714,3 +714,55 @@ def test_guard_a_later_dry_run_replaces_the_count(db: T2Database) -> None:
     _phase3("nexus-g8", "--dry-run")
     assert [t for t in _rows(db, with_counts=True) if t.startswith("gate-rollup-count-")] == [COUNT_P3]
     _run_raw("--phase", "3", "--beads", "nexus-g8", "--counted", "2")
+
+
+# ── the dry run uses the engine's whole expiry rule (nexus-1gdv0.2.14) ───────────
+NOW = datetime(2026, 11, 16, 12, 0, 0, tzinfo=UTC)
+
+
+def _aged(*, days: float = 0, seconds: float = 0, access: int = 0, stamp: str | None = "x") -> dict:
+    when = NOW - timedelta(days=days, seconds=seconds)
+    return {"timestamp": when.strftime("%Y-%m-%dT%H:%M:%SZ") if stamp else None, "access_count": access}
+
+
+def _dry_count(rows: list[dict]) -> int:
+    entries = [{"title": f"t{i}"} for i in range(len(rows))]
+    lines, past = gt.dry_run_lines(entries, {f"t{i}": r for i, r in enumerate(rows)}, NOW)
+    assert lines[-1] == f"would be quarantined by the next expire sweep: {past} of {len(rows)} candidate record(s)"
+    return past
+
+
+def test_dry_run_heat_record_older_than_30_days_but_inside_its_effective_ttl_is_not_counted() -> None:
+    # access_count 3: effective TTL 30 * (1 + ln 4) = 71.6 days, so 40 days old is not past it
+    assert gt.effective_ttl_days(3) == pytest.approx(71.588, abs=0.001)
+    assert _dry_count([_aged(days=40, access=3)]) == 0
+    assert _dry_count([_aged(days=40, access=0)]) == 1                 # the same age with no heat is past 30 days
+    assert _dry_count([_aged(days=72, access=3)]) == 1                 # and past the heat-lengthened TTL at 72
+    assert _dry_count([_aged(days=71, access=3)]) == 0
+
+
+def test_dry_run_boundary_age_equal_to_the_effective_ttl_is_not_counted_and_one_second_more_is() -> None:
+    assert _dry_count([_aged(days=30, access=0)]) == 0                 # exactly 30.0 days: strictly greater is required
+    assert _dry_count([_aged(days=30, seconds=1, access=0)]) == 1
+    assert gt.would_expire(_aged(days=30), now=NOW) is False
+    assert gt.would_expire(_aged(days=30, seconds=1), now=NOW) is True
+
+
+def test_dry_run_boundary_the_age_is_whole_seconds_as_the_engine_truncates_it() -> None:
+    # the engine divides Duration.toSeconds() by 86,400: 30 days and 0.9 s is still 30.0 days
+    later = NOW + timedelta(milliseconds=900)
+    assert gt.would_expire(_aged(days=30), now=later) is False
+    assert gt.would_expire(_aged(days=30), now=later + timedelta(seconds=1)) is True
+
+
+def test_dry_run_a_row_with_no_timestamp_is_not_counted(db: T2Database) -> None:
+    """The engine skips a null timestamp (MemoryRepository.java:695). The import route cannot store one, so the row is
+    a hand-made dict here, and this test checks the claim about the route against the real engine."""
+    assert _dry_count([_aged(days=400, stamp=None), {"timestamp": "", "access_count": 0}]) == 0
+    with pytest.raises(Exception, match=r"(?i)timestamp|400|required"):
+        db.memory.import_entry(project=REPO, title="null-ts", content="x", timestamp=None)   # type: ignore[arg-type]
+
+
+def test_dry_run_counts_only_what_is_past_across_a_mixed_set() -> None:
+    rows = [_aged(days=10), _aged(days=31), _aged(days=40, access=3), _aged(days=200, access=3), _aged(days=29.99)]
+    assert _dry_count(rows) == 2
