@@ -154,7 +154,7 @@ class TestSearchMetadataScopedTool:
 
 
 class TestSearchTopicScopedTool:
-    def test_structured_chunk_level_merges_collections(self, monkeypatch):
+    def test_structured_chunk_level_merges_collections(self, cloud_mode, monkeypatch):
         rows = {
             "c1": [{"id": "h1", "content": "x", "distance": 0.4, "collection": "c1"}],
             "c2": [{"id": "h2", "content": "y", "distance": 0.1, "collection": "c2"}],
@@ -181,7 +181,7 @@ class TestSearchTopicScopedTool:
         out = core.search_topic_scoped("q", "T", structured=True)
         assert isinstance(out, str) and out.startswith("Error:")
 
-    def test_merge_orders_and_cuts_on_the_calibrated_scale_across_models(self, monkeypatch):
+    def test_merge_orders_and_cuts_on_the_calibrated_scale_across_models(self, cloud_mode, monkeypatch):
         """GH #1667 follow-up C: voyage-code-3 distances run tighter than voyage-context-3 (0.45 vs 0.65
         calibration), so a raw merge put the code row at 0.38 ahead of the docs row at 0.50 and the cut
         to ``limit`` dropped the docs row. Calibrated, 0.50 * 0.45/0.65 = 0.346 wins; the reported
@@ -203,7 +203,7 @@ class TestSearchTopicScopedTool:
         assert out["distances"] == [0.50]
         assert out["collections"] == [docs_col]
 
-    def test_merge_within_one_model_is_still_by_raw_distance(self, monkeypatch):
+    def test_merge_within_one_model_is_still_by_raw_distance(self, cloud_mode, monkeypatch):
         a, b = "docs__1-1__voyage-context-3__v1", "knowledge__x__voyage-context-3__v1"
         rows = {
             a: [{"id": "ha", "content": "", "distance": 0.50, "collection": a}],
@@ -413,7 +413,7 @@ class TestReferenceOnlyRowContentCoercion:
         text = core.search_metadata_scoped("q", corpus="knowledge", structured=False)
         assert "None" not in text
 
-    def test_topic_scoped_null_content_coerces_to_empty_string(self, monkeypatch):
+    def test_topic_scoped_null_content_coerces_to_empty_string(self, cloud_mode, monkeypatch):
         rows = {"c1": [{"id": "h1", "content": None, "distance": 0.1, "collection": "c1"}]}
         t3 = _FakeServiceT3(topic_rows_by_col=rows)
         _wire(monkeypatch, t3, ["c1"])
@@ -522,7 +522,7 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         assert "onnx-local" in out
         assert "NX_VOYAGE_API_KEY" in out
 
-    def test_search_topic_scoped_names_the_mismatch(self, monkeypatch):
+    def test_search_topic_scoped_names_the_mismatch(self, cloud_mode, monkeypatch):
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
         monkeypatch.setattr(core, "collection_model", lambda name: "voyage-context-3")  # the merge groups by model; no tenant needed

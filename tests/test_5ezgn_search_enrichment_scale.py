@@ -111,7 +111,7 @@ def _in(collection: str, rid: str, distance: float) -> SearchResult:
     return SearchResult(id=rid, content="", distance=distance, collection=collection, metadata={})
 
 
-def test_cap_ranks_unscored_rows_by_calibrated_distance_across_embedding_models() -> None:
+def test_cap_ranks_unscored_rows_by_calibrated_distance_across_embedding_models(cloud_mode) -> None:
     """GH #1667 follow-up C: voyage-code-3 distances run tighter than voyage-context-3 (0.45 vs 0.65
     calibration), so a raw-distance cut filled the pool with code and dropped the CHANGELOG row a
     docs search ranks first. On the calibrated scale 0.50 * 0.45/0.65 = 0.346 sits ahead of 0.38."""
@@ -127,12 +127,14 @@ def test_cap_takes_the_model_of_resolver_the_search_built() -> None:
     can say they differ, so this fails without *model_of* whatever the install posture."""
     code, prose = "code__legacy", "docs__legacy"
     rows = [_in(code, "code-a", 0.38), _in(code, "code-b", 0.39), _in(prose, "doc", 0.50)]
-    models = {code: "voyage-code-3", prose: "voyage-context-3"}
+    # Local models, so the test stays in the default (local) posture the name derivation depends on:
+    # bge-base-en-v15-768 calibrates at 1.37, an unlisted model at the default 0.818.
+    models = {code: "bge-base-en-v15-768", prose: "unlisted-test-model"}
     assert "doc" not in [r.id for r in _cap_enrichment_pool(rows, set(), cap=2)]
     assert "doc" in [r.id for r in _cap_enrichment_pool(rows, set(), cap=2, model_of=models.get)]
 
 
-def test_search_cross_corpus_hands_its_own_model_resolver_to_the_cut(monkeypatch) -> None:
+def test_search_cross_corpus_hands_its_own_model_resolver_to_the_cut(cloud_mode, monkeypatch) -> None:
     """The production call site passes the search's row-preferred resolver, not None (review of 4a11ee38c)."""
     import nexus.search_engine as se  # noqa: PLC0415 — the module under test, patched by attribute
 
@@ -225,7 +227,7 @@ def test_cap_lexical_rows_do_not_make_a_family_unscored() -> None:
     assert [r.id for r in kept] == ["code-a", "code-b", "doc-lexical"]
 
 
-def test_cap_ranks_every_row_by_distance_when_one_collection_of_a_scored_family_degraded() -> None:
+def test_cap_ranks_every_row_by_distance_when_one_collection_of_a_scored_family_degraded(cloud_mode) -> None:
     """The family rule misses a collection that degraded inside a family that was otherwise scored: both
     collections are voyage-context-3 (one factor), so every family has a scored row. Core's render treats a
     degraded collection beside scored rows as partial_rerank and keeps every row in calibrated order; the cut
@@ -244,7 +246,7 @@ def test_cap_ranks_every_row_by_distance_when_one_collection_of_a_scored_family_
     assert [r.id for r in kept] == ["degraded-a", "degraded-b"]
 
 
-def test_cap_keeps_score_first_when_the_unscored_rows_are_local_modes_rows_beyond_the_rerank_cap() -> None:
+def test_cap_keeps_score_first_when_the_unscored_rows_are_local_modes_rows_beyond_the_rerank_cap(cloud_mode) -> None:
     """Local mode scores only the first rerank_max_candidates rows of a collection and flags no degrade: its
     unscored rows are not a degraded collection's, so score-first stands. A degrade named for a collection
     with no row in the pool changes nothing either."""
@@ -257,7 +259,7 @@ def test_cap_keeps_score_first_when_the_unscored_rows_are_local_modes_rows_beyon
     assert [r.id for r in kept] == ["far-scored", "farther-scored"]
 
 
-def test_cap_ignores_a_degraded_collection_whose_only_rows_are_lexical() -> None:
+def test_cap_ignores_a_degraded_collection_whose_only_rows_are_lexical(cloud_mode) -> None:
     """A lexical row is exempt from the cut, so its degraded collection does not flip the pool."""
     scored_col, degraded_col = "docs__1-1__voyage-context-3__v1", "knowledge__x__voyage-context-3__v1"
     rows = [
@@ -392,7 +394,9 @@ def test_topic_grouping_takes_the_model_of_resolver_the_search_built() -> None:
     from nexus.search_engine import _apply_topic_grouping  # noqa: PLC0415 — test-local
 
     code, prose = "code__legacy", "docs__legacy"
-    models = {code: "voyage-code-3", prose: "voyage-context-3"}
+    # Local models, so the test stays in the default (local) posture the name derivation depends on:
+    # bge-base-en-v15-768 calibrates at 1.37, an unlisted model at the default 0.818.
+    models = {code: "bge-base-en-v15-768", prose: "unlisted-test-model"}
     rows = [_in(code, "code", 0.38), _in(prose, "doc", 0.50)]
     assignments = {"code": 1, "doc": 2}
     labels = {1: "c", 2: "d"}
@@ -409,7 +413,7 @@ def test_topic_grouping_within_one_model_is_still_by_raw_distance() -> None:
     assert [r.id for r in out] == ["near", "mid", "far", "loose"]
 
 
-def test_search_cross_corpus_hands_its_own_model_resolver_to_the_topic_grouping(monkeypatch) -> None:
+def test_search_cross_corpus_hands_its_own_model_resolver_to_the_topic_grouping(cloud_mode, monkeypatch) -> None:
     """The production call site passes the search's row-preferred resolver, as it does to the pool cut."""
     import nexus.search_engine as se  # noqa: PLC0415 — the module under test, patched by attribute
 
@@ -458,7 +462,9 @@ def test_clustering_takes_the_model_of_resolver_the_search_built() -> None:
     from nexus.search_engine import _apply_clustering  # noqa: PLC0415 — test-local
 
     code, prose = "code__legacy", "docs__legacy"
-    models = {code: "voyage-code-3", prose: "voyage-context-3"}
+    # Local models, so the test stays in the default (local) posture the name derivation depends on:
+    # bge-base-en-v15-768 calibrates at 1.37, an unlisted model at the default 0.818.
+    models = {code: "bge-base-en-v15-768", prose: "unlisted-test-model"}
     rows = [_in(code, f"c{i}", d) for i, d in enumerate([0.38, 0.40, 0.42])] + [
         _in(prose, f"d{i}", d) for i, d in enumerate([0.50, 0.52, 0.54])
     ]
