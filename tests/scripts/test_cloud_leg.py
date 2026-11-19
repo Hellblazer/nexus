@@ -10,6 +10,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -363,7 +364,7 @@ def test_compare_counts_and_passes() -> None:
     text = rep.render()
     assert "examined 3, skipped 1 (u 1: accepted: internal), failed 0" in text and text.rstrip().endswith("CLOUD LEG PASSED")
     assert "ledger entries driven: 4 of 4 (routes driven: 4; ## Unshipped)" in text
-    assert "run r0123456; window w1" in text and "cloud slot tapped host: h (expected h)" in text
+    assert "run r0123456; window w1" in text and "cloud slot tapped hosts (from the request URLs): h (expected h)" in text
     assert text.splitlines()[0].split() == ["step", "local", "cloud", "verdict"]
 
 
@@ -399,45 +400,81 @@ def test_core_only_report_line_and_edge_override_line() -> None:
 def test_the_cloud_slot_must_show_the_edge_host() -> None:
     loc = [_res("s0", "local")]
     rep = cl.compare(_plan(1, 1), loc, [_res("s0", "cloud", host="localhost")], edge_host="api.conexus-nexus.com", environ={})
-    assert not rep.ok and any("not the edge api.conexus-nexus.com" in m for m in rep.nonvacuity)
+    assert not rep.ok and any("never the edge api.conexus-nexus.com" in m for m in rep.nonvacuity)
     assert cl.compare(_plan(1, 1), loc, [_res("s0", "cloud", host="api.conexus-nexus.com")], edge_host="api.conexus-nexus.com",
                       environ={}).ok
 
 
 # expected-red ---------------------------------------------------------------
 
-def test_expect_red_turns_a_cloud_only_failure_into_expected_red_with_status_and_reason() -> None:
+def _red(*statuses: int, why: str = "cloud self-seat ships in 0.1.197") -> "cl.ExpectRed":
+    return cl.ExpectRed(frozenset(statuses), why)
+
+
+def test_expect_red_turns_the_pinned_cloud_only_status_into_expected_red_with_status_and_reason() -> None:
     plan = _plan(3, 3)
     local, cloud = _slots(3, exit=1, taps=[[403, "POST", "/v1/identity"]])
-    rep = cl.compare(plan, local, cloud, expect_red={"s0": "cloud self-seat ships in 0.1.197"}, environ={})
+    rep = cl.compare(plan, local, cloud, expect_red={"s0": _red(403)}, environ={})
     assert rep.ok and rep.expected_red == 1 and rep.failed == 0
     text = rep.render()
     assert "EXPECTED-RED" in text and "cloud-only 403 on POST /v1/identity" in text and "cloud self-seat ships in 0.1.197" in text
-    assert "expected-red 1" in text and text.rstrip().endswith("CLOUD LEG PASSED")
-    # without the flag the same run fails
-    assert not cl.compare(plan, local, cloud, environ={}).ok
+    assert "pinned @403" in text and "expected-red 1" in text
+    assert text.rstrip().endswith("CLOUD LEG PASSED WITH EXPECTED-RED 1: s0")
+    assert not cl.compare(plan, local, cloud, environ={}).ok  # without the flag the same run fails
+    assert cl.compare(plan, local, cloud, expect_red={"s0": _red(401, 403)}, environ={}).ok  # a comma list pins several
+
+
+def test_expect_red_does_not_excuse_another_status() -> None:
+    """The cut is expected to fix a 403; a 500 is a different fault and must stay red."""
+    local, cloud = _slots(2, exit=1, taps=[[500, "POST", "/v1/identity"]])
+    rep = cl.compare(_plan(2, 2), local, cloud, expect_red={"s0": _red(403)}, environ={})
+    assert not rep.ok and rep.expected_red == 0 and "are not the pinned [403]" in rep.render()
+    local, cloud = _slots(2, exit=1, taps=[[403, "POST", "/v1/identity"], [500, "GET", "/v1/y"]])
+    assert not cl.compare(_plan(2, 2), local, cloud, expect_red={"s0": _red(403)}, environ={}).ok
+
+
+@pytest.mark.parametrize("why, cloud_over", [
+    ("a blind tap in the cloud", {"ready": False, "exit": 1}),
+    ("no HTTP request seen, exit 0", {"taps": []}),
+    ("the cloud exits 0 but never called the route", {"expect_route_missing": True}),
+    ("a round-trip miss", {"expect_ok": False}),
+    ("the cloud exit failure with no HTTP status", {"exit": 1, "taps": [[200, "GET", "/v1/x"]]}),
+    ("cloud 403 but exit 0", {"taps": [[403, "POST", "/v1/identity"]]}),
+])
+def test_expect_red_excuses_nothing_but_the_pinned_cloud_only_status(why: str, cloud_over: dict) -> None:
+    over = dict(cloud_over)
+    missing = over.pop("expect_route_missing", False)
+    local, cloud = _slots(2, **over)
+    if missing:
+        local[0] = local[0] | {"expect_route": "/v1/identity"} | {"taps": [[200, "POST", "/v1/identity"]]}
+        cloud[0] = cloud[0] | {"expect_route": "/v1/identity"}
+    rep = cl.compare(_plan(2, 2), local, cloud, expect_red={"s0": _red(403)}, environ={})
+    assert not rep.ok and rep.expected_red == 0, (why, rep.render())
+    assert "EXPECTED-RED" not in rep.render()
 
 
 def test_a_pass_on_an_expect_red_step_fails_the_run() -> None:
-    rep = cl.compare(_plan(2, 2), *_slots(2), expect_red={"s0": "demo"}, environ={})
+    rep = cl.compare(_plan(2, 2), *_slots(2), expect_red={"s0": _red(403, why="demo")}, environ={})
     assert not rep.ok and rep.failed == 1 and "expected red but passed: remove --expect-red s0" in rep.render()
 
 
 def test_a_local_failure_is_not_an_expected_cloud_red() -> None:
     local = [_res("s0", "local", exit=1, taps=[[500, "GET", "/v1/x"]])]
     cloud = [_res("s0", "cloud", exit=1, taps=[[500, "GET", "/v1/x"], [403, "GET", "/v1/y"]])]
-    rep = cl.compare(_plan(1, 1), local, cloud, expect_red={"s0": "x"}, environ={})
-    assert not rep.ok and "LOCAL slot failed too" in rep.render()
+    rep = cl.compare(_plan(1, 1), local, cloud, expect_red={"s0": _red(403)}, environ={})
+    assert not rep.ok and "not the pinned red" in rep.render()
 
 
-def test_expect_red_needs_a_known_step_and_a_reason() -> None:
+def test_expect_red_needs_a_known_step_a_status_pin_and_a_reason() -> None:
     with pytest.raises(cl.Refusal, match="not a step of this plan"):
-        cl.compare(_plan(1, 1), *_slots(1), expect_red={"nope": "x"}, environ={})
-    with pytest.raises(cl.Refusal, match="non-empty reason"):
-        cl.parse_pairs(["identity-seat-create"], "--expect-red")
-    with pytest.raises(cl.Refusal, match="non-empty reason"):
-        cl.parse_pairs(["identity-seat-create:  "], "--expect-red")
-    assert cl.parse_pairs(["identity-seat-create:a: b"], "--expect-red") == {"identity-seat-create": "a: b"}
+        cl.compare(_plan(1, 1), *_slots(1), expect_red={"nope": _red(403)}, environ={})
+    for bad in ("identity-seat-create", "identity-seat-create:why", "identity-seat-create@403", "identity-seat-create@403:  ",
+                "identity-seat-create@200:why", "identity-seat-create@abc:why", "identity-seat-create@:why", "@403:why"):
+        with pytest.raises(cl.Refusal, match="--expect-red needs"):
+            cl.parse_expect_red([bad])
+    got = cl.parse_expect_red(["identity-seat-create@403:cloud self-seat: ships in 0.1.197", "identity-seat-show@404,410:no seat"])
+    assert got["identity-seat-create"] == cl.ExpectRed(frozenset({403}), "cloud self-seat: ships in 0.1.197")
+    assert got["identity-seat-show"].statuses == frozenset({404, 410})
 
 
 # ── slot runner ─────────────────────────────────────────────────────────────
@@ -484,6 +521,24 @@ def test_a_step_whose_needs_are_missing_is_blocked_not_run(tmp_path: Path) -> No
     assert res[0]["blocked"] and res[0]["exit"] == -1 and not res[0]["taps"]
 
 
+def test_retries_keep_every_attempts_taps_and_never_retry_a_failure(tmp_path: Path) -> None:
+    counter = tmp_path / "count"
+    body = ('#!/bin/bash\nn=$(cat "%s" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "%s"\n'
+            'printf "#tap-ready\\n" >> "$NX_CLOUDLEG_TAP"\n'
+            'if [ "$n" = 1 ]; then printf "403\\tPOST\\t/v1/vectors/search\\th\\n" >> "$NX_CLOUDLEG_TAP"; exit 0; fi\n'
+            'printf "200\\tPOST\\t/v1/vectors/search\\th\\n" >> "$NX_CLOUDLEG_TAP"; echo cloudleg-r0123456; exit 0\n') % (counter, counter)
+    sb = _fake_sandbox(tmp_path, body)
+    plan = {"run": "r0123456", "label": "cloudleg-r0123456", "steps": [_step("store-search", expect_stdout="@label@", tries=3)]}
+    res = cl.run_slot(plan, runner=str(sb / "run"), sandbox=sb, host="h", workdir=tmp_path / "w", slot="cloud", sleep=lambda s: None)
+    assert res[0]["attempts"] == 2 and res[0]["taps"] == [[403, "POST", "/v1/vectors/search"], [200, "POST", "/v1/vectors/search"]]
+    local = [_res("store-search", "local")]
+    assert "cloud-only 403" in cl.judge_step(local[0], res[0])[1], "a 4xx on an earlier attempt must still fail the step"
+    # a non-zero exit is judged at once, not retried
+    sb2 = _fake_sandbox(tmp_path / "two")
+    res = cl.run_slot(plan, runner=str(sb2 / "run"), sandbox=sb2, host="h", workdir=tmp_path / "w2", slot="cloud", sleep=lambda s: pytest.fail("slept"))
+    assert res[0]["attempts"] == 1 and res[0]["exit"] == 1
+
+
 def test_a_step_that_reads_an_index_retries_then_is_judged_and_the_attempts_are_recorded(tmp_path: Path) -> None:
     counter = tmp_path / "count"
     body = ('#!/bin/bash\nn=$(cat "%s" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "%s"\n'
@@ -519,7 +574,7 @@ class _H(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def test_tap_records_status_method_route_and_nothing_else(tmp_path: Path) -> None:
+def test_tap_records_status_method_route_host_and_nothing_else(tmp_path: Path) -> None:
     pytest.importorskip("httpx")
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -531,18 +586,20 @@ def test_tap_records_status_method_route_and_nothing_else(tmp_path: Path) -> Non
         f"c = http.client.HTTPConnection('127.0.0.1', {port}); c.request('POST', '/v1/denied?x={SECRET}', body=b'{SECRET}'); c.getresponse().read()\n"
         f"httpx.Client().get('http://localhost:{port}/v1/not-my-host')\n"
     )
-    env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(TAP_DIR), "NX_CLOUDLEG_TAP": str(tap), "NX_CLOUDLEG_HOST": "127.0.0.1"}
+    env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(TAP_DIR), "NX_CLOUDLEG_TAP": str(tap)}
     try:
         cp = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
     finally:
         srv.shutdown()
     assert cp.returncode == 0, cp.stderr
     text = tap.read_text()
-    assert text.splitlines() == ["#tap-ready", "200\tGET\t/v1/a/b\t127.0.0.1", "403\tPOST\t/v1/denied\t127.0.0.1"]
+    assert text.splitlines() == ["#tap-ready", "200\tGET\t/v1/a/b\t127.0.0.1", "403\tPOST\t/v1/denied\t127.0.0.1",
+                                 "200\tGET\t/v1/not-my-host\tlocalhost"]
     assert SECRET not in text
     ready, rows = cl.parse_tap(tap)
-    assert ready and rows == [(200, "GET", "/v1/a/b"), (403, "POST", "/v1/denied")]
-    assert cl.parse_tap_hosts(tap)[2] == {"127.0.0.1"}
+    assert ready and rows[:2] == [(200, "GET", "/v1/a/b"), (403, "POST", "/v1/denied")]
+    # the host is read from each request's own URL, so it is evidence: the comparator filters on it
+    assert cl.parse_tap_hosts(tap)[2] == {"127.0.0.1", "localhost"}
 
 
 def test_tap_is_inert_without_its_variable(tmp_path: Path) -> None:
@@ -673,8 +730,30 @@ def test_sh_plan_only_names_unmapped_routes_and_stops_before_any_sandbox(tmp_pat
     ledger = tmp_path / "wire.md"
     ledger.write_text(_FIXTURE_LEDGER)
     cp = _leg(tmp_path, "--local-vs-local", "--plan-only", "--ledger", str(ledger))
-    assert cp.returncode == 0 and "1 unmapped" in cp.stdout and "2 routes driven" in cp.stdout
+    assert cp.returncode == 2 and "unmapped ledger route" in cp.stderr and "/v1/widgets/frob" in cp.stderr
+    ok = _leg(tmp_path, "--local-vs-local", "--plan-only", "--ledger", str(ledger), "--accept-skip", "/v1/widgets/frob:internal")
+    assert ok.returncode == 0 and "0 unmapped" in ok.stdout and "2 routes driven" in ok.stdout
     assert not [p for p in tmp_path.iterdir() if p.name.startswith("cloudleg-work")]
+
+
+@pytest.mark.parametrize("flag, fragment", [
+    ("identity-seat-create:no pin", "--expect-red needs"),
+    ("identity-seat-create@403:", "--expect-red needs"),
+    ("no-such-step@403:why", "not steps of this plan"),
+])
+def test_sh_aborts_on_a_bad_expect_red_before_any_sandbox(tmp_path: Path, flag: str, fragment: str) -> None:
+    cp = _leg(tmp_path, "--local-vs-local", "--core-only", "--plan-only", "--expect-red", flag)
+    assert cp.returncode == 2 and fragment in cp.stderr, (cp.stdout, cp.stderr)
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(("cloudleg-work", "nxcs"))]
+    good = _leg(tmp_path, "--local-vs-local", "--core-only", "--plan-only", "--expect-red", "identity-seat-create@403:cut fixes it")
+    assert good.returncode == 0, good.stderr
+
+
+def test_sh_aborts_on_an_unknown_accept_skip(tmp_path: Path) -> None:
+    ledger = tmp_path / "wire.md"
+    ledger.write_text(_FIXTURE_LEDGER)
+    cp = _leg(tmp_path, "--local-vs-local", "--plan-only", "--ledger", str(ledger), "--accept-skip", "POST /v1/typo:x")
+    assert cp.returncode == 2 and "no ledger entry names" in cp.stderr
 
 
 def test_sh_refusals_leave_no_sandbox_and_no_credential_files(tmp_path: Path) -> None:
@@ -765,16 +844,20 @@ def test_engine_start_uses_a_fresh_short_pg_root_and_stop_removes_it(tmp_path: P
 _STUB = r"""#!/bin/bash
 # Stands in for nx and the candidate python. Taps every route a step might expect, prints what the steps capture,
 # and LEAKS the sandbox's tokens into the identity dir (and a log outside the sandbox that proves it did).
+H="${NX_SERVICE_URL#*//}"; H="${H%%[:/]*}"
 if [ -n "$NX_CLOUDLEG_TAP" ]; then
   printf '#tap-ready\n' >> "$NX_CLOUDLEG_TAP"
   for r in /v1/identity /v1/identity/i1/bind /v1/memory/put /v1/tuples/out /v1/tuples/in /v1/tuples/ack /v1/t1/put \
            /v1/catalog/manifest/write_many /v1/vectors/search; do
-    printf '200\tPOST\t%s\t%s\n' "$r" "$NX_CLOUDLEG_HOST" >> "$NX_CLOUDLEG_TAP"
+    printf '200\tPOST\t%s\t%s\n' "$r" "$H" >> "$NX_CLOUDLEG_TAP"
   done
 fi
 mkdir -p "$NEXUS_CONFIG_DIR/identity/delegated"
 printf '%s %s\n' "$NX_MINT_TOKEN" "$NX_SERVICE_TOKEN" > "$NEXUS_CONFIG_DIR/identity/delegated/i1.token"
 printf 'token %s %s\n' "$NX_MINT_TOKEN" "$NX_SERVICE_TOKEN" > "$NEXUS_CONFIG_DIR/identity/last"
+# the T1 session lease the real client leaves beside them: a 43-character bearer
+printf '{"token": "%s", "expires_at": 1}\n' "$NX_MINT_TOKEN-lease-0123456789abcdefghij" > "$NEXUS_CONFIG_DIR/t1_session_lease.0fb0f3a8-65df-4eca-80db-7f53336bf840"
+mkdir -p "$HOME/.cache" "$HOME/.claude"; echo "tok-0123456789abcdefghijklmnopqrstuvwxyzABCDEF" > "$HOME/.cache/x"; echo "$NX_MINT_TOKEN" > "$HOME/.claude/y"
 echo leaked >> "@LEAKLOG@"
 echo '{"identity": "i1", "token_file": "/nonexistent", "generation": 1, "claim_id": "c1"}'
 echo "cloudleg-r0123456abc deadbeef12345678 $*"
@@ -809,6 +892,20 @@ def _keep_run(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], Path, P
     return cp, work, leaklog
 
 
+_TOKENISH = re.compile(rb"[A-Za-z0-9_-]{40,}")
+
+
+def _token_shaped(root: Path) -> list[str]:
+    """Files under *root* holding a 40+ character token-shaped string, the uv-installed tools and pythons and their launchers excluded."""
+    hits = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or "home/.local/share/uv/" in str(p) or "home/.local/bin" in str(p):
+            continue  # the installed packages and their launchers are not state
+        if _TOKENISH.search(p.read_bytes()):
+            hits.append(str(p.relative_to(root)))
+    return hits
+
+
 def test_keep_leaves_no_credential_or_token_in_the_kept_directory(tmp_path: Path) -> None:
     cp, work, leaklog = _keep_run(tmp_path)
     assert cp.returncode == 0, (cp.stdout[-1500:], cp.stderr[-1500:])
@@ -819,6 +916,22 @@ def test_keep_leaves_no_credential_or_token_in_the_kept_directory(tmp_path: Path
     assert hits == [], hits
     assert not list(work.glob("*/secrets")) and not list(work.glob("*/home/.config/nexus/identity")) and not list(work.rglob("*.token"))
     assert SECRET not in cp.stdout + cp.stderr
+    assert _token_shaped(work) == [], "a token-shaped string survives in the kept tree"
+
+
+@pytest.mark.skipif(os.environ.get("NX_CLOUDLEG_REAL_RUN") != "1",
+                    reason="set NX_CLOUDLEG_REAL_RUN=1 (needs the gate jar, uv and the network): a real local-vs-local --keep run")
+def test_a_real_local_vs_local_keep_run_leaves_no_token_shaped_string(tmp_path: Path) -> None:
+    wheel_dir = tmp_path / "wheel"
+    subprocess.run(["uv", "build", "--wheel", "-o", str(wheel_dir)], cwd=REPO_ROOT, check=True, capture_output=True, timeout=900)
+    wheel = next(wheel_dir.glob("conexus-*.whl"))
+    work = tmp_path / "kept"
+    cp = subprocess.run([BASH, str(LEG_SH), "--local-vs-local", "--keep", "--wheel", str(wheel), "--work-dir", str(work)],
+                        capture_output=True, text=True, timeout=1500, cwd=REPO_ROOT)
+    assert cp.returncode == 0 and "CLOUD LEG PASSED" in cp.stdout, (cp.stdout[-2000:], cp.stderr[-1000:])
+    assert (work / "local/home/.local/share/uv/tools/conexus").is_dir(), "the installed tools are kept"
+    assert _token_shaped(work) == [], "a token-shaped string survives in the kept tree"
+    assert not list(work.rglob("t1_session_lease*"))
 
 
 def test_sandbox_scrub_removes_secrets_identity_and_token_files(tmp_path: Path) -> None:
@@ -826,10 +939,16 @@ def test_sandbox_scrub_removes_secrets_identity_and_token_files(tmp_path: Path) 
     cp = _sh(f'cand_sandbox_create "{root}" >/dev/null\nprintf "%s\\n" {SECRET} > "{root}/secrets/NX_MINT_TOKEN"\n'
              f'mkdir -p "{root}/home/.config/nexus/identity/delegated" "{root}/home/stray"\n'
              f'echo {SECRET} > "{root}/home/.config/nexus/identity/delegated/i1.token"\necho {SECRET} > "{root}/home/stray/x.token"\n'
-             f'echo keep > "{root}/home/stray/other.txt"\ncand_sandbox_scrub "{root}"', {"PATH": os.environ["PATH"]})
+             f'echo keep > "{root}/home/stray/other.txt"\necho lease > "{root}/home/.config/nexus/t1_session_lease.abc"\n'
+             f'mkdir -p "{root}/home/.local/share/uv/tools/conexus/bin" "{root}/home/.local/state"\n'
+             f'echo tool > "{root}/home/.local/share/uv/tools/conexus/bin/python"\necho x > "{root}/tmp/scratch"\ncand_sandbox_scrub "{root}"',
+             {"PATH": os.environ["PATH"]})
     assert cp.returncode == 0, cp.stderr
-    assert not (root / "secrets").exists() and not (root / "home/.config/nexus/identity").exists()
-    assert not list(root.rglob("*.token")) and (root / "home/stray/other.txt").is_file()
+    assert not (root / "secrets").exists() and not list(root.rglob("*.token"))
+    # everything the client wrote under HOME is gone (the T1 lease included); only the installed tools survive
+    assert sorted(p.name for p in (root / "home/.config/nexus").iterdir()) == []
+    assert not (root / "home/stray").exists() and not (root / "home/.local/state").exists() and not list((root / "tmp").iterdir())
+    assert (root / "home/.local/share/uv/tools/conexus/bin/python").is_file()
 
 
 # ── the gate scripts' own conventions ───────────────────────────────────────

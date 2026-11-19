@@ -230,13 +230,25 @@ cand_engine_stop() {
     CAND_PG_ROOT=""
 }
 
-# cand_sandbox_scrub <dir> : delete every credential and token a sandbox holds (secrets, identity token files),
-# leaving the rest for inspection. cloud-leg.sh calls it on every exit path, --keep included.
+# cand_sandbox_scrub <dir> : delete every credential and token a sandbox holds, leaving the installed tools and the
+# non-secret working files for inspection. cloud-leg.sh calls it on every exit path, --keep included. What the client
+# wrote under HOME is all of it removed (home/.config/nexus holds the T1 session-lease bearer, the identity token
+# files and more; .cache, .claude and anything else the client creates may too): only the uv tool install (.local/share/uv/tools,
+# .local/bin) survives. The sandbox's tmp is emptied, and secrets/ goes.
 cand_sandbox_scrub() {
     local d="${1:?}"
     [ -f "$d/env.sh" ] || return 1
-    rm -rf "$d/secrets" "$d/home/.config/nexus/identity"
-    find "$d" -name '*.token' -type f -delete 2>/dev/null
+    rm -rf "$d/secrets"
+    if [ -d "$d/home" ]; then
+        find "$d/home" -mindepth 1 -maxdepth 1 ! -name .local -exec rm -rf {} + 2>/dev/null
+        if [ -d "$d/home/.local" ]; then
+            find "$d/home/.local" -mindepth 1 -maxdepth 1 ! -name share ! -name bin -exec rm -rf {} + 2>/dev/null
+            [ -d "$d/home/.local/share" ] && find "$d/home/.local/share" -mindepth 1 -maxdepth 1 ! -name uv -exec rm -rf {} + 2>/dev/null
+        fi
+        mkdir -p "$d/home/.config/nexus"
+    fi
+    [ -d "$d/tmp" ] && find "$d/tmp" -mindepth 1 -exec rm -rf {} + 2>/dev/null
+    find "$d" -name '*.token' -type f -not -path "$d/home/.local/share/uv/tools/*" -delete 2>/dev/null
     return 0
 }
 

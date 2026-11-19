@@ -476,7 +476,13 @@ def parse_tap(path: Path) -> tuple[bool, list[tuple[int, str, str]]]:
 
 def parse_tap_hosts(path: Path) -> tuple[bool, list[tuple[int, str, str]], set[str]]:
     """parse_tap plus the set of hosts the tap saw."""
-    ready, rows, hosts = False, [], set()
+    ready, rows4 = parse_tap_rows(path)
+    return ready, [(s, m, r) for s, m, r, _h in rows4], {h for *_x, h in rows4 if h}
+
+
+def parse_tap_rows(path: Path) -> tuple[bool, list[tuple[int, str, str, str]]]:
+    """(tap-ready, [(status, METHOD, normalized route, host)]): every exchange the tap saw, whatever its host."""
+    ready, rows = False, []
     if Path(path).is_file():
         for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
             if line == "#tap-ready":
@@ -484,10 +490,8 @@ def parse_tap_hosts(path: Path) -> tuple[bool, list[tuple[int, str, str]], set[s
                 continue
             parts = line.split("\t")
             if len(parts) >= 3 and parts[0].lstrip("-").isdigit():
-                rows.append((int(parts[0]), parts[1], norm_route(parts[2])))
-                if len(parts) >= 4:
-                    hosts.add(parts[3])
-    return ready, rows, hosts
+                rows.append((int(parts[0]), parts[1], norm_route(parts[2]), parts[3] if len(parts) >= 4 else ""))
+    return ready, rows
 
 
 _ID_SEG = re.compile(r"^(i\d+|\d+|[0-9a-f]{8,}|[0-9a-f]{8}-[0-9a-f-]{27}|.*cloudleg-.*)$")
@@ -549,7 +553,7 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
     results: list[dict[str, Any]] = []
     for n, step in enumerate(plan["steps"]):
         res: dict[str, Any] = {"name": step["name"], "slot": slot, "exit": None, "taps": [], "tap_ready": False,
-                               "stdout": "", "error": "", "skipped": None, "blocked": None, "attempts": 0,
+                               "stdout_chars": 0, "error": "", "skipped": None, "blocked": None, "attempts": 0,
                                "benign": bool(step.get("benign_refusal")), "host": host}
         missing = [v for v in step["needs"] if v not in variables]
         if missing:
@@ -561,10 +565,12 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
         exe = [nx] if step["kind"] == "nx" else [py]
         stdin = _fill(step["stdin"], variables) if step["stdin"] is not None else None
         want = step["expect_stdout"]
+        all_rows: list[tuple[int, str, str, str]] = []
+        tap_ready = False
         for attempt in range(1, max(1, int(step.get("tries", 1))) + 1):
             tapfile = Path(workdir) / f"tap-{slot}-{n:02d}-{step['name']}-{attempt}.log"
             tapfile.unlink(missing_ok=True)
-            extras = [f"PYTHONPATH={TAP_DIR}", f"NX_CLOUDLEG_TAP={tapfile}", f"NX_CLOUDLEG_HOST={host}"]
+            extras = [f"PYTHONPATH={TAP_DIR}", f"NX_CLOUDLEG_TAP={tapfile}"]
             if step["identity"] and "token_file" in variables:
                 extras.append(f"NX_IDENTITY_TOKEN={variables['token_file']}")
             try:
@@ -575,15 +581,18 @@ def run_slot(plan: dict[str, Any], *, runner: str, sandbox: Path, host: str, wor
                 out, err, code = "", "TimeoutExpired", 124
             res["attempts"] = attempt
             res["exit"] = code
-            res["tap_ready"], taps, seen_hosts = parse_tap_hosts(tapfile)
-            res["taps"] = [list(t) for t in taps]
-            res["hosts"] = sorted(seen_hosts)
-            res["stdout"] = _scrub(out, secrets)[:600]
+            ready, rows = parse_tap_rows(tapfile)
+            tap_ready = tap_ready or ready
+            all_rows += rows  # every attempt's exchanges count: a 4xx on a retried attempt is still a 4xx
+            res["tap_ready"] = tap_ready
+            res["taps"] = [[s, m, r] for s, m, r, h in all_rows if h == host]
+            res["hosts"] = sorted({h for *_x, h in all_rows if h})
+            res["stdout_chars"] = len(out)  # the output itself is not kept: it carries ids and may carry a token the scrub cannot know
             first_err = next((ln for ln in reversed(err.strip().splitlines()) if ln.strip()), "")
             res["error"] = _scrub(first_err, secrets)[:160]
             res["expect_ok"] = True if want is None else (_fill(want, variables) in out)
-            if code == 0 and res["expect_ok"]:
-                break
+            if code != 0 or res["expect_ok"]:
+                break  # retry only an empty result: a failure or a pass is judged as it stands
             if attempt < int(step.get("tries", 1)):
                 sleep(SEARCH_WAIT_S)
         res["expect_route"] = step.get("expect_route")
@@ -620,35 +629,68 @@ def _cell(res: dict[str, Any]) -> str:
 
 def judge_step(local: dict[str, Any], cloud: dict[str, Any]) -> tuple[str, str]:
     """(verdict, reason). Verdicts: PASS, PASS-both-refused (only a step flagged benign), FAIL."""
+    verdict, reason, _cloud_only = _judge(local, cloud)
+    return verdict, reason
+
+
+def _judge(local: dict[str, Any], cloud: dict[str, Any]) -> tuple[str, str, list[tuple[str, str, int]] | None]:
+    """(verdict, reason, cloud-only bad exchanges). The third is set ONLY for a FAIL whose cause is a status the cloud
+    returned and local did not, on a step where the cloud exited non-zero and local exited zero: the one shape
+    --expect-red may excuse. Every other FAIL (a blind tap, no HTTP, a route never called, a round-trip miss, a local
+    failure) returns None."""
     for res in (local, cloud):
         if res.get("blocked"):
-            return "FAIL", f"{res['slot']}: blocked, {res['blocked']}"
+            return "FAIL", f"{res['slot']}: blocked, {res['blocked']}", None
     for res in (local, cloud):
         if not res["tap_ready"]:
-            return "FAIL", f"{res['slot']}: the HTTP tap never installed, so no status was seen"
+            return "FAIL", f"{res['slot']}: the HTTP tap never installed, so no status was seen", None
         if res["exit"] == 0 and not res["taps"]:
-            return "FAIL", f"{res['slot']}: the step exited 0 but no HTTP request was seen at the client boundary"
+            return "FAIL", f"{res['slot']}: the step exited 0 but no HTTP request was seen at the client boundary", None
     cloud_only = sorted(_bad_set(cloud) - _bad_set(local))
     if cloud_only:
         m, r, s = cloud_only[0]
         more = f" (+{len(cloud_only) - 1} more)" if len(cloud_only) > 1 else ""
-        return "FAIL", f"cloud-only {s} on {m} {r}{more}; local returned none of it"
+        pure = cloud["exit"] != 0 and local["exit"] == 0
+        return "FAIL", f"cloud-only {s} on {m} {r}{more}; local returned none of it", (cloud_only if pure else None)
     if cloud["exit"] != 0 and local["exit"] == 0:
-        return "FAIL", f"cloud exit {cloud['exit']} where local exited 0: {cloud['error'] or 'no error text'}"
+        return "FAIL", f"cloud exit {cloud['exit']} where local exited 0: {cloud['error'] or 'no error text'}", None
     if local["exit"] != 0 and cloud["exit"] == 0:
-        return "FAIL", f"local-only failure (exit {local['exit']}): {local['error'] or 'no error text'}"
+        return "FAIL", f"local-only failure (exit {local['exit']}): {local['error'] or 'no error text'}", None
     if local["exit"] != 0 and cloud["exit"] != 0:
         if local.get("benign") and _bad_set(local) and _bad_set(local) == _bad_set(cloud):
-            return "PASS-both-refused", "the same refusal in both slots (a step flagged benign)"
-        return "FAIL", f"failed in both slots (exit {cloud['exit']}): {cloud['error'] or 'no error text'}"
+            return "PASS-both-refused", "the same refusal in both slots (a step flagged benign)", None
+        return "FAIL", f"failed in both slots (exit {cloud['exit']}): {cloud['error'] or 'no error text'}", None
     for res in (local, cloud):
         want = res.get("expect_route")
         if want and res["exit"] == 0 and not any(r == want for _s, _m, r in res["taps"]):
-            return "FAIL", f"{res['slot']}: the client never called {want} (it skipped the route, e.g. the engine's capability flag is not visible)"
+            return "FAIL", f"{res['slot']}: the client never called {want} (it skipped the route, e.g. the engine's capability flag is not visible)", None
     for res in (local, cloud):
         if not res.get("expect_ok", True):
-            return "FAIL", f"{res['slot']}: the round trip did not print its own text back"
-    return "PASS", ""
+            return "FAIL", f"{res['slot']}: the round trip did not print its own text back", None
+    return "PASS", "", None
+
+
+@dataclass(frozen=True)
+class ExpectRed:
+    """One --expect-red: the cloud-only status(es) the step is allowed to show, and why."""
+    statuses: frozenset[int]
+    reason: str
+
+
+def parse_expect_red(items: list[str]) -> dict[str, ExpectRed]:
+    """`<step>@<status>[,<status>...]:<reason>` -> {step: ExpectRed}. The status pin and the reason are mandatory."""
+    out: dict[str, ExpectRed] = {}
+    for item in items:
+        head, sep, reason = item.partition(":")
+        name, at, pin = head.partition("@")
+        try:
+            statuses = frozenset(int(x) for x in pin.split(",")) if at else frozenset()
+        except ValueError:
+            statuses = frozenset()
+        if not sep or not reason.strip() or not name.strip() or not statuses or any(not 400 <= x <= 599 for x in statuses):
+            raise Refusal(f"--expect-red needs <step>@<status>[,<status>]:<reason> with 4xx/5xx statuses and a non-empty reason, got '{item}'")
+        out[name.strip()] = ExpectRed(statuses, reason.strip())
+    return out
 
 
 @dataclass
@@ -662,6 +704,7 @@ class Report:
     nonvacuity: list[str]
     plan_failures: list[str] = field(default_factory=list)
     footer: list[str] = field(default_factory=list)
+    red_names: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -682,12 +725,17 @@ class Report:
         lines.extend(self.footer)
         for msg in self.nonvacuity:
             lines.append(f"NON-VACUITY FAILURE: {msg}")
-        lines.append("CLOUD LEG PASSED" if self.ok else "CLOUD LEG FAILED")
+        if not self.ok:
+            lines.append("CLOUD LEG FAILED")
+        elif self.expected_red:
+            lines.append(f"CLOUD LEG PASSED WITH EXPECTED-RED {self.expected_red}: {', '.join(self.red_names)}")
+        else:
+            lines.append("CLOUD LEG PASSED")
         return "\n".join(lines)
 
 
 def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[str, Any]], floor: int | None = None, *,
-            expect_red: dict[str, str] | None = None, window: str = "-", edge_host: str = "",
+            expect_red: dict[str, ExpectRed] | None = None, window: str = "-", edge_host: str = "",
             environ: dict[str, str] | None = None) -> Report:
     floor = plan.get("floor", 0) if floor is None else floor
     expect_red = dict(expect_red or {})
@@ -697,6 +745,7 @@ def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[
             raise Refusal(f"--expect-red names '{k}', which is not a step of this plan ({', '.join(sorted(names))})")
     env = os.environ if environ is None else environ
     rows: list[dict[str, str]] = []
+    red_names: list[str] = []
     examined = failed = refused = red = core_ok = 0
     skipped = [(a, b) for a, b in plan.get("skipped", [])]
     by_local = {r["name"]: r for r in local}
@@ -709,21 +758,26 @@ def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[
             examined += 1
             continue
         lres, cres = by_local[name], by_cloud[name]
-        verdict, reason = judge_step(lres, cres)
+        verdict, reason, cloud_only = _judge(lres, cres)
         if name in expect_red:
-            why = expect_red[name]
-            if verdict == "FAIL" and (lres["exit"] != 0 or lres.get("blocked")):
-                reason = f"{reason} (the LOCAL slot failed too, so this is not the expected cloud-only red)"
-            elif verdict == "FAIL":
-                verdict, reason = "EXPECTED-RED", f"{reason}; expected: {why}"
-            else:
+            pin = expect_red[name]
+            if verdict != "FAIL":
                 verdict, reason = "FAIL", f"expected red but passed: remove --expect-red {name}"
+            elif cloud_only is None:
+                reason = f"{reason} (not a cloud-only status, so not the pinned red @{','.join(map(str, sorted(pin.statuses)))})"
+            else:
+                got = sorted({s for _m, _r, s in cloud_only})
+                if set(got) <= pin.statuses:
+                    verdict, reason = "EXPECTED-RED", f"{reason}; pinned @{','.join(map(str, sorted(pin.statuses)))}: {pin.reason}"
+                else:
+                    reason = f"{reason}; cloud statuses {got} are not the pinned {sorted(pin.statuses)} ({pin.reason})"
         rows.append({"step": name, "local": _cell(lres), "cloud": _cell(cres), "verdict": verdict, "reason": reason})
         examined += 1
         if verdict == "FAIL":
             failed += 1
         elif verdict == "EXPECTED-RED":
             red += 1
+            red_names.append(name)
         elif verdict == "PASS-both-refused":
             refused += 1
         if step["core"] and not step["cleanup"] and verdict in {"PASS", "PASS-both-refused", "EXPECTED-RED"}:
@@ -738,16 +792,17 @@ def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[
     if env.get(EDGE_OVERRIDE_ENV):
         footer.append(f"EDGE HOST OVERRIDE in effect: {EDGE_OVERRIDE_ENV}={env[EDGE_OVERRIDE_ENV]}")
     hosts = sorted({h for r in cloud for h in r.get("hosts", [])})
-    footer.append(f"cloud slot tapped host: {', '.join(hosts) or 'none'}" + (f" (expected {edge_host})" if edge_host else ""))
+    footer.append(f"cloud slot tapped hosts (from the request URLs): {', '.join(hosts) or 'none'}"
+                  + (f" (expected {edge_host})" if edge_host else ""))
     footer.append(f"core steps ok {core_ok} of floor {floor}; run {plan['run']}; window {window}")
     nonv = []
-    if edge_host and hosts != [edge_host]:
-        nonv.append(f"the cloud slot's tap shows host(s) {hosts or 'none'}, not the edge {edge_host}")
+    if edge_host and edge_host not in hosts:
+        nonv.append(f"the cloud slot's tap saw host(s) {hosts or 'none'} in the request URLs, never the edge {edge_host}")
     if examined == 0:
         nonv.append("every step was skipped or none ran; nothing was examined")
     elif core_ok < floor:
         nonv.append(f"only {core_ok} core steps passed or were expected-red; the floor is {floor} (the fixed core)")
-    return Report(rows, examined, skipped, failed, red, refused, nonv, list(plan.get("failures", [])), footer)
+    return Report(rows, examined, skipped, failed, red, refused, nonv, list(plan.get("failures", [])), footer, red_names)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -773,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("compare"); c.add_argument("--plan", required=True); c.add_argument("--local", required=True)
     c.add_argument("--cloud", required=True); c.add_argument("--floor", type=int); c.add_argument("--expect-red", action="append", default=[])
     c.add_argument("--window", default="-"); c.add_argument("--edge-host", default="")
+    cp_ = sub.add_parser("check-plan"); cp_.add_argument("--plan", required=True); cp_.add_argument("--expect-red", action="append", default=[])
     a = ap.parse_args(argv)
     try:
         if a.cmd == "check-window":
@@ -809,10 +865,18 @@ def main(argv: list[str] | None = None) -> int:
             Path(a.out).write_text(json.dumps(res, indent=1), encoding="utf-8")
             print(f"slot {a.slot}: {len(res)} steps run")
             return 0
+        if a.cmd == "check-plan":
+            plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))
+            if plan.get("failures"):
+                raise Refusal("the plan has failures, so nothing runs:\n  " + "\n  ".join(plan["failures"]))
+            unknown = sorted(set(parse_expect_red(a.expect_red)) - {s["name"] for s in plan["steps"]})
+            if unknown:
+                raise Refusal(f"--expect-red names {unknown}, not steps of this plan")
+            return 0
         if a.cmd == "compare":
             plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))
             rep = compare(plan, json.loads(Path(a.local).read_text()), json.loads(Path(a.cloud).read_text()), a.floor,
-                          expect_red=parse_pairs(a.expect_red, "--expect-red"), window=a.window, edge_host=a.edge_host)
+                          expect_red=parse_expect_red(a.expect_red), window=a.window, edge_host=a.edge_host)
             print(rep.render())
             return 0 if rep.ok else 1
     except Refusal as exc:

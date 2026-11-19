@@ -5,7 +5,8 @@
 Put this directory on PYTHONPATH of an ``nx`` (or candidate-python) process and name a file in NX_CLOUDLEG_TAP:
 Python imports ``sitecustomize`` at start and this patches the two transports the client uses (``httpx.Client.send``
 for the T2, scratch, tuple and identity stores; ``http.client.HTTPConnection`` for the T3 vector client), appending
-``<status>\\t<METHOD>\\t<path>\\t<host>`` per exchange. Only requests to the host in NX_CLOUDLEG_HOST are recorded. Never
+``<status>\\t<METHOD>\\t<path>\\t<host>`` per exchange. Every request is recorded with the host of its URL (the comparator reads
+the host from here, so it is evidence and not a filter's echo). Never
 records a header, a query string or a body, so a bearer or identity token cannot reach the file. A request that
 raises records status 0 and the exception's class name as a fifth field.
 """
@@ -13,7 +14,6 @@ import os
 import threading
 
 _TAP = os.environ.get("NX_CLOUDLEG_TAP", "")
-_HOST = os.environ.get("NX_CLOUDLEG_HOST", "")
 _LOCK = threading.Lock()
 
 
@@ -33,7 +33,7 @@ def _install():
     orig_send = httpx.Client.send
 
     def send(self, request, *args, **kwargs):
-        mine = not _HOST or request.url.host == _HOST
+        mine = True
         try:
             resp = orig_send(self, request, *args, **kwargs)
         except BaseException as exc:
@@ -55,7 +55,7 @@ def _install():
 
     def getresponse(self, *args, **kwargs):
         tag = getattr(self, "_cl_tap", None)
-        mine = tag is not None and (not _HOST or self.host == _HOST)
+        mine = tag is not None
         try:
             resp = orig_get(self, *args, **kwargs)
         except BaseException as exc:

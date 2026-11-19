@@ -9,14 +9,15 @@
 #
 # USAGE
 #   tests/e2e/cloud-leg.sh --wheel <candidate.whl> --window <id> [--release v<X.Y.Z>] [--core-only]
-#        [--expect-red <step>:<reason>]... [--accept-skip "<route>:<reason>"]... [--no-ledger-entries-ok "<reason>"]
+#        [--expect-red <step>@<status>[,<status>]:<reason>]... [--accept-skip "<route>:<reason>"]... [--no-ledger-entries-ok "<reason>"]
 #        [--ledger <file>] [--op-item <title>] [--op-vault AI] [--work-dir <dir>] [--keep] [--plan-only]
 #   The release additions are the wire ledger's entries (docs/wire-contract-pending.md): `## Unshipped`, or with
 #   --release v<X.Y.Z> that release's `## Shipped` entries (the release skill's Step 4b has moved them there). Each
 #   route maps to a client call; an unmapped route FAILS unless --accept-skip names it. A full run with zero ledger
 #   entries FAILS unless --no-ledger-entries-ok gives a reason. --core-only runs the fixed core alone and reports how many
-#   ledger routes it did not drive. --expect-red <step>:<reason> turns that step's cloud-only failure into EXPECTED-RED
-#   (a step the cut itself fixes); a PASS on it fails the run. --plan-only prints the plan and stops.
+#   ledger routes it did not drive. --expect-red <step>@<status>:<reason> turns that step's cloud-only failure into EXPECTED-RED
+#   only when the cloud returned exactly the pinned status (a step the cut itself fixes, e.g. identity-seat-create@403);
+#   any other failure on it stays FAIL, and a PASS on it fails the run. --plan-only prints the plan and stops.
 #   tests/e2e/cloud-leg.sh --local-vs-local --wheel <candidate.whl>     # plumbing self-test, no cloud, no window
 #
 # REFUSES (exit 2, nothing written, before any sandbox exists) unless
@@ -85,7 +86,7 @@ cleanup() {
         [ -n "${WORK:-}" ] && [ -f "$WORK/cloud/env.sh" ] && cand_sandbox_destroy "$WORK/cloud" >/dev/null 2>&1
     fi
     [ -n "$CREDD" ] && rm -rf "$CREDD"
-    [ "$KEEP" = 0 ] && [ "$WORK_AUTO" = 1 ] && [ "$rc" = 0 ] && [ -n "${WORK:-}" ] && rm -rf "$WORK"
+    [ "$KEEP" = 0 ] && [ "$WORK_AUTO" = 1 ] && { [ "$rc" = 0 ] || [ "$rc" = 2 ]; } && [ -n "${WORK:-}" ] && rm -rf "$WORK"
     exit "$rc"
 }
 trap cleanup EXIT
@@ -135,6 +136,10 @@ PLAN_ARGS=(--ledger "$LEDGER")
 [ -z "$NO_LEDGER_OK" ] || PLAN_ARGS+=(--no-ledger-entries-ok "$NO_LEDGER_OK")
 for x in ${ACCEPT_SKIP[@]+"${ACCEPT_SKIP[@]}"}; do PLAN_ARGS+=(--accept-skip "$x"); done
 "$E2E_PYTHON" "$LEG" plan --run "$RUN_ID" "${PLAN_ARGS[@]}" --out "$WORK/plan.json" || exit 2
+# a plan with failures, or an --expect-red naming no step or lacking its @status pin, stops here: no sandbox, no cloud contact
+CHECK_ARGS=(--plan "$WORK/plan.json")
+for x in ${EXPECT_RED[@]+"${EXPECT_RED[@]}"}; do CHECK_ARGS+=(--expect-red "$x"); done
+"$E2E_PYTHON" "$LEG" check-plan "${CHECK_ARGS[@]}" || exit 2
 if [ "$PLAN_ONLY" = 1 ]; then exit 0; fi
 [ -f "$WHEEL" ] || { echo "REFUSED: --wheel <candidate wheel> is required and must exist" >&2; exit 2; }
 
@@ -150,7 +155,7 @@ if [ "$LOCAL_VS_LOCAL" = 1 ]; then
     CLOUD_HOST="127.0.0.1"
 else
     cand_sandbox_config cloud "$CREDD"
-    CLOUD_HOST="$("$E2E_PYTHON" -c 'import sys; print(sys.argv[1].split("//",1)[1].split("/",1)[0].rsplit("@",1)[-1].split(":",1)[0])' "$(head -n 1 "$CREDD/service_url")")"
+    CLOUD_HOST="$("$E2E_PYTHON" -c 'import sys; print(sys.argv[1].split("//",1)[1].split("/",1)[0].rsplit("@",1)[-1].split(":",1)[0].lower())' "$(head -n 1 "$CREDD/service_url")")"
 fi
 
 echo "cloud-leg: run $RUN_ID, label cloudleg-$RUN_ID, $([ "$LOCAL_VS_LOCAL" = 1 ] && echo 'LOCAL vs LOCAL (plumbing self-test)' || echo "cloud host $CLOUD_HOST")"
