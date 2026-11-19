@@ -66,6 +66,8 @@ public final class IdentityRepository {
     static final Set<String> CREATED_BY = Set.of("sam", "restart", "session", "dispatch");
     /** The creator a data-credential seat create is stamped with (RDR-253 amendment, Sam 2026-11-19): the token's identity. */
     static final java.util.regex.Pattern SELF_CREATOR = java.util.regex.Pattern.compile("^identity:i[0-9]+$");
+    /** The most seats one identity may create through the data credential (Sam 2026-11-19, "cap 5"). */
+    static final int SELF_SEAT_CAP = 5;
     static final int ALIAS_GRACE_DAYS = 7;
 
     private static final Pattern NAME = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
@@ -197,18 +199,33 @@ public final class IdentityRepository {
         if (!SELF_CREATOR.matcher(creator).matches()) {
             throw new IdentityException(400, "bad_created_by", "not an identity id: " + identityId);
         }
-        return insertSeat(tenant, name, displayName, creator);
+        return scope.withTenant(tenant, ctx -> {
+            // Sam 2026-11-19 ("cap 5", engine 0.1.198): an identity creates at most SELF_SEAT_CAP seats through the data
+            // credential, counted in every state. The caller's own row is locked first, so two concurrent creates of one
+            // identity are counted one after the other and cannot both see room for the last seat.
+            IdentityRows.lock(ctx, tenant, identityId);
+            int made = ctx.fetchCount(IDENTITY_RECORDS, IDENTITY_RECORDS.TENANT_ID.eq(tenant)
+                .and(IDENTITY_RECORDS.KIND.eq("seat")).and(IDENTITY_RECORDS.CREATOR.eq(creator)));
+            if (made >= SELF_SEAT_CAP) {
+                throw new IdentityException(409, "seat_limit", identityId + " has created " + made
+                    + " seats with the data credential, the most it may (" + SELF_SEAT_CAP + "); the tenant credential is not capped",
+                    Map.of("identity", identityId, "seats_created", made, "cap", SELF_SEAT_CAP));
+            }
+            return insertSeat(ctx, tenant, name, displayName, creator);
+        });
     }
 
     private Map<String, Object> insertSeat(String tenant, String name, String displayName, String createdBy) {
-        return scope.withTenant(tenant, ctx -> {
-            OffsetDateTime now = now();
-            String id = nextId(ctx, tenant);
-            IdentityRecordsRecord rec = insertRecord(ctx, tenant, id, "seat", null, displayName, createdBy, now);
-            insertAlias(ctx, tenant, id, name, now);
-            log.info("event=identity_created tenant={} id={} kind=seat name={} created_by={}", tenant, id, name, createdBy);
-            return IdentityRows.view(rec, name);
-        });
+        return scope.withTenant(tenant, ctx -> insertSeat(ctx, tenant, name, displayName, createdBy));
+    }
+
+    private Map<String, Object> insertSeat(DSLContext ctx, String tenant, String name, String displayName, String createdBy) {
+        OffsetDateTime now = now();
+        String id = nextId(ctx, tenant);
+        IdentityRecordsRecord rec = insertRecord(ctx, tenant, id, "seat", null, displayName, createdBy, now);
+        insertAlias(ctx, tenant, id, name, now);
+        log.info("event=identity_created tenant={} id={} kind=seat name={} created_by={}", tenant, id, name, createdBy);
+        return IdentityRows.view(rec, name);
     }
 
     /** Creates an ephemeral identity already bound to the launching process: generation 1, live, a {@code start} row. */
