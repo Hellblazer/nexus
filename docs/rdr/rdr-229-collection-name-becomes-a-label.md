@@ -2177,33 +2177,57 @@ these in the round 2 fixes, now addressed in the text:
 - P3.2 timing only the stamp, the swap and the rebuild: it times every
   move and pass (P3.2, Critical Assumption 5; T2 `229-research-54`).
 
-Recorded residuals, for Sam at acceptance (gate record
-`nexus_rdr/229-gate-latest`; not resolved here):
+Gate round 3 (2026-11-19, PASSED) recorded twelve residuals in
+`nexus_rdr/229-gate-latest`. Sam chose on 2026-11-19 to fix the five
+classed BLOCKS-PLANNING in the text and to carry the seven
+DISCOVER-AT-IMPLEMENTATION ones as beads at accept (ask
+`baton/rdr229-accept-route`, option 1). The five, now resolved in the text:
 
-- "[BLOCKS-PLANNING] chroma:// residue rule covers rename only;
-  NoteUri.moveTo's re-home, re-embed and collection-update callers still
-  move residue onto prefix-free labels (fix check c1a9d815e8cc) (carried
-  from round 1)"
-- "[BLOCKS-PLANNING] residue rule stated in force from P3.6 but owned by
-  P3.7; P3.6 and P3.8 do not wait for P3.7 (fix check c1a9d815e8cc)
-  (carried from round 1)"
-- "[BLOCKS-PLANNING] prefix-free labels already possible via
-  rename-collection --allow-legacy; "names before P3.6 are prefixed" and
-  CA3's Verified rest on it; P1.2 lacks a census of prefix-free chroma://
-  segments (fix check c1a9d815e8cc) (carried from round 1)"
+- The `chroma://` residue rule covered the rename only: the rule is in
+  `NoteUri.moveTo`, for all four callers (item 7, item 12, P2.10; T2
+  `229-research-55`).
+- The rule was stated in force from P3.6 but owned by P3.7: P2.10 owns
+  it, and P3.6 and P3.8 wait for it (item 7, P2.10, P3.6, P3.8, Phase
+  dependencies; T2 `229-research-56`).
+- Prefix-free labels are possible today through `--allow-legacy`: the
+  "prefixed before P3.6" premise is withdrawn, Critical Assumption 3 is
+  reopened for the URI-string classifiers, P1.2 counts the rows on every
+  install, and P2.10 repairs residue already moved (item 12, Critical
+  Assumption 3, P1.2, P2.10; T2 `229-research-57`).
+- The name composite foreign keys refused P3.7's one-row rename: seven of
+  the eight name keys refuse it, and P3.7's name-key drop move drops them
+  once gate 3 holds, before the rename (item 6 Switch and Contract, P3.3a,
+  P3.3c, P3.7, P4.1; T2 `229-research-58`).
+- S-1, Phase 4 retired the engine's name path with no per-install guard:
+  P4.0, behind a boot floor (Contract, P4.0, Phase dependencies,
+  Cross-Cutting; T2 `229-research-59`).
 
-The URI-string classifier rule (item 7, item 12, P3.7; T2
-`229-research-42`), the P3.7 test that renames a file-routed collection
-with `chroma://` residue, and the Test Plan's prefix-free-label row rest on
-the rule these residuals question, and are regenerated when Sam
-dispositions them.
+To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
+`nexus_rdr/229-gate-critique-2026-11-19-r3`), not resolved here:
+
+- S-2, P3.4's planner transition and gate 3's "P3.4 complete" test.
+- S-3, P3.3b and P3.3c against the two-level partitioning, installs with
+  PCI off, and the `changeset_id` of a move registered at run time.
+- S-4, `aspect_extraction_queue` absent on most installs.
+- S-5, the BYO paragraph's "P3.3b's pass ... still builds", which
+  contradicts gate 1; the text still reads so.
+- S-6, the downgrade boundary, which P3.1's CHECK places at P3.1, not
+  after P3.3 as "Still open" below says.
+- S-7, the client's trust in an id from gate 3, with no engine signal.
+- S-8, a tombstone whose successor was deleted, which the stamp cannot
+  give an id.
 
 Still open, for a design call: whether the label alphabet excludes `/`,
 which `NoteUri.collectionOf` treats as the end of the collection; what
 makes a live `(content_type, owner_id, embedding_model)` tuple unique once
-minting removes the name from that job; and the safe engine downgrade
+minting removes the name from that job; the safe engine downgrade
 point after P3.3, which matters most from P3.7, when the name columns go
-dead (Approach, item 7).
+dead (Approach, item 7; S-6 above); a repair for residue whose segment no
+longer names its collection and for residue `note-uri-001` rewrote to
+`nx-note://` (P1.2 counts both; item 12); and a note that `moveTo` moves
+onto a label that starts with `rdr__`, `docs__` or `code__`, which
+`isNote` then classes as no note, because P2.10's rule tests only the old
+segment (`NoteUri.java:110`, `:191-200`; T2 `229-research-60`).
 
 ### Assumption Verification
 
@@ -2243,13 +2267,22 @@ check found now have one too: `superseded_by_id`'s own CHECK (P3.1), the
 swap's registration by the P3.3b pass (P3.3b), the completion check's read
 set and gates (P3.1, P3.4, P3.5, P3.7, P4.1), the name-keyed upserts and
 child cascades until P4.1 (P3.3c, P3.5c), the old composites' drop
-(P4.1), and the timing of every move and pass (P3.2).
+(P3.7's name-key drop move), and the timing of every move and pass (P3.2).
+Items the round 3 residuals found now have one: the residue rule on every
+`moveTo` caller (P2.10), its order before P3.6 and P3.8 (P2.10), the count
+of residue on a prefix-free segment on every install (P1.2) and its repair
+(P2.10's moves), the drop of the name keys that refuse the one-row rename
+(P3.7's name-key drop move), and the retirement of the Java name path
+behind a boot floor (P4.0). The seven DISCOVER residuals, S-2 to S-8, go
+to beads at accept (Contradiction Check).
 Still without one: P3.5b's plan measurement of each both-shapes reader
 has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
 names no consumer; P1.2 measures the two production tenants, not local
-stores; no rule says what a mint does when a live label already has the
-minted form (P1.2 only counts such labels); and no audit covers where a
-label meets a file path beyond P3.6's Windows test.
+stores, apart from its residue count, which runs on every install; no
+rule says what a mint does when a live label already has the
+minted form (P1.2 only counts such labels); no audit covers where a
+label meets a file path beyond P3.6's Windows test; and no repair covers
+the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
 ### Cross-Cutting Concerns
 
@@ -2336,7 +2369,7 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
 - `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-54`, and
+- T2 `nexus_rdr/229-research-1` to `-60`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
   superseded).
 - T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
@@ -2412,3 +2445,4 @@ large, and moved under a ratchet.
   with the three residuals still recorded for Sam. T2 `229-research-50` to
   `-54` added.
 - 2026-11-19: Gate round 3 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `2e06cb126e67`; critique `nexus_rdr/229-gate-critique-2026-11-19-r3`.
+- 2026-11-19: Round 3 residuals dispositioned (Sam, ask `baton/rdr229-accept-route`, option 1). Fixed: residual 1 `f0d64bc6a`, residual 2 `a59ef5325`, residual 3 `4ce3d0def`, residual 4 `1d2e07f8d`, S-1 `bed7b07a7`, sweep `0947955d2`; S-2 to S-8 to beads at accept. Contradiction Check and Scope Verification regenerated. T2 `229-research-55` to `-60` added.
