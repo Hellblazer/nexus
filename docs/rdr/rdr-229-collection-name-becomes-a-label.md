@@ -558,7 +558,7 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   measurement bounds the backfill and the index rebuild per 1M rows (T2
   `229-research-30`); it does not time the key swap on that tenant.
 - [ ] No two live rows of one tenant share a label once renames stop
-  tombstoning, so the partial UNIQUE on live labels (Design item 6) can be
+  tombstoning, so the partial UNIQUE on live labels (item 7) can be
   created without data repair. — **Status**: Unverified, expected true (the
   label is the primary key today) — **Method**: Spike (folded into P1.2's
   census).
@@ -771,7 +771,9 @@ The key moves table by table in strangler order:
   with a label index beside it. Responses carry both.
 - **Contract (Phase 4).** The name columns on referencing tables are
   dropped, the `(tenant_id, name, embedding_model)` UNIQUE is dropped, and
-  the name-based arms of `COLLECTION_SCOPED_TABLES` go with them.
+  the name-based arms of `COLLECTION_SCOPED_TABLES` go with them. Dropping
+  `superseded_by` drops the label index whose predicate reads it, so P4.1
+  re-creates that index on `superseded_by_id` (item 7).
 
 **How each Phase 3 step runs (RDR-246).** No Phase 3 step rewrites the rows
 of, or builds an index on, a table that grows with user data inside the
@@ -949,7 +951,12 @@ UNIQUE index on `(tenant_id, name)` over rows that are not superseded. Two
 collections of one tenant can no longer answer to the same label, so a
 label in a command names one collection without ambiguity. From P4.1, a
 superseded (tombstoned) row keeps its label for history and releases it, so
-the label can be reused. Until P4.1 the name is still the primary key
+the label can be reused. P3.6's index reads `superseded_by` (`TEXT NOT NULL
+DEFAULT ''`, `catalog-001-baseline.xml:208`), and P4.1 drops that column.
+PostgreSQL drops "Indexes and table constraints involving the column"
+with it (T2 `229-research-45`). So P4.1 re-creates the partial UNIQUE over
+`superseded_by_id IS NULL` in the same changeset as the primary-key swap.
+Inferred, not read: a predicate column counts as involved. Until P4.1 the name is still the primary key
 (`PRIMARY KEY (tenant_id, name)`, `catalog-001-baseline.xml:211`; T2
 `229-research-36`), so a superseded row, including one a past rename left,
 keeps its name taken. Model siblings no longer collide, because each sibling gets
@@ -1291,7 +1298,9 @@ every script and note URI that names one.
   with both labels named; the rest of the bundle imports.
 - A route receives a label that two live rows hold: impossible in every
   phase. Until P4.1 the name is the primary key. From P4.1 the partial
-  UNIQUE on live labels, added in P3.6, holds it.
+  UNIQUE on live labels holds it: added in P3.6 over `superseded_by`, and
+  re-created by P4.1 over `superseded_by_id` in the changeset that drops
+  `superseded_by` (item 7).
 
 ## Implementation Plan
 
@@ -1493,7 +1502,8 @@ its acceptance is that test green plus the census pin it lowers.
   100-character label and a non-conformant label are accepted, a control
   character is refused, a second live row with one label is refused, and a
   user label of the minted form (`c` followed by digits) is refused.
-  Label reuse after supersession waits for P4.1.
+  Label reuse after supersession waits for P4.1. The "second live row
+  with one label is refused" test stays in the suite through P4.1.
 - P3.7 After P3.4 and P3.5: rename becomes a one-row registry update plus the
   note-URI rewrite; history tables and the referencing tables' dead name
   columns stop being rewritten (item 7); queued aspect tasks are still
@@ -1559,8 +1569,11 @@ its acceptance is that test green plus the census pin it lowers.
   also returns a row for each stamp move without `completed_at`, so it
   fails visibly instead of dropping early. On every other table the
   dropping changeset carries the CONTINUE precondition on every stamp
-  label. Test: a superseded
-  row's label can be reused by a new live collection.
+  label. The changeset that swaps the registry's primary key and drops
+  `superseded_by` also re-creates the partial UNIQUE on live labels over
+  `superseded_by_id IS NULL` (item 7). Test: a superseded
+  row's label can be reused by a new live collection, and P3.6's test that
+  refuses a second live row with one label still passes.
 - P4.2 Drop `legacy_grandfathered` and `idx_catalog_collections_legacy`.
 - P4.3 Delete every parser outside `legacy_names`; both census gates fall to
   the migration-source and diagnostic floor. The routing class has been
