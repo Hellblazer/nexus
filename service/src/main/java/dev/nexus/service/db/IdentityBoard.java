@@ -41,14 +41,42 @@ final class IdentityBoard {
     }
 
     /**
+     * The row id of the identity's board entry: the newest that carries its line. A quarantined entry is hidden from
+     * every read path: it is not "the board entry", so it is not retitled.
+     */
+    private static Long entryOf(DSLContext ctx, String tenant, String id) {
+        return ctx.select(MEMORY.ID).from(MEMORY).where(carriesLine(tenant, id).and(MEMORY.QUARANTINED_AT.isNull()))
+            .orderBy(MEMORY.TIMESTAMP.desc(), MEMORY.ID.desc()).limit(1).fetchOne(MEMORY.ID);
+    }
+
+    /** What {@link #retitleKeepingTaken} did: how many entries it retitled, and whether another entry held the title. */
+    record Retitled(int count, boolean titleTaken) {
+    }
+
+    /**
+     * {@link #retitle} for a promote (RDR-253 B4b): an entry already titled {@code title} is never overwritten. When
+     * another entry holds the title the identity's entry keeps its own, nothing is changed and the answer says
+     * {@code titleTaken}, so the promote itself stands: the entry stays findable by its {@code identity:} line. The
+     * title is checked first, not caught after the failed update, because a failed statement would abort the
+     * caller's whole transaction and take the promote with it.
+     */
+    static Retitled retitleKeepingTaken(DSLContext ctx, String tenant, String id, String title) {
+        Long entry = entryOf(ctx, tenant, id);
+        if (entry == null) {
+            return new Retitled(0, false);
+        }
+        boolean taken = ctx.fetchExists(ctx.selectOne().from(MEMORY).where(MEMORY.TENANT_ID.eq(tenant))
+            .and(MEMORY.PROJECT.eq(PROJECT)).and(MEMORY.TITLE.eq(title)).and(MEMORY.ID.ne(entry)));
+        return taken ? new Retitled(0, true) : new Retitled(retitle(ctx, tenant, id, title), false);
+    }
+
+    /**
      * Retitles the identity's entry (the newest, if more than one carries the line) and returns how many it
      * changed. A title already held by another entry is refused with {@code board_title_taken}, which the caller's
      * transaction turns into a rollback.
      */
     static int retitle(DSLContext ctx, String tenant, String id, String title) {
-        // A quarantined entry is hidden from every read path: it is not "the board entry", so it is not retitled.
-        Long entry = ctx.select(MEMORY.ID).from(MEMORY).where(carriesLine(tenant, id).and(MEMORY.QUARANTINED_AT.isNull()))
-            .orderBy(MEMORY.TIMESTAMP.desc(), MEMORY.ID.desc()).limit(1).fetchOne(MEMORY.ID);
+        Long entry = entryOf(ctx, tenant, id);
         if (entry == null) {
             return 0;
         }

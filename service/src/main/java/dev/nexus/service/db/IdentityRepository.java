@@ -273,7 +273,14 @@ public final class IdentityRepository {
         IdentityRows.indexSession(ctx, rec.getTenantId(), ev.sessionId(), rec.getId(), 1, now);
     }
 
-    /** Makes an ephemeral identity a seat with {@code name} as its alias. */
+    /**
+     * Makes an ephemeral identity a seat with {@code name} as its alias, and moves its board entry to that title in the
+     * same transaction (RDR-253 B4b, Sam 2026-11-19: engine 0.1.198 on; before it the client did this, and only from
+     * the session that owns the entry). Both routes reach here: the tenant credential's and the data credential's
+     * self-service promote (the handler fenced the token first). An entry already titled {@code name} is never
+     * overwritten: the promote stands, the entry keeps its title, and {@code board_retitle} says {@code title_taken}.
+     * {@code board_entries_retitled} is always present, which is how a client tells this engine from an older one.
+     */
     public Map<String, Object> promote(String tenant, String id, String name) {
         requireId(id);
         requireAliasName(name);
@@ -286,7 +293,13 @@ public final class IdentityRepository {
             insertAlias(ctx, tenant, id, name, now);
             rec.setKind("seat");
             rec.update();
-            return IdentityRows.view(rec, name);
+            IdentityBoard.Retitled board = IdentityBoard.retitleKeepingTaken(ctx, tenant, id, name);
+            Map<String, Object> out = new LinkedHashMap<>(IdentityRows.view(rec, name));
+            out.put("board_entries_retitled", board.count());
+            if (board.titleTaken()) {
+                out.put("board_retitle", "title_taken");
+            }
+            return out;
         });
     }
 

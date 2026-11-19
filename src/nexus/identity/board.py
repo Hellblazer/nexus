@@ -115,8 +115,9 @@ def retitle_entry(memory: Any, identity: str, title: str) -> str:
     """Move *identity*'s threads entry to *title* with ``put_replacing`` (the new title and the old one's quarantine
     in one engine transaction). Returns one line saying what happened, or ``""`` when no entry carries the line.
 
-    This is the client half of ``nx identity promote``: the engine's promote does not retitle (only ``rename``
-    does, in its own transaction, and a change there is an engine release). The write is fenced like any write to
+    This is the fallback half of ``nx identity promote`` for an engine older than 0.1.198, whose promote does not
+    retitle (from 0.1.198 on the engine does it in the promote's own transaction and ``ops.promote`` never calls
+    this). The write is fenced like any write to
     the entry, so it lands only when the caller is the owning session; an operator's shell gets the engine's
     refusal, which comes back as a line, never an exception: the identity is a seat by then and the entry is still
     found by its ``identity:`` line whatever its title.
