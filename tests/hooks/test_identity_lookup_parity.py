@@ -67,3 +67,40 @@ def test_both_withhold_an_expired_token_but_still_name_the_identity(lookup, tmp_
     _token(directory, 1, {"identity": "i12", "token": "old", "expires_at": 1.0, "session_id": NEW})
     assert lookup.lookup(NEW, tmp_path) == ("i12", "")
     assert board.binding_for_session(NEW, tmp_path) == ("i12", "")
+
+
+def test_a_file_whose_current_session_is_the_wanted_one_outranks_a_newer_file_that_only_lists_it(
+    lookup, tmp_path: Path
+) -> None:
+    """``/clear`` in seat A, then a ``/resume`` of that session id under seat B: A's token file still lists the id in
+    ``session_ids`` (and is the newer file), but B's file names it as its current session. B owns it."""
+    directory = tmp_path / "identity"
+    directory.mkdir()
+    _token(directory, 1, {"identity": "i9", "token": "seat-a", "session_id": NEW, "session_ids": [OLD, NEW]}, mtime=2000)
+    _token(directory, 2, {"identity": "i12", "token": "seat-b", "session_id": OLD, "session_ids": [OLD]}, mtime=1000)
+    assert lookup.lookup(OLD, tmp_path) == ("i12", "seat-b")
+    assert board.binding_for_session(OLD, tmp_path) == ("i12", "seat-b")
+    # the id seat A currently holds still finds seat A
+    assert lookup.lookup(NEW, tmp_path) == ("i9", "seat-a")
+    assert board.identity_for_session(NEW, tmp_path) == "i9"
+    # equal rank (both current, or both merely listed) falls back to the newest file
+    _token(directory, 3, {"identity": "i20", "session_id": OTHER, "session_ids": [OTHER]}, mtime=1)
+    _token(directory, 4, {"identity": "i21", "session_id": OTHER, "session_ids": [OTHER]}, mtime=5)
+    assert lookup.lookup(OTHER, tmp_path)[0] == board.identity_for_session(OTHER, tmp_path) == "i21"
+
+
+def test_both_withhold_a_token_inside_the_expiry_margin(lookup, tmp_path: Path) -> None:
+    import time  # noqa: PLC0415
+
+    from nexus.identity import token_contract  # noqa: PLC0415
+
+    assert lookup.EXPIRY_MARGIN_S == token_contract.EXPIRY_MARGIN_S
+    directory = tmp_path / "identity"
+    directory.mkdir()
+    soon = time.time() + token_contract.EXPIRY_MARGIN_S / 2
+    _token(directory, 1, {"identity": "i12", "token": "t", "expires_at": soon, "session_id": NEW})
+    assert lookup.lookup(NEW, tmp_path) == ("i12", "")
+    assert board.binding_for_session(NEW, tmp_path) == ("i12", "")
+    _token(directory, 1, {"identity": "i12", "token": "t", "expires_at": time.time() + 600, "session_id": NEW})
+    assert lookup.lookup(NEW, tmp_path) == ("i12", "t")
+    assert board.binding_for_session(NEW, tmp_path) == ("i12", "t")

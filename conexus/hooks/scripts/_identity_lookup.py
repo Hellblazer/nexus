@@ -17,6 +17,9 @@ import re
 import time
 from pathlib import Path
 
+#: token_contract.EXPIRY_MARGIN_S: a token inside this many seconds of its expiry is withheld too (pinned by
+#: tests/hooks/test_identity_lookup_parity.py).
+EXPIRY_MARGIN_S = 5.0
 _TOKEN_NAME = re.compile(r"^[0-9]+\.[0-9]+\.token$")  #: token_file._TOKEN_NAME, without the groups
 _IDENTITY_ID = re.compile(r"i[0-9]+")
 _IDENTITY_LINE = re.compile(r"^identity:[ \t]*(i[0-9]+)[ \t\r]*$", re.MULTILINE)  #: the engine's IdentityLine.LINE
@@ -29,12 +32,14 @@ def identity_of(body: str) -> str:
 
 
 def lookup(session_id: str, config_dir: Path) -> tuple[str, str]:
-    """``(identity, token)`` a token file binds *session_id* to, or ``("", "")``. The newest matching file by mtime
-    wins; *token* is ``""`` when the file holds none (an engine that issues no identity tokens)."""
+    """``(identity, token)`` a token file binds *session_id* to, or ``("", "")``. A file whose CURRENT ``session_id``
+    is *session_id* outranks one that merely lists it in ``session_ids`` (after ``/clear`` plus a ``/resume`` under
+    another seat, the old seat's file still lists the id the new seat now holds); then the newest by mtime wins.
+    *token* is ``""`` when the file holds none (an engine that issues no identity tokens)."""
     if not session_id:
         return "", ""
     want = session_id.lower()
-    best: tuple[float, str, str] | None = None
+    best: tuple[int, float, str, str] | None = None
     try:
         paths = [p for p in (Path(config_dir) / "identity").iterdir() if _TOKEN_NAME.match(p.name)]
     except OSError:
@@ -50,14 +55,16 @@ def lookup(session_id: str, config_dir: Path) -> tuple[str, str]:
         identity = data.get("identity")
         if not isinstance(identity, str) or not _IDENTITY_ID.fullmatch(identity):
             continue
-        held = [data.get("session_id"), *(data.get("session_ids") or [])] if isinstance(
-            data.get("session_ids") or [], list) else [data.get("session_id")]
+        current = data.get("session_id")
+        listed = data.get("session_ids")
+        held = [current, *(listed if isinstance(listed, list) else [])]
         if want not in {s.lower() for s in held if isinstance(s, str) and s}:
             continue
+        is_current = int(isinstance(current, str) and current.lower() == want)
         token = data.get("token") if isinstance(data.get("token"), str) else ""
         expires = data.get("expires_at")
-        if token and isinstance(expires, (int, float)) and expires <= time.time():
+        if token and isinstance(expires, (int, float)) and expires <= time.time() + EXPIRY_MARGIN_S:
             token = ""  # never send an expired token (token_header.current withholds it too); the MCP server refreshes
-        if best is None or stamp > best[0]:
-            best = (stamp, identity, token or "")
-    return (best[1], best[2]) if best else ("", "")
+        if best is None or (is_current, stamp) > best[:2]:
+            best = (is_current, stamp, identity, token or "")
+    return (best[2], best[3]) if best else ("", "")

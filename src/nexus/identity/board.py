@@ -42,17 +42,6 @@ def session_of(content: str) -> str:
     return m.group(1) if m else ""
 
 
-def belongs_to(content: str, *, identity: str = "", session_ids: Iterable[str] = ()) -> bool:
-    """Whether an entry is the caller's: its identity line names *identity*; or, for an entry with no identity line,
-    its ``session:`` line names one of *session_ids*. An entry whose identity line names another identity is never
-    the caller's, whatever its ``session:`` line says (a stale session line after a seat moved)."""
-    own = identity_of(content)
-    if own:
-        return bool(identity) and own == identity
-    sid = session_of(content).lower()
-    return bool(sid) and sid in {s.lower() for s in session_ids if s}
-
-
 def entries_for_identity(entries: Iterable[Mapping[str, Any]], identity: str) -> list[str]:
     """Titles of the entries whose identity line names *identity*, in the order given."""
     if not identity:
@@ -71,10 +60,13 @@ def binding_for_session(session_id: str, config_dir: Path | None = None) -> tupl
 
     A hook knows only its payload's session id. The token files under ``<config>/identity/`` name each one's session
     id and every session id the identity has held (``session_ids``), so a session id from before ``/clear`` still
-    finds its seat. When several files match (a stale one beside the live one), the newest by mtime wins.
+    finds its seat. When several files match, one whose CURRENT session id is the wanted one outranks one that merely
+    lists it (after ``/clear`` plus a ``/resume`` under another seat, the old seat's file still lists the id the new
+    seat now holds), then the newest by mtime wins.
     """
     if not session_id:
         return "", ""
+    from nexus.identity import token_contract  # noqa: PLC0415 -- hook import cost
     from nexus.identity.token_file import identity_dir, read_token_file, token_files  # noqa: PLC0415 -- hook import cost
 
     if config_dir is None:
@@ -82,7 +74,7 @@ def binding_for_session(session_id: str, config_dir: Path | None = None) -> tupl
 
         config_dir = _nx_config.nexus_config_dir()
     want = session_id.lower()
-    best: tuple[float, str, str] | None = None
+    best: tuple[int, float, str, str] | None = None
     for path in token_files(identity_dir(config_dir)):
         record = read_token_file(path)
         if record is None or not is_identity_id(str(record.identity or "")):
@@ -94,8 +86,10 @@ def binding_for_session(session_id: str, config_dir: Path | None = None) -> tupl
             stamp = path.stat().st_mtime
         except OSError:
             continue
-        if best is None or stamp > best[0]:
+        is_current = int(bool(record.session_id) and record.session_id.lower() == want)
+        if best is None or (is_current, stamp) > best[:2]:
             fresh = record.token if record.token and not (
-                record.expires_at is not None and record.expires_at <= time.time()) else ""  # never an expired token
-            best = (stamp, str(record.identity), fresh or "")
-    return (best[1], best[2]) if best else ("", "")
+                record.expires_at is not None and record.expires_at <= time.time() + token_contract.EXPIRY_MARGIN_S
+            ) else ""  # never an expired token
+            best = (is_current, stamp, str(record.identity), fresh or "")
+    return (best[2], best[3]) if best else ("", "")

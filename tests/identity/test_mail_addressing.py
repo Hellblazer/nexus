@@ -157,3 +157,26 @@ def test_a_name_held_by_two_sessions_is_still_refused_when_the_seat_is_not_live(
     tuples = _Tuples({"wren": [OLD_SESSION, "22222222-2222-4333-8444-555555555555"]})
     with pytest.raises(DirectoryResolutionError, match="held by more than one session"):
         resolve_send("wren", tuples, engine.alias)
+
+
+def test_own_identity_takes_the_seat_whose_current_session_it_is_not_one_that_only_held_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """The ``from`` guard's own-identity read shares the token-file rule: after ``/clear`` plus a ``/resume`` under
+    another seat, the old seat's (newer) file lists the id but the new seat's file holds it."""
+    import json  # noqa: PLC0415
+    import os  # noqa: PLC0415
+
+    import nexus.identity.token_header as th  # noqa: PLC0415
+    import nexus.tuple_directory as td  # noqa: PLC0415
+
+    directory = tmp_path / "identity"
+    directory.mkdir()
+    for pid, identity, current, mtime in ((1, "i9", "other", 2000), (2, "i12", OLD_SESSION, 1000)):
+        path = directory / f"{pid}.1.token"
+        path.write_text(json.dumps({"identity": identity, "generation": 1, "pid": pid, "started_at": 1,
+                                    "session_id": current, "session_ids": [OLD_SESSION]}), encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+    monkeypatch.setattr(th, "current", lambda: None)
+    monkeypatch.setattr(td, "_own_session_ids", lambda _sd, _pid: [OLD_SESSION])
+    assert td._own_identity(tmp_path, 1) == "i12"
