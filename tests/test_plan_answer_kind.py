@@ -71,8 +71,9 @@ _TABLE: dict[str, PlanAnswerKind] = {
 _ADDED_AFTER_DECLARATION: frozenset[str] = frozenset({"entity-resolution.yml"})
 
 #: What the 12 pre-existing builtins were BEFORE this bead, captured from the tree at origin/develop 4898d437d (the
-#: entity-resolution row is a freeze pin of its own YAML, see its comment; hybrid-factual-lookup's body hash was
-#: re-pinned when its search step gained ``lexical: true``, see tests/test_hybrid_factual_lookup_lexical.py):
+#: entity-resolution row is a freeze pin of its own YAML, see its comment; the hybrid-factual-lookup and entity-resolution body
+#: hashes were re-pinned (together) when their search step gained ``lexical: true``, see
+#: tests/test_hybrid_factual_lookup_lexical.py):
 #: (canonical dimensions, sha256[:12] of the description, name, verb, scope, sha256[:12] of the
 #: canonical JSON of the YAML plan_json body). The declaration may add a key beside ``steps``; it must
 #: move none of these.
@@ -92,7 +93,7 @@ _BEFORE: dict[str, tuple[str, str, str, str, str, str]] = {
     # FREEZE PIN, not a develop capture (the file has no row on develop 4898d437d): the entity-resolution YAML
     # as of fix round 1 of the nexus-irndi review, whose steps are hybrid-factual-lookup's. A change to its
     # description, dimensions, tags or steps moves these hashes on purpose and the diff shows the edit.
-    "entity-resolution.yml": ('{"scope":"global","strategy":"entity-resolution","verb":"research"}', "ca44c80f5808", "entity-resolution", "research", "global", "57af6c5e0bd4"),
+    "entity-resolution.yml": ('{"scope":"global","strategy":"entity-resolution","verb":"research"}', "ca44c80f5808", "entity-resolution", "research", "global", "c701db143564"),
 }
 
 

@@ -72,6 +72,18 @@ plan_json:
         # rank step downstream handles relevance. RF-9; tracked
         # systemically as nexus-h3e2.
         threshold: 2.0
+        # lexical: true turns on the cross-encoder rerank (MCP search applies
+        # it only with lexical=True); the lexical leg itself returns nothing
+        # on a whole question. Same step body as hybrid-factual-lookup.yml:
+        # the measured questions are exactly this template's "affected by"
+        # shape, and without it the rerank would depend on whether the
+        # request-kind call read the question as lookup. See that file for
+        # the numbers, the scope of the measurement (local engine, one HERB
+        # collection, retrieval reach r20, cloud untimed), the cost (search
+        # ~5-10 s per call) and the failure mode (an error from the lexical
+        # leg gives the plan EMPTY step-1 evidence, nexus-vi9u4). Retire this
+        # line with the one there when nexus-wohh7 lands.
+        lexical: true
     - tool: traverse
       args:
         seeds: $step1.tumblers
