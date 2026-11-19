@@ -1069,3 +1069,25 @@ class TestDispatcherOwnedMode:
         assert "NX_T1_HOST" not in env
         assert "NX_T1_PORT" not in env
         assert "NX_T1_ISOLATED" not in env
+
+
+def test_a_clear_whose_claude_has_no_recognised_mcp_server_says_so() -> None:
+    """The /clear handoff no longer fails silently (nexus-hczdo.1.11): when the matcher finds no MCP server under the
+    claude process, the hook logs a warning naming the claude pid and the new session id, and writes no marker."""
+    from unittest.mock import patch  # noqa: PLC0415
+
+    from structlog.testing import capture_logs  # noqa: PLC0415
+
+    from nexus.hooks import _write_t1_handoff_markers  # noqa: PLC0415
+
+    with (
+        patch("nexus.session.find_immediate_claude_pid", return_value=4242),
+        patch("nexus.session.find_mcp_sibling_pids", return_value=[]),
+        patch("nexus.daemon.t1_handoff.write_handoff_marker") as write,
+        capture_logs() as logs,
+    ):
+        _write_t1_handoff_markers("new-sess-id")
+    assert not write.called
+    assert [(e["event"], e["log_level"], e["claude_pid"], e["new_session_id"]) for e in logs] == [
+        ("t1_handoff_no_mcp_server_found", "warning", 4242, "new-sess-id"),
+    ]

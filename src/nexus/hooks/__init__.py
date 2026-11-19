@@ -206,6 +206,9 @@ def _write_t1_handoff_markers(new_session_id: str, identity_fields: dict | None 
             return
         mcp_pids = find_mcp_sibling_pids(claude_pid)
         if not mcp_pids:
+            # Not silent: a server the matcher cannot recognise leaves the MCP server on the old session id, and the
+            # first write after a /clear fails with no usable lease (nexus-hczdo.1.11, a framework Python's "Python").
+            _logger().warning("t1_handoff_no_mcp_server_found", claude_pid=claude_pid, new_session_id=new_session_id)
             return
         config_dir = nexus_config_dir()
         for mcp_pid in mcp_pids:
