@@ -518,6 +518,31 @@ def test_scanner_is_nonvacuous() -> None:
     )
 
 
+def _allowlist_entry_lines(offenders: list[_Site]) -> str:
+    """The ALLOWLIST entries a reviewed new site needs, one per file, with its live count and a reason slot."""
+    counts: dict[str, int] = {}
+    for s in offenders:
+        counts[s.file] = counts.get(s.file, 0) + 1
+    return "\n".join(f'    "{f}": ({n}, "<READ-ONLY | CONTAINER | NX_LOCAL+SANDBOX: why it cannot reach the shared tenant>"),'
+                     for f, n in sorted(counts.items()))
+
+
+def _ledger_fix_lines(live: dict[str, int], ledger: dict[str, int]) -> str:
+    """What each drifted entry must become: the live count, or deleted when no site is left."""
+    out = []
+    for f in sorted(live.keys() | ledger.keys()):
+        got, want = live.get(f, 0), ledger.get(f, 0)
+        if got == want:
+            continue
+        if got == 0:
+            out.append(f"  delete the {f!r} entry: no site is left")
+        elif want == 0:
+            out.append(f"  add {f!r} with count {got} (see test_every_host_harness_site_is_allowlisted)")
+        else:
+            out.append(f"  set {f!r} to count {got} (was {want}){' after reviewing the new site' if got > want else ''}")
+    return "\n".join(out)
+
+
 # ── The pinned invariant ─────────────────────────────────────────────────
 
 
@@ -534,6 +559,8 @@ def test_every_host_harness_site_is_allowlisted() -> None:
         "host-run harness site (nx index/store/collection, or store_put) not "
         "in the named ALLOWLIST:\n  "
         + "\n  ".join(f"{s.file}:{s.line}  {s.text!r}" for s in offenders)
+        + "\n\nOnce the site is reviewed against the rules below, the ALLOWLIST entry is:\n"
+        + _allowlist_entry_lines(offenders)
         + "\n\nEvery site here needs a NAMED, reviewed reason it cannot land "
           "debris in the shared production tenant -- READ-ONLY (no write "
           "path), CONTAINER (runs inside a throwaway Docker container that "
@@ -577,4 +604,16 @@ def test_ledger_matches_live_count() -> None:
         "ALLOWLIST count drifted from the live scan (raise the entry for a "
         "genuine new site with review; lower or delete it if a site was "
         "fixed/removed): " + ", ".join(mismatches)
+        + "\n" + _ledger_fix_lines(live_counts, ledger_counts)
     )
+
+
+def test_the_guard_messages_give_the_entry_to_add_and_the_count_to_set() -> None:
+    """Suite audit item 9 (2026-11-19): these two were 14 of the develop reds in two weeks; the failure now gives the
+    line to paste or the count to set, while every check stays as it was."""
+    add = _allowlist_entry_lines([_Site(file="scripts/x.sh", line=3, text="nx store put"),
+                                  _Site(file="scripts/x.sh", line=9, text="nx index repo")])
+    assert add.startswith('    "scripts/x.sh": (2, "<READ-ONLY | CONTAINER | NX_LOCAL+SANDBOX:')
+    fix = _ledger_fix_lines({"a.sh": 3, "b.sh": 1}, {"a.sh": 2, "c.sh": 1, "b.sh": 1})
+    assert "set 'a.sh' to count 3 (was 2) after reviewing the new site" in fix
+    assert "delete the 'c.sh' entry: no site is left" in fix and "b.sh" not in fix
