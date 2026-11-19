@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-10-17
 accepted_date:
 related_issues: ["nexus-j4gl6", "nexus-zvcou"]
-related_rdrs: [RDR-101, RDR-103, RDR-155, RDR-156, RDR-176, RDR-204, RDR-210, RDR-225, RDR-227, RDR-246]
+related_rdrs: [RDR-101, RDR-103, RDR-155, RDR-156, RDR-176, RDR-204, RDR-210, RDR-225, RDR-227, RDR-231, RDR-236, RDR-246, RDR-247, RDR-248]
 ---
 
 # RDR-229: The Collection Name Becomes a Label
@@ -32,11 +32,15 @@ the only reliable place to keep collection metadata. ChromaDB was retired at
 RDR-155. Collections are now Postgres rows, and one team owns both the client
 (`nx`, Python) and the server (the engine, a Java service).
 
-Bead nexus-j4gl6 (Sam, 2026-06-29) asks to stop encoding those facts in the
+Bead nexus-j4gl6 (Sam, 2026-06-29) asked to stop encoding those facts in the
 name, and to plan the work fully: "no need to encode anything in the name...
 given we control the horizontal AND the vertical, revisit these constraints."
 Its trigger, the production local-to-managed cutover, has passed (Sam's
-2026-10-17 grooming).
+2026-10-17 grooming). The bead was closed on 2026-11-10, "folded into RDR-247
+(nexus-f3yqd.8 ...) Superseded here", and Sam's 2026-11-12 ruling then
+deferred RDR-247 until this RDR is ready (Relationship to Prior RDRs). No
+bead tracks RDR-229 now; this RDR is its record until its beads are planned
+at acceptance (T2 `229-research-31`, `229-research-35`).
 
 Most of the bead's first two steps shipped in the meantime, under a different
 record. RDR-204 (closed 2026-09-10) made `nexus.catalog_collections` (the
@@ -182,6 +186,10 @@ name, so these paths have to find the row by its attributes first.
 | RDR-210 (one local engine serves both embedders) | Adjacent, closed 2026-10-26 | Finds model siblings and its re-embed target by the row tuple `(content_type, owner_id)`, never by a name (its Gap 4 fix and its RDR-229 row). One name-based sibling matcher is left, `repo_identity.list_sibling_collections`, with no caller in `src`; P2.7 retires it. |
 | RDR-225 (one vector table per embedding model) | Adjacent, closed 2026-10-22 (T2 `229-research-25`) | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`; the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
 | RDR-246 (data moves are background jobs) | Dependency, accepted 2026-11-16 | Its `nexus.data_moves` registry and `DataMoveWorker` run Phase 3's stamp and key swap as visible, resumable background moves, never at boot (item 6; T2 `229-research-32`). Its activation (nexus-f3yqd.2) is a Phase 3 prerequisite. |
+| RDR-247 (one index per row) | Downstream, deferred 2026-11-12 | Waits for this RDR and then rides with it as one visible job (Scope boundary with RDR-247). Received nexus-j4gl6 when Sam closed it on 2026-11-10. |
+| RDR-236 (chunk-row metadata normalization) | Adjacent, accepted, Phase 4 in progress | Its not-additive Phase 4 cut and Phase 3's dual write both change the chunk write path (Sequencing). |
+| RDR-248 (cloud tenant backup) | Adjacent, closed 2026-11-15 | Its tenant export keys `catalog_collections` and the chunks on names; its restore is a migration source (Gap 5). |
+| RDR-231 (note source URI scheme) | Adjacent, closed 2026-11-10 | Owns `NoteUri` and `note-uri-corpus.json`, which route by the label's prefix until P2.9 (item 12). |
 | RDR-227 (per-collection HNSW above the router threshold) | Adjacent, closed 2026-10-12 (T2 `229-research-25`) | Builds each per-collection index as a partial index `WHERE collection = '<name>'` and names it from a hash of model, tenant and name. Phase 3 rebuilds every such index on `collection_id`. |
 
 Searched `docs/rdr/README.md` and the RDR tree for "collection name",
@@ -209,6 +217,35 @@ with its four-column write sites intact and stays under
 `PlpgsqlCheckGateTest`. The manifest's new `embedding_model` column
 (`vectors-030-model-tenant-partition-functions.xml` lines 786-791) lets Phase 2 rewrite `chash_conformance_report` without
 parsing.
+
+**Scope boundary with RDR-247.** Sam deferred RDR-247 on 2026-11-12: "keep
+both indexes and wait for RDR-229 ... When RDR-229 is ready on its own
+merits, RDR-247 rides with it as one sequence, run as a visible job: stamp
+collection ids (stamp-before-build), build each per-collection index on the
+id, then the bounded drop of the shared leaf graph" (nexus-f3yqd.8, comment
+of 2026-11-12; RDR-247 Revision History; T2 `229-research-35`). Phase 3
+follows that order. RDR-229 owns the stamp (P3.1) and the per-collection
+index rebuild on the id (P3.4). A collection's rows are stamped before its
+index is built on the id, so no index is built twice. RDR-247 owns the
+bounded drop of the shared leaf graph, which is not in this RDR. The stamp
+cannot stop at new rows, the cost comparison's option (c): D3's chunks
+primary key holds `collection_id`, so every row must carry one before P3.3
+swaps the key. What (c) adds, stamping a collection's old rows just before
+its index build, fits P3.1's order. It is not an alternative to stamping
+everything.
+
+**Sequencing with RDR-236, RDR-246, RDR-248 and RDR-231.** RDR-246 (accepted)
+supplies the data-move mechanism Phase 3 runs on, and its activation
+(nexus-f3yqd.2) is a Phase 3 prerequisite (item 6). RDR-236 (accepted, Phase
+4 in progress: "Refuse, retire, sweep (not-additive, one paired cut)")
+changes what a chunk write may carry, and Phase 3's dual write changes the
+same write path. Inferred, not read: `collection_id` is a column, not a
+metadata key RDR-236's allow-list governs, so the two do not conflict, and
+their engine cuts are ordered at planning. RDR-248 (closed 2026-11-15)
+exports and restores a tenant keyed on names (Gap 5). RDR-231 (closed
+2026-11-10) put the collection label inside every note's
+`nx-note://<label>/` URI and owns `NoteUri` (item 12). T2
+`229-research-35`.
 
 ## Context
 
@@ -668,7 +705,10 @@ follow, each while the engine serves:
   (`PciBootWork.java`; T2 `229-research-33`). The new key's index is created
   `ON ONLY` the partitioned parent, built per leaf with `CONCURRENTLY` and
   attached, so the parent step is metadata only (PostgreSQL 17,
-  `ddl-partitioning.html` and `sql-createindex.html`).
+  `ddl-partitioning.html` and `sql-createindex.html`). A collection's
+  per-collection index on the id is built only once none of that
+  collection's rows has a null `collection_id`, the stamp-before-build order
+  of Sam's RDR-247 ruling (Scope boundary with RDR-247).
 - *The switch is a move's `on_complete`.* `ADD ... USING INDEX` "is not
   currently supported on partitioned tables" (`sql-altertable.html`). So
   P3.3 registers a move whose verification query returns any leaf without a
@@ -1067,8 +1107,10 @@ its acceptance is that test green plus the census pin it lowers.
   local store.
 - P3.4 Rebuild every per-collection index on `collection_id` (predicate and
   name hash) through the PCI reconciler, which reports in `boot_work` and
-  rebuilds a killed build from the start; `PciCatalog` reads the id back
-  from the predicate.
+  rebuilds a killed build from the start; each collection's index is built
+  after its rows are stamped (stamp-before-build, Scope boundary with
+  RDR-247); `PciCatalog` reads the id back from the predicate. The bounded
+  drop of the shared leaf graph that follows is RDR-247's.
 - P3.5 Engine readers and routes: `CollectionRegistry` keyed by id with a
   label index; every collection-taking route accepts `collection_id` and a
   label; responses carry both. Client caches keyed by id.
@@ -1282,6 +1324,13 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-225-vector-tables-per-embedding-model.md`, Technical Design.
 - `docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md`.
 - `docs/rdr/rdr-210-dual-mode-local-engine.md`, Gap 4.
+- `docs/rdr/rdr-246-data-moves-are-background-jobs.md`, Technical Design.
+- `docs/rdr/rdr-247-one-index-per-row.md`, Revision History (2026-11-12
+  deferral); bead nexus-f3yqd.8 (Sam's 2026-11-12 ruling);
+  T2 `nexus/rdr247-cost-comparison-2026-11-12`.
+- `docs/rdr/rdr-236-chunk-row-metadata-normalization.md`, Phase 4.
+- `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
+- `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
 - T2 `nexus_rdr/229-research-1` to `-31`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
