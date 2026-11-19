@@ -6,7 +6,8 @@ One small synchronous client shared by the SessionStart hook (the tenant credent
 credential) and the CLI. It attaches an identity token only where it is handed one: the bind that mints one is the
 call that cannot have one, every other call here is a read or an unfenced write, and a data credential makes, promotes
 and delegates seats through the caller's token (RDR-253 option 2: ``create_seat``, ``promote``, ``create_delegated``
-take ``token=``; the callers pass it when :attr:`IdentityClient.scope` is data). Fenced writes go through the T2
+take ``token=``; the callers pass it when :attr:`IdentityClient.scope` is data; so does a data credential's ``bind`` of
+``refresh`` or ``fork``, engine 0.1.198). Fenced writes go through the T2
 stores, which attach the token (:mod:`nexus.identity.token_header`).
 
 Which routes each credential may call is the engine's decision (``IdentityHandler.admit``), not this module's: a
@@ -40,6 +41,14 @@ OLD_ENGINE_SEAT_REFUSAL: str = "a 'data' credential may not call"
 #: The one line every seat caller says for it.
 SEATS_NEED_ENGINE: str = "seats need engine 0.1.197 in cloud mode"
 
+#: The bind events a data credential sends only with the identity's own live token (engine 0.1.198, RDR-253: a refresh
+#: or fork mints or re-keys a token, so the fence's check applies). The others stay as they were.
+TOKEN_BIND_EVENTS: frozenset[str] = frozenset({"refresh", "fork"})
+
+#: Seats one identity may create through a data credential (RDR-253, Sam 2026-11-19: cap 5). The engine's 409
+#: ``seat_limit`` may name its own ``limit``, which wins; this is only the number the line says when it does not.
+SEAT_LIMIT: int = 5
+
 
 class IdentityApiError(Exception):
     """The engine refused an identity call. *code* is its ``error`` field (``held``, ``generation_conflict``,
@@ -72,6 +81,10 @@ NO_TOKEN_ADVICE = ("no identity token was sent, and in cloud mode a seat is made
 #: script and a dispatch are not run from a session, so they never say to.
 OWN_TOKEN_401_ADVICE = "a session's server renews its token while it runs, so run this from a live session (or restart this one)"
 FILE_TOKEN_401_ADVICE = "the session that wrote that file renews the token while it runs, so that session must be live"
+#: What a caller adds to the ``seat_limit`` line: who may still make a seat. The tenant credential has no cap, and rename
+#: and purge are its own, so a seat made by mistake is cleaned up from a local-mode or operator shell.
+SEAT_LIMIT_ADVICE = ("make the seat from a local-mode or operator shell (the tenant credential has no cap), or remove one of "
+                     "this identity's there with `nx identity rename` or `purge`")
 #: One line per engine refusal of a seat call (RDR-253 option 2) that needs nothing from the caller; the codes that name
 #: the caller's token, the identity or the token's owner are built in :func:`seat_refusal_message`.
 _SEAT_REFUSALS = {
@@ -82,11 +95,12 @@ _SEAT_REFUSALS = {
 
 
 def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, token_source: str = OWN_TOKEN,
-                         no_token: str = NO_TOKEN_ADVICE, unauthorized: str = OWN_TOKEN_401_ADVICE) -> str:
+                         no_token: str = NO_TOKEN_ADVICE, unauthorized: str = OWN_TOKEN_401_ADVICE,
+                         seat_limit: str = SEAT_LIMIT_ADVICE) -> str:
     """One line for an engine refusal of a seat call (a data credential's create, promote or delegate). *token_source*
     says whose token was sent (``this process's token``, or ``the token in <file>``), *no_token* is the advice for a
-    call that sent none and *unauthorized* the advice after a 401, so each caller words them for itself. Never contains
-    a token value.
+    call that sent none, *unauthorized* the advice after a 401 and *seat_limit* the way out of ``409 seat_limit``, so
+    each caller words them for itself. Never contains a token value.
 
     Every 401 is the one line: the engine's AuthFilter answers all of them ``{"error": "unauthorized"}`` (it logs the
     reason, an expired or another tenant's identity token, and does not send it), so the client cannot tell the data
@@ -108,6 +122,10 @@ def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, 
         return f"another process holds this identity now, and {token_source} is for an older generation"
     if code == "session_held":
         return "the engine already indexes that session id under another identity, so a delegated identity cannot be bound to it"
+    if code == "seat_limit":
+        limit = exc.body.get("limit")
+        cap = limit if isinstance(limit, int) and not isinstance(limit, bool) else SEAT_LIMIT
+        return f"{identity or 'this identity'} has made {cap} seats, the most a session's credential may: {seat_limit}"
     if code == "bad_created_by":
         return "a tenant credential may give created_by only as sam or restart"
     if code in _SEAT_REFUSALS:
@@ -127,6 +145,19 @@ def evidence_body(
         "holder_gone": dict(holder_gone) if holder_gone else None,
     }
     return {k: v for k, v in fields.items() if v is not None}
+
+
+def _process_token() -> str | None:
+    """The live token in this process's nearest Claude ancestor's token file, or None (no ancestor, no file, a token past
+    its expiry). No engine call and no session check: the engine's fence is the check, and a bind runs at moments (a
+    hook, a ``/clear``) when the session id is not yet the file's."""
+    from nexus.identity import token_header  # noqa: PLC0415 — deferred: hook import cost
+
+    try:
+        record = token_header.current()
+    except Exception:  # noqa: BLE001 — a process that cannot find its file sends none; the engine says so
+        return None
+    return record.token if record is not None else None
 
 
 def _seg(value: str) -> str:
@@ -315,12 +346,23 @@ class IdentityClient:
         unheld or plainly lapsed identity and audit-logs the rest."""
         return self._request("POST", f"/{identity}/purge", json={"operator": True})
 
-    def bind(self, identity: str, event: str, expected_generation: int, evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def bind(self, identity: str, event: str, expected_generation: int, evidence: Mapping[str, Any] | None = None, *,
+             token: str | TokenFile | None = None) -> dict[str, Any]:
         """The compare-and-set. The answer is the identity view plus ``event``, ``generation_changed``, ``noop``,
-        and, from Step 2, ``identity_token``."""
+        and, from Step 2, ``identity_token``.
+
+        A data credential's ``refresh`` and ``fork`` carry the identity's own live token (engine 0.1.198): *token*, the
+        one being refreshed, else the nearest Claude ancestor's file, as the fenced routes send. With none the engine
+        answers 403 ``identity_token_required``, the honest refusal. No other event sends one, and the tenant credential
+        never does: it is the trust boundary for a request that names no process, and an identity token the engine
+        cannot resolve is a 401 on every route it rides."""
         body: dict[str, Any] = {"event": event, "expected_generation": expected_generation}
         body.update(evidence or {})
-        return self._request("POST", f"/{identity}/bind", json=body)
+        if event not in TOKEN_BIND_EVENTS or self._scope != SCOPE_DATA:
+            token = None
+        elif token is None:
+            token = _process_token()
+        return self._request("POST", f"/{identity}/bind", json=body, token=token)
 
     def gone(self, identity: str, expected_generation: int, holder_gone: Mapping[str, Any]) -> dict[str, Any]:
         """Record that the holder is gone (tenant credential only). ``recorded`` is false for a repeat."""

@@ -29,7 +29,7 @@ class _Engine:
     def session(self, session_id: str) -> dict:
         return {"identity": "i1"}
 
-    def bind(self, identity: str, event: str, generation: int, evidence: Any = None) -> dict:
+    def bind(self, identity: str, event: str, generation: int, evidence: Any = None, **_: Any) -> dict:
         self.calls.append((event, (identity, generation)))
         return {"id": identity, "generation": generation, "identity_token": f"tok-{len(self.calls)}",
                 "identity_token_expires_in_seconds": 3600}
@@ -189,9 +189,9 @@ def test_refresh_fork_and_end_carry_the_process_they_speak_for(tmp_path: Path) -
     seen: list[tuple[str, dict]] = []
     orig = engine.bind
 
-    def spy(identity: str, event: str, generation: int, evidence: Any = None) -> dict:
+    def spy(identity: str, event: str, generation: int, evidence: Any = None, **kw: Any) -> dict:
         seen.append((event, dict(evidence or {})))
-        return orig(identity, event, generation, evidence)
+        return orig(identity, event, generation, evidence, **kw)
 
     engine.bind = spy                                  # type: ignore[method-assign]
     engine.session = lambda sid: (_ for _ in ()).throw(IdentityApiError(404, "unknown_session", "no", {}))   # type: ignore[method-assign]
@@ -261,10 +261,10 @@ def test_a_call_that_was_out_when_a_marker_moved_the_lease_changes_nothing_of_th
         if outcome == "refresh_answers":
             orig = engine.bind
 
-            def slow(identity: str, event: str, generation: int, evidence: Any = None) -> dict:
+            def slow(identity: str, event: str, generation: int, evidence: Any = None, **kw: Any) -> dict:
                 entered.set()
                 release.wait(10)
-                return orig(identity, event, generation, evidence)
+                return orig(identity, event, generation, evidence, **kw)
 
             engine.bind = slow                        # type: ignore[method-assign]
             engine.renew = lambda *a, **k: {}        # type: ignore[method-assign]

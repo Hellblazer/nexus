@@ -39,6 +39,7 @@ class FakeEngine:
         self.refuse: dict[str, IdentityApiError] = {}     # route name -> the refusal it answers with (a staged failure)
         self.work: dict[tuple[str, str, str], tuple[str, float]] = {}     # (identity, kind, ref) -> (state, updated_at)
         self.member_of: dict[str, dict[str, str]] = {}                  # identity -> {group: role}, in join order
+        self.bind_tokens: list[tuple[str, Any]] = []   # (event, token) of every bind that carried one
         self.caller_token: str | None = None   # the identity the caller's token names; a membership write is fenced on it
 
     # ── staging (not routes) ────────────────────────────────────────────────
@@ -229,9 +230,12 @@ class FakeEngine:
             raise _refuse(409, "generation_superseded", "superseded")
         return self._view(rec)
 
-    def bind(self, identity: str, event: str, expected_generation: int, evidence: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def bind(self, identity: str, event: str, expected_generation: int, evidence: Mapping[str, Any] | None = None, *,
+             token: Any = None) -> dict[str, Any]:
         ev = dict(evidence or {})
         self.calls.append(("bind", (identity, event, expected_generation, ev)))
+        if token is not None:
+            self.bind_tokens.append((event, token))      # what a refresh or fork carried (engine 0.1.198); not a call
         rec = self._get(identity)
         if rec["generation"] != expected_generation:
             code = "generation_superseded" if event in ("clear", "fork", "refresh", "end") and expected_generation < rec["generation"] else "generation_conflict"

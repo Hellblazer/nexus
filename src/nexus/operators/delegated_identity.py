@@ -214,7 +214,8 @@ class DelegatedIdentity:
         try:
             self._client.renew(self.identity, self._generation)
             if self._lifetime is not None and self._clock() >= self._issued + self._lifetime / 2:
-                view = self._client.bind(self.identity, "refresh", self._generation, self._evidence)
+                # its own token, the one being refreshed: the process's file names the dispatcher's identity, not this one's
+                view = self._client.bind(self.identity, "refresh", self._generation, self._evidence, token=self._token)
                 token, lifetime = token_contract.token_from_response(view)
                 if token:
                     with self._lock:  # only the file write is under the lock: finish() takes it for an instant, never behind HTTP
