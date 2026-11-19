@@ -858,3 +858,41 @@ def test_project_must_be_the_repository_the_command_runs_in_and_never_a_repo_rdr
     assert "otherrepo" in out and REPO in out and "RDR files" in out
     assert [t for t in _rows(db, with_counts=True) if t.startswith("gate-rollup-count-")] == []   # nothing was recorded
     assert "1 listed" in _run_raw("--phase", "3", "--beads", "nexus-pj", "--dry-run")           # the repo's own project passes
+
+
+def _lossy_after_write(monkeypatch: pytest.MonkeyPatch, *, on_write: int, change) -> None:
+    """From the *on_write*-th pointer write on, a pointer read hands back the records with *change* applied."""
+    real_read, real_write = gr.read_pointer, gr.write_pointer
+    writes: list[int] = []
+
+    def counting_write(*a, **k):
+        writes.append(1)
+        return real_write(*a, **k)
+
+    def lossy_read(t3, title):
+        got = real_read(t3, title)
+        if got is not None and len(writes) >= on_write:
+            for rec in got.listed:
+                change(rec)
+        return got
+
+    monkeypatch.setattr(gr, "write_pointer", counting_write)
+    monkeypatch.setattr(gr, "read_pointer", lossy_read)
+
+
+def test_the_pointer_read_back_also_compares_the_ttl_marks(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _gate(db, "nexus-pm")
+    _lossy_after_write(monkeypatch, on_write=2, change=lambda rec: rec.update(ttl_set=False))   # the second write carries the marks
+    out = _phase3("nexus-pm", expect=1)
+    assert "1 record(s) now have the TTL but the pointer's ttl marks were not written" in out and "did not read back" in out
+    assert _rows(db)[name]["ttl"] == 30
+
+
+def test_the_pointer_read_back_also_compares_the_state_of_a_carried_record(db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    _gate(db, "nexus-ps", sha="aaa1111")
+    reaped = _gate(db, "nexus-ps", sha="bbb2222")
+    _phase3("nexus-ps")
+    db.delete(project=REPO, title=reaped)
+    _lossy_after_write(monkeypatch, on_write=1, change=lambda rec: rec.pop("state", None))     # the carried state is lost
+    out = _phase3("nexus-ps", expect=1)
+    assert "did not read back from T3 with the same list" in out

@@ -553,7 +553,8 @@ the cause if any of these fail:
    the run stops and names the title, because that record's full text would be
    lost. Carried records take no part in Step 2.3 or the TTL step: they
    already have one. After the pointer is written it is read back from T3 by its
-   title and must list the same records, and every listed record's archive
+   title and must list the same records with the same marks (`ttl_set`,
+   `restored`, `state`: the next run decides from them), and every listed record's archive
    reads back whole and equal to the record, so no record gets a TTL until its
    full text reads back from T3. These reads do not stamp access (A8).
 3. For each listed bead, its newest record has the verdict `justified`. Newest
@@ -1367,3 +1368,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Review round 1, blocker 2: the quarantined listing the carry reads before the writes was reused by the read-back, so a row the sweep quarantined after its import (not in that older listing) read as "not in the read after the write". The read-back now makes its own listing; Step 3's read cost says up to two. |
 | 2026-11-19 | Review round 1, blocker 4: the count guard compared only the recorded number, so time passing (a record crossing its effective TTL after the dry run) left the count Sam was told stale while the guard still passed. The real run now recomputes the engine rule over its candidates at its own clock and refuses when the number differs from the recorded count; the guard paragraph says so. |
 | 2026-11-19 | Review round 1, blocker 5: `--project` accepted `<repo>_rdr` and any other project, so the open-phase check could read one repository's RDR files for another repository's records. A project ending `_rdr` is refused, and so is a project that is not the working directory's repository (the check reads that checkout's RDR files and nothing maps a project name to another checkout; refusing was chosen over a lookup because the command runs from the checkout it rolls up). |
+| 2026-11-19 | Review round 1, blocker 6: the pointer read-back compared only (project, title), so a pointer that came back with different `ttl_set`, `restored` or `state` marks, the ones the next run decides from, passed. It now compares those too. |

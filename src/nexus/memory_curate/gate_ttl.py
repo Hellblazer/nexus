@@ -207,12 +207,17 @@ def classify(sel: gr.Selection, prev: gr.Pointer | None, by_title: dict[str, dic
 
 def write_verified_pointer(t3: Any, project: str, scope: gr.Scope, sel: gr.Selection, accept_open: tuple[str, ...],
                            res: Result) -> str:
-    """Write the pointer and read it back from T3; it must list the same records. Returns its text."""
+    """Write the pointer and read it back from T3; it must list the same records with the same marks (``ttl_set``,
+    ``restored``, ``state``), because the next run decides from them. Returns its text."""
     text, res.pointer_parts = gr.render_pointer(scope, project, sel, accepted_open=accept_open, carried=res.carried)
     res.stale = gr.write_pointer(t3, scope, text, res.pointer_parts)
     back = gr.read_pointer(t3, res.pointer_title)
-    want = {(e["project"], e["title"]) for e in [*sel.listed, *res.carried]}
-    if back is None or {(e["project"], e["title"]) for e in back.listed} != want:
+
+    def identity(e: dict[str, Any]) -> tuple[Any, ...]:
+        """A record and the state a later run reads from it: which run gave it a TTL, a restore, a carried state."""
+        return e["project"], e["title"], bool(e.get("ttl_set")), bool(e.get("restored")), e.get("state")
+
+    if back is None or {identity(e) for e in back.listed} != {identity(e) for e in [*sel.listed, *res.carried]}:
         raise gr.GateRollupError(f"the pointer {res.pointer_title!r} did not read back from T3 with the same list")
     return text
 
