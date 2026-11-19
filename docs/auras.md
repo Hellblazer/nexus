@@ -12,14 +12,29 @@ Every aura ships off. Nexus never turns one on for you.
 
 ## What ships
 
-One aura ships: `ci_develop_red`. It watches `board/ci/nexus-develop--done`, the subspace where CI posts each finished develop run. When a run fails, it writes a block to your threads entry:
+One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (see [Loading an aura for a group](#loading-an-aura-for-a-group)) and it watches `board/ci/nexus-develop--owner`, where the engine's owner stamper posts who owns a red develop. The stamper names one owner for each red, and a next-up session behind it. The aura writes a block to your threads entry, worded for what this session has to do:
 
 ```text
 ## aura: develop CI red
-state: develop red at 8b30c16: diagnose before the next push (worktrees rule 7)
+state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: nx tuple out board/ci/nexus-develop--owner kind=ack sha=8b30c161bdb23adab27171f3185c2b52f158b736
 ```
 
-The next green develop run removes the block (any green, as [Clearing](#what-you-see-when-it-fires) says). It is meant for nexus developers: a red develop sha is a finding to diagnose before anyone pushes on top of it.
+There are six displays. `<owner>` is the owner's identity id: the row carries ids, not aliases, and the procedure has no read grant to resolve one.
+
+| The row says | The block says | Wakes you |
+|---|---|---|
+| You own it, the red is from your push (`earliest_suspect`) | `Develop is red at <sha>, first red in your push. Diagnose it.` | yes |
+| You own it, the leader takes it (`owner_unleased`, `owner_not_live`, `owner_not_member`, `no_record`, `chain_gap`, `stamper_error`) | `Develop is red at <sha>; the leader takes it (<reason>). Diagnose it.` | yes |
+| You own it after a hand-off (`handoff`) | `Develop is red at <sha>; it was handed to you after no acknowledgement. Diagnose it.` | yes |
+| Escalated, and it names you or no one (`escalated`) | `Develop is red at <sha>; no one acknowledged. Raise an ask to Sam.` | yes |
+| You are next up | `Develop is red at <sha>; <owner> owns it. You are next up.` | yes |
+| Someone else owns it | `Develop is red at <sha>; <owner> owns it. Hold your pushes.` | no |
+
+The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when it comes from the owner's identity. The state line holds 200 characters, so the hint names the subspace, the kind and the sha and leaves out the flags the template needs (`--key`, `--nonce`; see `nx tuple out --help`); it is left off when the sha is too long to fit whole. An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
+
+A session wakes (the channel notice below) only on a post that starts something: a row with `refresh: false` that makes it the owner or next up, or an escalated row that names it or names no one. A refresh row, where a newer red keeps the same owner, rewrites the block and does not wake it again. A `kind=clear` post (develop is green again) removes the block.
+
+Until the `push-train` group is formed and serves `nexus-develop`, no session loads the aura, so a session with `auras.ci_develop_red=on` sees no develop reds at all. The old `--done`-based aura is gone; `nx aura check` warns about an aura on an `--owner` subspace that is loaded by a group not serving its topic.
 
 ## Turning one on
 
@@ -47,17 +62,17 @@ Turning an aura on in the global config turns it on for every Claude session on 
 
 **The threads entry.** The block goes into your own entry in T2 project `threads`, the one whose first line is `session: <your session id>` (the [cross-session board](agents/threads-board.md), shown in `nx console`, Threads tab). The block is always two lines: the heading `## aura: <name>` and one `state:` line of at most 200 printable ASCII characters. A later fire replaces it. The aura never creates an entry: with no entry carrying your session line, or with two, nothing is written and the server logs why.
 
-**The channel.** When the aura's file sets `display.channel = true`, as `ci_develop_red` does, the session also gets a channel notice. It is a fixed template and never carries the procedure's text:
+**The channel.** When the aura's file sets `display.channel = true`, the session also gets a channel notice on every fire. It is a fixed template and never carries the procedure's text:
 
 ```text
-aura ci_develop_red fired on board/ci/nexus-develop--done tuple <id>; see the "aura: develop CI red" block in your threads entry
+aura ci_develop_red fired on board/ci/nexus-develop--owner tuple <id>; see the "aura: develop CI red" block in your threads entry
 ```
 
 That notice wakes an idle session the way any channel message does.
 
-`display.channel` may also be the name of a boolean field of the procedure's result (`channel = "wake"`). The notice is then sent only when that field is `true`, so one aura can wake some sessions and leave the block alone for the rest. The text is still the fixed template. A result with no such field, or one that is not a boolean, is a failure like a missing `when` field: the block shows `aura error: result on tuple <id>`, no notice goes out, and three in a row disable the aura.
+`display.channel` may also be the name of a boolean field of the procedure's result (`channel = "wake"`, as `ci_develop_red` does). The notice is then sent only when that field is `true`, so one aura can wake some sessions and leave the block alone for the rest. The text is still the fixed template. A result with no such field, or one that is not a boolean, is a failure like a missing `when` field: the block shows `aura error: result on tuple <id>`, no notice goes out, and three in a row disable the aura.
 
-**Clearing.** An aura with a `[clear]` table removes its block when a post matching that table arrives on the same subspace. For `ci_develop_red` that is the next develop run whose outcome is `success`, for any sha: a green that finishes late for an older sha also clears a newer red, so after a clear, check the newest develop run before you push. A clear does not run the procedure.
+**Clearing.** An aura with a `[clear]` table removes its block when a post matching that table arrives on the same subspace. For `ci_develop_red` that is a `kind=clear` post, which the stamper writes when develop is green again. A clear does not run the procedure.
 
 Posts on the aura's subspace are not announced to the agent unless the session also subscribes that subspace itself; the aura's notice is the only one.
 
@@ -115,7 +130,7 @@ nx aura check [NAME]  # grammar, procedure, argument mapping, subspace fields
 
 ## Writing your own
 
-An aura file sits beside its procedure in a library root: the shipped `src/nexus/procedures/`, or a repo's `.nexus/procedures/` (read only while `NX_PROCEDURES_REPO_ROOT=1`). The shipped pair is the example to copy:
+An aura file sits beside its procedure in a library root: the shipped `src/nexus/procedures/`, or a repo's `.nexus/procedures/` (read only while `NX_PROCEDURES_REPO_ROOT=1`). RDR-249's first example, the form the shipped `ci_develop_red` had before RDR-252 moved it onto the owner post, is the shape to copy (the shipped file in `src/nexus/procedures/` is the current one):
 
 ```toml
 aura = "ci_develop_red"
