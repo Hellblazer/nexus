@@ -96,8 +96,8 @@ doc:
     n: kind sha, the number of runs in the fold, more than the length of runs when trailing entries were dropped; kind push, commits pushed
     base: kind push only; develop's sha before the push
     owner: kind owner only; the owner's identity id or null
-    next: kind owner only; the next-up identity id or null
-    reason: kind owner only; why this owner
+    next: kind owner only; the next-up identity id, null on handoff, escalated and stamper_error rows
+    reason: kind owner only; earliest_suspect, handoff, escalated or stamper_error
     suspects: kind owner only; shas pushed since the last green, at most ten; suspects_total is the count
     episode_at: kind owner only; UTC start of the red episode
     refresh: kind owner only; true when the owner is kept
