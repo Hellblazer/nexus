@@ -47,6 +47,8 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` -- the subagent git-write guard denies `branch -f`, tag writes, `revert`, `pull` and `fetch` with a local destination in the primary checkout, and `submodule foreach` and `--output=` everywhere (8.4.1 review follow-up; remaining classes in nexus-nl41q).
+
 ## Deferred to the next client release
 
 - `conexus/skills/phase-review-gate/SKILL.md` -- the close step runs `nx memory gate-rollup --dry-run`, tells Sam the count and waits for his word before the real run (RDR-209 Phase 3, nexus-1gdv0.2); the verb ships in the client, so this waits for the client release.
