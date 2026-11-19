@@ -649,7 +649,9 @@ def clock_columns(sql: SqlFn) -> dict[str, list[str]]:
     catalog so a column added later is shifted too."""
     out = sql(
         "select table_name, column_name from information_schema.columns where table_schema = 'nexus' "
-        "and table_name like 'tuple%' and data_type = 'timestamp with time zone' order by 1, 2"
+        "and table_name like 'tuple%' and data_type = 'timestamp with time zone' and table_name in "
+        "(select table_name from information_schema.tables where table_schema = 'nexus' "
+        "and table_type = 'BASE TABLE') order by 1, 2"
     )
     cols: dict[str, list[str]] = {}
     for table, column in out:
@@ -659,19 +661,24 @@ def clock_columns(sql: SqlFn) -> dict[str, list[str]]:
 
 def shift_clock(sql: SqlFn, shift_s: float) -> tuple[int, dict[str, int]]:
     """Move every tuple-space clock column forward by ``shift_s`` (whole seconds; NULL stays NULL), one update
-    per table, and return the seconds used and the rows each table holds.
+    per table, vacuum each table after, and return the seconds used and the rows each table holds.
 
     A cached store is reused for 30 days, but doctor reads the tuple space against the wall clock: a saved
     unclaimed tuple reads as that old (``tuples.oldest_unclaimed``, 60 minutes) and the saved sweep as that
     stale (``tuples.sweep_freshness``, 18 hours). One shift for every column keeps each age, gap and expiry
-    the seed left, as if the store had been seeded just now. No shift under a second runs no update."""
+    the seed left at save time, as if the store had been saved just now (a fresh seed pays the same gap from
+    its last tuple write to doctor). No shift under a second runs no update.
+
+    The UPDATE leaves a dead version of every row (``created_at`` is indexed, so it is never HOT), and
+    ``tuples.dead_tuple_ratio`` is a hard-fail doctor row: each shifted table is vacuumed at once, in its own
+    statement (VACUUM cannot share a call with the update), not left to autovacuum's timing."""
     secs = int(shift_s)
     if secs <= 0:
         return 0, {}
     shifted: dict[str, int] = {}
     for table, columns in clock_columns(sql).items():
         sets = ", ".join(f"{_ident(c)} = {_ident(c)} + interval '{secs} seconds'" for c in columns)
-        # nexus.tuples and nexus.tuple_claim_log FORCE row-level security. A role it would filter (an install
+        # nexus.tuples, tuple_claim_log and tuple_deliveries FORCE row-level security. A role it would filter (an install
         # whose credentials name only the schema owner) must not shift a silent subset: with row_security
         # off, PG refuses the update instead, the restore fails and the rehearsal seeds afresh.
         out = sql(
@@ -679,6 +686,8 @@ def shift_clock(sql: SqlFn, shift_s: float) -> tuple[int, dict[str, int]]:
             "select count(*)::bigint from u"
         )
         shifted[table] = int(out[0][0])
+    for table in shifted:
+        sql(f"vacuum (analyze) nexus.{_ident(table)}")
     return secs, shifted
 
 
@@ -794,7 +803,7 @@ class Restore:
     rows: int | None = None
     relocated: Relocated | None = None
     saved_at: str = ""  # when the entry was saved, ISO UTC
-    shift_s: float = 0.0  # how far the store's tuple-space clock was moved forward (now - saved_at)
+    shift_s: int = 0  # whole seconds the store's tuple-space clock was moved forward (now - saved_at)
     path_rows: dict[str, int] = dataclasses.field(
         default_factory=dict
     )  # rows rewritten, per column
@@ -934,7 +943,7 @@ class SeedCache:
         if not isinstance(old_port, int):
             return Restore(False, f"the manifest's PG port is {old_port!r}")
         try:
-            shift_s = max(0.0, self.clock() - _parse_iso(str(man.get("saved_at", ""))))
+            saved_at = _parse_iso(str(man.get("saved_at", "")))
         except ValueError:
             return Restore(
                 False,
@@ -1010,9 +1019,20 @@ class SeedCache:
             return Restore(
                 False, f"the restored cluster is not cleanly shut down: {why}"
             )
+        # Taken after the copy and the relocation, so the restore's own time is shifted too.
+        shift_s = max(0.0, self.clock() - saved_at)
         try:
             got = self.rewrite_fn(config, pairs, shift_s)
         except Exception as exc:  # noqa: BLE001 - psql, ProbeError, pg_ctl: the store could not be read
+            if "row-level security" in str(exc):
+                # The install's credentials name only the schema owner, which FORCE row-level security
+                # filters: the entry is sound, this install cannot shift it. Keep it and say so.
+                return Restore(
+                    False,
+                    "the store's tuple clock cannot be moved with this install's credentials (row-level "
+                    f"security refused the schema owner; no PG_SUPERUSER_PASS): {exc}",
+                    transient=True,
+                )
             return Restore(
                 False,
                 f"the store could not be read with its PG started alone: {type(exc).__name__}: {exc}",
@@ -1034,6 +1054,13 @@ class SeedCache:
                 False,
                 f"the path columns name the saved run dir in {got.before}, the manifest says {man.get('path_rows')}",
             )
+        want = int(shift_s) if shift_s >= 1 else 0
+        if got.shift_s != want or (want and not {"tuples", "tuple_tenants"} <= set(got.shifted)):
+            return Restore(
+                False,
+                f"the store's tuple clock did not move as asked: {want} s wanted, {got.shift_s} s applied to "
+                f"{sorted(got.shifted)}; doctor would read the saved tuple space as stale",
+            )
         left = {k: v for k, v in got.after.items() if v}
         if left:
             return Restore(
@@ -1052,7 +1079,7 @@ class SeedCache:
             rows=got.rows,
             relocated=relocated,
             saved_at=str(man.get("saved_at", "")),
-            shift_s=shift_s,
+            shift_s=got.shift_s,
             path_rows=dict(got.before),
             port=new_port,
         )

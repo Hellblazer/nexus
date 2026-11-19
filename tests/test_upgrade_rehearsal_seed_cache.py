@@ -155,6 +155,7 @@ def read_fn(config: Path, olds) -> object:
 
 
 def rewrite_fn(config: Path, pairs, shift_s: float = 0.0) -> object:
+    """The store rewrite stand-in; it reports the shift it was asked for as applied to both tuple tables."""
     path, data = _cols(config)
     olds = [p[0] for p in pairs]
     before = {k: sum(any(o in v for o in olds) for v in vs) for k, vs in data.items()}
@@ -165,7 +166,9 @@ def rewrite_fn(config: Path, pairs, shift_s: float = 0.0) -> object:
             vs[i] = v
     path.write_text(json.dumps(data))
     after = {k: sum(any(o in v for o in olds) for v in vs) for k, vs in data.items()}
-    return sc.StoreRewrite(rows_of(config), before, after)
+    secs = int(shift_s) if shift_s >= 1 else 0
+    shifted = {"tuple_tenants": 1, "tuples": 3} if secs else {}
+    return sc.StoreRewrite(rows_of(config), before, after, shifted, secs)
 
 
 def clean(_config: Path) -> str | None:
@@ -914,7 +917,7 @@ def test_a_restore_shifts_the_store_clock_by_the_time_since_the_save(tmp_path: P
     res = c.restore(k, new_run(tmp_path), floor=FLOOR)
     assert res.ok, res.reason
     assert seen == [62 * 3600.0]
-    assert res.shift_s == 62 * 3600.0
+    assert res.shift_s == 62 * 3600
 
 
 def test_a_restore_right_after_the_save_shifts_nothing(tmp_path: Path) -> None:
@@ -931,7 +934,7 @@ def test_a_restore_right_after_the_save_shifts_nothing(tmp_path: Path) -> None:
 
 def test_an_entry_whose_saved_at_cannot_be_read_is_not_restored(tmp_path: Path) -> None:
     """Without saved_at the shift is unknown, and a restore with the wrong clock fails doctor later, far from
-    the cause: refuse it here, naming the field, and keep the run dir untouched."""
+    the cause: refuse it here, naming the field."""
     c, k, _ = seeded_cache(tmp_path)
     entry = _entry(tmp_path, k)
     man_path = entry / sc.MANIFEST
@@ -940,3 +943,36 @@ def test_an_entry_whose_saved_at_cannot_be_read_is_not_restored(tmp_path: Path) 
     man_path.write_text(json.dumps(man))
     res = c.restore(k, new_run(tmp_path), floor=FLOOR)
     assert not res.ok and "saved_at" in res.reason
+
+
+def test_a_restore_whose_shift_did_not_land_is_refused(tmp_path: Path) -> None:
+    """A rewrite that ignores the shift (or finds no tuple tables) would restore 'ok' with the clock unmoved and
+    doctor would fail later, far from the cause: the restore checks the applied shift and the tables moved."""
+    clock = Clock()
+
+    def unmoved(config: Path, pairs, shift_s: float = 0.0) -> object:
+        return rewrite_fn(config, pairs, 0.0)
+
+    c, k, _ = seeded_cache(tmp_path, clock=clock, rewrite_fn=unmoved)
+    clock.t += 3 * 3600
+    res = c.restore(k, new_run(tmp_path), floor=FLOOR)
+    assert not res.ok and "clock" in res.reason
+
+
+def test_a_row_security_refusal_keeps_the_entry_and_says_why(tmp_path: Path) -> None:
+    """An install whose credentials name only the schema owner cannot shift FORCE-RLS tuple tables: PG refuses.
+    That is the install's credentials, not a bad entry: the restore fails as transient (the entry is kept) and
+    the reason names row-level security."""
+    clock = Clock()
+    c, k, _ = seeded_cache(tmp_path, clock=clock)
+
+    def refused(_config: Path, _pairs, _shift_s: float = 0.0) -> object:
+        raise sc.SeedCacheError(
+            'ProbeError: psql failed: ERROR:  query would be affected by row-level security policy for table "tuples"'
+        )
+
+    c.rewrite_fn = refused
+    clock.t += 3600
+    res = c.restore(k, new_run(tmp_path), floor=FLOOR)
+    assert not res.ok and res.transient and "row-level security" in res.reason
+    assert _entry(tmp_path, k).is_dir(), "the entry is kept"

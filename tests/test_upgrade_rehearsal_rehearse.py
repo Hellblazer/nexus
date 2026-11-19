@@ -116,6 +116,10 @@ case "$q" in
     n=$(cat $S/lsn); n=$((n + 1048576)); echo $n > $S/lsn; printf '0/%X\\n' $n ;;
   "select wal_bytes"*) echo 5000 ;;
   "select coalesce(sum(write_bytes)"*) printf '1\\t2\\n' ;;
+  "select table_name, column_name from information_schema.columns where table_schema = 'nexus' and table_name like 'tuple%'"*)
+    printf 'tuple_tenants\tlast_swept_at\ntuples\tcreated_at\n' ;;
+  "set row_security = off; with u as (update nexus."*) echo 1 ;;
+  "vacuum (analyze) nexus."*) ;;
   "select count(*)"*) cat $S/rows ;;
   "select index_relid"*)
     [ -e $S/building ] && printf 'nexus.@INDEX@\\t4242\\tbuilding\\t1\\t10\\t1\\t10\\n' ;;

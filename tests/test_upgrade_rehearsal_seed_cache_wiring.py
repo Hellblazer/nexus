@@ -470,3 +470,18 @@ def test_a_standin_run_does_not_evict_or_use_the_real_entry(cached: World) -> No
     names = [e.name for e in entries(cached)]
     assert real.name in names and len(names) == 2
     assert any("-standin-" in n for n in names) and any("-real-" in n for n in names)
+
+
+def test_the_driver_passes_the_shift_to_the_store_rewrite(
+    cached: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_offline_rewrite is the production rewrite_fn: the shift the cache computes must reach rewrite_store."""
+    seen: list[float] = []
+    monkeypatch.setattr(ur.seed_cache, "rows_with_pg_up", lambda config, work: work())
+    monkeypatch.setattr(ur, "_store_sql", lambda config: (lambda q: [["0"]]))
+    monkeypatch.setattr(
+        ur.seed_cache, "rewrite_store",
+        lambda sql, pairs, shift_s=0.0: seen.append(shift_s) or ur.seed_cache.StoreRewrite(0, {}, {}),
+    )
+    ur._offline_rewrite(cached.root, [("/x", "/y")], 7200.0)
+    assert seen == [7200.0]

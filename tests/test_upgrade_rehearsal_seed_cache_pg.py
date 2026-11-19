@@ -157,6 +157,7 @@ class FakePg:
         #: tuple-space clock columns: table -> column -> epoch seconds (None = NULL)
         self.times: dict[str, dict[str, list[int | None]]] = times or {}
         self.shifted_with: list[tuple[str, int]] = []
+        self.vacuumed: list[str] = []
 
     def __call__(self, q: str) -> list[list[str]]:
         self.queries.append(q)
@@ -204,6 +205,10 @@ class FakePg:
                 self.times[t][col] = [None if v is None else v + d for v in self.times[t][col]]
             self.shifted_with.append((t, d))
             return [[str(len(next(iter(self.times[t].values()))))]]
+        m = re.match(r'vacuum \(analyze\) nexus\."(\w+)"$', q)
+        if m:
+            self.vacuumed.append(m.group(1))
+            return []
         raise AssertionError(f"unexpected query: {q}")
 
 
@@ -334,3 +339,23 @@ def test_the_shift_turns_row_security_off_so_a_filtered_role_fails_loudly() -> N
     sc.rewrite_store(pg, [], shift_s=60)
     updates = [q for q in pg.queries if "update nexus." in q]
     assert updates and all(q.startswith("set row_security = off; ") for q in updates)
+
+
+def test_the_shift_vacuums_each_table_it_updated() -> None:
+    """The shift's UPDATE leaves one dead row version per tuple (created_at is indexed, so it is not HOT), and
+    tuples.dead_tuple_ratio is a hard-fail doctor row: each shifted table is vacuumed right after, not left to
+    autovacuum's timing."""
+    pg = FakePg({}, times=_tuple_times())
+    sc.rewrite_store(pg, [], shift_s=60)
+    assert sorted(pg.vacuumed) == ["tuple_tenants", "tuples"]
+    last_update = max(i for i, q in enumerate(pg.queries) if "update nexus." in q)
+    first_vacuum = min(i for i, q in enumerate(pg.queries) if q.startswith("vacuum"))
+    assert first_vacuum > last_update
+
+
+def test_only_base_tables_are_shifted() -> None:
+    """A tuple* view with a timestamptz column must not be updated: the catalog read keeps base tables only."""
+    pg = FakePg({}, times=_tuple_times())
+    sc.rewrite_store(pg, [], shift_s=60)
+    asked = next(q for q in pg.queries if "table_name like 'tuple%'" in q)
+    assert "table_type = 'BASE TABLE'" in asked
