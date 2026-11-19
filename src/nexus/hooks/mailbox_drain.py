@@ -637,7 +637,9 @@ _IDENTITY_TOKEN = ""
 _DRAIN_ADDRESS = ""
 
 
-def _identity_headers() -> dict[str, str]:
+def _identity_headers(route: str = "/v1/tuples/") -> dict[str, str]:
+    if not route.startswith("/v1/tuples/"):
+        return {}  # only the tuple routes are fenced on mailbox/<id>; a memory read never carries the token
     a = _DRAIN_ADDRESS
     if _IDENTITY_TOKEN and a.startswith("i") and a[1:].isdigit():
         return {"X-Nexus-Identity-Token": _IDENTITY_TOKEN}
@@ -670,7 +672,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     req = urllib.request.Request(
         url, data=payload, method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
-                 **_identity_headers()},
+                 **_identity_headers(route)},
     )
     # Never spend longer than the drain has left: a sequence of calls each
     # just under the per-call cap would otherwise blow the whole budget while

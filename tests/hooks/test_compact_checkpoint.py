@@ -1583,6 +1583,22 @@ class TestIdentityLine:
         (title, _got, how, _error), searches = self._drive(mod, monkeypatch, {"9": ("baton", legacy)}, "")
         assert (title, how) == ("baton", "session id") and searches == [SID]
 
+    def test_the_title_fallback_refuses_an_entry_naming_another_identity(self, mod, monkeypatch) -> None:
+        theirs = "identity: i7\n## Theirs\nstate: x\n"
+
+        def fake(args, cwd, timeout):
+            if args[1] == "search":
+                return "", None
+            if args[1] == "list":
+                return "[5] threads/linda  (-, 2026-11-18T20:00:00Z)", None
+            return theirs, None
+
+        monkeypatch.setattr(mod, "_run_nx", fake)
+        title, _body, how, error = mod._board_entry(SID, NAME, None, mod._BOARD_TIMEOUT_S, "i12")
+        assert (title, how) == ("", "") and "names another identity (i7)" in error
+        title, _body, how, _error = mod._board_entry(SID, NAME, None, mod._BOARD_TIMEOUT_S, "")
+        assert (title, how) == (NAME, "exact title"), "with no identity of our own the title still finds it"
+
     def test_the_identity_lookup_reads_the_token_files_by_held_session_id(self, tmp_path) -> None:
         sys.path.insert(0, str(SCRIPT.parent))
         try:

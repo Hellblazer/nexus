@@ -107,7 +107,7 @@ def _entries(
     found = []
     if identity:
         # RDR-253 Step 5: the entry's identity: line finds it across /clear and restart, whatever its session: line says
-        for row in search(f"identity: {identity}"):  # the whole line: prose naming the id does not match it
+        for row in search(f"identity: {identity}"):  # full-text on both words; the parsed line decides
             title = str(row.get("title", ""))
             session = parse_session(title, str(row.get("content", "")))
             if session.identity == identity:

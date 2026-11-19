@@ -98,9 +98,8 @@ class ThreadsBlockWriter:
                 return ""
         return self.identity
 
-    def _mine(self, row: Mapping[str, Any]) -> bool:
+    def _mine(self, row: Mapping[str, Any], mine: str) -> bool:
         session = parse_session(str(row.get("title", "")), str(row.get("content", "")))
-        mine = self._current_identity()
         if session.identity and mine:
             return session.identity == mine
         # no identity line (Phase 1), or no identity of our own (a Desktop session): our session line decides
@@ -108,8 +107,9 @@ class ThreadsBlockWriter:
 
     def _entry(self, aura: str) -> Mapping[str, Any] | None:
         rows = list(self._read())
-        mine = [row for row in rows if self._mine(row)]
-        if self._current_identity() and any(
+        own = self._current_identity()  # once per write: with no identity yet it reads the token directory
+        mine = [row for row in rows if self._mine(row, own)]
+        if own and any(
             self.identity == parse_session("", str(r.get("content", ""))).identity for r in mine
         ):
             # the identity-lined entry is the seat's; a legacy entry still carrying the session line is not a second one

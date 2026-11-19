@@ -415,3 +415,12 @@ def test_identity_for_session_reads_the_token_files_including_held_session_ids(t
     write_token_file(path, stale)
     os.utime(path, (1, 1))  # older than the live file
     assert identity_for_session(new, tmp_path) == "i12", "the newest file wins"
+
+
+def test_the_title_fallback_never_takes_an_entry_naming_another_identity() -> None:
+    search, _ = _search([])
+    theirs = {"title": "marlowe", "content": "identity: i7\n" + ENTRY}
+    now = datetime(2026, 11, 14, 9, 0, tzinfo=PST)
+    assert due_lines(SID, now, search=search, by_title=lambda t: theirs, name="marlowe", identity="i12") == []
+    # with no identity of our own the title still finds it (a Desktop session, Phase 1)
+    assert due_lines(SID, now, search=search, by_title=lambda t: theirs, name="marlowe", identity="")

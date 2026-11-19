@@ -541,7 +541,8 @@ def _board_entry(
         return min(left(), _SESSION_PHASE_S - (_mono() - started))
 
     error: str | None = None
-    # the identity phase searches for the whole line, so prose that merely mentions the id cannot fill the candidates
+    # the identity phase searches for both words of the line (full-text: "identity" AND the id), which keeps most prose
+    # mentions out of the candidates; a hit is taken only when its body really has the line
     for query, how in (((f"identity: {identity}", "identity"),) if identity else ()) + ((session_id, "session id"),):
         found, error = _search_phase(query, how, session_id, identity, cwd, phase_left)
         if found is not None:
