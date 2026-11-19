@@ -162,7 +162,7 @@ class TestValidateFromAddress:
         assert validate_from_address(agent_id) == agent_id
 
     def test_neither_shape_is_refused(self) -> None:
-        with pytest.raises(DirectoryResolutionError, match="neither a session id nor an agent id"):
+        with pytest.raises(DirectoryResolutionError, match="neither a session id, an identity nor an agent id"):
             validate_from_address("not-a-valid-shape")
 
 
@@ -279,7 +279,7 @@ class TestCheckFromAddressIsOwn:
             check_from_address_is_own(self.OTHER, state_dir=tmp_path, claude_pid=4242)
 
     def test_the_shape_check_still_runs_first(self, tmp_path) -> None:
-        with pytest.raises(DirectoryResolutionError, match="neither a session id nor an agent id"):
+        with pytest.raises(DirectoryResolutionError, match="neither a session id, an identity nor an agent id"):
             check_from_address_is_own("not-a-valid-shape", state_dir=tmp_path, claude_pid=4242)
 
 
