@@ -246,7 +246,8 @@ code (research 3); lane D, outside systems (research 4).
    `user`), in place or by relaunch, the script keeps a seat the session
    already holds (the relaunch carries `NX_SEAT`), else promotes the session's
    ephemeral identity to a seat of that name, else creates one
-   (`created_by: restart`); a launch that names no seat, or gives `-n`
+   (`created_by: restart`; a cloud install's script holds only the data credential, so it promotes with the
+   session's own token and creates none); a launch that names no seat, or gives `-n`
    a name that is not a seat's, gets an ephemeral identity that can be
    promoted to a seat (Sam, 2026-11-16).
 2. **A binding log.** Each time a session takes, keeps or loses a seat
@@ -281,7 +282,7 @@ Only the mailbox's `address_kind` gains `identity`.
 
 ```
 identity_records      id  kind=seat|ephemeral|delegated  parent=<id or none>  generation=<n>  state=unheld|live|lapsed|ended
-                      display_name=<name or null>  created_by=<sam|restart|session|dispatch>  created_at=<UTC>  ended_at=<UTC or null>
+                      display_name=<name or null>  created_by=<sam|restart|session|dispatch|identity:i<n>>  created_at=<UTC>  ended_at=<UTC or null>
 identity_aliases      name  identity=<id>  state=live|retired  since=<UTC>  retired_at=<UTC or null>  renamed_to=<name or null>
 identity_bindings     identity=<id>  seq  event=start|clear|resume|fork|takeover|release|rename|end|lapse|revive|gone  generation=<n>  lease=leased|unleased
                       session_id=<uuid>  host=<hostname>  pid=<n>  started_at=<ms>  proc_start=<UTC, to the second>  pane=<tmux pane or null>
@@ -1093,7 +1094,8 @@ check on the holder's host and the lease check for a holder on another host,
 and runs from a plain shell; the restart script's seats: a session that holds a
 seat keeps it (the relaunch carries `NX_SEAT`), and for a name the user set (the
 registry `nameSource` is `user`) with no seat, the session's ephemeral identity
-is promoted, else a seat is created with `created_by=restart`, before an in-place
+is promoted, else a seat is created with `created_by=restart` (local mode; in a cloud install the data credential
+promotes only, and a seat it creates is stamped `created_by=identity:<id>`), before an in-place
 `/restart` or a relaunch alike, while a derived name is not passed back as `-n`;
 delegated identities, their renewal and their token file for a `claude -p`
 dispatch that grants tools, and a `gone` row for a dead dispatcher.
