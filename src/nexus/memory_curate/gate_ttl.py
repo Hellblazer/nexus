@@ -83,7 +83,7 @@ def order_key(entry: dict[str, Any], content: str) -> tuple[str, int]:
     The date is the header ``date:`` field; a record with no header is dated from the first ``YYYY-MM-DD`` in its
     title, else from its timestamp's day. The round is the title's last ``-r<N>`` followed by ``-`` or the end
     (live titles put it before the date, ``confirm-<bead>-r2-2026-11-15``), read with the record's own bead id removed
-    from the title so an id such as ``nexus-r1234`` is no round; 0 when there is none, so a record with no round sorts
+    from the title so an id whose suffix is ``r`` and digits is no round; 0 when there is none, so a record with no round sorts
     before ``-r1``. ``gate_record`` writes no round field, so the title is the only place a round lives. The first live
     dry run (nexus-1gdv0.2.17) read a mid-title round as 0 and let an ``-r1`` partial tie an ``-r2`` justified.
     The row's timestamp is not used: a re-put re-stamps a row, so it would let an edited older record pass."""

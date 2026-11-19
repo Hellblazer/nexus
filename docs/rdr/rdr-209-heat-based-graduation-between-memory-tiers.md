@@ -563,7 +563,7 @@ the cause if any of these fail:
    its timestamp's day; the round is the title's last `-r<N>` followed by `-` or
    the end, read with the record's own bead id removed from the title (a number,
    so `-r10` follows `-r9`; live titles put it before the date,
-   `confirm-<bead>-r2-2026-11-15`, and an id such as `nexus-r1234` is no round),
+   `confirm-<bead>-r2-2026-11-15`, and an id whose suffix is `r` and digits is no round),
    0 when there is none, because `gate_record` writes no round field. Dates are
    day-granular and the round is optional, so when more than one record shares
    the newest date and round the worse verdict decides (`not-justified` over
