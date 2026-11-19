@@ -108,6 +108,26 @@ absent on older engines stays absent") and record the conexus bead id on the
 nexus bead before the tag — the edge half must be live before Step 6.1 can
 pass, and Step 6.1 is what gates the paired client release.
 
+**Request headers too (2026-11-19).** The edge also filters what reaches the engine: CloudFront's origin request
+policy forwards an allowlist of request headers, and a header not on it is dropped silently. RDR-253's
+`X-Nexus-Identity-Token` shipped engine-green in 0.1.196 and client 8.5.0 and was never forwarded, so every fenced
+cloud write arrived with no token and was refused `403 identity_token_required` (a dropped header reads as "no token",
+never as an error at the edge). Before the tag, list the request headers the cut adds on either side:
+
+```bash
+git diff <last-engine-tag>..HEAD -U0 -- service/src/main/java | grep '^+' | grep -oE '"X-[A-Za-z0-9-]+"' | sort -u
+git diff <last-client-tag>..HEAD -U0 -- src/nexus conexus | grep '^+' | grep -oE '"X-[A-Za-z0-9-]+"' | sort -u
+```
+
+For each name that the engine reads from a request (`getRequestHeaders()`) or the client sends, and that the edge does
+not already forward (today, by name: `Authorization`, `X-Nexus-Tenant`, `X-Nexus-Client-Version`,
+`X-Nexus-Request-Deadline-Ms`, `X-Correlation-ID`, `X-Forwarded-For`, and `X-Nexus-Identity-Token` once bob's
+2026-11-19 change is live; confirm against the policy, not this list), raise the paired edge change with bob (a cloud
+change: Sam's go) and record it on the cut bead before the tag. Response headers (`X-Nexus-Export-*`,
+`X-Nexus-Usage-Tokens`, `X-Nexus-Skipped-Collections`, `X-Nexus-Deadline-Outcome`, `X-Nexus-Unattested`) go the other
+way and are governed by the edge's response policy: check a new one there the same way. Step 6.1's client-visibility
+gate does not catch a dropped request header unless a leg makes a fenced write, so this check is the gate.
+
 ### 3f. PRE-CUT check: the Windows switch, when the cut must carry Windows (RDR-224, nexus-f9bgu.28)
 
 A tag cut with the repo variable `NX_WINDOWS_RELEASE_LEGS` off publishes the 21
