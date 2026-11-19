@@ -36,13 +36,16 @@ def crs():
 
 def stand_in(rows: list[dict[str, Any]] | None = None, *, code: int = 0, text: str | None = None):
     calls: list[tuple[str, ...]] = []
+    seen_timeouts: list[float] = []
 
-    def nx(*args: str) -> subprocess.CompletedProcess:
+    def nx(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
         calls.append(args)
+        seen_timeouts.append(timeout)
         body = text if text is not None else json.dumps({"identity": "i1", "alive": True, "work": rows or []})
         return subprocess.CompletedProcess(args, code, body if code == 0 else "", body if code else "")
 
     nx.calls = calls  # type: ignore[attr-defined]
+    nx.timeouts = seen_timeouts  # type: ignore[attr-defined]
     return nx
 
 
@@ -55,6 +58,7 @@ def test_the_work_is_read_through_the_running_filter_by_session_id(crs, monkeypa
     monkeypatch.setattr(crs, "_nx_identity", nx)
     assert crs.session_work({"sessionId": "sid-1"}) == ["worktree /w/a", "tmux sock"]
     assert nx.calls == [("work", "list", "--session", "sid-1", "--running", "--json")], "stale rows are the CLI's to drop"
+    assert nx.timeouts == [5] == [crs.WORK_TIMEOUT_S], "a hung engine must not stall --status for the default minute"
 
 
 def test_the_standing_mail_wait_is_not_reported_other_waits_are(crs, monkeypatch) -> None:
@@ -73,8 +77,16 @@ def test_what_cannot_be_read_is_none_never_an_empty_list(crs, monkeypatch, code,
     assert crs.session_work({"sessionId": "sid-1"}) == want
 
 
+def test_a_hung_nx_is_none_not_a_stalled_status(crs, monkeypatch) -> None:
+    def hung(*a, timeout=60):
+        raise subprocess.TimeoutExpired("nx", timeout)
+
+    monkeypatch.setattr(crs, "_nx_identity", hung)
+    assert crs.session_work({"sessionId": "sid-1"}) is None
+
+
 def test_a_missing_nx_is_none(crs, monkeypatch) -> None:
-    def boom(*a):
+    def boom(*a, **k):
         raise FileNotFoundError("nx")
 
     monkeypatch.setattr(crs, "_nx_identity", boom)
@@ -87,10 +99,26 @@ def test_the_ready_ask_tells_the_session_its_running_work(crs, monkeypatch) -> N
     monkeypatch.setattr(crs, "_nx_identity", stand_in([row("worktree", "/w/a")]))
     text = crs.ready_prompt({"sessionId": "sid-1", "name": "alpha", "pid": 1}, "/tmp/x.json")
     assert "1 running work row(s)" in text and "worktree /w/a" in text
+    assert "outlive a restart" in text and "cuts off" not in text, "a worktree survives the restart"
     monkeypatch.setattr(crs, "_nx_identity", stand_in([]))
     assert "no running work registered" in crs.ready_prompt({"sessionId": "sid-1", "name": "alpha", "pid": 1}, "/tmp/x.json")
     monkeypatch.setattr(crs, "_nx_identity", stand_in(code=1, text="Error: the engine is not answering"))
     assert "could not read the work" in crs.ready_prompt({"sessionId": "sid-1", "name": "alpha", "pid": 1}, "/tmp/x.json")
+
+
+def test_the_note_says_per_kind_what_a_restart_cuts_off_and_what_it_leaves(crs) -> None:
+    """S6: waits, watchers and work-run lab runs are the session's children; a worktree and a tmux server outlive it. The
+    readiness reply is the pre-declared criterion, so a note that says 'a restart does not end them' about a lab run would
+    steer an agent to answer ready with the run in flight."""
+    note = crs.work_note(["labrun pytest-full", "wait other", "watcher w", "worktree /w/a", "tmux sock"])
+    cut, kept = note.split("A restart cuts off ")[1].split(" outlive a restart")[0], note.split(" outlive a restart")[1]
+    assert "3 of them" in note and all(k in cut for k in ("labrun pytest-full", "wait other", "watcher w"))
+    assert "Answer not ready" in cut and "worktree" not in cut.split("Answer not ready")[0]
+    assert "2" in note.split("A restart cuts off")[1] and all(k in kept for k in ("worktree /w/a", "tmux sock"))
+    only_kept = crs.work_note(["worktree /w/a"])
+    assert "cuts off" not in only_kept and "Answer not ready" not in only_kept
+    only_cut = crs.work_note(["labrun r"])
+    assert "Answer not ready" in only_cut and "outlive" not in only_cut
 
 
 def test_status_prints_each_targets_running_work_and_the_exit_code_ignores_it(crs, monkeypatch, capsys) -> None:
@@ -124,12 +152,35 @@ def test_status_prints_each_targets_running_work_and_the_exit_code_ignores_it(cr
 
 
 def test_the_go_gate_never_reads_the_work(crs, monkeypatch) -> None:
-    """The restart's refusal criteria are pre-declared: they must not start to read the work report."""
+    """The restart's refusal criteria are pre-declared. The gate gets a real manifest and reply, so it reaches
+    ``readiness()``; the answer is the same whether the work report is empty, full or raising, and the report is never
+    asked."""
+    now = time.time()
+    found = [{"sessionId": "sid-1", "name": "alpha", "pane": "%1", "pid": 1}]
+    manifest = {"stamp": "s", "at": now - 120, "targets": [{"sessionId": "sid-1", "path": "/reply", "name": "alpha", "how": "", "marker": ""}],
+                "excluded": []}
+    reads = {"n": 0}
+    monkeypatch.setattr(crs, "load_manifest", lambda: (manifest, ""))
+    monkeypatch.setattr(crs, "read_reply", lambda *a, **k: ("ok", {"ready": True, "reason": "", "eta": None, "mtime": now - 30}))
+    monkeypatch.setattr(crs, "status", lambda s: "idle")
+    monkeypatch.setattr(crs, "session_tasks", lambda s: [])
+    monkeypatch.setattr(crs, "LOG", Path("/dev/null"))
+    reached = {"n": 0}
+    real_readiness = crs.readiness
+    monkeypatch.setattr(crs, "readiness", lambda *a, **k: (reached.__setitem__("n", reached["n"] + 1), real_readiness(*a, **k))[1])
+
     def forbidden(*a, **k):
+        reads["n"] += 1
         raise AssertionError("the go gate read the work report")
 
-    monkeypatch.setattr(crs, "session_work", forbidden)
-    monkeypatch.setattr(crs, "_nx_identity", forbidden)
-    monkeypatch.setattr(crs, "load_manifest", lambda: (None, "no ready round yet"))
-    monkeypatch.setattr(crs, "LOG", Path("/dev/null"))
-    assert crs.go_gate([{"sessionId": "sid-1", "name": "alpha", "pane": "%1"}], force=False, max_age=300) == 3
+    answers = []
+    for work in (lambda s: [], lambda s: ["labrun r", "worktree /w"], forbidden):
+        monkeypatch.setattr(crs, "session_work", work)
+        monkeypatch.setattr(crs, "_nx_identity", forbidden)
+        answers.append(crs.go_gate(found, force=False, max_age=300, now=now))
+    assert reached["n"] == 3, "the gate reached readiness(): the test can fail"
+    assert answers == [0, 0, 0] and reads["n"] == 0
+    # and the criteria still bite: a not-ready reply refuses whatever the work says
+    monkeypatch.setattr(crs, "read_reply", lambda *a, **k: ("ok", {"ready": False, "reason": "mid-review", "eta": None, "mtime": now - 30}))
+    monkeypatch.setattr(crs, "session_work", lambda s: [])
+    assert crs.go_gate(found, force=False, max_age=300, now=now) == 3

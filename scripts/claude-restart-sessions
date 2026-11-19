@@ -1755,8 +1755,8 @@ def _nx_binary() -> str:
     return shutil.which("nx") or "nx"
 
 
-def _nx_identity(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([_nx_binary(), "identity", *args], capture_output=True, text=True, timeout=60)
+def _nx_identity(*args: str, timeout: float = 60) -> subprocess.CompletedProcess:
+    return subprocess.run([_nx_binary(), "identity", *args], capture_output=True, text=True, timeout=timeout)
 
 
 def _identity_error(done: subprocess.CompletedProcess) -> str:
@@ -2368,6 +2368,13 @@ def session_tasks(s: dict) -> list[str] | None:
             if sf.SNAPSHOT_MARK in p.command and p.pid not in mine and not sf.standing(p.command)]
 
 
+#: Seconds ``session_work`` waits for ``nx identity work list``: --status asks every target, so a hung engine must not stall it.
+WORK_TIMEOUT_S = 5
+
+#: Work that runs under the session and ends with it: a restart cuts these off. A worktree or a tmux server outlives it.
+WORK_ENDS_WITH_SESSION = ("wait", "watcher", "labrun")
+
+
 def session_work(s: dict) -> list[str] | None:
     """The background work the session's identity has registered and is still running (RDR-253 Step 6), one line each,
     or None when it cannot be read. Read through ``nx identity work list --running``: a running row of an identity whose
@@ -2378,7 +2385,7 @@ def session_work(s: dict) -> list[str] | None:
     if not sid:
         return None
     try:
-        done = _nx_identity("work", "list", "--session", sid, "--running", "--json")
+        done = _nx_identity("work", "list", "--session", sid, "--running", "--json", timeout=WORK_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
@@ -2395,10 +2402,20 @@ def work_note(work: list[str] | None) -> str:
         return "This script could not read the work your identity has registered. "
     if not work:
         return "Your identity has no running work registered. "
-    shown = "; ".join(work[:5]) + (f"; and {len(work) - 5} more" if len(work) > 5 else "")
-    return (f"Your identity has {len(work)} running work row(s) registered (a worktree, tmux server, wait, watcher or "
-            f"lab run you own): {shown}. A restart does not end them; finish or forget what is done "
-            f"(`nx identity work done|forget`). ")
+    cut = [w for w in work if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
+    kept = [w for w in work if w not in cut]
+
+    def shown(rows: list[str]) -> str:
+        return "; ".join(rows[:5]) + (f"; and {len(rows) - 5} more" if len(rows) > 5 else "")
+
+    out = f"Your identity has {len(work)} running work row(s) registered. "
+    if cut:
+        out += (f"A restart cuts off {len(cut)} of them, which run under your session and end with it (a wait, watcher or "
+                f"lab run): {shown(cut)}. Answer not ready unless you can lose them. ")
+    if kept:
+        out += (f"{len(kept)} outlive a restart and a restart leaves them alone (a worktree or tmux server): {shown(kept)}. "
+                f"Mark finished ones done or forget them (`nx identity work done|forget`). ")
+    return out
 
 
 def tasks_note(tasks: list[str] | None) -> str:
