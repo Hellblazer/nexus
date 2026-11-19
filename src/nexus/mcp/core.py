@@ -9649,8 +9649,9 @@ def mailbox_send(
     to: Annotated[str, Field(
         description=(
             "Destination: a session id, an agent id (\"a\" + 16 hex "
-            "chars), or a name. A name is resolved against the live "
-            "session directory at send time."
+            "chars), an identity id (\"i\" + digits), or a name. A name is "
+            "resolved at send time: a seat's name through its alias first, "
+            "then the live session directory."
         ),
     )],
     body: Annotated[str | None, Field(
@@ -9664,8 +9665,9 @@ def mailbox_send(
     )] = None,
     from_address: Annotated[str | None, Field(
         description=(
-            "Optional sender override -- this session's own id, or an agent "
-            "id. Defaults to this MCP server's own current session."
+            "Optional sender override -- this session's own id, its own "
+            "identity, or an agent id. Defaults to this MCP server's own "
+            "current session."
         ),
     )] = None,
 ) -> dict:
@@ -9680,11 +9682,15 @@ def mailbox_send(
     `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "...", "notice": "..."}`; `notice` is
     present only when `to` was a renamed seat's old name, still delivering in its 7-day grace (RDR-253).
 
-    A name resolves through `directory/<name>`'s live rows: no live
-    holder is refused, naming the name; more than one distinct holding
-    session is refused, naming every holder -- resend to one of those
-    session ids directly instead. `from_address`, when given, must be an
-    agent id or this server's own session id (any other session id is
+    A name resolves through `alias/<name>` first (a seat's name), then
+    `directory/<name>`'s live rows: one live holder gets the mail in its
+    session mailbox; two or more distinct holding sessions are refused,
+    naming every holder -- resend to one of those session ids directly
+    instead; with no holder and a seat behind the name, the mail waits in
+    the seat's identity mailbox until it binds; with no holder and no
+    seat, the send is refused, naming the name. A retired alias past its
+    7-day grace is refused with "renamed to <new> on <date>". `from_address`, when given, must be an
+    agent id, this server's own session id or its own identity (any other session id or identity is
     refused; `from` is a claim, JDR-002). With no `from_address`, the sender
     defaults to this MCP server's own current session, and is refused
     when that cannot be resolved. A missing or blank `body` is refused too.

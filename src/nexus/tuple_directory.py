@@ -237,15 +237,22 @@ def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> Send
     return SendTarget(address, kind, notice)
 
 
-def identity_alias_lookup() -> AliasLookup | None:
-    """``IdentityClient.alias`` for this host's engine, or None when no identity client can be built (no endpoint or
-    credential): the send then resolves through the directory alone, as an old client does."""
-    try:
+def identity_alias_lookup() -> AliasLookup:
+    """``IdentityClient.alias`` for this host's engine. The client is built, used and closed inside each lookup, so
+    a send to a session or agent id (which :func:`resolve_send` never looks up) builds none, and none is left
+    open. A host with no endpoint or credential raises from the lookup, which :func:`resolve_send` reads as "no
+    identity routes here": the send then resolves through the directory alone, as an old client does."""
+
+    def lookup(name: str) -> Mapping[str, Any]:
         from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
 
-        return IdentityClient.from_config().alias
-    except Exception:  # noqa: BLE001 -- no identity routes here is the Phase 1 fallback, never a failed send
-        return None
+        client = IdentityClient.from_config()
+        try:
+            return client.alias(name)
+        finally:
+            client.close()
+
+    return lookup
 
 
 def identity_from_not_own_message(value: str, own: str) -> str:

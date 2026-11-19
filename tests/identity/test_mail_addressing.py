@@ -180,3 +180,38 @@ def test_own_identity_takes_the_seat_whose_current_session_it_is_not_one_that_on
     monkeypatch.setattr(th, "current", lambda: None)
     monkeypatch.setattr(td, "_own_session_ids", lambda _sd, _pid: [OLD_SESSION])
     assert td._own_identity(tmp_path, 1) == "i12"
+
+
+def test_the_alias_lookup_builds_no_client_for_a_session_or_agent_id_and_closes_the_one_it_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415
+    from nexus.tuple_directory import identity_alias_lookup  # noqa: PLC0415
+
+    log: list[str] = []
+
+    class _Client:
+        def alias(self, name: str) -> dict[str, Any]:
+            log.append(f"alias {name}")
+            if name == "gone":
+                raise IdentityApiError(404, "unknown_name", "no seat")
+            return {"identity": "i4", "identity_state": "lapsed"}
+
+        def close(self) -> None:
+            log.append("close")
+
+    def build() -> _Client:
+        log.append("build")
+        return _Client()
+
+    monkeypatch.setattr(IdentityClient, "from_config", staticmethod(build))
+    lookup = identity_alias_lookup()
+    assert resolve_send(OLD_SESSION, _Tuples(), lookup) == SendTarget(OLD_SESSION, "session")
+    assert resolve_send("a0123456789abcdef", _Tuples(), lookup).address_kind == "agent"
+    assert log == [], "no client for an id that is never looked up"
+    assert resolve_send("wren", _Tuples(), lookup) == SendTarget("i4", "identity")
+    assert log == ["build", "alias wren", "close"]
+    log.clear()
+    with pytest.raises(DirectoryResolutionError):
+        resolve_send("gone", _Tuples(), lookup)  # 404 falls to the directory, which has no holder
+    assert log == ["build", "alias gone", "close"], "closed on the failing path too"
