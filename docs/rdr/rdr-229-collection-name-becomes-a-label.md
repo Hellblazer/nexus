@@ -489,9 +489,10 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   RDR-246's data-move registry (`nexus.data_moves`) is on develop, with
   per-tenant and per-leaf runs, a verification query and an `on_complete`.
   Phase 3 runs on it (item 6). *T2 `229-research-31`, `229-research-32`.*
-- **✅ Verified** (measured) — conexus shipped 36 releases between 2026-10-08
-  and 2026-11-07 (`git tag`), so "a stated number of releases" (D4) is weeks,
-  not months, at the current rate.
+- **✅ Verified** (measured) — conexus shipped 36 client releases between
+  2026-10-08 and 2026-11-07 (`git tag`), 24 of them minor (`x.y.0`, v7.75.0
+  to v7.98.0), so "a stated number of releases" (D4) is weeks, not months,
+  at the current rate. *T2 `229-research-36`.*
 
 ### Critical Assumptions
 
@@ -812,8 +813,8 @@ target mints, and keeps the label (or reports a clash with a live label on
 the target and refuses that collection). An old bundle, which carries names
 only, still imports through `legacy_names` for N minor releases after the
 release that ships the new format. N is open for Sam to set at the gate
-(Open Item O1; this draft proposes 20, about one month at the measured
-rate). From minor release N+1 on it is refused with a message that says to re-export from the source, and,
+(Open Item O1; this draft proposes 20, about 25 days at the measured rate
+of 24 minor releases in 30 days). From minor release N+1 on it is refused with a message that says to re-export from the source, and,
 because a recovery bundle may outlive its source, names the last conexus
 version that still imports it.
 
@@ -1323,8 +1324,8 @@ threads board, recorded through halcyon's session).
 - **O1. How many minor releases does the old-bundle fallback last?** D4
   says a stated number; Sam sets it at the gate. Proposed: 20 minor
   releases after the release that ships the new bundle format (P3.9).
-  conexus shipped 36 releases in the 30 days to 2026-11-07, so 20 is about a
-  month at that rate; a smaller number shortens the window in which a
+  conexus shipped 36 releases in the 30 days to 2026-11-07, 24 of them
+  minor, so 20 minor releases is about 25 days at that rate; a smaller number shortens the window in which a
   recovery bundle from a lost installation restores on a current release,
   and the refusal message names the last version that still imports one
   either way.
