@@ -2016,12 +2016,16 @@ def search_cross_corpus(
     # Opt-in (nexus-tu8wp.3): the route is used only when NX_SEARCH_PER_COLLECTION
     # is 1/true/on/yes; it measured ~2x slower than the batched path on the cloud.
     # A call that asks for topic routing, and CAN be routed (a prose collection, no
-    # chash_allow, no metadata where), takes it regardless (RDR-134 Step 7): the route
-    # is the only one that can route. One that cannot keeps the default path.
+    # chash_allow, no metadata where, an engine that reports vector_topic_route_supported),
+    # takes it regardless (RDR-134 Step 7): the route is the only one that can route. One
+    # that cannot keeps the default path. The capability probe is cached and never raises.
+    _probe = getattr(t3, "supports_topic_route", None)
     routable = (
         topic_route is not None
         and any(is_prose(c) for c in collections)
         and unrouted_reason(where=effective_where, chash_allow=_allow) is None
+        and callable(_probe)
+        and _probe() is True
     )
     per_collection_route = (
         getattr(t3, "supports_per_collection_search", False) is True

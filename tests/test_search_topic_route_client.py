@@ -526,6 +526,16 @@ class TestEvent:
             _search(engine, cols, **kw)
         assert engine.route_calls() == []
 
+    def test_without_the_opt_in_an_engine_that_cannot_route_keeps_the_default_path(self, monkeypatch) -> None:
+        # An engine without vector_topic_route_supported (0.1.196, or a cloud edge whose /version allowlist
+        # trims the flag) answers unrouted; forcing it onto the slower route would buy nothing.
+        cols = _cols("docs", _BGE, 2)
+        engine = _engine(monkeypatch, cols, capable=False)
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV)
+        (e,), results = _events(lambda: _search(engine, cols, topic_route=_TOP1))
+        assert engine.route_calls() == [] and results
+        assert e["routed"] == 0 and e["unrouted_reason"] == "per_collection_route_off"
+
     def test_a_client_without_the_route_cannot_route(self, monkeypatch) -> None:
         cols = _cols("docs", _BGE, 2)
         engine = _engine(monkeypatch, cols)
