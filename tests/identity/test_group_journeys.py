@@ -180,7 +180,7 @@ def row_join_leave_and_list_round_trip_a_seat_joins_an_ephemeral_is_refused_and_
         assert "member" in b and "lapsed" in b
         assert "unleased" in d, d
         assert list(lines) == [world.q("alpha"), world.q("beta"), world.q("desk")], "join order"
-        data = json.loads(_cli(alpha, "list", name, "--json").output)
+        data = json.loads(_cli(alpha, "list", name, "--json").stdout)
         assert [m["state"] for m in data["members"]] == ["live", "lapsed", "unleased"] and data["group"]["leader"] == alpha.identity
 
         leader_leaves = _cli(alpha, "leave", name)
@@ -247,7 +247,7 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
 
         result = _cli(alpha, "ack-times", name, "--json")
         assert result.exit_code == 0, result.output
-        reds = json.loads(result.output)["reds"]
+        reds = json.loads(result.stdout)["reds"]
         assert [(r["sha"], r["acked_by"], r["handoffs"]) for r in reds] == [(s1, alpha.identity, 0), (s2, beta.identity, 1), (s3, None, 0)]
         assert 11.9 <= reds[0]["minutes"] <= 12.6 and 8.9 <= reds[1]["minutes"] <= 9.6 and reds[2]["minutes"] is None, reds
         assert reds[0]["cleared_at"] and reds[1]["cleared_at"] is None
