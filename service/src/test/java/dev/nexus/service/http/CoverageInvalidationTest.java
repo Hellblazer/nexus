@@ -39,6 +39,14 @@ class CoverageInvalidationTest {
             .as("a non-string value is not a name").isEmpty();
     }
 
+    /** An absorb trashes a row, which changes the live chunks: the move routes drop the tenant's coverage (RDR-254). */
+    @Test
+    void theMoveRoutes_dropTheTenantsCoverage() {
+        assertThat(CatalogHandler.COVERAGE_OPS).contains("/documents/move", "/owners/move");
+        assertThat(CoverageInvalidation.collectionsNamedBy(java.util.Map.of("tumbler", "1.1.1", "new_file_path", "/p", "owner", "1.1", "new_root", "/r")))
+            .as("a move body names no collection, so the whole tenant is dropped").isEmpty();
+    }
+
     /**
      * The two 202 job routes drop in the job's body ({@link CoverageInvalidation#dropAfter}). Listed, their hook would
      * drop at the 202, before the job writes, and the route test's post-job read could not tell that from a drop at the

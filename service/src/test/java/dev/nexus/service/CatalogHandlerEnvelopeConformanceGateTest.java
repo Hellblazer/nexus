@@ -185,6 +185,13 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         + "limit of them, capped when more drifted than were listed; a limit above 10,000 is a 400. NextSeqDriftReadRouteTest "
         + "pins the envelope, the cap edge and the 400";
 
+    private static final String MOVE_DELEGATE =
+        "the handler method delegates to CatalogMoveRoutes: one flat report of counts per call (repointed, absorbed, trashed, "
+        + "skipped, aspect and highlight rows, links) plus absorbed_tumblers, which lists exactly the rows the move absorbed. "
+        + "That list is the report's record of an absorb (an absorb cannot be fully undone, RDR-254 Undo), so it is never "
+        + "truncated: it is as long as the move's own work, which one request bounds, not a page of a growing collection. "
+        + "CatalogDocumentMoveTest and CatalogOwnerMoveTest pin the report";
+
     // ── Route table (rationale-as-data, pinned classification) ─────────────
 
     record RouteSpec(String route, String handler, boolean collectionReturning,
@@ -242,6 +249,10 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         // "source_uri_moved"}) -- no JSON array (not collectionReturning) and the
         // request body carries two tumbler scalars, no id list (not idListAccepting).
         neither("/merge", "handleMerge"),
+        // RDR-254: the document move; the body lives in CatalogMoveRoutes.
+        collectionExempt("/documents/move", "handleDocumentsMove", MOVE_DELEGATE),
+        // RDR-254: the owner move, same report plus owners_folded; the body lives in CatalogMoveRoutes.
+        collectionExempt("/owners/move", "handleOwnersMove", MOVE_DELEGATE),
         // nexus-bivz3.24: response is a flat scalar map of class counts plus a "sample" OBJECT whose values are small
         // example lists (capped by the request's own "sample", at most 500 each); no top-level JSON array
         // (not collectionReturning), and the request carries apply/limit/sample scalars, no id list.

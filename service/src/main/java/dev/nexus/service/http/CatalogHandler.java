@@ -39,6 +39,7 @@ import java.util.*;
  *   POST  /v1/catalog/update             update document fields
  *   POST  /v1/catalog/update_many        batch-update fields for N documents (nexus-xedhp)
  *   POST  /v1/catalog/merge              collapse a duplicate document into its canonical one, one transaction (nexus-z4rpi)
+ *   POST  /v1/catalog/documents/move     re-point a curator document at a new path, absorbing the row registered there; dry_run required (RDR-254; CatalogMoveRoutes)
  *   POST  /v1/catalog/note_uri_repair    census (and, with apply, rewrite) of note rows whose source_uri names a collection the note no longer lives in (nexus-bivz3.24)
  *   POST  /v1/catalog/sensitivity        set or clear the one-way sensitive flag on N documents, audited (nexus-rfvyy.6.5, RDR-243)
  *   POST  /v1/catalog/delete_many        batch-tombstone N documents (nexus-xedhp)
@@ -87,6 +88,7 @@ import java.util.*;
  *   GET   /v1/catalog/owners/list        list all owners
  *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
  *   POST  /v1/catalog/owners/deactivate  soft-delete an owner (nexus-cw262 -- excluded from list/by_type by default)
+ *   POST  /v1/catalog/owners/move        keep a repo owner across a root move: fold the owner at the new root, rewrite its URIs; dry_run required (RDR-254; CatalogMoveRoutes)
  *   POST  /v1/catalog/owners/reactivate  clear an owner's deactivated_at (nexus-cw262)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
@@ -153,6 +155,8 @@ public final class CatalogHandler implements HttpHandler {
     private final CatalogCensusRoutes censusRoutes;
     /** RDR-254 P1-S2: the owner route bodies moved out of this class. */
     private final CatalogOwnerRoutes ownerRoutes;
+    /** RDR-254: the document and owner move routes. */
+    private final CatalogMoveRoutes moveRoutes;
     /** nexus-f3yqd R2: the manifest fill job routes ({@link CatalogManifestFillRoutes}). */
     private final CatalogManifestFillRoutes manifestFill;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
@@ -165,7 +169,7 @@ public final class CatalogHandler implements HttpHandler {
         "/purge-trash", "/ghost-sweep", "/manifest/write", "/manifest/append", "/manifest/append_many",
         "/manifest/write_many", "/manifest/purge", "/manifest/resync", "/manifest/null_collection",
         "/collections/delete", "/collections/rename", "/collections/rehome", "/collections/supersede",
-        "/import/document", "/import/chunk", "/import/collection");
+        "/import/document", "/import/chunk", "/import/collection", "/documents/move", "/owners/move");
 
     /**
      * The statement timeout production runs a reconcile commit under: the reconcile registry's per-job cap, because
@@ -273,6 +277,7 @@ public final class CatalogHandler implements HttpHandler {
         this.boundedReads = new CatalogBoundedReadRoutes(repo);
         this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
         this.ownerRoutes = new CatalogOwnerRoutes(repo);
+        this.moveRoutes = new CatalogMoveRoutes(new dev.nexus.service.db.CatalogMoves(repo));
         this.censusRoutes = new CatalogCensusRoutes(
             new dev.nexus.service.db.IndexRunCensusReads(repo), new dev.nexus.service.db.NextSeqDriftReads(repo));
         this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
@@ -311,6 +316,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/update"                -> handleUpdate(exchange, tenant, method);
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
                 case "/merge"                 -> handleMerge(exchange, tenant, method);
+                case "/documents/move"        -> handleDocumentsMove(exchange, tenant, method);
                 case "/note_uri_repair"       -> handleNoteUriRepair(exchange, tenant, method);
                 case "/sensitivity"           -> handleSensitivity(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
@@ -391,6 +397,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/owners/by_type"        -> handleOwnerByType(exchange, tenant, method);
                 case "/owners/deactivate"     -> handleOwnerDeactivate(exchange, tenant, method);
                 case "/owners/reactivate"     -> handleOwnerReactivate(exchange, tenant, method);
+                case "/owners/move"           -> handleOwnersMove(exchange, tenant, method);
 
                 // ── Collections ───────────────────────────────────────────────
                 case "/collections/upsert"    -> handleCollectionUpsert(exchange, tenant, method);
@@ -2418,6 +2425,12 @@ public final class CatalogHandler implements HttpHandler {
     private void handleOwnerHeadHash(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.headHash(exchange, tenant, method); }
     private void handleOwnerShow(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.show(exchange, tenant, method); }
     private void handleOwnerByType(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.byType(exchange, tenant, method); }
+
+    /** POST /v1/catalog/documents/move (RDR-254): the body is {@link CatalogMoveRoutes#documentsMove}. */
+    private void handleDocumentsMove(HttpExchange exchange, String tenant, String method) throws IOException { moveRoutes.documentsMove(exchange, tenant, method); }
+
+    /** POST /v1/catalog/owners/move (RDR-254): the body is {@link CatalogMoveRoutes#ownersMove}. */
+    private void handleOwnersMove(HttpExchange exchange, String tenant, String method) throws IOException { moveRoutes.ownersMove(exchange, tenant, method); }
 
     /** GET /v1/catalog/owners/next_seq_drift?limit=N (nexus-f3yqd): the read-only form of the sweep above; the body is {@link CatalogCensusRoutes#nextSeqDrift}. */
     private void handleNextSeqDriftRead(HttpExchange exchange, String tenant, String method) throws IOException { censusRoutes.nextSeqDrift(exchange, tenant, method); }
