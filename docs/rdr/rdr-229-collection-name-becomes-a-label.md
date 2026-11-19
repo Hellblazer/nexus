@@ -97,8 +97,9 @@ engine's `NoteUri.isFileRoutedCollection` tests a live collection at one
 site (T2 `229-research-34`, `229-research-39`, `229-research-42`). Apart
 from these, `aspect_readers.is_note_uri` and the engine's `NoteUri.isNote`
 classify a URI string over a frozen list. They stay as they are once
-`NoteUri.moveTo` stops moving `chroma://` residue on every caller and the
-rows it has already moved onto a prefix-free label are repaired (item 7,
+`NoteUri.moveTo` and `catalog_reconcile_commit` stop moving `chroma://`
+residue on every path and the
+rows they have already moved onto a prefix-free label are repaired (item 7,
 item 12, P2.10). A minted label carries no prefix. A
 minted collection would therefore lose its aspect extractor, its quality
 boost, its search threshold and over-fetch, its chunk content type and its
@@ -545,9 +546,10 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   list, which is complete only while no `chroma://` residue carries a
   segment without a file-routed prefix. That does not hold today:
   `nx catalog rename-collection --allow-legacy` already renames to a
-  prefix-free label (`collections.py:287-293`), and `moveTo` has moved
-  residue onto any such label (T2 `229-research-57`). It holds on an
-  install once P2.10's `moveTo` change ships and its repair move has
+  prefix-free label (`collections.py:287-293`), and `moveTo` and
+  `catalog_reconcile_commit` have moved residue onto any such label (T2
+  `229-research-57`, `229-research-62`). It holds on an
+  install once P2.10's change to both ships and its repair move has
   completed there, apart from the two shapes item 12 leaves unrepaired,
   which P1.2 counts (item 7, item 12; T2 `229-research-42`,
   `229-research-55`). **Method** for that half: Spike (P1.2's count on
@@ -1191,7 +1193,8 @@ nx-note://<old>/} becomes {@code nx-note://<new>/} and {@code
 chroma://<old>/} becomes {@code chroma://<new>/}", and `namesCollection`
 selects both schemes with no `isNote` test (T2 `229-research-40`,
 `229-research-55`). The rule sits in `moveTo`, not on the rename path,
-because four operations move a document's URI through it, and each one's
+because four of the five operations that move a document's URI go
+through it, and each one's
 collision pre-check also goes through it (`CatalogRepository.java`; T2
 `229-research-55`):
 
@@ -1202,7 +1205,17 @@ collision pre-check also goes through it (`CatalogRepository.java`; T2
 - rename (`:11464`, `:11468`, `:11472`, its rows selected by
   `namesCollection` at `:11466`, `:11470`, `:11474`; pre-check `:11127`).
 
-So on all four, `chroma://` residue keeps the segment it was written with,
+A fifth path copies `moveTo` in plpgsql: `nexus.catalog_reconcile_commit`
+(`catalog-048-reconcile.xml`, defined once at `:151`) rewrites a moved
+document's URI in its collision pre-check (`:433-441`) and its two
+document UPDATEs (`:527-535`, `:545-551`), each with a `WHEN
+starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')`
+arm and no file-routed test. A census of every SQL splice of a note scheme
+onto a collection finds only these and the run-once `note-uri-001`
+backfill (T2 `229-research-62`). P2.10 redefines the function by
+changeset with `moveTo`'s rule.
+
+So on all five, `chroma://` residue keeps the segment it was written with,
 and so does an `nx-note://` value whose segment is file-routed, which the
 shared corpus classes as no note (`"nx-note://docs__1-1__voyage-context-3__v1/docs/catalog.md",
 "is_note": false`, `note-uri-corpus.json:11`). Moving either onto a
@@ -1364,8 +1377,9 @@ list stays complete because of one fact, one repair and one rule:
   "the is_conformant_collection_name gate on the new name"
   (`collections.py:236`, gate at `:287-293`), and `moveTo` has moved the
   collection's residue onto the new label, and onto any such label a
-  re-home, re-embed move or collection update targets (T2
-  `229-research-57`). How many rows that touched is unmeasured; P1.2
+  re-home, re-embed move or collection update targets, as
+  `catalog_reconcile_commit` has for a reconcile repoint (T2
+  `229-research-57`, `229-research-62`). How many rows that touched is unmeasured; P1.2
   counts them on every install. P2.10 registers one RDR-246 data move per
   table that holds a source URI (`catalog_documents`, `document_aspects`,
   `document_highlights`) that restores a file-routed segment: a
@@ -1389,10 +1403,11 @@ list stays complete because of one fact, one repair and one rule:
   because the rename came before that changeset (inferred, not read: it
   rewrote every `chroma://` value whose segment is not file-routed,
   `note-uri-001-backfill.xml:24`), which no string rule tells from a note.
-- From P2.10 `NoteUri.moveTo` moves no `chroma://` residue, and no
-  `nx-note://` value with a file-routed segment, on any caller: rename,
-  re-home, the re-embed move or the collection update (item 7; T2
-  `229-research-55`). Residue
+- From P2.10 no path moves `chroma://` residue, or an `nx-note://` value
+  with a file-routed segment: not `NoteUri.moveTo` on rename, re-home, the
+  re-embed move or the collection update, and not
+  `catalog_reconcile_commit` (item 7; T2 `229-research-55`,
+  `229-research-62`). Residue
   keeps its prefixed segment, and the stale-note repair keeps skipping it
   at `if (!NoteUri.isNote(uri)) continue;` whether or not that segment
   still names a live row (T2 `229-research-42`).
@@ -1707,10 +1722,12 @@ its acceptance is that test green plus the census pin it lowers.
   the stale-note repair still tells file residue from notes. Blocks P3.6 and
   P3.8.
 - P2.10 Engine: `NoteUri.moveTo` rewrites only `nx-note://` URIs that
-  `isNote` classes as notes, and `namesCollection` selects only those, so
-  no caller moves `chroma://` residue or an `nx-note://<file-routed>`
-  value (item 7; T2 `229-research-55`, `229-research-56`). It changes no
-  schema and no caller. Its changeset also registers the repair of
+  `isNote` classes as notes, and `namesCollection` selects only those; a
+  changeset redefines `nexus.catalog_reconcile_commit` with the same rule
+  in its three URI rewrites; so no path moves `chroma://` residue or an
+  `nx-note://<file-routed>` value (item 7; T2 `229-research-55`,
+  `229-research-56`, `229-research-62`). It changes no schema. Its
+  changeset also registers the repair of
   residue already on a prefix-free segment, one data move per table
   (`catalog_documents`, `document_aspects`, `document_highlights`), with
   item 12's rule as the template and, as the verification, the rows that
@@ -1723,8 +1740,9 @@ its acceptance is that test green plus the census pin it lowers.
   label is left alone; a row whose new value a live document holds is
   skipped and counted. Test, for the rule: moving the documents of a file-routed
   collection that carry `chroma://` residue and an `nx-note://<file-routed>`
-  value onto a prefix-free label, by a rename, a re-home, a re-embed move
-  and a collection update, leaves both on their old segment, still classed
+  value onto a prefix-free label, by a rename, a re-home, a re-embed move,
+  a collection update and a reconcile commit that repoints them, leaves
+  both on their old segment, still classed
   file-routed by `NoteUri.isNote` and `is_note_uri`, and skipped by the
   stale-note repair; `NoteUriCorpusTest`'s `moveTo` assertions, which pin
   the `chroma://` arm today, are inverted. Blocks P3.6 and P3.8.
@@ -1856,7 +1874,7 @@ its acceptance is that test green plus the census pin it lowers.
   the seven name foreign keys that refuse a one-row rename and the queue's
   key where that table exists, and the
   one-row rename waits for its `completed_at` as well (item 6, Switch; T2
-  `229-research-58`, `229-research-61`). The rename, like every other `NoteUri.moveTo` caller, rewrites only
+  `229-research-58`, `229-research-61`). The rename, like every other URI-move path, rewrites only
   `nx-note://` URIs that `isNote` classes as notes, never `chroma://`
   residue, the rule P2.10 ships (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
@@ -1866,7 +1884,7 @@ its acceptance is that test green plus the census pin it lowers.
   topic assignments, aspects, topics, `taxonomy_meta` and highlights rows;
   and the one-row rename of a file-routed collection that has `chroma://`
   residue to a prefix-free label leaves the residue on its old segment
-  (P2.10's test covers the other three operations).
+  (P2.10's test covers the other four paths).
 - P3.8 Minting (item 8), after P2.9, P2.10, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
