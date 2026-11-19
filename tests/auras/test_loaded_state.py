@@ -454,7 +454,7 @@ def test_the_lease_tells_its_listeners_when_it_adopts_another_identity(tmp_path:
     finally:
         remove()
         broken()
-    assert identity_lease._LISTENERS == []
+    assert identity_lease._IDENTITY_LISTENERS == []
 
 
 def test_the_loader_rewrites_the_state_with_the_new_identity_and_keeps_the_loaded_one() -> None:

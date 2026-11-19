@@ -478,7 +478,7 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
     before = len(_REAL_RUNS)
-    listeners = list(identity_lease._LISTENERS)  # noqa: SLF001
+    listeners = list(identity_lease._IDENTITY_LISTENERS)  # noqa: SLF001
     subs, loader, sender, calls = asyncio.run(scenario(["push-train"], title, sid))
     first_loader = loader
     assert subs.aura_topics() == [owner_subspace] and loader.loaded_identity == "i7"
@@ -498,11 +498,11 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     assert subs.aura_topics() == [] and _ran(before) == 0 and sender.calls == []
     assert loader.decisions["ci_develop_red"].reason == "not_a_member"
     assert "GET /v1/group/push-train" not in calls, "a non-member reads no group"
-    assert len(identity_lease._LISTENERS) == len(listeners) + 2, "each start listens to the lease"  # noqa: SLF001
+    assert len(identity_lease._IDENTITY_LISTENERS) == len(listeners) + 2, "each start listens to the lease"  # noqa: SLF001
     loader.close()
     first_loader.close()
     loader.close()                                                  # twice is harmless
-    assert identity_lease._LISTENERS == listeners, "close removes the loader's listener: none leaks per start"  # noqa: SLF001
+    assert identity_lease._IDENTITY_LISTENERS == listeners, "close removes the loader's listener: none leaks per start"  # noqa: SLF001
 
 
 @pytest.mark.parametrize("with_plain_aura", [True, False], ids=["extends_the_runtime", "builds_the_runtime_late"])
