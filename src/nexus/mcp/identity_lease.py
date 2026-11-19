@@ -577,13 +577,13 @@ _GUARD = threading.Lock()
 
 def start() -> IdentityLease | None:
     """Start this server's identity lease on its own daemon thread. Idempotent. None when there is no Claude
-    ancestor (a server started by hand) or identity is switched off with ``NX_IDENTITY_LEASE=0``."""
+    ancestor (a server started by hand) or identity is switched off with ``NX_IDENTITY_LEASE=0`` or ``NX_IDENTITY_BIND=0``."""
     global _LEASE, _THREAD
     with _GUARD:
         if _LEASE is not None:
             return _LEASE
-        if os.environ.get("NX_IDENTITY_LEASE", "1") == "0":
-            return None
+        if os.environ.get("NX_IDENTITY_LEASE", "1") == "0" or (os.environ.get("NX_IDENTITY_BIND") or "").strip() == "0":
+            return None  # NX_IDENTITY_BIND=0 is the one switch the SessionStart hook honours too (nexus.hooks.identity_bind)
         from nexus import config as _nx_config  # noqa: PLC0415 — deferred: server start cost; a module attribute so a patched config dir reaches it
         from importlib.metadata import PackageNotFoundError, version as _dist_version  # noqa: PLC0415
         from nexus.session import _command_name_of, find_immediate_claude_pid  # noqa: PLC0415
