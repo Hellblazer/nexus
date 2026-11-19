@@ -84,10 +84,12 @@ DOC_PAGE_TIMEOUT_S: float = 15.0
 
 def read_doc_page(client: Any, route: str, flag: str, *, limit: int, offset: int,
                   **params: Any) -> tuple[list[dict], int]:
-    """One page of a paged document route: ``(documents, count)``, ``count`` being the exact number of matches
-    whatever the page. The flag is checked first; the body must be ``{count, limit, offset, documents}`` with
-    ``offset`` echoed, at most ``limit`` documents, each a map with a non-empty string ``tumbler``, else
-    ``MALFORMED``."""
+    """One page of a paged document route: ``(documents, count)``, ``count`` being the route's number of matches
+    whatever the page (exact for by-meta; an upper bound for by-author, whose route is a superset of the client's
+    rule). The flag is checked first; the body must be ``{count, limit, offset, documents}`` with ``offset`` echoed
+    and exactly ``min(limit, count - offset)`` documents (none past the count), each a map with a non-empty string
+    ``tumbler``, else ``MALFORMED``. A page shorter than its count says is never read as the end: the engine takes
+    an empty page's count from a second statement, so a concurrent insert can make the two disagree."""
     if not 1 <= limit <= DOC_PAGE_MAX or offset < 0:
         raise ValueError(f"limit must be 1..{DOC_PAGE_MAX} and offset at least 0, got {limit}, {offset}")
     require_flag(client, route, flag)
@@ -96,7 +98,9 @@ def read_doc_page(client: Any, route: str, flag: str, *, limit: int, offset: int
         raise EngineRouteUnavailable(route, flag, EngineRouteUnavailable.MALFORMED, type(body).__name__)
     count, docs = body.get("count"), body.get("documents")
     if (not isinstance(count, int) or isinstance(count, bool) or count < 0 or body.get("offset") != offset
-            or not isinstance(docs, list) or len(docs) > limit
+            or not isinstance(docs, list) or len(docs) != min(limit, max(count - offset, 0))
             or not all(isinstance(d, dict) and isinstance(d.get("tumbler"), str) and d["tumbler"] for d in docs)):
-        raise EngineRouteUnavailable(route, flag, EngineRouteUnavailable.MALFORMED, f"keys {sorted(body)}")
+        shape = (f"{len(docs)} documents at offset {offset} of a count of {count}, limit {limit}"
+                 if isinstance(docs, list) and isinstance(count, int) else f"keys {sorted(body)}")
+        raise EngineRouteUnavailable(route, flag, EngineRouteUnavailable.MALFORMED, shape)
     return docs, count

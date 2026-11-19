@@ -102,10 +102,10 @@ def test_a_transport_error_is_failed(monkeypatch: pytest.MonkeyPatch, name: str)
 
 
 def test_author_page_travels_the_wire_and_converts_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = _page([_doc("1.1.2", author="Leslie Lamport"), _doc("1.1.10", author="L. Lamport")], count=7, offset=40, limit=2)
+    body = _page([_doc("1.1.2", author="Leslie Lamport"), _doc("1.1.10", author="L. Lamport")], count=47, offset=40, limit=2)
     c, calls = _client(monkeypatch, get=body)
     entries, count = c.documents_by_author("lamport", limit=2, offset=40)
-    assert count == 7 and [str(e.tumbler) for e in entries] == ["1.1.2", "1.1.10"]
+    assert count == 47 and [str(e.tumbler) for e in entries] == ["1.1.2", "1.1.10"]
     assert entries[0].author == "Leslie Lamport"
     ((path, kw),) = calls
     assert path == "/docs/by-author" and kw["author"] == "lamport" and kw["limit"] == 2 and kw["offset"] == 40
@@ -141,14 +141,33 @@ def test_author_bad_arguments_send_nothing(monkeypatch: pytest.MonkeyPatch, auth
     assert calls == []
 
 
+@pytest.mark.parametrize(("docs", "count", "offset", "limit"), [
+    (0, 5, 0, 10),      # an empty page under a count that says rows exist
+    (2, 10, 0, 5),      # shorter than the page the count promises
+    (1, 3, 3, 10),      # a row past the count
+])
+def test_a_page_whose_length_disagrees_with_its_count_is_never_read_as_the_end(
+        monkeypatch: pytest.MonkeyPatch, docs: int, count: int, offset: int, limit: int) -> None:
+    body = _page([_doc(f"1.1.{i}") for i in range(docs)], count=count, offset=offset, limit=limit)
+    c, _calls = _client(monkeypatch, get=body)
+    with pytest.raises(EngineRouteUnavailable) as exc:
+        c.documents_by_author("x", limit=limit, offset=offset)
+    assert exc.value.reason == EngineRouteUnavailable.MALFORMED
+
+
+def test_an_empty_page_at_or_past_the_count_is_the_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    c, _calls = _client(monkeypatch, get=_page([], count=4, offset=4))
+    assert c.documents_by_author("x", offset=4) == ([], 4)
+
+
 # ── by-meta ─────────────────────────────────────────────────────────────────────
 
 
 def test_meta_clauses_travel_the_wire_with_the_stated_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    c, calls = _client(monkeypatch, get=_page([_doc("1.1.3")], count=3, offset=10, limit=5))
+    c, calls = _client(monkeypatch, get=_page([_doc("1.1.3")], count=11, offset=10, limit=5))
     entries, count = c.documents_by_meta(content_type="paper", meta=[("extraction_source", "file"), ("q", "true")],
                                          meta_min=[("miss_count", 2)], limit=5, offset=10)
-    assert count == 3 and [str(e.tumbler) for e in entries] == ["1.1.3"]
+    assert count == 11 and [str(e.tumbler) for e in entries] == ["1.1.3"]
     ((path, kw),) = calls
     assert path == "/docs/by-meta"
     assert {k: v for k, v in kw.items() if k not in ("idempotent", "timeout")} == {
@@ -229,3 +248,19 @@ def test_locators_bound_is_checked_before_sending(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(ValueError):
         c.sensitive_locators(limit)
     assert calls == []
+
+
+# ── the engine release named to users ───────────────────────────────────────────
+
+
+def test_the_named_engine_release_is_newer_than_the_last_cut_without_the_routes() -> None:
+    """engine-service-v0.1.196 (cut 2026-11-18) carries none of the Phase 2 routes, so a message naming it, or anything
+    older, would send a user to an engine without the route. The landing (nexus-uwggq.2.18) raises REQUIRED_ENGINE_VERSION
+    to the release that carries them; the client floor must never pass the release the messages name."""
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+
+    named = parse_engine_version(PHASE2_ROUTES_ENGINE)
+    assert named is not None and named > (0, 1, 196)
+    assert REQUIRED_ENGINE_VERSION <= named, (
+        "the client floor is past the engine the route messages name: set PHASE2_ROUTES_ENGINE to the release that "
+        "carries the routes")

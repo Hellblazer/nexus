@@ -185,13 +185,13 @@ def _author_alone_rows(cat, author: str, *, limit: int, offset: int, keep) -> li
         presented = _present_entries(cat, page)
         result = presented.rows + presented.trailer()
     elif not has_more:
-        # An empty list renders as nothing, which reads as a broken tool (nexus-r88er F12). The route's count is
-        # exact, so past offset 0 the note says how many matches lie before the page asked for. Rows the filter
-        # dropped are matches on this page, not before it, so they take the zero-match note.
-        if offset == 0 or raw:
+        # An empty list renders as nothing, which reads as a broken tool (nexus-r88er F12). The route's count is an
+        # upper bound (its answer is a superset of keep, nexus-uwggq.2.6), so past offset 0 the note gives it as "at
+        # most"; at offset 0 an empty page means no match.
+        if offset == 0:
             return [{"note": _ZERO_MATCH_NOTE}]
         return [{"note": (
-            f"No rows at offset {offset}: this search has {count} match{'' if count == 1 else 'es'}, "
+            f"No rows at offset {offset}: this search has at most {count} match{'' if count == 1 else 'es'}, "
             "all before that offset."
         )}]
     if has_more:

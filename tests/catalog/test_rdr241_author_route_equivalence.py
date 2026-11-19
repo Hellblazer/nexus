@@ -18,27 +18,27 @@ from tests._catalog_fixture_ops import ActiveCatalog
 
 AUTHORS: list[str | None] = [
     "Leslie Lamport",
-    "Gödel, Kurt",            # precomposed o with diaeresis
-    "Gödel, Kurt",           # o plus combining diaeresis
-    "GÖDEL",
-    "Paul Erdős",
-    "Anders Ångström",
-    "Jan Łukasiewicz",
-    "Straße",
-    "İsmet İnönü",
-    "Σίσυφος",
-    "ΣΊΣΥΦΟΣ",   # the same name in capitals, ending in a capital sigma
-    "Пушкин",
-    "湯川秀樹",
+    "G\u00f6del, Kurt",            # precomposed o with diaeresis
+    "Go\u0308del, Kurt",           # o plus combining diaeresis
+    "G\u00d6DEL",
+    "Paul Erd\u0151s",
+    "Anders \u00c5ngstr\u00f6m",
+    "Jan \u0141ukasiewicz",
+    "Stra\u00dfe",
+    "\u0130smet \u0130n\u00f6n\u00fc",
+    "\u03a3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2",
+    "\u03a3\u038a\u03a3\u03a5\u03a6\u039f\u03a3",   # the same name in capitals, ending in a capital sigma
+    "\u041f\u0443\u0448\u043a\u0438\u043d",
+    "\u6e6f\u5ddd\u79c0\u6a39",
     "100%_done",
     "",
     None,
 ]
 
 NEEDLES = [
-    "lamport", "hild", "gödel", "GÖDEL", "ödel", "erdős", "ERDŐS", "ångström",
-    "łukasiewicz", "straße", "İnönü", "inönü", "σίσυφος",
-    "ΣΊΣΥΦΟΣ", "ПУШКИН", "湯川", "%", "_", "100%_",
+    "lamport", "hild", "g\u00f6del", "G\u00d6DEL", "\u00f6del", "erd\u0151s", "ERD\u0150S", "\u00e5ngstr\u00f6m",
+    "\u0142ukasiewicz", "stra\u00dfe", "\u0130n\u00f6n\u00fc", "in\u00f6n\u00fc", "\u03c3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2",
+    "\u03a3\u038a\u03a3\u03a5\u03a6\u039f\u03a3", "\u041f\u0423\u0428\u041a\u0418\u041d", "\u6e6f\u5ddd", "%", "_", "100%_",
 ]
 
 
@@ -61,6 +61,10 @@ def test_the_route_is_a_superset_and_equals_the_client_filter_after_it(t2_servic
     back = {str(e.tumbler): e.author for e in client.all_documents(limit=0) if str(e.tumbler) in by_tumbler}
     assert len(back) == len(by_tumbler), "every fixture row reads back"
 
+    # no normalization: the precomposed and the decomposed Gödel stay two authors, and "gödel" (precomposed) selects
+    # exactly one of them, so an editor that normalized the fixture would fail here rather than pass vacuously
+    assert AUTHORS[1] != AUTHORS[2] and len(AUTHORS[1]) == len(AUTHORS[2]) - 1
+    assert sum(_keep("g\u00f6del", a) for a in AUTHORS) == 2, "precomposed G\u00f6del and G\u00d6DEL, not the decomposed one"
     selecting = 0
     for needle in NEEDLES:
         expected = [t for t in sorted(by_tumbler) if _keep(needle, by_tumbler[t])]

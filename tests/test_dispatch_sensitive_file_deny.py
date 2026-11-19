@@ -323,6 +323,23 @@ def test_a_malformed_row_is_not_read_as_no_sensitive_documents() -> None:
     assert r.drop_file_tools and r.deny_rules == ()
 
 
+@pytest.mark.parametrize("flag", ["missing", None, "true", 1])
+def test_a_row_without_a_boolean_sensitive_flag_drops_the_file_tools(flag) -> None:
+    """A dict row whose ``sensitive`` is absent or not a bool would read as "not sensitive" and fail open; the guard
+    in file_tool_restriction drops the tools instead (review r1 of 4978f3985)."""
+    row = {"tumbler": "1.1.1", "source_uri": "file:///srv/secret/a.md", "file_path": "", "alias_of": "",
+           "physical_collection": "docs__a__bge-768__v1"}
+    if flag != "missing":
+        row["sensitive"] = flag
+
+    class _NoFlag:
+        def sensitive_locators(self, limit: int = 10_000):
+            return {"count": 1, "limit": limit, "capped": False, "documents": [row]}
+
+    r = sp.file_tool_restriction(reader=_NoFlag())
+    assert r.drop_file_tools and r.deny_rules == ()
+
+
 _FLAG = "catalog_sensitive_locators_supported"
 
 

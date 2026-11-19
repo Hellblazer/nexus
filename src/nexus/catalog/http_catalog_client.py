@@ -1313,7 +1313,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return [_to_entry(d) for d in first.values()]
 
     def documents_by_author(self, author: str, *, limit: int = 1000, offset: int = 0) -> tuple[list[CatalogEntry], int]:
-        """One page of ``GET /docs/by-author`` as ``(entries, count)`` (nexus-uwggq.2.6): see ``engine_reads.by_author``."""
+        """One page of ``GET /docs/by-author`` as ``(entries, count)`` (nexus-uwggq.2.6): a SUPERSET of ``needle.lower() in
+        (author or "").lower()`` (no normalization, ``%`` and ``_`` literal), ``count`` an upper bound; the caller applies
+        that rule to every page (``engine_reads.by_author``)."""
         rows, count = _by_author.read_docs_by_author(self, author, limit=limit, offset=offset)
         return [_to_entry(d) for d in rows], count
 

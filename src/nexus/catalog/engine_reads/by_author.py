@@ -2,11 +2,14 @@
 """Client reader for ``GET /v1/catalog/docs/by-author`` (RDR-241 Phase 2, nexus-uwggq.2.6).
 
 The route answers the tenant's live documents whose author contains the requested text, one page at a time in the
-engine's text order of tumbler, as ``{count, limit, offset, documents}`` with an exact ``count``. Its matching rule:
-Unicode default lowercase on both sides, no normalization (a precomposed ``ö`` and ``o`` plus a combining diaeresis
-stay different), ``%`` and ``_`` matched literally, an empty or absent author never matching. The engine lowers
-with PostgreSQL's simple case mapping (``pg_c_utf8``), the client's final filter (``_keep`` in ``mcp/catalog.py``)
-with Python's ``str.lower`` (the full mapping); where they differ is recorded on nexus-uwggq.2.6."""
+engine's text order of tumbler, as ``{count, limit, offset, documents}``. The client's rule, applied by its final filter
+(``_keep`` in ``mcp/catalog.py``): ``needle.lower() in (author or "").lower()``, Python's Unicode default lowercase (the
+full mapping), no normalization (a precomposed ``ö`` and ``o`` plus a combining diaeresis stay different), ``%`` and
+``_`` literal, an empty or absent author never matching. The engine folds with the simple mapping (``pg_c_utf8``), reads
+the final sigma as the medial one and drops U+0307 on both sides, so its answer is a SUPERSET of that rule: it never
+leaves out a row the rule keeps, ``count`` is an upper bound, and the final filter removes the rows it adds (the
+dotted-I pairs). Sam 2026-11-19, T2 ``nexus/sam-ruling-rdr241-author-fold-2026-11-19``. A caller must apply the rule
+to every page; the route's rows alone are not the answer."""
 from __future__ import annotations
 
 from typing import Any

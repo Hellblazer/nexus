@@ -134,9 +134,9 @@ def test_a_page_the_filter_empties_with_more_behind_it_still_points_on(serve) ->
 def test_offset_past_the_matches_names_the_route_count(serve) -> None:
     serve(FakeEngine(_docs(3)))
     rows = mcp_catalog.catalog_search(author="Filler", offset=50)
-    assert rows == [{"note": "No rows at offset 50: this search has 3 matches, all before that offset."}]
+    assert rows == [{"note": "No rows at offset 50: this search has at most 3 matches, all before that offset."}]
     serve(FakeEngine(_docs(1)))
-    assert "has 1 match," in mcp_catalog.catalog_search(author="Filler", offset=7)[0]["note"]
+    assert "has at most 1 match," in mcp_catalog.catalog_search(author="Filler", offset=7)[0]["note"]
 
 
 def test_no_match_at_offset_zero_is_the_zero_match_note(serve) -> None:

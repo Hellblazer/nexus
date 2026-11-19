@@ -4,9 +4,10 @@ client's own filter answers, against a real engine built from this tree.
 
 For each filter set, the route's documents, paged to completion through ``HttpCatalogClient.documents_by_meta``,
 equal ``documents_with_meta`` for the pairs combined with ``meta_at_least`` for the bound, over the same documents
-read back from the engine, in the engine's text order of tumbler. The one allowed difference: the row whose
-``miss_count`` was written as ``1e20`` may come back from the route and not from the oracle (``meta_at_least``'s
-docstring says why), never the other way round; any other difference fails.
+read back from the engine, in the engine's text order of tumbler, and ``count`` is exact. No difference is allowed: a
+``miss_count`` written as the float ``1e20`` reads back from jsonb as a plain integer on both sides (``meta_at_least``'s
+docstring), so the float-widening case of nexus-uwggq.2.2 cannot arise on stored rows, and the rows are asserted to
+read back that way.
 """
 from __future__ import annotations
 
@@ -78,11 +79,13 @@ def test_the_route_answers_what_the_client_filter_answers(t2_service_env, name: 
         t = cat.register(Tumbler.parse(str(owner)), title, content_type=ctype, meta=meta,
                          source_uri=f"nx-note://meta-eq/{len(titles)}")
         titles[str(t)] = meta
-    big = next(t for t, m in titles.items() if m.get("miss_count") == 1e20 and isinstance(m.get("miss_count"), float))
+    bigs = [t for t, m in titles.items() if isinstance(m.get("miss_count"), float) and m["miss_count"] == 1e20]
 
     client = HttpCatalogClient(tenant=tenant)
     back = {str(e.tumbler): e for e in client.all_documents(limit=0) if str(e.tumbler) in titles}
     assert len(back) == len(titles), "every fixture row reads back"
+    assert bigs and all(back[t].meta["miss_count"] == 10**20 and isinstance(back[t].meta["miss_count"], int)
+                        for t in bigs), "a stored 1e20 reads back as a plain integer"
 
     fs = _FILTER_SETS[name]
     entries = [back[t] for t in sorted(back)]   # the engine's text order of tumbler
@@ -99,7 +102,4 @@ def test_the_route_answers_what_the_client_filter_answers(t2_service_env, name: 
         got = [str(e.tumbler) for e in rows]
         assert got == sorted(got), f"{name}: rows come in the engine's text order of tumbler"
         assert count == len(got), f"{name}: count is exact"
-        extra, missing = [t for t in got if t not in expected], [t for t in expected if t not in got]
-        assert missing == [], f"{name}: the route left out rows the client filter keeps: {missing}"
-        assert set(extra) <= {big}, f"{name}: the route added rows the client filter drops: {extra}"
-        assert [t for t in got if t != big] == [t for t in expected if t != big]
+        assert got == expected, f"{name}: the route answers exactly what the client filter answers"
