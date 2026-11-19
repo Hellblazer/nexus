@@ -15,7 +15,7 @@ Use, per kind (Sam's K6 decision, nexus-qo7ie.5; the report header prints these)
 - T2 namespace (the repository's projects, ``<repo>`` and ``<repo>_*``): a ``memory_get`` of
   one of its titles, a ``memory_search`` naming it (one naming no project credits no project: the engine
   stamps only the rows it returns), or a row whose ``last_accessed`` is in the window (the engine stamps it
-  on every get and search, which is the only trace of a Bash ``nx memory`` read, and of the SessionStart
+  on every tracked get and on each row a search returns, which is the only trace of a Bash ``nx memory`` read, and of the SessionStart
   hook's own gets, :func:`nexus.memory_curate.hook_reads_note`); a write is a row timestamp in the window.
 - MCP tool of the ``nexus`` and ``nexus-catalog`` servers: a call. The registry is the servers'
   own (``_tool_manager.list_tools()``), diffed with the called names, so a tool never called is
@@ -304,7 +304,7 @@ def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any
         for r in data[project]:
             if r.get("timestamp"):
                 written = _later(written, r["timestamp"])
-            if _in_window(r.get("last_accessed"), since):  # the engine stamps it on every get and search, Bash ones too
+            if _in_window(r.get("last_accessed"), since):  # the engine stamps it on every tracked get and on each row a search returns, Bash ones too
                 used[project] = _later(used.get(project), r["last_accessed"])
         if project in used or _in_window(written, since):
             continue
@@ -316,7 +316,7 @@ def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any
                    "stamps last_accessed only on the rows it returned, so a project it hit is used only through "
                    "last_accessed)")
     out.append("  limits: Bash `nx memory` reads are attributed to a project only through last_accessed (the engine "
-               "stamps it on every get and search); the repo's own namespace reads as written after the first run, "
+               "stamps it on every tracked get and on each row a search returns); the repo's own namespace reads as written after the first run, "
                "since the stored report lands there; " + mc.hook_reads_note())
     return out
 
