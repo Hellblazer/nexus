@@ -92,7 +92,7 @@ def worktree_gone(row: Mapping[str, Any]) -> bool:
     """A ``worktree`` row whose absolute path is not a directory on this host. A path on another host reads as gone
     here too, which is why only the work-limit purge and display filters use it, never may-stop."""
     ref = str(row.get("ref") or "")
-    return row.get("kind") == "worktree" and ref.startswith("/") and not os.path.isdir(ref)
+    return row.get("kind") == "worktree" and os.path.isabs(ref) and not os.path.isdir(ref)
 
 
 def mark_done(client: Any, identity: str, kind: str, ref: str) -> Work:

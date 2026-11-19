@@ -364,7 +364,7 @@ def _running_work_section(cwd: str | None) -> list[str]:
         rows = json.loads(done.stdout)["work"]
         # A worktree row whose directory is gone (an agent's isolation worktree the harness removed) is not listed.
         lines = [f"- {r['kind']} {r['ref']}" for r in rows if isinstance(r, dict) and r.get("kind") and r.get("ref")
-                 and not (r["kind"] == "worktree" and str(r["ref"]).startswith("/") and not os.path.isdir(str(r["ref"])))]
+                 and not (r["kind"] == "worktree" and os.path.isabs(str(r["ref"])) and not os.path.isdir(str(r["ref"])))]
     except Exception:  # noqa: BLE001 — an addition to the checkpoint: any failure leaves it out, silently
         return []
     if not lines:
