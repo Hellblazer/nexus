@@ -725,7 +725,8 @@ The key moves table by table in strangler order:
   `chunk_orphaned_at` (which reach the name through the chunks key), and the
   operational name columns with no foreign key (`physical_collection`,
   `pdf_pipeline`, `chash_remap`, `reembed_jobs`, `superseded_by` as
-  `superseded_by_id`; the table after the history tables, below, gives
+  `superseded_by_id`, NULL for a live row and the successor's id for a
+  tombstone; the table after the history tables, below, gives
   every name column without a registry foreign key its disposition). The
   engine writes both columns on every insert; a
   registered data move fills the old rows (below). The quarantine
@@ -799,7 +800,18 @@ while the engine serves:
 
 - *The stamp is a data move.* P3.1's changeset adds, `NOT VALID`, on every
   table in the Expand list, a CHECK that the id is set wherever the name is
-  set: `(<name column> IS NULL) = (collection_id IS NULL)`. The
+  set: `(<name column> IS NULL) = (collection_id IS NULL)`. The exception
+  is `superseded_by`, which is `TEXT NOT NULL DEFAULT ''`
+  (`catalog-001-baseline.xml:208`) and empty on a live row: the engine
+  writes `.set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")` to make a row current
+  (`CatalogRepository.java:9922`) and the new name on a rename's tombstone
+  (`:11477`). Its CHECK is `(superseded_by = '') = (superseded_by_id IS
+  NULL)`, added `NOT VALID` in P3.1 and validated with the stamp. The
+  stamp fills it from the text column: a non-empty `superseded_by`
+  resolves to the `collection_id` of the row with the same `tenant_id` and
+  name, and `''` stays NULL. Inferred, not read: a tombstone whose
+  successor was later deleted names no row, so P1.2 counts those (T2
+  `229-research-50`). The
   partitioned `nexus.chunks` already carries a `NOT VALID` CHECK this way
   (`chunks_chash_octet_check`; T2 `229-research-41`). P3.1 then registers one
   move per table. `DataMoveWorker` runs it through dml_utils in primary-key
@@ -963,7 +975,7 @@ of them.
 
 | Column | Reaches the registry | Disposition | Rename today |
 | --- | --- | --- | --- |
-| `catalog_collections.superseded_by` | no | Expand as `superseded_by_id`; dropped at P4.1 | written on the tombstone |
+| `catalog_collections.superseded_by` | no | Expand as `superseded_by_id` (NULL when live, the successor's id on a tombstone), under its own CHECK `(superseded_by = '') = (superseded_by_id IS NULL)`; dropped at P4.1 | written on the tombstone |
 | `catalog_document_chunks.collection` | through the chunks key | Expand; child key switched in P3.3c | rewritten |
 | `chunk_orphaned_at.collection` | through the chunks key | Expand; child key switched in P3.3c | rewritten by its `ON UPDATE CASCADE` from the chunks key (vectors-030:1047-1051) |
 | `catalog_documents.physical_collection` | no | Expand | rewritten |
@@ -994,7 +1006,11 @@ DEFAULT ''`, `catalog-001-baseline.xml:208`), and P4.1 drops that column.
 PostgreSQL drops "Indexes and table constraints involving the column"
 with it (T2 `229-research-45`). So P4.1 re-creates the partial UNIQUE over
 `superseded_by_id IS NULL` in the same changeset as the primary-key swap.
-Inferred, not read: a predicate column counts as involved. Until P4.1 the name is still the primary key
+Inferred, not read: a predicate column counts as involved. That predicate
+selects exactly the live rows, because `superseded_by_id` is NULL on a
+live row and set on a tombstone, under the CHECK `(superseded_by = '') =
+(superseded_by_id IS NULL)` that the stamp validates (item 6; T2
+`229-research-50`). Until P4.1 the name is still the primary key
 (`PRIMARY KEY (tenant_id, name)`, `catalog-001-baseline.xml:211`; T2
 `229-research-36`), so a superseded row, including one a past rename left,
 keeps its name taken. Model siblings no longer collide, because each sibling gets
@@ -1345,8 +1361,9 @@ every script and note URI that names one.
 - A route receives a label that two live rows hold: impossible in every
   phase. Until P4.1 the name is the primary key. From P4.1 the partial
   UNIQUE on live labels holds it: added in P3.6 over `superseded_by`, and
-  re-created by P4.1 over `superseded_by_id` in the changeset that drops
-  `superseded_by` (item 7).
+  re-created by P4.1 over `superseded_by_id IS NULL` in the changeset that
+  drops `superseded_by` (item 7). That column is NULL exactly on live rows,
+  under its own CHECK (item 6).
 
 ## Implementation Plan
 
@@ -1405,7 +1422,9 @@ its acceptance is that test green plus the census pin it lowers.
   embedding_model)` tuples with more than one candidate row, which
   `collectionForTuple` today settles by `NAME ASC` behind a grandfathered
   filter D5 drops; and live names that already match `^c[0-9]+$`, the
-  minted form (T2 `229-research-38`). Bounded load, results in T2.
+  minted form (T2 `229-research-38`); and tombstones whose `superseded_by`
+  names no row of their tenant, which the stamp cannot give an id (item 6;
+  T2 `229-research-50`). Bounded load, results in T2.
   Blocks P2.2 onward.
 - P1.3 Widen the engine Java gate to the `quarantine-` literal; add the SQL
   live-body gate. First live run pasted into the bead.
@@ -1484,7 +1503,9 @@ its acceptance is that test green plus the census pin it lowers.
   collection_id, embedding_model)`, the RDR-225 composite's future target
   (item 6), as plain changeset work on a small table; `collection_id` columns on every referencing table (item 6
   list) and, `NOT VALID`, the CHECK `(<name column> IS NULL) =
-  (collection_id IS NULL)` on each; every writer (item 6's census: 109 Java
+  (collection_id IS NULL)` on each, except `superseded_by`, whose CHECK is
+  `(superseded_by = '') = (superseded_by_id IS NULL)` and whose stamp
+  resolves a non-empty name to the successor's id (item 6); every writer (item 6's census: 109 Java
   write sites, 26 SQL functions) sets the id on insert and update from this
   cut, and its acceptance re-runs that census over helper-routed and
   by-name writes and finds every writer of `taxonomy_centroids` before the
@@ -1635,7 +1656,9 @@ its acceptance is that test green plus the census pin it lowers.
   dropping changeset carries the CONTINUE precondition on every stamp
   label. The changeset that swaps the registry's primary key and drops
   `superseded_by` also re-creates the partial UNIQUE on live labels over
-  `superseded_by_id IS NULL` (item 7). Test: a superseded
+  `superseded_by_id IS NULL` (item 7), which holds because the CHECK
+  `(superseded_by = '') = (superseded_by_id IS NULL)` keeps that column NULL
+  exactly on live rows. Test: a superseded
   row's label can be reused by a new live collection, and P3.6's test that
   refuses a second live row with one label still passes.
 - P4.2 Drop `legacy_grandfathered` and `idx_catalog_collections_legacy`.
