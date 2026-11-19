@@ -390,13 +390,15 @@ def _row(kind: str, at: str, sha: str, who: str = "engine", **body: Any) -> Any:
 
 
 class _Tuples:
-    def __init__(self, rows: list[Any]) -> None:
-        self.rows, self.reads = rows, []
+    """A tuple store whose read answers at most *cap* rows a call, as the engine does (it may cap below the ``n`` asked)."""
+
+    def __init__(self, rows: list[Any], cap: int | None = None) -> None:
+        self.rows, self.reads, self.cap = rows, [], cap
 
     def rd(self, subspace: str, keys: Any = None, *, n: int = 1, since: Any = None, **_: Any) -> list[Any]:
         self.reads.append(subspace)
         rows = [r for r in self.rows if since is None or (r.created_at, r.id) > tuple(since)]
-        return rows[:n]
+        return rows[: min(n, self.cap) if self.cap else n]
 
 
 def test_ack_times_reports_per_red_the_sha_episode_ack_time_and_minutes() -> None:
@@ -406,7 +408,8 @@ def test_ack_times_reports_per_red_the_sha_episode_ack_time_and_minutes() -> Non
         _row("clear", "2026-11-19T10:30:00Z", SHA1),
         # a second red: handed off, and the first owner's late ack does not count
         _row("owner", "2026-11-19T12:00:05Z", SHA2, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T12:00:00Z", refresh=False),
-        _row("owner", "2026-11-19T12:20:05Z", SHA2, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T12:00:00Z", refresh=False),
+        # the engine's hand-off row carries a NEW episode_at (OwnerDecision.handOn passes in.now()), not the red's
+        _row("owner", "2026-11-19T12:20:05Z", SHA2, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T12:20:00Z", refresh=False, handoffs=1),
         _row("ack", "2026-11-19T12:25:00Z", SHA2, who="i4"),
         _row("ack", "2026-11-19T12:41:00Z", SHA2, who="i5"),
         # a third red nobody acknowledged yet
@@ -422,7 +425,7 @@ def test_ack_times_reports_per_red_the_sha_episode_ack_time_and_minutes() -> Non
         (SHA2, "2026-11-19T12:00:00Z", "2026-11-19T12:41:00Z", 41.0, "i5"),
         (SHA3, "2026-11-19T14:00:00Z", None, None, None)]
     assert [r["handoffs"] for r in reds] == [0, 1, 0]
-    assert tuples.reads == ["board/ci/nexus-develop--owner"], "the topics of the group's serves, on their --owner subspace"
+    assert set(tuples.reads) == {"board/ci/nexus-develop--owner"}, "the topics of the group's serves, on their --owner subspace"
 
 
 def test_ack_times_text_names_an_unacknowledged_red_and_a_group_serving_nothing_is_an_error() -> None:
@@ -445,6 +448,50 @@ def test_ack_times_with_no_reds_says_so_and_skips_a_refresh_row_as_a_new_red() -
     ]
     reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
     assert [(r["sha"], r["minutes"]) for r in reds] == [(SHA1, 9.0)], "a refresh row keeps its episode, and an ack of any red tip of it counts"
+
+
+def test_a_hand_off_and_an_escalation_continue_the_open_red_whatever_episode_at_they_carry() -> None:
+    """One red, three owner rows: the engine stamps each hand-on with a new episode_at. Minutes run from the FIRST row's."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False, handoffs=0),
+        _row("owner", "2026-11-19T10:05:05Z", SHA2, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=True, handoffs=0),
+        _row("owner", "2026-11-19T10:25:05Z", SHA2, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T10:25:00Z", refresh=False, handoffs=1),
+        _row("owner", "2026-11-19T10:30:05Z", SHA2, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T10:25:00Z", refresh=True, handoffs=1),
+        _row("owner", "2026-11-19T10:50:05Z", SHA2, owner=None, next=None, reason="escalated", episode_at="2026-11-19T10:50:00Z", refresh=False, handoffs=2),
+        _row("ack", "2026-11-19T10:55:00Z", SHA2, who="i5"),     # i5 is no longer the owner: does not count
+        _row("clear", "2026-11-19T11:10:00Z", SHA2),
+        _row("owner", "2026-11-19T13:00:05Z", SHA3, owner="i4", next="i5", reason="no_record", episode_at="2026-11-19T13:00:00Z", refresh=False, handoffs=0),
+    ]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
+    assert [(r["sha"], r["episode_at"], r["handoffs"], r["acked_at"], r["cleared_at"]) for r in reds] == [
+        (SHA1, "2026-11-19T10:00:00Z", 2, None, "2026-11-19T11:10:00Z"),
+        (SHA3, "2026-11-19T13:00:00Z", 0, None, None)], "one red with both hand-ons counted, then the next red"
+
+
+def test_ack_times_pages_until_an_empty_page_when_the_engine_caps_a_read_below_the_page_size() -> None:
+    rows = [_row("owner", f"2026-11-19T{10 + i:02d}:00:05Z", f"{i}" * 40, owner="i4", next=None, reason="no_record",
+                 episode_at=f"2026-11-19T{10 + i:02d}:00:00Z", refresh=False) for i in range(5)]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows, cap=2)), "ack-times", "push-train", "--json").stdout)["reds"]
+    assert len(reds) == 5, "a short page is not the last page"
+
+
+def test_ack_times_says_so_when_it_stops_at_the_row_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.commands import group_cmd  # noqa: PLC0415
+
+    monkeypatch.setattr(group_cmd, "_PAGE", 2)
+    monkeypatch.setattr(group_cmd, "_MAX_ROWS", 4)
+    rows = [_row("owner", f"2026-11-19T{10 + i:02d}:00:05Z", f"{i}" * 40, owner="i4", next=None, reason="no_record",
+                 episode_at=f"2026-11-19T{10 + i:02d}:00:00Z", refresh=False) for i in range(6)]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    result = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json")
+    assert result.exit_code == 0 and len(json.loads(result.stdout)["reds"]) == 4, "stdout stays parseable"
+    assert "stopped at 4 rows" in result.stderr and "nexus-develop--owner" in result.stderr
+    text = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train")
+    assert "stopped at 4 rows" in text.stderr
+    full = _run(_env(wire, tuples=_Tuples(rows[:3])), "ack-times", "push-train")
+    assert "stopped at" not in full.stderr, "no notice when the read reached the end"
 
 
 def test_the_command_is_registered_and_every_verb_has_help() -> None:

@@ -27,6 +27,8 @@ _RECONNECT = ("The MCP server reads group membership once, when it starts: recon
               "for the auras that load by group to take effect.")
 _PAGE = 300
 _MAX_ROWS = 10_000
+#: The owner-row reasons the engine posts for a hand-on; each carries a new ``episode_at`` and continues the open red.
+_HAND_ON_REASONS = ("handoff", "escalated")
 
 
 @dataclass
@@ -307,17 +309,19 @@ def _instant(text: str | None) -> datetime | None:
         return None
 
 
-def _rows(store: Any, subspace: str, topic: str) -> list[Any]:
-    """Every row of *subspace*, oldest first, paged with the ``since`` cursor (bounded, so a board read stays a bounded call)."""
+def _rows(store: Any, subspace: str, topic: str) -> tuple[list[Any], bool]:
+    """The rows of *subspace*, oldest first, paged with the ``since`` cursor until an empty page (the engine may cap a
+    read below ``_PAGE``, so a short page is not the last), at most ``_MAX_ROWS`` so a board read stays a bounded call.
+    The flag is true when the ceiling stopped the read with rows still unread."""
     out: list[Any] = []
     since: tuple[str, str] | None = None
     while len(out) < _MAX_ROWS:
-        page = store.rd(subspace, {"topic": topic}, n=_PAGE, since=since)
+        page = store.rd(subspace, {"topic": topic}, n=min(_PAGE, _MAX_ROWS - len(out)), since=since)
+        if not page:
+            return out, False
         out.extend(page)
-        if len(page) < _PAGE:
-            break
         since = (page[-1].created_at, page[-1].id)
-    return out
+    return out, bool(store.rd(subspace, {"topic": topic}, n=1, since=since))
 
 
 def _json_body(row: Any) -> dict[str, Any]:
@@ -329,17 +333,23 @@ def _json_body(row: Any) -> dict[str, Any]:
 
 
 def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
-    """One entry per red episode of an ``--owner`` subspace, from its owner, clear and ack rows.
+    """One entry per red of an ``--owner`` subspace, from its owner, clear and ack rows.
 
-    An episode is the owner rows sharing one ``episode_at`` (a refresh row keeps it). It lasts from its first row to the
-    next clear row or the next episode's first row. An ack counts as the engine counts it (RDR-252 "Acknowledgement"):
-    inside the episode, from the identity the latest owner row of the episode named as owner at the ack's time (an ack
-    from one the red was handed away from does not), and for the sha of any red tip of the episode. ``minutes`` runs
-    from ``episode_at`` to the first counting ack; a red with none has ``acked_at`` null.
+    A red begins at an owner row that is neither a refresh nor a hand-on, and lasts to the next clear row or the next
+    red's first row. Its later owner rows continue it: a refresh keeps the red's ``episode_at``, but a hand-off or an
+    escalation is stamped by the engine with a NEW ``episode_at`` (``OwnerDecision.handOn`` passes ``in.now()``), so
+    ``reason`` (``handoff`` or ``escalated``) is what ties such a row to the open red, not its ``episode_at``. An ack
+    counts as the engine counts it (RDR-252 "Acknowledgement"): inside the red, from the identity the latest owner row
+    named as owner at the ack's time (an ack from one the red was handed away from does not, and none counts once the
+    red is escalated with no owner), and for the sha of any red tip of the red. The ack is matched on the row's
+    ``dims.from``, which the poster writes (the engine matches the row's sender-session stamp; the two agree for an
+    honest owner, and this read is a calibration aid, not the engine's count). ``minutes`` runs from the first row's
+    ``episode_at`` to the first counting ack; a red with none has ``acked_at`` null. ``handoffs`` counts the hand-ons,
+    the escalation included, as the engine's own counter does.
     """
     ordered = sorted(rows, key=lambda r: (r.created_at or "", r.id))
-    owners: dict[str, list[tuple[datetime, Any, dict[str, Any]]]] = {}
-    clears: list[datetime] = []
+    reds: list[dict[str, Any]] = []
+    open_red: dict[str, Any] | None = None
     acks: list[tuple[datetime, Any]] = []
     for row in ordered:
         at = _instant(row.created_at)
@@ -348,33 +358,39 @@ def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
         kind = (row.dims or {}).get("kind")
         if kind == "owner":
             body = _json_body(row)
-            owners.setdefault(body.get("episode_at") or row.created_at, []).append((at, row, body))
+            key = body.get("episode_at") or row.created_at
+            if open_red is not None and (body.get("reason") in _HAND_ON_REASONS or key == open_red["key"]):
+                open_red["rows"].append((at, row, body))
+            else:
+                open_red = {"key": key, "rows": [(at, row, body)], "cleared": None}
+                reds.append(open_red)
         elif kind == "clear":
-            clears.append(at)
+            if open_red is not None:
+                open_red["cleared"] = at
+                open_red = None
         elif kind == "ack":
             acks.append((at, row))
-    starts = sorted(((rows_[0][0], key) for key, rows_ in owners.items()), key=lambda s: s[0])
     out: list[dict[str, Any]] = []
-    for index, (start, key) in enumerate(starts):
-        episode = owners[key]
-        end = starts[index + 1][0] if index + 1 < len(starts) else None
-        cleared = next((c for c in clears if c >= start and (end is None or c < end)), None)
-        if cleared is not None:
-            end = cleared
+    for index, red in enumerate(reds):
+        episode, cleared = red["rows"], red["cleared"]
+        start = episode[0][0]
+        end = cleared if cleared is not None else (reds[index + 1]["rows"][0][0] if index + 1 < len(reds) else None)
         tips = {(r.dims or {}).get("sha") for _, r, _ in episode} | {s for _, _, b in episode for s in (b.get("suspects") or [])}
         acked: tuple[datetime, Any] | None = None
         for at, ack in acks:
             if at < start or (end is not None and at >= end):
                 continue
             current = [b for t, _, b in episode if t <= at][-1:]
-            if current and (ack.dims or {}).get("from") == current[0].get("owner") and (ack.dims or {}).get("sha") in tips:
+            owner = current[0].get("owner") if current else None
+            if owner and (ack.dims or {}).get("from") == owner and (ack.dims or {}).get("sha") in tips:
                 acked = (at, ack)
                 break
-        began = _instant(key) or start
+        began = _instant(red["key"]) or start
         first = episode[0]
         out.append({
-            "sha": (first[1].dims or {}).get("sha"), "episode_at": key, "reason": first[2].get("reason"),
-            "owner": episode[-1][2].get("owner"), "handoffs": sum(1 for _, _, b in episode if b.get("reason") == "handoff" and not b.get("refresh")),
+            "sha": (first[1].dims or {}).get("sha"), "episode_at": red["key"], "reason": first[2].get("reason"),
+            "owner": episode[-1][2].get("owner"),
+            "handoffs": sum(1 for _, _, b in episode[1:] if b.get("reason") in _HAND_ON_REASONS and not b.get("refresh")),
             "acked_at": acked[1].created_at if acked else None, "acked_by": (acked[1].dims or {}).get("from") if acked else None,
             "minutes": round((acked[0] - began).total_seconds() / 60, 1) if acked else None,
             "cleared_at": cleared.isoformat().replace("+00:00", "Z") if cleared else None,
@@ -404,9 +420,11 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     for topic in topics:
         subspace = f"board/ci/{topic}--owner"
         try:
-            rows = _rows(store, subspace, f"{topic}--owner")
+            rows, truncated = _rows(store, subspace, f"{topic}--owner")
         except Exception as exc:  # noqa: BLE001 — CLI boundary: one line and exit 1
             raise click.ClickException(f"could not read {subspace}: {type(exc).__name__}: {exc}") from exc
+        if truncated:
+            click.echo(f"note: stopped at {len(rows)} rows of {subspace}; later reds are not shown", err=True)
         reds.extend({"topic": topic, **red} for red in reds_from(rows))
     if as_json:
         click.echo(json.dumps({"group": name, "reds": reds}, indent=2, sort_keys=True))
