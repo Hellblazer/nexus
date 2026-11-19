@@ -2609,6 +2609,7 @@ def search_cross_corpus(
     all_results = _cap_enrichment_pool(
         all_results, pool_lexical_ids,
         cap=max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
+        model_of=model_of,
     )
     call_deadline.check("search_cross_corpus:before_doc_ids")
 
@@ -3013,6 +3014,8 @@ def _cap_enrichment_pool(
     results: list[SearchResult],
     lexical_ids: set[str],
     cap: int | None = None,
+    *,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> list[SearchResult]:
     """Keep at most *cap* non-lexical rows of *results*, best first.
 
@@ -3020,7 +3023,12 @@ def _cap_enrichment_pool(
     passes ``max(MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM)``.
     "Best" is the order a caller ranks by: rows carrying a server
     ``rerank_score`` by that score, ahead of unscored rows, which go by
-    vector distance. A lexical row is always kept: it is threshold-exempt
+    vector distance on the calibrated scale (GH #1667 follow-up C): raw
+    distance times the per-model factor :func:`nexus.scoring.order_by_calibrated_distance`
+    uses, resolved with *model_of*, the row-preferred resolver the search
+    built. A raw-distance cut over a pool spanning voyage-code-3 and
+    voyage-context-3 kept only code, whose distances run tighter, and dropped
+    the prose rows the calibrated ordering after it would have ranked first. A lexical row is always kept: it is threshold-exempt
     because its vector distance is usually the worst in the window, so a
     distance cut would drop exactly what that leg exists to find. Kept rows
     stay in their input order, so every step after this sees the same
@@ -3036,17 +3044,19 @@ def _cap_enrichment_pool(
     70).
     """
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local search helper import
+    from nexus.scoring import _resolve_calibration_factors  # noqa: PLC0415 — as above
 
     limit = QUOTAS.MAX_QUERY_RESULTS if cap is None else cap
     ranked = [i for i, r in enumerate(results) if r.id not in lexical_ids]
     if len(ranked) <= limit:
         return results
+    factors = _resolve_calibration_factors(results, model_of=model_of)
 
     def _key(i: int) -> tuple[int, float]:
         score = results[i].metadata.get("rerank_score")
         if score is not None:
             return (0, -float(score))
-        return (1, results[i].distance)
+        return (1, results[i].distance * factors.get(results[i].collection, 1.0))
 
     keep = set(sorted(ranked, key=_key)[:limit])
     _log.debug(

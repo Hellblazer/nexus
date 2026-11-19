@@ -18,7 +18,9 @@ import threading
 import time
 
 import numpy as np
+import pytest
 
+from nexus import call_deadline
 from nexus.search_engine import SearchResult, _cap_enrichment_pool, search_cross_corpus
 
 N_COLS = 80
@@ -101,6 +103,40 @@ def test_cap_ranks_rerank_scored_rows_ahead_of_unscored() -> None:
     assert [r.id for r in kept] == ["low-score", "high-score"]
 
 
+CODE = "code__1-1__voyage-code-3__v1"
+DOCS = "docs__1-1__voyage-context-3__v1"
+
+
+def _in(collection: str, rid: str, distance: float) -> SearchResult:
+    return SearchResult(id=rid, content="", distance=distance, collection=collection, metadata={})
+
+
+def test_cap_ranks_unscored_rows_by_calibrated_distance_across_embedding_models() -> None:
+    """GH #1667 follow-up C: voyage-code-3 distances run tighter than voyage-context-3 (0.45 vs 0.65
+    calibration), so a raw-distance cut filled the pool with code and dropped the CHANGELOG row a
+    docs search ranks first. On the calibrated scale 0.50 * 0.45/0.65 = 0.346 sits ahead of 0.38."""
+    rows = [_in(CODE, "code-a", 0.38), _in(CODE, "code-b", 0.39), _in(DOCS, "changelog", 0.50)]
+    kept = _cap_enrichment_pool(rows, set(), cap=2)
+    assert "changelog" in [r.id for r in kept]
+    assert [r.id for r in kept] == ["code-a", "changelog"], "kept rows stay in input order"
+
+
+def test_cap_takes_the_model_of_resolver_the_search_built() -> None:
+    """The cut must agree with the scoring on each collection's model: a legacy name with no model token
+    is calibrated by the row-preferred resolver, not left at factor 1.0."""
+    legacy = "docs__legacy"
+    rows = [_in(CODE, "code-a", 0.38), _in(CODE, "code-b", 0.39), _in(legacy, "doc", 0.50)]
+    models = {CODE: "voyage-code-3", legacy: "voyage-context-3"}
+    kept = _cap_enrichment_pool(rows, set(), cap=2, model_of=models.get)
+    assert "doc" in [r.id for r in kept]
+
+
+def test_cap_within_one_model_is_still_by_raw_distance() -> None:
+    rows = [_in(DOCS, "far", 0.60), _in(DOCS, "near", 0.40), _in(DOCS, "mid", 0.50)]
+    kept = _cap_enrichment_pool(rows, set(), cap=2)
+    assert [r.id for r in kept] == ["near", "mid"]
+
+
 def test_cap_is_a_no_op_under_the_limit() -> None:
     rows = [_row("a", 0.1), _row("b", 0.2)]
     assert _cap_enrichment_pool(rows, set(), cap=2) is rows
@@ -117,10 +153,6 @@ def test_pool_cap_scales_with_the_requested_page() -> None:
 def test_search_stops_at_a_stage_boundary_once_its_deadline_passes() -> None:
     """An abandoned search (nx_answer's budget cut) stops instead of making
     its remaining round trips: no embedding fetch runs after the deadline."""
-    import pytest
-
-    from nexus import call_deadline
-
     t3 = _WideT3()
     token = call_deadline.set_deadline(time.monotonic() - 1.0)
     try:
